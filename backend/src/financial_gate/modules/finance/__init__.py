@@ -1,4 +1,6 @@
 """Finance module: instruments, accounts and the double-entry ledger."""
 
-# Placeholder until the module registry exists; replaced by the real module spec later.
-MODULE = None
+from financial_gate.modules import ModuleSpec
+from financial_gate.modules.finance.api import install
+
+MODULE = ModuleSpec(name="finance", install=install)
