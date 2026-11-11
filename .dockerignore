@@ -1,0 +1,10 @@
+# Build context for web/Dockerfile is the repository root: keep host builds and secrets out.
+.git/
+.superpowers/
+private/
+backups/
+infra/.env
+**/node_modules/
+**/dist/
+**/.venv/
+**/__pycache__/

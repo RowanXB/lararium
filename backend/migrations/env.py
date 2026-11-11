@@ -1,9 +1,8 @@
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import create_engine, pool
-
-from financial_gate.config import get_settings
 
 config = context.config
 
@@ -12,9 +11,13 @@ if config.config_file_name is not None:
 
 
 def database_url() -> str:
-    url = config.get_main_option("sqlalchemy.url") or get_settings().migration_database_url
+    # Read the variable directly: full Settings would also demand the app's runtime variables.
+    url = config.get_main_option("sqlalchemy.url") or os.environ.get("FG_MIGRATION_DATABASE_URL")
     if not url:
-        raise RuntimeError("Set FG_MIGRATION_DATABASE_URL (or sqlalchemy.url) to run migrations")
+        raise RuntimeError(
+            "Set FG_MIGRATION_DATABASE_URL (or sqlalchemy.url in the Alembic config)"
+            " to run migrations"
+        )
     return url
 
 
