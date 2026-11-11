@@ -17,7 +17,7 @@ from financial_gate.core.timeutil import local_date
 from financial_gate.modules.finance import models
 from financial_gate.modules.finance.errors import LedgerImbalanceError, TransactionNotFoundError
 from financial_gate.modules.finance.instruments import get_instrument
-from financial_gate.modules.finance.money import to_plain_str, tolerance
+from financial_gate.modules.finance.money import require_finite, to_plain_str, tolerance
 
 TransactionStatus = Literal["pending", "booked", "inferred", "confirmed", "void"]
 TransactionOrigin = Literal["connector", "manual", "inference", "rule"]
@@ -81,6 +81,17 @@ def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
     if posting.price_per_unit is not None and posting.price_instrument_id is not None:
         return posting.price_instrument_id, posting.quantity * posting.price_per_unit
     return posting.instrument_id, posting.quantity
+
+
+def _require_finite(posting: PostingInput) -> None:
+    amounts = {
+        "quantity": posting.quantity,
+        "cost_per_unit": posting.cost_per_unit,
+        "price_per_unit": posting.price_per_unit,
+    }
+    for name, amount in amounts.items():
+        if amount is not None:
+            require_finite(name, amount)
 
 
 def compute_residuals(postings: Sequence[PostingInput]) -> dict[UUID, Decimal]:
@@ -194,11 +205,16 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
     tolerance; otherwise raise LedgerImbalanceError before anything is written."""
     if tx.occurred_at.utcoffset() is None:
         raise ValueError("occurred_at needs a timezone")
+    if len(tx.postings) < 2:
+        raise ValueError("a transaction needs at least two postings")
+    for posting in tx.postings:
+        _require_finite(posting)
     session = ctx.session
     residuals = compute_residuals(tx.postings)
     for instrument_id, residual in residuals.items():
         instrument = await get_instrument(session, instrument_id)
-        if abs(residual) > tolerance(instrument.decimals):
+        # copy_abs is exact; abs() would round the residual to the context's 28 digits.
+        if residual.copy_abs() > tolerance(instrument.decimals):
             raise LedgerImbalanceError(residuals)
     booking_date = tx.booking_date
     if booking_date is None:
@@ -220,27 +236,26 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
             .returning(models.Transaction.id)
         )
     ).scalar_one()
-    if tx.postings:
-        await session.execute(
-            insert(models.Posting).values(
-                [
-                    {
-                        "transaction_id": transaction_id,
-                        "position": position,
-                        "account_id": posting.account_id,
-                        "instrument_id": posting.instrument_id,
-                        "quantity": posting.quantity,
-                        "cost_per_unit": posting.cost_per_unit,
-                        "cost_instrument_id": posting.cost_instrument_id,
-                        "price_per_unit": posting.price_per_unit,
-                        "price_instrument_id": posting.price_instrument_id,
-                        "is_fee": posting.is_fee,
-                        "memo": posting.memo,
-                    }
-                    for position, posting in enumerate(tx.postings)
-                ]
-            )
+    await session.execute(
+        insert(models.Posting).values(
+            [
+                {
+                    "transaction_id": transaction_id,
+                    "position": position,
+                    "account_id": posting.account_id,
+                    "instrument_id": posting.instrument_id,
+                    "quantity": posting.quantity,
+                    "cost_per_unit": posting.cost_per_unit,
+                    "cost_instrument_id": posting.cost_instrument_id,
+                    "price_per_unit": posting.price_per_unit,
+                    "price_instrument_id": posting.price_instrument_id,
+                    "is_fee": posting.is_fee,
+                    "memo": posting.memo,
+                }
+                for position, posting in enumerate(tx.postings)
+            ]
         )
+    )
     record = await _load_transaction(session, transaction_id)
     _publish(ctx, "finance.transaction.posted", record)
     return record
@@ -282,9 +297,10 @@ async def find_unbalanced_transactions(session: AsyncSession) -> list[UUID]:
         .subquery()
     )
     # |sum| > 10^-decimals / 2, rewritten with a positive exponent so NUMERIC stays exact.
-    unbalanced = (
-        func.abs(func.sum(weights.c.weight)) * func.power(literal(10, Numeric), i.decimals) * 2 > 1
-    )
+    # The explicit cast matters: a bare 10 is bound as an integer, and power(int, int)
+    # resolves to the binary double-precision variant, which rounds the comparison.
+    ten = literal(10).cast(Numeric)
+    unbalanced = func.abs(func.sum(weights.c.weight)) * func.power(ten, i.decimals) * 2 > 1
     rows = await session.scalars(
         select(weights.c.transaction_id)
         .join(i, i.id == weights.c.instrument_id)

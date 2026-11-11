@@ -9,3 +9,9 @@ def tolerance(decimals: int) -> Decimal:
 def to_plain_str(value: Decimal) -> str:
     """Fixed-point notation, never an exponent; existing trailing zeros are kept."""
     return format(value, "f")
+
+
+def require_finite(name: str, value: Decimal) -> None:
+    """Raise ValueError for NaN and infinities, which Decimal accepts but amounts can't be."""
+    if not value.is_finite():
+        raise ValueError(f"{name} must be a finite number")

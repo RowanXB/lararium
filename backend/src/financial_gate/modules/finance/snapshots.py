@@ -15,7 +15,7 @@ from financial_gate.core.timeutil import local_date
 from financial_gate.modules.finance import models
 from financial_gate.modules.finance.accounts import get_account
 from financial_gate.modules.finance.instruments import get_instrument
-from financial_gate.modules.finance.money import to_plain_str
+from financial_gate.modules.finance.money import require_finite, to_plain_str
 
 SnapshotKind = Literal["reported", "manual"]
 
@@ -76,6 +76,7 @@ async def record_snapshot(
     """Record an observed balance of one instrument in one account at a moment."""
     if as_of.utcoffset() is None:
         raise ValueError("as_of needs a timezone")
+    require_finite("quantity", quantity)
     session = ctx.session
     await get_account(session, account_id)  # raises AccountNotFoundError if missing
     await get_instrument(session, instrument_id)  # raises InstrumentNotFoundError if missing
