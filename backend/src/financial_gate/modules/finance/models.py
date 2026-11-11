@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Text, func, text
@@ -33,3 +33,24 @@ class InstrumentIdentifier(Base):
     )
     scheme: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text, primary_key=True)
+
+
+class Account(Base):
+    __tablename__ = "accounts"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    name: Mapped[str] = mapped_column(Text)
+    ledger_type: Mapped[str] = mapped_column(Text)
+    subtype: Mapped[str] = mapped_column(Text)
+    institution_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    tax_wrapper: Mapped[str] = mapped_column(Text, server_default=text("'none'"))
+    parent_account_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.accounts.id"))
+    balance_mode: Mapped[str] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(Text, server_default=text("'manual'"))
+    source_connection_id: Mapped[UUID | None]
+    status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    opened_on: Mapped[date | None]
+    closed_on: Mapped[date | None]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
