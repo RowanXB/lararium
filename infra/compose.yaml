@@ -2,6 +2,7 @@ name: financial-gate
 services:
   db:
     image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       FG_OWNER_PASSWORD: ${FG_OWNER_PASSWORD}
@@ -26,6 +27,7 @@ services:
   # No published ports: only Caddy (web) reaches the api, over the compose network.
   api:
     build: ../backend
+    restart: unless-stopped
     command: ["uvicorn", "financial_gate.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
@@ -37,6 +39,7 @@ services:
     build:
       context: ..
       dockerfile: web/Dockerfile
+    restart: unless-stopped
     # Loopback only: `tailscale serve` is the sole ingress and sets Tailscale-User-Login.
     ports: ["127.0.0.1:8080:80"]
     depends_on: [api]
