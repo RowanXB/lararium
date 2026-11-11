@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, formatQuantity, negateDecimalString } from "./format";
+import { formatMoney, formatQuantity, isDecimalString, negateDecimalString } from "./format";
 
 describe("formatMoney", () => {
   it("formats GBP from a string", () => {
@@ -33,5 +33,23 @@ describe("negateDecimalString", () => {
     ["0.00", "0.00"],
   ])("%s -> %s", (input, expected) => {
     expect(negateDecimalString(input)).toBe(expected);
+  });
+});
+
+describe("isDecimalString", () => {
+  it.each(["0", "1234.56", "-12.30", "000.5"])("accepts %s", (value) => {
+    expect(isDecimalString(value)).toBe(true);
+  });
+
+  it.each(["", "-", "1.", ".5", "+1", "1e3", "1,000", "NaN", "\u0661\u0662"])(
+    "rejects %s",
+    (value) => {
+      expect(isDecimalString(value)).toBe(false);
+    },
+  );
+
+  it("rejects a sign when only unsigned amounts are allowed", () => {
+    expect(isDecimalString("-500", { unsigned: true })).toBe(false);
+    expect(isDecimalString("500", { unsigned: true })).toBe(true);
   });
 });

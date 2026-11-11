@@ -19,9 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { errorMessage } from "../lib/errors";
-import { negateDecimalString } from "../lib/format";
-
-const DECIMAL = /^-?\d+(\.\d+)?$/;
+import { isDecimalString, negateDecimalString } from "../lib/format";
 
 const LEDGER_TYPES: { value: AccountCreate["ledger_type"]; label: string }[] = [
   { value: "asset", label: "Asset" },
@@ -176,7 +174,8 @@ function SnapshotForm({
   function submit(event: FormEvent) {
     event.preventDefault();
     const entered = quantity.trim();
-    if (!selectedInstrumentId || !DECIMAL.test(entered)) {
+    // The amount owed is entered positive; a "-" would flip the stored sign to an asset.
+    if (!selectedInstrumentId || !isDecimalString(entered, { unsigned: isLiability })) {
       setInvalid(true);
       return;
     }
@@ -229,7 +228,13 @@ function SnapshotForm({
       <Button type="submit" disabled={mutation.isPending}>
         Save snapshot
       </Button>
-      {invalid && <p className="text-sm text-destructive">Enter a number, e.g. 1234.56</p>}
+      {invalid && (
+        <p className="text-sm text-destructive">
+          {isLiability
+            ? "Enter the amount owed as a positive number, e.g. 500"
+            : "Enter a number, e.g. 1234.56"}
+        </p>
+      )}
       {mutation.isError && (
         <p className="text-sm text-destructive">{errorMessage(mutation.error)}</p>
       )}

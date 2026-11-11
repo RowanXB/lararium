@@ -19,3 +19,11 @@ export function negateDecimalString(value: string): string {
   if (/^[0.]*$/.test(value)) return value;
   return `-${value}`;
 }
+
+// The backend's DecimalStr pattern (ASCII digits only), optionally without the sign.
+const DECIMAL = /^-?[0-9]+(\.[0-9]+)?$/;
+const UNSIGNED_DECIMAL = /^[0-9]+(\.[0-9]+)?$/;
+
+export function isDecimalString(value: string, { unsigned = false } = {}): boolean {
+  return (unsigned ? UNSIGNED_DECIMAL : DECIMAL).test(value);
+}

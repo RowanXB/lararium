@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 
 import { recordSnapshot } from "../api";
 import { AccountsPage } from "./AccountsPage";
@@ -46,15 +46,22 @@ vi.mock("../api", () => ({
   createAccount: vi.fn(),
 }));
 
-it("sends liability balances as negative quantities", async () => {
-  const user = userEvent.setup();
+beforeEach(() => {
+  vi.mocked(recordSnapshot).mockClear();
+});
+
+async function creditCardForm() {
   render(
     <QueryClientProvider client={new QueryClient()}>
       <AccountsPage />
     </QueryClientProvider>,
   );
+  return within(await screen.findByRole("form", { name: "Snapshot for Credit card" }));
+}
 
-  const form = within(await screen.findByRole("form", { name: "Snapshot for Credit card" }));
+it("sends liability balances as negative quantities", async () => {
+  const user = userEvent.setup();
+  const form = await creditCardForm();
   await user.type(form.getByLabelText("Amount owed"), "500");
   await user.click(form.getByRole("button", { name: "Save snapshot" }));
 
@@ -67,4 +74,16 @@ it("sends liability balances as negative quantities", async () => {
       }),
     }),
   );
+});
+
+it("rejects a negative amount owed instead of storing a positive liability", async () => {
+  const user = userEvent.setup();
+  const form = await creditCardForm();
+  await user.type(form.getByLabelText("Amount owed"), "-500");
+  await user.click(form.getByRole("button", { name: "Save snapshot" }));
+
+  expect(
+    form.getByText("Enter the amount owed as a positive number, e.g. 500"),
+  ).toBeInTheDocument();
+  expect(recordSnapshot).not.toHaveBeenCalled();
 });
