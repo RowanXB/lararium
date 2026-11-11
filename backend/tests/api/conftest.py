@@ -4,9 +4,9 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.api.app import create_app
-from financial_gate.config import Settings
-from financial_gate.deps import get_session
+from lararium.api.app import create_app
+from lararium.config import Settings
+from lararium.deps import get_session
 
 # Never connected to: get_session is overridden to yield the test session.
 UNUSED_DATABASE_URL = "postgresql+psycopg://unused@localhost/unused"

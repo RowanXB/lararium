@@ -6,12 +6,12 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.json_types import JSONValue
-from financial_gate.modules.finance import models
-from financial_gate.modules.finance.errors import NotACurrencyError
-from financial_gate.modules.finance.instruments import get_instrument
-from financial_gate.modules.finance.money import require_finite, to_plain_str
+from lararium.core.commands import CommandContext
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance import models
+from lararium.modules.finance.errors import NotACurrencyError
+from lararium.modules.finance.instruments import get_instrument
+from lararium.modules.finance.money import require_finite, to_plain_str
 
 
 async def _require_fiat(session: AsyncSession, instrument_id: UUID) -> None:

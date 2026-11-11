@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "src" / "financial_gate"
+SRC = Path(__file__).parents[1] / "src" / "lararium"
 
 
 def test_no_float_in_source() -> None:

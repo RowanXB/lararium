@@ -12,10 +12,12 @@ if config.config_file_name is not None:
 
 def database_url() -> str:
     # Read the variable directly: full Settings would also demand the app's runtime variables.
-    url = config.get_main_option("sqlalchemy.url") or os.environ.get("FG_MIGRATION_DATABASE_URL")
+    url = config.get_main_option("sqlalchemy.url") or os.environ.get(
+        "LARARIUM_MIGRATION_DATABASE_URL"
+    )
     if not url:
         raise RuntimeError(
-            "Set FG_MIGRATION_DATABASE_URL (or sqlalchemy.url in the Alembic config)"
+            "Set LARARIUM_MIGRATION_DATABASE_URL (or sqlalchemy.url in the Alembic config)"
             " to run migrations"
         )
     return url

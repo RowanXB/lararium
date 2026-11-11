@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, Text, func, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from financial_gate.core.json_types import JSONValue
+from lararium.core.json_types import JSONValue
 
 UUIDV7 = text("uuidv7()")
 CORE_SCHEMA = {"schema": "core"}

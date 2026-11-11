@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.commands import command_context
+from lararium.core.commands import command_context
 
 
 async def test_command_context_writes_audit_and_events(session, actor) -> None:

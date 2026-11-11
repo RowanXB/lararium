@@ -4,8 +4,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import exc, text
 
-from financial_gate.modules.finance.errors import NotACurrencyError
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.errors import NotACurrencyError
+from lararium.modules.finance.pricing import record_fx_rate, record_price
 
 DAY = date(2026, 11, 10)
 

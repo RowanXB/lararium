@@ -8,9 +8,9 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession
 from testcontainers.community.postgres import PostgresContainer
 
-from financial_gate.core.actors import Actor
-from financial_gate.core.commands import command_context
-from financial_gate.db import create_engine
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
+from lararium.db import create_engine
 
 BACKEND = Path(__file__).parents[1]
 INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
@@ -19,7 +19,7 @@ INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
 @pytest.fixture(scope="session")
 def postgres() -> Iterator[PostgresContainer]:
     container = PostgresContainer("postgres:18").with_volume_mapping(
-        str(INFRA_POSTGRES), "/fg", mode="ro"
+        str(INFRA_POSTGRES), "/lararium", mode="ro"
     )
     with container:
         result = container.exec(
@@ -34,7 +34,7 @@ def postgres() -> Iterator[PostgresContainer]:
                 "-U",
                 container.username,
                 "-f",
-                "/fg/roles.sql",
+                "/lararium/roles.sql",
             ]
         )
         assert result.exit_code == 0, result.output.decode()
@@ -44,17 +44,17 @@ def postgres() -> Iterator[PostgresContainer]:
 def _url(container: PostgresContainer, user: str, password: str) -> str:
     host = container.get_container_host_ip()
     port = container.get_exposed_port(5432)
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/financial_gate"
+    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/lararium"
 
 
 @pytest.fixture(scope="session")
 def owner_url(postgres: PostgresContainer) -> str:
-    return _url(postgres, "fg_owner", "owner")
+    return _url(postgres, "lararium_owner", "owner")
 
 
 @pytest.fixture(scope="session")
 def backend_url(postgres: PostgresContainer) -> str:
-    return _url(postgres, "fg_backend", "backend")
+    return _url(postgres, "lararium_backend", "backend")
 
 
 @pytest.fixture(scope="session")

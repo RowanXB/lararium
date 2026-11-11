@@ -1,4 +1,4 @@
-# Financial Gate Phase 1 Design: Personal Financial Infrastructure
+# Lararium phase 1 design: personal finance infrastructure
 
 **Languages:** English | [简体中文](./2026-11-11-financial-gate-phase1-design.zh-CN.md)
 
@@ -20,7 +20,7 @@ The decision log in §15 gives each decision a status:
 
 ## 1. Intent
 
-Financial Gate is a **self-hosted personal financial infrastructure**. Its first goal is to aggregate and track all of one person's assets in one place: brokers, exchanges, banks, self-custodied crypto wallets, and banks that have no API and only allow manual import of transaction statements or deposit information.
+Lararium is a **self-hosted personal financial infrastructure**. Its first goal is to aggregate and track all of one person's assets in one place: brokers, exchanges, banks, self-custodied crypto wallets, and banks that have no API and only allow manual import of transaction statements or deposit information.
 
 It is open-source software: each user deploys their own instance on their own machine and connects their own accounts with their own credentials. It is not a hosted service (see "Open source and compliance" in §3).
 
@@ -449,7 +449,7 @@ For these modules, Phase 1 must:
 3. Include the "device push" and "outbound actions" capabilities, as well as external ID mapping, in the connector contract (§7.1).
 4. Follow the time model in §6.5. Future calendar, sleep and journal data must all store local time plus time zone; all-day events store a date.
 5. Give each module its own schema and database role; the future MCP is off by default for each module and is enabled one module at a time by the user. Health and journal data will also have to pass through an "AI gateway" later, which decides whether it may be sent to external models.
-6. Include "Agent" in the audit log's actor model.
+6. Include "Agent" in the audit log's actor model. The future AI assistant module will be `modules/lares` (each domain agent is a "lar"); its agents act through this actor type and the AI gateway in item 5.
 7. Future device push goes to a receiving endpoint inside the Tailscale private network, with one token per device. The design of the webhook receiver and inbox must be reusable for this.
 
 ## 13. Milestones (suggested order)
@@ -509,6 +509,7 @@ The roadmap after that:
 | All test data is synthetic; personal notes go in `private/`, which is not tracked by git | Confirmed |
 | Documentation is bilingual: English is the primary version; Chinese translations live alongside as `*.zh-CN.md` | Confirmed |
 | Milestone order (M0–M9) and the roadmap after it | Default |
+| Project name: Lararium (renamed from financial-gate before publication); the future AI assistant module is named `lares` | Confirmed |
 
 ## 16. Left to the implementer
 

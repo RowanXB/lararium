@@ -4,18 +4,18 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from financial_gate.core.settings_store import set_setting
-from financial_gate.modules.finance.accounts import close_account
-from financial_gate.modules.finance.instruments import create_instrument, get_currency, set_hidden
-from financial_gate.modules.finance.ledger import (
+from lararium.core.settings_store import set_setting
+from lararium.modules.finance.accounts import close_account
+from lararium.modules.finance.instruments import create_instrument, get_currency, set_hidden
+from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     post_transaction,
     void_transaction,
 )
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
-from financial_gate.modules.finance.snapshots import record_snapshot
-from financial_gate.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
+from lararium.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
 
 LON = ZoneInfo("Europe/London")
 

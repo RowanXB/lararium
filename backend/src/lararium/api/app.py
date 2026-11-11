@@ -4,11 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-from financial_gate import __version__
-from financial_gate.api import core_routes
-from financial_gate.config import Settings, get_settings
-from financial_gate.db import create_engine, make_sessionmaker
-from financial_gate.modules.registry import MODULES
+from lararium import __version__
+from lararium.api import core_routes
+from lararium.config import Settings, get_settings
+from lararium.db import create_engine, make_sessionmaker
+from lararium.modules.registry import MODULES
 
 
 def _operation_id(route: APIRoute) -> str:
@@ -26,12 +26,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await engine.dispose()
 
     app = FastAPI(
-        title="financial-gate",
+        title="Lararium",
         version=__version__,
         lifespan=lifespan,
         generate_unique_id_function=_operation_id,
     )
-    # Read by financial_gate.deps.
+    # Read by lararium.deps.
     app.state.settings = settings
     app.state.sessionmaker = make_sessionmaker(engine)
     app.include_router(core_routes.public_router)

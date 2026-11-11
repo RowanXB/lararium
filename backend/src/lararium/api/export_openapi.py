@@ -1,9 +1,9 @@
-"""Print the OpenAPI document: `python -m financial_gate.api.export_openapi`."""
+"""Print the OpenAPI document: `python -m lararium.api.export_openapi`."""
 
 import json
 
-from financial_gate.api.app import create_app
-from financial_gate.config import Settings
+from lararium.api.app import create_app
+from lararium.config import Settings
 
 
 def render_openapi() -> str:

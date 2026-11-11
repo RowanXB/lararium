@@ -6,11 +6,11 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, exists, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.entities import get_self_entity_id
-from financial_gate.core.json_types import JSONValue
-from financial_gate.modules.finance import models
-from financial_gate.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.core.commands import CommandContext
+from lararium.core.entities import get_self_entity_id
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance import models
+from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
 LedgerType = Literal["asset", "liability", "income", "expense", "equity"]
 AccountSubtype = Literal[

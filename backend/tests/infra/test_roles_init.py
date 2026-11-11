@@ -28,25 +28,25 @@ def test_passwords_are_not_on_the_psql_command_line() -> None:
 def initialised() -> Iterator[PostgresContainer]:
     container = (
         PostgresContainer("postgres:18")
-        .with_env("FG_OWNER_PASSWORD", OWNER_PW)
-        .with_env("FG_BACKEND_PASSWORD", BACKEND_PW)
-        .with_volume_mapping(str(INFRA_POSTGRES), "/fg", mode="ro")
+        .with_env("LARARIUM_OWNER_PASSWORD", OWNER_PW)
+        .with_env("LARARIUM_BACKEND_PASSWORD", BACKEND_PW)
+        .with_volume_mapping(str(INFRA_POSTGRES), "/lararium", mode="ro")
         .with_volume_mapping(str(INFRA_POSTGRES / "init"), "/docker-entrypoint-initdb.d", mode="ro")
     )
     with container:
         yield container
 
 
-@pytest.mark.parametrize(("user", "password"), [("fg_owner", OWNER_PW), ("fg_backend", BACKEND_PW)])
-def test_roles_log_in_to_financial_gate(
-    initialised: PostgresContainer, user: str, password: str
-) -> None:
+@pytest.mark.parametrize(
+    ("user", "password"), [("lararium_owner", OWNER_PW), ("lararium_backend", BACKEND_PW)]
+)
+def test_roles_log_in_to_lararium(initialised: PostgresContainer, user: str, password: str) -> None:
     with psycopg.connect(
         host=initialised.get_container_host_ip(),
         port=int(initialised.get_exposed_port(5432)),
         user=user,
         password=password,
-        dbname="financial_gate",
+        dbname="lararium",
     ) as conn:
         row = conn.execute("select current_user, current_database()").fetchone()
-    assert row == (user, "financial_gate")
+    assert row == (user, "lararium")

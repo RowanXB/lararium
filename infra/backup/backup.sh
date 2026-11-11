@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dump the financial_gate database to $BACKUP_DIR/fg-<UTC timestamp>.dump (pg_dump custom
+# Dump the lararium database to $BACKUP_DIR/lararium-<UTC timestamp>.dump (pg_dump custom
 # format), then, when RESTIC_REPOSITORY is set, back $BACKUP_DIR up with restic.
 set -euo pipefail
 # Dumps hold every balance and transaction: everything this script creates is owner-only.
@@ -21,9 +21,9 @@ esac
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"  # mkdir -p leaves an existing directory's mode alone
 
-out="$BACKUP_DIR/fg-$(date -u +%Y%m%dT%H%M%SZ).dump"
+out="$BACKUP_DIR/lararium-$(date -u +%Y%m%dT%H%M%SZ).dump"
 # Write to a temporary name first so a failed dump never looks like a good backup.
-"${compose[@]}" exec -T db pg_dump -U postgres -d financial_gate --format=custom > "$out.partial"
+"${compose[@]}" exec -T db pg_dump -U postgres -d lararium --format=custom > "$out.partial"
 mv "$out.partial" "$out"
 echo "wrote $out"
 

@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import exc, text
 
-from financial_gate.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.snapshots import record_snapshot
 
 
 async def test_snapshot_as_of_date_uses_reporting_timezone(run, make_account, gbp) -> None:

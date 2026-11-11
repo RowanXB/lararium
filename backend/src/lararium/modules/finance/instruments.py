@@ -9,11 +9,11 @@ from sqlalchemy import ColumnElement, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.entities import get_self_entity_id
-from financial_gate.core.json_types import JSONValue
-from financial_gate.modules.finance import models
-from financial_gate.modules.finance.errors import (
+from lararium.core.commands import CommandContext
+from lararium.core.entities import get_self_entity_id
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance import models
+from lararium.modules.finance.errors import (
     DuplicateIdentifierError,
     InstrumentNotFoundError,
     UnknownCurrencyError,

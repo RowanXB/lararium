@@ -17,7 +17,7 @@ function Layout() {
     <div className="min-h-screen">
       <header className="border-b">
         <nav className="mx-auto flex max-w-5xl items-center gap-6 px-4 py-3">
-          <span className="font-semibold">financial-gate</span>
+          <span className="font-semibold">Lararium</span>
           {NAV.map((item) => (
             <Link
               key={item.to}

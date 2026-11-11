@@ -1,8 +1,8 @@
 from uuid import UUID
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
-from financial_gate.core.models import Entity
+from lararium.core.commands import CommandContext
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.core.models import Entity
 
 
 async def test_organization_matched_case_insensitively(run) -> None:

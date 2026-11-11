@@ -3,8 +3,8 @@ from uuid import UUID
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.models import Entity
+from lararium.core.commands import CommandContext
+from lararium.core.models import Entity
 
 
 async def get_self_entity_id(session: AsyncSession) -> UUID:

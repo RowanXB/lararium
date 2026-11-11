@@ -4,9 +4,9 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import exc, text
 
-from financial_gate.modules.finance.errors import LedgerImbalanceError
-from financial_gate.modules.finance.instruments import create_instrument
-from financial_gate.modules.finance.ledger import (
+from lararium.modules.finance.errors import LedgerImbalanceError
+from lararium.modules.finance.instruments import create_instrument
+from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     find_unbalanced_transactions,

@@ -1,6 +1,10 @@
-# financial-gate
+# Lararium
 
 [English](README.md) | 简体中文
+
+Lararium（家神龛）是古罗马家庭中供奉家宅守护神 Lares 的神龛。这个项目就是你家的 lararium：
+存放你的财务数据，并逐步扩展到生活中的其他数据，由你自托管、由你保管。它的 AI 助手将是它的
+lares。
 
 一个自托管、只读的个人财务系统：复式记账账本、余额快照、价格与汇率，以及净资产视图。
 后端为 Python 3.13（FastAPI）+ PostgreSQL 18，前端为 React SPA；用 Docker Compose 部署，
@@ -22,21 +26,22 @@ make check
 再以自动重载方式启动 API：
 
 ```bash
-docker run -d --name fg-dev-db -p 127.0.0.1:5432:5432 \
-  -e POSTGRES_PASSWORD=dev -e FG_OWNER_PASSWORD=owner -e FG_BACKEND_PASSWORD=backend \
-  -v "$PWD/infra/postgres:/fg:ro" \
+docker run -d --name lararium-dev-db -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_PASSWORD=dev \
+  -e LARARIUM_OWNER_PASSWORD=owner -e LARARIUM_BACKEND_PASSWORD=backend \
+  -v "$PWD/infra/postgres:/lararium:ro" \
   -v "$PWD/infra/postgres/init:/docker-entrypoint-initdb.d:ro" \
   postgres:18
 
 cd backend
-FG_MIGRATION_DATABASE_URL=postgresql+psycopg://fg_owner:owner@127.0.0.1:5432/financial_gate \
+LARARIUM_MIGRATION_DATABASE_URL=postgresql+psycopg://lararium_owner:owner@127.0.0.1:5432/lararium \
   uv run alembic upgrade head
-FG_DATABASE_URL=postgresql+psycopg://fg_backend:backend@127.0.0.1:5432/financial_gate \
-FG_AUTH_MODE=dev \
-  uv run uvicorn financial_gate.api.app:create_app --factory --reload
+LARARIUM_DATABASE_URL=postgresql+psycopg://lararium_backend:backend@127.0.0.1:5432/lararium \
+LARARIUM_AUTH_MODE=dev \
+  uv run uvicorn lararium.api.app:create_app --factory --reload
 ```
 
-`FG_AUTH_MODE=dev` 会跳过 Tailscale 请求头校验，切勿在部署中使用。在另一个终端启动前端
+`LARARIUM_AUTH_MODE=dev` 会跳过 Tailscale 请求头校验，切勿在部署中使用。在另一个终端启动前端
 开发服务器（它把 `/api` 代理到 `127.0.0.1:8000`）：
 
 ```bash
@@ -55,14 +60,14 @@ pnpm dev
 cp infra/env.example infra/.env
 chmod 600 infra/.env
 # 填写 infra/.env：每个密码都用 `openssl rand -hex 32` 生成，
-# 并把 FG_OWNER_LOGIN 设为你的 Tailscale 登录名（例如 you@example.com）。
+# 并把 LARARIUM_OWNER_LOGIN 设为你的 Tailscale 登录名（例如 you@example.com）。
 make up
 tailscale serve --bg 8080
 ```
 
-`make up` 会构建镜像并启动 PostgreSQL（`db`），以 `fg_owner` 身份执行一次迁移
-（`migrate`），然后以 `fg_backend` 身份启动 API（`api`），以及提供 SPA 并转发 `/api/*`
-的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `financial-gate_pgdata` 卷中。
+`make up` 会构建镜像并启动 PostgreSQL（`db`），以 `lararium_owner` 身份执行一次迁移
+（`migrate`），然后以 `lararium_backend` 身份启动 API（`api`），以及提供 SPA 并转发 `/api/*`
+的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中。
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
@@ -73,7 +78,7 @@ tailscale serve --bg --https=8443 8080
 ```
 
 然后打开 `https://<主机名>.<你的tailnet>.ts.net:8443`。身份请求头仍由 `tailscale serve`
-提供，其他都不用改。不要改成把 financial-gate 挂在别的反向代理后面（比如已经占着 443 的
+提供，其他都不用改。不要改成把 Lararium 挂在别的反向代理后面（比如已经占着 443 的
 nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Login`。
 
 ### 安全模型
@@ -86,7 +91,7 @@ nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Log
 
 ### 访问方式与请求头信任
 
-API 依据 `Tailscale-User-Login` 请求头认证请求，只放行 `FG_OWNER_LOGIN`。这之所以安全，
+API 依据 `Tailscale-User-Login` 请求头认证请求，只放行 `LARARIUM_OWNER_LOGIN`。这之所以安全，
 完全取决于服务的暴露方式：
 
 - `tailscale serve` 是唯一入口。它接受来自你 tailnet 的连接，把 `Tailscale-User-Login`
@@ -125,17 +130,17 @@ chmod 600 infra/.env
 make backup   # 或：infra/backup/backup.sh
 ```
 
-它会写出 `$BACKUP_DIR/fg-<UTC 时间戳>.dump`（`pg_dump` 自定义格式；`BACKUP_DIR` 为相对
+它会写出 `$BACKUP_DIR/lararium-<UTC 时间戳>.dump`（`pg_dump` 自定义格式；`BACKUP_DIR` 为相对
 路径时相对于仓库根目录）。如果 `infra/.env` 里设置了 `RESTIC_REPOSITORY`，随后还会用
 `RESTIC_PASSWORD` 执行 `restic backup "$BACKUP_DIR"`；主机上需要装有 `restic`。
-如需每晚执行，可添加一条 cron，例如 `0 3 * * * cd /path/to/financial-gate && make backup`。
+如需每晚执行，可添加一条 cron，例如 `0 3 * * * cd /path/to/lararium && make backup`。
 
 把某个备份恢复到一个新数据库（脚本拒绝覆盖已存在的数据库）：
 
 ```bash
-infra/backup/restore.sh backups/fg-20260101T030000Z.dump financial_gate_restore
+infra/backup/restore.sh backups/lararium-20260101T030000Z.dump lararium_restore
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
-  psql -U postgres -d financial_gate_restore -tAc "select count(*) from finance.instruments"
+  psql -U postgres -d lararium_restore -tAc "select count(*) from finance.instruments"
 ```
 
 要让恢复出的副本生效：停止 API，交换数据库名，再重新启动：
@@ -143,8 +148,8 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
 ```bash
 docker compose -f infra/compose.yaml --env-file infra/.env stop api
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U postgres \
-  -c "ALTER DATABASE financial_gate RENAME TO financial_gate_old" \
-  -c "ALTER DATABASE financial_gate_restore RENAME TO financial_gate"
+  -c "ALTER DATABASE lararium RENAME TO lararium_old" \
+  -c "ALTER DATABASE lararium_restore RENAME TO lararium"
 docker compose -f infra/compose.yaml --env-file infra/.env start api
 ```
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: restore.sh <dump file> <target database name>
-# Creates a NEW database owned by fg_owner and restores the dump into it. It refuses to
+# Creates a NEW database owned by lararium_owner and restores the dump into it. It refuses to
 # touch an existing database: inspect the copy, then switch over deliberately.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ infra="$(cd "$(dirname "$0")/.." && pwd)"
 compose=(docker compose -f "$infra/compose.yaml" --env-file "$infra/.env")
 
 "${compose[@]}" exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-  -c "CREATE DATABASE $target OWNER fg_owner"
+  -c "CREATE DATABASE $target OWNER lararium_owner"
 "${compose[@]}" exec -T db pg_restore -U postgres -d "$target" \
-  --no-owner --role=fg_owner --exit-on-error < "$dump"
+  --no-owner --role=lararium_owner --exit-on-error < "$dump"
 echo "restored $dump into $target"

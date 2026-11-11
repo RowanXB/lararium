@@ -5,9 +5,9 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.actors import Actor
-from financial_gate.core.json_types import JSONValue
-from financial_gate.core.models import AuditLogEntry, Event
+from lararium.core.actors import Actor
+from lararium.core.json_types import JSONValue
+from lararium.core.models import AuditLogEntry, Event
 
 
 class CommandContext:

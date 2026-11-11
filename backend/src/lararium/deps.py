@@ -1,6 +1,6 @@
 """Request dependencies shared by the API layer and the modules' routes.
 
-They live outside `financial_gate.api` because modules may not import the API package
+They live outside `lararium.api` because modules may not import the API package
 (import-linter contract); `create_app` puts what they need on `app.state`.
 """
 
@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from financial_gate.config import Settings
-from financial_gate.core.actors import Actor
+from lararium.config import Settings
+from lararium.core.actors import Actor
 
 OWNER_HEADER = "Tailscale-User-Login"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})

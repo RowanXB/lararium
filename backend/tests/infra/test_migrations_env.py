@@ -1,4 +1,4 @@
-"""`alembic` must run with only FG_MIGRATION_DATABASE_URL set, as the compose `migrate` job does."""
+"""`alembic` must run with only LARARIUM_MIGRATION_DATABASE_URL set, as compose `migrate` does."""
 
 import os
 import subprocess
@@ -9,7 +9,7 @@ BACKEND = Path(__file__).parents[2]
 
 
 def _alembic(*args: str, **env: str) -> subprocess.CompletedProcess[str]:
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("FG_")}
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("LARARIUM_")}
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND,
@@ -21,11 +21,11 @@ def _alembic(*args: str, **env: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_needs_only_the_migration_url(owner_url: str) -> None:
-    result = _alembic("current", FG_MIGRATION_DATABASE_URL=owner_url)
+    result = _alembic("current", LARARIUM_MIGRATION_DATABASE_URL=owner_url)
     assert result.returncode == 0, result.stderr
 
 
 def test_missing_migration_url_says_what_to_set() -> None:
     result = _alembic("current")
     assert result.returncode != 0
-    assert "Set FG_MIGRATION_DATABASE_URL" in result.stderr
+    assert "Set LARARIUM_MIGRATION_DATABASE_URL" in result.stderr

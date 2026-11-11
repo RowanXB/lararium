@@ -1,6 +1,11 @@
-# financial-gate
+# Lararium
 
 English | [简体中文](README.zh-CN.md)
+
+A lararium was the shrine in a Roman home where the Lares, the household's guardian
+spirits, lived. This project is your household's lararium: your finances and, over time,
+the rest of your life's data, self-hosted and kept by you. Its AI assistants will be its
+lares.
 
 A self-hosted, read-only personal finance system: a double-entry ledger, balance
 snapshots, prices and FX rates, and a net worth view. Python 3.13 (FastAPI) on
@@ -23,21 +28,22 @@ To run the app, start a development database (roles are created by the same init
 the deployment uses), migrate it, then start the API with auto-reload:
 
 ```bash
-docker run -d --name fg-dev-db -p 127.0.0.1:5432:5432 \
-  -e POSTGRES_PASSWORD=dev -e FG_OWNER_PASSWORD=owner -e FG_BACKEND_PASSWORD=backend \
-  -v "$PWD/infra/postgres:/fg:ro" \
+docker run -d --name lararium-dev-db -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_PASSWORD=dev \
+  -e LARARIUM_OWNER_PASSWORD=owner -e LARARIUM_BACKEND_PASSWORD=backend \
+  -v "$PWD/infra/postgres:/lararium:ro" \
   -v "$PWD/infra/postgres/init:/docker-entrypoint-initdb.d:ro" \
   postgres:18
 
 cd backend
-FG_MIGRATION_DATABASE_URL=postgresql+psycopg://fg_owner:owner@127.0.0.1:5432/financial_gate \
+LARARIUM_MIGRATION_DATABASE_URL=postgresql+psycopg://lararium_owner:owner@127.0.0.1:5432/lararium \
   uv run alembic upgrade head
-FG_DATABASE_URL=postgresql+psycopg://fg_backend:backend@127.0.0.1:5432/financial_gate \
-FG_AUTH_MODE=dev \
-  uv run uvicorn financial_gate.api.app:create_app --factory --reload
+LARARIUM_DATABASE_URL=postgresql+psycopg://lararium_backend:backend@127.0.0.1:5432/lararium \
+LARARIUM_AUTH_MODE=dev \
+  uv run uvicorn lararium.api.app:create_app --factory --reload
 ```
 
-`FG_AUTH_MODE=dev` skips the Tailscale header check; never use it in a deployment. In a
+`LARARIUM_AUTH_MODE=dev` skips the Tailscale header check; never use it in a deployment. In a
 second terminal, start the web dev server (it proxies `/api` to `127.0.0.1:8000`):
 
 ```bash
@@ -57,15 +63,15 @@ On a server with Docker Engine 28 or later and Tailscale:
 cp infra/env.example infra/.env
 chmod 600 infra/.env
 # Fill in infra/.env: generate each password with `openssl rand -hex 32`, and set
-# FG_OWNER_LOGIN to your Tailscale login (e.g. you@example.com).
+# LARARIUM_OWNER_LOGIN to your Tailscale login (e.g. you@example.com).
 make up
 tailscale serve --bg 8080
 ```
 
 `make up` builds the images and starts PostgreSQL (`db`), runs the migrations once as
-`fg_owner` (`migrate`), then starts the API as `fg_backend` (`api`) and Caddy serving the
-SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
-`financial-gate_pgdata` volume.
+`lararium_owner` (`migrate`), then starts the API as `lararium_backend` (`api`) and Caddy
+serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
+`lararium_pgdata` volume.
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
@@ -76,7 +82,7 @@ tailscale serve --bg --https=8443 8080
 ```
 
 and open `https://<host>.<your-tailnet>.ts.net:8443`. `tailscale serve` still supplies the
-identity header, so nothing else changes. Don't put financial-gate behind another reverse
+identity header, so nothing else changes. Don't put Lararium behind another reverse
 proxy (e.g. an nginx already on 443) instead: traffic that bypasses `tailscale serve` can
 forge `Tailscale-User-Login`.
 
@@ -93,7 +99,7 @@ forge `Tailscale-User-Login`.
 ### Access and header trust
 
 The API authenticates requests by the `Tailscale-User-Login` header and admits only
-`FG_OWNER_LOGIN`. That is only safe because of how the stack is exposed:
+`LARARIUM_OWNER_LOGIN`. That is only safe because of how the stack is exposed:
 
 - `tailscale serve` is the only ingress. It accepts connections from your tailnet, sets
   `Tailscale-User-Login` to the caller's identity, and forwards to `127.0.0.1:8080`.
@@ -132,18 +138,18 @@ chmod 600 infra/.env
 make backup   # or: infra/backup/backup.sh
 ```
 
-This writes `$BACKUP_DIR/fg-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
+This writes `$BACKUP_DIR/lararium-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
 `BACKUP_DIR` is relative to the repository root). If `RESTIC_REPOSITORY` is set in
 `infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using `RESTIC_PASSWORD`; the
 `restic` binary must be installed on the host. To run it nightly, add a cron entry such
-as `0 3 * * * cd /path/to/financial-gate && make backup`.
+as `0 3 * * * cd /path/to/lararium && make backup`.
 
 Restore a dump into a new database (the script refuses to overwrite an existing one):
 
 ```bash
-infra/backup/restore.sh backups/fg-20260101T030000Z.dump financial_gate_restore
+infra/backup/restore.sh backups/lararium-20260101T030000Z.dump lararium_restore
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
-  psql -U postgres -d financial_gate_restore -tAc "select count(*) from finance.instruments"
+  psql -U postgres -d lararium_restore -tAc "select count(*) from finance.instruments"
 ```
 
 To make the restored copy live, stop the API, swap the database names, and start it again:
@@ -151,8 +157,8 @@ To make the restored copy live, stop the API, swap the database names, and start
 ```bash
 docker compose -f infra/compose.yaml --env-file infra/.env stop api
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U postgres \
-  -c "ALTER DATABASE financial_gate RENAME TO financial_gate_old" \
-  -c "ALTER DATABASE financial_gate_restore RENAME TO financial_gate"
+  -c "ALTER DATABASE lararium RENAME TO lararium_old" \
+  -c "ALTER DATABASE lararium_restore RENAME TO lararium"
 docker compose -f infra/compose.yaml --env-file infra/.env start api
 ```
 

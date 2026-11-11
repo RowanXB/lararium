@@ -6,9 +6,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 搭好 financial-gate 的骨架和账本核心：能手动建账户、录入余额快照和持仓数量、记复式交易、录入价格和汇率，并在网页上看到任意一天的净资产。
+**Goal:** 搭好 Lararium 的骨架和账本核心：能手动建账户、录入余额快照和持仓数量、记复式交易、录入价格和汇率，并在网页上看到任意一天的净资产。
 
-**Architecture:** Python 模块化单体：`financial_gate.core` 是公共层，`financial_gate.modules.finance` 是财务模块，`financial_gate.api` 把各模块挂到 FastAPI 上。所有数据存 PostgreSQL 18。估值逻辑写成带版本号的 SQL 函数，界面、以后的 BI 和 MCP 共用同一套。前端是 React + Vite 的 SPA，API 客户端从 OpenAPI 生成。
+**Architecture:** Python 模块化单体：`lararium.core` 是公共层，`lararium.modules.finance` 是财务模块，`lararium.api` 把各模块挂到 FastAPI 上。所有数据存 PostgreSQL 18。估值逻辑写成带版本号的 SQL 函数，界面、以后的 BI 和 MCP 共用同一套。前端是 React + Vite 的 SPA，API 客户端从 OpenAPI 生成。
 
 **Tech Stack:** Python 3.13、uv、FastAPI、Pydantic v2、SQLAlchemy 2（async，psycopg 3）、Alembic、pytest + pytest-asyncio + testcontainers；PostgreSQL 18；React、Vite、TanStack Router / Query、shadcn/ui、ECharts、@hey-api/openapi-ts、Vitest + Testing Library；Docker Compose、Caddy。
 
@@ -33,7 +33,7 @@
 - 所有 ID 用 UUIDv7（数据库默认值 `uuidv7()`）。
 - 机器时间戳存 UTC 的 `timestamptz`；日期用 `date` 单独存；`core.timezone` 默认 `Europe/London`。
 - 报告币种默认 GBP（设置项 `finance.reporting_currency`）。
-- 依赖方向：`financial_gate.core` 不能 import `financial_gate.modules` 或 `financial_gate.api`；`financial_gate.modules` 不能 import `financial_gate.api`。由 import-linter 检查。第二个模块出现时，再加一条“模块之间互相独立”的 independence 合约。
+- 依赖方向：`lararium.core` 不能 import `lararium.modules` 或 `lararium.api`；`lararium.modules` 不能 import `lararium.api`。由 import-linter 检查。第二个模块出现时，再加一条“模块之间互相独立”的 independence 合约。
 - 系统只读：不写任何下单、转账、提现功能。
 - 本计划不开任何公网入口；只通过 Tailscale 访问。
 - 不用 Next.js、SQLite、Redis、Kafka。
@@ -58,7 +58,7 @@
 ## 文件结构
 
 ```
-financial-gate/
+lararium/
 ├── Makefile                      # check / backend-check / openapi / web-check / up
 ├── README.md                     # 怎么在本机和服务器上跑起来
 ├── README.zh-CN.md               # README.md 的中文译文
@@ -75,9 +75,9 @@ financial-gate/
 │   ├── pyproject.toml, uv.lock, alembic.ini, Dockerfile
 │   ├── migrations/env.py
 │   ├── migrations/versions/      # 0001_core_baseline … 0006_finance_valuation_v1
-│   ├── src/financial_gate/
+│   ├── src/lararium/
 │   │   ├── __init__.py           # __version__
-│   │   ├── config.py             # Settings（FG_ 开头的环境变量）
+│   │   ├── config.py             # Settings（LARARIUM_ 开头的环境变量）
 │   │   ├── db.py                 # engine 和 session 工厂
 │   │   ├── core/                 # 公共层，不认识任何模块
 │   │   │   ├── actors.py         # Actor
@@ -119,11 +119,11 @@ financial-gate/
 ### Task 1: 仓库与后端工具链
 
 **Files:**
-- Create: `backend/pyproject.toml`, `backend/src/financial_gate/__init__.py`, `backend/src/financial_gate/core/__init__.py`, `backend/src/financial_gate/modules/__init__.py`, `backend/src/financial_gate/api/__init__.py`, `Makefile`
+- Create: `backend/pyproject.toml`, `backend/src/lararium/__init__.py`, `backend/src/lararium/core/__init__.py`, `backend/src/lararium/modules/__init__.py`, `backend/src/lararium/api/__init__.py`, `Makefile`
 - Test: `backend/tests/test_package.py`, `backend/tests/test_no_floats.py`
 
 **Interfaces:**
-- Produces: 包 `financial_gate`（`__version__ = "0.1.0"`）；命令 `make backend-check`，依次运行 `ruff check`、`ruff format --check`、`pyright`、`lint-imports`、`pytest`。
+- Produces: 包 `lararium`（`__version__ = "0.1.0"`）；命令 `make backend-check`，依次运行 `ruff check`、`ruff format --check`、`pyright`、`lint-imports`、`pytest`。
 
 - [ ] **Step 1: 建分支，并提交设计文档和本计划**
 
@@ -136,13 +136,13 @@ git commit -m "docs: add license, phase-1 design and foundation plan"
 - [ ] **Step 2: 建 `backend/pyproject.toml` 和四个空包**
 
 `pyproject.toml` 的内容：
-- `[project]`：name `financial-gate`，version `0.1.0`，`requires-python = ">=3.13"`，`license = "AGPL-3.0-or-later"`；依赖 `fastapi`、`uvicorn[standard]`、`pydantic>=2`、`pydantic-settings`、`sqlalchemy[asyncio]>=2.0`、`psycopg[binary]>=3.2`、`alembic`、`tzdata`。
+- `[project]`：name `lararium`，version `0.1.0`，`requires-python = ">=3.13"`，`license = "AGPL-3.0-or-later"`；依赖 `fastapi`、`uvicorn[standard]`、`pydantic>=2`、`pydantic-settings`、`sqlalchemy[asyncio]>=2.0`、`psycopg[binary]>=3.2`、`alembic`、`tzdata`。
 - `[dependency-groups] dev`：`pytest`、`pytest-asyncio`、`httpx`、`testcontainers[postgres]`、`ruff`、`pyright`、`import-linter`。
-- 构建后端用 hatchling，包目录是 `src/financial_gate`。
+- 构建后端用 hatchling，包目录是 `src/lararium`。
 - `[tool.pytest.ini_options]`：`asyncio_mode = "auto"`、`asyncio_default_fixture_loop_scope = "session"`、`asyncio_default_test_loop_scope = "session"`、`testpaths = ["tests"]`。
 - `[tool.ruff]`：`line-length = 100`、`target-version = "py313"`；lint 规则选 `E, F, I, UP, B, ASYNC, DTZ, RUF`（DTZ 禁止不带时区的 datetime，RUF032 禁止用浮点字面量构造 Decimal）。
 - `[tool.pyright]`：`typeCheckingMode = "strict"`、`include = ["src"]`、`pythonVersion = "3.13"`。
-- `[tool.importlinter]`：`root_package = "financial_gate"`，两条 forbidden 合约，内容见 Global Constraints 里的依赖方向。
+- `[tool.importlinter]`：`root_package = "lararium"`，两条 forbidden 合约，内容见 Global Constraints 里的依赖方向。
 
 `.gitignore` 和 `LICENSE`（AGPL-3.0 全文）已经在仓库根目录，不用再建；`.gitignore` 已包含 `private/`、`backups/`、`infra/.env`、`.venv/`、`__pycache__/`、`node_modules/`、`web/dist/`。
 
@@ -150,11 +150,11 @@ git commit -m "docs: add license, phase-1 design and foundation plan"
 
 ```python
 # backend/tests/test_package.py
-import financial_gate
+import lararium
 
 
 def test_package_version() -> None:
-    assert financial_gate.__version__ == "0.1.0"
+    assert lararium.__version__ == "0.1.0"
 ```
 
 ```python
@@ -162,7 +162,7 @@ def test_package_version() -> None:
 import re
 from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "src" / "financial_gate"
+SRC = Path(__file__).parents[1] / "src" / "lararium"
 
 
 def test_no_float_in_source() -> None:
@@ -178,9 +178,9 @@ def test_no_float_in_source() -> None:
 - [ ] **Step 4: 运行，确认失败**
 
 Run: `cd backend && uv sync && uv run pytest -q`
-Expected: FAIL，`AttributeError: module 'financial_gate' has no attribute '__version__'`
+Expected: FAIL，`AttributeError: module 'lararium' has no attribute '__version__'`
 
-- [ ] **Step 5: 在 `src/financial_gate/__init__.py` 里写 `__version__ = "0.1.0"`；在根目录 `Makefile` 里加 `backend-check` 目标**
+- [ ] **Step 5: 在 `src/lararium/__init__.py` 里写 `__version__ = "0.1.0"`；在根目录 `Makefile` 里加 `backend-check` 目标**
 
 `backend-check` 在 `backend/` 目录下依次运行：`uv run ruff check .`、`uv run ruff format --check .`、`uv run pyright`、`uv run lint-imports`、`uv run pytest -q`。`check` 目标暂时只依赖 `backend-check`。
 
@@ -202,33 +202,33 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Files:**
 - Create: `infra/postgres/roles.sql`, `infra/postgres/init/00-roles.sh`
-- Create: `backend/src/financial_gate/config.py`, `backend/src/financial_gate/db.py`
+- Create: `backend/src/lararium/config.py`, `backend/src/lararium/db.py`
 - Create: `backend/alembic.ini`, `backend/migrations/env.py`, `backend/migrations/versions/0001_core_baseline.py`
 - Test: `backend/tests/conftest.py`, `backend/tests/core/test_baseline.py`
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)`（`env_prefix="FG_"`）：`database_url: str`、`migration_database_url: str | None = None`、`auth_mode: Literal["dev", "tailscale"] = "tailscale"`、`owner_login: str | None = None`（tailscale 模式下没有 `owner_login` 时校验报错；测试和 OpenAPI 导出显式传 `auth_mode="dev"`）；`def get_settings() -> Settings`（带 `lru_cache`）。
+  - `class Settings(BaseSettings)`（`env_prefix="LARARIUM_"`）：`database_url: str`、`migration_database_url: str | None = None`、`auth_mode: Literal["dev", "tailscale"] = "tailscale"`、`owner_login: str | None = None`（tailscale 模式下没有 `owner_login` 时校验报错；测试和 OpenAPI 导出显式传 `auth_mode="dev"`）；`def get_settings() -> Settings`（带 `lru_cache`）。
   - `def create_engine(url: str) -> AsyncEngine`；`def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]`（`expire_on_commit=False`）。
-  - 数据库角色：`fg_owner`（拥有 schema，只用来跑迁移）、`fg_backend`（应用使用，只有增删改查权限）。数据库名 `financial_gate`。
-  - 测试 fixture：`owner_url`、`backend_url`（session 级，`postgresql+psycopg://…` 字符串）；`session`（每个测试一个 `AsyncSession`，以 `fg_backend` 连接，外层事务在测试结束时回滚）。
+  - 数据库角色：`lararium_owner`（拥有 schema，只用来跑迁移）、`lararium_backend`（应用使用，只有增删改查权限）。数据库名 `lararium`。
+  - 测试 fixture：`owner_url`、`backend_url`（session 级，`postgresql+psycopg://…` 字符串）；`session`（每个测试一个 `AsyncSession`，以 `lararium_backend` 连接，外层事务在测试结束时回滚）。
 
 - [ ] **Step 1: 写 `infra/postgres/roles.sql`**（测试和部署共用这一份）
 
 ```sql
-CREATE ROLE fg_owner LOGIN PASSWORD :'owner_pw';
-CREATE ROLE fg_backend LOGIN PASSWORD :'backend_pw';
-CREATE DATABASE financial_gate OWNER fg_owner;
-\connect financial_gate
+CREATE ROLE lararium_owner LOGIN PASSWORD :'owner_pw';
+CREATE ROLE lararium_backend LOGIN PASSWORD :'backend_pw';
+CREATE DATABASE lararium OWNER lararium_owner;
+\connect lararium
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 ```
 
-`00-roles.sh` 用 `psql -v ON_ERROR_STOP=1 -v owner_pw="$FG_OWNER_PASSWORD" -v backend_pw="$FG_BACKEND_PASSWORD" -U "$POSTGRES_USER" -f /fg/roles.sql` 执行它。
+`00-roles.sh` 用 `psql -v ON_ERROR_STOP=1 -v owner_pw="$LARARIUM_OWNER_PASSWORD" -v backend_pw="$LARARIUM_BACKEND_PASSWORD" -U "$POSTGRES_USER" -f /lararium/roles.sql` 执行它。
 
 - [ ] **Step 2: 写 `tests/conftest.py`**
 
-- session 级 fixture：启动 `PostgresContainer("postgres:18")`，把 `infra/postgres/` 只读挂载到容器的 `/fg`，在容器里执行 `psql -v ON_ERROR_STOP=1 -v owner_pw=owner -v backend_pw=backend -U <容器超级用户> -f /fg/roles.sql`，断言退出码为 0。
-- 由此得出 `owner_url`（`fg_owner:owner`）和 `backend_url`（`fg_backend:backend`），都指向 `financial_gate` 库。
+- session 级 fixture：启动 `PostgresContainer("postgres:18")`，把 `infra/postgres/` 只读挂载到容器的 `/lararium`，在容器里执行 `psql -v ON_ERROR_STOP=1 -v owner_pw=owner -v backend_pw=backend -U <容器超级用户> -f /lararium/roles.sql`，断言退出码为 0。
+- 由此得出 `owner_url`（`lararium_owner:owner`）和 `backend_url`（`lararium_backend:backend`），都指向 `lararium` 库。
 - session 级 fixture 用 `owner_url` 跑 `alembic upgrade head`（通过 `alembic.config.Config` 设置 `sqlalchemy.url`）。
 - `session` fixture：用 `backend_url` 建 async engine，开一个连接并 `begin()` 外层事务，`AsyncSession(bind=conn, join_transaction_mode="create_savepoint")`，测试结束后回滚外层事务。这样被测代码里的 `commit()` 只释放 savepoint，不会污染其他测试。
 
@@ -285,11 +285,11 @@ Expected: FAIL（alembic 找不到配置或迁移；如果 schema 已建，则 `
 `migrations/env.py` 用同步 engine，从 `Settings.migration_database_url` 或 alembic 配置里的 `sqlalchemy.url` 读连接串。迁移一律用 `op.execute` 写原生 SQL。`0001_core_baseline` 的内容：
 
 ```sql
-CREATE SCHEMA core AUTHORIZATION fg_owner;
-CREATE SCHEMA finance AUTHORIZATION fg_owner;
-GRANT USAGE ON SCHEMA core, finance TO fg_backend;
-ALTER DEFAULT PRIVILEGES FOR ROLE fg_owner IN SCHEMA core, finance
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fg_backend;
+CREATE SCHEMA core AUTHORIZATION lararium_owner;
+CREATE SCHEMA finance AUTHORIZATION lararium_owner;
+GRANT USAGE ON SCHEMA core, finance TO lararium_backend;
+ALTER DEFAULT PRIVILEGES FOR ROLE lararium_owner IN SCHEMA core, finance
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lararium_backend;
 
 CREATE TABLE core.settings (
   key text PRIMARY KEY,
@@ -355,7 +355,7 @@ git commit -m "feat: add database roles, test harness and core baseline migratio
 ### Task 3: 公共层——命令上下文、事件、审计、设置、实体
 
 **Files:**
-- Create: `backend/src/financial_gate/core/{actors.py, json_types.py, errors.py, timeutil.py, models.py, commands.py, settings_store.py, entities.py}`
+- Create: `backend/src/lararium/core/{actors.py, json_types.py, errors.py, timeutil.py, models.py, commands.py, settings_store.py, entities.py}`
 - Modify: `backend/tests/conftest.py`（加 `actor` 和 `run` 两个 fixture）
 - Test: `backend/tests/core/test_commands.py`, `backend/tests/core/test_settings_store.py`, `backend/tests/core/test_entities.py`, `backend/tests/core/test_timeutil.py`
 
@@ -379,7 +379,7 @@ git commit -m "feat: add database roles, test harness and core baseline migratio
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.commands import command_context
+from lararium.core.commands import command_context
 
 
 async def test_command_context_writes_audit_and_events(session, actor) -> None:
@@ -427,8 +427,8 @@ async def test_event_insert_notifies_listeners(backend_url: str) -> None:
 # backend/tests/core/test_settings_store.py
 import pytest
 
-from financial_gate.core.errors import SettingNotFoundError
-from financial_gate.core.settings_store import get_setting, get_timezone, set_setting
+from lararium.core.errors import SettingNotFoundError
+from lararium.core.settings_store import get_setting, get_timezone, set_setting
 
 
 async def test_get_and_set_setting(session, run) -> None:
@@ -445,7 +445,7 @@ async def test_unknown_setting_raises(session) -> None:
 
 ```python
 # backend/tests/core/test_entities.py
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
 
 
 async def test_organization_matched_case_insensitively(run) -> None:
@@ -465,7 +465,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from financial_gate.core.timeutil import local_date
+from lararium.core.timeutil import local_date
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -482,7 +482,7 @@ def test_local_date_rejects_naive_datetime() -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/core -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.core.commands'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.core.commands'`
 
 - [ ] **Step 3: 实现 `core/` 下这几个文件，并在 `conftest.py` 里加 `actor` 和 `run` fixture**
 
@@ -505,7 +505,7 @@ git commit -m "feat: add command context with audit log, outbox events and setti
 ### Task 4: 资产（instrument）与金额工具
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/{__init__.py, errors.py, money.py, models.py, instruments.py}`, `backend/migrations/versions/0002_finance_instruments.py`
+- Create: `backend/src/lararium/modules/finance/{__init__.py, errors.py, money.py, models.py, instruments.py}`, `backend/migrations/versions/0002_finance_instruments.py`
 - Test: `backend/tests/finance/conftest.py`, `backend/tests/finance/test_money.py`, `backend/tests/finance/test_instruments.py`
 
 **Interfaces:**
@@ -534,7 +534,7 @@ git commit -m "feat: add command context with audit log, outbox events and setti
 # backend/tests/finance/test_money.py
 from decimal import Decimal
 
-from financial_gate.modules.finance.money import to_plain_str, tolerance
+from lararium.modules.finance.money import to_plain_str, tolerance
 
 
 def test_tolerance_is_half_of_last_decimal_place() -> None:
@@ -553,9 +553,9 @@ def test_to_plain_str_never_uses_exponent() -> None:
 # backend/tests/finance/test_instruments.py
 import pytest
 
-from financial_gate.core.settings_store import get_setting
-from financial_gate.modules.finance.errors import DuplicateIdentifierError
-from financial_gate.modules.finance.instruments import (
+from lararium.core.settings_store import get_setting
+from lararium.modules.finance.errors import DuplicateIdentifierError
+from lararium.modules.finance.instruments import (
     InstrumentIdentifier, create_instrument, find_by_identifier, get_currency, list_instruments,
     set_hidden,
 )
@@ -604,7 +604,7 @@ async def test_reporting_currency_defaults_to_gbp(session) -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/finance -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.modules.finance'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.modules.finance'`
 
 - [ ] **Step 3: 写迁移 `0002_finance_instruments`**
 
@@ -655,8 +655,8 @@ git commit -m "feat: add instruments with identifiers and decimal helpers"
 ### Task 5: 账户
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/accounts.py`, `backend/migrations/versions/0003_finance_accounts.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/accounts.py`, `backend/migrations/versions/0003_finance_accounts.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_accounts.py`；在 `backend/tests/finance/conftest.py` 里加 `make_account` fixture
 
 **Interfaces:**
@@ -684,9 +684,9 @@ from datetime import date
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
-from financial_gate.modules.finance.accounts import close_account, create_account
-from financial_gate.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.modules.finance.accounts import close_account, create_account
+from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
 
 async def test_create_manual_bank_account(session, run) -> None:
@@ -736,7 +736,7 @@ async def test_create_account_emits_event(session, make_account) -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/finance/test_accounts.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.modules.finance.accounts'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.modules.finance.accounts'`
 
 - [ ] **Step 3: 写迁移 `0003_finance_accounts`**
 
@@ -781,8 +781,8 @@ git commit -m "feat: add accounts with tax wrappers, parents and closing"
 ### Task 6: 复式账本
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/ledger.py`, `backend/migrations/versions/0004_finance_ledger.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/ledger.py`, `backend/migrations/versions/0004_finance_ledger.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_ledger_residuals.py`, `backend/tests/finance/test_ledger.py`
 
 **Interfaces:**
@@ -804,7 +804,7 @@ git commit -m "feat: add accounts with tax wrappers, parents and closing"
 from decimal import Decimal
 from uuid import uuid4
 
-from financial_gate.modules.finance.ledger import PostingInput, compute_residuals
+from lararium.modules.finance.ledger import PostingInput, compute_residuals
 
 A, B, C, GBP, USD, ETH = (uuid4() for _ in range(6))
 
@@ -839,7 +839,7 @@ def test_eighteen_decimals_sum_exactly() -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/finance/test_ledger_residuals.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.modules.finance.ledger'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.modules.finance.ledger'`
 
 - [ ] **Step 3: 在 `ledger.py` 里实现 `PostingInput` 和 `compute_residuals`**
 
@@ -858,8 +858,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from financial_gate.modules.finance.errors import LedgerImbalanceError
-from financial_gate.modules.finance.ledger import (
+from lararium.modules.finance.errors import LedgerImbalanceError
+from lararium.modules.finance.ledger import (
     PostingInput, TransactionInput, find_unbalanced_transactions, post_transaction,
     void_transaction,
 )
@@ -985,8 +985,8 @@ git commit -m "feat: add double-entry ledger with balance checks"
 ### Task 7: 余额快照、价格、汇率
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/snapshots.py`, `backend/src/financial_gate/modules/finance/pricing.py`, `backend/migrations/versions/0005_finance_snapshots_prices.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/snapshots.py`, `backend/src/lararium/modules/finance/pricing.py`, `backend/migrations/versions/0005_finance_snapshots_prices.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_snapshots.py`, `backend/tests/finance/test_pricing.py`；在 `tests/finance/conftest.py` 里加 `btc` fixture（crypto，小数位 8，计价币种 USD）
 
 **Interfaces:**
@@ -1007,7 +1007,7 @@ from decimal import Decimal
 
 import pytest
 
-from financial_gate.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.snapshots import record_snapshot
 
 
 async def test_snapshot_as_of_date_uses_reporting_timezone(run, make_account, gbp) -> None:
@@ -1032,8 +1032,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from financial_gate.modules.finance.errors import NotACurrencyError
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.errors import NotACurrencyError
+from lararium.modules.finance.pricing import record_fx_rate, record_price
 
 DAY = date(2026, 11, 10)
 
@@ -1064,7 +1064,7 @@ async def test_fx_rate_must_be_positive(run, usd, gbp) -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/finance/test_snapshots.py tests/finance/test_pricing.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.modules.finance.snapshots'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.modules.finance.snapshots'`
 
 - [ ] **Step 3: 写迁移 `0005_finance_snapshots_prices`**
 
@@ -1128,7 +1128,7 @@ git commit -m "feat: add balance snapshots, prices and fx rates"
 ### Task 8: 估值函数（v1）
 
 **Files:**
-- Create: `backend/migrations/versions/0006_finance_valuation_v1.py`, `backend/src/financial_gate/modules/finance/valuation.py`
+- Create: `backend/migrations/versions/0006_finance_valuation_v1.py`, `backend/src/lararium/modules/finance/valuation.py`
 - Test: `backend/tests/finance/test_valuation.py`
 
 **Interfaces:**
@@ -1180,15 +1180,15 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from financial_gate.core.settings_store import set_setting
-from financial_gate.modules.finance.instruments import create_instrument, get_currency, set_hidden
-from financial_gate.modules.finance.accounts import close_account
-from financial_gate.modules.finance.ledger import (
+from lararium.core.settings_store import set_setting
+from lararium.modules.finance.instruments import create_instrument, get_currency, set_hidden
+from lararium.modules.finance.accounts import close_account
+from lararium.modules.finance.ledger import (
     PostingInput, TransactionInput, post_transaction, void_transaction,
 )
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
-from financial_gate.modules.finance.snapshots import record_snapshot
-from financial_gate.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
+from lararium.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
 
 LON = ZoneInfo("Europe/London")
 
@@ -1334,7 +1334,7 @@ async def test_series_has_one_row_per_day(session) -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/finance/test_valuation.py -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.modules.finance.valuation'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.modules.finance.valuation'`
 
 - [ ] **Step 3: 写迁移 `0006_finance_valuation_v1`，按上面的规则实现四个 SQL 函数（`LANGUAGE sql STABLE` 或 `plpgsql STABLE`）；在 `valuation.py` 里写 Python 封装**
 
@@ -1357,8 +1357,8 @@ git commit -m "feat: add versioned valuation functions and net worth series"
 ### Task 9: REST API
 
 **Files:**
-- Create: `backend/src/financial_gate/api/{app.py, deps.py, core_routes.py, export_openapi.py}`, `backend/src/financial_gate/modules/registry.py`, `backend/src/financial_gate/modules/finance/{schemas.py, api.py}`
-- Modify: `backend/src/financial_gate/modules/finance/__init__.py`（真正的 `MODULE`）
+- Create: `backend/src/lararium/api/{app.py, deps.py, core_routes.py, export_openapi.py}`, `backend/src/lararium/modules/registry.py`, `backend/src/lararium/modules/finance/{schemas.py, api.py}`
+- Modify: `backend/src/lararium/modules/finance/__init__.py`（真正的 `MODULE`）
 - Test: `backend/tests/api/conftest.py`, `backend/tests/api/test_core_api.py`, `backend/tests/api/test_finance_api.py`
 
 **Interfaces:**
@@ -1382,7 +1382,7 @@ git commit -m "feat: add versioned valuation functions and net worth series"
       - `record_price` POST `/prices` → 204（body：`instrument_id`、`quote_currency`（ISO 代码）、`price`、`as_of_date`）；`record_fx_rate` POST `/fx-rates` → 204（body：`base`、`quote`（ISO 代码）、`rate`、`as_of_date`）。
       - `get_holdings` GET `/holdings?date=YYYY-MM-DD`（默认是报告时区的今天）；`get_net_worth` GET `/net-worth?start=&end=`（默认是截至今天的 365 天）。
   - 每个写操作都在 `command_context(session, actor, "<route name>", <body 的 JSON 形式>)` 里执行。
-  - `python -m financial_gate.api.export_openapi`：把 OpenAPI 以 `sort_keys=True`、`indent=2` 输出到 stdout。
+  - `python -m lararium.api.export_openapi`：把 OpenAPI 以 `sort_keys=True`、`indent=2` 输出到 stdout。
   - 测试 fixture（`tests/api/conftest.py`）：`client` 用 `dev` 模式；`tailscale_client` 用 `tailscale` 模式，`owner_login="me@example.com"`。两者都覆盖 `get_session`，让它返回测试用的 `session`，并通过 `httpx.ASGITransport` 发请求。
 
 - [ ] **Step 1: 写失败的测试**
@@ -1419,7 +1419,7 @@ async def test_writes_record_actor_in_audit_log(tailscale_client, session) -> No
 # backend/tests/api/test_finance_api.py
 import json
 
-from financial_gate.api.export_openapi import render_openapi
+from lararium.api.export_openapi import render_openapi
 
 
 async def _gbp_id(client) -> str:
@@ -1491,7 +1491,7 @@ def test_openapi_export_is_deterministic() -> None:
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `cd backend && uv run pytest tests/api -q`
-Expected: FAIL，`ModuleNotFoundError: No module named 'financial_gate.api.app'`
+Expected: FAIL，`ModuleNotFoundError: No module named 'lararium.api.app'`
 
 - [ ] **Step 3: 实现 `registry.py`、`schemas.py`、`finance/api.py`、`core_routes.py`、`deps.py`、`app.py`、`export_openapi.py`**
 
@@ -1624,45 +1624,45 @@ git commit -m "feat: add web UI for net worth, accounts and instruments"
 **Interfaces:**
 - Consumes: 任务 2 的 `roles.sql` 和 `00-roles.sh`，任务 9 的 `create_app`，任务 10 的前端构建产物。
 - Produces:
-  - Compose 服务：`db`（`postgres:18`）、`migrate`（一次性运行 `alembic upgrade head`，用 `fg_owner`）、`api`（uvicorn，用 `fg_backend`，`FG_AUTH_MODE=tailscale`）、`web`（Caddy 托管 SPA，并把 `/api/*` 转给 api），只绑定 `127.0.0.1:8080`。
+  - Compose 服务：`db`（`postgres:18`）、`migrate`（一次性运行 `alembic upgrade head`，用 `lararium_owner`）、`api`（uvicorn，用 `lararium_backend`，`LARARIUM_AUTH_MODE=tailscale`）、`web`（Caddy 托管 SPA，并把 `/api/*` 转给 api），只绑定 `127.0.0.1:8080`。
   - 访问方式：在主机上运行 `tailscale serve --bg 8080`，Tailscale 会给请求加上 `Tailscale-User-Login` 头。
-  - 环境变量（`infra/env.example`）：`POSTGRES_PASSWORD`、`FG_OWNER_PASSWORD`、`FG_BACKEND_PASSWORD`、`FG_OWNER_LOGIN`、`BACKUP_DIR`，以及可选的 `RESTIC_REPOSITORY`、`RESTIC_PASSWORD`。`infra/.env` 不进 git；README 里说明怎么用 SOPS + age 加密它，以及怎么解密回来。
+  - 环境变量（`infra/env.example`）：`POSTGRES_PASSWORD`、`LARARIUM_OWNER_PASSWORD`、`LARARIUM_BACKEND_PASSWORD`、`LARARIUM_OWNER_LOGIN`、`BACKUP_DIR`，以及可选的 `RESTIC_REPOSITORY`、`RESTIC_PASSWORD`。`infra/.env` 不进 git；README 里说明怎么用 SOPS + age 加密它，以及怎么解密回来。
 
 - [ ] **Step 1: 写 `compose.yaml`、两个 Dockerfile 和 `Caddyfile`**
 
 ```yaml
 # infra/compose.yaml
-name: financial-gate
+name: lararium
 services:
   db:
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      FG_OWNER_PASSWORD: ${FG_OWNER_PASSWORD}
-      FG_BACKEND_PASSWORD: ${FG_BACKEND_PASSWORD}
+      LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD}
+      LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql
-      - ./postgres:/fg:ro
+      - ./postgres:/lararium:ro
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d financial_gate"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lararium"]
       interval: 5s
       retries: 30
   migrate:
     build: ../backend
     command: ["alembic", "upgrade", "head"]
     environment:
-      FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
-      FG_MIGRATION_DATABASE_URL: postgresql+psycopg://fg_owner:${FG_OWNER_PASSWORD}@db:5432/financial_gate
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD}@db:5432/lararium
     depends_on:
       db: { condition: service_healthy }
   api:
     build: ../backend
-    command: ["uvicorn", "financial_gate.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
-      FG_AUTH_MODE: tailscale
-      FG_OWNER_LOGIN: ${FG_OWNER_LOGIN}
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_AUTH_MODE: tailscale
+      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN}
     depends_on:
       migrate: { condition: service_completed_successfully }
   web:
@@ -1695,7 +1695,7 @@ volumes:
 
 Run:
 ```bash
-cp infra/env.example infra/.env   # 填入本地测试用的密码，FG_OWNER_LOGIN 填 me@example.com
+cp infra/env.example infra/.env   # 填入本地测试用的密码，LARARIUM_OWNER_LOGIN 填 me@example.com
 docker compose -f infra/compose.yaml --env-file infra/.env up -d --build
 curl -s http://127.0.0.1:8080/api/v1/health
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/api/v1/finance/accounts
@@ -1707,14 +1707,14 @@ Expected: 依次输出 `{"status":"ok"}`、`401`、`[]`；浏览器打开 `http:
 
 两个脚本都用 `docker compose -f "$(dirname "$0")/../compose.yaml" --env-file "$(dirname "$0")/../.env"` 找到这套服务。
 
-- `backup.sh`：`… exec -T db pg_dump -U postgres -d financial_gate --format=custom` 输出到 `$BACKUP_DIR/fg-<UTC 时间戳>.dump`。设置了 `RESTIC_REPOSITORY` 时，再执行 `restic backup "$BACKUP_DIR"`。
-- `restore.sh <dump 文件> <目标库名>`：新建一个 owner 为 `fg_owner` 的目标库，然后 `pg_restore --no-owner --role=fg_owner` 恢复进去。
+- `backup.sh`：`… exec -T db pg_dump -U postgres -d lararium --format=custom` 输出到 `$BACKUP_DIR/lararium-<UTC 时间戳>.dump`。设置了 `RESTIC_REPOSITORY` 时，再执行 `restic backup "$BACKUP_DIR"`。
+- `restore.sh <dump 文件> <目标库名>`：新建一个 owner 为 `lararium_owner` 的目标库，然后 `pg_restore --no-owner --role=lararium_owner` 恢复进去。
 
 Run:
 ```bash
 infra/backup/backup.sh
-infra/backup/restore.sh "$(ls -t backups/fg-*.dump | head -1)" financial_gate_restore_check
-docker compose -f infra/compose.yaml exec -T db psql -U postgres -d financial_gate_restore_check -tAc "select count(*) from finance.instruments"
+infra/backup/restore.sh "$(ls -t backups/lararium-*.dump | head -1)" lararium_restore_check
+docker compose -f infra/compose.yaml exec -T db psql -U postgres -d lararium_restore_check -tAc "select count(*) from finance.instruments"
 ```
 Expected: 最后一条命令输出 `10`（种子币种的数量）
 

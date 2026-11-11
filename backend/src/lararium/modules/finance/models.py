@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import DateTime, ForeignKey, Numeric, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from financial_gate.core.models import UUIDV7, Base
+from lararium.core.models import UUIDV7, Base
 
 FINANCE_SCHEMA = {"schema": "finance"}
 

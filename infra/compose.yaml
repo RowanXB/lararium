@@ -1,38 +1,38 @@
-name: financial-gate
+name: lararium
 services:
   db:
     image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      FG_OWNER_PASSWORD: ${FG_OWNER_PASSWORD}
-      FG_BACKEND_PASSWORD: ${FG_BACKEND_PASSWORD}
+      LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD}
+      LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql
-      - ./postgres:/fg:ro
+      - ./postgres:/lararium:ro
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # -h 127.0.0.1: during first-start init the server listens on the socket only,
       # so this stays unhealthy until roles.sql has run and TCP is up.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d financial_gate"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d lararium"]
       interval: 5s
       retries: 30
   migrate:
     build: ../backend
     command: ["alembic", "upgrade", "head"]
     environment:
-      FG_MIGRATION_DATABASE_URL: postgresql+psycopg://fg_owner:${FG_OWNER_PASSWORD}@db:5432/financial_gate
+      LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD}@db:5432/lararium
     depends_on:
       db: { condition: service_healthy }
   # No published ports: only Caddy (web) reaches the api, over the compose network.
   api:
     build: ../backend
     restart: unless-stopped
-    command: ["uvicorn", "financial_gate.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
-      FG_AUTH_MODE: tailscale
-      FG_OWNER_LOGIN: ${FG_OWNER_LOGIN}
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_AUTH_MODE: tailscale
+      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN}
     depends_on:
       migrate: { condition: service_completed_successfully }
   web:

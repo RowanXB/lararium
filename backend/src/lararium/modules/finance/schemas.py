@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-from financial_gate.modules.finance.accounts import (
+from lararium.modules.finance.accounts import (
     AccountStatus,
     AccountSubtype,
     BalanceMode,
@@ -26,11 +26,11 @@ from financial_gate.modules.finance.accounts import (
     SourceKind,
     TaxWrapper,
 )
-from financial_gate.modules.finance.instruments import IdentifierScheme, InstrumentKind
-from financial_gate.modules.finance.ledger import TransactionOrigin, TransactionStatus
-from financial_gate.modules.finance.money import to_plain_str
-from financial_gate.modules.finance.snapshots import SnapshotKind
-from financial_gate.modules.finance.valuation import HoldingStatus
+from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
+from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
+from lararium.modules.finance.money import to_plain_str
+from lararium.modules.finance.snapshots import SnapshotKind
+from lararium.modules.finance.valuation import HoldingStatus
 
 DECIMAL_PATTERN = r"^-?[0-9]+(\.[0-9]+)?$"  # ASCII digits only: \d matches any script's digits
 _DECIMAL_RE = re.compile(DECIMAL_PATTERN)

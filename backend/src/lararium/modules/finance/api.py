@@ -10,12 +10,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import command_context
-from financial_gate.core.entities import get_or_create_organization
-from financial_gate.core.json_types import JSONValue
-from financial_gate.core.settings_store import get_setting, get_timezone, set_setting
-from financial_gate.deps import ActorDep, SessionDep, get_actor
-from financial_gate.modules.finance import (
+from lararium.core.commands import command_context
+from lararium.core.entities import get_or_create_organization
+from lararium.core.json_types import JSONValue
+from lararium.core.settings_store import get_setting, get_timezone, set_setting
+from lararium.deps import ActorDep, SessionDep, get_actor
+from lararium.modules.finance import (
     accounts,
     errors,
     instruments,
@@ -24,8 +24,8 @@ from financial_gate.modules.finance import (
     snapshots,
     valuation,
 )
-from financial_gate.modules.finance.money import to_plain_str
-from financial_gate.modules.finance.schemas import (
+from lararium.modules.finance.money import to_plain_str
+from lararium.modules.finance.schemas import (
     AccountClose,
     AccountCreate,
     AccountOut,

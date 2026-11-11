@@ -4,15 +4,15 @@ from datetime import date
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
-from financial_gate.modules.finance.accounts import (
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.modules.finance.accounts import (
     close_account,
     create_account,
     get_account,
     list_accounts,
     rename_account,
 )
-from financial_gate.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
 
 async def test_create_manual_bank_account(session, run) -> None:

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from financial_gate.modules.finance.money import to_plain_str, tolerance
+from lararium.modules.finance.money import to_plain_str, tolerance
 
 
 def test_tolerance_is_half_of_last_decimal_place() -> None:

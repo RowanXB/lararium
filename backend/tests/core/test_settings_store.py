@@ -1,7 +1,7 @@
 import pytest
 
-from financial_gate.core.errors import SettingNotFoundError
-from financial_gate.core.settings_store import get_setting, get_timezone, set_setting
+from lararium.core.errors import SettingNotFoundError
+from lararium.core.settings_store import get_setting, get_timezone, set_setting
 
 
 async def test_get_and_set_setting(session, run) -> None:

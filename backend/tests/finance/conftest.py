@@ -4,8 +4,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.modules.finance.accounts import AccountRecord, create_account
-from financial_gate.modules.finance.instruments import (
+from lararium.modules.finance.accounts import AccountRecord, create_account
+from lararium.modules.finance.instruments import (
     InstrumentRecord,
     create_instrument,
     get_currency,

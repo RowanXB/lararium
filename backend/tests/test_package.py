@@ -1,5 +1,5 @@
-import financial_gate
+import lararium
 
 
 def test_package_version() -> None:
-    assert financial_gate.__version__ == "0.1.0"
+    assert lararium.__version__ == "0.1.0"

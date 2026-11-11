@@ -4,10 +4,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.errors import SettingNotFoundError
-from financial_gate.core.json_types import JSONValue
-from financial_gate.core.models import Setting
+from lararium.core.commands import CommandContext
+from lararium.core.errors import SettingNotFoundError
+from lararium.core.json_types import JSONValue
+from lararium.core.models import Setting
 
 TIMEZONE_KEY = "core.timezone"
 

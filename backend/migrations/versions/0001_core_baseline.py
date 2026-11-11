@@ -15,12 +15,12 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 UPGRADE = [
-    "CREATE SCHEMA core AUTHORIZATION fg_owner",
-    "CREATE SCHEMA finance AUTHORIZATION fg_owner",
-    "GRANT USAGE ON SCHEMA core, finance TO fg_backend",
+    "CREATE SCHEMA core AUTHORIZATION lararium_owner",
+    "CREATE SCHEMA finance AUTHORIZATION lararium_owner",
+    "GRANT USAGE ON SCHEMA core, finance TO lararium_backend",
     """
-    ALTER DEFAULT PRIVILEGES FOR ROLE fg_owner IN SCHEMA core, finance
-      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fg_backend
+    ALTER DEFAULT PRIVILEGES FOR ROLE lararium_owner IN SCHEMA core, finance
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lararium_backend
     """,
     """
     CREATE TABLE core.settings (
@@ -83,7 +83,7 @@ UPGRADE = [
       occurred_at timestamptz NOT NULL DEFAULT now()
     )
     """,
-    "REVOKE UPDATE, DELETE ON core.audit_log FROM fg_backend",
+    "REVOKE UPDATE, DELETE ON core.audit_log FROM lararium_backend",
 ]
 
 DOWNGRADE = [

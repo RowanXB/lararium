@@ -9,15 +9,15 @@ from uuid import UUID
 from sqlalchemy import Numeric, case, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.entities import get_self_entity_id
-from financial_gate.core.json_types import JSONValue
-from financial_gate.core.settings_store import get_timezone
-from financial_gate.core.timeutil import local_date
-from financial_gate.modules.finance import models
-from financial_gate.modules.finance.errors import LedgerImbalanceError, TransactionNotFoundError
-from financial_gate.modules.finance.instruments import get_instrument
-from financial_gate.modules.finance.money import require_finite, to_plain_str, tolerance
+from lararium.core.commands import CommandContext
+from lararium.core.entities import get_self_entity_id
+from lararium.core.json_types import JSONValue
+from lararium.core.settings_store import get_timezone
+from lararium.core.timeutil import local_date
+from lararium.modules.finance import models
+from lararium.modules.finance.errors import LedgerImbalanceError, TransactionNotFoundError
+from lararium.modules.finance.instruments import get_instrument
+from lararium.modules.finance.money import require_finite, to_plain_str, tolerance
 
 TransactionStatus = Literal["pending", "booked", "inferred", "confirmed", "void"]
 TransactionOrigin = Literal["connector", "manual", "inference", "rule"]

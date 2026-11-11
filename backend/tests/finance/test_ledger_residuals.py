@@ -1,7 +1,7 @@
 from decimal import Decimal
 from uuid import uuid4
 
-from financial_gate.modules.finance.ledger import PostingInput, compute_residuals
+from lararium.modules.finance.ledger import PostingInput, compute_residuals
 
 A, B, C, GBP, USD, ETH = (uuid4() for _ in range(6))
 

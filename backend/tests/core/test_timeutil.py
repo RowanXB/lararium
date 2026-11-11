@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from financial_gate.core.timeutil import local_date
+from lararium.core.timeutil import local_date
 
 LONDON = ZoneInfo("Europe/London")
 

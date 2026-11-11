@@ -7,15 +7,15 @@ from uuid import UUID
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from financial_gate.core.commands import CommandContext
-from financial_gate.core.entities import get_self_entity_id
-from financial_gate.core.json_types import JSONValue
-from financial_gate.core.settings_store import get_timezone
-from financial_gate.core.timeutil import local_date
-from financial_gate.modules.finance import models
-from financial_gate.modules.finance.accounts import get_account
-from financial_gate.modules.finance.instruments import get_instrument
-from financial_gate.modules.finance.money import require_finite, to_plain_str
+from lararium.core.commands import CommandContext
+from lararium.core.entities import get_self_entity_id
+from lararium.core.json_types import JSONValue
+from lararium.core.settings_store import get_timezone
+from lararium.core.timeutil import local_date
+from lararium.modules.finance import models
+from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.instruments import get_instrument
+from lararium.modules.finance.money import require_finite, to_plain_str
 
 SnapshotKind = Literal["reported", "manual"]
 

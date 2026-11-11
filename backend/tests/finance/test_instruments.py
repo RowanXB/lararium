@@ -1,8 +1,8 @@
 import pytest
 
-from financial_gate.core.settings_store import get_setting
-from financial_gate.modules.finance.errors import DuplicateIdentifierError
-from financial_gate.modules.finance.instruments import (
+from lararium.core.settings_store import get_setting
+from lararium.modules.finance.errors import DuplicateIdentifierError
+from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     create_instrument,
     find_by_identifier,

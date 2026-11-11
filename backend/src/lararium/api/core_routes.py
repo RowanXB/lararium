@@ -6,9 +6,9 @@ from zoneinfo import available_timezones
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_validator
 
-from financial_gate.core.commands import command_context
-from financial_gate.core.settings_store import TIMEZONE_KEY, get_timezone, set_setting
-from financial_gate.deps import ActorDep, SessionDep, get_actor
+from lararium.core.commands import command_context
+from lararium.core.settings_store import TIMEZONE_KEY, get_timezone, set_setting
+from lararium.deps import ActorDep, SessionDep, get_actor
 
 public_router = APIRouter(prefix="/api/v1", tags=["core"])
 router = APIRouter(prefix="/api/v1", tags=["core"], dependencies=[Depends(get_actor)])

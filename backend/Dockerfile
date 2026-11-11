@@ -18,7 +18,7 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --locked --no-dev
 
-RUN useradd --system --uid 10001 --no-create-home fg
-USER fg
+RUN useradd --system --uid 10001 --no-create-home lararium
+USER lararium
 
-CMD ["uvicorn", "financial_gate.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

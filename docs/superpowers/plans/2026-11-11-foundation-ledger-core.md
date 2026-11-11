@@ -6,9 +6,9 @@ The English version is authoritative; if the two versions differ, follow this on
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the skeleton and ledger core of financial-gate: create accounts by hand, enter balance snapshots and holding quantities, record double-entry transactions, enter prices and FX rates, and see net worth for any day in the web UI.
+**Goal:** Build the skeleton and ledger core of Lararium: create accounts by hand, enter balance snapshots and holding quantities, record double-entry transactions, enter prices and FX rates, and see net worth for any day in the web UI.
 
-**Architecture:** Python modular monolith: `financial_gate.core` is the shared layer, `financial_gate.modules.finance` is the finance module, and `financial_gate.api` mounts the modules onto FastAPI. All data lives in PostgreSQL 18. Valuation logic is written as versioned SQL functions, shared by the UI and, later, by BI and MCP. The frontend is a React + Vite SPA, with an API client generated from OpenAPI.
+**Architecture:** Python modular monolith: `lararium.core` is the shared layer, `lararium.modules.finance` is the finance module, and `lararium.api` mounts the modules onto FastAPI. All data lives in PostgreSQL 18. Valuation logic is written as versioned SQL functions, shared by the UI and, later, by BI and MCP. The frontend is a React + Vite SPA, with an API client generated from OpenAPI.
 
 **Tech Stack:** Python 3.13, uv, FastAPI, Pydantic v2, SQLAlchemy 2 (async, psycopg 3), Alembic, pytest + pytest-asyncio + testcontainers; PostgreSQL 18; React, Vite, TanStack Router / Query, shadcn/ui, ECharts, @hey-api/openapi-ts, Vitest + Testing Library; Docker Compose, Caddy.
 
@@ -33,7 +33,7 @@ Of the spec's shared objects, this plan builds only the ones the ledger core nee
 - All IDs are UUIDv7 (database default `uuidv7()`).
 - Machine timestamps are stored as UTC `timestamptz`; dates are stored separately as `date`; `core.timezone` defaults to `Europe/London`.
 - The reporting currency defaults to GBP (setting `finance.reporting_currency`).
-- Dependency direction: `financial_gate.core` must not import `financial_gate.modules` or `financial_gate.api`; `financial_gate.modules` must not import `financial_gate.api`. Enforced by import-linter. When a second module appears, add an independence contract ("modules are independent of each other").
+- Dependency direction: `lararium.core` must not import `lararium.modules` or `lararium.api`; `lararium.modules` must not import `lararium.api`. Enforced by import-linter. When a second module appears, add an independence contract ("modules are independent of each other").
 - The system is read-only: no order placement, transfer or withdrawal features.
 - This plan opens no public entry point; access is via Tailscale only.
 - No Next.js, SQLite, Redis or Kafka.
@@ -58,7 +58,7 @@ The spec implicitly requires correct handling of these five kinds of input or si
 ## File Structure
 
 ```
-financial-gate/
+lararium/
 ├── Makefile                      # check / backend-check / openapi / web-check / up
 ├── README.md                     # how to run it locally and on the server
 ├── README.zh-CN.md               # Chinese translation of README.md
@@ -75,9 +75,9 @@ financial-gate/
 │   ├── pyproject.toml, uv.lock, alembic.ini, Dockerfile
 │   ├── migrations/env.py
 │   ├── migrations/versions/      # 0001_core_baseline … 0006_finance_valuation_v1
-│   ├── src/financial_gate/
+│   ├── src/lararium/
 │   │   ├── __init__.py           # __version__
-│   │   ├── config.py             # Settings (environment variables prefixed FG_)
+│   │   ├── config.py             # Settings (environment variables prefixed LARARIUM_)
 │   │   ├── db.py                 # engine and session factory
 │   │   ├── core/                 # shared layer, knows nothing about modules
 │   │   │   ├── actors.py         # Actor
@@ -119,11 +119,11 @@ financial-gate/
 ### Task 1: Repository and backend toolchain
 
 **Files:**
-- Create: `backend/pyproject.toml`, `backend/src/financial_gate/__init__.py`, `backend/src/financial_gate/core/__init__.py`, `backend/src/financial_gate/modules/__init__.py`, `backend/src/financial_gate/api/__init__.py`, `Makefile`
+- Create: `backend/pyproject.toml`, `backend/src/lararium/__init__.py`, `backend/src/lararium/core/__init__.py`, `backend/src/lararium/modules/__init__.py`, `backend/src/lararium/api/__init__.py`, `Makefile`
 - Test: `backend/tests/test_package.py`, `backend/tests/test_no_floats.py`
 
 **Interfaces:**
-- Produces: package `financial_gate` (`__version__ = "0.1.0"`); command `make backend-check`, which runs `ruff check`, `ruff format --check`, `pyright`, `lint-imports` and `pytest` in that order.
+- Produces: package `lararium` (`__version__ = "0.1.0"`); command `make backend-check`, which runs `ruff check`, `ruff format --check`, `pyright`, `lint-imports` and `pytest` in that order.
 
 - [ ] **Step 1: Create the branch, and commit the design doc and this plan**
 
@@ -136,13 +136,13 @@ git commit -m "docs: add license, phase-1 design and foundation plan"
 - [ ] **Step 2: Create `backend/pyproject.toml` and the four empty packages**
 
 Contents of `pyproject.toml`:
-- `[project]`: name `financial-gate`, version `0.1.0`, `requires-python = ">=3.13"`, `license = "AGPL-3.0-or-later"`; dependencies `fastapi`, `uvicorn[standard]`, `pydantic>=2`, `pydantic-settings`, `sqlalchemy[asyncio]>=2.0`, `psycopg[binary]>=3.2`, `alembic`, `tzdata`.
+- `[project]`: name `lararium`, version `0.1.0`, `requires-python = ">=3.13"`, `license = "AGPL-3.0-or-later"`; dependencies `fastapi`, `uvicorn[standard]`, `pydantic>=2`, `pydantic-settings`, `sqlalchemy[asyncio]>=2.0`, `psycopg[binary]>=3.2`, `alembic`, `tzdata`.
 - `[dependency-groups] dev`: `pytest`, `pytest-asyncio`, `httpx`, `testcontainers[postgres]`, `ruff`, `pyright`, `import-linter`.
-- The build backend is hatchling, with package directory `src/financial_gate`.
+- The build backend is hatchling, with package directory `src/lararium`.
 - `[tool.pytest.ini_options]`: `asyncio_mode = "auto"`, `asyncio_default_fixture_loop_scope = "session"`, `asyncio_default_test_loop_scope = "session"`, `testpaths = ["tests"]`.
 - `[tool.ruff]`: `line-length = 100`, `target-version = "py313"`; lint rules select `E, F, I, UP, B, ASYNC, DTZ, RUF` (DTZ forbids datetimes without a timezone, RUF032 forbids constructing a Decimal from a floating-point literal).
 - `[tool.pyright]`: `typeCheckingMode = "strict"`, `include = ["src"]`, `pythonVersion = "3.13"`.
-- `[tool.importlinter]`: `root_package = "financial_gate"`, with two forbidden contracts matching the dependency direction in Global Constraints.
+- `[tool.importlinter]`: `root_package = "lararium"`, with two forbidden contracts matching the dependency direction in Global Constraints.
 
 `.gitignore` and `LICENSE` (full AGPL-3.0 text) are already at the repository root, so don't create them again; `.gitignore` already includes `private/`, `backups/`, `infra/.env`, `.venv/`, `__pycache__/`, `node_modules/`, `web/dist/`.
 
@@ -150,11 +150,11 @@ Contents of `pyproject.toml`:
 
 ```python
 # backend/tests/test_package.py
-import financial_gate
+import lararium
 
 
 def test_package_version() -> None:
-    assert financial_gate.__version__ == "0.1.0"
+    assert lararium.__version__ == "0.1.0"
 ```
 
 ```python
@@ -162,7 +162,7 @@ def test_package_version() -> None:
 import re
 from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "src" / "financial_gate"
+SRC = Path(__file__).parents[1] / "src" / "lararium"
 
 
 def test_no_float_in_source() -> None:
@@ -178,9 +178,9 @@ def test_no_float_in_source() -> None:
 - [ ] **Step 4: Run them and confirm they fail**
 
 Run: `cd backend && uv sync && uv run pytest -q`
-Expected: FAIL, `AttributeError: module 'financial_gate' has no attribute '__version__'`
+Expected: FAIL, `AttributeError: module 'lararium' has no attribute '__version__'`
 
-- [ ] **Step 5: Write `__version__ = "0.1.0"` in `src/financial_gate/__init__.py`; add a `backend-check` target to the root `Makefile`**
+- [ ] **Step 5: Write `__version__ = "0.1.0"` in `src/lararium/__init__.py`; add a `backend-check` target to the root `Makefile`**
 
 `backend-check` runs, in the `backend/` directory and in this order: `uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright`, `uv run lint-imports`, `uv run pytest -q`. For now the `check` target depends only on `backend-check`.
 
@@ -202,33 +202,33 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Files:**
 - Create: `infra/postgres/roles.sql`, `infra/postgres/init/00-roles.sh`
-- Create: `backend/src/financial_gate/config.py`, `backend/src/financial_gate/db.py`
+- Create: `backend/src/lararium/config.py`, `backend/src/lararium/db.py`
 - Create: `backend/alembic.ini`, `backend/migrations/env.py`, `backend/migrations/versions/0001_core_baseline.py`
 - Test: `backend/tests/conftest.py`, `backend/tests/core/test_baseline.py`
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)` (`env_prefix="FG_"`): `database_url: str`, `migration_database_url: str | None = None`, `auth_mode: Literal["dev", "tailscale"] = "tailscale"`, `owner_login: str | None = None` (a model validator rejects tailscale mode without `owner_login`; tests and OpenAPI export pass `auth_mode="dev"` explicitly); `def get_settings() -> Settings` (with `lru_cache`).
+  - `class Settings(BaseSettings)` (`env_prefix="LARARIUM_"`): `database_url: str`, `migration_database_url: str | None = None`, `auth_mode: Literal["dev", "tailscale"] = "tailscale"`, `owner_login: str | None = None` (a model validator rejects tailscale mode without `owner_login`; tests and OpenAPI export pass `auth_mode="dev"` explicitly); `def get_settings() -> Settings` (with `lru_cache`).
   - `def create_engine(url: str) -> AsyncEngine`; `def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]` (`expire_on_commit=False`).
-  - Database roles: `fg_owner` (owns the schemas, used only to run migrations), `fg_backend` (used by the application, with only select/insert/update/delete privileges). Database name `financial_gate`.
-  - Test fixtures: `owner_url`, `backend_url` (session-scoped, `postgresql+psycopg://…` strings); `session` (one `AsyncSession` per test, connected as `fg_backend`, whose outer transaction is rolled back when the test ends).
+  - Database roles: `lararium_owner` (owns the schemas, used only to run migrations), `lararium_backend` (used by the application, with only select/insert/update/delete privileges). Database name `lararium`.
+  - Test fixtures: `owner_url`, `backend_url` (session-scoped, `postgresql+psycopg://…` strings); `session` (one `AsyncSession` per test, connected as `lararium_backend`, whose outer transaction is rolled back when the test ends).
 
 - [ ] **Step 1: Write `infra/postgres/roles.sql`** (shared by tests and deployment)
 
 ```sql
-CREATE ROLE fg_owner LOGIN PASSWORD :'owner_pw';
-CREATE ROLE fg_backend LOGIN PASSWORD :'backend_pw';
-CREATE DATABASE financial_gate OWNER fg_owner;
-\connect financial_gate
+CREATE ROLE lararium_owner LOGIN PASSWORD :'owner_pw';
+CREATE ROLE lararium_backend LOGIN PASSWORD :'backend_pw';
+CREATE DATABASE lararium OWNER lararium_owner;
+\connect lararium
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 ```
 
-`00-roles.sh` runs it with `psql -v ON_ERROR_STOP=1 -v owner_pw="$FG_OWNER_PASSWORD" -v backend_pw="$FG_BACKEND_PASSWORD" -U "$POSTGRES_USER" -f /fg/roles.sql`.
+`00-roles.sh` runs it with `psql -v ON_ERROR_STOP=1 -v owner_pw="$LARARIUM_OWNER_PASSWORD" -v backend_pw="$LARARIUM_BACKEND_PASSWORD" -U "$POSTGRES_USER" -f /lararium/roles.sql`.
 
 - [ ] **Step 2: Write `tests/conftest.py`**
 
-- A session-scoped fixture starts `PostgresContainer("postgres:18")`, mounts `infra/postgres/` read-only at `/fg` in the container, runs `psql -v ON_ERROR_STOP=1 -v owner_pw=owner -v backend_pw=backend -U <container superuser> -f /fg/roles.sql` inside the container, and asserts that the exit code is 0.
-- From that, derive `owner_url` (`fg_owner:owner`) and `backend_url` (`fg_backend:backend`), both pointing at the `financial_gate` database.
+- A session-scoped fixture starts `PostgresContainer("postgres:18")`, mounts `infra/postgres/` read-only at `/lararium` in the container, runs `psql -v ON_ERROR_STOP=1 -v owner_pw=owner -v backend_pw=backend -U <container superuser> -f /lararium/roles.sql` inside the container, and asserts that the exit code is 0.
+- From that, derive `owner_url` (`lararium_owner:owner`) and `backend_url` (`lararium_backend:backend`), both pointing at the `lararium` database.
 - A session-scoped fixture runs `alembic upgrade head` with `owner_url` (setting `sqlalchemy.url` through `alembic.config.Config`).
 - `session` fixture: build an async engine from `backend_url`, open a connection and `begin()` an outer transaction, create `AsyncSession(bind=conn, join_transaction_mode="create_savepoint")`, and roll back the outer transaction when the test ends. This way a `commit()` in the code under test only releases a savepoint and doesn't leak into other tests.
 
@@ -285,11 +285,11 @@ Expected: FAIL (alembic can't find its config or migrations; if the schemas alre
 `migrations/env.py` uses a sync engine and reads the connection string from `Settings.migration_database_url` or from `sqlalchemy.url` in the alembic config. All migrations are written as raw SQL with `op.execute`. Contents of `0001_core_baseline`:
 
 ```sql
-CREATE SCHEMA core AUTHORIZATION fg_owner;
-CREATE SCHEMA finance AUTHORIZATION fg_owner;
-GRANT USAGE ON SCHEMA core, finance TO fg_backend;
-ALTER DEFAULT PRIVILEGES FOR ROLE fg_owner IN SCHEMA core, finance
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fg_backend;
+CREATE SCHEMA core AUTHORIZATION lararium_owner;
+CREATE SCHEMA finance AUTHORIZATION lararium_owner;
+GRANT USAGE ON SCHEMA core, finance TO lararium_backend;
+ALTER DEFAULT PRIVILEGES FOR ROLE lararium_owner IN SCHEMA core, finance
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO lararium_backend;
 
 CREATE TABLE core.settings (
   key text PRIMARY KEY,
@@ -355,7 +355,7 @@ git commit -m "feat: add database roles, test harness and core baseline migratio
 ### Task 3: Shared layer — command context, events, audit, settings, entities
 
 **Files:**
-- Create: `backend/src/financial_gate/core/{actors.py, json_types.py, errors.py, timeutil.py, models.py, commands.py, settings_store.py, entities.py}`
+- Create: `backend/src/lararium/core/{actors.py, json_types.py, errors.py, timeutil.py, models.py, commands.py, settings_store.py, entities.py}`
 - Modify: `backend/tests/conftest.py` (add the `actor` and `run` fixtures)
 - Test: `backend/tests/core/test_commands.py`, `backend/tests/core/test_settings_store.py`, `backend/tests/core/test_entities.py`, `backend/tests/core/test_timeutil.py`
 
@@ -379,7 +379,7 @@ git commit -m "feat: add database roles, test harness and core baseline migratio
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.commands import command_context
+from lararium.core.commands import command_context
 
 
 async def test_command_context_writes_audit_and_events(session, actor) -> None:
@@ -427,8 +427,8 @@ async def test_event_insert_notifies_listeners(backend_url: str) -> None:
 # backend/tests/core/test_settings_store.py
 import pytest
 
-from financial_gate.core.errors import SettingNotFoundError
-from financial_gate.core.settings_store import get_setting, get_timezone, set_setting
+from lararium.core.errors import SettingNotFoundError
+from lararium.core.settings_store import get_setting, get_timezone, set_setting
 
 
 async def test_get_and_set_setting(session, run) -> None:
@@ -445,7 +445,7 @@ async def test_unknown_setting_raises(session) -> None:
 
 ```python
 # backend/tests/core/test_entities.py
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
 
 
 async def test_organization_matched_case_insensitively(run) -> None:
@@ -465,7 +465,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from financial_gate.core.timeutil import local_date
+from lararium.core.timeutil import local_date
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -482,7 +482,7 @@ def test_local_date_rejects_naive_datetime() -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/core -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.core.commands'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.core.commands'`
 
 - [ ] **Step 3: Implement the files under `core/`, and add the `actor` and `run` fixtures to `conftest.py`**
 
@@ -505,7 +505,7 @@ git commit -m "feat: add command context with audit log, outbox events and setti
 ### Task 4: Instruments and money helpers
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/{__init__.py, errors.py, money.py, models.py, instruments.py}`, `backend/migrations/versions/0002_finance_instruments.py`
+- Create: `backend/src/lararium/modules/finance/{__init__.py, errors.py, money.py, models.py, instruments.py}`, `backend/migrations/versions/0002_finance_instruments.py`
 - Test: `backend/tests/finance/conftest.py`, `backend/tests/finance/test_money.py`, `backend/tests/finance/test_instruments.py`
 
 **Interfaces:**
@@ -534,7 +534,7 @@ git commit -m "feat: add command context with audit log, outbox events and setti
 # backend/tests/finance/test_money.py
 from decimal import Decimal
 
-from financial_gate.modules.finance.money import to_plain_str, tolerance
+from lararium.modules.finance.money import to_plain_str, tolerance
 
 
 def test_tolerance_is_half_of_last_decimal_place() -> None:
@@ -553,9 +553,9 @@ def test_to_plain_str_never_uses_exponent() -> None:
 # backend/tests/finance/test_instruments.py
 import pytest
 
-from financial_gate.core.settings_store import get_setting
-from financial_gate.modules.finance.errors import DuplicateIdentifierError
-from financial_gate.modules.finance.instruments import (
+from lararium.core.settings_store import get_setting
+from lararium.modules.finance.errors import DuplicateIdentifierError
+from lararium.modules.finance.instruments import (
     InstrumentIdentifier, create_instrument, find_by_identifier, get_currency, list_instruments,
     set_hidden,
 )
@@ -604,7 +604,7 @@ async def test_reporting_currency_defaults_to_gbp(session) -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/finance -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.modules.finance'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.modules.finance'`
 
 - [ ] **Step 3: Write migration `0002_finance_instruments`**
 
@@ -655,8 +655,8 @@ git commit -m "feat: add instruments with identifiers and decimal helpers"
 ### Task 5: Accounts
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/accounts.py`, `backend/migrations/versions/0003_finance_accounts.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/accounts.py`, `backend/migrations/versions/0003_finance_accounts.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_accounts.py`; add a `make_account` fixture to `backend/tests/finance/conftest.py`
 
 **Interfaces:**
@@ -684,9 +684,9 @@ from datetime import date
 import pytest
 from sqlalchemy import text
 
-from financial_gate.core.entities import get_or_create_organization, get_self_entity_id
-from financial_gate.modules.finance.accounts import close_account, create_account
-from financial_gate.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.modules.finance.accounts import close_account, create_account
+from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
 
 async def test_create_manual_bank_account(session, run) -> None:
@@ -736,7 +736,7 @@ async def test_create_account_emits_event(session, make_account) -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/finance/test_accounts.py -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.modules.finance.accounts'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.modules.finance.accounts'`
 
 - [ ] **Step 3: Write migration `0003_finance_accounts`**
 
@@ -781,8 +781,8 @@ git commit -m "feat: add accounts with tax wrappers, parents and closing"
 ### Task 6: Double-entry ledger
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/ledger.py`, `backend/migrations/versions/0004_finance_ledger.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/ledger.py`, `backend/migrations/versions/0004_finance_ledger.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_ledger_residuals.py`, `backend/tests/finance/test_ledger.py`
 
 **Interfaces:**
@@ -804,7 +804,7 @@ git commit -m "feat: add accounts with tax wrappers, parents and closing"
 from decimal import Decimal
 from uuid import uuid4
 
-from financial_gate.modules.finance.ledger import PostingInput, compute_residuals
+from lararium.modules.finance.ledger import PostingInput, compute_residuals
 
 A, B, C, GBP, USD, ETH = (uuid4() for _ in range(6))
 
@@ -839,7 +839,7 @@ def test_eighteen_decimals_sum_exactly() -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/finance/test_ledger_residuals.py -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.modules.finance.ledger'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.modules.finance.ledger'`
 
 - [ ] **Step 3: Implement `PostingInput` and `compute_residuals` in `ledger.py`**
 
@@ -858,8 +858,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from financial_gate.modules.finance.errors import LedgerImbalanceError
-from financial_gate.modules.finance.ledger import (
+from lararium.modules.finance.errors import LedgerImbalanceError
+from lararium.modules.finance.ledger import (
     PostingInput, TransactionInput, find_unbalanced_transactions, post_transaction,
     void_transaction,
 )
@@ -985,8 +985,8 @@ git commit -m "feat: add double-entry ledger with balance checks"
 ### Task 7: Balance snapshots, prices, FX rates
 
 **Files:**
-- Create: `backend/src/financial_gate/modules/finance/snapshots.py`, `backend/src/financial_gate/modules/finance/pricing.py`, `backend/migrations/versions/0005_finance_snapshots_prices.py`
-- Modify: `backend/src/financial_gate/modules/finance/models.py`
+- Create: `backend/src/lararium/modules/finance/snapshots.py`, `backend/src/lararium/modules/finance/pricing.py`, `backend/migrations/versions/0005_finance_snapshots_prices.py`
+- Modify: `backend/src/lararium/modules/finance/models.py`
 - Test: `backend/tests/finance/test_snapshots.py`, `backend/tests/finance/test_pricing.py`; add a `btc` fixture to `tests/finance/conftest.py` (crypto, 8 decimals, quoted in USD)
 
 **Interfaces:**
@@ -1007,7 +1007,7 @@ from decimal import Decimal
 
 import pytest
 
-from financial_gate.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.snapshots import record_snapshot
 
 
 async def test_snapshot_as_of_date_uses_reporting_timezone(run, make_account, gbp) -> None:
@@ -1032,8 +1032,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from financial_gate.modules.finance.errors import NotACurrencyError
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.errors import NotACurrencyError
+from lararium.modules.finance.pricing import record_fx_rate, record_price
 
 DAY = date(2026, 11, 10)
 
@@ -1064,7 +1064,7 @@ async def test_fx_rate_must_be_positive(run, usd, gbp) -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/finance/test_snapshots.py tests/finance/test_pricing.py -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.modules.finance.snapshots'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.modules.finance.snapshots'`
 
 - [ ] **Step 3: Write migration `0005_finance_snapshots_prices`**
 
@@ -1128,7 +1128,7 @@ git commit -m "feat: add balance snapshots, prices and fx rates"
 ### Task 8: Valuation functions (v1)
 
 **Files:**
-- Create: `backend/migrations/versions/0006_finance_valuation_v1.py`, `backend/src/financial_gate/modules/finance/valuation.py`
+- Create: `backend/migrations/versions/0006_finance_valuation_v1.py`, `backend/src/lararium/modules/finance/valuation.py`
 - Test: `backend/tests/finance/test_valuation.py`
 
 **Interfaces:**
@@ -1180,15 +1180,15 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from financial_gate.core.settings_store import set_setting
-from financial_gate.modules.finance.instruments import create_instrument, get_currency, set_hidden
-from financial_gate.modules.finance.accounts import close_account
-from financial_gate.modules.finance.ledger import (
+from lararium.core.settings_store import set_setting
+from lararium.modules.finance.instruments import create_instrument, get_currency, set_hidden
+from lararium.modules.finance.accounts import close_account
+from lararium.modules.finance.ledger import (
     PostingInput, TransactionInput, post_transaction, void_transaction,
 )
-from financial_gate.modules.finance.pricing import record_fx_rate, record_price
-from financial_gate.modules.finance.snapshots import record_snapshot
-from financial_gate.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
+from lararium.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
 
 LON = ZoneInfo("Europe/London")
 
@@ -1334,7 +1334,7 @@ The three cases in `test_fiat_valued_direct_inverse_and_via_eur`: USD uses the d
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/finance/test_valuation.py -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.modules.finance.valuation'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.modules.finance.valuation'`
 
 - [ ] **Step 3: Write migration `0006_finance_valuation_v1`, implementing the four SQL functions per the rules above (`LANGUAGE sql STABLE` or `plpgsql STABLE`); write the Python wrappers in `valuation.py`**
 
@@ -1357,8 +1357,8 @@ git commit -m "feat: add versioned valuation functions and net worth series"
 ### Task 9: REST API
 
 **Files:**
-- Create: `backend/src/financial_gate/api/{app.py, deps.py, core_routes.py, export_openapi.py}`, `backend/src/financial_gate/modules/registry.py`, `backend/src/financial_gate/modules/finance/{schemas.py, api.py}`
-- Modify: `backend/src/financial_gate/modules/finance/__init__.py` (the real `MODULE`)
+- Create: `backend/src/lararium/api/{app.py, deps.py, core_routes.py, export_openapi.py}`, `backend/src/lararium/modules/registry.py`, `backend/src/lararium/modules/finance/{schemas.py, api.py}`
+- Modify: `backend/src/lararium/modules/finance/__init__.py` (the real `MODULE`)
 - Test: `backend/tests/api/conftest.py`, `backend/tests/api/test_core_api.py`, `backend/tests/api/test_finance_api.py`
 
 **Interfaces:**
@@ -1382,7 +1382,7 @@ git commit -m "feat: add versioned valuation functions and net worth series"
       - `record_price` POST `/prices` → 204 (body: `instrument_id`, `quote_currency` (ISO code), `price`, `as_of_date`); `record_fx_rate` POST `/fx-rates` → 204 (body: `base`, `quote` (ISO codes), `rate`, `as_of_date`).
       - `get_holdings` GET `/holdings?date=YYYY-MM-DD` (defaults to today in the reporting timezone); `get_net_worth` GET `/net-worth?start=&end=` (defaults to the 365 days up to today).
   - Every write runs inside `command_context(session, actor, "<route name>", <the body as JSON>)`.
-  - `python -m financial_gate.api.export_openapi`: writes the OpenAPI document to stdout with `sort_keys=True` and `indent=2`.
+  - `python -m lararium.api.export_openapi`: writes the OpenAPI document to stdout with `sort_keys=True` and `indent=2`.
   - Test fixtures (`tests/api/conftest.py`): `client` uses `dev` mode; `tailscale_client` uses `tailscale` mode with `owner_login="me@example.com"`. Both override `get_session` so that it returns the test `session`, and send requests through `httpx.ASGITransport`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1419,7 +1419,7 @@ async def test_writes_record_actor_in_audit_log(tailscale_client, session) -> No
 # backend/tests/api/test_finance_api.py
 import json
 
-from financial_gate.api.export_openapi import render_openapi
+from lararium.api.export_openapi import render_openapi
 
 
 async def _gbp_id(client) -> str:
@@ -1491,7 +1491,7 @@ def test_openapi_export_is_deterministic() -> None:
 - [ ] **Step 2: Run them and confirm they fail**
 
 Run: `cd backend && uv run pytest tests/api -q`
-Expected: FAIL, `ModuleNotFoundError: No module named 'financial_gate.api.app'`
+Expected: FAIL, `ModuleNotFoundError: No module named 'lararium.api.app'`
 
 - [ ] **Step 3: Implement `registry.py`, `schemas.py`, `finance/api.py`, `core_routes.py`, `deps.py`, `app.py` and `export_openapi.py`**
 
@@ -1624,45 +1624,45 @@ git commit -m "feat: add web UI for net worth, accounts and instruments"
 **Interfaces:**
 - Consumes: `roles.sql` and `00-roles.sh` from Task 2, `create_app` from Task 9, the frontend build output from Task 10.
 - Produces:
-  - Compose services: `db` (`postgres:18`), `migrate` (runs `alembic upgrade head` once, as `fg_owner`), `api` (uvicorn, as `fg_backend`, `FG_AUTH_MODE=tailscale`), `web` (Caddy serving the SPA and forwarding `/api/*` to api), bound only to `127.0.0.1:8080`.
+  - Compose services: `db` (`postgres:18`), `migrate` (runs `alembic upgrade head` once, as `lararium_owner`), `api` (uvicorn, as `lararium_backend`, `LARARIUM_AUTH_MODE=tailscale`), `web` (Caddy serving the SPA and forwarding `/api/*` to api), bound only to `127.0.0.1:8080`.
   - Access: run `tailscale serve --bg 8080` on the host; Tailscale adds the `Tailscale-User-Login` header to requests.
-  - Environment variables (`infra/env.example`): `POSTGRES_PASSWORD`, `FG_OWNER_PASSWORD`, `FG_BACKEND_PASSWORD`, `FG_OWNER_LOGIN`, `BACKUP_DIR`, plus the optional `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`. `infra/.env` is not tracked by git; the README explains how to encrypt it with SOPS + age, and how to decrypt it again.
+  - Environment variables (`infra/env.example`): `POSTGRES_PASSWORD`, `LARARIUM_OWNER_PASSWORD`, `LARARIUM_BACKEND_PASSWORD`, `LARARIUM_OWNER_LOGIN`, `BACKUP_DIR`, plus the optional `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`. `infra/.env` is not tracked by git; the README explains how to encrypt it with SOPS + age, and how to decrypt it again.
 
 - [ ] **Step 1: Write `compose.yaml`, the two Dockerfiles and the `Caddyfile`**
 
 ```yaml
 # infra/compose.yaml
-name: financial-gate
+name: lararium
 services:
   db:
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      FG_OWNER_PASSWORD: ${FG_OWNER_PASSWORD}
-      FG_BACKEND_PASSWORD: ${FG_BACKEND_PASSWORD}
+      LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD}
+      LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql
-      - ./postgres:/fg:ro
+      - ./postgres:/lararium:ro
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d financial_gate"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lararium"]
       interval: 5s
       retries: 30
   migrate:
     build: ../backend
     command: ["alembic", "upgrade", "head"]
     environment:
-      FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
-      FG_MIGRATION_DATABASE_URL: postgresql+psycopg://fg_owner:${FG_OWNER_PASSWORD}@db:5432/financial_gate
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD}@db:5432/lararium
     depends_on:
       db: { condition: service_healthy }
   api:
     build: ../backend
-    command: ["uvicorn", "financial_gate.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      FG_DATABASE_URL: postgresql+psycopg://fg_backend:${FG_BACKEND_PASSWORD}@db:5432/financial_gate
-      FG_AUTH_MODE: tailscale
-      FG_OWNER_LOGIN: ${FG_OWNER_LOGIN}
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_AUTH_MODE: tailscale
+      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN}
     depends_on:
       migrate: { condition: service_completed_successfully }
   web:
@@ -1695,7 +1695,7 @@ volumes:
 
 Run:
 ```bash
-cp infra/env.example infra/.env   # fill in passwords for local testing; set FG_OWNER_LOGIN to me@example.com
+cp infra/env.example infra/.env   # fill in passwords for local testing; set LARARIUM_OWNER_LOGIN to me@example.com
 docker compose -f infra/compose.yaml --env-file infra/.env up -d --build
 curl -s http://127.0.0.1:8080/api/v1/health
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/api/v1/finance/accounts
@@ -1707,14 +1707,14 @@ Expected: outputs `{"status":"ok"}`, `401`, `[]` in that order; opening `http://
 
 Both scripts find the stack with `docker compose -f "$(dirname "$0")/../compose.yaml" --env-file "$(dirname "$0")/../.env"`.
 
-- `backup.sh`: `… exec -T db pg_dump -U postgres -d financial_gate --format=custom`, written to `$BACKUP_DIR/fg-<UTC timestamp>.dump`. When `RESTIC_REPOSITORY` is set, it then also runs `restic backup "$BACKUP_DIR"`.
-- `restore.sh <dump file> <target database name>`: creates a new target database owned by `fg_owner`, then restores into it with `pg_restore --no-owner --role=fg_owner`.
+- `backup.sh`: `… exec -T db pg_dump -U postgres -d lararium --format=custom`, written to `$BACKUP_DIR/lararium-<UTC timestamp>.dump`. When `RESTIC_REPOSITORY` is set, it then also runs `restic backup "$BACKUP_DIR"`.
+- `restore.sh <dump file> <target database name>`: creates a new target database owned by `lararium_owner`, then restores into it with `pg_restore --no-owner --role=lararium_owner`.
 
 Run:
 ```bash
 infra/backup/backup.sh
-infra/backup/restore.sh "$(ls -t backups/fg-*.dump | head -1)" financial_gate_restore_check
-docker compose -f infra/compose.yaml exec -T db psql -U postgres -d financial_gate_restore_check -tAc "select count(*) from finance.instruments"
+infra/backup/restore.sh "$(ls -t backups/lararium-*.dump | head -1)" lararium_restore_check
+docker compose -f infra/compose.yaml exec -T db psql -U postgres -d lararium_restore_check -tAc "select count(*) from finance.instruments"
 ```
 Expected: the last command prints `10` (the number of seeded currencies)
 

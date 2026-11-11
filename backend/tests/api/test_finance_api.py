@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from financial_gate.api.export_openapi import render_openapi
+from lararium.api.export_openapi import render_openapi
 
 
 async def _gbp_id(client) -> str:

@@ -21,7 +21,7 @@ backend-check: backend-sync
 # Regenerate web/openapi.json from the backend, then the typed client from it.
 # The export goes to a temporary file first, so a failed export can't truncate the spec.
 openapi: backend-sync web-install
-	cd backend && uv run --locked python -m financial_gate.api.export_openapi > ../web/openapi.json.tmp \
+	cd backend && uv run --locked python -m lararium.api.export_openapi > ../web/openapi.json.tmp \
 		|| { rm -f ../web/openapi.json.tmp; exit 1; }
 	mv web/openapi.json.tmp web/openapi.json
 	cd web && pnpm openapi-ts

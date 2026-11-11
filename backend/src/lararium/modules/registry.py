@@ -1,6 +1,6 @@
 """The modules the application installs, in order."""
 
-from financial_gate.modules import ModuleSpec, finance
+from lararium.modules import ModuleSpec, finance
 
 __all__ = ["MODULES", "ModuleSpec"]
 
