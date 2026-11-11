@@ -1,5 +1,6 @@
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
@@ -7,6 +8,8 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession
 from testcontainers.community.postgres import PostgresContainer
 
+from financial_gate.core.actors import Actor
+from financial_gate.core.commands import command_context
 from financial_gate.db import create_engine
 
 BACKEND = Path(__file__).parents[1]
@@ -75,3 +78,20 @@ async def session(backend_url: str, migrated: None) -> AsyncIterator[AsyncSessio
                 await outer.rollback()
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+def actor() -> Actor:
+    return Actor("user", "test")
+
+
+type Run = Callable[..., Awaitable[Any]]
+
+
+@pytest.fixture
+def run(session: AsyncSession, actor: Actor) -> Run:
+    async def _run(fn: Callable[..., Awaitable[Any]], /, *args: Any, **kwargs: Any) -> Any:
+        async with command_context(session, actor, "test", {}) as ctx:
+            return await fn(ctx, *args, **kwargs)
+
+    return _run

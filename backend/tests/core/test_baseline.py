@@ -39,3 +39,8 @@ async def test_exactly_one_self_entity(session: AsyncSession) -> None:
         text("select kind, owner_entity_id = id from core.entities where is_self")
     )
     assert rows.all() == [("person", True)]
+
+
+async def test_backend_role_cannot_modify_audit_log(session: AsyncSession) -> None:
+    with pytest.raises(exc.ProgrammingError, match="permission denied"):
+        await session.execute(text("update core.audit_log set actor_id = 'x'"))

@@ -83,6 +83,7 @@ UPGRADE = [
       occurred_at timestamptz NOT NULL DEFAULT now()
     )
     """,
+    "REVOKE UPDATE, DELETE ON core.audit_log FROM fg_backend",
 ]
 
 DOWNGRADE = [
