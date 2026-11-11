@@ -1,0 +1,19 @@
+# 个人笔记和真实数据，永远不进 git
+private/
+backups/
+infra/.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Web
+node_modules/
+web/dist/
+
+# OS / editor
+.DS_Store
+
+# SDD 执行台账（本地）
+.superpowers/
