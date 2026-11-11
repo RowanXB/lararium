@@ -32,7 +32,7 @@ from financial_gate.modules.finance.money import to_plain_str
 from financial_gate.modules.finance.snapshots import SnapshotKind
 from financial_gate.modules.finance.valuation import HoldingStatus
 
-DECIMAL_PATTERN = r"^-?\d+(\.\d+)?$"
+DECIMAL_PATTERN = r"^-?[0-9]+(\.[0-9]+)?$"  # ASCII digits only: \d matches any script's digits
 _DECIMAL_RE = re.compile(DECIMAL_PATTERN)
 
 

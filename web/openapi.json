@@ -324,7 +324,7 @@
             "type": "string"
           },
           "rate": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Rate",
             "type": "string"
           }
@@ -378,7 +378,7 @@
           "fx_rate": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -405,7 +405,7 @@
             "title": "Price Currency Id"
           },
           "quantity": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Quantity",
             "type": "string"
           },
@@ -425,7 +425,7 @@
           "unit_price": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -437,7 +437,7 @@
           "value": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -646,7 +646,7 @@
             "type": "integer"
           },
           "value": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Value",
             "type": "string"
           }
@@ -681,7 +681,7 @@
           "cost_per_unit": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -720,7 +720,7 @@
           "price_per_unit": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -730,7 +730,7 @@
             "title": "Price Per Unit"
           },
           "quantity": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Quantity",
             "type": "string"
           }
@@ -765,7 +765,7 @@
           "cost_per_unit": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -811,7 +811,7 @@
           "price_per_unit": {
             "anyOf": [
               {
-                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                 "type": "string"
               },
               {
@@ -821,7 +821,7 @@
             "title": "Price Per Unit"
           },
           "quantity": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Quantity",
             "type": "string"
           }
@@ -855,7 +855,7 @@
             "type": "string"
           },
           "price": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Price",
             "type": "string"
           },
@@ -912,7 +912,7 @@
             "type": "string"
           },
           "quantity": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Quantity",
             "type": "string"
           }
@@ -961,7 +961,7 @@
             "type": "string"
           },
           "quantity": {
-            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "title": "Quantity",
             "type": "string"
           }

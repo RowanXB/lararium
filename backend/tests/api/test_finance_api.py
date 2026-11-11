@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from financial_gate.api.export_openapi import render_openapi
 
 
@@ -26,6 +28,18 @@ async def test_amounts_must_be_strings(client) -> None:
     response = await client.post(
         f"/api/v1/finance/accounts/{account_id}/snapshots",
         json={"instrument_id": gbp_id, "quantity": 0.1, "as_of": "2026-11-10T12:00:00Z"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "quantity", ["\u0661\u0662", "1\uff10", "NaN", "Infinity", "1e3", "+1", "12\n"]
+)
+async def test_amounts_must_be_plain_ascii_decimals(client, quantity) -> None:
+    account_id, gbp_id = await _account(client), await _gbp_id(client)
+    response = await client.post(
+        f"/api/v1/finance/accounts/{account_id}/snapshots",
+        json={"instrument_id": gbp_id, "quantity": quantity, "as_of": "2026-11-10T12:00:00Z"},
     )
     assert response.status_code == 422
 
@@ -141,4 +155,4 @@ def test_openapi_operation_ids_and_decimal_schema() -> None:
     }
     assert {"create_account", "record_snapshot", "get_net_worth", "health"} <= operation_ids
     quantity = document["components"]["schemas"]["SnapshotCreate"]["properties"]["quantity"]
-    assert (quantity["type"], quantity["pattern"]) == ("string", r"^-?\d+(\.\d+)?$")
+    assert (quantity["type"], quantity["pattern"]) == ("string", r"^-?[0-9]+(\.[0-9]+)?$")

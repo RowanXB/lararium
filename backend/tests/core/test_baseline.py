@@ -41,6 +41,9 @@ async def test_exactly_one_self_entity(session: AsyncSession) -> None:
     assert rows.all() == [("person", True)]
 
 
-async def test_backend_role_cannot_modify_audit_log(session: AsyncSession) -> None:
+@pytest.mark.parametrize(
+    "statement", ["update core.audit_log set actor_id = 'x'", "delete from core.audit_log"]
+)
+async def test_backend_role_cannot_modify_audit_log(session: AsyncSession, statement: str) -> None:
     with pytest.raises(exc.ProgrammingError, match="permission denied"):
-        await session.execute(text("update core.audit_log set actor_id = 'x'"))
+        await session.execute(text(statement))
