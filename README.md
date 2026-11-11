@@ -51,7 +51,7 @@ After changing the API, regenerate `web/openapi.json` and the typed client with
 
 ## Server deployment
 
-On a server with Docker and Tailscale:
+On a server with Docker Engine 28 or later and Tailscale:
 
 ```bash
 cp infra/env.example infra/.env
@@ -66,6 +66,16 @@ tailscale serve --bg 8080
 `fg_owner` (`migrate`), then starts the API as `fg_backend` (`api`) and Caddy serving the
 SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
 `financial-gate_pgdata` volume.
+
+### Security model
+
+- The system is read-only: it never places orders, moves money or withdraws funds.
+- All third-party credentials are read-only: when a connector needs an API key or token,
+  create one that can only read.
+- Private keys and seed phrases are never stored: wallets are tracked by public address
+  only.
+- Docker Engine 28 or later is required. Older engines could let other machines on the
+  LAN reach ports published on `127.0.0.1`, which would expose the `web` port below.
 
 ### Access and header trust
 
@@ -101,7 +111,7 @@ SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
 chmod 600 infra/.env
 ```
 
-Don't commit `infra/.env.sops` to a public repository.
+`infra/.env.sops` is ignored by git too; don't force-add it to a public repository.
 
 ## Backup and restore
 

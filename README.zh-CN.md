@@ -49,7 +49,7 @@ pnpm dev
 
 ## 服务器部署
 
-在装有 Docker 和 Tailscale 的服务器上：
+在装有 Docker Engine 28 或更新版本以及 Tailscale 的服务器上：
 
 ```bash
 cp infra/env.example infra/.env
@@ -63,6 +63,14 @@ tailscale serve --bg 8080
 `make up` 会构建镜像并启动 PostgreSQL（`db`），以 `fg_owner` 身份执行一次迁移
 （`migrate`），然后以 `fg_backend` 身份启动 API（`api`），以及提供 SPA 并转发 `/api/*`
 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `financial-gate_pgdata` 卷中。
+
+### 安全模型
+
+- 系统是只读的：从不下单、转账或提现。
+- 所有第三方凭据都是只读的：连接器需要 API key 或 token 时，只创建只读权限的那种。
+- 从不保存私钥和助记词：钱包只按公开地址跟踪。
+- 需要 Docker Engine 28 或更新版本。更旧的引擎可能让局域网里的其他机器访问到发布在
+  `127.0.0.1` 上的端口，从而暴露下面的 `web` 端口。
 
 ### 访问方式与请求头信任
 
@@ -97,7 +105,7 @@ SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
 chmod 600 infra/.env
 ```
 
-不要把 `infra/.env.sops` 提交到公开仓库。
+`infra/.env.sops` 同样被 git 忽略；不要强行把它加进公开仓库。
 
 ## 备份与恢复
 
