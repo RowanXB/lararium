@@ -93,14 +93,19 @@ function NewInstrumentForm() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
+    const trimmedSymbol = symbol.trim();
     const coingecko = coingeckoId.trim();
+    const identifiers: NonNullable<InstrumentCreate["identifiers"]> = [];
+    // FX rates and the reporting currency find currencies by their ISO 4217 code.
+    if (kind === "fiat") identifiers.push({ scheme: "iso4217", value: trimmedSymbol });
+    if (coingecko) identifiers.push({ scheme: "coingecko", value: coingecko });
     mutation.mutate({
       kind,
-      symbol: symbol.trim(),
+      symbol: trimmedSymbol,
       name: name.trim(),
       decimals: Number.parseInt(decimals, 10),
       quote_currency: quoteCurrency.trim() || null,
-      identifiers: coingecko ? [{ scheme: "coingecko", value: coingecko }] : [],
+      identifiers,
     });
   }
 

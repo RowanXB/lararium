@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
+import { getHoldings, getNetWorth } from "../api";
 import { NetWorthPage } from "./NetWorthPage";
 
 vi.mock("../api", () => ({
@@ -30,4 +31,24 @@ it("shows the total and warns about missing prices", async () => {
   expect(
     screen.getByText("2 items are missing a price or FX rate and are excluded from net worth"),
   ).toBeInTheDocument();
+});
+
+it("shows holdings and net worth as of the chosen day", async () => {
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <NetWorthPage />
+    </QueryClientProvider>,
+  );
+
+  const asOf = await screen.findByLabelText("As of");
+  fireEvent.change(asOf, { target: { value: "2026-01-31" } });
+
+  await waitFor(() =>
+    expect(getHoldings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: { date: "2026-01-31" } }),
+    ),
+  );
+  expect(getNetWorth).toHaveBeenLastCalledWith(
+    expect.objectContaining({ query: { end: "2026-01-31" } }),
+  );
 });

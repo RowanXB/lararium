@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment } from "react";
+import { Fragment, useId, useState } from "react";
 
 import { getFinanceSettings, getHoldings, getNetWorth, type HoldingOut } from "../api";
 import { NetWorthChart } from "../components/NetWorthChart";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
 import {
   Table,
   TableBody,
@@ -12,6 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table";
+import { todayForInput } from "../lib/dates";
 import { errorMessage } from "../lib/errors";
 import { formatMoney, formatQuantity } from "../lib/format";
 
@@ -41,17 +44,22 @@ function groupByAccount(holdings: HoldingOut[]): HoldingOut[][] {
 }
 
 export function NetWorthPage() {
+  const asOfId = useId();
+  const [asOf, setAsOf] = useState(todayForInput);
+  // A cleared date input leaves the API's own default: today.
+  const day = asOf || undefined;
+
   const settings = useQuery({
     queryKey: ["finance-settings"],
     queryFn: async () => (await getFinanceSettings({ throwOnError: true })).data,
   });
   const netWorth = useQuery({
-    queryKey: ["net-worth"],
-    queryFn: async () => (await getNetWorth({ throwOnError: true })).data,
+    queryKey: ["net-worth", day],
+    queryFn: async () => (await getNetWorth({ query: { end: day }, throwOnError: true })).data,
   });
   const holdings = useQuery({
-    queryKey: ["holdings"],
-    queryFn: async () => (await getHoldings({ throwOnError: true })).data,
+    queryKey: ["holdings", day],
+    queryFn: async () => (await getHoldings({ query: { date: day }, throwOnError: true })).data,
   });
 
   const currency = settings.data?.reporting_currency;
@@ -61,6 +69,11 @@ export function NetWorthPage() {
 
   return (
     <div className="space-y-6">
+      <div className="grid w-fit gap-1.5">
+        <Label htmlFor={asOfId}>As of</Label>
+        <Input id={asOfId} type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+      </div>
+
       {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
 
       <Card>
