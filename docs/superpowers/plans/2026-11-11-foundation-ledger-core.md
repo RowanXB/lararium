@@ -208,7 +208,7 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)` (`env_prefix="FG_"`): `database_url: str`, `migration_database_url: str | None = None`, `auth_mode: Literal["dev", "tailscale"] = "dev"`, `owner_login: str | None = None`; `def get_settings() -> Settings` (with `lru_cache`).
+  - `class Settings(BaseSettings)` (`env_prefix="FG_"`): `database_url: str`, `migration_database_url: str | None = None`, `auth_mode: Literal["dev", "tailscale"] = "tailscale"`, `owner_login: str | None = None` (a model validator rejects tailscale mode without `owner_login`; tests and OpenAPI export pass `auth_mode="dev"` explicitly); `def get_settings() -> Settings` (with `lru_cache`).
   - `def create_engine(url: str) -> AsyncEngine`; `def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]` (`expire_on_commit=False`).
   - Database roles: `fg_owner` (owns the schemas, used only to run migrations), `fg_backend` (used by the application, with only select/insert/update/delete privileges). Database name `financial_gate`.
   - Test fixtures: `owner_url`, `backend_url` (session-scoped, `postgresql+psycopg://…` strings); `session` (one `AsyncSession` per test, connected as `fg_backend`, whose outer transaction is rolled back when the test ends).

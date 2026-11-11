@@ -208,7 +208,7 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)`（`env_prefix="FG_"`）：`database_url: str`、`migration_database_url: str | None = None`、`auth_mode: Literal["dev", "tailscale"] = "dev"`、`owner_login: str | None = None`；`def get_settings() -> Settings`（带 `lru_cache`）。
+  - `class Settings(BaseSettings)`（`env_prefix="FG_"`）：`database_url: str`、`migration_database_url: str | None = None`、`auth_mode: Literal["dev", "tailscale"] = "tailscale"`、`owner_login: str | None = None`（tailscale 模式下没有 `owner_login` 时校验报错；测试和 OpenAPI 导出显式传 `auth_mode="dev"`）；`def get_settings() -> Settings`（带 `lru_cache`）。
   - `def create_engine(url: str) -> AsyncEngine`；`def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]`（`expire_on_commit=False`）。
   - 数据库角色：`fg_owner`（拥有 schema，只用来跑迁移）、`fg_backend`（应用使用，只有增删改查权限）。数据库名 `financial_gate`。
   - 测试 fixture：`owner_url`、`backend_url`（session 级，`postgresql+psycopg://…` 字符串）；`session`（每个测试一个 `AsyncSession`，以 `fg_backend` 连接，外层事务在测试结束时回滚）。
