@@ -18,8 +18,12 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 UPGRADE = [
-    # How many units of p_quote one unit of p_base buys on p_day: same currency, then the
-    # direct rate, then the reciprocal of the inverse rate, then one hop via EUR; else NULL.
+    # How many units of p_quote one unit of p_base buys on p_day. Same currency is exactly 1.
+    # Otherwise the candidate paths are the direct rate, the reciprocal of the inverse rate,
+    # and one hop via EUR (each leg chosen by these same rules); the path whose rate is the
+    # most recent on or before p_day wins, a via-EUR path being as old as its older leg.
+    # Ties go direct, then inverse, then via EUR. Within a path the latest as_of_date wins,
+    # then source 'manual', then the latest recorded_at. No path gives NULL.
     """
     CREATE FUNCTION finance.v1_fx_rate(p_base uuid, p_quote uuid, p_day date) RETURNS numeric
     LANGUAGE sql STABLE AS $$
@@ -33,27 +37,44 @@ UPGRADE = [
         UNION ALL SELECT 'to_eur', p_base, eur.id FROM eur
         UNION ALL SELECT 'from_eur', eur.id, p_quote FROM eur
       ),
+      -- Up to two candidates per pair: its latest direct rate (preference 1) and the
+      -- reciprocal of its latest inverse rate (preference 2).
       legs AS (
-        SELECT pairs.step, coalesce(
-          (SELECT r.rate FROM finance.fx_rates r
+        SELECT pairs.step, c.rate, c.as_of_date, c.preference
+        FROM pairs
+        CROSS JOIN LATERAL (
+          (SELECT r.rate, r.as_of_date, 1 AS preference FROM finance.fx_rates r
            WHERE r.base_instrument_id = pairs.base AND r.quote_instrument_id = pairs.quote
              AND r.as_of_date <= p_day
            ORDER BY r.as_of_date DESC, (r.source = 'manual') DESC, r.recorded_at DESC
-           LIMIT 1),
-          (SELECT 1 / r.rate FROM finance.fx_rates r
+           LIMIT 1)
+          UNION ALL
+          (SELECT 1 / r.rate, r.as_of_date, 2 FROM finance.fx_rates r
            WHERE r.base_instrument_id = pairs.quote AND r.quote_instrument_id = pairs.base
              AND r.as_of_date <= p_day
            ORDER BY r.as_of_date DESC, (r.source = 'manual') DESC, r.recorded_at DESC
            LIMIT 1)
-        ) AS rate
-        FROM pairs
+        ) c
+      ),
+      best_legs AS (
+        SELECT DISTINCT ON (legs.step) legs.step, legs.rate, legs.as_of_date
+        FROM legs
+        ORDER BY legs.step, legs.as_of_date DESC, legs.preference
+      ),
+      candidates AS (
+        SELECT legs.rate, legs.as_of_date, legs.preference
+        FROM legs WHERE legs.step = 'direct'
+        UNION ALL
+        SELECT a.rate * b.rate, least(a.as_of_date, b.as_of_date), 3
+        FROM best_legs a, best_legs b
+        WHERE a.step = 'to_eur' AND b.step = 'from_eur'
       )
       SELECT CASE
         WHEN p_base = p_quote THEN 1::numeric
-        ELSE coalesce(
-          (SELECT legs.rate FROM legs WHERE legs.step = 'direct'),
-          (SELECT a.rate * b.rate FROM legs a, legs b
-           WHERE a.step = 'to_eur' AND b.step = 'from_eur')
+        ELSE (
+          SELECT candidates.rate FROM candidates
+          ORDER BY candidates.as_of_date DESC, candidates.preference
+          LIMIT 1
         )
       END
     $$

@@ -1156,12 +1156,14 @@ git commit -m "feat: add balance snapshots, prices and fx rates"
   - `snapshots`：取快照的数量；没有快照就没有这一行。
   - `transactions`：`booking_date <= p_day` 的分录求和。
   - `hybrid`：有快照时 = 快照数量 + 交易 `occurred_at > 快照.as_of` 且 `booking_date <= p_day` 的分录之和；没有快照时，和 `transactions` 一样。
-- **汇率 `v1_fx_rate`**，按顺序尝试：
-  1. 两边是同一币种 → 1；
-  2. 直接汇率：取 `as_of_date <= p_day` 的最新一条，同一天先取 `source = 'manual'`，再按 `recorded_at DESC`；
-  3. 反向汇率的倒数；
-  4. 经 EUR 中转：两段各自按第 2、3 步取，只中转一次；
-  5. 都没有 → NULL。
+- **汇率 `v1_fx_rate`**（设计文档 §9，"取当天或之前最新的汇率"）：
+  1. 两边是同一币种 → 恰好为 1；
+  2. 否则最多有三条候选路径：
+     - 直接：取 `as_of_date <= p_day` 的最新一条 base→quote 汇率，同一天先取 `source = 'manual'`，再按 `recorded_at DESC`；
+     - 反向：按同样规则取最新一条 quote→base 汇率，再取倒数；
+     - 经 EUR 中转：base→EUR × EUR→quote，只中转一次；每一段都按这里的同一套规则取（直接和反向里取较新的，日期相同取直接）。这条路径的生效日期是两段中较早的那个日期；
+  3. 生效日期最新的路径胜出；日期相同时依次优先直接、反向、经 EUR；
+  4. 没有任何路径 → NULL。
 - **估值 `v1_valuation_asof`**：
   - 只包含 `ledger_type` 为 `asset` 或 `liability` 的账户，排除隐藏的资产和数量为 0 的行。
   - 报告币种取 `core.settings` 里 `finance.reporting_currency` 对应的 fiat 资产。
@@ -1368,7 +1370,7 @@ git commit -m "feat: add versioned valuation functions and net worth series"
     - `auth_mode="dev"` 时返回 `Actor("user", "dev")`；
     - `auth_mode="tailscale"` 时，请求头 `Tailscale-User-Login` 必须等于 `owner_login`，否则返回 401；通过时返回 `Actor("user", <登录名>)`。
     - `/api/v1/health` 不要求身份。
-  - `DecimalStr`：基于 `Decimal` 的 Annotated 类型。只接受符合 `^-?\d+(\.\d+)?$` 的字符串，其他输入（包括 JSON 数字）一律 422；输出时用 `to_plain_str`；JSON schema 是 `{"type": "string", "pattern": …}`。所有金额、数量、价格、汇率字段都用它。
+  - `DecimalStr`：基于 `Decimal` 的 Annotated 类型。只接受符合 `^-?[0-9]+(\.[0-9]+)?$` 的字符串（只允许 ASCII 数字），其他输入（包括 JSON 数字）一律 422；输出时用 `to_plain_str`；JSON schema 是 `{"type": "string", "pattern": …}`。所有金额、数量、价格、汇率字段都用它。
   - 路由（route name → 方法和路径）：
     - core：`health` GET `/api/v1/health` → `{"status": "ok"}`；`get_settings` GET `/api/v1/settings` → `{"timezone": …}`；`update_settings` PUT `/api/v1/settings`（时区必须是合法的 IANA 名称，否则 422）。
     - finance（前缀 `/api/v1/finance`）：

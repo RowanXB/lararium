@@ -2,6 +2,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import text
+
 from financial_gate.core.settings_store import set_setting
 from financial_gate.modules.finance.accounts import close_account
 from financial_gate.modules.finance.instruments import create_instrument, get_currency, set_hidden
@@ -232,3 +234,156 @@ async def test_reporting_currency_change_revalues(session, run, make_account, gb
 async def test_series_has_one_row_per_day(session) -> None:
     days = [p.day for p in await net_worth_series(session, date(2026, 11, 1), date(2026, 11, 3))]
     assert days == [date(2026, 11, 1), date(2026, 11, 2), date(2026, 11, 3)]
+
+
+async def fx(session, base, quote, day: date) -> Decimal | None:
+    return await session.scalar(
+        text("select finance.v1_fx_rate(:base, :quote, :day)"),
+        {"base": base.id, "quote": quote.id, "day": day},
+    )
+
+
+async def rate(run, base, quote, value: str, day: date, source: str = "manual") -> None:
+    await run(
+        record_fx_rate,
+        base_instrument_id=base.id,
+        quote_instrument_id=quote.id,
+        rate=Decimal(value),
+        as_of_date=day,
+        source=source,
+    )
+
+
+async def test_same_currency_rate_is_exactly_one(session, gbp) -> None:
+    assert str(await fx(session, gbp, gbp, date(2026, 11, 10))) == "1"
+
+
+async def test_fresher_via_eur_path_beats_older_direct_rate(session, run, usd, eur, gbp) -> None:
+    await rate(run, usd, gbp, "0.8", date(2026, 11, 1))
+    await rate(run, usd, eur, "0.9", date(2026, 11, 9))
+    await rate(run, eur, gbp, "0.85", date(2026, 11, 8))
+    assert await fx(session, usd, gbp, date(2026, 11, 10)) == Decimal("0.765")
+    # Before the second leg exists there is no via-EUR path, so the direct rate stands.
+    assert await fx(session, usd, gbp, date(2026, 11, 7)) == Decimal("0.8")
+
+
+async def test_via_eur_path_is_as_old_as_its_older_leg(session, run, usd, eur, gbp) -> None:
+    await rate(run, usd, gbp, "0.8", date(2026, 11, 1))
+    await rate(run, usd, eur, "0.9", date(2026, 11, 9))
+    await rate(run, eur, gbp, "0.85", date(2026, 10, 30))
+    assert await fx(session, usd, gbp, date(2026, 11, 10)) == Decimal("0.8")
+
+
+async def test_same_day_direct_beats_via_eur(session, run, usd, eur, gbp) -> None:
+    day = date(2026, 11, 10)
+    await rate(run, usd, gbp, "0.8", day)
+    await rate(run, usd, eur, "0.9", day)
+    await rate(run, eur, gbp, "0.85", day)
+    assert await fx(session, usd, gbp, day) == Decimal("0.8")
+
+
+async def test_fresher_inverse_beats_older_direct_and_loses_a_tie(session, run, usd, gbp) -> None:
+    await rate(run, usd, gbp, "0.8", date(2026, 11, 1))
+    await rate(run, gbp, usd, "1.6", date(2026, 11, 5))
+    assert await fx(session, usd, gbp, date(2026, 11, 10)) == Decimal("0.625")
+    await rate(run, usd, gbp, "0.7", date(2026, 11, 5))
+    assert await fx(session, usd, gbp, date(2026, 11, 10)) == Decimal("0.7")
+
+
+async def test_manual_fx_rate_preferred_within_a_day(session, run, usd, gbp) -> None:
+    day = date(2026, 11, 10)
+    await rate(run, usd, gbp, "0.8", day)
+    await rate(run, usd, gbp, "0.7", day, source="ecb")
+    # Recorded later, so only the manual preference keeps it from winning.
+    await session.execute(
+        text(
+            "update finance.fx_rates set recorded_at = now() + interval '1 hour'"
+            " where source = 'ecb'"
+        )
+    )
+    assert await fx(session, usd, gbp, day) == Decimal("0.8")
+
+
+async def price(run, instrument, quote, value: str, day: date, source: str = "manual") -> None:
+    await run(
+        record_price,
+        instrument_id=instrument.id,
+        quote_instrument_id=quote.id,
+        price=Decimal(value),
+        as_of_date=day,
+        source=source,
+    )
+
+
+async def test_manual_price_preferred_within_a_day(session, run, make_account, btc, gbp) -> None:
+    wallet = await make_account(name="Wallet", subtype="wallet")
+    day = date(2026, 11, 10)
+    await snap(run, wallet, btc, "1", at(2026, 11, 10))
+    await price(run, btc, gbp, "50000", day)
+    await price(run, btc, gbp, "40000", day, source="coingecko")
+    await session.execute(
+        text(
+            "update finance.prices set recorded_at = now() + interval '1 hour'"
+            " where source = 'coingecko'"
+        )
+    )
+    [h] = await holdings_asof(session, day)
+    assert (h.unit_price, h.value) == (Decimal("50000"), Decimal("50000"))
+
+
+async def test_latest_price_on_or_before_the_day(session, run, make_account, btc, gbp) -> None:
+    wallet = await make_account(name="Wallet", subtype="wallet")
+    await snap(run, wallet, btc, "2", at(2026, 11, 1))
+    await price(run, btc, gbp, "100", date(2026, 11, 1))
+    await price(run, btc, gbp, "200", date(2026, 11, 5))
+    await price(run, btc, gbp, "300", date(2026, 11, 20))
+    values = [(await holdings_asof(session, date(2026, 11, d)))[0].value for d in (4, 5, 10)]
+    assert values == [Decimal("200"), Decimal("400"), Decimal("400")]
+
+
+async def test_hybrid_ignores_postings_booked_after_the_day(
+    session, run, make_account, gbp
+) -> None:
+    bank = await make_account(name="Bank", balance_mode="hybrid")
+    other = await make_account(name="Other", balance_mode="transactions")
+    await snap(run, bank, gbp, "2000", at(2026, 11, 1, 18))
+    # Happened after the snapshot, but only booked on the 6th.
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=at(2026, 11, 3),
+            booking_date=date(2026, 11, 6),
+            description="t",
+            postings=[
+                PostingInput(other.id, gbp.id, Decimal("-300")),
+                PostingInput(bank.id, gbp.id, Decimal("300")),
+            ],
+        ),
+    )
+    for day, expected in ((date(2026, 11, 5), "2000"), (date(2026, 11, 6), "2300")):
+        rows = {r.account_id: r.quantity for r in await balances_asof(session, day)}
+        assert rows[bank.id] == Decimal(expected)
+
+
+async def test_balance_rows_report_the_snapshot_used(session, run, make_account, gbp) -> None:
+    bank = await make_account(name="Bank", balance_mode="hybrid")
+    other = await make_account(name="Other", balance_mode="transactions")
+    await snap(run, bank, gbp, "2000", at(2026, 11, 1, 18))
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=at(2026, 11, 3),
+            description="t",
+            postings=[
+                PostingInput(other.id, gbp.id, Decimal("-300")),
+                PostingInput(bank.id, gbp.id, Decimal("300")),
+            ],
+        ),
+    )
+    rows = {r.account_id: r for r in await balances_asof(session, date(2026, 11, 5))}
+    assert (
+        rows[bank.id].quantity,
+        rows[bank.id].snapshot_quantity,
+        rows[bank.id].snapshot_date,
+    ) == (Decimal("2300"), Decimal("2000"), date(2026, 11, 1))
+    assert (rows[other.id].snapshot_quantity, rows[other.id].snapshot_date) == (None, None)

@@ -1156,12 +1156,14 @@ git commit -m "feat: add balance snapshots, prices and fx rates"
   - `snapshots`: the snapshot's quantity; no snapshot means no row.
   - `transactions`: the sum of postings with `booking_date <= p_day`.
   - `hybrid`: with a snapshot, = the snapshot quantity + the sum of postings whose transactions have `occurred_at > snapshot.as_of` and `booking_date <= p_day`; without a snapshot, the same as `transactions`.
-- **FX rate `v1_fx_rate`**, tried in this order:
-  1. same currency on both sides → 1;
-  2. direct rate: the latest one with `as_of_date <= p_day`; within the same day, prefer `source = 'manual'`, then order by `recorded_at DESC`;
-  3. the reciprocal of the inverse rate;
-  4. via EUR: each of the two legs taken per steps 2 and 3, with only one intermediate hop;
-  5. none of these → NULL.
+- **FX rate `v1_fx_rate`** (spec §9, "the latest rate on or before the day"):
+  1. same currency on both sides → exactly 1;
+  2. otherwise there are up to three candidate paths:
+     - direct: the latest base→quote rate with `as_of_date <= p_day`; within the same day, prefer `source = 'manual'`, then order by `recorded_at DESC`;
+     - inverse: the reciprocal of the latest quote→base rate, chosen the same way;
+     - via EUR: base→EUR × EUR→quote, with only one intermediate hop; each leg is chosen by these same rules (its fresher of direct and inverse, direct on a tie). The path's effective date is the older of its two legs' dates;
+  3. the path with the most recent effective date wins; ties go direct, then inverse, then via EUR;
+  4. no path → NULL.
 - **Valuation `v1_valuation_asof`**:
   - Includes only accounts whose `ledger_type` is `asset` or `liability`, and excludes hidden instruments and rows with a quantity of 0.
   - The reporting currency is the fiat instrument matching `finance.reporting_currency` in `core.settings`.
@@ -1368,7 +1370,7 @@ git commit -m "feat: add versioned valuation functions and net worth series"
     - with `auth_mode="dev"`, returns `Actor("user", "dev")`;
     - with `auth_mode="tailscale"`, the `Tailscale-User-Login` request header must equal `owner_login`, otherwise it returns 401; when it matches, returns `Actor("user", <login>)`.
     - `/api/v1/health` requires no identity.
-  - `DecimalStr`: an Annotated type based on `Decimal`. It accepts only strings matching `^-?\d+(\.\d+)?$`; any other input (including JSON numbers) gets 422; output goes through `to_plain_str`; the JSON schema is `{"type": "string", "pattern": …}`. All amount, quantity, price and FX rate fields use it.
+  - `DecimalStr`: an Annotated type based on `Decimal`. It accepts only strings matching `^-?[0-9]+(\.[0-9]+)?$` (ASCII digits only); any other input (including JSON numbers) gets 422; output goes through `to_plain_str`; the JSON schema is `{"type": "string", "pattern": …}`. All amount, quantity, price and FX rate fields use it.
   - Routes (route name → method and path):
     - core: `health` GET `/api/v1/health` → `{"status": "ok"}`; `get_settings` GET `/api/v1/settings` → `{"timezone": …}`; `update_settings` PUT `/api/v1/settings` (the timezone must be a valid IANA name, otherwise 422).
     - finance (prefix `/api/v1/finance`):
