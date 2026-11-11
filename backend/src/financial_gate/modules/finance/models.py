@@ -94,3 +94,50 @@ class Posting(Base):
     price_instrument_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.instruments.id"))
     is_fee: Mapped[bool] = mapped_column(server_default=text("false"))
     memo: Mapped[str] = mapped_column(Text, server_default=text("''"))
+
+
+class BalanceSnapshot(Base):
+    __tablename__ = "balance_snapshots"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    quantity: Mapped[Decimal] = mapped_column(Numeric)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    as_of_date: Mapped[date]
+    kind: Mapped[str] = mapped_column(Text)
+    owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Price(Base):
+    __tablename__ = "prices"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    quote_instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    price: Mapped[Decimal] = mapped_column(Numeric)
+    as_of_date: Mapped[date]
+    source: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class FxRate(Base):
+    __tablename__ = "fx_rates"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    base_instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    quote_instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    rate: Mapped[Decimal] = mapped_column(Numeric)
+    as_of_date: Mapped[date]
+    source: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

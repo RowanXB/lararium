@@ -5,7 +5,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from financial_gate.modules.finance.accounts import AccountRecord, create_account
-from financial_gate.modules.finance.instruments import InstrumentRecord, get_currency
+from financial_gate.modules.finance.instruments import (
+    InstrumentRecord,
+    create_instrument,
+    get_currency,
+)
 
 
 @pytest.fixture
@@ -21,6 +25,19 @@ async def usd(session: AsyncSession) -> InstrumentRecord:
 @pytest.fixture
 async def eur(session: AsyncSession) -> InstrumentRecord:
     return await get_currency(session, "EUR")
+
+
+@pytest.fixture
+async def btc(run: Callable[..., Awaitable[Any]], usd: InstrumentRecord) -> InstrumentRecord:
+    return await run(
+        create_instrument,
+        kind="crypto",
+        symbol="BTC",
+        name="Bitcoin",
+        decimals=8,
+        quote_instrument_id=usd.id,
+        identifiers=[],
+    )
 
 
 type MakeAccount = Callable[..., Awaitable[AccountRecord]]
