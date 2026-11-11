@@ -1,7 +1,8 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, Numeric, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from financial_gate.core.models import UUIDV7, Base
@@ -54,3 +55,42 @@ class Account(Base):
     opened_on: Mapped[date | None]
     closed_on: Mapped[date | None]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    occurred_tz: Mapped[str | None] = mapped_column(Text)
+    booking_date: Mapped[date]
+    value_date: Mapped[date | None]
+    description: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    counterparty_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    status: Mapped[str] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(Text)
+    owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Posting(Base):
+    __tablename__ = "postings"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="CASCADE")
+    )
+    position: Mapped[int]
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    quantity: Mapped[Decimal] = mapped_column(Numeric)
+    cost_per_unit: Mapped[Decimal | None] = mapped_column(Numeric)
+    cost_instrument_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.instruments.id"))
+    price_per_unit: Mapped[Decimal | None] = mapped_column(Numeric)
+    price_instrument_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.instruments.id"))
+    is_fee: Mapped[bool] = mapped_column(server_default=text("false"))
+    memo: Mapped[str] = mapped_column(Text, server_default=text("''"))
