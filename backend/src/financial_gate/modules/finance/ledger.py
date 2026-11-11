@@ -298,7 +298,7 @@ async def find_unbalanced_transactions(session: AsyncSession) -> list[UUID]:
     )
     # |sum| > 10^-decimals / 2, rewritten with a positive exponent so NUMERIC stays exact.
     # The explicit cast matters: a bare 10 is bound as an integer, and power(int, int)
-    # resolves to the binary double-precision variant, which rounds the comparison.
+    # resolves to the double precision variant, which rounds the comparison.
     ten = literal(10).cast(Numeric)
     unbalanced = func.abs(func.sum(weights.c.weight)) * func.power(ten, i.decimals) * 2 > 1
     rows = await session.scalars(
