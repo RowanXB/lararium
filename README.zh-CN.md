@@ -64,6 +64,18 @@ tailscale serve --bg 8080
 （`migrate`），然后以 `fg_backend` 身份启动 API（`api`），以及提供 SPA 并转发 `/api/*`
 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `financial-gate_pgdata` 卷中。
 
+在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
+
+**如果主机的 443 端口已被占用**，换一个 HTTPS 端口：
+
+```bash
+tailscale serve --bg --https=8443 8080
+```
+
+然后打开 `https://<主机名>.<你的tailnet>.ts.net:8443`。身份请求头仍由 `tailscale serve`
+提供，其他都不用改。不要改成把 financial-gate 挂在别的反向代理后面（比如已经占着 443 的
+nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Login`。
+
 ### 安全模型
 
 - 系统是只读的：从不下单、转账或提现。

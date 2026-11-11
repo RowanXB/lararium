@@ -67,6 +67,19 @@ tailscale serve --bg 8080
 SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
 `financial-gate_pgdata` volume.
 
+Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
+
+**If port 443 is already taken on the host**, serve on another HTTPS port instead:
+
+```bash
+tailscale serve --bg --https=8443 8080
+```
+
+and open `https://<host>.<your-tailnet>.ts.net:8443`. `tailscale serve` still supplies the
+identity header, so nothing else changes. Don't put financial-gate behind another reverse
+proxy (e.g. an nginx already on 443) instead: traffic that bypasses `tailscale serve` can
+forge `Tailscale-User-Login`.
+
 ### Security model
 
 - The system is read-only: it never places orders, moves money or withdraws funds.
