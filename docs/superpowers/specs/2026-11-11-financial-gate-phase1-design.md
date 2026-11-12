@@ -546,6 +546,9 @@ The roadmap after that:
 
 - **Automatic sync for UK banks** (only needed in Phase 2): Enable Banking's officially stated coverage is 30 EEA countries; the UK is not in the EEA, and whether UK banks are supported has not been confirmed. When Phase 2 comes, one can register and check the available banks by country in its console; if the UK is not supported, look for another aggregator that covers the UK and is available to individuals.
 - **Whether an eToro key can be set to read-only**: verify before implementing M8.
+- **TODO: ingress hardening.** The API trusts the `Tailscale-User-Login` header, which is only safe while nothing but `tailscale serve` can reach the `web` and `api` containers. Today that relies on Docker Engine 28 or later. The planned fix has two stages:
+  1. **Isolation.** Run Tailscale as a sidecar container whose network namespace `web` and `api` share, so that they listen on loopback only and the stack publishes nothing but a fixed WireGuard UDP port. Postgres's `pg_hba` admits only the compose subnet. This removes the dependency on the host's Docker version and Tailscale install (e.g. Synology's Docker 24, or Windows Server). Do this before deploying on a host with Docker older than 28.
+  2. **Identity.** The API identifies the caller through Tailscale's whois instead of a header. This is needed when the first client runs on a tagged node (the AI assistant, MCP or scripts); verify then whether `tailscale serve` sends identity headers for tagged nodes.
 
 ## 18. References
 

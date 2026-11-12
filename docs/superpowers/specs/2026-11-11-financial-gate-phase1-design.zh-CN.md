@@ -546,6 +546,9 @@ api 和 worker 是同一套 Python 代码跑成的两个进程。整个后端是
 
 - **英国银行的自动同步方案**（第二阶段才需要）：Enable Banking 官方写的覆盖范围是 EEA 的 30 个国家，英国不在 EEA 内，是否支持英国的银行没有确认。到第二阶段时，可以注册后在它的控制台里按国家查看可选的银行；不支持的话，另找覆盖英国、个人可用的聚合服务。
 - **eToro 的 key 能不能设成只读**：实现 M8 前核实。
+- **TODO：入口加固。** api 信任 `Tailscale-User-Login` 请求头，只有在除了 `tailscale serve` 谁都连不到 `web` 和 `api` 容器时才安全。目前这一点依赖 Docker Engine 28 或更新版本。计划分两阶段修：
+  1. **隔离。** 把 Tailscale 作为边车容器运行，`web` 和 `api` 共用它的网络空间，只监听回环地址；整套服务除了一个固定的 WireGuard UDP 端口，不发布任何端口。Postgres 的 `pg_hba` 只允许 compose 内部网段连接。这样就不再依赖主机的 Docker 版本和 Tailscale 安装（比如群晖的 Docker 24，或 Windows Server）。在 Docker 低于 28 的主机上部署之前完成。
+  2. **认人。** api 改用 Tailscale 的 whois 识别调用方，不再信任请求头。等到第一个跑在带标签节点上的客户端（AI 助手、MCP 或脚本）出现时再做；届时核实 `tailscale serve` 对带标签节点是否发送身份头。
 
 ## 18. 参考
 
