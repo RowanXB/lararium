@@ -5,7 +5,7 @@
 本文是英文版的中文译文；两者如有出入，以英文版为准。
 
 > **状态：暂缓（2026-11-12）。** 使用者主要依靠 Monzo API，只是偶尔手动导入，所以先做 M3（Monzo）。恢复这份计划时：
-> - **任务 1（文档）**届时已经由 M3 的计划建好，M3 会把较大的 API 响应存成文档。先看看 M3 建了什么，再决定跳过还是调整任务 1。
+> - **任务 1（文档）**仍然需要做：M3 的计划把 Monzo 返回的小 JSON 直接存成原始记录，不建文档。恢复前先确认是不是已有更早的计划建好了它。
 > - **任务 4（OFX）**以及其他任务里和 OFX 有关的部分都是可选的。使用者的银行目前都不提供 OFX；除非哪家开始提供，否则跳过。这些部分是 `OfxProfileConfig`、决策 13 里的 `LEDGERBAL`、任务 5 和 7 里的 OFX 测试，以及 OFX 示例文件。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

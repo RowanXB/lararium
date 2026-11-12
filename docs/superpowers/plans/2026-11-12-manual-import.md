@@ -5,7 +5,7 @@
 The English version is authoritative; if the two versions differ, follow this one.
 
 > **Status: deferred (2026-11-12).** The owner mostly relies on the Monzo API and imports by hand only occasionally, so M3 (Monzo) comes first. When this plan is resumed:
-> - **Task 1 (documents)** will already have been built by the M3 plan, which stores large API responses as documents. Check what M3 built and skip or adapt Task 1.
+> - **Task 1 (documents)** is still needed: the M3 plan stores Monzo's small JSON responses as raw records and does not build documents. Check whether a later plan built them first.
 > - **Task 4 (OFX)** and the OFX parts of the other tasks are optional. None of the owner's banks currently provides OFX; skip them unless one does. These are `OfxProfileConfig`, `LEDGERBAL` in Decision 13, the OFX tests in Tasks 5 and 7, and the OFX example files.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
