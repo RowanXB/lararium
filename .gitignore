@@ -2,6 +2,7 @@
 private/
 backups/
 infra/.env
+infra/.env.sops
 
 # Python
 .venv/

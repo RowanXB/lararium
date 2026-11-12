@@ -1,0 +1,6 @@
+# Generated files: GitHub collapses them in diffs and leaves them out of language stats.
+# `make check` already keeps them in step with their sources, so there is nothing to review.
+backend/uv.lock linguist-generated
+web/pnpm-lock.yaml linguist-generated
+web/openapi.json linguist-generated
+web/src/api/** linguist-generated
