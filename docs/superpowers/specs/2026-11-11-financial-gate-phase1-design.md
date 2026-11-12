@@ -512,7 +512,11 @@ The roadmap after that:
 | Project name: Lararium (renamed from financial-gate before publication); the future AI assistant module is named `lares` | Confirmed |
 | A posting's cost or price is in another instrument than the posting's own; otherwise it could rescale the quantity and balance anything. The database enforces this too | Default |
 | An instrument has an ISO 4217 code if and only if it is a fiat currency | Default |
-| Domain code checks every rule the database enforces before writing; a constraint violation that still reaches the API is a 4xx (`constraint_violation`), never a 500 | Default |
+| Domain code checks every rule the database enforces before writing; a database error a request still causes is a 4xx (`constraint_violation`, `invalid_value`) or a 503 (`query_timeout`) with a readable message, never a 500 | Default |
+| An amount has at most 40 digits on each side of the decimal point | Default |
+| A net-worth series covers at most ten years (3,653 days), and every database statement times out after 30 seconds | Default |
+| The API refuses cross-site requests, reads included, and the app can't be framed by other pages | Default |
+| Every API error carries a human-readable `message`; the web UI shows it as is | Default |
 
 ## 16. Left to the implementer
 

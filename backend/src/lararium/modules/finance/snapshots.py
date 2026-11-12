@@ -16,7 +16,7 @@ from lararium.modules.finance import models
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.instruments import get_instrument
-from lararium.modules.finance.money import require_finite, to_plain_str
+from lararium.modules.finance.money import require_amount, to_plain_str
 
 SnapshotKind = Literal["reported", "manual"]
 
@@ -77,7 +77,7 @@ async def record_snapshot(
     """Record an observed balance of one instrument in one account at a moment."""
     if as_of.utcoffset() is None:
         raise FinanceValidationError("as_of needs a timezone")
-    require_finite("quantity", quantity)
+    require_amount("quantity", quantity)
     session = ctx.session
     await get_account(session, account_id)  # raises AccountNotFoundError if missing
     await get_instrument(session, instrument_id)  # raises InstrumentNotFoundError if missing

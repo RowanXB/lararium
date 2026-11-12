@@ -41,7 +41,11 @@ describe("isDecimalString", () => {
     expect(isDecimalString(value)).toBe(true);
   });
 
-  it.each(["", "-", "1.", ".5", "+1", "1e3", "1,000", "NaN", "\u0661\u0662"])(
+  it("accepts 40 digits on each side of the point", () => {
+    expect(isDecimalString(`${"9".repeat(40)}.${"9".repeat(40)}`)).toBe(true);
+  });
+
+  it.each(["", "-", "1.", ".5", "+1", "1e3", "1,000", "NaN", "\u0661\u0662", "1".repeat(41), `0.${"1".repeat(41)}`])(
     "rejects %s",
     (value) => {
       expect(isDecimalString(value)).toBe(false);

@@ -22,7 +22,7 @@ from lararium.modules.finance.errors import (
     TransactionNotFoundError,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.money import require_finite, to_plain_str, tolerance
+from lararium.modules.finance.money import require_amount, to_plain_str, tolerance
 
 TransactionStatus = Literal["pending", "booked", "inferred", "confirmed", "void"]
 TransactionOrigin = Literal["connector", "manual", "inference", "rule"]
@@ -98,7 +98,7 @@ def _validate_posting(posting: PostingInput) -> None:
     }
     for name, amount in amounts.items():
         if amount is not None:
-            require_finite(name, amount)
+            require_amount(name, amount)
     if posting.quantity == 0:
         raise FinanceValidationError("quantity must not be zero")
     # A cost or price converts the quantity into another instrument for the balance check.

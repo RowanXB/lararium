@@ -3,6 +3,8 @@ import json
 import pytest
 
 from lararium.api.export_openapi import render_openapi
+from lararium.modules.finance import errors
+from lararium.modules.finance.api import _ERRORS  # pyright: ignore[reportPrivateUsage]
 
 
 async def _gbp_id(client) -> str:
@@ -33,7 +35,9 @@ async def test_amounts_must_be_strings(client) -> None:
 
 
 @pytest.mark.parametrize(
-    "quantity", ["\u0661\u0662", "1\uff10", "NaN", "Infinity", "1e3", "+1", "12\n"]
+    "quantity",
+    # The last two have more digits than an amount may have (40 on each side of the point).
+    ["\u0661\u0662", "1\uff10", "NaN", "Infinity", "1e3", "+1", "12\n", "1" * 41, "0." + "1" * 41],
 )
 async def test_amounts_must_be_plain_ascii_decimals(client, quantity) -> None:
     account_id, gbp_id = await _account(client), await _gbp_id(client)
@@ -102,6 +106,7 @@ async def test_unbalanced_transaction_returns_residuals(client) -> None:
     assert response.status_code == 422
     assert response.json()["detail"] == {
         "error": "ledger_imbalance",
+        "message": "the postings don't balance per instrument",
         "residuals": {gbp_id: "-0.01"},
     }
 
@@ -185,7 +190,10 @@ def test_openapi_operation_ids_and_decimal_schema() -> None:
     }
     assert {"create_account", "record_snapshot", "get_net_worth", "health"} <= operation_ids
     quantity = document["components"]["schemas"]["SnapshotCreate"]["properties"]["quantity"]
-    assert (quantity["type"], quantity["pattern"]) == ("string", r"^-?[0-9]+(\.[0-9]+)?$")
+    assert (quantity["type"], quantity["pattern"]) == (
+        "string",
+        r"^-?[0-9]{1,40}(\.[0-9]{1,40})?$",
+    )
 
 
 MISSING_ID = "01900000-0000-7000-8000-000000000000"
@@ -232,5 +240,56 @@ async def test_fiat_without_iso4217_code_is_rejected(client) -> None:
         "/api/v1/finance/instruments",
         json={"kind": "fiat", "symbol": "NGN", "name": "Naira", "decimals": 2},
     )
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "invalid_input"
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    [c for c in _ERRORS if c is not errors.FinanceValidationError],  # that one takes a sentence
+)
+def test_every_error_message_explains_itself(error_class) -> None:
+    # The web UI shows the message as is, so a bare id or code would explain nothing.
+    message = str(error_class("XYZ"))
+    assert "XYZ" in message
+    assert message != "XYZ"
+
+
+async def test_ledger_imbalance_has_a_message(client) -> None:
+    a, b, gbp_id = (
+        await _account(client, name="A"),
+        await _account(client, name="B"),
+        await _gbp_id(client),
+    )
+    response = await client.post(
+        "/api/v1/finance/transactions",
+        json={
+            "occurred_at": "2026-11-10T12:00:00Z",
+            "description": "bad",
+            "postings": [
+                {"account_id": a, "instrument_id": gbp_id, "quantity": "-1"},
+                {"account_id": b, "instrument_id": gbp_id, "quantity": "2"},
+            ],
+        },
+    )
+    assert response.status_code == 422
+    assert "don't balance" in response.json()["detail"]["message"]
+
+
+async def test_net_worth_near_the_first_representable_day(client) -> None:
+    response = await client.get("/api/v1/finance/net-worth", params={"end": "0001-06-01"})
+    assert response.status_code == 200
+    assert response.json()[0]["day"] == "0001-01-01"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"start": "0001-01-01", "end": "2026-11-10"},  # longer than the longest series
+        {"start": "2026-11-11", "end": "2026-11-10"},  # ends before it starts
+    ],
+)
+async def test_net_worth_range_out_of_bounds_is_rejected(client, params) -> None:
+    response = await client.get("/api/v1/finance/net-worth", params=params)
     assert response.status_code == 422
     assert response.json()["detail"]["error"] == "invalid_input"

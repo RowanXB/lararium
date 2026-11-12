@@ -12,6 +12,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.modules.finance.errors import FinanceValidationError
+
 HoldingStatus = Literal["ok", "missing_price", "missing_fx"]
 
 
@@ -87,7 +89,16 @@ async def holdings_asof(session: AsyncSession, day: date) -> list[HoldingRow]:
     ]
 
 
+# Each day of a series is a full valuation, so this bounds the work one call can start.
+MAX_SERIES_DAYS = 3653  # ten years
+
+
 async def net_worth_series(session: AsyncSession, start: date, end: date) -> list[NetWorthPoint]:
+    """Net worth for every day from start to end, both included."""
+    if end < start:
+        raise FinanceValidationError("the series must not end before it starts")
+    if (end - start).days + 1 > MAX_SERIES_DAYS:
+        raise FinanceValidationError(f"a series covers at most {MAX_SERIES_DAYS} days")
     rows = await session.execute(
         text("select * from finance.v1_net_worth_series(:start, :end) order by day"),
         {"start": start, "end": end},

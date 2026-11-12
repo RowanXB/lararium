@@ -15,7 +15,6 @@ from lararium.config import Settings
 from lararium.core.actors import Actor
 
 OWNER_HEADER = "Tailscale-User-Login"
-SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -36,10 +35,12 @@ def _is_cross_site(request: Request) -> bool:
 
 
 def get_actor(request: Request) -> Actor:
-    # The owner's browser attaches the identity header to every request it sends, even one
-    # a page on another site triggers, so a write must come from our own origin. Requests
-    # without these headers (curl, scripts) don't come from a browser page and pass.
-    if request.method not in SAFE_METHODS and _is_cross_site(request):
+    # The owner's identity is attached to every request the owner's browser sends, even one
+    # a page on another site triggers, so a request must come from our own origin. That
+    # holds for reads too: another site can't see the response, but an <img src> can still
+    # start the work (a long net-worth series, say). Requests without these headers (curl,
+    # scripts) don't come from a browser page and pass.
+    if _is_cross_site(request):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site request refused")
     settings = cast(Settings, request.app.state.settings)
     if settings.auth_mode == "dev":

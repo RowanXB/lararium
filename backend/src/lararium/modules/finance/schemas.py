@@ -32,7 +32,9 @@ from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.snapshots import SnapshotKind
 from lararium.modules.finance.valuation import HoldingStatus
 
-DECIMAL_PATTERN = r"^-?[0-9]+(\.[0-9]+)?$"  # ASCII digits only: \d matches any script's digits
+# ASCII digits only (\d matches any script's digits), at most 40 on each side of the point:
+# money.require_amount's bounds, so OpenAPI states them and the client can check them too.
+DECIMAL_PATTERN = r"^-?[0-9]{1,40}(\.[0-9]{1,40})?$"
 _DECIMAL_RE = re.compile(DECIMAL_PATTERN)
 
 

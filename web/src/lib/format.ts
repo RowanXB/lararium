@@ -20,9 +20,10 @@ export function negateDecimalString(value: string): string {
   return `-${value}`;
 }
 
-// The backend's DecimalStr pattern (ASCII digits only), optionally without the sign.
-const DECIMAL = /^-?[0-9]+(\.[0-9]+)?$/;
-const UNSIGNED_DECIMAL = /^[0-9]+(\.[0-9]+)?$/;
+// The backend's DecimalStr pattern (ASCII digits only, at most 40 on each side of the
+// point), optionally without the sign.
+const DECIMAL = /^-?[0-9]{1,40}(\.[0-9]{1,40})?$/;
+const UNSIGNED_DECIMAL = /^[0-9]{1,40}(\.[0-9]{1,40})?$/;
 
 export function isDecimalString(value: string, { unsigned = false } = {}): boolean {
   return (unsigned ? UNSIGNED_DECIMAL : DECIMAL).test(value);

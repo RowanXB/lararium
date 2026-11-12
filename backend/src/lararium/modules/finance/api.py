@@ -73,7 +73,7 @@ async def _ledger_imbalance(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, errors.LedgerImbalanceError)
     residuals = {str(key): to_plain_str(value) for key, value in exc.residuals.items()}
     return JSONResponse(
-        {"detail": {"error": "ledger_imbalance", "residuals": residuals}},
+        {"detail": {"error": "ledger_imbalance", "message": str(exc), "residuals": residuals}},
         status.HTTP_422_UNPROCESSABLE_CONTENT,
     )
 
@@ -319,6 +319,8 @@ async def get_net_worth(
 ) -> list[NetWorthPointOut]:
     """Daily net worth; defaults to the 365 days up to and including today."""
     end = end or await _today(session)
-    start = start or end - timedelta(days=364)
+    if start is None:
+        # Clamped, because a year before the first representable day would overflow.
+        start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
     points = await valuation.net_worth_series(session, start, end)
     return [NetWorthPointOut.model_validate(point) for point in points]

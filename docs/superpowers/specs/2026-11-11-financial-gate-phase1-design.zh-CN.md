@@ -512,7 +512,11 @@ api 和 worker 是同一套 Python 代码跑成的两个进程。整个后端是
 | 项目名称：Lararium（发布前由 financial-gate 改名）；以后的 AI 助手模块命名为 `lares` | 已确认 |
 | posting 的 cost 或 price 必须用另一种 instrument 计价，不能用 posting 自己的 instrument；否则它能把数量任意缩放，让任何交易都显得平衡。数据库也强制这一点 | 默认决定 |
 | instrument 有 ISO 4217 代码，当且仅当它是法币 | 默认决定 |
-| 数据库强制的每条规则，领域代码都在写入前先检查；仍然到达 API 的约束冲突返回 4xx（`constraint_violation`），绝不返回 500 | 默认决定 |
+| 数据库强制的每条规则，领域代码都在写入前先检查；请求仍然引发的数据库错误返回 4xx（`constraint_violation`、`invalid_value`）或 503（`query_timeout`），并附可读的说明，绝不返回 500 | 默认决定 |
+| 金额小数点前后各最多 40 位数字 | 默认决定 |
+| 净值序列最多覆盖十年（3,653 天），每条数据库语句 30 秒超时 | 默认决定 |
+| API 拒绝跨站请求（包括读请求），本应用不能被别的页面嵌入 | 默认决定 |
+| 每个 API 错误都带人能读懂的 `message`；Web 界面原样显示它 | 默认决定 |
 
 ## 16. 留给实现者
 

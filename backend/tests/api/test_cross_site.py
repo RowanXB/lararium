@@ -1,4 +1,7 @@
-"""Writes from another site are refused: the browser attaches the owner's identity to them."""
+"""Requests from another site are refused: the owner's identity is attached to them too.
+
+Reads as well as writes: another site can't see a response, but it can start the work.
+"""
 
 import pytest
 
@@ -45,9 +48,14 @@ async def test_same_origin_write_allowed(tailscale_client, headers) -> None:
     assert response.status_code == 200
 
 
-async def test_cross_site_read_unaffected(tailscale_client) -> None:
-    response = await tailscale_client.get(
-        "/api/v1/settings",
-        headers=OWNER | {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"},
-    )
+@pytest.mark.parametrize("headers", CROSS_SITE)
+async def test_cross_site_read_rejected(tailscale_client, headers) -> None:
+    # An <img src> on another site could otherwise start a long net-worth series.
+    response = await tailscale_client.get("/api/v1/finance/net-worth", headers=OWNER | headers)
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("headers", SAME_ORIGIN)
+async def test_same_origin_read_allowed(tailscale_client, headers) -> None:
+    response = await tailscale_client.get("/api/v1/settings", headers=OWNER | headers)
     assert response.status_code == 200

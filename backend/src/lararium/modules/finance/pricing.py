@@ -11,7 +11,7 @@ from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import FinanceValidationError, NotACurrencyError
 from lararium.modules.finance.instruments import get_instrument
-from lararium.modules.finance.money import require_finite, to_plain_str
+from lararium.modules.finance.money import require_amount, to_plain_str
 
 
 async def _require_fiat(session: AsyncSession, instrument_id: UUID) -> None:
@@ -36,7 +36,7 @@ async def record_price(
 ) -> None:
     """Record an instrument's price in a fiat currency; a later entry for the same
     instrument, currency, date and source replaces the earlier one."""
-    require_finite("price", price)
+    require_amount("price", price)
     session = ctx.session
     await get_instrument(session, instrument_id)  # raises InstrumentNotFoundError if missing
     await _require_fiat(session, quote_instrument_id)
@@ -82,7 +82,7 @@ async def record_fx_rate(
 ) -> None:
     """Record how many units of the quote currency one unit of the base currency buys;
     a later entry for the same pair, date and source replaces the earlier one."""
-    require_finite("rate", rate)
+    require_amount("rate", rate)
     if rate <= 0:
         raise FinanceValidationError("rate must be positive")
     session = ctx.session

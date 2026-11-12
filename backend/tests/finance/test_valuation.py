@@ -1,11 +1,13 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import text
 
 from lararium.core.settings_store import set_setting
 from lararium.modules.finance.accounts import close_account
+from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     create_instrument,
@@ -20,7 +22,12 @@ from lararium.modules.finance.ledger import (
 )
 from lararium.modules.finance.pricing import record_fx_rate, record_price
 from lararium.modules.finance.snapshots import record_snapshot
-from lararium.modules.finance.valuation import balances_asof, holdings_asof, net_worth_series
+from lararium.modules.finance.valuation import (
+    MAX_SERIES_DAYS,
+    balances_asof,
+    holdings_asof,
+    net_worth_series,
+)
 
 LON = ZoneInfo("Europe/London")
 
@@ -392,3 +399,22 @@ async def test_balance_rows_report_the_snapshot_used(session, run, make_account,
         rows[bank.id].snapshot_date,
     ) == (Decimal("2300"), Decimal("2000"), date(2026, 11, 1))
     assert (rows[other.id].snapshot_quantity, rows[other.id].snapshot_date) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (date(2016, 1, 1), date(2026, 11, 10)),  # more days than MAX_SERIES_DAYS
+        (date(2026, 11, 11), date(2026, 11, 10)),  # ends before it starts
+    ],
+)
+async def test_net_worth_series_range_is_bounded(session, start, end) -> None:
+    # Every day is a full valuation, so the range bounds the work a single request can start.
+    with pytest.raises(FinanceValidationError):
+        await net_worth_series(session, start, end)
+
+
+async def test_net_worth_series_at_the_longest_range(session) -> None:
+    end = date(2026, 11, 10)
+    points = await net_worth_series(session, end - timedelta(days=MAX_SERIES_DAYS - 1), end)
+    assert len(points) == MAX_SERIES_DAYS
