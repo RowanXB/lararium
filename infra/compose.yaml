@@ -36,6 +36,7 @@ services:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale
       LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN:?set LARARIUM_OWNER_LOGIN in infra/.env}
+      LARARIUM_MASTER_KEY: ${LARARIUM_MASTER_KEY:?set LARARIUM_MASTER_KEY in infra/.env}
     depends_on:
       migrate: { condition: service_completed_successfully }
   web:

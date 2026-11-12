@@ -12,13 +12,14 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic",
     "tzdata",
+    "httpx>=0.28.1",
+    "cryptography>=50.0.2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "httpx",
     "testcontainers[postgres]",
     "ruff",
     "pyright",
