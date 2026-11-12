@@ -33,6 +33,28 @@ it("shows the total and warns about missing prices", async () => {
   ).toBeInTheDocument();
 });
 
+it("warns when earlier days in the chart are incomplete although the latest is not", async () => {
+  vi.mocked(getNetWorth).mockResolvedValueOnce({
+    data: [
+      { day: "2026-11-09", value: "900.00", missing_count: 1 },
+      { day: "2026-11-10", value: "900.00", missing_count: 1 },
+      { day: "2026-11-11", value: "1500.00", missing_count: 0 },
+    ],
+  } as Awaited<ReturnType<typeof getNetWorth>>);
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <NetWorthPage />
+    </QueryClientProvider>,
+  );
+
+  expect(await screen.findByText("£1,500.00")).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      "2 earlier days in the chart leave out items missing a price or FX rate (marked in amber)",
+    ),
+  ).toBeInTheDocument();
+});
+
 it("shows holdings and net worth as of the chosen day", async () => {
   render(
     <QueryClientProvider client={new QueryClient()}>

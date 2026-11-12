@@ -33,6 +33,13 @@ function missingMessage(count: number): string {
     : `${count} items are missing a price or FX rate and are excluded from net worth`;
 }
 
+// The latest day has its own message above; this covers the rest of the chart's range.
+function earlierIncompleteMessage(days: number): string {
+  return days === 1
+    ? "1 earlier day in the chart leaves out items missing a price or FX rate (marked in amber)"
+    : `${days} earlier days in the chart leave out items missing a price or FX rate (marked in amber)`;
+}
+
 function groupByAccount(holdings: HoldingOut[]): HoldingOut[][] {
   const groups = new Map<string, HoldingOut[]>();
   for (const holding of holdings) {
@@ -65,6 +72,7 @@ export function NetWorthPage() {
   const currency = settings.data?.reporting_currency;
   const points = netWorth.data ?? [];
   const latest = points.at(-1);
+  const earlierIncomplete = points.slice(0, -1).filter((p) => p.missing_count > 0).length;
   const error = settings.error ?? netWorth.error ?? holdings.error;
 
   return (
@@ -81,13 +89,14 @@ export function NetWorthPage() {
           <CardTitle>Net worth</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {latest && latest.missing_count > 0 && (
-            <p
+          {latest && (latest.missing_count > 0 || earlierIncomplete > 0) && (
+            <div
               role="status"
-              className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+              className="space-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
             >
-              {missingMessage(latest.missing_count)}
-            </p>
+              {latest.missing_count > 0 && <p>{missingMessage(latest.missing_count)}</p>}
+              {earlierIncomplete > 0 && <p>{earlierIncompleteMessage(earlierIncomplete)}</p>}
+            </div>
           )}
           {currency && latest ? (
             <>
