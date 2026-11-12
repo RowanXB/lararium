@@ -1,12 +1,15 @@
 name: lararium
+# Required settings use ${VAR:?...}, so compose refuses to start when one is missing or
+# empty. The db init scripts can't be the check: they run once, after initdb has made the
+# volume permanent, and a failure there leaves a volume no later start can finish.
 services:
   db:
     image: postgres:18
     restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD}
-      LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD:?set LARARIUM_OWNER_PASSWORD in infra/.env}
+      LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}
     volumes:
       - pgdata:/var/lib/postgresql
       - ./postgres:/lararium:ro
@@ -21,7 +24,7 @@ services:
     build: ../backend
     command: ["alembic", "upgrade", "head"]
     environment:
-      LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD}@db:5432/lararium
+      LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD:?set LARARIUM_OWNER_PASSWORD in infra/.env}@db:5432/lararium
     depends_on:
       db: { condition: service_healthy }
   # No published ports: only Caddy (web) reaches the api, over the compose network.
@@ -30,9 +33,9 @@ services:
     restart: unless-stopped
     command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD}@db:5432/lararium
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale
-      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN}
+      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN:?set LARARIUM_OWNER_LOGIN in infra/.env}
     depends_on:
       migrate: { condition: service_completed_successfully }
   web:
