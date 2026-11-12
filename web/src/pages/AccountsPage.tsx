@@ -292,11 +292,18 @@ export function AccountsPage() {
                       .join(" · ")}
                   </p>
                 </div>
-                <SnapshotForm
-                  account={account}
-                  instruments={instruments.data ?? []}
-                  defaultInstrumentId={defaultInstrumentId}
-                />
+                {/* Valuation ignores snapshots on transactions-mode accounts (v1_balances_asof). */}
+                {account.balance_mode === "transactions" ? (
+                  <p className="text-sm text-muted-foreground">
+                    Balance comes from transactions, so snapshots don't apply
+                  </p>
+                ) : (
+                  <SnapshotForm
+                    account={account}
+                    instruments={instruments.data ?? []}
+                    defaultInstrumentId={defaultInstrumentId}
+                  />
+                )}
               </li>
             ))}
           </ul>

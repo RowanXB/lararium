@@ -25,6 +25,22 @@ vi.mock("../api", () => ({
         opened_on: null,
         closed_on: null,
       },
+      {
+        id: "0190a0b0-0000-7000-8000-000000000002",
+        name: "Ledger account",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "manual",
+        source_connection_id: null,
+        status: "open",
+        opened_on: null,
+        closed_on: null,
+      },
     ],
   })),
   listInstruments: vi.fn(async () => ({
@@ -86,4 +102,12 @@ it("rejects a negative amount owed instead of storing a positive liability", asy
     form.getByText("Enter the amount owed as a positive number, e.g. 500"),
   ).toBeInTheDocument();
   expect(recordSnapshot).not.toHaveBeenCalled();
+});
+
+it("offers no snapshot form for accounts whose balance comes from transactions", async () => {
+  await creditCardForm();
+  expect(screen.queryByRole("form", { name: "Snapshot for Ledger account" })).toBeNull();
+  expect(
+    screen.getByText("Balance comes from transactions, so snapshots don't apply"),
+  ).toBeInTheDocument();
 });
