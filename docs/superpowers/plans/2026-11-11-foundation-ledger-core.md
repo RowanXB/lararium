@@ -208,7 +208,7 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)` (`env_prefix="LARARIUM_"`): `database_url: str`, `migration_database_url: str | None = None`, `auth_mode: Literal["dev", "tailscale"] = "tailscale"`, `owner_login: str | None = None` (a model validator rejects tailscale mode without `owner_login`; tests and OpenAPI export pass `auth_mode="dev"` explicitly); `def get_settings() -> Settings` (with `lru_cache`).
+  - `class Settings(BaseSettings)` (`env_prefix="LARARIUM_"`): `database_url: str`, `auth_mode: Literal["dev", "tailscale"] = "tailscale"`, `owner_login: str | None = None` (a model validator rejects tailscale mode without `owner_login`; tests and OpenAPI export pass `auth_mode="dev"` explicitly); `def get_settings() -> Settings` (with `lru_cache`).
   - `def create_engine(url: str) -> AsyncEngine`; `def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]` (`expire_on_commit=False`).
   - Database roles: `lararium_owner` (owns the schemas, used only to run migrations), `lararium_backend` (used by the application, with only select/insert/update/delete privileges). Database name `lararium`.
   - Test fixtures: `owner_url`, `backend_url` (session-scoped, `postgresql+psycopg://…` strings); `session` (one `AsyncSession` per test, connected as `lararium_backend`, whose outer transaction is rolled back when the test ends).
@@ -282,7 +282,7 @@ Expected: FAIL (alembic can't find its config or migrations; if the schemas alre
 
 - [ ] **Step 5: Write `config.py`, `db.py`, the Alembic config and migration `0001_core_baseline`**
 
-`migrations/env.py` uses a sync engine and reads the connection string from `Settings.migration_database_url` or from `sqlalchemy.url` in the alembic config. All migrations are written as raw SQL with `op.execute`. Contents of `0001_core_baseline`:
+`migrations/env.py` uses a sync engine and reads the connection string from `sqlalchemy.url` in the alembic config or from the `LARARIUM_MIGRATION_DATABASE_URL` environment variable (directly, not through `Settings`, which would also demand the app's runtime variables). All migrations are written as raw SQL with `op.execute`. Contents of `0001_core_baseline`:
 
 ```sql
 CREATE SCHEMA core AUTHORIZATION lararium_owner;

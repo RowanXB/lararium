@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LARARIUM_")
 
     database_url: str
-    migration_database_url: str | None = None
     auth_mode: Literal["dev", "tailscale"] = "tailscale"
     owner_login: str | None = None
 

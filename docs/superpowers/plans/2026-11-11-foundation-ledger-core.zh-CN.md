@@ -208,7 +208,7 @@ git commit -m "chore: scaffold backend package and tooling"
 
 **Interfaces:**
 - Produces:
-  - `class Settings(BaseSettings)`（`env_prefix="LARARIUM_"`）：`database_url: str`、`migration_database_url: str | None = None`、`auth_mode: Literal["dev", "tailscale"] = "tailscale"`、`owner_login: str | None = None`（tailscale 模式下没有 `owner_login` 时校验报错；测试和 OpenAPI 导出显式传 `auth_mode="dev"`）；`def get_settings() -> Settings`（带 `lru_cache`）。
+  - `class Settings(BaseSettings)`（`env_prefix="LARARIUM_"`）：`database_url: str`、`auth_mode: Literal["dev", "tailscale"] = "tailscale"`、`owner_login: str | None = None`（tailscale 模式下没有 `owner_login` 时校验报错；测试和 OpenAPI 导出显式传 `auth_mode="dev"`）；`def get_settings() -> Settings`（带 `lru_cache`）。
   - `def create_engine(url: str) -> AsyncEngine`；`def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]`（`expire_on_commit=False`）。
   - 数据库角色：`lararium_owner`（拥有 schema，只用来跑迁移）、`lararium_backend`（应用使用，只有增删改查权限）。数据库名 `lararium`。
   - 测试 fixture：`owner_url`、`backend_url`（session 级，`postgresql+psycopg://…` 字符串）；`session`（每个测试一个 `AsyncSession`，以 `lararium_backend` 连接，外层事务在测试结束时回滚）。
@@ -282,7 +282,7 @@ Expected: FAIL（alembic 找不到配置或迁移；如果 schema 已建，则 `
 
 - [ ] **Step 5: 写 `config.py`、`db.py`、Alembic 配置和迁移 `0001_core_baseline`**
 
-`migrations/env.py` 用同步 engine，从 `Settings.migration_database_url` 或 alembic 配置里的 `sqlalchemy.url` 读连接串。迁移一律用 `op.execute` 写原生 SQL。`0001_core_baseline` 的内容：
+`migrations/env.py` 用同步 engine，从 alembic 配置里的 `sqlalchemy.url` 或环境变量 `LARARIUM_MIGRATION_DATABASE_URL` 读连接串（直接读环境变量，不经过 `Settings`，因为 `Settings` 还会要求应用运行时的变量）。迁移一律用 `op.execute` 写原生 SQL。`0001_core_baseline` 的内容：
 
 ```sql
 CREATE SCHEMA core AUTHORIZATION lararium_owner;
