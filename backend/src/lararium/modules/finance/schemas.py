@@ -164,6 +164,15 @@ class PostingCreate(BaseModel):
     is_fee: bool = False
     memo: str = ""
 
+    @model_validator(mode="after")
+    def _cost_and_price_are_paired(self) -> Self:
+        # Mirrors the postings paired-nullability CHECKs so a half pair is a 422, not a 500.
+        if (self.cost_per_unit is None) != (self.cost_instrument_id is None):
+            raise ValueError("cost_per_unit and cost_instrument_id must be given together")
+        if (self.price_per_unit is None) != (self.price_instrument_id is None):
+            raise ValueError("price_per_unit and price_instrument_id must be given together")
+        return self
+
 
 class TransactionCreate(BaseModel):
     occurred_at: AwareDatetime

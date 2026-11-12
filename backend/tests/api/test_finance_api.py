@@ -106,6 +106,36 @@ async def test_unbalanced_transaction_returns_residuals(client) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "half_pair",
+    [
+        {"cost_per_unit": "1.00"},
+        {"cost_instrument_id": "GBP"},
+        {"price_per_unit": "1.00"},
+        {"price_instrument_id": "GBP"},
+    ],
+)
+async def test_half_specified_cost_or_price_is_rejected_as_422(client, half_pair) -> None:
+    a, b, gbp_id = (
+        await _account(client, name="A"),
+        await _account(client, name="B"),
+        await _gbp_id(client),
+    )
+    extra = {key: gbp_id if value == "GBP" else value for key, value in half_pair.items()}
+    response = await client.post(
+        "/api/v1/finance/transactions",
+        json={
+            "occurred_at": "2026-11-10T12:00:00Z",
+            "description": "half pair",
+            "postings": [
+                {"account_id": a, "instrument_id": gbp_id, "quantity": "-1.00"} | extra,
+                {"account_id": b, "instrument_id": gbp_id, "quantity": "1.00"},
+            ],
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_openapi_export_is_deterministic() -> None:
     first, second = render_openapi(), render_openapi()
     assert first == second
