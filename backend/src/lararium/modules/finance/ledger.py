@@ -15,8 +15,13 @@ from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
-from lararium.modules.finance.errors import LedgerImbalanceError, TransactionNotFoundError
-from lararium.modules.finance.instruments import get_instrument
+from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.errors import (
+    FinanceValidationError,
+    LedgerImbalanceError,
+    TransactionNotFoundError,
+)
+from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
 from lararium.modules.finance.money import require_finite, to_plain_str, tolerance
 
 TransactionStatus = Literal["pending", "booked", "inferred", "confirmed", "void"]
@@ -83,7 +88,9 @@ def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
     return posting.instrument_id, posting.quantity
 
 
-def _require_finite(posting: PostingInput) -> None:
+def _validate_posting(posting: PostingInput) -> None:
+    """Every rule the postings table CHECKs enforce, so breaking one is a validation error
+    and the CHECKs stay a backstop."""
     amounts = {
         "quantity": posting.quantity,
         "cost_per_unit": posting.cost_per_unit,
@@ -92,6 +99,41 @@ def _require_finite(posting: PostingInput) -> None:
     for name, amount in amounts.items():
         if amount is not None:
             require_finite(name, amount)
+    if posting.quantity == 0:
+        raise FinanceValidationError("quantity must not be zero")
+    # A cost or price converts the quantity into another instrument for the balance check.
+    # In the posting's own instrument it would rescale the quantity by any factor and so
+    # balance anything.
+    for leg, instrument_id in (
+        ("cost", posting.cost_instrument_id),
+        ("price", posting.price_instrument_id),
+    ):
+        if instrument_id == posting.instrument_id:
+            raise FinanceValidationError(
+                f"a posting can't be weighed in its own instrument: {leg}_instrument_id"
+                " equals instrument_id"
+            )
+
+
+async def _resolve_references(
+    session: AsyncSession, postings: Sequence[PostingInput]
+) -> dict[UUID, InstrumentRecord]:
+    """Look up every account and instrument the postings name, so a missing one is a
+    not-found error rather than a foreign key failure. Returns the instruments by id."""
+    for account_id in dict.fromkeys(posting.account_id for posting in postings):
+        await get_account(session, account_id)  # raises AccountNotFoundError if missing
+    instrument_ids = dict.fromkeys(
+        instrument_id
+        for posting in postings
+        for instrument_id in (
+            posting.instrument_id,
+            posting.cost_instrument_id,
+            posting.price_instrument_id,
+        )
+        if instrument_id is not None
+    )
+    # get_instrument raises InstrumentNotFoundError if one is missing.
+    return {i: await get_instrument(session, i) for i in instrument_ids}
 
 
 def compute_residuals(postings: Sequence[PostingInput]) -> dict[UUID, Decimal]:
@@ -204,17 +246,17 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
     """Write a transaction whose postings balance per instrument, within that instrument's
     tolerance; otherwise raise LedgerImbalanceError before anything is written."""
     if tx.occurred_at.utcoffset() is None:
-        raise ValueError("occurred_at needs a timezone")
+        raise FinanceValidationError("occurred_at needs a timezone")
     if len(tx.postings) < 2:
-        raise ValueError("a transaction needs at least two postings")
+        raise FinanceValidationError("a transaction needs at least two postings")
     for posting in tx.postings:
-        _require_finite(posting)
+        _validate_posting(posting)
     session = ctx.session
+    instruments = await _resolve_references(session, tx.postings)
     residuals = compute_residuals(tx.postings)
     for instrument_id, residual in residuals.items():
-        instrument = await get_instrument(session, instrument_id)
         # copy_abs is exact; abs() would round the residual to the context's 28 digits.
-        if residual.copy_abs() > tolerance(instrument.decimals):
+        if residual.copy_abs() > tolerance(instruments[instrument_id].decimals):
             raise LedgerImbalanceError(residuals)
     booking_date = tx.booking_date
     if booking_date is None:

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
-from lararium.modules.finance.errors import NotACurrencyError
+from lararium.modules.finance.errors import FinanceValidationError, NotACurrencyError
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.money import require_finite, to_plain_str
 
@@ -84,7 +84,7 @@ async def record_fx_rate(
     a later entry for the same pair, date and source replaces the earlier one."""
     require_finite("rate", rate)
     if rate <= 0:
-        raise ValueError("rate must be positive")
+        raise FinanceValidationError("rate must be positive")
     session = ctx.session
     await _require_fiat(session, base_instrument_id)
     await _require_fiat(session, quote_instrument_id)

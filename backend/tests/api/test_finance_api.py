@@ -186,3 +186,51 @@ def test_openapi_operation_ids_and_decimal_schema() -> None:
     assert {"create_account", "record_snapshot", "get_net_worth", "health"} <= operation_ids
     quantity = document["components"]["schemas"]["SnapshotCreate"]["properties"]["quantity"]
     assert (quantity["type"], quantity["pattern"]) == ("string", r"^-?[0-9]+(\.[0-9]+)?$")
+
+
+MISSING_ID = "01900000-0000-7000-8000-000000000000"
+
+
+@pytest.mark.parametrize(
+    ("first_extra", "second_extra", "status", "error"),
+    [
+        # A posting weighed in its own instrument could hide any gap.
+        ({"price_per_unit": "2", "price_instrument_id": "GBP"}, {}, 422, "invalid_input"),
+        ({"cost_per_unit": "2", "cost_instrument_id": "GBP"}, {}, 422, "invalid_input"),
+        ({"quantity": "0"}, {"quantity": "0.00"}, 422, "invalid_input"),
+        ({}, {"account_id": MISSING_ID}, 404, "account_not_found"),
+        ({"instrument_id": MISSING_ID}, {"instrument_id": MISSING_ID}, 404, "instrument_not_found"),
+    ],
+)
+async def test_invalid_postings_are_client_errors(
+    client, first_extra, second_extra, status, error
+) -> None:
+    a, b, gbp_id = (
+        await _account(client, name="A"),
+        await _account(client, name="B"),
+        await _gbp_id(client),
+    )
+
+    def posting(account: str, quantity: str, extra: dict[str, str]) -> dict[str, str]:
+        extra = {key: gbp_id if value == "GBP" else value for key, value in extra.items()}
+        return {"account_id": account, "instrument_id": gbp_id, "quantity": quantity} | extra
+
+    response = await client.post(
+        "/api/v1/finance/transactions",
+        json={
+            "occurred_at": "2026-11-10T12:00:00Z",
+            "description": "invalid",
+            "postings": [posting(a, "10", first_extra), posting(b, "-10", second_extra)],
+        },
+    )
+    assert response.status_code == status
+    assert response.json()["detail"]["error"] == error
+
+
+async def test_fiat_without_iso4217_code_is_rejected(client) -> None:
+    response = await client.post(
+        "/api/v1/finance/instruments",
+        json={"kind": "fiat", "symbol": "NGN", "name": "Naira", "decimals": 2},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "invalid_input"

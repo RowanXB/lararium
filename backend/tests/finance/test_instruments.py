@@ -1,7 +1,7 @@
 import pytest
 
 from lararium.core.settings_store import get_setting
-from lararium.modules.finance.errors import DuplicateIdentifierError
+from lararium.modules.finance.errors import DuplicateIdentifierError, FinanceValidationError
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     create_instrument,
@@ -65,3 +65,41 @@ async def test_hidden_instrument_left_out_of_default_list(session, run, usd) -> 
 
 async def test_reporting_currency_defaults_to_gbp(session) -> None:
     assert await get_setting(session, "finance.reporting_currency") == "GBP"
+
+
+@pytest.mark.parametrize(
+    ("kind", "identifiers"),
+    [
+        # A currency is found by its ISO 4217 code: without one it could never be valued.
+        ("fiat", []),
+        ("fiat", [InstrumentIdentifier("isin", "XS0000000001")]),
+        ("fiat", [InstrumentIdentifier("iso4217", "NGN"), InstrumentIdentifier("iso4217", "NGX")]),
+        # Anything with an ISO 4217 code would be taken for a currency.
+        ("crypto", [InstrumentIdentifier("iso4217", "XBT")]),
+    ],
+)
+async def test_iso4217_code_if_and_only_if_fiat(session, run, kind, identifiers) -> None:
+    with pytest.raises(FinanceValidationError, match="ISO 4217"):
+        await run(
+            create_instrument,
+            kind=kind,
+            symbol="X",
+            name="X",
+            decimals=2,
+            quote_instrument_id=None,
+            identifiers=identifiers,
+        )
+    assert await find_by_identifier(session, "iso4217", "NGN") is None
+
+
+async def test_create_fiat_with_its_code(session, run) -> None:
+    naira = await run(
+        create_instrument,
+        kind="fiat",
+        symbol="NGN",
+        name="Naira",
+        decimals=2,
+        quote_instrument_id=None,
+        identifiers=[InstrumentIdentifier("iso4217", "ngn")],
+    )
+    assert (await get_currency(session, "NGN")).id == naira.id

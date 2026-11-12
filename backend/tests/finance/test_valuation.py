@@ -6,7 +6,12 @@ from sqlalchemy import text
 
 from lararium.core.settings_store import set_setting
 from lararium.modules.finance.accounts import close_account
-from lararium.modules.finance.instruments import create_instrument, get_currency, set_hidden
+from lararium.modules.finance.instruments import (
+    InstrumentIdentifier,
+    create_instrument,
+    get_currency,
+    set_hidden,
+)
 from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
@@ -147,7 +152,7 @@ async def test_missing_fx_is_flagged_not_zero(session, run, make_account, gbp) -
         name="Naira",
         decimals=2,
         quote_instrument_id=None,
-        identifiers=[],
+        identifiers=[InstrumentIdentifier("iso4217", "NGN")],  # but no NGN rate is recorded
     )
     bank, fx_wallet = (
         await make_account(name="Bank"),

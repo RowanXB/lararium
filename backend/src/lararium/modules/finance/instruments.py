@@ -15,6 +15,7 @@ from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import (
     DuplicateIdentifierError,
+    FinanceValidationError,
     InstrumentNotFoundError,
     UnknownCurrencyError,
 )
@@ -157,6 +158,20 @@ async def list_instruments(
     return await _load(session, models.Instrument.hidden.is_(False))
 
 
+def _require_iso4217_code_iff_fiat(
+    kind: InstrumentKind, identifiers: Sequence[InstrumentIdentifier]
+) -> None:
+    # Currencies are looked up by ISO 4217 code (get_currency), so the code is what makes an
+    # instrument a currency: a fiat without one could never be priced or converted, and
+    # anything else with one would be taken for a currency. Instruments are only created
+    # here, and neither kind nor identifiers change afterwards, so this holds for all rows.
+    codes = [i for i in identifiers if i.scheme == "iso4217"]
+    if kind == "fiat" and len(codes) != 1:
+        raise FinanceValidationError("a fiat currency needs exactly one ISO 4217 code")
+    if kind != "fiat" and codes:
+        raise FinanceValidationError("only a fiat currency can have an ISO 4217 code")
+
+
 async def create_instrument(
     ctx: CommandContext,
     *,
@@ -167,6 +182,7 @@ async def create_instrument(
     quote_instrument_id: UUID | None,
     identifiers: Sequence[InstrumentIdentifier],
 ) -> InstrumentRecord:
+    _require_iso4217_code_iff_fiat(kind, identifiers)
     session = ctx.session
     instrument = models.Instrument(
         kind=kind,

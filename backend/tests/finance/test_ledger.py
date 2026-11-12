@@ -1,10 +1,16 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 from sqlalchemy import exc, text
 
-from lararium.modules.finance.errors import LedgerImbalanceError
+from lararium.modules.finance.errors import (
+    AccountNotFoundError,
+    FinanceValidationError,
+    InstrumentNotFoundError,
+    LedgerImbalanceError,
+)
 from lararium.modules.finance.instruments import create_instrument
 from lararium.modules.finance.ledger import (
     PostingInput,
@@ -15,6 +21,7 @@ from lararium.modules.finance.ledger import (
 )
 
 LATE_31_MARCH = datetime(2026, 3, 31, 23, 30, tzinfo=UTC)
+MISSING_ID = UUID("01900000-0000-7000-8000-000000000000")
 
 
 async def test_booking_date_derived_in_reporting_timezone(run, make_account, gbp) -> None:
@@ -305,3 +312,106 @@ async def test_integrity_check_weighs_cost_and_price_legs(
         {"t": tx.id, "usd": usd.id},
     )
     assert await find_unbalanced_transactions(session) == [tx.id]
+
+
+@pytest.mark.parametrize("leg", ["cost", "price"])
+async def test_posting_cannot_be_weighed_in_its_own_instrument(
+    session, run, make_account, gbp, leg
+) -> None:
+    # 10 GBP "priced" at 2 GBP each would weigh 20 GBP and hide a 10 GBP gap.
+    a, b = await make_account(name="A"), await make_account(name="B")
+    conversion = {f"{leg}_per_unit": Decimal("2"), f"{leg}_instrument_id": gbp.id}
+    with pytest.raises(FinanceValidationError, match="its own instrument"):
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=LATE_31_MARCH,
+                description="self-priced",
+                postings=[
+                    PostingInput(a.id, gbp.id, Decimal("10"), **conversion),
+                    PostingInput(b.id, gbp.id, Decimal("-20")),
+                ],
+            ),
+        )
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+
+
+@pytest.mark.parametrize("leg", ["cost", "price"])
+async def test_database_rejects_posting_weighed_in_its_own_instrument(
+    session, run, make_account, gbp, usd, leg
+) -> None:
+    a, b = await make_account(name="A"), await make_account(name="B")
+    tx = await _post_annotated(
+        run, a, b, gbp, usd, **{f"{leg}_per_unit": Decimal("0.80"), f"{leg}_instrument_id": gbp.id}
+    )
+    with pytest.raises(exc.IntegrityError, match="check constraint"):
+        await session.execute(
+            text(
+                f"update finance.postings set {leg}_instrument_id = instrument_id"
+                " where transaction_id = :t and instrument_id = :usd"
+            ),
+            {"t": tx.id, "usd": usd.id},
+        )
+
+
+async def test_zero_quantity_rejected(session, run, make_account, gbp) -> None:
+    a, b = await make_account(name="A"), await make_account(name="B")
+    with pytest.raises(FinanceValidationError, match="quantity must not be zero"):
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=LATE_31_MARCH,
+                description="zero fee line",
+                postings=[
+                    PostingInput(a.id, gbp.id, Decimal("-1")),
+                    PostingInput(b.id, gbp.id, Decimal("1")),
+                    PostingInput(b.id, gbp.id, Decimal("0.00"), is_fee=True),
+                ],
+            ),
+        )
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+
+
+async def test_unknown_account_rejected(session, run, make_account, gbp) -> None:
+    a = await make_account(name="A")
+    with pytest.raises(AccountNotFoundError):
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=LATE_31_MARCH,
+                description="to nowhere",
+                postings=[
+                    PostingInput(a.id, gbp.id, Decimal("-1")),
+                    PostingInput(MISSING_ID, gbp.id, Decimal("1")),
+                ],
+            ),
+        )
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+
+
+@pytest.mark.parametrize("where", ["instrument", "cost", "price"])
+async def test_unknown_instrument_rejected(session, run, make_account, gbp, where) -> None:
+    # A balanced pair has no residual, so the balance check alone never looks it up.
+    a, b = await make_account(name="A"), await make_account(name="B")
+    instrument = MISSING_ID if where == "instrument" else gbp.id
+    conversion = (
+        {}
+        if where == "instrument"
+        else {
+            f"{where}_per_unit": Decimal("1"),
+            f"{where}_instrument_id": MISSING_ID,
+        }
+    )
+    with pytest.raises(InstrumentNotFoundError):
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=LATE_31_MARCH,
+                description="unknown instrument",
+                postings=[
+                    PostingInput(a.id, instrument, Decimal("-1"), **conversion),
+                    PostingInput(b.id, instrument, Decimal("1"), **conversion),
+                ],
+            ),
+        )
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0

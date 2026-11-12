@@ -510,6 +510,9 @@ The roadmap after that:
 | Documentation is bilingual: English is the primary version; Chinese translations live alongside as `*.zh-CN.md` | Confirmed |
 | Milestone order (M0–M9) and the roadmap after it | Default |
 | Project name: Lararium (renamed from financial-gate before publication); the future AI assistant module is named `lares` | Confirmed |
+| A posting's cost or price is in another instrument than the posting's own; otherwise it could rescale the quantity and balance anything. The database enforces this too | Default |
+| An instrument has an ISO 4217 code if and only if it is a fiat currency | Default |
+| Domain code checks every rule the database enforces before writing; a constraint violation that still reaches the API is a 4xx (`constraint_violation`), never a 500 | Default |
 
 ## 16. Left to the implementer
 

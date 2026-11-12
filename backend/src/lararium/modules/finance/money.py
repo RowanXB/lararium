@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from lararium.modules.finance.errors import FinanceValidationError
+
 
 def tolerance(decimals: int) -> Decimal:
     """Half of the last decimal place: amounts closer than this are equal at that precision."""
@@ -12,6 +14,6 @@ def to_plain_str(value: Decimal) -> str:
 
 
 def require_finite(name: str, value: Decimal) -> None:
-    """Raise ValueError for NaN and infinities, which Decimal accepts but amounts can't be."""
+    """Reject NaN and infinities, which Decimal accepts but amounts can't be."""
     if not value.is_finite():
-        raise ValueError(f"{name} must be a finite number")
+        raise FinanceValidationError(f"{name} must be a finite number")

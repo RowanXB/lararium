@@ -510,6 +510,9 @@ api 和 worker 是同一套 Python 代码跑成的两个进程。整个后端是
 | 文档双语：英文为主版本，中文译文以 `*.zh-CN.md` 放在旁边 | 已确认 |
 | 里程碑顺序（M0–M9）和之后的路线 | 默认决定 |
 | 项目名称：Lararium（发布前由 financial-gate 改名）；以后的 AI 助手模块命名为 `lares` | 已确认 |
+| posting 的 cost 或 price 必须用另一种 instrument 计价，不能用 posting 自己的 instrument；否则它能把数量任意缩放，让任何交易都显得平衡。数据库也强制这一点 | 默认决定 |
+| instrument 有 ISO 4217 代码，当且仅当它是法币 | 默认决定 |
+| 数据库强制的每条规则，领域代码都在写入前先检查；仍然到达 API 的约束冲突返回 4xx（`constraint_violation`），绝不返回 500 | 默认决定 |
 
 ## 16. 留给实现者
 

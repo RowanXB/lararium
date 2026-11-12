@@ -6,6 +6,10 @@ class FinanceError(Exception):
     """Base class for finance module errors."""
 
 
+class FinanceValidationError(FinanceError, ValueError):
+    """The input breaks a finance rule: the caller has to change the request."""
+
+
 class UnknownCurrencyError(FinanceError):
     """No instrument has the given ISO 4217 code."""
 
