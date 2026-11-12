@@ -102,6 +102,11 @@ API 依据 `Tailscale-User-Login` 请求头认证请求，只放行 `LARARIUM_OW
   `tailscale funnel`，主机上也不能有不受信任的本地用户或容器。谁能访问到这个端口，
   谁就能自己伪造这个请求头、冒充你。
 
+`tailscale serve` 会给你浏览器发出的每个请求都附上你的身份，包括别的网站页面触发的请求，
+所以只要 `Sec-Fetch-Site` 或 `Origin` 显示请求来自别的网站，API 就拒绝它，读请求也一样。
+Caddy 还禁止别的页面用 iframe 嵌入本应用（`frame-ancestors 'none'`），所以诱骗来的点击
+无法通过被嵌入的页面执行操作。
+
 ## 密钥：用 SOPS + age 加密 `infra/.env`
 
 `infra/.env` 保存所有凭据，已被 git 忽略。如需保存一份加密副本（例如和备份放在一起），

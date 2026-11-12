@@ -109,6 +109,12 @@ The API authenticates requests by the `Tailscale-User-Login` header and admits o
   no `tailscale funnel`, and no untrusted local users or containers on the host. Anyone
   who can reach it can send the header themselves and act as you.
 
+Because `tailscale serve` attaches your identity to every request your browser sends,
+including ones another site's page triggers, the API refuses any request whose
+`Sec-Fetch-Site` or `Origin` shows it came from another site, reads included. Caddy also
+forbids other pages from framing the app (`frame-ancestors 'none'`), so a lured click
+can't act through a framed copy.
+
 ## Secrets: encrypting `infra/.env` with SOPS + age
 
 `infra/.env` holds every credential and is ignored by git. To keep an encrypted copy

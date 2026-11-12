@@ -1,4 +1,10 @@
 :80 {
+	# Never framed by another page: a framed page is same-origin to the API, so a click
+	# lured onto it would pass the backend's cross-site check.
+	header {
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+	}
 	handle /api/* {
 		reverse_proxy api:8000
 	}
