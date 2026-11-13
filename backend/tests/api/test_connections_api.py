@@ -21,6 +21,7 @@ from lararium.core.connections import (
     create_connection,
     get_connection,
     load_credential,
+    set_status,
     update_config,
 )
 from lararium.deps import get_session, get_session_factory
@@ -60,6 +61,7 @@ class FakeMonzo:
 
     def __init__(self) -> None:
         self.approve_after: int | None = 0
+        self.transactions_fail = False
         self.token_forms: list[dict[str, list[str]]] = []
         self.requests: list[httpx.Request] = []
         now = datetime.now(UTC)
@@ -88,6 +90,8 @@ class FakeMonzo:
         if path == "/pots":
             return httpx.Response(200, json={"pots": [make_pot()]})
         assert path == "/transactions", path
+        if self.transactions_fail:
+            return httpx.Response(500, json={"code": "internal_service"})
         return httpx.Response(200, json={"transactions": self.transactions})
 
     def account_requests(self) -> list[httpx.Request]:
@@ -502,6 +506,73 @@ async def test_await_approval_stops_when_no_longer_authorising(
     assert monzo.account_requests() == []
     assert (await get_connection(session, connection_id)).status == "disabled"
     assert notifier.messages == []
+
+
+@pytest.mark.parametrize("syncing", ["healthy", "failing"])
+async def test_authorising_refused_while_the_connection_syncs(
+    api, session, run, monzo, queue, syncing: str
+) -> None:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+    await run(set_status, created["id"], syncing)
+
+    refused = await api.post(f"/api/v1/connections/{created['id']}/authorize", headers=OWNER)
+    callback = await _callback(api, state)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "not_authorisable"
+    assert (callback.status_code, callback.headers["location"]) == (
+        303,
+        "/connections?error=status",
+    )
+    assert monzo.token_forms == []
+    assert await load_credential(session, KEY, created["id"], "access_token") is None
+    assert (await get_connection(session, created["id"])).status == syncing
+    assert list(queue.jobs.values()) == []
+
+
+@pytest.mark.parametrize("status", ["needs_reauth", "authorising", "disabled"])
+async def test_authorising_allowed_where_no_sync_runs(api, run, queue, status: str) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], status)
+    state = await _authorize(api, created["id"])
+    response = await _callback(api, state)
+    assert response.headers["location"] == "/connections"
+
+
+async def test_failed_backfill_clears_the_request(api, session, sessions, monzo, queue) -> None:
+    connection_id = await _authorising(api)
+    monzo.transactions_fail = True
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    connection = await get_connection(session, connection_id)
+    assert connection.status == "failing"
+    assert "backfill_requested" not in connection.config
+    assert connection.warnings == [
+        "Full history could not be fetched during approval; authorise again to retry"
+    ]
+
+    # The next sync is incremental, clamped to Monzo's 90 days.
+    monzo.transactions_fail = False
+    monzo.requests.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
+        await jobs.run_sync(
+            session,
+            uuid.UUID(connection_id),
+            settings=_settings(),
+            http=http,
+            notifier=notifier,
+            session_factory=sessions,
+        )
+    since = [r.url.params["since"] for r in monzo.requests if r.url.path == "/transactions"]
+    assert since
+    floor = datetime.now(UTC) - timedelta(days=89)
+    assert abs(datetime.fromisoformat(since[0]) - floor) < timedelta(minutes=1)
+    after = await get_connection(session, connection_id)
+    assert after.status == "healthy"
+    assert after.warnings[0].startswith("Full history could not be fetched")
 
 
 def test_connection_operation_ids() -> None:

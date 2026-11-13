@@ -30,6 +30,7 @@ from lararium.core.connections import (
     set_status,
     store_credential,
     store_oauth_state,
+    transition_status,
 )
 from lararium.core.errors import ConnectionNotFoundError, CredentialRejectedError
 from lararium.core.secrets import load_master_key
@@ -51,6 +52,10 @@ CALLBACK_PATH = "/oauth/monzo/callback"
 STATE_VALID_FOR = timedelta(minutes=10)
 # Where the callback sends the browser back to: the web app's Connections page.
 DONE = "/connections"
+# Authorising may start only where no sync runs (run_sync syncs healthy and failing ones):
+# the new tokens are saved outside the sync lock, so a sync's refresh could overwrite them.
+# Disabled is included because authorising again is how a connection is re-enabled.
+AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "authorising", "disabled")
 
 router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
 # The callback alone may be a cross-site navigation (from auth.monzo.com).
@@ -204,6 +209,15 @@ async def authorize_connection(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"error": "not_authorisable", "message": "this connection has no Monzo client id"},
         )
+    if connection.status not in AUTHORISABLE:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "error": "not_authorisable",
+                "message": f"a {connection.status} connection can't be authorised again;"
+                " authorise it once it needs it",
+            },
+        )
     state = secrets.token_urlsafe(32)
     args = {"connection_id": str(connection_id)}
     async with command_context(session, actor, "authorize_connection", args) as ctx:
@@ -239,6 +253,8 @@ async def monzo_oauth_callback(
         return _done("state")
 
     connection = await get_connection(session, connection_id)
+    if connection.status not in AUTHORISABLE:
+        return _done("status")
     client_id = connection.config.get("client_id")
     client_secret = await load_credential(session, master_key, connection_id, "client_secret")
     if not isinstance(client_id, str) or client_secret is None:
@@ -253,7 +269,9 @@ async def monzo_oauth_callback(
 
     args = {"connection_id": str(connection_id)}
     async with command_context(session, actor, "monzo_oauth_callback", args) as ctx:
-        await set_status(ctx, connection_id, "authorising")
+        moved = await transition_status(ctx, connection_id, "authorising", only_from=AUTHORISABLE)
+    if moved is None:
+        return _done("status")
     # After the commit, so the job finds the connection authorising.
     await defer_await_approval(connection_id)
     return _done()

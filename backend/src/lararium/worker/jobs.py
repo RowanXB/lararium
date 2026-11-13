@@ -19,6 +19,7 @@ from lararium.core.connections import (
     get_connection,
     record_sync_failure,
     record_sync_success,
+    set_warnings,
     transition_status,
     update_config,
 )
@@ -43,6 +44,8 @@ MAX_ERROR_LENGTH = 500
 APPROVAL_POLL_SECONDS = 10
 APPROVAL_WINDOW_SECONDS = 4 * 60
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
+BACKFILL_FAILED = "Full history could not be fetched during approval; authorise again to retry"
+BACKFILL_REQUESTED = "backfill_requested"
 
 
 async def _notify(notifier: Notifier, text: str) -> None:
@@ -212,7 +215,7 @@ async def run_await_approval(
         moved = await transition_status(ctx, connection_id, "healthy", only_from=("authorising",))
         if moved is not None:
             # Read by the sync below, which removes it once the backfill is stored.
-            await update_config(ctx, connection_id, {"backfill_requested": True})
+            await update_config(ctx, connection_id, {BACKFILL_REQUESTED: True})
     if moved is None:
         return
     await run_sync(
@@ -223,6 +226,14 @@ async def run_await_approval(
         notifier=notifier,
         session_factory=session_factory,
     )
+    # A backfill that failed can't be retried outside the window: drop the request, so later
+    # syncs are incremental (and clamped to Monzo's 90 days), and say what was missed.
+    after = await get_connection(session, connection_id)
+    if after.config.get(BACKFILL_REQUESTED):
+        async with command_context(session, actor, "connection.backfill_failed", args) as ctx:
+            await update_config(ctx, connection_id, remove=[BACKFILL_REQUESTED])
+            if BACKFILL_FAILED not in after.warnings:
+                await set_warnings(ctx, connection_id, [*after.warnings, BACKFILL_FAILED])
 
 
 async def _end_approval(
