@@ -2,5 +2,6 @@
 
 from lararium.modules import ModuleSpec
 from lararium.modules.finance.api import install
+from lararium.modules.finance.monzo.sync import MonzoConnector
 
-MODULE = ModuleSpec(name="finance", install=install)
+MODULE = ModuleSpec(name="finance", install=install, connectors={"monzo": MonzoConnector()})
