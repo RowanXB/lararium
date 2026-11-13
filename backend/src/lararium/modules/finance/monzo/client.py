@@ -121,7 +121,11 @@ class MonzoClient:
         self, account_id: str, *, since: str | None, before: str | None = None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Yield pages of up to 100 transactions, oldest first, from `since` (a timestamp or a
-        transaction id) until a short page; each next page starts after the last id."""
+        transaction id) until a short page; each next page starts after the last id.
+
+        A full page ending at a cursor already used would repeat forever (an upstream that
+        ignores `since`), so it raises MonzoApiError(200, "pagination_stalled")."""
+        used: set[str] = set()
         while True:
             params = [
                 ("account_id", account_id),
@@ -135,11 +139,14 @@ class MonzoClient:
             page: list[dict[str, Any]] = (
                 await self._request("GET", "/transactions", params=params)
             )["transactions"]
+            if len(page) >= PAGE_SIZE and page[-1]["id"] in used:
+                raise MonzoApiError(200, "pagination_stalled")
             if page:
                 yield page
             if len(page) < PAGE_SIZE:
                 return
             since = page[-1]["id"]
+            used.add(page[-1]["id"])
 
     async def webhooks(self, account_id: str) -> list[dict[str, Any]]:
         params = [("account_id", account_id)]

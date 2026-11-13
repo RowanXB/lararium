@@ -78,6 +78,29 @@ async def test_transactions_paginates_with_since_last_id() -> None:
         assert request.headers["authorization"] == f"Bearer {ACCESS}"
 
 
+async def test_transactions_stops_on_a_repeated_page() -> None:
+    # An upstream that ignores `since` returns the same full page forever.
+    page = [make_transaction(id=f"tx_TEST{i:04d}") for i in range(100)]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) > 5:
+            raise AssertionError("pagination did not stop")
+        return httpx.Response(200, json={"transactions": page})
+
+    async with _http(handler) as http:
+        client = MonzoClient(http, Secret(ACCESS))
+        pages: list[list[dict]] = []
+        with pytest.raises(MonzoApiError) as raised:
+            async for got in client.transactions(ACCOUNT_ID, since=None):
+                pages.append(got)
+
+    assert (raised.value.status, raised.value.code) == (200, "pagination_stalled")
+    assert len(requests) == 2
+    assert len(pages) == 1
+
+
 async def test_transactions_passes_since_and_before() -> None:
     seen: list[httpx.Request] = []
 
