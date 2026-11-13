@@ -491,14 +491,13 @@ async def normalize(
             notified[monzo_id] = difference
             await _notify(ctx, f"{connection.display_name}: {warning}")
 
-    config = dict(connection.config)
-    config[ACCOUNT_MAP_KEY] = n.account_map
+    # Only this normaliser's keys: others (such as an OAuth state) may have changed meanwhile.
+    values: dict[str, JSONValue] = {ACCOUNT_MAP_KEY: n.account_map}
     if notified:
-        config[NOTIFIED_KEY] = notified
-    else:
-        config.pop(NOTIFIED_KEY, None)
-    if config != connection.config:
-        await update_config(ctx.command, connection.id, config)
+        values[NOTIFIED_KEY] = notified
+    remove = [] if notified or NOTIFIED_KEY not in connection.config else [NOTIFIED_KEY]
+    if remove or any(connection.config.get(key) != value for key, value in values.items()):
+        await update_config(ctx.command, connection.id, values, remove=remove)
     if warnings != connection.warnings:
         await set_warnings(ctx.command, connection.id, warnings)
     return n.report

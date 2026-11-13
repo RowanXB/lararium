@@ -10,7 +10,12 @@ from lararium.core.connectors import Capability, SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.monzo.auth import access_token_for
-from lararium.modules.finance.monzo.client import EXPAND, PAGE_SIZE, MonzoClient
+from lararium.modules.finance.monzo.client import (
+    EXPAND,
+    PAGE_SIZE,
+    MonzoClient,
+    NotYetApprovedError,
+)
 from lararium.modules.finance.monzo.normalize import FetchedRecord, normalize
 
 VERSION = "monzo-sync-1"
@@ -49,6 +54,15 @@ class MonzoConnector:
     name = "monzo"
     version = VERSION
     capabilities: frozenset[Capability] = frozenset({"balances", "transactions", "webhook"})
+
+    async def check_access(self, ctx: SyncContext) -> bool:
+        # Monzo answers 403 until the owner approves the new token in the app (SCA).
+        client = MonzoClient(ctx.http, await access_token_for(ctx))
+        try:
+            await client.accounts()
+        except NotYetApprovedError:
+            return False
+        return True
 
     async def sync(self, ctx: SyncContext) -> JSONValue:
         # First, before anything locks the connection row: it may commit rotated tokens in a
@@ -137,8 +151,7 @@ class MonzoConnector:
         # Only now, with every page fetched, is the backfill request done.
         current = await get_connection(ctx.command.session, connection.id)
         if full_backfill:
-            config = {k: v for k, v in current.config.items() if k != "backfill_requested"}
-            await update_config(ctx.command, connection.id, config)
+            await update_config(ctx.command, connection.id, remove=["backfill_requested"])
         merged = current.warnings + [w for w in warnings if w not in current.warnings]
         if merged != current.warnings:
             await set_warnings(ctx.command, connection.id, merged)

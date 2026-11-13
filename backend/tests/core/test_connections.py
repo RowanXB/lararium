@@ -1,11 +1,13 @@
+import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import exc, text
 
 from lararium.core.connections import (
     ConnectionRecord,
+    consume_oauth_state,
     create_connection,
     get_connection,
     list_connections,
@@ -15,6 +17,8 @@ from lararium.core.connections import (
     set_status,
     set_warnings,
     store_credential,
+    store_oauth_state,
+    transition_status,
     update_config,
 )
 from lararium.core.errors import ConnectionNotFoundError
@@ -124,13 +128,67 @@ async def test_failure_counter_resets_on_success(session, run) -> None:
     assert synced.last_success_at is not None
 
 
-async def test_warnings_and_config_are_replaced(run) -> None:
+async def test_warnings_replaced_and_config_merged(run) -> None:
     connection = await _create(run)
     warned = await run(set_warnings, connection.id, ["history may be truncated"])
     assert warned.warnings == ["history may be truncated"]
     configured = await run(update_config, connection.id, {"client_id": "c2", "n": 1})
     assert configured.config == {"client_id": "c2", "n": 1}
     assert configured.warnings == ["history may be truncated"]
+    removed = await run(update_config, connection.id, {"m": [1]}, remove=["n", "absent"])
+    assert removed.config == {"client_id": "c2", "m": [1]}
+
+
+async def test_config_write_keeps_keys_written_since_it_was_read(run) -> None:
+    # A writer holding a stale record (an API request racing a sync) only touches its keys.
+    connection = await _create(run)
+    await run(update_config, connection.id, {"account_map": {"acc_1": "a"}})
+    assert connection.config == {"client_id": "c1"}  # the stale copy
+    after = await run(update_config, connection.id, {"backfill_requested": True})
+    assert after.config == {
+        "client_id": "c1",
+        "account_map": {"acc_1": "a"},
+        "backfill_requested": True,
+    }
+
+
+async def test_transition_status_only_from_given_statuses(session, run) -> None:
+    connection = await _create(run)
+    await run(set_status, connection.id, "disabled")
+    assert await run(transition_status, connection.id, "failing", only_from=("healthy",)) is None
+    assert (await get_connection(session, connection.id)).status == "disabled"
+
+    await run(set_status, connection.id, "healthy")
+    moved = await run(
+        transition_status, connection.id, "failing", only_from=("healthy",), error="boom"
+    )
+    assert moved == "healthy"
+    after = await get_connection(session, connection.id)
+    assert (after.status, after.last_error) == ("failing", "boom")
+
+
+async def test_oauth_state_stored_as_hash_and_used_once(session, run) -> None:
+    connection = await _create(run)
+    await run(update_config, connection.id, {"account_map": {"acc_1": "a"}})
+    await run(store_oauth_state, connection.id, "state-TEST", timedelta(minutes=10))
+
+    config = (await get_connection(session, connection.id)).config
+    assert "state-TEST" not in str(config)
+    assert config["oauth_state"]["hash"] == hashlib.sha256(b"state-TEST").hexdigest()
+    assert await run(consume_oauth_state, "other-state") is None
+    assert await run(consume_oauth_state, "state-TEST") == connection.id
+    assert await run(consume_oauth_state, "state-TEST") is None
+    assert (await get_connection(session, connection.id)).config == {
+        "client_id": "c1",
+        "account_map": {"acc_1": "a"},
+    }
+
+
+async def test_expired_oauth_state_is_refused_and_removed(session, run) -> None:
+    connection = await _create(run)
+    await run(store_oauth_state, connection.id, "state-TEST", timedelta(minutes=-1))
+    assert await run(consume_oauth_state, "state-TEST") is None
+    assert "oauth_state" not in (await get_connection(session, connection.id)).config
 
 
 async def test_raw_record_dedup_by_content(session, run) -> None:

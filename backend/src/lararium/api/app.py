@@ -13,6 +13,7 @@ from lararium.api import core_routes
 from lararium.config import Settings, get_settings
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.registry import MODULES
+from lararium.worker.app import procrastinate_app
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-        yield
+        # Routes queue worker jobs (a sync, the wait for a connection's approval).
+        async with procrastinate_app.open_async():
+            yield
         await engine.dispose()
 
     app = FastAPI(

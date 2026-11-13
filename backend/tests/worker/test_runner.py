@@ -1,4 +1,6 @@
 import base64
+import uuid
+from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
@@ -9,6 +11,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from lararium.config import Settings
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
 from lararium.core.connections import (
     create_connection,
     get_connection,
@@ -17,6 +21,7 @@ from lararium.core.connections import (
 from lararium.core.connectors import Connector, SyncContext
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
+from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.worker import jobs
 from lararium.worker.app import procrastinate_app
@@ -37,9 +42,13 @@ class FakeConnector:
         self.error: Exception | None = None
         self.cursor: JSONValue = {"since": "t1"}
         self.seen: list[SyncContext] = []
+        # Runs in the middle of the sync, as a concurrent change would.
+        self.during: Callable[[], Awaitable[None]] | None = None
 
     async def sync(self, ctx: SyncContext) -> JSONValue:
         self.seen.append(ctx)
+        if self.during is not None:
+            await self.during()
         if self.error is not None:
             raise self.error
         return self.cursor
@@ -76,7 +85,7 @@ async def _healthy_connection(run):
     return connection
 
 
-async def _run_sync(session, connection, notifier) -> None:
+async def _run_sync(session, connection, notifier, session_factory=None) -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(404))
     ) as http:
@@ -86,7 +95,7 @@ async def _run_sync(session, connection, notifier) -> None:
             settings=SETTINGS,
             http=http,
             notifier=notifier,
-            session_factory=async_sessionmaker(bind=session.bind),
+            session_factory=session_factory or async_sessionmaker(bind=session.bind),
         )
 
 
@@ -242,3 +251,69 @@ async def test_procrastinate_schema_present(session) -> None:
     )
     count = await session.scalar(text("select count(*) from procrastinate.procrastinate_jobs"))
     assert count == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [None, RuntimeError("upstream down"), CredentialRejectedError("rejected")],
+    ids=["success", "failure", "rejected"],
+)
+async def test_disable_during_sync_is_kept(
+    backend_url: str, owner_url: str, migrated: None, fake, notifier, error: Exception | None
+) -> None:
+    # Real commits through their own engine: the disable must commit while the sync runs,
+    # outside its transaction, as the owner's request would.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id = None
+    owner = Actor("user", "dev")
+    try:
+        async with sessions() as setup, command_context(setup, owner, "test.setup", {}) as ctx:
+            connection = await create_connection(
+                ctx, connector="fake", display_name=f"Fake {uuid.uuid4()}", config={}
+            )
+            connection_id = connection.id
+            await set_status(ctx, connection_id, "failing")
+
+        async def disable() -> None:
+            args = {"connection_id": str(connection_id)}
+            async with (
+                sessions() as other,
+                command_context(other, owner, "disable_connection", args) as ctx,
+            ):
+                await set_status(ctx, connection.id, "disabled")
+            fake.error = error
+
+        fake.during = disable
+        # From failing: a success would mark it healthy and say it recovered; a rejection
+        # would mark it needs_reauth and notify.
+        async with sessions() as session:
+            await _run_sync(session, connection, notifier, sessions)
+
+        async with sessions() as fresh:
+            assert (await get_connection(fresh, connection_id)).status == "disabled"
+        assert notifier.messages == []
+    finally:
+        if connection_id is not None:
+            await _delete_connection(engine, owner_url, connection_id)
+        await engine.dispose()
+
+
+async def _delete_connection(engine, owner_url: str, connection_id: uuid.UUID) -> None:
+    async with engine.begin() as conn:
+        params = {"id": connection_id}
+        await conn.execute(text("delete from core.events where subject_id = :id"), params)
+        await conn.execute(text("delete from core.connections where id = :id"), params)
+    owner = create_engine(owner_url)
+    try:
+        # The audit log is append-only for the backend role.
+        async with owner.begin() as conn:
+            await conn.execute(
+                text(
+                    "delete from core.audit_log where args->>'connection_id' = :id"
+                    " or changes ? ('connection:' || :id)"
+                ),
+                {"id": str(connection_id)},
+            )
+    finally:
+        await owner.dispose()

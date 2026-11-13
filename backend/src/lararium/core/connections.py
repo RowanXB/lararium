@@ -4,13 +4,15 @@ Credentials are encrypted before they reach the database and never go into event
 audit log or a ConnectionRecord.
 """
 
+import hashlib
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import ColumnElement, Text, bindparam, func, select, update
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -150,6 +152,32 @@ async def create_connection(
     return record
 
 
+async def _locked_status(ctx: CommandContext, connection_id: UUID) -> ConnectionStatus:
+    # Lock the row, so two concurrent changes can't both report the same "from".
+    previous = await ctx.session.scalar(
+        select(Connection.status).where(Connection.id == connection_id).with_for_update()
+    )
+    if previous is None:
+        raise ConnectionNotFoundError(str(connection_id))
+    return cast(ConnectionStatus, previous)
+
+
+async def _change_status(
+    ctx: CommandContext,
+    connection_id: UUID,
+    previous: ConnectionStatus,
+    status: ConnectionStatus,
+    error: str | None,
+) -> ConnectionRecord:
+    values: dict[str, Any] = {"status": status}
+    if error is not None:
+        values["last_error"] = error
+    record = await _update(ctx, connection_id, **values)
+    if previous != status:
+        ctx.emit("core.connection.status_changed", connection_id, {"from": previous, "to": status})
+    return record
+
+
 async def set_status(
     ctx: CommandContext,
     connection_id: UUID,
@@ -158,19 +186,28 @@ async def set_status(
     error: str | None = None,
 ) -> ConnectionRecord:
     """Set the status, and last_error when given; emit an event only if the status changes."""
-    # Lock the row, so two concurrent changes can't both report the same "from".
-    previous = await ctx.session.scalar(
-        select(Connection.status).where(Connection.id == connection_id).with_for_update()
-    )
-    if previous is None:
-        raise ConnectionNotFoundError(str(connection_id))
-    values: dict[str, Any] = {"status": status}
-    if error is not None:
-        values["last_error"] = error
-    record = await _update(ctx, connection_id, **values)
-    if previous != status:
-        ctx.emit("core.connection.status_changed", connection_id, {"from": previous, "to": status})
-    return record
+    previous = await _locked_status(ctx, connection_id)
+    return await _change_status(ctx, connection_id, previous, status, error)
+
+
+async def transition_status(
+    ctx: CommandContext,
+    connection_id: UUID,
+    status: ConnectionStatus,
+    *,
+    only_from: Collection[ConnectionStatus],
+    error: str | None = None,
+) -> ConnectionStatus | None:
+    """Set the status only if the current one, read under the row lock, is in `only_from`.
+
+    Return the status it had, or None when it was left alone: a change made meanwhile (the
+    owner disabled the connection, say) wins over one decided on an older reading.
+    """
+    previous = await _locked_status(ctx, connection_id)
+    if previous not in only_from:
+        return None
+    await _change_status(ctx, connection_id, previous, status, error)
+    return previous
 
 
 async def record_sync_success(
@@ -204,9 +241,68 @@ async def set_warnings(
 
 
 async def update_config(
-    ctx: CommandContext, connection_id: UUID, config: dict[str, JSONValue]
+    ctx: CommandContext,
+    connection_id: UUID,
+    values: Mapping[str, JSONValue] | None = None,
+    *,
+    remove: Collection[str] = (),
 ) -> ConnectionRecord:
+    """Set the given keys and remove others, leaving every other key as it is.
+
+    The merge happens in the UPDATE itself, on the row as it is then, so writers that each own
+    their keys (a sync's account map, the API's OAuth state) never undo each other's changes.
+    """
+    config: Any = Connection.config
+    if values:
+        config = config.op("||", return_type=JSONB)(bindparam(None, dict(values), type_=JSONB))
+    if remove:
+        config = config.op("-", return_type=JSONB)(bindparam(None, list(remove), type_=ARRAY(Text)))
     return await _update(ctx, connection_id, config=config)
+
+
+OAUTH_STATE_KEY = "oauth_state"
+
+
+def _state_hash(state: str) -> str:
+    return hashlib.sha256(state.encode()).hexdigest()
+
+
+async def store_oauth_state(
+    ctx: CommandContext, connection_id: UUID, state: str, valid_for: timedelta
+) -> None:
+    """Remember an OAuth state for this connection: only its hash, and when it expires.
+
+    A new state replaces the previous one, which then no longer works.
+    """
+    expires_at = datetime.now(UTC) + valid_for
+    stored: dict[str, JSONValue] = {
+        "hash": _state_hash(state),
+        "expires_at": expires_at.isoformat(),
+    }
+    await update_config(ctx, connection_id, {OAUTH_STATE_KEY: stored})
+
+
+async def consume_oauth_state(ctx: CommandContext, state: str) -> UUID | None:
+    """The connection whose OAuth state this is, if it hasn't expired; None otherwise.
+
+    The state is removed either way, so it works once: the row lock makes a second, concurrent
+    use wait for this one and then find nothing.
+    """
+    stored_hash = Connection.config[OAUTH_STATE_KEY]["hash"].astext
+    row = (
+        await ctx.session.execute(
+            select(Connection.id, Connection.config[OAUTH_STATE_KEY]["expires_at"].astext)
+            .where(stored_hash == _state_hash(state))
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    connection_id, expires_at = row
+    await update_config(ctx, connection_id, remove=[OAUTH_STATE_KEY])
+    if expires_at is None or datetime.fromisoformat(expires_at) <= datetime.now(UTC):
+        return None
+    return connection_id
 
 
 def _aad(connection_id: UUID, purpose: str) -> str:

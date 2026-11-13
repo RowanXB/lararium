@@ -40,3 +40,11 @@ class Connector(Protocol):
     async def sync(self, ctx: SyncContext) -> JSONValue:
         """Fetch and store new data; return the connection's new cursor."""
         ...
+
+    async def check_access(self, ctx: SyncContext) -> bool:
+        """Whether the provider serves data for the stored credentials yet.
+
+        False while the owner still has to approve them with the provider; credentials the
+        provider rejects raise CredentialRejectedError. It writes nothing through ctx.command.
+        """
+        ...

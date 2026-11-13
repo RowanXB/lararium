@@ -125,6 +125,66 @@ export type AccountRename = {
 };
 
 /**
+ * AuthorizeOut
+ */
+export type AuthorizeOut = {
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * ConnectionOut
+ */
+export type ConnectionOut = {
+    /**
+     * Connector
+     */
+    connector: string;
+    /**
+     * Consecutive Failures
+     */
+    consecutive_failures: number;
+    /**
+     * Credential Expires At
+     */
+    credential_expires_at: string | null;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Last Error
+     */
+    last_error: string | null;
+    /**
+     * Last Success At
+     */
+    last_success_at: string | null;
+    /**
+     * Redirect Uri
+     */
+    redirect_uri: string | null;
+    /**
+     * Status
+     */
+    status: 'created' | 'authorising' | 'healthy' | 'failing' | 'needs_reauth' | 'disabled';
+    /**
+     * Warnings
+     */
+    warnings: Array<string>;
+    /**
+     * Webhook Enabled
+     */
+    webhook_enabled: boolean;
+};
+
+/**
  * FinanceSettingsOut
  */
 export type FinanceSettingsOut = {
@@ -322,6 +382,20 @@ export type InstrumentUpdate = {
      * Hidden
      */
     hidden: boolean;
+};
+
+/**
+ * MonzoConnectionCreate
+ */
+export type MonzoConnectionCreate = {
+    /**
+     * Client Id
+     */
+    client_id: string;
+    /**
+     * Display Name
+     */
+    display_name: string;
 };
 
 /**
@@ -529,6 +603,16 @@ export type SnapshotOut = {
 };
 
 /**
+ * SyncQueuedOut
+ */
+export type SyncQueuedOut = {
+    /**
+     * Queued
+     */
+    queued: boolean;
+};
+
+/**
  * TransactionCreate
  */
 export type TransactionCreate = {
@@ -611,6 +695,182 @@ export type ValidationError = {
      */
     type: string;
 };
+
+/**
+ * MonzoConnectionCreate
+ */
+export type MonzoConnectionCreateWritable = {
+    /**
+     * Client Id
+     */
+    client_id: string;
+    /**
+     * Client Secret
+     */
+    client_secret: string;
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+export type ListConnectionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections';
+};
+
+export type ListConnectionsResponses = {
+    /**
+     * Response List Connections
+     *
+     * Successful Response
+     */
+    200: Array<ConnectionOut>;
+};
+
+export type ListConnectionsResponse = ListConnectionsResponses[keyof ListConnectionsResponses];
+
+export type CreateMonzoConnectionData = {
+    body: MonzoConnectionCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections';
+};
+
+export type CreateMonzoConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateMonzoConnectionError = CreateMonzoConnectionErrors[keyof CreateMonzoConnectionErrors];
+
+export type CreateMonzoConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
+
+export type MonzoOauthCallbackData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Code
+         */
+        code?: string | null;
+        /**
+         * State
+         */
+        state?: string | null;
+    };
+    url: '/api/v1/connections/oauth/monzo/callback';
+};
+
+export type MonzoOauthCallbackErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type MonzoOauthCallbackError = MonzoOauthCallbackErrors[keyof MonzoOauthCallbackErrors];
+
+export type AuthorizeConnectionData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/authorize';
+};
+
+export type AuthorizeConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AuthorizeConnectionError = AuthorizeConnectionErrors[keyof AuthorizeConnectionErrors];
+
+export type AuthorizeConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: AuthorizeOut;
+};
+
+export type AuthorizeConnectionResponse = AuthorizeConnectionResponses[keyof AuthorizeConnectionResponses];
+
+export type DisableConnectionData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/disable';
+};
+
+export type DisableConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DisableConnectionError = DisableConnectionErrors[keyof DisableConnectionErrors];
+
+export type DisableConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type DisableConnectionResponse = DisableConnectionResponses[keyof DisableConnectionResponses];
+
+export type SyncConnectionNowData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/sync';
+};
+
+export type SyncConnectionNowErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SyncConnectionNowError = SyncConnectionNowErrors[keyof SyncConnectionNowErrors];
+
+export type SyncConnectionNowResponses = {
+    /**
+     * Successful Response
+     */
+    202: SyncQueuedOut;
+};
+
+export type SyncConnectionNowResponse = SyncConnectionNowResponses[keyof SyncConnectionNowResponses];
 
 export type ListAccountsData = {
     body?: never;
