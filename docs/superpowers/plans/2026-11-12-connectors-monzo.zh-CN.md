@@ -190,8 +190,7 @@ infra/compose.yaml, env.example, postgres/roles.sql, postgres/init/00-roles.sh, 
     - `class Secret`，有 `reveal() -> str`；`repr`/`str` 返回 `"Secret(***)"`。
     - `def encrypt(master_key: bytes, plaintext: str, aad: str) -> tuple[bytes, bytes]` 返回 `(nonce, ciphertext)`，nonce 是 12 字节随机数。
     - `def decrypt(master_key: bytes, nonce: bytes, ciphertext: bytes, aad: str) -> Secret`，任何失败都抛 `CredentialDecryptError`。
-    - `def load_master_key(value: SecretStr) -> bytes`，要求是恰好 32 字节内容的 base64。
-  - **`Settings` 新增：** `master_key: SecretStr | None = None`，在 `auth_mode == "tailscale"` 时必填（校验器写法和 `owner_login` 一样）；`public_base_url: str | None = None`。
+  - **`Settings` 新增：** `master_key: SecretStr | None = None`，在 `auth_mode == "tailscale"` 时必填（校验器写法和 `owner_login` 一样）；`public_base_url: str | None = None`；`lararium.config` 里还有 `def load_master_key(value: SecretStr) -> bytes`，要求是恰好 32 字节内容的 base64。
   - **`core/connections.py`：**
     - `ConnectionStatus = Literal["created", "authorising", "healthy", "failing", "needs_reauth", "disabled"]`。
     - `@dataclass(frozen=True) class ConnectionRecord`：`id, connector: str, display_name: str, status, config: dict[str, JSONValue], cursor: JSONValue, last_success_at, last_error: str | None, consecutive_failures: int, credential_expires_at, warnings: list[str], created_at`。
@@ -350,7 +349,7 @@ infra/compose.yaml, env.example, postgres/roles.sql, postgres/init/00-roles.sh, 
 - Produces:
   - `class MonzoConnector`，`name="monzo"`、`version="monzo-sync-1"`、`capabilities={"balances", "transactions", "webhook"}`。
   - `async def sync(self, ctx: SyncContext) -> JSONValue` 存下类型为 `accounts`、`balance`、`pots` 和 `transactions_page` 的原始记录，每条都带上请求参数，然后调用 `normalize(ctx)`（任务 6）。
-  - 游标的结构是 `{"accounts": {<monzo_account_id>: {"last_created": str, "backfilled": bool}}}`。
+  - 游标的结构是 `{"accounts": {<monzo_account_id>: {"last_created": str, "reconciled": bool}}}`。
   - `full_backfill: bool` 取自 `ctx.connection.config.get("backfill_requested")`。任务 7 设置这个标记，同步完成后把它清掉。
 
 规则：决策 8（窗口、重叠、截断、截断警告）。已关闭的 Monzo 账户（返回里 `closed: true`）照样同步，但不给它们注册 webhook。
@@ -375,7 +374,7 @@ infra/compose.yaml, env.example, postgres/roles.sql, postgres/init/00-roles.sh, 
 - Consumes: 任务 3 和 5；`snapshots.record_snapshot`（kind 为 `reported`）；`get_or_create_organization`；`get_currency`。
 - Produces:
   - `NORMALIZER_VERSION = "monzo-norm-1"`。
-  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, backfilled: Collection[str] = (), first_backfills: Collection[str] = ()) -> NormalizeReport`，其中 `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`。
+  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, reconciled: Collection[str] = (), openings: Collection[str] = ()) -> NormalizeReport`，其中 `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`。
   - `def to_quantity(minor_units: int, decimals: int) -> Decimal`，即 `Decimal(minor_units).scaleb(-decimals)`。
 
 规则：决策 5、6 和 9。账户和 pot 通过设置 `config["account_map"]` 查找或创建：这是 Monzo id → 财务账户 id 的映射，存在连接的 config 里。

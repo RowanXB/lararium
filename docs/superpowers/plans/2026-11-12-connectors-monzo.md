@@ -190,8 +190,7 @@ infra/compose.yaml, env.example, postgres/roles.sql, postgres/init/00-roles.sh, 
     - `class Secret`, with `reveal() -> str`; `repr`/`str` give `"Secret(***)"`.
     - `def encrypt(master_key: bytes, plaintext: str, aad: str) -> tuple[bytes, bytes]` returns `(nonce, ciphertext)`, with a 12-byte random nonce.
     - `def decrypt(master_key: bytes, nonce: bytes, ciphertext: bytes, aad: str) -> Secret` raises `CredentialDecryptError` on any failure.
-    - `def load_master_key(value: SecretStr) -> bytes` requires base64 of exactly 32 bytes.
-  - **`Settings` additions:** `master_key: SecretStr | None = None`, required when `auth_mode == "tailscale"` (same validator style as `owner_login`); `public_base_url: str | None = None`.
+  - **`Settings` additions:** `master_key: SecretStr | None = None`, required when `auth_mode == "tailscale"` (same validator style as `owner_login`); `public_base_url: str | None = None`; `lararium.config` also holds `def load_master_key(value: SecretStr) -> bytes`, which requires base64 of exactly 32 bytes.
   - **`core/connections.py`:**
     - `ConnectionStatus = Literal["created", "authorising", "healthy", "failing", "needs_reauth", "disabled"]`.
     - `@dataclass(frozen=True) class ConnectionRecord`: `id, connector: str, display_name: str, status, config: dict[str, JSONValue], cursor: JSONValue, last_success_at, last_error: str | None, consecutive_failures: int, credential_expires_at, warnings: list[str], created_at`.
@@ -350,7 +349,7 @@ Migration `0009`: apply `procrastinate.schema.SchemaManager.get_schema()` inside
 - Produces:
   - `class MonzoConnector` with `name="monzo"`, `version="monzo-sync-1"`, `capabilities={"balances", "transactions", "webhook"}`.
   - `async def sync(self, ctx: SyncContext) -> JSONValue` stores raw records of types `accounts`, `balance`, `pots` and `transactions_page`, each with its request parameters, and then calls `normalize(ctx)` (Task 6).
-  - The cursor shape is `{"accounts": {<monzo_account_id>: {"last_created": str, "backfilled": bool}}}`.
+  - The cursor shape is `{"accounts": {<monzo_account_id>: {"last_created": str, "reconciled": bool}}}`.
   - `full_backfill: bool` comes from `ctx.connection.config.get("backfill_requested")`. Task 7 sets that flag and the sync clears it.
 
 Rules: Decision 8 (window, overlap, clamp, truncation warning). Closed Monzo accounts (`closed: true` in the response) are still synced, but no webhook is registered for them.
@@ -375,7 +374,7 @@ Rules: Decision 8 (window, overlap, clamp, truncation warning). Closed Monzo acc
 - Consumes: Tasks 3 and 5; `snapshots.record_snapshot` (kind `reported`); `get_or_create_organization`; `get_currency`.
 - Produces:
   - `NORMALIZER_VERSION = "monzo-norm-1"`.
-  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, backfilled: Collection[str] = (), first_backfills: Collection[str] = ()) -> NormalizeReport`, with `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`.
+  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, reconciled: Collection[str] = (), openings: Collection[str] = ()) -> NormalizeReport`, with `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`.
   - `def to_quantity(minor_units: int, decimals: int) -> Decimal`, which is `Decimal(minor_units).scaleb(-decimals)`.
 
 Rules: Decisions 5, 6 and 9. Accounts and pots are found or created by the setting `config["account_map"]`: Monzo id → finance account id, kept in the connection's config.
