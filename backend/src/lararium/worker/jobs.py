@@ -20,11 +20,10 @@ from lararium.core.connections import (
     get_connection,
     record_sync_failure,
     record_sync_success,
-    set_warnings,
     transition_status,
     update_config,
 )
-from lararium.core.connectors import SyncContext, WebhookTarget
+from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.models import Connection
 from lararium.core.notify import Notifier, notifier_from_settings
@@ -47,7 +46,6 @@ MAX_ERROR_LENGTH = 500
 APPROVAL_POLL_SECONDS = 10
 APPROVAL_WINDOW_SECONDS = 4 * 60
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
-BACKFILL_FAILED = "Full history could not be fetched during approval; authorise again to retry"
 BACKFILL_REQUESTED = "backfill_requested"
 
 
@@ -181,8 +179,8 @@ async def run_await_approval(
 
     Polls every 10 s for up to 4 minutes while the connection is `authorising`. On the first
     success it requests a full backfill, marks the connection healthy and syncs it at once,
-    inside the window in which all history can be fetched. On timeout the connection needs
-    authorising again, and the owner is told.
+    inside the window in which all history can be fetched. On timeout, or if that backfill
+    fails, the connection needs authorising again, and the owner is told.
     """
     master_key = _master_key(settings)
     connection = await get_connection(session, connection_id)
@@ -251,14 +249,19 @@ async def run_await_approval(
         notifier=notifier,
         session_factory=session_factory,
     )
-    # A backfill that failed can't be retried outside the window: drop the request, so later
-    # syncs are incremental (and clamped to Monzo's 90 days), and say what was missed.
+    # A backfill that failed can't be retried outside the window, and syncing on with partial
+    # history (and no opening balance) would make the numbers wrong without saying so. So the
+    # connection needs authorising again, which opens a new window (ruling R18).
     after = await get_connection(session, connection_id)
     if after.config.get(BACKFILL_REQUESTED):
         async with command_context(session, actor, "connection.backfill_failed", args) as ctx:
             await update_config(ctx, connection_id, remove=[BACKFILL_REQUESTED])
-            if BACKFILL_FAILED not in after.warnings:
-                await set_warnings(ctx, connection_id, [*after.warnings, BACKFILL_FAILED])
+            # A rejection has already moved it to needs_reauth, and told the owner.
+            moved = await transition_status(
+                ctx, connection_id, "needs_reauth", only_from=SYNCABLE, error=BACKFILL_FAILED
+            )
+        if moved is not None:
+            await _notify(notifier, f"{after.display_name}: {BACKFILL_FAILED}")
 
 
 async def _end_approval(

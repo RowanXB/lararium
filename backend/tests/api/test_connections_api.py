@@ -5,6 +5,7 @@ import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -24,8 +25,11 @@ from lararium.core.connections import (
     set_status,
     update_config,
 )
+from lararium.core.connectors import BACKFILL_FAILED
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
+from lararium.modules.finance.monzo import sync as monzo_sync
+from lararium.modules.finance.monzo.client import MonzoClient
 from lararium.worker import jobs
 from lararium.worker.app import procrastinate_app
 
@@ -62,6 +66,7 @@ class FakeMonzo:
     def __init__(self) -> None:
         self.approve_after: int | None = 0
         self.transactions_fail = False
+        self.balance = -2468
         self.token_forms: list[dict[str, list[str]]] = []
         self.requests: list[httpx.Request] = []
         now = datetime.now(UTC)
@@ -86,7 +91,7 @@ class FakeMonzo:
                 return httpx.Response(403, json={"code": "forbidden.insufficient_permissions"})
             return httpx.Response(200, json={"accounts": [self.account]})
         if path == "/balance":
-            return httpx.Response(200, json=make_balance(balance=-2468))
+            return httpx.Response(200, json=make_balance(balance=self.balance))
         if path == "/pots":
             return httpx.Response(200, json={"pots": [make_pot()]})
         assert path == "/transactions", path
@@ -562,39 +567,71 @@ async def test_authorising_allowed_where_no_sync_runs(api, run, queue, status: s
     assert response.headers["location"] == "/connections"
 
 
-async def test_failed_backfill_clears_the_request(api, session, sessions, monzo, queue) -> None:
+@pytest.fixture
+def no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monzo's 5xx answers are retried after 2, 4 and 8 s; here without the wait."""
+
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(monzo_sync, "MonzoClient", partial(MonzoClient, sleep=no_sleep))
+
+
+async def _account_balance(session: AsyncSession, connection_id: str) -> Any:
+    account_map: Any = (await get_connection(session, uuid.UUID(connection_id))).config[
+        "account_map"
+    ]
+    return await session.scalar(
+        text(
+            "select sum(p.quantity) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where p.account_id = cast(:account as uuid) and t.status <> 'void'"
+        ),
+        {"account": account_map["acc_TEST1"]},
+    )
+
+
+async def test_failed_backfill_needs_authorising_again(
+    api, session, sessions, monzo, queue, no_retry_waits
+) -> None:
     connection_id = await _authorising(api)
     monzo.transactions_fail = True
     notifier, clock = RecordingNotifier(), FakeClock()
 
     await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
 
+    # Partial history without its opening balance would make net worth wrong: the
+    # connection doesn't sync on, it asks to be authorised again.
     connection = await get_connection(session, connection_id)
-    assert connection.status == "failing"
+    assert connection.status == "needs_reauth"
+    assert connection.last_error == BACKFILL_FAILED
     assert "backfill_requested" not in connection.config
-    assert connection.warnings == [
-        "Full history could not be fetched during approval; authorise again to retry"
-    ]
+    assert connection.warnings == []
+    assert len(notifier.messages) == 1
+    assert "My Monzo" in notifier.messages[0] and BACKFILL_FAILED in notifier.messages[0]
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
 
-    # The next sync is incremental, clamped to Monzo's 90 days.
+    # Authorising again is allowed, and its backfill completes the history.
     monzo.transactions_fail = False
-    monzo.requests.clear()
-    async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
-        await jobs.run_sync(
-            session,
-            uuid.UUID(connection_id),
-            settings=_settings(),
-            http=http,
-            notifier=notifier,
-            session_factory=sessions,
+    monzo.balance = 10000
+    state = await _authorize(api, connection_id)
+    assert (await _callback(api, state)).status_code == 303
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("healthy", None)
+    assert connection.warnings == []
+    assert len(notifier.messages) == 1
+    # Two payments of 12.34 and an opening of 124.68 add up to Monzo's 100.00.
+    assert str(await _account_balance(session, connection_id)) == "100.00"
+    opening = await session.scalar(
+        text(
+            "select p.quantity from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where t.external_id = 'opening:acc_TEST1' and p.position = 0"
         )
-    since = [r.url.params["since"] for r in monzo.requests if r.url.path == "/transactions"]
-    assert since
-    floor = datetime.now(UTC) - timedelta(days=89)
-    assert abs(datetime.fromisoformat(since[0]) - floor) < timedelta(minutes=1)
-    after = await get_connection(session, connection_id)
-    assert after.status == "healthy"
-    assert after.warnings[0].startswith("Full history could not be fetched")
+    )
+    assert str(opening) == "124.68"
 
 
 def test_connection_operation_ids() -> None:

@@ -22,6 +22,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.ledger import void_transaction
 from lararium.modules.finance.monzo.normalize import (
     NORMALIZER_VERSION,
     FetchedRecord,
@@ -62,8 +63,8 @@ async def _normalize(
     transactions: Sequence[dict[str, Any]] = (),
     balance: int = 25000,
     pots: Sequence[dict[str, Any]] = (),
-    backfilled: Sequence[str] = (),
-    first_backfills: Sequence[str] = (),
+    reconciled: Sequence[str] = (),
+    openings: Sequence[str] = (),
     notifier: RecordingNotifier | None = None,
 ) -> NormalizeReport:
     """Store one sync's raw records (as MonzoConnector.sync would), then normalize them."""
@@ -98,9 +99,7 @@ async def _normalize(
                 notifier=notifier or RecordingNotifier(),
                 session_factory=async_sessionmaker(bind=session.bind),
             )
-            return await normalize(
-                ctx, fetched, backfilled=backfilled, first_backfills=first_backfills
-            )
+            return await normalize(ctx, fetched, reconciled=reconciled, openings=openings)
 
 
 async def _account_map(session, connection: ConnectionRecord) -> dict[str, uuid.UUID]:
@@ -194,8 +193,8 @@ async def test_pot_history_before_first_snapshot(session, run) -> None:
         transactions=history,
         balance=25000,
         pots=[make_pot(balance=5000)],
-        backfilled=[ACCOUNT_ID],
-        first_backfills=[ACCOUNT_ID],
+        reconciled=[ACCOUNT_ID],
+        openings=[ACCOUNT_ID],
     )
 
     account_map = await _account_map(session, connection)
@@ -339,7 +338,7 @@ async def test_opening_adjustment_once(session, run) -> None:
         make_transaction(id="tx_TEST0002", amount=-5000, created="2026-03-05T12:00:00.000Z"),
     ]
     notifier = RecordingNotifier()
-    backfill = {"backfilled": [ACCOUNT_ID], "first_backfills": [ACCOUNT_ID]}
+    backfill = {"reconciled": [ACCOUNT_ID], "openings": [ACCOUNT_ID]}
 
     first = await _normalize(
         session, connection, transactions=history, balance=25000, notifier=notifier, **backfill
@@ -366,7 +365,7 @@ async def test_opening_adjustment_once(session, run) -> None:
         transactions=history,
         balance=26000,
         notifier=notifier,
-        backfilled=[ACCOUNT_ID],
+        reconciled=[ACCOUNT_ID],
     )
 
     assert len(await _transactions(session)) == 3  # nothing new posted
@@ -378,6 +377,55 @@ async def test_opening_adjustment_once(session, run) -> None:
     assert "10.00" in notifier.messages[0]
 
 
+async def test_opening_recomputed_in_place(session, run) -> None:
+    connection = await _connection(run)
+    recent = [make_transaction(id="tx_TEST0002", amount=-5000, created="2026-03-05T12:00:00.000Z")]
+    await _normalize(session, connection, transactions=recent, openings=[ACCOUNT_ID])
+    older = make_transaction(id="tx_TEST0001", amount=15000, created="2026-01-10T12:00:00.000Z")
+
+    # A later backfill brings older history: the opening shrinks and moves before it.
+    report = await _normalize(
+        session, connection, transactions=[older, *recent], openings=[ACCOUNT_ID]
+    )
+
+    assert report.mismatches == []
+    (opening,) = [
+        r for r in await _transactions(session) if r.external_id == f"opening:{ACCOUNT_ID}"
+    ]
+    assert (opening.status, opening.booking_date) == ("booked", date(2026, 1, 9))
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert (await _postings(session, opening.id))[0] == (main, Decimal("150.00"), "")
+
+    # History that now adds up on its own needs no opening.
+    report = await _normalize(
+        session, connection, transactions=[older, *recent], balance=10000, openings=[ACCOUNT_ID]
+    )
+    assert report.voided == 1
+    assert report.mismatches == []
+    statuses = {r.external_id: r.status for r in await _transactions(session)}
+    assert statuses[f"opening:{ACCOUNT_ID}"] == "void"
+
+
+async def test_opening_voided_by_the_owner_stays_void(session, run) -> None:
+    connection = await _connection(run)
+    history = [make_transaction(amount=15000)]
+    await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+    (opening,) = [
+        r for r in await _transactions(session) if r.external_id == f"opening:{ACCOUNT_ID}"
+    ]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, opening.id)
+
+    report = await _normalize(
+        session, connection, transactions=history, balance=30000, openings=[ACCOUNT_ID]
+    )
+
+    statuses = {r.external_id: r.status for r in await _transactions(session)}
+    assert statuses[f"opening:{ACCOUNT_ID}"] == "void"
+    # Still reconciled: the owner's choice shows as a mismatch, never silently undone.
+    assert len(report.mismatches) == 1
+
+
 async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None:
     connection = await _connection(run)
     notifier = RecordingNotifier()
@@ -387,8 +435,8 @@ async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None
         connection,
         transactions=history,
         notifier=notifier,
-        backfilled=[ACCOUNT_ID],
-        first_backfills=[ACCOUNT_ID],
+        reconciled=[ACCOUNT_ID],
+        openings=[ACCOUNT_ID],
     )
 
     async def reconcile(balance: int) -> NormalizeReport:
@@ -398,7 +446,7 @@ async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None
             transactions=history,
             balance=balance,
             notifier=notifier,
-            backfilled=[ACCOUNT_ID],
+            reconciled=[ACCOUNT_ID],
         )
 
     await reconcile(26000)
@@ -421,12 +469,12 @@ async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None
 
 async def test_reconciliation_keeps_other_warnings(session, run) -> None:
     connection = await _connection(run)
-    await _normalize(session, connection, backfilled=[ACCOUNT_ID], first_backfills=[ACCOUNT_ID])
+    await _normalize(session, connection, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID])
     async with command_context(session, CONNECTOR, "test", {}) as command:
         await set_warnings(command, connection.id, ["history may be truncated"])
 
-    await _normalize(session, connection, balance=26000, backfilled=[ACCOUNT_ID])
-    await _normalize(session, connection, balance=25000, backfilled=[ACCOUNT_ID])
+    await _normalize(session, connection, balance=26000, reconciled=[ACCOUNT_ID])
+    await _normalize(session, connection, balance=25000, reconciled=[ACCOUNT_ID])
 
     assert await _warnings(session, connection) == ["history may be truncated"]
 
@@ -452,8 +500,8 @@ async def test_normalize_is_idempotent(session, run) -> None:
     run_args: dict[str, Any] = {
         "transactions": history,
         "pots": [make_pot()],
-        "backfilled": [ACCOUNT_ID],
-        "first_backfills": [ACCOUNT_ID],
+        "reconciled": [ACCOUNT_ID],
+        "openings": [ACCOUNT_ID],
     }
     first = await _normalize(session, connection, **run_args)
     assert first.created == 4  # three transactions and the opening adjustment
@@ -462,8 +510,9 @@ async def test_normalize_is_idempotent(session, run) -> None:
 
     second = await _normalize(session, connection, **run_args)
 
+    # The three transactions, and the opening recomputed to the same amount.
     assert second == NormalizeReport(
-        created=0, updated=0, unchanged=3, voided=0, skipped_declined=0, mismatches=[]
+        created=0, updated=0, unchanged=4, voided=0, skipped_declined=0, mismatches=[]
     )
     assert await session.scalar(text("select count(*) from finance.balance_snapshots")) == snapshots
     assert await session.scalar(text("select count(*) from core.events")) == events

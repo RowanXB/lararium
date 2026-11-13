@@ -10,8 +10,10 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   against the pot's account for a pot move and against "Unassigned" otherwise; when it changes
   upstream it is replaced in place, and a pending one that comes back declined or zero is
   voided;
-- after an account's first full backfill, any difference from Monzo's balance is posted once
-  as an opening balance adjustment; later differences are warnings, never corrected.
+- after each full backfill of an account, and when an account is first seen outside one,
+  the difference from Monzo's balance is posted as its opening balance adjustment, replaced
+  in place, so older history fetched later corrects it instead of adding to it (ruling R18);
+  any other difference is a warning, never corrected.
 """
 
 import logging
@@ -19,7 +21,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -128,26 +130,38 @@ async def _connector_transaction(
     return None if row is None else (row.id, cast(TransactionStatus, row.status))
 
 
-async def _ledger_balance(session: AsyncSession, account_id: UUID, instrument_id: UUID) -> Decimal:
-    """Everything posted to the account in the instrument, pending included, void excluded."""
+async def _ledger_balance(
+    session: AsyncSession, account_id: UUID, instrument_id: UUID, *, excluding: str | None = None
+) -> Decimal:
+    """Everything posted to the account in the instrument, pending included, void excluded,
+    and so is the transaction with the external id `excluding`."""
     t, p = models.Transaction, models.Posting
     total = await session.scalar(
         select(func.sum(p.quantity))
         .join(t, t.id == p.transaction_id)
-        .where(p.account_id == account_id, p.instrument_id == instrument_id, t.status != "void")
+        .where(
+            p.account_id == account_id,
+            p.instrument_id == instrument_id,
+            t.status != "void",
+            t.external_id.is_distinct_from(excluding),
+        )
     )
     return total if total is not None else Decimal(0)
 
 
 async def _earliest_posting(
-    session: AsyncSession, account_id: UUID
+    session: AsyncSession, account_id: UUID, *, excluding: str
 ) -> tuple[datetime, date] | None:
     t, p = models.Transaction, models.Posting
     row = (
         await session.execute(
             select(t.occurred_at, t.booking_date)
             .join(p, p.transaction_id == t.id)
-            .where(p.account_id == account_id, t.status != "void")
+            .where(
+                p.account_id == account_id,
+                t.status != "void",
+                t.external_id.is_distinct_from(excluding),
+            )
             .order_by(t.booking_date, t.occurred_at)
             .limit(1)
         )
@@ -352,6 +366,9 @@ class _Normalizer:
                 ],
             ),
         )
+        self.count(outcome)
+
+    def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
         if outcome == "created":
             self.report.created += 1
         elif outcome == "updated":
@@ -360,24 +377,31 @@ class _Normalizer:
             self.report.unchanged += 1
 
     async def opening(self, monzo_account: dict[str, Any], minor_units: int, code: str) -> None:
-        """Post the difference from Monzo's balance once, the day before the earliest
-        transaction. Never touched again once it exists, even if the owner voided it."""
+        """Post the difference between Monzo's balance and the rest of the ledger, the day
+        before the earliest other transaction, replacing the opening posted before. An opening
+        the owner voided stays void; one no longer needed is voided."""
         monzo_id: str = monzo_account["id"]
         external_id = f"opening:{monzo_id}"
-        if await _connector_transaction(self.session, self.connection_id, external_id):
+        existing = await _connector_transaction(self.session, self.connection_id, external_id)
+        if existing is not None and existing[1] == "void":
+            self.report.unchanged += 1
             return
         account_id = self.require_mapped(monzo_id)
         currency = await self.currency(code)
         balance = to_quantity(minor_units, currency.decimals)
-        difference = balance - await _ledger_balance(self.session, account_id, currency.id)
+        others = await _ledger_balance(self.session, account_id, currency.id, excluding=external_id)
+        difference = balance - others
         if difference == 0:
+            if existing is not None:
+                await void_transaction(self.command, existing[0])
+                self.report.voided += 1
             return
-        earliest = await _earliest_posting(self.session, account_id)
+        earliest = await _earliest_posting(self.session, account_id, excluding=external_id)
         if earliest is None:
             created = _parse(monzo_account["created"])
             earliest = (created, local_date(created, self.tz))
         occurred_at, booking_date = earliest
-        await upsert_connector_transaction(
+        _, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
                 occurred_at=occurred_at - timedelta(days=1),
@@ -396,7 +420,7 @@ class _Normalizer:
                 ],
             ),
         )
-        self.report.created += 1
+        self.count(outcome)
 
     async def reconcile(self, monzo_id: str, minor_units: int, code: str) -> tuple[str, str] | None:
         """(difference, warning) for this account, or None when the ledger agrees."""
@@ -420,14 +444,15 @@ async def normalize(
     ctx: SyncContext,
     fetched: Sequence[FetchedRecord],
     *,
-    backfilled: Collection[str] = (),
-    first_backfills: Collection[str] = (),
+    reconciled: Collection[str] = (),
+    openings: Collection[str] = (),
 ) -> NormalizeReport:
     """Apply one sync's responses to the ledger.
 
-    `backfilled`: the Monzo accounts whose full history is in the ledger, which are reconciled
-    against Monzo's balance. `first_backfills`: those whose first full backfill finished in this
-    sync, which get their opening balance adjustment first.
+    `openings`: the Monzo accounts whose opening balance adjustment is (re)computed in this
+    sync: those whose full backfill it completed, and those it saw first. `reconciled`: the
+    accounts that already have one, which are checked against Monzo's balance (as are
+    `openings`, after their adjustment).
     """
     session = ctx.command.session
     connection = await get_connection(session, ctx.connection.id)
@@ -460,12 +485,12 @@ async def normalize(
             for tx in content:
                 await n.transaction(tx, str(request["account_id"]))
 
-    reconciled = set(backfilled) | set(first_backfills)
+    checked = set(reconciled) | set(openings)
     mismatches: dict[str, tuple[str, str] | None] = {}
     for monzo_id, balance in balances.items():
-        if monzo_id not in reconciled:
+        if monzo_id not in checked:
             continue
-        if monzo_id in first_backfills:
+        if monzo_id in openings:
             await n.opening(accounts[monzo_id], balance["balance"], balance["currency"])
         mismatches[monzo_id] = await n.reconcile(monzo_id, balance["balance"], balance["currency"])
 

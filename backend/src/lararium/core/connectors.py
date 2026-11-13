@@ -13,6 +13,10 @@ from lararium.core.json_types import JSONValue
 from lararium.core.notify import Notifier
 from lararium.core.secrets import Secret
 
+# A connection's last_error when the full backfill after its approval failed; until it is
+# authorised again, which repeats the backfill, its history is incomplete.
+BACKFILL_FAILED = "Full history could not be fetched during approval; authorise again to retry"
+
 Capability = Literal[
     "balances", "holdings", "transactions", "webhook", "device_push", "outbound_actions"
 ]

@@ -2,11 +2,12 @@
 normalise what was fetched into the ledger (normalize.py) in the same transaction.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from lararium.core.connections import get_connection, set_warnings, update_config
-from lararium.core.connectors import Capability, SyncContext
+from lararium.core.connectors import BACKFILL_FAILED, Capability, SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.monzo.auth import access_token_for
@@ -39,18 +40,36 @@ def _format(value: datetime) -> str:
     return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
 
 
-def _account_state(cursor: JSONValue, account_id: str) -> tuple[str | None, bool]:
-    """The cursor's (last_created, backfilled) for one account; (None, False) if unseen."""
+def _truncated(account_id: str) -> str:
+    return f"Monzo account {account_id}: history may be truncated"
+
+
+@dataclass(frozen=True)
+class _AccountState:
+    """What the cursor remembers of one account."""
+
+    last_created: str | None
+    # Its full history was fetched.
+    backfilled: bool
+    # It has its opening balance adjustment, so it is checked against Monzo's balance.
+    reconciled: bool
+
+
+def _account_state(cursor: JSONValue, account_id: str) -> _AccountState | None:
+    """The cursor's state for one account; None if no sync has seen it."""
     if not isinstance(cursor, dict):
-        return None, False
+        return None
     accounts = cursor.get("accounts")
     state = accounts.get(account_id) if isinstance(accounts, dict) else None
     if not isinstance(state, dict):
-        return None, False
+        return None
     last_created = state.get("last_created")
-    return (
-        last_created if isinstance(last_created, str) else None,
-        state.get("backfilled") is True,
+    backfilled = state.get("backfilled") is True
+    return _AccountState(
+        last_created=last_created if isinstance(last_created, str) else None,
+        backfilled=backfilled,
+        # A backfilled account got its opening with the backfill.
+        reconciled=state.get("reconciled") is True or backfilled,
     )
 
 
@@ -114,13 +133,15 @@ class MonzoConnector:
         cursor = connection.cursor
         previous = cursor.get("accounts") if isinstance(cursor, dict) else None
         cursor_accounts: dict[str, JSONValue] = dict(previous) if isinstance(previous, dict) else {}
-        backfilled_accounts: list[str] = []
-        first_backfills: list[str] = []
+        reconciled_accounts: list[str] = []
+        openings: list[str] = []
 
         for account in accounts:
             account_id: str = account["id"]
-            last_created, backfilled = _account_state(connection.cursor, account_id)
-            was_backfilled = backfilled
+            state = _account_state(connection.cursor, account_id)
+            last_created = state.last_created if state else None
+            backfilled = state.backfilled if state else False
+            reconciled = state.reconciled if state else False
 
             await store("balance", {"account_id": account_id}, await client.balance(account_id))
             await store("pots", {"current_account_id": account_id}, await client.pots(account_id))
@@ -154,26 +175,34 @@ class MonzoConnector:
             if full_backfill:
                 backfilled = True
                 if earliest and _parse(earliest) - _parse(account["created"]) > TRUNCATION_GRACE:
-                    warnings.append(f"Monzo account {account_id}: history may be truncated")
+                    warnings.append(_truncated(account_id))
+            # The opening adjustment is recomputed after every full backfill, which may have
+            # fetched older history, and made for an account first seen outside one (a joint
+            # account opened later, say). From then on the account is reconciled.
+            if full_backfill or state is None:
+                openings.append(account_id)
+                reconciled = True
+            elif reconciled:
+                reconciled_accounts.append(account_id)
 
             cursor_accounts[account_id] = {
                 "last_created": newest or account["created"],
                 "backfilled": backfilled,
+                "reconciled": reconciled,
             }
-            if backfilled:
-                backfilled_accounts.append(account_id)
-                if not was_backfilled:
-                    first_backfills.append(account_id)
 
         # Only now, with every page fetched, is the backfill request done.
         current = await get_connection(ctx.command.session, connection.id)
         if full_backfill:
             await update_config(ctx.command, connection.id, remove=["backfill_requested"])
         kept = [w for w in current.warnings if not w.startswith(WEBHOOK_WARNING)]
+        if full_backfill:
+            # What a completed backfill settles; a truncation that still applies is in
+            # `warnings` again.
+            settled = {BACKFILL_FAILED} | {_truncated(a["id"]) for a in accounts}
+            kept = [w for w in kept if w not in settled]
         merged = kept + [w for w in warnings if w not in kept]
         if merged != current.warnings:
             await set_warnings(ctx.command, connection.id, merged)
-        await normalize(
-            ctx, fetched, backfilled=backfilled_accounts, first_backfills=first_backfills
-        )
+        await normalize(ctx, fetched, reconciled=reconciled_accounts, openings=openings)
         return {"accounts": cursor_accounts}
