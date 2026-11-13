@@ -139,7 +139,13 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
     by_type = {r.record_type: r for r in rows}
     assert by_type["balance"].request == {"account_id": ACCOUNT_ID}
     assert by_type["pots"].request == {"current_account_id": ACCOUNT_ID}
-    assert by_type["transactions_page"].request == {"account_id": ACCOUNT_ID, "since": None}
+    # Everything needed to replay the page request exactly.
+    assert by_type["transactions_page"].request == {
+        "account_id": ACCOUNT_ID,
+        "since": None,
+        "limit": "100",
+        "expand[]": "merchant",
+    }
     assert by_type["transactions_page"].content[0]["id"] == "tx_TEST0001"
     assert cursor == {"accounts": {ACCOUNT_ID: {"last_created": _iso(created), "backfilled": True}}}
     # A full backfill sends no `since`, and the request flag is cleared afterwards.
@@ -151,7 +157,8 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
 
 async def test_incremental_sync_uses_14_day_overlap(session, run) -> None:
     last_created = datetime.now(UTC) - timedelta(days=5)
-    cursor = {"accounts": {ACCOUNT_ID: {"last_created": _iso(last_created), "backfilled": True}}}
+    # Not backfilled, so the empty ledger isn't reconciled against the balance.
+    cursor = {"accounts": {ACCOUNT_ID: {"last_created": _iso(last_created), "backfilled": False}}}
     fake = FakeMonzo([])
     connection = await _connection(run, cursor=cursor)
 
@@ -166,7 +173,7 @@ async def test_incremental_sync_uses_14_day_overlap(session, run) -> None:
 
 async def test_since_clamped_to_89_days_with_warning(session, run) -> None:
     last_created = datetime.now(UTC) - timedelta(days=200)
-    cursor = {"accounts": {ACCOUNT_ID: {"last_created": _iso(last_created), "backfilled": True}}}
+    cursor = {"accounts": {ACCOUNT_ID: {"last_created": _iso(last_created), "backfilled": False}}}
     fake = FakeMonzo([])
     connection = await _connection(run, cursor=cursor)
 
@@ -245,3 +252,52 @@ async def test_paginates_and_keeps_closed_accounts(session, run) -> None:
 
     assert (await _raw_types(session)).count("transactions_page") == 2
     assert cursor["accounts"][ACCOUNT_ID]["last_created"] == history[-1]["created"]  # type: ignore[index]
+
+
+async def test_accounts_missing_from_response_keep_their_cursor(session, run) -> None:
+    now = datetime.now(UTC)
+    other = {"last_created": _iso(now - timedelta(days=2)), "backfilled": True}
+    cursor = {
+        "accounts": {
+            ACCOUNT_ID: {"last_created": _iso(now - timedelta(days=5)), "backfilled": True},
+            "acc_TEST_GONE": other,
+        }
+    }
+    connection = await _connection(run, cursor=cursor)
+
+    result = await _sync(session, run, connection, FakeMonzo([]))
+
+    assert result["accounts"]["acc_TEST_GONE"] == other  # type: ignore[index]
+
+
+async def test_sync_normalizes_into_the_ledger(session, run) -> None:
+    now = datetime.now(UTC)
+    payment = make_transaction(
+        id="tx_TEST0001", amount=-1234, created=_iso(now - timedelta(days=3))
+    )
+    account = make_account(created=_iso(now - timedelta(days=4)))
+    connection = await _connection(run, config={"backfill_requested": True})
+
+    await _sync(session, run, connection, FakeMonzo([payment], account))
+
+    after = await get_connection(session, connection.id)
+    account_map = after.config["account_map"]
+    assert isinstance(account_map, dict)
+    assert set(account_map) == {ACCOUNT_ID, "pot_TEST1"}
+    rows = (
+        await session.execute(
+            text("select external_id from finance.transactions order by external_id")
+        )
+    ).all()
+    # The payment, and the opening balance that brings the ledger to Monzo's 250.00.
+    assert [r.external_id for r in rows] == [f"opening:{ACCOUNT_ID}", "tx_TEST0001"]
+    balance = await session.scalar(
+        text(
+            "select sum(p.quantity) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where p.account_id = cast(:account as uuid) and t.status <> 'void'"
+        ),
+        {"account": account_map[ACCOUNT_ID]},
+    )
+    assert str(balance) == "250.00"
+    assert after.warnings == []

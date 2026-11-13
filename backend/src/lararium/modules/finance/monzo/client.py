@@ -16,6 +16,8 @@ API = "https://api.monzo.com"
 AUTH = "https://auth.monzo.com/"
 # Monzo's maximum page size for GET /transactions.
 PAGE_SIZE = 100
+# GET /transactions expands each merchant id into the merchant object.
+EXPAND = "merchant"
 
 # Monzo error codes look like "unauthorized.bad_access_token.expired"; anything else is
 # replaced, so an echoed token can't reach a message.
@@ -129,7 +131,7 @@ class MonzoClient:
         while True:
             params = [
                 ("account_id", account_id),
-                ("expand[]", "merchant"),
+                ("expand[]", EXPAND),
                 ("limit", str(PAGE_SIZE)),
             ]
             if since is not None:

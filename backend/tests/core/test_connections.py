@@ -18,7 +18,7 @@ from lararium.core.connections import (
     update_config,
 )
 from lararium.core.errors import ConnectionNotFoundError
-from lararium.core.raw_records import list_raw_records, store_raw_record
+from lararium.core.raw_records import get_raw_records, list_raw_records, store_raw_record
 from lararium.modules import registry
 
 KEY = bytes(range(32))
@@ -163,6 +163,28 @@ async def test_raw_record_dedup_by_content(session, run) -> None:
     )
     assert records[0].content_hash != records[1].content_hash
     assert await session.scalar(text("select count(*) from core.raw_records")) == 2
+
+
+async def test_get_raw_records_by_id(session, run) -> None:
+    connection = await _create(run)
+
+    async def store(content, sync) -> uuid.UUID:
+        return await run(
+            store_raw_record,
+            connection_id=connection.id,
+            record_type="balance",
+            request={},
+            content=content,
+            connector_version="1",
+            sync_id=sync,
+        )
+
+    old = await store({"balance": 1}, uuid.uuid4())
+    new = await store({"balance": 2}, uuid.uuid4())
+
+    records = await get_raw_records(session, [new, old])
+    assert [(r.id, r.content) for r in records] == [(new, {"balance": 2}), (old, {"balance": 1})]
+    assert await get_raw_records(session, []) == []
 
 
 @pytest.mark.parametrize(

@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -76,35 +78,47 @@ async def store_raw_record(
     ).scalar_one()
 
 
+def _columns() -> tuple[Any, ...]:
+    r = models.RawRecord
+    return (
+        r.id,
+        r.connection_id,
+        r.sync_id,
+        r.record_type,
+        r.request,
+        r.fetched_at,
+        r.content,
+        r.content_hash,
+        r.connector_version,
+    )
+
+
+def _record(row: Any) -> RawRecord:
+    return RawRecord(
+        id=row.id,
+        connection_id=row.connection_id,
+        sync_id=row.sync_id,
+        record_type=row.record_type,
+        request=row.request,
+        fetched_at=row.fetched_at,
+        content=row.content,
+        content_hash=row.content_hash,
+        connector_version=row.connector_version,
+    )
+
+
 async def list_raw_records(session: AsyncSession, sync_id: UUID) -> list[RawRecord]:
     """The records first stored by this sync, in the order they were stored."""
     r = models.RawRecord
-    rows = await session.execute(
-        select(
-            r.id,
-            r.connection_id,
-            r.sync_id,
-            r.record_type,
-            r.request,
-            r.fetched_at,
-            r.content,
-            r.content_hash,
-            r.connector_version,
-        )
-        .where(r.sync_id == sync_id)
-        .order_by(r.id)
-    )
-    return [
-        RawRecord(
-            id=row.id,
-            connection_id=row.connection_id,
-            sync_id=row.sync_id,
-            record_type=row.record_type,
-            request=row.request,
-            fetched_at=row.fetched_at,
-            content=row.content,
-            content_hash=row.content_hash,
-            connector_version=row.connector_version,
-        )
-        for row in rows
-    ]
+    rows = await session.execute(select(*_columns()).where(r.sync_id == sync_id).order_by(r.id))
+    return [_record(row) for row in rows]
+
+
+async def get_raw_records(session: AsyncSession, ids: Sequence[UUID]) -> list[RawRecord]:
+    """The records with these ids, in the order given; a record stored once and returned
+    for several identical responses comes back once per id."""
+    if not ids:
+        return []
+    rows = await session.execute(select(*_columns()).where(models.RawRecord.id.in_(set(ids))))
+    by_id = {row.id: _record(row) for row in rows}
+    return [by_id[record_id] for record_id in ids]
