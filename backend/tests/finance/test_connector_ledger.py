@@ -11,6 +11,7 @@ from lararium.modules.finance.ledger import (
     TransactionInput,
     post_transaction,
     upsert_connector_transaction,
+    void_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.valuation import balances_asof, net_worth_series
@@ -145,3 +146,31 @@ async def test_system_accounts_reused_and_excluded_from_net_worth(
     )
     [point] = await net_worth_series(session, date(2026, 11, 3), date(2026, 11, 3))
     assert point.value == Decimal("100")
+
+
+async def test_owner_void_is_sticky(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    await run(void_transaction, created.id)
+    record, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "9.00", status="booked")
+    )
+    assert outcome == "unchanged"
+    assert record.status == "void"
+    status = await session.scalar(
+        text("select status from finance.transactions where id = :i"), {"i": created.id}
+    )
+    assert status == "void"
+    quantities = {
+        r.quantity
+        for r in await session.execute(
+            text("select quantity from finance.postings where transaction_id = :i"),
+            {"i": created.id},
+        )
+    }
+    assert quantities == {Decimal("5.00"), Decimal("-5.00")}
+    updates = await session.scalar(
+        text("select count(*) from core.events where type = 'finance.transaction.updated'")
+    )
+    assert updates == 0

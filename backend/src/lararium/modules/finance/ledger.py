@@ -368,6 +368,9 @@ async def upsert_connector_transaction(
             f"transaction {existing.id} was not created by a connector; refusing to replace it"
         )
     before = await _load_transaction(session, existing.id)
+    if existing.status == "void" and tx.status != "void":
+        # The owner's void is a decision that survives re-syncs.
+        return before, "unchanged"
     booking_date = await _validate_transaction(session, tx)
     fields_unchanged = (
         existing.occurred_at == tx.occurred_at
