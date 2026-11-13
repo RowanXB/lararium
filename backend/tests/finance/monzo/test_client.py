@@ -124,9 +124,9 @@ async def test_transactions_passes_since_and_before() -> None:
 
 class RecordingSleep:
     def __init__(self) -> None:
-        self.slept: list[float] = []
+        self.slept: list[int] = []
 
-    async def __call__(self, seconds: float) -> None:
+    async def __call__(self, seconds: int) -> None:
         self.slept.append(seconds)
 
 

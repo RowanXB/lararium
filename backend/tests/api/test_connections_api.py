@@ -571,7 +571,7 @@ async def test_authorising_allowed_where_no_sync_runs(api, run, queue, status: s
 def no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Monzo's 5xx answers are retried after 2, 4 and 8 s; here without the wait."""
 
-    async def no_sleep(seconds: float) -> None:
+    async def no_sleep(seconds: int) -> None:
         return None
 
     monkeypatch.setattr(monzo_sync, "MonzoClient", partial(MonzoClient, sleep=no_sleep))

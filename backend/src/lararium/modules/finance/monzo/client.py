@@ -83,7 +83,7 @@ def raise_for_error(response: httpx.Response) -> None:
 
 
 type Params = Sequence[tuple[str, str]]
-type Sleep = Callable[[float], Awaitable[None]]
+type Sleep = Callable[[int], Awaitable[None]]
 
 
 def _retry_delay(response: httpx.Response, backoff: int) -> int:
