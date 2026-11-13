@@ -58,7 +58,7 @@ Choices the spec leaves open, made here so the tasks don't have to:
    - **Never shown.** Credentials never appear in logs, events, audit args, API responses or notifications.
 4. **Token rotation is crash-safe.** Because refresh tokens are single-use, the new token pair is encrypted and committed in its **own short transaction** before it is used. If anything later fails, the next run still holds a valid refresh token. A refresh that Monzo rejects (`invalid_grant`, or 401 on the token endpoint) moves the connection to `needs_reauth` and notifies the owner.
 5. **Ledger mapping.**
-   - **Accounts.** Each Monzo account becomes a finance account: `asset`/`bank`, `source_kind='connection'`, balance mode `transactions`, named from `description` (`uk_retail` → "Monzo", `uk_retail_joint` → "Monzo Joint"). Each pot becomes a child account: `asset`/`savings_pot`, balance mode `snapshots`, fed by an institution-reported snapshot of `pots[].balance` on every sync. A deleted pot is closed.
+   - **Accounts.** Each Monzo account becomes a finance account: `asset`/`bank`, `source_kind='connection'`, balance mode `transactions`, named from `description` (`uk_retail` → "Monzo", `uk_retail_joint` → "Monzo Joint"). Each pot becomes a child account: `asset`/`savings_pot`, balance mode `hybrid`: its history comes from the pot moves before its first snapshot, then from the pot snapshot (kind `reported`) of `pots[].balance` that every sync records. A deleted pot is closed.
    - **Transactions.** Each non-declined transaction becomes one ledger transaction, keyed by `(connection_id, external_id = transaction id)`:
      - `occurred_at = created`, `booking_date` = the local date of `created`, `value_date` = the local date of `settled` (or `None`);
      - status `pending` while `settled == ""`, else `booked`;
@@ -85,7 +85,7 @@ Choices the spec leaves open, made here so the tasks don't have to:
 9. **Opening balance and reconciliation.**
    - **Opening balance, set once.** After the first full backfill of an account, the ledger balance (including pending, excluding void) is compared with `GET /balance` `balance`. Any difference is posted once as an "Opening balance adjustment" transaction (`external_id = f"opening:{monzo_account_id}"`), booked the day before the earliest transaction, against the system account **"Opening balances"**. It is never silently changed after that.
    - **Reconciliation on every later sync.** A difference larger than the currency's tolerance is a **reconciliation mismatch**: it is recorded as a connection warning and sent to Feishu once per new value, never auto-corrected.
-   - **Snapshots.** The balance is also stored as an institution-reported snapshot, for the M9 reconciliation views.
+   - **Snapshots.** The balance is also stored as a snapshot of kind `reported`, for the M9 reconciliation views.
 10. **System accounts** are generic: `get_or_create_system_account(ctx, key)` with key `"unassigned"` → "Unassigned" or `"opening_balances"` → "Opening balances". Both are `equity`/`other`/`transactions`, remembered in the settings `finance.system_account.<key>`. They never affect net worth. When the deferred M2 plan is resumed, it reuses these instead of its own "Unassigned (imports)".
 11. **Webhook receiver.** It is a separate Starlette app, `lararium.webhook_in`, running from the same image with its own database role `lararium_webhook_in`. That role has only `USAGE` on schema `core` and `INSERT` on `core.webhook_inbox` (no `SELECT`, so no `RETURNING`).
     - **Its one route.** `POST /monzo/{secret}` compares `secret` with `LARARIUM_WEBHOOK_SECRET` using `hmac.compare_digest`. A wrong secret gets 404. A body over 64 KiB gets 413, and a body that is not valid JSON gets 400. Otherwise it inserts `(source='monzo', body)` and returns 200 with no body.
@@ -372,16 +372,16 @@ Rules: Decision 8 (window, overlap, clamp, truncation warning). Closed Monzo acc
 - Create: `monzo/normalize.py`, `tests/finance/monzo/test_normalize.py`
 
 **Interfaces:**
-- Consumes: Tasks 3 and 5; `snapshots.record_snapshot` (kind `institution`); `get_or_create_organization`; `get_currency`.
+- Consumes: Tasks 3 and 5; `snapshots.record_snapshot` (kind `reported`); `get_or_create_organization`; `get_currency`.
 - Produces:
   - `NORMALIZER_VERSION = "monzo-norm-1"`.
-  - `async def normalize(ctx: SyncContext) -> NormalizeReport`, with `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`.
+  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, backfilled: Collection[str] = (), first_backfills: Collection[str] = ()) -> NormalizeReport`, with `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`.
   - `def to_quantity(minor_units: int, decimals: int) -> Decimal`, which is `Decimal(minor_units).scaleb(-decimals)`.
 
 Rules: Decisions 5, 6 and 9. Accounts and pots are found or created by the setting `config["account_map"]`: Monzo id → finance account id, kept in the connection's config.
 
 - [ ] **Step 1: Write the failing tests** (each one stages raw records with the fixture builders, then normalizes):
-  - `test_creates_accounts_and_pot_children`: a pot account has the main account as its `parent_account_id`, is in mode `snapshots`, and has a snapshot equal to the pot balance.
+  - `test_creates_accounts_and_pot_children`: a pot account has the main account as its `parent_account_id`, is in mode `hybrid`, and has a snapshot equal to the pot balance.
   - `test_card_payment_posts_against_unassigned`: `-1234` minor GBP gives `-12.34`; the counterparty is the merchant entity; the status is `booked` when settled.
   - `test_pending_settles_with_new_amount`: a pending `-5000`, then settled `-4250`: one transaction, `updated`, quantity `-42.50`, status `booked`.
   - `test_reversed_pending_is_voided`.

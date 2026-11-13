@@ -58,7 +58,7 @@
    - **绝不外露。** 凭证不出现在日志、事件、审计参数、API 响应或通知里。
 4. **token 轮换要扛得住崩溃。** 因为 refresh token 只能用一次，新的一对 token 要先加密，并在**单独的一个短事务**里提交，然后才使用。之后不管哪里出错，下次运行手里仍然有有效的 refresh token。刷新被 Monzo 拒绝（`invalid_grant`，或 token 接口返回 401）时，连接转为 `needs_reauth`，并通知使用者。
 5. **账本映射。**
-   - **账户。** 每个 Monzo 账户对应一个财务账户：`asset`/`bank`，`source_kind='connection'`，余额模式 `transactions`，名称按 `description` 取（`uk_retail` → "Monzo"，`uk_retail_joint` → "Monzo Joint"）。每个 pot 对应一个子账户：`asset`/`savings_pot`，余额模式 `snapshots`，每次同步都用 `pots[].balance` 记一条机构报告的快照。pot 被删掉时，对应账户关闭。
+   - **账户。** 每个 Monzo 账户对应一个财务账户：`asset`/`bank`，`source_kind='connection'`，余额模式 `transactions`，名称按 `description` 取（`uk_retail` → "Monzo"，`uk_retail_joint` → "Monzo Joint"）。每个 pot 对应一个子账户：`asset`/`savings_pot`，余额模式 `hybrid`：第一条快照之前的历史来自 pot 转账，之后来自 pot 快照（类型 `reported`），每次同步都用 `pots[].balance` 记一条。pot 被删掉时，对应账户关闭。
    - **交易。** 每笔没被拒的交易对应一笔账本交易，以 `(connection_id, external_id = transaction id)` 为键：
      - `occurred_at = created`，`booking_date` = `created` 的本地日期，`value_date` = `settled` 的本地日期（没有就是 `None`）；
      - `settled == ""` 时状态是 `pending`，否则是 `booked`；
@@ -85,7 +85,7 @@
 9. **期初余额和对账。**
    - **期初余额只设一次。** 某个账户第一次全量回填之后，把账本余额（包括 pending，不包括 void）和 `GET /balance` 的 `balance` 比较。差额只记一次，记成一笔 "Opening balance adjustment" 交易（`external_id = f"opening:{monzo_account_id}"`），记账日期是最早那笔交易的前一天，另一侧是系统账户 **"Opening balances"**。之后绝不悄悄修改它。
    - **之后每次同步都对账。** 差额超过该币种容差时，就是一次**对账不符**：记为连接的一条警告，每出现一个新的差额值就往飞书发一次通知，绝不自动修正。
-   - **快照。** 余额也存成一条机构报告的快照，供 M9 的对账视图使用。
+   - **快照。** 余额也存成一条类型为 `reported` 的快照，供 M9 的对账视图使用。
 10. **系统账户**是通用的：`get_or_create_system_account(ctx, key)`，key 为 `"unassigned"` → "Unassigned"，`"opening_balances"` → "Opening balances"。两者都是 `equity`/`other`/`transactions`，记在设置项 `finance.system_account.<key>` 里。它们从不影响净值。暂缓的 M2 计划恢复时，直接复用这两个账户，不再用它自己的 "Unassigned (imports)"。
 11. **webhook 接收器。** 它是一个独立的 Starlette 应用 `lararium.webhook_in`，和其他服务用同一个镜像运行，但有自己的数据库角色 `lararium_webhook_in`。这个角色只有 schema `core` 的 `USAGE` 和 `core.webhook_inbox` 的 `INSERT` 权限（没有 `SELECT`，所以也不能用 `RETURNING`）。
     - **唯一的路由。** `POST /monzo/{secret}` 用 `hmac.compare_digest` 比较 `secret` 和 `LARARIUM_WEBHOOK_SECRET`。密钥不对返回 404。请求体超过 64 KiB 返回 413，不是合法 JSON 返回 400。否则插入 `(source='monzo', body)`，返回不带内容的 200。
@@ -372,16 +372,16 @@ infra/compose.yaml, env.example, postgres/roles.sql, postgres/init/00-roles.sh, 
 - Create: `monzo/normalize.py`, `tests/finance/monzo/test_normalize.py`
 
 **Interfaces:**
-- Consumes: 任务 3 和 5；`snapshots.record_snapshot`（kind 为 `institution`）；`get_or_create_organization`；`get_currency`。
+- Consumes: 任务 3 和 5；`snapshots.record_snapshot`（kind 为 `reported`）；`get_or_create_organization`；`get_currency`。
 - Produces:
   - `NORMALIZER_VERSION = "monzo-norm-1"`。
-  - `async def normalize(ctx: SyncContext) -> NormalizeReport`，其中 `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`。
+  - `async def normalize(ctx: SyncContext, fetched: Sequence[FetchedRecord], *, backfilled: Collection[str] = (), first_backfills: Collection[str] = ()) -> NormalizeReport`，其中 `NormalizeReport(created: int, updated: int, unchanged: int, voided: int, skipped_declined: int, mismatches: list[str])`。
   - `def to_quantity(minor_units: int, decimals: int) -> Decimal`，即 `Decimal(minor_units).scaleb(-decimals)`。
 
 规则：决策 5、6 和 9。账户和 pot 通过设置 `config["account_map"]` 查找或创建：这是 Monzo id → 财务账户 id 的映射，存在连接的 config 里。
 
 - [ ] **Step 1: 写失败的测试**（每个测试先用 fixture 构造函数准备好原始记录，再执行 normalize）：
-  - `test_creates_accounts_and_pot_children`：pot 账户的 `parent_account_id` 是主账户，模式是 `snapshots`，并有一条等于 pot 余额的快照。
+  - `test_creates_accounts_and_pot_children`：pot 账户的 `parent_account_id` 是主账户，模式是 `hybrid`，并有一条等于 pot 余额的快照。
   - `test_card_payment_posts_against_unassigned`：`-1234` 个最小单位的 GBP 得到 `-12.34`；对方是商户实体；已结算时状态是 `booked`。
   - `test_pending_settles_with_new_amount`：先是 pending 的 `-5000`，然后以 `-4250` 结算：只有一笔交易，结果 `updated`，数量 `-42.50`，状态 `booked`。
   - `test_reversed_pending_is_voided`。
