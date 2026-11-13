@@ -15,7 +15,7 @@ import hmac
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import LiteralString, NoReturn
+from typing import Any, LiteralString, NoReturn, cast
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -29,6 +29,8 @@ from lararium.config import WebhookInSettings
 from lararium.db import STATEMENT_TIMEOUT, psycopg_dsn
 
 MAX_BODY_BYTES = 64 * 1024
+# Deeper than any real delivery. Fixed here because Python's own parser limit varies by version.
+MAX_JSON_DEPTH = 64
 # No RETURNING: the receiver's role can't SELECT.
 INSERT: LiteralString = "INSERT INTO core.webhook_inbox (source, body) VALUES ('monzo', %s::jsonb)"
 
@@ -36,6 +38,24 @@ INSERT: LiteralString = "INSERT INTO core.webhook_inbox (source, body) VALUES ('
 def _not_json(constant: str) -> NoReturn:
     # NaN and Infinity, which Python accepts but JSON (and jsonb) doesn't.
     raise ValueError(f"{constant} is not JSON")
+
+
+def _too_deep(value: Any) -> bool:
+    """Whether JSON nesting exceeds MAX_JSON_DEPTH. Iterative, so hostile depth can't recurse."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if not isinstance(item, dict | list):
+            continue
+        if depth > MAX_JSON_DEPTH:
+            return True
+        children: list[Any] = (
+            list(cast("dict[str, Any]", item).values())
+            if isinstance(item, dict)
+            else cast("list[Any]", item)
+        )
+        stack.extend((child, depth + 1) for child in children)
+    return False
 
 
 async def _read_body(request: Request) -> bytes | None:
@@ -70,16 +90,23 @@ def create_app(database_url: str, secret: SecretStr) -> Starlette:
             return Response(status_code=413)
         try:
             document = body.decode()
-            json.loads(document, parse_constant=_not_json)
+            parsed = json.loads(document, parse_constant=_not_json)
         except (ValueError, RecursionError):
             # UnicodeDecodeError and JSONDecodeError are ValueErrors; RecursionError is nesting
             # too deep to parse.
             return Response(status_code=400)
+        if _too_deep(parsed):
+            return Response(status_code=400)
         try:
             async with pool.connection() as conn:
                 await conn.execute(INSERT, (document,))
-        except psycopg.DataError:
-            # JSON that jsonb refuses, such as a \u0000 in a string.
+        except (
+            psycopg.DataError,
+            psycopg.errors.ProgramLimitExceeded,
+            psycopg.errors.StatementTooComplex,
+        ):
+            # JSON that jsonb refuses, such as a \u0000 in a string, or that is too complex
+            # for Postgres (a backstop for MAX_JSON_DEPTH).
             return Response(status_code=400)
         return Response(status_code=200)
 

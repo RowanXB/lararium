@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from starlette.applications import Starlette
 
 from lararium.webhook_in import app as receiver
-from lararium.webhook_in.app import MAX_BODY_BYTES, create_app
+from lararium.webhook_in.app import MAX_BODY_BYTES, MAX_JSON_DEPTH, create_app
 
 SECRET = "whsec-TEST-0123456789abcdef0123456789"
 DELIVERY = {
@@ -137,6 +137,25 @@ async def test_invalid_json_400(client: httpx.AsyncClient, inbox: Rows, body: by
 
     assert response.status_code == 400
     assert inbox() == []
+
+
+async def test_nesting_past_limit_400(client: httpx.AsyncClient, inbox: Rows) -> None:
+    depth = MAX_JSON_DEPTH + 1
+    body = b"[" * depth + b"]" * depth
+
+    response = await client.post(f"/monzo/{SECRET}", content=body)
+
+    assert response.status_code == 400
+    assert inbox() == []
+
+
+async def test_nesting_at_limit_200(client: httpx.AsyncClient, inbox: Rows) -> None:
+    body = b'{"a": ' * (MAX_JSON_DEPTH - 1) + b"[]" + b"}" * (MAX_JSON_DEPTH - 1)
+
+    response = await client.post(f"/monzo/{SECRET}", content=body)
+
+    assert response.status_code == 200
+    assert len(inbox()) == 1
 
 
 async def test_get_is_405(client: httpx.AsyncClient, inbox: Rows) -> None:
