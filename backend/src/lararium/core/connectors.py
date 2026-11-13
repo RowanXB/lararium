@@ -5,6 +5,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.core.commands import CommandContext
 from lararium.core.connections import ConnectionRecord
@@ -26,6 +27,9 @@ class SyncContext:
     master_key: bytes = field(repr=False)
     http: httpx.AsyncClient
     notifier: Notifier
+    # For writes that must commit on their own, outside the sync's transaction (such as
+    # rotated single-use tokens, which must survive the sync failing).
+    session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
 
 
 class Connector(Protocol):

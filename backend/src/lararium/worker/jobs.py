@@ -6,7 +6,7 @@ from uuid import UUID
 import httpx
 from procrastinate import exceptions as procrastinate_exceptions
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.config import Settings, get_settings
 from lararium.core.actors import Actor
@@ -54,6 +54,7 @@ async def run_sync(
     settings: Settings,
     http: httpx.AsyncClient,
     notifier: Notifier,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Sync one connection and record the outcome, notifying the owner when it matters.
 
@@ -81,6 +82,7 @@ async def run_sync(
                     master_key=master_key,
                     http=http,
                     notifier=notifier,
+                    session_factory=session_factory,
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
@@ -146,13 +148,15 @@ async def sync_connection(connection_id: str) -> None:
     engine = create_engine(settings.database_url)
     try:
         async with httpx.AsyncClient(timeout=30) as http:
-            async with make_sessionmaker(engine)() as session:
+            sessions = make_sessionmaker(engine)
+            async with sessions() as session:
                 await run_sync(
                     session,
                     UUID(connection_id),
                     settings=settings,
                     http=http,
                     notifier=notifier_from_settings(settings, http),
+                    session_factory=sessions,
                 )
     finally:
         await engine.dispose()

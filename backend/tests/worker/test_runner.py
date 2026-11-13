@@ -6,6 +6,7 @@ from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate.testing import InMemoryConnector
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from lararium.config import Settings
 from lararium.core.connections import (
@@ -79,7 +80,14 @@ async def _run_sync(session, connection, notifier) -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(404))
     ) as http:
-        await jobs.run_sync(session, connection.id, settings=SETTINGS, http=http, notifier=notifier)
+        await jobs.run_sync(
+            session,
+            connection.id,
+            settings=SETTINGS,
+            http=http,
+            notifier=notifier,
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
 
 
 async def test_run_sync_success_records_cursor(session, run, fake, notifier) -> None:
