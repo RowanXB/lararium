@@ -39,9 +39,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderPage() {
+function renderPage(client = new QueryClient()) {
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={client}>
       <ConnectionsPage />
     </QueryClientProvider>,
   );
@@ -49,7 +49,8 @@ function renderPage() {
 
 it("add form sends the secret and clears it", async () => {
   const user = userEvent.setup();
-  renderPage();
+  const client = new QueryClient();
+  renderPage(client);
   expect(await screen.findByText(CONNECTION.redirect_uri)).toBeInTheDocument();
   await user.type(screen.getByLabelText("Display name"), "Joint");
   await user.type(screen.getByLabelText("Client ID"), "oauth2client_000");
@@ -65,6 +66,32 @@ it("add form sends the secret and clears it", async () => {
   );
   await waitFor(() => expect(screen.getByLabelText("Client secret")).toHaveValue(""));
   expect(document.body.textContent).not.toContain("s3cret");
+  await waitFor(() =>
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not
+      .toContain("s3cret"),
+  );
+});
+
+it("shows the server's error when adding fails", async () => {
+  vi.mocked(createMonzoConnection).mockRejectedValueOnce({
+    detail: { error: "bad", message: "Client ID rejected" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  await user.type(await screen.findByLabelText("Display name"), "Joint");
+  await user.type(screen.getByLabelText("Client ID"), "id");
+  await user.type(screen.getByLabelText("Client secret"), "s3cret");
+  await user.click(screen.getByRole("button", { name: "Add Monzo" }));
+  expect(await screen.findByText("Client ID rejected")).toBeInTheDocument();
+});
+
+it("shows this origin's callback URL before any connection exists", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [] } as never);
+  vi.stubGlobal("location", { href: "", search: "", origin: "https://lararium.example" });
+  renderPage();
+  expect(
+    await screen.findByText("https://lararium.example/api/v1/connections/oauth/monzo/callback"),
+  ).toBeInTheDocument();
 });
 
 it("authorise redirects to the returned url", async () => {

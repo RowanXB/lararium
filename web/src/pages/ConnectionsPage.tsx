@@ -127,8 +127,13 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
   const [displayName, setDisplayName] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [error, setError] = useState<string>();
+  const callbackUrl =
+    redirectUri ?? `${window.location.origin}/api/v1/connections/oauth/monzo/callback`;
 
   const mutation = useMutation({
+    // gcTime 0 plus the reset below drops the request variables (the secret) from the cache.
+    gcTime: 0,
     mutationFn: async (body: { display_name: string; client_id: string; client_secret: string }) =>
       (await createMonzoConnection({ body, throwOnError: true })).data,
     onSuccess: async () => {
@@ -136,15 +141,20 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
       setClientId("");
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
     },
+    onError: (failure) => setError(errorMessage(failure)),
   });
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    mutation.mutate({
-      display_name: displayName.trim(),
-      client_id: clientId.trim(),
-      client_secret: clientSecret,
-    });
+    setError(undefined);
+    mutation.mutate(
+      {
+        display_name: displayName.trim(),
+        client_id: clientId.trim(),
+        client_secret: clientSecret,
+      },
+      { onSettled: () => mutation.reset() },
+    );
     // The secret only lives in the request; never keep it in state afterwards.
     setClientSecret("");
   }
@@ -166,22 +176,14 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
             required
           />
           <p className="text-sm text-muted-foreground sm:col-span-3">
-            {redirectUri ? (
-              <>
-                Create an OAuth client at developers.monzo.com and set its redirect URL to{" "}
-                <code>{redirectUri}</code>.
-              </>
-            ) : (
-              "Create an OAuth client at developers.monzo.com. The redirect URL to use is shown here once a connection exists."
-            )}
+            Create an OAuth client at developers.monzo.com and set its redirect URL to{" "}
+            <code>{callbackUrl}</code>.
           </p>
           <div className="flex items-center gap-3 sm:col-span-3">
             <Button type="submit" disabled={mutation.isPending}>
               Add Monzo
             </Button>
-            {mutation.isError && (
-              <p className="text-sm text-destructive">{errorMessage(mutation.error)}</p>
-            )}
+            {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
         </form>
       </CardContent>
@@ -215,7 +217,9 @@ export function ConnectionsPage() {
       {list.map((connection) => (
         <ConnectionCard key={connection.id} connection={connection} />
       ))}
-      <AddMonzoForm redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined} />
+      <AddMonzoForm
+        redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined}
+      />
     </div>
   );
 }
