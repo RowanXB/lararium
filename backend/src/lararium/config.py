@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     master_key: SecretStr | None = None
     # Where the owner's browser reaches Lararium, e.g. for OAuth redirect URLs.
     public_base_url: str | None = None
+    # Feishu custom bot for notifications; neither set means no notifications.
+    feishu_webhook_url: SecretStr | None = None
+    feishu_secret: SecretStr | None = None
 
     @model_validator(mode="after")
     def _tailscale_needs_owner_login(self) -> Self:

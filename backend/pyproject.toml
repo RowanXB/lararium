@@ -14,6 +14,7 @@ dependencies = [
     "tzdata",
     "httpx>=0.28.1",
     "cryptography>=50.0.2",
+    "procrastinate>=3.11.0",
 ]
 
 [dependency-groups]
