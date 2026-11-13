@@ -22,7 +22,13 @@ from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.accounts import get_account
-from lararium.modules.finance.ledger import void_transaction
+from lararium.modules.finance.instruments import get_currency
+from lararium.modules.finance.ledger import (
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+    void_transaction,
+)
 from lararium.modules.finance.monzo.normalize import (
     NORMALIZER_VERSION,
     FetchedRecord,
@@ -465,6 +471,48 @@ async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None
     # Matching again resets the memory: the same difference later is news again.
     await reconcile(26000)
     assert len(notifier.messages) == 3
+
+
+async def test_reconciliation_counts_manual_postings(session, run) -> None:
+    connection = await _connection(run)
+    history = [make_transaction(id="tx_TEST0001", amount=15000, created="2026-03-01T12:00:00.000Z")]
+    await _normalize(session, connection, transactions=history)  # creates the accounts
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    unassigned = await _unassigned(run)
+    gbp = await get_currency(session, "GBP")
+
+    async def post_manual(amount: str) -> None:
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=datetime(2026, 3, 2, 12, tzinfo=UTC),
+                description="Manual",
+                postings=[
+                    PostingInput(main, gbp.id, Decimal(amount)),
+                    PostingInput(unassigned, gbp.id, -Decimal(amount)),
+                ],
+            ),
+        )
+
+    await post_manual("10.00")
+    # The opening absorbs the manual posting (balance 250 = 150 + 10 + opening 90)...
+    report = await _normalize(
+        session, connection, transactions=history, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID]
+    )
+    assert report.mismatches == []
+    # ...and reconciling again, opening recomputed or not, must still count it.
+    report = await _normalize(
+        session, connection, transactions=history, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID]
+    )
+    assert report.mismatches == []
+    assert await _warnings(session, connection) == []
+
+    await post_manual("5.00")  # a later manual posting is reported exactly
+    report = await _normalize(session, connection, transactions=history, reconciled=[ACCOUNT_ID])
+
+    assert len(report.mismatches) == 1
+    (warning,) = await _warnings(session, connection)
+    assert "(difference -5.00 GBP)" in warning
 
 
 async def test_reconciliation_keeps_other_warnings(session, run) -> None:

@@ -136,16 +136,14 @@ async def _ledger_balance(
     """Everything posted to the account in the instrument, pending included, void excluded,
     and so is the transaction with the external id `excluding`."""
     t, p = models.Transaction, models.Posting
-    total = await session.scalar(
+    query = (
         select(func.sum(p.quantity))
         .join(t, t.id == p.transaction_id)
-        .where(
-            p.account_id == account_id,
-            p.instrument_id == instrument_id,
-            t.status != "void",
-            t.external_id.is_distinct_from(excluding),
-        )
+        .where(p.account_id == account_id, p.instrument_id == instrument_id, t.status != "void")
     )
+    if excluding is not None:  # IS DISTINCT FROM NULL would drop manual postings (NULL id)
+        query = query.where(t.external_id.is_distinct_from(excluding))
+    total = await session.scalar(query)
     return total if total is not None else Decimal(0)
 
 
