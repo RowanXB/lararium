@@ -115,8 +115,8 @@ class MonzoClient:
         data: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         # Only reads are retried: repeating a write could apply it twice.
-        delays = RETRY_DELAYS if method == "GET" else ()
-        for attempt in range(len(delays) + 1):
+        delays = iter(RETRY_DELAYS if method == "GET" else ())
+        while True:
             response = await self._http.request(
                 method,
                 f"{API}{path}",
@@ -124,9 +124,10 @@ class MonzoClient:
                 data=data,
                 headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
             )
-            if attempt == len(delays) or not _transient(response):
+            backoff = next(delays, None) if _transient(response) else None
+            if backoff is None:
                 break
-            await self._sleep(_retry_delay(response, delays[attempt]))
+            await self._sleep(_retry_delay(response, backoff))
         raise_for_error(response)
         if not response.content:
             return {}
