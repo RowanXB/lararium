@@ -31,6 +31,7 @@ from lararium.core.notify import Notifier, notifier_from_settings
 from lararium.core.secrets import Secret
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
+from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.monzo.webhooks import process_inbox
 from lararium.worker.app import defer_sync, procrastinate_app
 
@@ -104,7 +105,7 @@ async def run_sync(
     except Exception as exc:
         # command_context has rolled the failed sync back; record the failure on its own.
         rejected = isinstance(exc, CredentialRejectedError)
-        error = (str(exc) if rejected else f"{type(exc).__name__}: {exc}")[:MAX_ERROR_LENGTH]
+        error = _describe(exc)[:MAX_ERROR_LENGTH]
         logger.warning("sync of connection %s failed: %s", connection_id, type(exc).__name__)
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
             failures = await record_sync_failure(ctx, connection_id, error)
@@ -128,6 +129,19 @@ async def run_sync(
 
     if recovered:
         await _notify(notifier, f"{connection.display_name} has recovered and is syncing again.")
+
+
+def _describe(exc: Exception) -> str:
+    """What last_error (and the owner's notification) says about a failed sync.
+
+    Raw exception text can quote anything, an upstream response included, so only messages
+    written to be shown are: a rejection's, and a MonzoApiError's (its status and code).
+    """
+    if isinstance(exc, CredentialRejectedError):
+        return str(exc)
+    if isinstance(exc, MonzoApiError):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
 
 
 def _webhook_target(settings: Settings) -> WebhookTarget | None:

@@ -26,6 +26,7 @@ from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
+from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.worker import jobs
 from lararium.worker.app import defer_sync, procrastinate_app
 
@@ -171,7 +172,7 @@ async def test_failure_marks_failing(session, run, fake, notifier) -> None:
 
     after = await get_connection(session, connection.id)
     assert (after.status, after.consecutive_failures) == ("failing", 1)
-    assert after.last_error == "RuntimeError: upstream down"
+    assert after.last_error == "RuntimeError"
     assert after.cursor is None
     assert notifier.messages == []
 
@@ -197,6 +198,34 @@ async def test_third_failure_notifies_once(session, run, fake, notifier) -> None
     assert len(notifier.messages) == 2
     assert "recovered" in notifier.messages[1]
     assert "Fake bank" in notifier.messages[1]
+
+
+async def test_last_error_and_notification_carry_no_exception_text(
+    session, run, fake, notifier
+) -> None:
+    connection = await _healthy_connection(run)
+    # Exception messages can quote anything, such as an upstream response.
+    fake.error = ValueError("account 12345678 sort code 04-00-04: unexpected field")
+
+    for _ in range(3):
+        await _run_sync(session, connection, notifier)
+
+    after = await get_connection(session, connection.id)
+    assert after.last_error == "ValueError"
+    (message,) = notifier.messages
+    assert "ValueError" in message
+    for shown in (after.last_error, message):
+        assert "12345678" not in shown and "04-00-04" not in shown
+
+
+async def test_last_error_names_the_monzo_error_code(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+    fake.error = MonzoApiError(500, "internal_service")
+
+    await _run_sync(session, connection, notifier)
+
+    after = await get_connection(session, connection.id)
+    assert after.last_error == "MonzoApiError: Monzo API error 500: internal_service"
 
 
 async def test_credential_rejected_sets_needs_reauth(session, run, fake, notifier) -> None:
