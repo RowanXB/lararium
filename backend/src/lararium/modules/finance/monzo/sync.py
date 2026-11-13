@@ -73,7 +73,8 @@ class MonzoConnector:
                 connector_version=VERSION,
                 sync_id=ctx.sync_id,
             )
-            fetched.append(FetchedRecord(record_id, request))
+            # Called right after each response arrives, so this is its fetch time.
+            fetched.append(FetchedRecord(record_id, request, datetime.now(UTC)))
 
         warnings: list[str] = []
         accounts = await client.accounts()

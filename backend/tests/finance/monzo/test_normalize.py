@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -30,6 +30,7 @@ from lararium.modules.finance.monzo.normalize import (
     to_quantity,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
+from lararium.modules.finance.valuation import balances_asof
 
 from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_transaction
 
@@ -80,7 +81,7 @@ async def _normalize(
                 connector_version="monzo-sync-1",
                 sync_id=sync_id,
             )
-            fetched.append(FetchedRecord(record_id, request))
+            fetched.append(FetchedRecord(record_id, request, datetime.now(UTC)))
 
         await store("accounts", {}, [make_account()])
         await store("balance", {"account_id": ACCOUNT_ID}, make_balance(balance=balance))
@@ -156,7 +157,7 @@ async def test_creates_accounts_and_pot_children(session, run) -> None:
         "transactions",
     )
     assert (main.source_kind, main.source_connection_id) == ("connection", connection.id)
-    assert (pot.name, pot.subtype, pot.balance_mode) == ("Savings", "savings_pot", "snapshots")
+    assert (pot.name, pot.subtype, pot.balance_mode) == ("Savings", "savings_pot", "hybrid")
     assert pot.parent_account_id == main.id
     assert pot.source_connection_id == connection.id
     snapshots = list(
@@ -168,6 +169,51 @@ async def test_creates_accounts_and_pot_children(session, run) -> None:
     assert by_account[pot.id] == (Decimal("50.00"), "reported")
     # The main account's reported balance is kept too, for reconciliation views.
     assert by_account[main.id] == (Decimal("250.00"), "reported")
+
+
+def _iso(value: datetime) -> str:
+    return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
+
+
+async def test_pot_history_before_first_snapshot(session, run) -> None:
+    connection = await _connection(run)
+    now = datetime.now(UTC)
+    history = [
+        make_transaction(id="tx_TEST0001", amount=30000, created=_iso(now - timedelta(days=20))),
+        make_transaction(
+            id="tx_TEST0002",
+            amount=-5000,
+            created=_iso(now - timedelta(days=10)),
+            metadata={"pot_id": "pot_TEST1"},
+        ),
+    ]
+
+    await _normalize(
+        session,
+        connection,
+        transactions=history,
+        balance=25000,
+        pots=[make_pot(balance=5000)],
+        backfilled=[ACCOUNT_ID],
+        first_backfills=[ACCOUNT_ID],
+    )
+
+    account_map = await _account_map(session, connection)
+    main, pot = account_map[ACCOUNT_ID], account_map["pot_TEST1"]
+
+    async def on(day: date) -> dict[uuid.UUID, Decimal]:
+        rows = await balances_asof(session, day)
+        return {r.account_id: r.quantity for r in rows if r.account_id in (main, pot)}
+
+    today = now.date()
+    before_move = await on(today - timedelta(days=15))
+    after_move = await on(today - timedelta(days=5))
+    assert sum(before_move.values()) == Decimal("300.00")
+    # The pot move only moves money: before the pot's first snapshot, its moves value it.
+    assert sum(after_move.values()) == Decimal("300.00")
+    assert after_move[pot] == Decimal("50.00")
+    current = await on(today + timedelta(days=1))
+    assert current[pot] == Decimal("50.00")  # the snapshot, the move not counted twice
 
 
 async def test_deleted_pot_is_closed(session, run) -> None:

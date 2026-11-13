@@ -3,8 +3,9 @@
 Deterministic from its inputs and versioned (NORMALIZER_VERSION), so the ledger can later be
 regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 
-- each Monzo account is a transactions-mode bank account; each pot a snapshots-mode child of
-  it, fed by the pot balance on every sync; a deleted pot is closed;
+- each Monzo account is a transactions-mode bank account; each pot a hybrid-mode child of it
+  (ruling R14), valued by its moves before its first snapshot and by the pot balance fetched
+  on each sync afterwards; a deleted pot is closed;
 - each non-declined transaction is one ledger transaction keyed by its Monzo id, posted
   against the pot's account for a pot move and against "Unassigned" otherwise; when it changes
   upstream it is replaced in place, and a pending one that comes back declined or zero is
@@ -60,14 +61,16 @@ _ACCOUNT_NAMES = {"uk_retail": "Monzo", "uk_retail_joint": "Monzo Joint"}
 
 @dataclass(frozen=True)
 class FetchedRecord:
-    """One response the sync stored: its raw record and the request that fetched it.
+    """One response the sync stored: its raw record, the request that fetched it, and when.
 
-    The request travels with the id because raw records are deduplicated by content: two
-    accounts whose balances read the same share one record, stored with the first request.
+    The request and time travel with the id because raw records are deduplicated by content:
+    two accounts whose balances read the same share one record, stored with the first request,
+    and a response seen again keeps the record's first fetch time.
     """
 
     record_id: UUID
     request: dict[str, JSONValue]
+    fetched_at: datetime
 
 
 @dataclass
@@ -152,16 +155,34 @@ async def _earliest_posting(
     return None if row is None else (row.occurred_at, row.booking_date)
 
 
-async def _latest_snapshot(
-    session: AsyncSession, account_id: UUID, instrument_id: UUID
-) -> Decimal | None:
-    s = models.BalanceSnapshot
-    return await session.scalar(
-        select(s.quantity)
-        .where(s.account_id == account_id, s.instrument_id == instrument_id)
-        .order_by(s.as_of.desc(), s.recorded_at.desc())
-        .limit(1)
+async def _snapshot_still_holds(
+    session: AsyncSession, account_id: UUID, instrument_id: UUID, quantity: Decimal
+) -> bool:
+    """Whether the latest snapshot already says `quantity` with nothing posted after it, so a
+    new one would add nothing (a hybrid account counts postings made after its snapshot)."""
+    s, t, p = models.BalanceSnapshot, models.Transaction, models.Posting
+    latest = (
+        await session.execute(
+            select(s.quantity, s.as_of)
+            .where(s.account_id == account_id, s.instrument_id == instrument_id)
+            .order_by(s.as_of.desc(), s.recorded_at.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+    if latest is None or latest.quantity != quantity:
+        return False
+    posted_since = await session.scalar(
+        select(func.count())
+        .select_from(p)
+        .join(t, t.id == p.transaction_id)
+        .where(
+            p.account_id == account_id,
+            p.instrument_id == instrument_id,
+            t.status != "void",
+            t.occurred_at > latest.as_of,
+        )
     )
+    return posted_since == 0
 
 
 class _Normalizer:
@@ -170,7 +191,6 @@ class _Normalizer:
         self.session = ctx.command.session
         self.connection_id = ctx.connection.id
         self.tz = tz
-        # Each sync observes balances now; a deduplicated raw record keeps its first fetch time.
         self.observed_at = datetime.now(UTC)
         stored_map = config.get(ACCOUNT_MAP_KEY)
         self.account_map: dict[str, JSONValue] = (
@@ -200,18 +220,21 @@ class _Normalizer:
             raise ValueError(f"Monzo account {monzo_id} has no finance account")
         return account_id
 
-    async def snapshot(self, account_id: UUID, minor_units: int, currency_code: str) -> None:
-        """Record the reported balance, unless it is what the latest snapshot already says."""
+    async def snapshot(
+        self, account_id: UUID, minor_units: int, currency_code: str, as_of: datetime
+    ) -> None:
+        """Record the balance reported at `as_of` (when it was fetched), unless the latest
+        snapshot already accounts for it."""
         currency = await self.currency(currency_code)
         quantity = to_quantity(minor_units, currency.decimals)
-        if await _latest_snapshot(self.session, account_id, currency.id) == quantity:
+        if await _snapshot_still_holds(self.session, account_id, currency.id, quantity):
             return
         await record_snapshot(
             self.command,
             account_id=account_id,
             instrument_id=currency.id,
             quantity=quantity,
-            as_of=self.observed_at,
+            as_of=as_of,
             kind="reported",
         )
 
@@ -236,7 +259,7 @@ class _Normalizer:
         )
         self.account_map[monzo_id] = str(created.id)
 
-    async def pot(self, pot: dict[str, Any], parent_monzo_id: str) -> None:
+    async def pot(self, pot: dict[str, Any], parent_monzo_id: str, fetched_at: datetime) -> None:
         pot_id: str = pot["id"]
         account_id = self.mapped(pot_id)
         if account_id is None:
@@ -247,7 +270,8 @@ class _Normalizer:
                 name=str(pot.get("name") or "Pot"),
                 ledger_type="asset",
                 subtype="savings_pot",
-                balance_mode="snapshots",
+                # Hybrid: its moves value it until the first snapshot, then postings after it.
+                balance_mode="hybrid",
                 institution_entity_id=await get_or_create_organization(self.command, "Monzo"),
                 parent_account_id=self.require_mapped(parent_monzo_id),
                 opened_on=local_date(_parse(pot["created"]), self.tz),
@@ -255,7 +279,7 @@ class _Normalizer:
             )
             account_id = created.id
             self.account_map[pot_id] = str(account_id)
-        await self.snapshot(account_id, pot["balance"], pot["currency"])
+        await self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
         if pot.get("deleted") and (await get_account(self.session, account_id)).status == "open":
             await close_account(self.command, account_id, local_date(self.observed_at, self.tz))
 
@@ -410,26 +434,28 @@ async def normalize(
     n = _Normalizer(ctx, await get_timezone(session), connection.config)
     records = await get_raw_records(session, [f.record_id for f in fetched])
     responses = [
-        (record.record_type, f.request, cast(Any, record.content))
+        (record.record_type, f.request, f.fetched_at, cast(Any, record.content))
         for f, record in zip(fetched, records, strict=True)
     ]
 
     accounts: dict[str, dict[str, Any]] = {}
-    for record_type, _, content in responses:
+    for record_type, _, _, content in responses:
         if record_type == "accounts":
             for account in content:
                 accounts[account["id"]] = account
                 await n.account(account)
     balances: dict[str, dict[str, Any]] = {}
-    for record_type, request, content in responses:
+    for record_type, request, fetched_at, content in responses:
         if record_type == "pots":
             for pot in content:
-                await n.pot(pot, str(request["current_account_id"]))
+                await n.pot(pot, str(request["current_account_id"]), fetched_at)
         elif record_type == "balance":
             monzo_id = str(request["account_id"])
             balances[monzo_id] = content
-            await n.snapshot(n.require_mapped(monzo_id), content["balance"], content["currency"])
-    for record_type, request, content in responses:
+            await n.snapshot(
+                n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
+            )
+    for record_type, request, _, content in responses:
         if record_type == "transactions_page":
             for tx in content:
                 await n.transaction(tx, str(request["account_id"]))
