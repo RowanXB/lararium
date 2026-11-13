@@ -546,9 +546,10 @@ api 和 worker 是同一套 Python 代码跑成的两个进程。整个后端是
 
 - **英国银行的自动同步方案**（第二阶段才需要）：Enable Banking 官方写的覆盖范围是 EEA 的 30 个国家，英国不在 EEA 内，是否支持英国的银行没有确认。到第二阶段时，可以注册后在它的控制台里按国家查看可选的银行；不支持的话，另找覆盖英国、个人可用的聚合服务。
 - **eToro 的 key 能不能设成只读**：实现 M8 前核实。
-- **TODO：入口加固。** api 信任 `Tailscale-User-Login` 请求头，只有在除了 `tailscale serve` 谁都连不到 `web` 和 `api` 容器时才安全。目前这一点依赖 Docker Engine 28 或更新版本。计划分两阶段修：
-  1. **隔离。** 把 Tailscale 作为边车容器运行，`web` 和 `api` 共用它的网络空间，只监听回环地址；整套服务除了一个固定的 WireGuard UDP 端口，不发布任何端口。Postgres 的 `pg_hba` 只允许 compose 内部网段连接。这样就不再依赖主机的 Docker 版本和 Tailscale 安装（比如群晖的 Docker 24，或 Windows Server）。在 Docker 低于 28 的主机上部署之前完成。
-  2. **认人。** api 改用 Tailscale 的 whois 识别调用方，不再信任请求头。等到第一个跑在带标签节点上的客户端（AI 助手、MCP 或脚本）出现时再做；届时核实 `tailscale serve` 对带标签节点是否发送身份头。
+- **TODO：入口加固。** api 信任 `Tailscale-User-Login` 请求头，所以任何不经过 `tailscale serve`、直接连到 Caddy（`127.0.0.1:8080`）的一方都能冒充 owner。能直接连到的有两类：
+  1. **主机是 Linux、Docker Engine 低于 28 时，局域网里的其他机器。** 这些版本允许局域网绕过 `127.0.0.1` 绑定，直接路由到容器地址。Docker Desktop（macOS、Windows）不受影响，因为局域网连不到它的虚拟机。在这类主机（比如群晖的 Docker 24）上部署之前，先升级 Docker，或者加一条主机防火墙规则。把 Tailscale 作为边车容器运行也能摆脱对主机的依赖，但要多一个 auth key、一个状态卷和一个 tailnet 节点，只有在本身就想不依赖主机环境时才值得做。如果做，要保持可选：用 `-f` 叠加一个 compose 覆盖文件，就能在边车和主机上的 `tailscale serve` 之间切换，镜像和 api 代码都不变（两种方式都通过同一个请求头传递身份）。
+  2. **主机上的任何进程。** 单用户主机上接受这个风险。
+- **TODO：非浏览器客户端的身份识别。** 等到第一个跑在带标签节点上的客户端（AI 助手、MCP 或脚本）出现时，核实 `tailscale serve` 是否给它发送身份头。如果不发，届时在 Tailscale 的 whois 和每个客户端单独的 API token 之间选；token 不会让 api 更依赖 Tailscale。
 
 ## 18. 参考
 
