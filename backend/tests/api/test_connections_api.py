@@ -299,6 +299,14 @@ async def test_config_writes_keep_the_account_map(api, session, run, queue) -> N
     assert config == {"client_id": "oauth2client_TEST1", "account_map": account_map}
 
 
+async def test_redirect_uri_ignores_a_trailing_slash(session, sessions, monzo) -> None:
+    async for api in _client(_settings(public_base_url=f"{BASE_URL}/"), session, sessions, monzo):
+        created = await _create(api)
+
+    assert created["redirect_uri"] == REDIRECT_URI
+    assert "//api" not in created["redirect_uri"]
+
+
 async def test_public_base_url_required(session, sessions, monzo, run) -> None:
     async for api in _client(_settings(public_base_url=None), session, sessions, monzo):
         response = await api.post(

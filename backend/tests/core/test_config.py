@@ -12,6 +12,7 @@ MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 @pytest.fixture(autouse=True)
 def _no_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LARARIUM_PUBLIC_BASE_URL", raising=False)
     monkeypatch.delenv("LARARIUM_AUTH_MODE", raising=False)
     monkeypatch.delenv("LARARIUM_OWNER_LOGIN", raising=False)
     monkeypatch.delenv("LARARIUM_MASTER_KEY", raising=False)
@@ -90,3 +91,29 @@ def test_webhook_secret_must_be_at_least_32_characters(secret: str) -> None:
         Settings(database_url=DATABASE_URL, auth_mode="dev", webhook_secret=secret)
     with pytest.raises(ValidationError, match="at least 32"):
         WebhookInSettings(database_url=DATABASE_URL, webhook_secret=secret)
+
+
+def test_public_base_url_has_no_trailing_slash() -> None:
+    settings = Settings(database_url=DATABASE_URL, auth_mode="dev", public_base_url="https://host/")
+    assert settings.public_base_url == "https://host"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "not base64!",
+        base64.b64encode(bytes(31)).decode(),
+        base64.b64encode(bytes(33)).decode(),
+    ],
+    ids=["bad-base64", "31-bytes", "33-bytes"],
+)
+@pytest.mark.parametrize("auth_mode", ["dev", "tailscale"])
+def test_malformed_master_key_fails_at_startup(key: str, auth_mode: str) -> None:
+    with pytest.raises(ValidationError, match="master key must be base64 of 32 bytes") as raised:
+        Settings(
+            database_url=DATABASE_URL,
+            auth_mode=auth_mode,  # pyright: ignore[reportArgumentType]
+            owner_login="me@example.com",
+            master_key=key,  # pyright: ignore[reportArgumentType]
+        )
+    assert key not in str(raised.value)

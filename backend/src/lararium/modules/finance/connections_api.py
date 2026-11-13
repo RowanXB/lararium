@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, SecretStr
 
-from lararium.config import Settings
+from lararium.config import Settings, load_master_key
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import (
@@ -33,7 +33,6 @@ from lararium.core.connections import (
     transition_status,
 )
 from lararium.core.errors import ConnectionNotFoundError, CredentialRejectedError
-from lararium.core.secrets import load_master_key
 from lararium.deps import (
     ActorDep,
     SessionDep,

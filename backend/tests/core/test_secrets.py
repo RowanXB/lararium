@@ -3,8 +3,9 @@ import base64
 import pytest
 from pydantic import SecretStr
 
+from lararium.config import load_master_key
 from lararium.core.errors import CredentialDecryptError
-from lararium.core.secrets import Secret, decrypt, encrypt, load_master_key
+from lararium.core.secrets import Secret, decrypt, encrypt
 
 KEY = bytes(range(32))
 

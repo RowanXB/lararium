@@ -13,7 +13,7 @@ from procrastinate.manager import JobManager
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lararium.config import Settings, get_settings
+from lararium.config import Settings, get_settings, load_master_key
 from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
@@ -28,7 +28,7 @@ from lararium.core.connectors import SyncContext, WebhookTarget
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.models import Connection
 from lararium.core.notify import Notifier, notifier_from_settings
-from lararium.core.secrets import Secret, load_master_key
+from lararium.core.secrets import Secret
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.modules.finance.monzo.webhooks import process_inbox

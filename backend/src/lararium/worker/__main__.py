@@ -5,7 +5,6 @@ import logging
 from lararium.config import get_settings
 from lararium.worker.app import procrastinate_app
 
-
 # httpx logs every request's full URL at INFO, and httpcore its connections at DEBUG; the
 # Feishu hook URL carries the bot's token, and Monzo URLs carry account ids.
 QUIET_LOGGERS = ("httpx", "httpcore")

@@ -1,9 +1,28 @@
+import base64
+import binascii
 import re
 from functools import lru_cache
 from typing import Literal, Self
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Decoded here rather than in lararium.core.secrets, which encrypts with it: the webhook
+# receiver imports this module and nothing from core.
+MASTER_KEY_BYTES = 32
+
+
+def load_master_key(value: SecretStr) -> bytes:
+    """Decode the base64 master key; it must be exactly 32 bytes."""
+    # The messages never include the value.
+    try:
+        key = base64.b64decode(value.get_secret_value(), validate=True)
+    except binascii.Error:
+        raise ValueError("the master key must be base64 of 32 bytes") from None
+    if len(key) != MASTER_KEY_BYTES:
+        raise ValueError(f"the master key must be base64 of 32 bytes, got {len(key)} bytes")
+    return key
+
 
 # The webhook secret is a path segment of the URL providers deliver to, so it must need no
 # escaping (RFC 3986 unreserved characters), e.g. `openssl rand -hex 32`.
@@ -28,7 +47,8 @@ def _check_webhook_secret(value: SecretStr | None) -> SecretStr | None:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="LARARIUM_")
+    # Errors name the field, never its value: several fields hold secrets.
+    model_config = SettingsConfigDict(env_prefix="LARARIUM_", hide_input_in_errors=True)
 
     database_url: str
     auth_mode: Literal["dev", "tailscale"] = "tailscale"
@@ -50,7 +70,7 @@ class Settings(BaseSettings):
     def _empty_is_unset(cls, value: object) -> object:
         return None if value == "" else value
 
-    @field_validator("webhook_base_url")
+    @field_validator("public_base_url", "webhook_base_url")
     @classmethod
     def _no_trailing_slash(cls, value: str | None) -> str | None:
         return None if value is None else value.rstrip("/") or None
@@ -59,6 +79,14 @@ class Settings(BaseSettings):
     @classmethod
     def _url_safe_secret(cls, value: SecretStr | None) -> SecretStr | None:
         return _check_webhook_secret(value)
+
+    @field_validator("master_key")
+    @classmethod
+    def _usable_master_key(cls, value: SecretStr | None) -> SecretStr | None:
+        # A malformed key fails here, at startup, not at the first sync. Empty is checked below.
+        if value is not None and value.get_secret_value():
+            load_master_key(value)
+        return value
 
     def webhook(self) -> tuple[str, SecretStr] | None:
         """The webhook base URL and secret, or None unless both are set."""
