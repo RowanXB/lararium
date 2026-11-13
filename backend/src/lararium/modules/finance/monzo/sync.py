@@ -13,10 +13,12 @@ from lararium.modules.finance.monzo.auth import access_token_for
 from lararium.modules.finance.monzo.client import (
     EXPAND,
     PAGE_SIZE,
+    MonzoApiError,
     MonzoClient,
     NotYetApprovedError,
 )
 from lararium.modules.finance.monzo.normalize import FetchedRecord, normalize
+from lararium.modules.finance.monzo.webhooks import ensure_webhooks
 
 VERSION = "monzo-sync-1"
 # Re-fetched on every incremental sync: pending transactions settle or change after creation.
@@ -24,6 +26,8 @@ OVERLAP = timedelta(days=14)
 # Outside the approval window Monzo serves 90 days; stay one day inside it.
 MAX_LOOKBACK = timedelta(days=89)
 TRUNCATION_GRACE = timedelta(days=7)
+# Replaced on every sync: the warning is current until registration next succeeds.
+WEBHOOK_WARNING = "Monzo webhooks could not be updated"
 
 
 def _parse(value: str) -> datetime:
@@ -93,6 +97,19 @@ class MonzoConnector:
         warnings: list[str] = []
         accounts = await client.accounts()
         await store("accounts", {}, accounts)
+        if ctx.webhook is not None:
+            # Not stored as raw records: the registered URLs carry the secret.
+            open_accounts = [a["id"] for a in accounts if not a.get("closed")]
+            try:
+                await ensure_webhooks(
+                    client, open_accounts, ctx.webhook.base_url, ctx.webhook.secret
+                )
+            except Exception as exc:
+                # Best effort: without webhooks, syncs still run on the schedule. A
+                # MonzoApiError names only the status and Monzo's code; any other error only
+                # its type, as its message may quote the URL.
+                reason = str(exc) if isinstance(exc, MonzoApiError) else type(exc).__name__
+                warnings.append(f"{WEBHOOK_WARNING} ({reason}); syncing on the schedule only")
         # Accounts missing from this response keep their state, in case they come back.
         cursor = connection.cursor
         previous = cursor.get("accounts") if isinstance(cursor, dict) else None
@@ -152,7 +169,8 @@ class MonzoConnector:
         current = await get_connection(ctx.command.session, connection.id)
         if full_backfill:
             await update_config(ctx.command, connection.id, remove=["backfill_requested"])
-        merged = current.warnings + [w for w in warnings if w not in current.warnings]
+        kept = [w for w in current.warnings if not w.startswith(WEBHOOK_WARNING)]
+        merged = kept + [w for w in warnings if w not in kept]
         if merged != current.warnings:
             await set_warnings(ctx.command, connection.id, merged)
         await normalize(

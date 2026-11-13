@@ -245,6 +245,20 @@ async def test_create_connection_hides_secret(api, session) -> None:
     }
 
 
+async def test_webhook_enabled_when_base_url_and_secret_set(session, sessions, monzo) -> None:
+    secret = "whsec-TEST-0123456789abcdef"
+    settings = _settings(
+        webhook_base_url="https://hooks.lararium.example", webhook_secret=SecretStr(secret)
+    )
+    async for api in _client(settings, session, sessions, monzo):
+        created = await _create(api)
+        listed = await api.get("/api/v1/connections", headers=OWNER)
+
+    assert created["webhook_enabled"] is True
+    assert listed.json()[0]["webhook_enabled"] is True
+    assert secret not in str(created) + listed.text
+
+
 async def test_authorize_returns_monzo_url_and_stores_state_hash(api, session) -> None:
     created = await _create(api)
     before = datetime.now(UTC)

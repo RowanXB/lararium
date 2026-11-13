@@ -23,13 +23,14 @@ from lararium.core.connections import (
     transition_status,
     update_config,
 )
-from lararium.core.connectors import SyncContext
+from lararium.core.connectors import SyncContext, WebhookTarget
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.models import Connection
 from lararium.core.notify import Notifier, notifier_from_settings
-from lararium.core.secrets import load_master_key
+from lararium.core.secrets import Secret, load_master_key
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
+from lararium.modules.finance.monzo.webhooks import process_inbox
 from lararium.worker.app import defer_sync, procrastinate_app
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ async def run_sync(
                     http=http,
                     notifier=notifier,
                     session_factory=session_factory,
+                    webhook=_webhook_target(settings),
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
@@ -125,6 +127,14 @@ async def run_sync(
 
     if recovered:
         await _notify(notifier, f"{connection.display_name} has recovered and is syncing again.")
+
+
+def _webhook_target(settings: Settings) -> WebhookTarget | None:
+    webhook = settings.webhook()
+    if webhook is None:
+        return None
+    base_url, secret = webhook
+    return WebhookTarget(base_url, Secret(secret.get_secret_value()))
 
 
 def _master_key(settings: Settings) -> bytes:
@@ -325,5 +335,13 @@ async def schedule_syncs(timestamp: int) -> None:
 @procrastinate_app.periodic(cron="* * * * *")
 @procrastinate_app.task(name="process_webhook_inbox")
 async def process_webhook_inbox(timestamp: int) -> int:
-    """Turn queued webhook deliveries into syncs. The body arrives with the webhook task."""
-    return 0
+    """Turn stored webhook deliveries into syncs; the queueing lock drops duplicates."""
+    engine = create_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as session:
+            processed = await process_inbox(session, defer=defer_sync)
+    finally:
+        await engine.dispose()
+    if processed:
+        logger.info("processed %d webhook deliveries", processed)
+    return processed

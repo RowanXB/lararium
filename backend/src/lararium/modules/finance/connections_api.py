@@ -160,8 +160,9 @@ def _out(record: ConnectionRecord, settings: Settings) -> ConnectionOut:
         credential_expires_at=record.credential_expires_at,
         warnings=record.warnings,
         redirect_uri=_redirect_uri(settings),
-        # No webhook receiver is configured yet: the 30-minute schedule is the only trigger.
-        webhook_enabled=False,
+        # Only whether webhooks are configured: never the secret. Without them, the 30-minute
+        # schedule is the only trigger.
+        webhook_enabled=settings.webhook() is not None,
     )
 
 

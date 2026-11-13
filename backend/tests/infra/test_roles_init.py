@@ -14,6 +14,7 @@ INIT_SCRIPT = INFRA_POSTGRES / "init" / "00-roles.sh"
 # Quotes, a backslash and a space: anything that would break naive quoting.
 OWNER_PW = "o'w\\ner pw"
 BACKEND_PW = "b\"a:ck'end"
+WEBHOOK_IN_PW = "w$e b\\hook'in"
 
 
 def test_passwords_are_not_on_the_psql_command_line() -> None:
@@ -30,6 +31,7 @@ def initialised() -> Iterator[PostgresContainer]:
         PostgresContainer("postgres:18")
         .with_env("LARARIUM_OWNER_PASSWORD", OWNER_PW)
         .with_env("LARARIUM_BACKEND_PASSWORD", BACKEND_PW)
+        .with_env("LARARIUM_WEBHOOK_IN_PASSWORD", WEBHOOK_IN_PW)
         .with_volume_mapping(str(INFRA_POSTGRES), "/lararium", mode="ro")
         .with_volume_mapping(str(INFRA_POSTGRES / "init"), "/docker-entrypoint-initdb.d", mode="ro")
     )
@@ -38,7 +40,12 @@ def initialised() -> Iterator[PostgresContainer]:
 
 
 @pytest.mark.parametrize(
-    ("user", "password"), [("lararium_owner", OWNER_PW), ("lararium_backend", BACKEND_PW)]
+    ("user", "password"),
+    [
+        ("lararium_owner", OWNER_PW),
+        ("lararium_backend", BACKEND_PW),
+        ("lararium_webhook_in", WEBHOOK_IN_PW),
+    ],
 )
 def test_roles_log_in_to_lararium(initialised: PostgresContainer, user: str, password: str) -> None:
     with psycopg.connect(

@@ -10,6 +10,11 @@ from sqlalchemy.ext.asyncio import (
 STATEMENT_TIMEOUT = "30s"
 
 
+def psycopg_dsn(database_url: str) -> str:
+    """The SQLAlchemy URL as a plain libpq DSN, for code that uses psycopg directly."""
+    return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
 def create_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url, connect_args={"options": f"-c statement_timeout={STATEMENT_TIMEOUT}"}

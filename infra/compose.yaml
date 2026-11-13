@@ -10,6 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
       LARARIUM_OWNER_PASSWORD: ${LARARIUM_OWNER_PASSWORD:?set LARARIUM_OWNER_PASSWORD in infra/.env}
       LARARIUM_BACKEND_PASSWORD: ${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}
+      LARARIUM_WEBHOOK_IN_PASSWORD: ${LARARIUM_WEBHOOK_IN_PASSWORD:?set LARARIUM_WEBHOOK_IN_PASSWORD in infra/.env}
     volumes:
       - pgdata:/var/lib/postgresql
       - ./postgres:/lararium:ro

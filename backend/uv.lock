@@ -666,9 +666,11 @@ dependencies = [
     { name = "httpx" },
     { name = "procrastinate" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -691,9 +693,11 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "procrastinate", specifier = ">=3.11.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "psycopg-pool", specifier = ">=3.3.3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "starlette", specifier = ">=1.10.0" },
     { name = "tzdata" },
     { name = "uvicorn", extras = ["standard"] },
 ]

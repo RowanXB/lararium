@@ -6,11 +6,7 @@ from uuid import UUID
 from procrastinate import App, PsycopgConnector
 from procrastinate import exceptions as procrastinate_exceptions
 
-
-def psycopg_dsn(database_url: str) -> str:
-    """The SQLAlchemy URL as a plain libpq DSN."""
-    return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
-
+from lararium.db import psycopg_dsn
 
 # Procrastinate's SQL functions refer to its tables unqualified, hence the search_path.
 # Nothing connects until the app is opened, so an unset URL only fails at worker start-up,

@@ -15,6 +15,8 @@ dependencies = [
     "httpx>=0.28.1",
     "cryptography>=50.0.2",
     "procrastinate>=3.11.0",
+    "starlette>=1.10.0",
+    "psycopg-pool>=3.3.3",
 ]
 
 [dependency-groups]
@@ -67,3 +69,15 @@ name = "modules do not depend on api"
 type = "forbidden"
 source_modules = ["lararium.modules"]
 forbidden_modules = ["lararium.api"]
+
+[[tool.importlinter.contracts]]
+name = "the webhook receiver uses only config and db"
+type = "forbidden"
+source_modules = ["lararium.webhook_in"]
+forbidden_modules = [
+    "lararium.api",
+    "lararium.core",
+    "lararium.deps",
+    "lararium.modules",
+    "lararium.worker",
+]

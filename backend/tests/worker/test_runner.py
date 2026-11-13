@@ -124,6 +124,42 @@ async def test_run_sync_success_records_cursor(session, run, fake, notifier) -> 
     assert audit == 1
 
 
+async def test_run_sync_passes_the_webhook_target(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+    settings = Settings(
+        database_url="postgresql+psycopg://x@localhost/x",
+        auth_mode="dev",
+        master_key=SecretStr(base64.b64encode(bytes(range(32))).decode()),
+        webhook_base_url="https://hooks.lararium.example/",
+        webhook_secret=SecretStr("whsec-TEST"),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(404))
+    ) as http:
+        await jobs.run_sync(
+            session,
+            connection.id,
+            settings=settings,
+            http=http,
+            notifier=notifier,
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+
+    webhook = fake.seen[0].webhook
+    assert webhook is not None
+    assert webhook.base_url == "https://hooks.lararium.example"
+    assert webhook.secret.reveal() == "whsec-TEST"
+    assert "whsec-TEST" not in repr(fake.seen[0])
+
+
+async def test_run_sync_without_webhook_settings_passes_none(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+
+    await _run_sync(session, connection, notifier)
+
+    assert fake.seen[0].webhook is None
+
+
 async def test_failure_marks_failing(session, run, fake, notifier) -> None:
     connection = await _healthy_connection(run)
     fake.error = RuntimeError("upstream down")

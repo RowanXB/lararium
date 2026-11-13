@@ -11,10 +11,20 @@ from lararium.core.commands import CommandContext
 from lararium.core.connections import ConnectionRecord
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import Notifier
+from lararium.core.secrets import Secret
 
 Capability = Literal[
     "balances", "holdings", "transactions", "webhook", "device_push", "outbound_actions"
 ]
+
+
+@dataclass(frozen=True)
+class WebhookTarget:
+    """Where providers deliver webhooks: the receiver's public base URL and the secret in its
+    path. The secret is a credential: it never goes into logs, raw records or warnings."""
+
+    base_url: str
+    secret: Secret
 
 
 @dataclass
@@ -30,6 +40,8 @@ class SyncContext:
     # For writes that must commit on their own, outside the sync's transaction (such as
     # rotated single-use tokens, which must survive the sync failing).
     session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
+    # Set when webhooks are configured; the connector then registers them with the provider.
+    webhook: WebhookTarget | None = None
 
 
 class Connector(Protocol):
