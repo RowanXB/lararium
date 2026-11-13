@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 
 import httpx
+from procrastinate.manager import JobManager
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -345,3 +346,22 @@ async def process_webhook_inbox(timestamp: int) -> int:
     if processed:
         logger.info("processed %d webhook deliveries", processed)
     return processed
+
+
+async def retry_stalled(manager: JobManager) -> int:
+    """Put back to `todo` the jobs left `doing` by a worker that stopped sending heartbeats
+    (killed mid-job, say); return how many. Until then such a job holds its lock, and so
+    blocks every later sync of its connection."""
+    stalled = list(await manager.get_stalled_jobs())
+    for job in stalled:
+        await manager.retry_job(job)
+    return len(stalled)
+
+
+@procrastinate_app.periodic(cron="*/5 * * * *")
+@procrastinate_app.task(name="retry_stalled_jobs", queueing_lock="retry_stalled_jobs")
+async def retry_stalled_jobs(timestamp: int) -> int:
+    retried = await retry_stalled(procrastinate_app.job_manager)
+    if retried:
+        logger.warning("retried %d jobs left running by a stopped worker", retried)
+    return retried

@@ -1,10 +1,13 @@
 import base64
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 import httpx
 import pytest
 from procrastinate import exceptions as procrastinate_exceptions
+from procrastinate import utils as procrastinate_utils
+from procrastinate.jobs import Status
 from procrastinate.testing import InMemoryConnector
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -24,7 +27,7 @@ from lararium.core.json_types import JSONValue
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.worker import jobs
-from lararium.worker.app import procrastinate_app
+from lararium.worker.app import defer_sync, procrastinate_app
 
 SETTINGS = Settings(
     database_url="postgresql+psycopg://x@localhost/x",
@@ -271,7 +274,49 @@ async def test_periodic_schedules() -> None:
         task.task.name: task.cron
         for task in procrastinate_app.periodic_registry.periodic_tasks.values()
     }
-    assert crons == {"schedule_syncs": "*/30 * * * *", "process_webhook_inbox": "* * * * *"}
+    assert crons == {
+        "schedule_syncs": "*/30 * * * *",
+        "process_webhook_inbox": "* * * * *",
+        "retry_stalled_jobs": "*/5 * * * *",
+    }
+
+
+@pytest.mark.parametrize("worker_gone", ["dead", "pruned"])
+async def test_a_sync_left_doing_by_a_lost_worker_is_retried(worker_gone: str) -> None:
+    with procrastinate_app.replace_connector(InMemoryConnector()) as app:
+        connector: InMemoryConnector = app.connector  # pyright: ignore[reportAssignmentType]
+        manager = app.job_manager
+        assert await defer_sync("c1")
+        lost = await manager.register_worker()
+        stalled = await manager.fetch_job(queues=None, worker_id=lost)
+        assert stalled is not None
+        # The worker is killed mid-job: its heartbeat stops, and a restarted worker may
+        # prune it, which leaves the job `doing` with no worker.
+        connector.workers[lost] = procrastinate_utils.utcnow() - timedelta(minutes=5)
+        if worker_gone == "pruned":
+            await manager.prune_stalled_workers(seconds_since_heartbeat=30)
+        live = await manager.register_worker()
+        # The stalled job still holds the connection's lock.
+        assert await manager.fetch_job(queues=None, worker_id=live) is None
+
+        assert await jobs.retry_stalled(manager) == 1
+
+        retried = await manager.fetch_job(queues=None, worker_id=live)
+        assert retried is not None and retried.id == stalled.id
+        await manager.finish_job(retried, status=Status.SUCCEEDED, delete_job=False)
+        # The connection syncs again: a new sync can be queued and run.
+        assert await defer_sync("c1")
+        assert await manager.fetch_job(queues=None, worker_id=live) is not None
+
+
+async def test_jobs_of_live_workers_are_not_retried() -> None:
+    with procrastinate_app.replace_connector(InMemoryConnector()) as app:
+        manager = app.job_manager
+        assert await defer_sync("c1")
+        worker = await manager.register_worker()
+        assert await manager.fetch_job(queues=None, worker_id=worker) is not None
+
+        assert await jobs.retry_stalled(manager) == 0
 
 
 async def test_procrastinate_schema_present(session) -> None:

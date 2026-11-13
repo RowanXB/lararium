@@ -55,6 +55,12 @@ def test_worker_runs_the_worker_module_after_the_migrations() -> None:
     )
 
 
+def test_worker_may_finish_an_approval_wait_when_stopped() -> None:
+    # Longer than the 4-minute approval window: a job killed mid-run holds its sync lock
+    # until the stalled-job retry frees it.
+    assert _services()["worker"]["stop_grace_period"] == "5m"
+
+
 def test_api_does_not_log_requests() -> None:
     # The OAuth callback URL carries ?code= and &state=.
     assert "--no-access-log" in _services()["api"]["command"]

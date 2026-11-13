@@ -49,6 +49,9 @@ services:
     build: ../backend
     restart: unless-stopped
     command: ["python", "-m", "lararium.worker"]
+    # Time to finish a running job, including the 4-minute approval wait, before being
+    # killed; a job killed anyway is retried by the stalled-job task.
+    stop_grace_period: 5m
     environment:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale
