@@ -77,6 +77,12 @@ serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; th
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
+**Upgrading a deployment from before connectors.** Compose now requires
+`LARARIUM_MASTER_KEY` and `LARARIUM_WEBHOOK_IN_PASSWORD`, so set both in `infra/.env` before the
+next `make up` (the key with `openssl rand -base64 32`, the password with `openssl rand -hex 32`).
+Then create the webhook receiver's role as **Existing databases** under
+[Webhooks through Cloudflare Tunnel](#webhooks-through-cloudflare-tunnel) describes.
+
 **If port 443 is already taken on the host**, serve on another HTTPS port instead:
 
 ```bash
@@ -185,6 +191,10 @@ connector, check them against your own account (nothing here changes anything in
 6. Where reality differs, fix the fixtures and the normalizer using synthetic data, never the
    real responses.
 
+Known gap: syncs re-fetch only the last 14 days, so a pending payment that disappears or settles
+more than 14 days after it was made stays pending until you notice it. The reconciliation
+mismatch warning on the connection is the signal.
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo
@@ -194,9 +204,10 @@ port on your server is opened:
 1. In Cloudflare Zero Trust create a tunnel and copy its token into `CLOUDFLARE_TUNNEL_TOKEN`.
    Add a public hostname (for example `hooks.example.com`) with the service
    `http://webhook-in:8000`, and set `LARARIUM_WEBHOOK_BASE_URL` to `https://hooks.example.com`.
-2. Generate the path secret: `openssl rand -hex 32` into `LARARIUM_WEBHOOK_SECRET` (at least 32
-   characters, letters and digits only; the receiver refuses anything shorter). Monzo's
-   deliveries are unsigned, so this secret in the URL is what tells yours from anyone else's.
+2. Generate the path secret into `LARARIUM_WEBHOOK_SECRET`: at least 32 characters, using only
+   letters, digits and `. _ ~ -` (hex from `openssl rand -hex 32` is simplest). The receiver
+   refuses anything else. Monzo's deliveries are unsigned, so this secret in the URL is what
+   tells yours from anyone else's.
 3. In the zone's WAF add a custom rule with the action Block and this expression, so that
    nothing but Monzo's `POST /monzo/...` reaches the tunnel:
 

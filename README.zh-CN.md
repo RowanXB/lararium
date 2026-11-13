@@ -72,6 +72,12 @@ tailscale serve --bg 8080
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
+**升级连接器出现之前的部署。** compose 现在要求设置 `LARARIUM_MASTER_KEY` 和
+`LARARIUM_WEBHOOK_IN_PASSWORD`，所以在下一次 `make up` 之前先把两者填进 `infra/.env`（主密钥用
+`openssl rand -base64 32` 生成，密码用 `openssl rand -hex 32` 生成）。然后按
+[通过 Cloudflare Tunnel 接收 Webhook](#通过-cloudflare-tunnel-接收-webhook) 一节里**已有的数据库**
+的说明创建 webhook 接收器的角色。
+
 **如果主机的 443 端口已被占用**，换一个 HTTPS 端口：
 
 ```bash
@@ -163,9 +169,13 @@ Monzo 是一个连接器：`worker` 服务每 30 分钟（以及点击「立即�
    - 转账和他人付款上的 **counterparty（对手方）** 字段；
    - 往 pot 里转入或转出的交易上的 **`metadata.pot_id`**；
    - **401 响应体的形态**：带的是 `code` 还是 `error`（客户端两种都读）；
-   - **被撤销的待处理付款** 长什么样（`decline_reason` 出现或消失、`amount` 变化，还是交易被删除）；
+   - **被撤销的待处理付款** 长什么样（同一个交易 id 带上 `decline_reason`、`amount` 或 `settled`
+     发生变化，还是交易完全不再出现）；
    - Monzo 在你于应用里批准之前是否确实返回 **403**，客户端是按这个假设写的。
 6. 与现实不符的地方，用合成数据修改夹具和 normalizer，绝不要用真实响应。
+
+已知缺口：每次同步只重新获取最近 14 天，所以一笔在发生 14 天以后才消失或结算的待处理付款，会一直
+保持待处理，直到你发现为止。连接上的对账不符警告就是信号。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
@@ -175,9 +185,9 @@ URL。只有一个很小的接收器通过 Cloudflare Tunnel 暴露出去，服�
 1. 在 Cloudflare Zero Trust 创建一个 tunnel，把它的 token 填进 `CLOUDFLARE_TUNNEL_TOKEN`。添加
    一个公共主机名（例如 `hooks.example.com`），服务填 `http://webhook-in:8000`，并把
    `LARARIUM_WEBHOOK_BASE_URL` 设为 `https://hooks.example.com`。
-2. 生成路径密钥：用 `openssl rand -hex 32` 填进 `LARARIUM_WEBHOOK_SECRET`（至少 32 个字符，只能是
-   字母和数字；更短的接收器会拒绝启动）。Monzo 的推送没有签名，所以 URL 里的这个密钥就是区分你的
-   推送和别人请求的依据。
+2. 生成路径密钥填进 `LARARIUM_WEBHOOK_SECRET`：至少 32 个字符，只能用字母、数字和 `. _ ~ -`
+   （用 `openssl rand -hex 32` 生成的十六进制最简单）。不符合要求的，接收器会拒绝启动。Monzo 的
+   推送没有签名，所以 URL 里的这个密钥就是区分你的推送和别人请求的依据。
 3. 在该域名的 WAF 里添加一条自定义规则，动作选 Block，表达式如下，这样除了 Monzo 的
    `POST /monzo/...` 之外，什么都进不了 tunnel：
 
