@@ -1,6 +1,7 @@
 import { createRootRoute, createRoute, createRouter, Link, Outlet } from "@tanstack/react-router";
 
 import { AccountsPage } from "./pages/AccountsPage";
+import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { InstrumentsPage } from "./pages/InstrumentsPage";
 import { NetWorthPage } from "./pages/NetWorthPage";
 import { PricesPage } from "./pages/PricesPage";
@@ -10,6 +11,7 @@ const NAV = [
   { to: "/accounts", label: "Accounts" },
   { to: "/instruments", label: "Instruments" },
   { to: "/prices", label: "Prices" },
+  { to: "/connections", label: "Connections" },
 ] as const;
 
 function Layout() {
@@ -45,6 +47,7 @@ const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/instruments", component: InstrumentsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/prices", component: PricesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/connections", component: ConnectionsPage }),
 ]);
 
 export const router = createRouter({ routeTree });
