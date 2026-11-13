@@ -131,7 +131,7 @@ async def test_run_sync_passes_the_webhook_target(session, run, fake, notifier) 
         auth_mode="dev",
         master_key=SecretStr(base64.b64encode(bytes(range(32))).decode()),
         webhook_base_url="https://hooks.lararium.example/",
-        webhook_secret=SecretStr("whsec-TEST"),
+        webhook_secret=SecretStr("whsec-TEST-0123456789abcdef0123456789"),
     )
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(404))
@@ -148,8 +148,8 @@ async def test_run_sync_passes_the_webhook_target(session, run, fake, notifier) 
     webhook = fake.seen[0].webhook
     assert webhook is not None
     assert webhook.base_url == "https://hooks.lararium.example"
-    assert webhook.secret.reveal() == "whsec-TEST"
-    assert "whsec-TEST" not in repr(fake.seen[0])
+    assert webhook.secret.reveal() == "whsec-TEST-0123456789abcdef0123456789"
+    assert "whsec-TEST-0123456789abcdef0123456789" not in repr(fake.seen[0])
 
 
 async def test_run_sync_without_webhook_settings_passes_none(session, run, fake, notifier) -> None:

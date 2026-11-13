@@ -246,7 +246,7 @@ async def test_create_connection_hides_secret(api, session) -> None:
 
 
 async def test_webhook_enabled_when_base_url_and_secret_set(session, sessions, monzo) -> None:
-    secret = "whsec-TEST-0123456789abcdef"
+    secret = "whsec-TEST-0123456789abcdef0123456789"
     settings = _settings(
         webhook_base_url="https://hooks.lararium.example", webhook_secret=SecretStr(secret)
     )

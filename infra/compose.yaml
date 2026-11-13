@@ -32,14 +32,59 @@ services:
   api:
     build: ../backend
     restart: unless-stopped
-    command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     environment:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale
       LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN:?set LARARIUM_OWNER_LOGIN in infra/.env}
       LARARIUM_MASTER_KEY: ${LARARIUM_MASTER_KEY:?set LARARIUM_MASTER_KEY in infra/.env}
+      LARARIUM_PUBLIC_BASE_URL: ${LARARIUM_PUBLIC_BASE_URL:-}
+      LARARIUM_WEBHOOK_BASE_URL: ${LARARIUM_WEBHOOK_BASE_URL:-}
+      LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
     depends_on:
       migrate: { condition: service_completed_successfully }
+  # Runs the connection syncs and the periodic jobs. No ports; it only talks to the db and
+  # to the providers.
+  worker:
+    build: ../backend
+    restart: unless-stopped
+    command: ["python", "-m", "lararium.worker"]
+    environment:
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
+      LARARIUM_AUTH_MODE: tailscale
+      LARARIUM_OWNER_LOGIN: ${LARARIUM_OWNER_LOGIN:?set LARARIUM_OWNER_LOGIN in infra/.env}
+      LARARIUM_MASTER_KEY: ${LARARIUM_MASTER_KEY:?set LARARIUM_MASTER_KEY in infra/.env}
+      LARARIUM_PUBLIC_BASE_URL: ${LARARIUM_PUBLIC_BASE_URL:-}
+      LARARIUM_WEBHOOK_BASE_URL: ${LARARIUM_WEBHOOK_BASE_URL:-}
+      LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
+      LARARIUM_FEISHU_WEBHOOK_URL: ${LARARIUM_FEISHU_WEBHOOK_URL:-}
+      LARARIUM_FEISHU_SECRET: ${LARARIUM_FEISHU_SECRET:-}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+  # Webhook ingress, started only with `--profile webhook`. Compose interpolates inactive
+  # services too, so their secrets can't be required (`:?`) without breaking a plain
+  # `make up`; instead the receiver refuses to start without a valid secret, and
+  # cloudflared without a token. The receiver can only insert
+  # into the webhook inbox (role lararium_webhook_in). `python -m lararium.webhook_in` runs
+  # uvicorn without access logs, which would otherwise record the secret in the URL path.
+  webhook-in:
+    build: ../backend
+    restart: unless-stopped
+    profiles: ["webhook"]
+    command: ["python", "-m", "lararium.webhook_in"]
+    environment:
+      LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_webhook_in:${LARARIUM_WEBHOOK_IN_PASSWORD:?set LARARIUM_WEBHOOK_IN_PASSWORD in infra/.env}@db:5432/lararium
+      LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+  cloudflared:
+    image: cloudflare/cloudflared:2025.11.1
+    restart: unless-stopped
+    profiles: ["webhook"]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [webhook-in]
   web:
     build:
       context: ..

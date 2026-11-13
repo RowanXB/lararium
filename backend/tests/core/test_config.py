@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from lararium.config import Settings, WebhookInSettings
 
 DATABASE_URL = "postgresql+psycopg://x@localhost/x"
+SECRET = "0123456789abcdef0123456789abcdef"  # 32 characters, the minimum
 MASTER_KEY = base64.b64encode(bytes(range(32))).decode()
 
 
@@ -43,20 +44,29 @@ def test_webhook_needs_both_base_url_and_secret() -> None:
     dev = {"database_url": DATABASE_URL, "auth_mode": "dev"}
     assert Settings(**dev).webhook() is None
     assert Settings(**dev, webhook_base_url="https://hooks.example").webhook() is None
-    assert Settings(**dev, webhook_secret="s3cret").webhook() is None
+    assert Settings(**dev, webhook_secret=SECRET).webhook() is None
     assert Settings(**dev, webhook_base_url="", webhook_secret="").webhook() is None
 
-    settings = Settings(**dev, webhook_base_url="https://hooks.example/", webhook_secret="s3cret")
+    settings = Settings(**dev, webhook_base_url="https://hooks.example/", webhook_secret=SECRET)
     webhook = settings.webhook()
     assert webhook is not None
     base_url, secret = webhook
     # Without the trailing slash, so `{base}/monzo/{secret}` has no empty segment.
     assert base_url == "https://hooks.example"
-    assert secret.get_secret_value() == "s3cret"
-    assert "s3cret" not in repr(settings)
+    assert secret.get_secret_value() == SECRET
+    assert SECRET not in repr(settings)
 
 
-@pytest.mark.parametrize("secret", ["has/slash", "has space", "pct%41", "q?x", "frag#x", "é"])
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "has/slash" + "a" * 32,
+        "has space" + "a" * 32,
+        "pct%41" + "a" * 32,
+        "q?x" + "a" * 32,
+        "é" * 40,
+    ],
+)
 def test_webhook_secret_must_be_url_safe(secret: str) -> None:
     with pytest.raises(ValidationError, match="webhook_secret"):
         Settings(database_url=DATABASE_URL, auth_mode="dev", webhook_secret=secret)
@@ -66,9 +76,17 @@ def test_webhook_secret_must_be_url_safe(secret: str) -> None:
 
 def test_webhook_in_settings_need_only_database_url_and_secret() -> None:
     # Tailscale mode is the default, yet the receiver needs no owner login or master key.
-    settings = WebhookInSettings(database_url=DATABASE_URL, webhook_secret="s3cret")
-    assert settings.webhook_secret.get_secret_value() == "s3cret"
+    settings = WebhookInSettings(database_url=DATABASE_URL, webhook_secret=SECRET)
+    assert settings.webhook_secret.get_secret_value() == SECRET
     with pytest.raises(ValidationError, match="webhook_secret"):
         WebhookInSettings(database_url=DATABASE_URL)  # pyright: ignore[reportCallIssue]
     with pytest.raises(ValidationError, match="webhook_secret"):
         WebhookInSettings(database_url=DATABASE_URL, webhook_secret="")
+
+
+@pytest.mark.parametrize("secret", ["short", "s3cret", "a" * 31])
+def test_webhook_secret_must_be_at_least_32_characters(secret: str) -> None:
+    with pytest.raises(ValidationError, match="at least 32"):
+        Settings(database_url=DATABASE_URL, auth_mode="dev", webhook_secret=secret)
+    with pytest.raises(ValidationError, match="at least 32"):
+        WebhookInSettings(database_url=DATABASE_URL, webhook_secret=secret)

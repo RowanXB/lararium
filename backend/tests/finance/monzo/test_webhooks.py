@@ -27,7 +27,7 @@ from .fixtures import ACCOUNT_ID, make_account
 from .test_sync import CONNECTOR, KEY, FakeMonzo, _connection
 
 BASE = "https://hooks.lararium.example"
-SECRET = "whsec-TEST-0123456789abcdef"
+SECRET = "whsec-TEST-0123456789abcdef0123456789"
 OUR_URL = f"{BASE}/monzo/{SECRET}"
 OTHER_ACCOUNT = "acc_TEST2"
 

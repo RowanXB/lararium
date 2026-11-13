@@ -14,7 +14,7 @@ from starlette.applications import Starlette
 from lararium.webhook_in import app as receiver
 from lararium.webhook_in.app import MAX_BODY_BYTES, create_app
 
-SECRET = "whsec-TEST-0123456789abcdef"
+SECRET = "whsec-TEST-0123456789abcdef0123456789"
 DELIVERY = {
     "type": "transaction.created",
     "data": {"account_id": "acc_TEST1", "id": "tx_TEST0001", "amount": -1234},

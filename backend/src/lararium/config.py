@@ -10,9 +10,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _URL_SAFE = re.compile(r"[A-Za-z0-9._~-]+")
 
 
+# Anyone who learns the URL can post to the receiver, so it must not be guessable.
+MIN_WEBHOOK_SECRET_LENGTH = 32
+
+
 def _check_webhook_secret(value: SecretStr | None) -> SecretStr | None:
-    if value is not None and not _URL_SAFE.fullmatch(value.get_secret_value()):
+    if value is None:
+        return value
+    secret = value.get_secret_value()
+    if not _URL_SAFE.fullmatch(secret):
         raise ValueError("must be non-empty and use only letters, digits and . _ ~ -")
+    if len(secret) < MIN_WEBHOOK_SECRET_LENGTH:
+        raise ValueError(
+            f"must be at least {MIN_WEBHOOK_SECRET_LENGTH} characters, e.g. `openssl rand -hex 32`"
+        )
     return value
 
 
