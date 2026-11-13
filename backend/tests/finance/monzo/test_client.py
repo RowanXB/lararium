@@ -122,6 +122,82 @@ async def test_transactions_passes_since_and_before() -> None:
     assert seen[0].url.params["before"] == "2026-02-01T00:00:00Z"
 
 
+class RecordingSleep:
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
+async def test_get_retries_rate_limits_then_succeeds() -> None:
+    history = [make_transaction(id="tx_TEST0001")]
+    answers = [
+        httpx.Response(429, json={"code": "too_many_requests"}),
+        httpx.Response(429, json={"code": "too_many_requests"}, headers={"Retry-After": "7"}),
+        httpx.Response(200, json={"transactions": history}),
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return answers[len(requests) - 1]
+
+    sleep = RecordingSleep()
+    async with _http(handler) as http:
+        client = MonzoClient(http, Secret(ACCESS), sleep=sleep)
+        pages = [page async for page in client.transactions(ACCOUNT_ID, since=None)]
+
+    assert pages == [history]
+    assert len(requests) == 3
+    # Backoff of 2 s, then the 7 s Monzo asked for.
+    assert sleep.slept == [2, 7]
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "slept"),
+    [
+        (500, None, [2, 4, 8]),
+        (503, "120", [2, 4, 8]),  # over 30 s: the backoff instead
+        (429, "1", [1, 1, 1]),
+    ],
+)
+async def test_get_gives_up_after_three_retries(status, retry_after, slept) -> None:
+    requests: list[httpx.Request] = []
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json={"code": "internal_service"}, headers=headers)
+
+    sleep = RecordingSleep()
+    async with _http(handler) as http:
+        with pytest.raises(MonzoApiError) as raised:
+            await MonzoClient(http, Secret(ACCESS), sleep=sleep).accounts()
+
+    assert raised.value.status == status
+    assert len(requests) == 4
+    assert sleep.slept == slept
+
+
+async def test_only_gets_are_retried() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, json={"code": "unavailable"})
+
+    sleep = RecordingSleep()
+    async with _http(handler) as http:
+        with pytest.raises(MonzoApiError):
+            await MonzoClient(http, Secret(ACCESS), sleep=sleep).register_webhook(
+                ACCOUNT_ID, "https://hooks.example/monzo/s3cret"
+            )
+
+    assert len(requests) == 1
+    assert sleep.slept == []
+
+
 def test_authorize_url_params() -> None:
     redirect = "https://lararium.example/api/v1/connections/oauth/monzo/callback?x=1"
     url = authorize_url("oauth2client_TEST1", redirect, "st ate&1")
@@ -161,7 +237,7 @@ async def test_error_mapping(status, body, error, code) -> None:
 
     async with _http(handler) as http:
         with pytest.raises(MonzoApiError) as raised:
-            await MonzoClient(http, Secret(ACCESS)).accounts()
+            await MonzoClient(http, Secret(ACCESS), sleep=RecordingSleep()).accounts()
 
     assert type(raised.value) is error
     assert raised.value.status == status
@@ -227,7 +303,7 @@ async def test_errors_never_contain_tokens() -> None:
 
         async with _http(handler) as http:
             with pytest.raises(MonzoApiError) as api_error:
-                await MonzoClient(http, Secret(ACCESS)).accounts()
+                await MonzoClient(http, Secret(ACCESS), sleep=RecordingSleep()).accounts()
             raised.append(api_error.value)
             with pytest.raises((MonzoApiError, CredentialRejectedError)) as token_error:
                 await refresh(
@@ -311,6 +387,9 @@ async def test_valid_access_token_is_used_without_refresh(session, run) -> None:
     [
         (400, {"error": "invalid_grant", "error_description": "refresh token is invalid"}),
         (401, {"code": "unauthorized.bad_refresh_token.evicted"}),
+        (400, {"code": "bad_request.invalid_grant"}),
+        (400, {"code": "unauthorized.bad_refresh_token"}),
+        (403, {"code": "forbidden"}),
     ],
 )
 async def test_invalid_grant_is_credential_rejected(session, run, status, body) -> None:
@@ -336,6 +415,15 @@ async def test_invalid_grant_is_credential_rejected(session, run, status, body) 
     }
     kept = await load_credential(session, KEY, connection.id, "refresh_token")
     assert kept is not None and kept.reveal() == "rt-old"
+
+
+async def test_rate_limited_token_request_is_not_a_rejection() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"code": "too_many_requests"})
+
+    async with _http(handler) as http:
+        with pytest.raises(MonzoRateLimitedError):
+            await refresh(http, "oauth2client_TEST1", Secret("cs-TEST"), Secret("rt-old"))
 
 
 async def test_refreshed_tokens_committed_before_use(
@@ -369,7 +457,7 @@ async def test_refreshed_tokens_committed_before_use(
                 async with command_context(sync_session, CONNECTOR, "connection.sync", args) as ctx:
                     token = await access_token_for(_sync_ctx(ctx, connection, http, sessions))
                     assert token.reveal() == "at-new"
-                    await MonzoClient(http, token).accounts()
+                    await MonzoClient(http, token, sleep=RecordingSleep()).accounts()
 
         async with sessions() as fresh:
             refreshed = await load_credential(fresh, KEY, connection_id, "refresh_token")

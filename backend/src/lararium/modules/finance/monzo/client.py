@@ -4,8 +4,9 @@ Error messages carry the HTTP status and Monzo's error code only, never a token 
 response body, which an upstream could fill with anything it was sent.
 """
 
+import asyncio
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -23,6 +24,10 @@ EXPAND = "merchant"
 # replaced, so an echoed token can't reach a message.
 _CODE = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)*")
 _MAX_CODE_LENGTH = 100
+# A GET answered 429 or 5xx is retried after each of these waits, then the error is raised.
+RETRY_DELAYS = (2, 4, 8)
+# A Retry-After up to this many seconds is waited instead of the backoff.
+MAX_RETRY_AFTER = 30
 
 
 class MonzoApiError(Exception):
@@ -78,12 +83,28 @@ def raise_for_error(response: httpx.Response) -> None:
 
 
 type Params = Sequence[tuple[str, str]]
+type Sleep = Callable[[float], Awaitable[None]]
+
+
+def _retry_delay(response: httpx.Response, backoff: int) -> int:
+    """The wait before retrying: Monzo's Retry-After when it is a short number of seconds."""
+    value = response.headers.get("Retry-After", "").strip()
+    if value.isdecimal() and int(value) <= MAX_RETRY_AFTER:
+        return int(value)
+    return backoff
+
+
+def _transient(response: httpx.Response) -> bool:
+    return response.status_code == 429 or response.status_code >= 500
 
 
 class MonzoClient:
-    def __init__(self, http: httpx.AsyncClient, access_token: Secret) -> None:
+    def __init__(
+        self, http: httpx.AsyncClient, access_token: Secret, *, sleep: Sleep = asyncio.sleep
+    ) -> None:
         self._http = http
         self._access_token = access_token
+        self._sleep = sleep
 
     async def _request(
         self,
@@ -93,13 +114,19 @@ class MonzoClient:
         params: Params = (),
         data: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        response = await self._http.request(
-            method,
-            f"{API}{path}",
-            params=list(params),
-            data=data,
-            headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
-        )
+        # Only reads are retried: repeating a write could apply it twice.
+        delays = RETRY_DELAYS if method == "GET" else ()
+        for attempt in range(len(delays) + 1):
+            response = await self._http.request(
+                method,
+                f"{API}{path}",
+                params=list(params),
+                data=data,
+                headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
+            )
+            if attempt == len(delays) or not _transient(response):
+                break
+            await self._sleep(_retry_delay(response, delays[attempt]))
         raise_for_error(response)
         if not response.content:
             return {}

@@ -53,9 +53,9 @@ def authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
 
 async def _token_request(http: httpx.AsyncClient, form: dict[str, str]) -> TokenPair:
     response = await http.post(TOKEN_URL, data=form)
-    if response.status_code == 401 or (
-        response.status_code == 400 and error_code(response) == "invalid_grant"
-    ):
+    # Any client error but a rate limit means these credentials won't work again: an expired
+    # or reused refresh token comes back as 400 or 401, under several codes.
+    if 400 <= response.status_code < 500 and response.status_code != 429:
         raise CredentialRejectedError(
             f"Monzo rejected the credentials ({error_code(response)}); authorise again"
         )
