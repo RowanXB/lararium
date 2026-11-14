@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CloseAccountData, CloseAccountErrors, CloseAccountResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountsData, ListAccountsResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
+import type { AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -17,6 +17,45 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
      */
     meta?: keyof ClientMeta extends never ? Record<string, unknown> : ClientMeta;
 };
+
+/**
+ * List Connections
+ */
+export const listConnections = <ThrowOnError extends boolean = false>(options?: Options<ListConnectionsData, ThrowOnError>): RequestResult<ListConnectionsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<ListConnectionsResponses, unknown, ThrowOnError>({ url: '/api/v1/connections', ...options });
+
+/**
+ * Create Monzo Connection
+ */
+export const createMonzoConnection = <ThrowOnError extends boolean = false>(options: Options<CreateMonzoConnectionData, ThrowOnError>): RequestResult<CreateMonzoConnectionResponses, CreateMonzoConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateMonzoConnectionResponses, CreateMonzoConnectionErrors, ThrowOnError>({
+    url: '/api/v1/connections',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Monzo Oauth Callback
+ *
+ * Where Monzo sends the browser back: exchange the code, then wait for approval.
+ */
+export const monzoOauthCallback = <ThrowOnError extends boolean = false>(options?: Options<MonzoOauthCallbackData, ThrowOnError>): RequestResult<unknown, MonzoOauthCallbackErrors, ThrowOnError> => (options?.client ?? client).get<unknown, MonzoOauthCallbackErrors, ThrowOnError>({ url: '/api/v1/connections/oauth/monzo/callback', ...options });
+
+/**
+ * Authorize Connection
+ */
+export const authorizeConnection = <ThrowOnError extends boolean = false>(options: Options<AuthorizeConnectionData, ThrowOnError>): RequestResult<AuthorizeConnectionResponses, AuthorizeConnectionErrors, ThrowOnError> => (options.client ?? client).post<AuthorizeConnectionResponses, AuthorizeConnectionErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/authorize', ...options });
+
+/**
+ * Disable Connection
+ */
+export const disableConnection = <ThrowOnError extends boolean = false>(options: Options<DisableConnectionData, ThrowOnError>): RequestResult<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError> => (options.client ?? client).post<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/disable', ...options });
+
+/**
+ * Sync Connection Now
+ */
+export const syncConnectionNow = <ThrowOnError extends boolean = false>(options: Options<SyncConnectionNowData, ThrowOnError>): RequestResult<SyncConnectionNowResponses, SyncConnectionNowErrors, ThrowOnError> => (options.client ?? client).post<SyncConnectionNowResponses, SyncConnectionNowErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/sync', ...options });
 
 /**
  * List Accounts

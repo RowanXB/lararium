@@ -1,0 +1,782 @@
+"""/api/v1/connections, the Monzo OAuth callback and the approval window (Decision 7)."""
+
+import base64
+import hashlib
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import Any
+from unittest.mock import ANY
+from urllib.parse import parse_qs, urlsplit
+
+import httpx
+import pytest
+from procrastinate.testing import InMemoryConnector
+from pydantic import SecretStr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lararium.api.app import create_app
+from lararium.config import Settings
+from lararium.core.connections import (
+    create_connection,
+    get_connection,
+    load_credential,
+    set_status,
+    update_config,
+)
+from lararium.core.connectors import BACKFILL_FAILED
+from lararium.deps import get_session, get_session_factory
+from lararium.modules.finance import connections_api
+from lararium.modules.finance.monzo import sync as monzo_sync
+from lararium.modules.finance.monzo.client import MonzoClient
+from lararium.worker import jobs
+from lararium.worker.app import procrastinate_app
+
+from ..finance.monzo.fixtures import make_account, make_balance, make_pot, make_transaction
+
+KEY = bytes(range(32))
+OWNER = {"Tailscale-User-Login": "me@example.com"}
+BASE_URL = "https://lararium.example"
+REDIRECT_URI = f"{BASE_URL}/api/v1/connections/oauth/monzo/callback"
+CALLBACK = "/api/v1/connections/oauth/monzo/callback"
+CLIENT_SECRET = "cs-TEST-do-not-log"
+NAVIGATION = {
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+}
+EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
+
+
+def _settings(**overrides: Any) -> Settings:
+    fields: dict[str, Any] = {
+        "database_url": "postgresql+psycopg://unused@localhost/unused",
+        "auth_mode": "tailscale",
+        "owner_login": "me@example.com",
+        "master_key": SecretStr(base64.b64encode(KEY).decode()),
+        "public_base_url": BASE_URL,
+    }
+    return Settings(**(fields | overrides))
+
+
+class FakeMonzo:
+    """Monzo's token endpoint and API; /accounts answers 403 until `approve_after` calls."""
+
+    def __init__(self) -> None:
+        self.approve_after: int | None = 0
+        self.transactions_fail = False
+        self.balance = -2468
+        self.token_forms: list[dict[str, list[str]]] = []
+        self.requests: list[httpx.Request] = []
+        # The access token the token endpoint hands out; tokens Monzo has revoked (401).
+        self.access_token = "at-TEST"
+        self.revoked: set[str] = set()
+        self.refresh_rejected = False
+        now = datetime.now(UTC)
+        self.account = make_account(created=_iso(now - timedelta(days=30)))
+        self.transactions = [
+            make_transaction(id="tx_TEST0001", created=_iso(now - timedelta(days=29))),
+            make_transaction(id="tx_TEST0002", created=_iso(now - timedelta(days=2))),
+        ]
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if path == "/oauth2/token":
+            form = parse_qs(request.content.decode())
+            self.token_forms.append(form)
+            if self.refresh_rejected and form["grant_type"] == ["refresh_token"]:
+                return httpx.Response(401, json={"error": "invalid_grant"})
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": self.access_token,
+                    "refresh_token": "rt-TEST",
+                    "expires_in": 21600,
+                },
+            )
+        token = request.headers["Authorization"].removeprefix("Bearer ")
+        if token in self.revoked:
+            return httpx.Response(401, json={"code": "unauthorized.bad_access_token"})
+        if path == "/accounts":
+            polls = len(self.account_requests())
+            if self.approve_after is None or polls <= self.approve_after:
+                return httpx.Response(403, json={"code": "forbidden.insufficient_permissions"})
+            return httpx.Response(200, json={"accounts": [self.account]})
+        if path == "/balance":
+            return httpx.Response(200, json=make_balance(balance=self.balance))
+        if path == "/pots":
+            return httpx.Response(200, json={"pots": [make_pot()]})
+        assert path == "/transactions", path
+        if self.transactions_fail:
+            return httpx.Response(500, json={"code": "internal_service"})
+        return httpx.Response(200, json={"transactions": self.transactions})
+
+    def account_requests(self) -> list[httpx.Request]:
+        return [r for r in self.requests if r.url.path == "/accounts"]
+
+
+def _iso(value: datetime) -> str:
+    return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
+
+
+class RecordingNotifier:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, text: str) -> None:
+        self.messages.append(text)
+
+
+class FakeClock:
+    """Wall-clock time that only moves when the approval job sleeps."""
+
+    def __init__(self) -> None:
+        self.now = datetime.now(UTC)
+        self.slept: list[int] = []
+        # Runs after each sleep, at the new time.
+        self.after_sleep: Callable[[], Awaitable[None]] | None = None
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    async def sleep(self, seconds: int) -> None:
+        self.slept.append(seconds)
+        self.now += timedelta(seconds=seconds)
+        if self.after_sleep is not None:
+            await self.after_sleep()
+
+
+@pytest.fixture
+def monzo() -> FakeMonzo:
+    return FakeMonzo()
+
+
+@pytest.fixture
+def sessions(session: AsyncSession) -> async_sessionmaker[AsyncSession]:
+    # Sessions of their own (save_tokens) still run inside the test's rolled-back transaction.
+    return async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+
+
+@pytest.fixture
+def queue() -> Any:
+    with procrastinate_app.replace_connector(InMemoryConnector()) as app:
+        yield app.connector
+
+
+async def _client(
+    settings: Settings,
+    session: AsyncSession,
+    sessions: async_sessionmaker[AsyncSession],
+    monzo: FakeMonzo,
+) -> AsyncIterator[httpx.AsyncClient]:
+    app = create_app(settings)
+
+    async def _test_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def _test_http() -> AsyncIterator[httpx.AsyncClient]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
+            yield http
+
+    app.dependency_overrides[get_session] = _test_session
+    app.dependency_overrides[get_session_factory] = lambda: sessions
+    app.dependency_overrides[connections_api.get_http] = _test_http
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+async def api(session, sessions, monzo) -> AsyncIterator[httpx.AsyncClient]:
+    async for client in _client(_settings(), session, sessions, monzo):
+        yield client
+
+
+async def _create(api: httpx.AsyncClient) -> dict[str, Any]:
+    response = await api.post(
+        "/api/v1/connections",
+        json={
+            "display_name": "My Monzo",
+            "client_id": "oauth2client_TEST1",
+            "client_secret": CLIENT_SECRET,
+        },
+        headers=OWNER,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def _authorize(api: httpx.AsyncClient, connection_id: str) -> str:
+    """Start authorising; return the state in the Monzo URL."""
+    response = await api.post(f"/api/v1/connections/{connection_id}/authorize", headers=OWNER)
+    assert response.status_code == 200, response.text
+    return parse_qs(urlsplit(response.json()["url"]).query)["state"][0]
+
+
+async def _callback(api: httpx.AsyncClient, state: str, **headers: str) -> httpx.Response:
+    return await api.get(
+        CALLBACK,
+        params={"code": "code-TEST", "state": state},
+        headers=OWNER | NAVIGATION | headers,
+    )
+
+
+async def _logged(session: AsyncSession) -> str:
+    """Everything the audit log and the events hold, as text."""
+    logged = await session.scalar(
+        text(
+            "select coalesce((select string_agg(args::text || changes::text, ' ')"
+            " from core.audit_log), '')"
+            " || coalesce((select string_agg(data::text, ' ') from core.events), '')"
+        )
+    )
+    return logged or ""
+
+
+async def test_create_connection_hides_secret(api, session) -> None:
+    created = await _create(api)
+
+    assert CLIENT_SECRET not in str(created)
+    assert created["status"] == "created"
+    assert created["connector"] == "monzo"
+    assert created["redirect_uri"] == REDIRECT_URI
+    assert created["webhook_enabled"] is False
+    args = await session.scalar(
+        text("select args from core.audit_log where command = 'create_monzo_connection'")
+    )
+    assert args == {"display_name": "My Monzo", "client_id": "oauth2client_TEST1"}
+    assert CLIENT_SECRET not in await _logged(session)
+    stored = await load_credential(session, KEY, created["id"], "client_secret")
+    assert stored is not None and stored.reveal() == CLIENT_SECRET
+
+    listed = await api.get("/api/v1/connections", headers=OWNER)
+    assert listed.status_code == 200
+    assert CLIENT_SECRET not in listed.text
+    assert [c["id"] for c in listed.json()] == [created["id"]]
+    assert set(listed.json()[0]) == {
+        "id",
+        "connector",
+        "display_name",
+        "status",
+        "last_success_at",
+        "last_error",
+        "consecutive_failures",
+        "credential_expires_at",
+        "warnings",
+        "redirect_uri",
+        "webhook_enabled",
+    }
+
+
+async def test_webhook_enabled_when_base_url_and_secret_set(session, sessions, monzo) -> None:
+    secret = "whsec-TEST-0123456789abcdef0123456789"
+    settings = _settings(
+        webhook_base_url="https://hooks.lararium.example", webhook_secret=SecretStr(secret)
+    )
+    async for api in _client(settings, session, sessions, monzo):
+        created = await _create(api)
+        listed = await api.get("/api/v1/connections", headers=OWNER)
+
+    assert created["webhook_enabled"] is True
+    assert listed.json()[0]["webhook_enabled"] is True
+    assert secret not in str(created) + listed.text
+
+
+async def test_authorize_returns_monzo_url_and_stores_state_hash(api, session) -> None:
+    created = await _create(api)
+    before = datetime.now(UTC)
+
+    response = await api.post(f"/api/v1/connections/{created['id']}/authorize", headers=OWNER)
+
+    assert response.status_code == 200
+    url = urlsplit(response.json()["url"])
+    assert (url.scheme, url.netloc, url.path) == ("https", "auth.monzo.com", "/")
+    query = parse_qs(url.query)
+    state = query.pop("state")[0]
+    assert len(state) >= 32
+    assert query == {
+        "client_id": ["oauth2client_TEST1"],
+        "redirect_uri": [REDIRECT_URI],
+        "response_type": ["code"],
+    }
+    config = (await get_connection(session, created["id"])).config
+    stored: Any = config["oauth_state"]
+    assert stored["hash"] == hashlib.sha256(state.encode()).hexdigest()
+    expires_at = datetime.fromisoformat(stored["expires_at"])
+    assert before + timedelta(minutes=9) < expires_at <= datetime.now(UTC) + timedelta(minutes=10)
+    assert state not in str(config)
+    assert state not in await _logged(session)
+
+
+async def test_config_writes_keep_the_account_map(api, session, run, queue) -> None:
+    created = await _create(api)
+    account_map = {"acc_TEST1": "01900000-0000-7000-8000-000000000001"}
+    # As a sync that ran meanwhile would have written it.
+    await run(update_config, created["id"], {"account_map": account_map})
+
+    state = await _authorize(api, created["id"])
+    assert (await get_connection(session, created["id"])).config["account_map"] == account_map
+    assert (await _callback(api, state)).status_code == 303
+
+    config = (await get_connection(session, created["id"])).config
+    assert config == {
+        "client_id": "oauth2client_TEST1",
+        "account_map": account_map,
+        "authorised_at": ANY,
+    }
+
+
+async def test_redirect_uri_ignores_a_trailing_slash(session, sessions, monzo) -> None:
+    async for api in _client(_settings(public_base_url=f"{BASE_URL}/"), session, sessions, monzo):
+        created = await _create(api)
+
+    assert created["redirect_uri"] == REDIRECT_URI
+    assert "//api" not in created["redirect_uri"]
+
+
+async def test_public_base_url_required(session, sessions, monzo, run) -> None:
+    async for api in _client(_settings(public_base_url=None), session, sessions, monzo):
+        response = await api.post(
+            "/api/v1/connections",
+            json={"display_name": "M", "client_id": "oauth2client_TEST1", "client_secret": "s"},
+            headers=OWNER,
+        )
+        assert response.status_code == 422
+        assert "LARARIUM_PUBLIC_BASE_URL" in response.json()["detail"]["message"]
+
+        connection = await run(
+            create_connection,
+            connector="monzo",
+            display_name="M",
+            config={"client_id": "oauth2client_TEST1"},
+        )
+        response = await api.post(f"/api/v1/connections/{connection.id}/authorize", headers=OWNER)
+        assert response.status_code == 422
+        assert response.json()["detail"]["error"] == "not_configured"
+        listed = await api.get("/api/v1/connections", headers=OWNER)
+        assert listed.json()[0]["redirect_uri"] is None
+
+
+async def test_callback_navigation_allowed_but_fetch_refused(api, queue) -> None:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+
+    # Only a top-level navigation may come from another site (auth.monzo.com).
+    refused = [
+        OWNER | NAVIGATION | {"Sec-Fetch-Mode": "cors"},
+        OWNER | NAVIGATION | {"Sec-Fetch-Dest": "iframe"},
+        OWNER | {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"},
+    ]
+    for headers in refused:
+        response = await api.get(
+            CALLBACK, params={"code": "code-TEST", "state": state}, headers=headers
+        )
+        assert response.status_code == 403, headers
+    # The owner header is still required.
+    response = await api.get(
+        CALLBACK, params={"code": "code-TEST", "state": state}, headers=NAVIGATION
+    )
+    assert response.status_code == 401
+
+    response = await _callback(api, state)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/connections"
+
+
+async def test_other_routes_still_refuse_cross_site_navigation(api) -> None:
+    response = await api.get("/api/v1/connections", headers=OWNER | NAVIGATION)
+    assert response.status_code == 403
+
+
+async def test_callback_state_single_use_and_expiring(api, session, monzo, queue) -> None:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+
+    first = await _callback(api, state)
+    again = await _callback(api, state)
+
+    assert (first.status_code, first.headers["location"]) == (303, "/connections")
+    assert (again.status_code, again.headers["location"]) == (303, "/connections?error=state")
+    assert len(monzo.token_forms) == 1
+
+    unknown = await _callback(api, "not-a-state")
+    assert unknown.headers["location"] == "/connections?error=state"
+
+    expiring = await _authorize(api, created["id"])
+    await session.execute(
+        text(
+            "update core.connections set config = jsonb_set(config, '{oauth_state,expires_at}',"
+            " to_jsonb(cast(:past as text))) where id = :id"
+        ),
+        {"past": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(), "id": created["id"]},
+    )
+    expired = await _callback(api, expiring)
+    assert expired.headers["location"] == "/connections?error=state"
+    assert "oauth_state" not in (await get_connection(session, created["id"])).config
+    assert len(monzo.token_forms) == 1
+
+
+async def test_callback_exchanges_code_and_defers_approval(api, session, monzo, queue) -> None:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+
+    response = await _callback(api, state)
+
+    assert response.status_code == 303
+    assert monzo.token_forms == [
+        {
+            "grant_type": ["authorization_code"],
+            "client_id": ["oauth2client_TEST1"],
+            "client_secret": [CLIENT_SECRET],
+            "redirect_uri": [REDIRECT_URI],
+            "code": ["code-TEST"],
+        }
+    ]
+    access = await load_credential(session, KEY, created["id"], "access_token")
+    refresh = await load_credential(session, KEY, created["id"], "refresh_token")
+    assert access is not None and access.reveal() == "at-TEST"
+    assert refresh is not None and refresh.reveal() == "rt-TEST"
+    assert (await get_connection(session, created["id"])).status == "authorising"
+    # Saved in the callback's own transaction, with the authorisation they belong to.
+    saved_by = await session.scalar(
+        text("select actor_type || ':' || actor_id from core.audit_log where command = :c"),
+        {"c": "monzo_oauth_callback"},
+    )
+    assert saved_by == "user:me@example.com"
+
+    queued = list(queue.jobs.values())
+    assert [(j["task_name"], j["args"], j["lock"]) for j in queued] == [
+        ("await_approval", {"connection_id": created["id"]}, f"sync:{created['id']}")
+    ]
+    logged = await _logged(session)
+    for value in ("code-TEST", state, "at-TEST", "rt-TEST", CLIENT_SECRET):
+        assert value not in logged
+
+
+async def test_sync_now_and_disable(api, session, queue) -> None:
+    created = await _create(api)
+
+    synced = await api.post(f"/api/v1/connections/{created['id']}/sync", headers=OWNER)
+    again = await api.post(f"/api/v1/connections/{created['id']}/sync", headers=OWNER)
+    disabled = await api.post(f"/api/v1/connections/{created['id']}/disable", headers=OWNER)
+    missing = await api.post(
+        "/api/v1/connections/01900000-0000-7000-8000-000000000001/sync", headers=OWNER
+    )
+
+    assert (synced.status_code, synced.json()) == (202, {"queued": True})
+    assert (again.status_code, again.json()) == (202, {"queued": False})
+    queued = list(queue.jobs.values())
+    assert [(j["task_name"], j["queueing_lock"]) for j in queued] == [
+        ("sync_connection", f"sync:{created['id']}")
+    ]
+    assert (disabled.status_code, disabled.json()["status"]) == (200, "disabled")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["error"] == "connection_not_found"
+
+
+async def _authorising(api: httpx.AsyncClient) -> str:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+    assert (await _callback(api, state)).status_code == 303
+    return created["id"]
+
+
+async def _await_approval(
+    session: AsyncSession,
+    sessions: async_sessionmaker[AsyncSession],
+    connection_id: str,
+    monzo: FakeMonzo,
+    notifier: RecordingNotifier,
+    clock: FakeClock,
+) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
+        await jobs.run_await_approval(
+            session,
+            uuid.UUID(connection_id),
+            settings=_settings(),
+            http=http,
+            notifier=notifier,
+            session_factory=sessions,
+            now=clock,
+            sleep=clock.sleep,
+        )
+
+
+async def test_await_approval_backfills_on_first_success(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = 2  # approved during the third poll
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    assert clock.slept == [10, 10]
+    connection = await get_connection(session, connection_id)
+    assert connection.status == "healthy"
+    assert connection.last_success_at is not None
+    assert "account_map" in connection.config
+    # The full backfill: no `since`, so all history comes while the window is open.
+    tx_requests = [r for r in monzo.requests if r.url.path == "/transactions"]
+    assert tx_requests and all("since" not in r.url.params for r in tx_requests)
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 2
+    assert connection.warnings == []
+    assert notifier.messages == []
+
+
+async def test_approval_window_expired(api, session, sessions, monzo, queue) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = None  # never approved
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    # Every 10 s until 4 minutes after the tokens were saved: polls at 0, 10, ..., 230 s.
+    assert len(monzo.account_requests()) == 24
+    assert sum(clock.slept) == 240
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("needs_reauth", EXPIRED)
+    assert len(notifier.messages) == 1
+    assert "My Monzo" in notifier.messages[0] and EXPIRED in notifier.messages[0]
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+    assert await session.scalar(text("select count(*) from finance.accounts")) == 0
+
+
+async def test_await_approval_stops_when_no_longer_authorising(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    response = await api.post(f"/api/v1/connections/{connection_id}/disable", headers=OWNER)
+    assert response.status_code == 200
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    assert monzo.account_requests() == []
+    assert (await get_connection(session, connection_id)).status == "disabled"
+    assert notifier.messages == []
+
+
+async def _authorised_at(
+    sessions: async_sessionmaker[AsyncSession], connection_id: str, at: datetime
+) -> None:
+    """Commit `at` as the current authorisation's time, as a callback then would have."""
+    async with sessions() as other, other.begin():
+        await other.execute(
+            text(
+                "update core.connections"
+                " set config = config || jsonb_build_object('authorised_at', cast(:at as text))"
+                " where id = :id"
+            ),
+            {"at": at.isoformat(), "id": uuid.UUID(connection_id)},
+        )
+
+
+async def test_authorising_again_mid_wait_gets_a_fresh_window(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = 26  # approved during the poll at 260 s
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    async def reauthorise_at_200s() -> None:
+        if sum(clock.slept) == 200:
+            await _authorised_at(sessions, connection_id, clock.now)
+
+    clock.after_sleep = reauthorise_at_200s
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    # Past the first authorisation's 4 minutes, but inside the second one's.
+    assert sum(clock.slept) == 260
+    assert (await get_connection(session, connection_id)).status == "healthy"
+    assert notifier.messages == []
+
+
+async def test_a_rerun_after_the_window_closed_does_not_backfill(
+    api, session, sessions, monzo, queue
+) -> None:
+    # The worker died mid-backfill and the job runs again later: Monzo no longer serves all
+    # history, so the connection needs authorising again instead of fetching part of it.
+    connection_id = await _authorising(api)
+    await _authorised_at(sessions, connection_id, datetime.now(UTC) - timedelta(minutes=5))
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("needs_reauth", EXPIRED)
+    assert monzo.account_requests() == []
+    assert not [r for r in monzo.requests if r.url.path == "/transactions"]
+    assert len(notifier.messages) == 1
+
+
+@pytest.mark.parametrize("syncing", ["healthy", "failing"])
+async def test_authorising_refused_while_the_connection_syncs(
+    api, session, run, monzo, queue, syncing: str
+) -> None:
+    created = await _create(api)
+    state = await _authorize(api, created["id"])
+    await run(set_status, created["id"], syncing)
+
+    refused = await api.post(f"/api/v1/connections/{created['id']}/authorize", headers=OWNER)
+    callback = await _callback(api, state)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "not_authorisable"
+    assert (callback.status_code, callback.headers["location"]) == (
+        303,
+        "/connections?error=status",
+    )
+    assert monzo.token_forms == []
+    assert await load_credential(session, KEY, created["id"], "access_token") is None
+    assert (await get_connection(session, created["id"])).status == syncing
+    assert list(queue.jobs.values()) == []
+
+
+@pytest.mark.parametrize("status", ["needs_reauth", "authorising", "disabled"])
+async def test_authorising_allowed_where_no_sync_runs(api, run, queue, status: str) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], status)
+    state = await _authorize(api, created["id"])
+    response = await _callback(api, state)
+    assert response.headers["location"] == "/connections"
+
+
+async def _sync_now(
+    session: AsyncSession,
+    sessions: async_sessionmaker[AsyncSession],
+    connection_id: str,
+    monzo: FakeMonzo,
+    notifier: RecordingNotifier,
+) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
+        await jobs.run_sync(
+            session,
+            uuid.UUID(connection_id),
+            settings=_settings(),
+            http=http,
+            notifier=notifier,
+            session_factory=sessions,
+        )
+
+
+async def test_a_token_revoked_before_its_expiry_is_refreshed(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    notifier, clock = RecordingNotifier(), FakeClock()
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+    # The owner removed the access in the Monzo app; the token's stored expiry is hours away.
+    monzo.revoked, monzo.access_token = {"at-TEST"}, "at-TEST2"
+
+    await _sync_now(session, sessions, connection_id, monzo, notifier)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("healthy", None)
+    assert monzo.token_forms[-1]["grant_type"] == ["refresh_token"]
+    assert notifier.messages == []
+
+
+async def test_a_revoked_token_that_cannot_be_refreshed_needs_authorising(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    notifier, clock = RecordingNotifier(), FakeClock()
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+    monzo.revoked, monzo.refresh_rejected = {"at-TEST"}, True
+
+    await _sync_now(session, sessions, connection_id, monzo, notifier)
+
+    # Not `failing` until the stored expiry: it can be authorised again at once.
+    assert (await get_connection(session, connection_id)).status == "needs_reauth"
+    assert len(notifier.messages) == 1
+
+
+@pytest.fixture
+def no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monzo's 5xx answers are retried after 2, 4 and 8 s; here without the wait."""
+
+    async def no_sleep(seconds: int) -> None:
+        return None
+
+    monkeypatch.setattr(monzo_sync, "MonzoClient", partial(MonzoClient, sleep=no_sleep))
+
+
+async def _account_balance(session: AsyncSession, connection_id: str) -> Any:
+    account_map: Any = (await get_connection(session, uuid.UUID(connection_id))).config[
+        "account_map"
+    ]
+    return await session.scalar(
+        text(
+            "select sum(p.quantity) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where p.account_id = cast(:account as uuid) and t.status <> 'void'"
+        ),
+        {"account": account_map["acc_TEST1"]},
+    )
+
+
+async def test_failed_backfill_needs_authorising_again(
+    api, session, sessions, monzo, queue, no_retry_waits
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.transactions_fail = True
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    # Partial history without its opening balance would make net worth wrong: the
+    # connection doesn't sync on, it asks to be authorised again.
+    connection = await get_connection(session, connection_id)
+    assert connection.status == "needs_reauth"
+    assert connection.last_error == BACKFILL_FAILED
+    assert connection.warnings == []
+    assert len(notifier.messages) == 1
+    assert "My Monzo" in notifier.messages[0] and BACKFILL_FAILED in notifier.messages[0]
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+
+    # Authorising again is allowed, and its backfill completes the history.
+    monzo.transactions_fail = False
+    monzo.balance = 10000
+    state = await _authorize(api, connection_id)
+    assert (await _callback(api, state)).status_code == 303
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("healthy", None)
+    assert connection.warnings == []
+    assert len(notifier.messages) == 1
+    # Two payments of 12.34 and an opening of 124.68 add up to Monzo's 100.00.
+    assert str(await _account_balance(session, connection_id)) == "100.00"
+    opening = await session.scalar(
+        text(
+            "select p.quantity from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where t.external_id = 'opening:acc_TEST1' and p.position = 0"
+        )
+    )
+    assert str(opening) == "124.68"
+
+
+def test_connection_operation_ids() -> None:
+    spec = create_app(_settings()).openapi()
+    operations = {
+        (method, path): operation["operationId"]
+        for path, item in spec["paths"].items()
+        if path.startswith("/api/v1/connections")
+        for method, operation in item.items()
+    }
+    assert operations == {
+        ("get", "/api/v1/connections"): "list_connections",
+        ("post", "/api/v1/connections"): "create_monzo_connection",
+        ("post", "/api/v1/connections/{connection_id}/authorize"): "authorize_connection",
+        ("get", "/api/v1/connections/oauth/monzo/callback"): "monzo_oauth_callback",
+        ("post", "/api/v1/connections/{connection_id}/sync"): "sync_connection_now",
+        ("post", "/api/v1/connections/{connection_id}/disable"): "disable_connection",
+    }
+    schema = spec["components"]["schemas"]["MonzoConnectionCreate"]
+    assert schema["properties"]["client_secret"]["writeOnly"] is True

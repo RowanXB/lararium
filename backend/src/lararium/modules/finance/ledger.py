@@ -6,7 +6,7 @@ from decimal import MAX_PREC, Decimal, localcontext
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import Numeric, case, func, insert, literal, select, update
+from sqlalchemy import Numeric, case, delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -52,6 +52,8 @@ class TransactionInput:
     occurred_tz: str | None = None
     value_date: date | None = None
     counterparty_entity_id: UUID | None = None
+    connection_id: UUID | None = None
+    external_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,42 +244,28 @@ def _publish(ctx: CommandContext, event_type: str, record: TransactionRecord) ->
     ctx.record_change(f"transaction:{record.id}", _change_data(record))
 
 
-async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> TransactionRecord:
-    """Write a transaction whose postings balance per instrument, within that instrument's
-    tolerance; otherwise raise LedgerImbalanceError before anything is written."""
+async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> date:
+    """Everything post_transaction checks before writing; returns the booking date."""
     if tx.occurred_at.utcoffset() is None:
         raise FinanceValidationError("occurred_at needs a timezone")
     if len(tx.postings) < 2:
         raise FinanceValidationError("a transaction needs at least two postings")
     for posting in tx.postings:
         _validate_posting(posting)
-    session = ctx.session
     instruments = await _resolve_references(session, tx.postings)
     residuals = compute_residuals(tx.postings)
     for instrument_id, residual in residuals.items():
         # copy_abs is exact; abs() would round the residual to the context's 28 digits.
         if residual.copy_abs() > tolerance(instruments[instrument_id].decimals):
             raise LedgerImbalanceError(residuals)
-    booking_date = tx.booking_date
-    if booking_date is None:
-        booking_date = local_date(tx.occurred_at, await get_timezone(session))
-    transaction_id = (
-        await session.execute(
-            insert(models.Transaction)
-            .values(
-                occurred_at=tx.occurred_at,
-                occurred_tz=tx.occurred_tz,
-                booking_date=booking_date,
-                value_date=tx.value_date,
-                description=tx.description,
-                counterparty_entity_id=tx.counterparty_entity_id,
-                status=tx.status,
-                origin=tx.origin,
-                owner_entity_id=await get_self_entity_id(session),
-            )
-            .returning(models.Transaction.id)
-        )
-    ).scalar_one()
+    if tx.booking_date is not None:
+        return tx.booking_date
+    return local_date(tx.occurred_at, await get_timezone(session))
+
+
+async def _insert_postings(
+    session: AsyncSession, transaction_id: UUID, postings: Sequence[PostingInput]
+) -> None:
     await session.execute(
         insert(models.Posting).values(
             [
@@ -294,13 +282,134 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
                     "is_fee": posting.is_fee,
                     "memo": posting.memo,
                 }
-                for position, posting in enumerate(tx.postings)
+                for position, posting in enumerate(postings)
             ]
         )
     )
+
+
+async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> TransactionRecord:
+    """Write a transaction whose postings balance per instrument, within that instrument's
+    tolerance; otherwise raise LedgerImbalanceError before anything is written."""
+    session = ctx.session
+    booking_date = await _validate_transaction(session, tx)
+    transaction_id = (
+        await session.execute(
+            insert(models.Transaction)
+            .values(
+                occurred_at=tx.occurred_at,
+                occurred_tz=tx.occurred_tz,
+                booking_date=booking_date,
+                value_date=tx.value_date,
+                description=tx.description,
+                counterparty_entity_id=tx.counterparty_entity_id,
+                status=tx.status,
+                origin=tx.origin,
+                connection_id=tx.connection_id,
+                external_id=tx.external_id,
+                owner_entity_id=await get_self_entity_id(session),
+            )
+            .returning(models.Transaction.id)
+        )
+    ).scalar_one()
+    await _insert_postings(session, transaction_id, tx.postings)
     record = await _load_transaction(session, transaction_id)
     _publish(ctx, "finance.transaction.posted", record)
     return record
+
+
+def _posting_key(
+    posting: PostingInput | PostingRecord,
+) -> tuple[object, ...]:
+    return (
+        posting.account_id,
+        posting.instrument_id,
+        posting.quantity,
+        posting.cost_per_unit,
+        posting.cost_instrument_id,
+        posting.price_per_unit,
+        posting.price_instrument_id,
+        posting.is_fee,
+        posting.memo,
+    )
+
+
+async def upsert_connector_transaction(
+    ctx: CommandContext, tx: TransactionInput
+) -> tuple[TransactionRecord, Literal["created", "updated", "unchanged"]]:
+    """Post a connector's transaction, or replace the fields and postings of the one it
+    already posted under the same (connection_id, external_id), keeping its id. An
+    identical re-sync writes nothing."""
+    if tx.origin != "connector" or tx.connection_id is None or tx.external_id is None:
+        raise FinanceValidationError(
+            "a connector transaction needs origin 'connector', a connection_id and an external_id"
+        )
+    session = ctx.session
+    t = models.Transaction
+    existing = (
+        await session.execute(
+            select(
+                t.id,
+                t.origin,
+                t.occurred_at,
+                t.occurred_tz,
+                t.booking_date,
+                t.value_date,
+                t.description,
+                t.counterparty_entity_id,
+                t.status,
+            ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
+        )
+    ).one_or_none()
+    if existing is None:
+        return await post_transaction(ctx, tx), "created"
+    if existing.origin != "connector":
+        raise FinanceValidationError(
+            f"transaction {existing.id} was not created by a connector; refusing to replace it"
+        )
+    before = await _load_transaction(session, existing.id)
+    if existing.status == "void" and tx.status != "void":
+        # The owner's void is a decision that survives re-syncs.
+        return before, "unchanged"
+    booking_date = await _validate_transaction(session, tx)
+    fields_unchanged = (
+        existing.occurred_at == tx.occurred_at
+        and existing.occurred_tz == tx.occurred_tz
+        and existing.booking_date == booking_date
+        and existing.value_date == tx.value_date
+        and existing.description == tx.description
+        and existing.counterparty_entity_id == tx.counterparty_entity_id
+        and existing.status == tx.status
+    )
+    # Postings compare by position: the connector emits them in a stable order.
+    if fields_unchanged and [_posting_key(p) for p in before.postings] == [
+        _posting_key(p) for p in tx.postings
+    ]:
+        return before, "unchanged"
+    await session.execute(
+        update(t)
+        .where(t.id == existing.id)
+        .values(
+            occurred_at=tx.occurred_at,
+            occurred_tz=tx.occurred_tz,
+            booking_date=booking_date,
+            value_date=tx.value_date,
+            description=tx.description,
+            counterparty_entity_id=tx.counterparty_entity_id,
+            status=tx.status,
+        )
+    )
+    await session.execute(
+        delete(models.Posting).where(models.Posting.transaction_id == existing.id)
+    )
+    await _insert_postings(session, existing.id, tx.postings)
+    record = await _load_transaction(session, existing.id)
+    ctx.emit("finance.transaction.updated", record.id, {"transaction_id": str(record.id)})
+    ctx.record_change(
+        f"transaction:{record.id}",
+        {"before": _change_data(before), "after": _change_data(record)},
+    )
+    return record, "updated"
 
 
 async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:

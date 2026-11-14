@@ -34,14 +34,16 @@ def _is_cross_site(request: Request) -> bool:
     return urlsplit(origin).netloc.lower() != host.lower()
 
 
-def get_actor(request: Request) -> Actor:
-    # The owner's identity is attached to every request the owner's browser sends, even one
-    # a page on another site triggers, so a request must come from our own origin. That
-    # holds for reads too: another site can't see the response, but an <img src> can still
-    # start the work (a long net-worth series, say). Requests without these headers (curl,
-    # scripts) don't come from a browser page and pass.
-    if _is_cross_site(request):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site request refused")
+def _is_top_level_navigation(request: Request) -> bool:
+    # The browser sets both headers itself; a page can't fake them with fetch() or an iframe.
+    return (
+        request.method == "GET"
+        and request.headers.get("sec-fetch-mode") == "navigate"
+        and request.headers.get("sec-fetch-dest") == "document"
+    )
+
+
+def _owner(request: Request) -> Actor:
     settings = cast(Settings, request.app.state.settings)
     if settings.auth_mode == "dev":
         return Actor("user", "dev")
@@ -51,5 +53,33 @@ def get_actor(request: Request) -> Actor:
     return Actor("user", login)
 
 
+def get_actor(request: Request) -> Actor:
+    # The owner's identity is attached to every request the owner's browser sends, even one
+    # a page on another site triggers, so a request must come from our own origin. That
+    # holds for reads too: another site can't see the response, but an <img src> can still
+    # start the work (a long net-worth series, say). Requests without these headers (curl,
+    # scripts) don't come from a browser page and pass.
+    if _is_cross_site(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site request refused")
+    return _owner(request)
+
+
+def get_actor_allowing_navigation(request: Request) -> Actor:
+    """get_actor, except that a top-level GET navigation may come from another site.
+
+    Only for an OAuth callback, which the provider's page sends the browser to: the route
+    must still check a single-use state, which another site can't know.
+    """
+    if _is_cross_site(request) and not _is_top_level_navigation(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site request refused")
+    return _owner(request)
+
+
+def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    """For writes that must commit on their own, outside the request's session."""
+    return cast(async_sessionmaker[AsyncSession], request.app.state.sessionmaker)
+
+
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+SessionFactoryDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 ActorDep = Annotated[Actor, Depends(get_actor)]
