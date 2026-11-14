@@ -1,7 +1,5 @@
 # Lararium phase 1 design: personal finance infrastructure
 
-**Languages:** English | [简体中文](./2026-11-11-financial-gate-phase1-design.zh-CN.md)
-
 - Date: 2026-11-11
 - Status: Confirmed; implementation is starting according to plan
 - License: AGPL-3.0-or-later (open-source project)
@@ -517,7 +515,7 @@ The roadmap after that:
 | The user's decisions are stored separately and re-applied after the ledger is regenerated | Default |
 | Joint accounts count 100% in Phase 1 | Default |
 | All test data is synthetic; personal notes go in `private/`, which is not tracked by git | Confirmed |
-| Documentation is bilingual: English is the primary version; Chinese translations live alongside as `*.zh-CN.md` | Confirmed |
+| Documentation is in English. Only the README also has a Chinese translation, `README.zh-CN.md` (changed 2026-11-14: every doc used to have a `*.zh-CN.md` translation) | Confirmed |
 | Milestone order (M0–M9) and the roadmap after it | Default |
 | Project name: Lararium (renamed from financial-gate before publication); the future AI assistant module is named `lares` | Confirmed |
 | A posting's cost or price is in another instrument than the posting's own; otherwise it could rescale the quantity and balance anything. The database enforces this too | Default |
