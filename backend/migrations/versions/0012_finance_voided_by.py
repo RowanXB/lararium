@@ -15,13 +15,28 @@ down_revision: str | None = "0011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Voids made before this: who made each is in the audit log, as the actor of the latest
+# command that recorded the transaction as void (a void records it whole; a connector's
+# upsert records it as before and after). A void with no such entry stays NULL, which counts
+# as the owner's and so never gives way.
+BACKFILL_VOIDED_BY = """
+    UPDATE finance.transactions t SET voided_by = (
+      SELECT a.actor_type FROM core.audit_log a
+      WHERE a.changes -> ('transaction:' || t.id) ->> 'status' = 'void'
+         OR a.changes -> ('transaction:' || t.id) -> 'after' ->> 'status' = 'void'
+      ORDER BY a.occurred_at DESC, a.id DESC
+      LIMIT 1
+    )
+    WHERE t.status = 'void'
+"""
+
 UPGRADE = [
-    # NULL on voids made before this: treated as the owner's, which never give way.
     "ALTER TABLE finance.transactions ADD COLUMN voided_by text",
     """
     ALTER TABLE finance.transactions ADD CONSTRAINT transactions_voided_by_only_when_void
       CHECK (voided_by IS NULL OR status = 'void')
     """,
+    BACKFILL_VOIDED_BY,
 ]
 
 DOWNGRADE = [
