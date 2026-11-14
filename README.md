@@ -166,8 +166,13 @@ Two system accounts appear in the ledger:
 Credentials (the client secret and the OAuth tokens) are encrypted with `LARARIUM_MASTER_KEY`
 before they are stored. **Back the master key up separately from your database dumps** (a
 dump plus the key restores everything; a dump alone can't read the credentials). If the key is
-lost, every stored credential is unreadable: you must re-enter each one and re-authorise each
-connection. Generate it once with `openssl rand -base64 32`; don't rotate it by editing `.env`.
+lost, every stored credential is unreadable, and a connection can't be repaired in place: add
+each one again, with its client secret, and authorise it. Then disable the old connection and
+close its accounts and pots, so they stop counting towards net worth. The web app can't close
+accounts yet, so use the API from a device on your tailnet: list them with
+`GET /api/v1/finance/accounts`, and close each with `POST /api/v1/finance/accounts/<id>/close`
+and the body `{"closed_on": "<today>"}`. Generate the key once with `openssl rand -base64 32`;
+don't rotate it by editing `.env`.
 
 ### Verifying against your real Monzo account
 
@@ -192,9 +197,11 @@ connector, check them against your own account (nothing here changes anything in
 6. Where reality differs, fix the fixtures and the normalizer using synthetic data, never the
    real responses.
 
-Known gap: syncs re-fetch only the last 14 days, so a pending payment that disappears or settles
-more than 14 days after it was made stays pending until you notice it. The reconciliation
-mismatch warning on the connection is the signal.
+Known gaps: a pending payment is fetched again until it settles or is voided, but one that
+Monzo stops listing altogether stays pending; the reconciliation mismatch warning on the
+connection is the signal. And history a sync needs that is older than the 89 days Monzo serves
+outside the approval window (after a long outage, say) can't be fetched: the connection then
+shows a "sync window limited" warning, and authorising again backfills it.
 
 ## Webhooks through Cloudflare Tunnel
 
