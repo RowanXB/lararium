@@ -71,6 +71,8 @@ class Transaction(Base):
     status: Mapped[str] = mapped_column(Text)
     origin: Mapped[str] = mapped_column(Text)
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    connection_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.connections.id"))
+    external_id: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

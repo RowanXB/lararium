@@ -1,3 +1,4 @@
+import base64
 from collections.abc import AsyncIterator
 
 import httpx
@@ -34,7 +35,10 @@ async def client(session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
 @pytest.fixture
 async def tailscale_client(session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
     settings = Settings(
-        database_url=UNUSED_DATABASE_URL, auth_mode="tailscale", owner_login="me@example.com"
+        database_url=UNUSED_DATABASE_URL,
+        auth_mode="tailscale",
+        owner_login="me@example.com",
+        master_key=base64.b64encode(bytes(range(32))).decode(),
     )
     async for c in _client(settings, session):
         yield c

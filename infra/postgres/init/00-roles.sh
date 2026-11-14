@@ -3,6 +3,7 @@ set -euo pipefail
 
 : "${LARARIUM_OWNER_PASSWORD:?LARARIUM_OWNER_PASSWORD must be set}"
 : "${LARARIUM_BACKEND_PASSWORD:?LARARIUM_BACKEND_PASSWORD must be set}"
+: "${LARARIUM_WEBHOOK_IN_PASSWORD:?LARARIUM_WEBHOOK_IN_PASSWORD must be set}"
 
 # The passwords stay off the command line (visible in `ps`): psql reads them from the
 # environment via \getenv, and the commands arrive on stdin. roles.sql stays the single
@@ -10,5 +11,6 @@ set -euo pipefail
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'SQL'
 \getenv owner_pw LARARIUM_OWNER_PASSWORD
 \getenv backend_pw LARARIUM_BACKEND_PASSWORD
+\getenv webhook_in_pw LARARIUM_WEBHOOK_IN_PASSWORD
 \i /lararium/roles.sql
 SQL

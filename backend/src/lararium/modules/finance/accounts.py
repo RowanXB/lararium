@@ -135,6 +135,7 @@ async def create_account(
     tax_wrapper: TaxWrapper = "none",
     parent_account_id: UUID | None = None,
     opened_on: date | None = None,
+    source_connection_id: UUID | None = None,
 ) -> AccountRecord:
     session = ctx.session
     if parent_account_id is not None and not await session.scalar(
@@ -153,6 +154,8 @@ async def create_account(
                 tax_wrapper=tax_wrapper,
                 parent_account_id=parent_account_id,
                 balance_mode=balance_mode,
+                source_kind="manual" if source_connection_id is None else "connection",
+                source_connection_id=source_connection_id,
                 opened_on=opened_on,
             )
             .returning(models.Account.id)
