@@ -580,6 +580,35 @@ async def test_an_approval_just_before_the_deadline_is_still_checked(
     assert notifier.messages == []
 
 
+async def test_a_slow_last_check_still_gets_one_after_the_deadline(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = 24  # approved after the poll at 230 s, before the 4 minutes are up
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    def slow_at_230s(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts" and len(monzo.account_requests()) == 23:
+            clock.now += timedelta(seconds=35)  # Monzo takes 35 s to answer the poll at 230 s
+        return monzo(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow_at_230s)) as http:
+        await jobs.run_await_approval(
+            session,
+            uuid.UUID(connection_id),
+            settings=_settings(),
+            http=http,
+            notifier=notifier,
+            session_factory=sessions,
+            now=clock,
+            sleep=clock.sleep,
+        )
+
+    # The next round starts 45 s past the deadline, and still asks once more.
+    assert (await get_connection(session, connection_id)).status == "healthy"
+    assert notifier.messages == []
+
+
 async def test_await_approval_stops_when_no_longer_authorising(
     api, session, sessions, monzo, queue
 ) -> None:

@@ -48,8 +48,9 @@ MAX_ERROR_LENGTH = 500
 # full backfill inside the 5 minutes after approval in which Monzo serves all history.
 APPROVAL_POLL_SECONDS = 10
 APPROVAL_WINDOW = timedelta(minutes=4)
-# How long past the deadline one last approval check is still made (see run_await_approval).
-LAST_CHECK_GRACE = timedelta(seconds=30)
+# Monzo serves all history for this long after the owner approves.
+FULL_HISTORY_WINDOW = timedelta(minutes=5)
+HTTP_TIMEOUT_SECONDS = 30
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
 
 
@@ -219,6 +220,8 @@ async def run_await_approval(
     actor = Actor("connector", connector.name)
     args = {"connection_id": str(connection_id), "connector": connector.name}
     check_id: UUID = (await session.execute(select(func.uuidv7()))).scalar_one()
+    # The authorisation this job has asked Monzo about before its deadline, if any.
+    polled_in_time: str | None = None
 
     while True:
         connection = await get_connection(session, connection_id)
@@ -234,17 +237,20 @@ async def run_await_approval(
         deadline = (
             datetime.fromisoformat(authorised_at) + APPROVAL_WINDOW if authorised_at else None
         )
-        # Past the deadline by less than LAST_CHECK_GRACE, Monzo is asked once more: an
-        # approval given since the previous poll still counts, and its full-history window is
-        # still open. Long past it (a job run again after its worker died), it isn't.
+        # A job that asked before the deadline asks once more after it, however long its last
+        # check and wait took: an approval given since still counts, as Monzo's full-history
+        # window runs from the approval. One that didn't (run again after its worker died,
+        # say) ends without asking, so it doesn't backfill late.
         expired = deadline is None or now() >= deadline
-        if deadline is None or now() >= deadline + LAST_CHECK_GRACE:
+        if expired and polled_in_time != authorised_at:
             await session.rollback()
             if await _end_approval(
                 session, connection_id, actor, args, APPROVAL_EXPIRED, authorised_at
             ):
                 await _notify(notifier, f"{connection.display_name}: {APPROVAL_EXPIRED}")
             return
+        if not expired:
+            polled_in_time = authorised_at
         try:
             # check_access writes nothing through this context; a token it refreshes is
             # committed in a session of its own.
@@ -362,7 +368,7 @@ async def _job_resources(
 ) -> AsyncGenerator[tuple[httpx.AsyncClient, async_sessionmaker[AsyncSession]]]:
     engine = create_engine(settings.database_url)
     try:
-        async with httpx.AsyncClient(timeout=30) as http:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as http:
             yield http, make_sessionmaker(engine)
     finally:
         await engine.dispose()
