@@ -180,6 +180,44 @@ async def test_get_gives_up_after_three_retries(status, retry_after, slept) -> N
     assert sleep.slept == slept
 
 
+async def test_get_retries_dropped_connections_like_a_503() -> None:
+    history = [make_transaction(id="tx_TEST0001")]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        if len(requests) == 2:
+            raise httpx.RemoteProtocolError("peer closed the connection", request=request)
+        return httpx.Response(200, json={"transactions": history})
+
+    sleep = RecordingSleep()
+    async with _http(handler) as http:
+        client = MonzoClient(http, Secret(ACCESS), sleep=sleep)
+        pages = [page async for page in client.transactions(ACCOUNT_ID, since=None)]
+
+    assert pages == [history]
+    assert sleep.slept == [2, 4]
+
+
+async def test_a_transport_error_is_raised_once_the_retries_run_out() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("unreachable", request=request)
+
+    sleep = RecordingSleep()
+    async with _http(handler) as http:
+        with pytest.raises(httpx.ConnectError):
+            await MonzoClient(http, Secret(ACCESS), sleep=sleep).accounts()
+        # A write isn't repeated: it could apply twice.
+        with pytest.raises(httpx.ConnectError):
+            await MonzoClient(http, Secret(ACCESS), sleep=sleep).register_webhook(
+                ACCOUNT_ID, "https://hooks.example/monzo/s3cret"
+            )
+
+    assert sleep.slept == [2, 4, 8]
+
+
 async def test_only_gets_are_retried() -> None:
     requests: list[httpx.Request] = []
 

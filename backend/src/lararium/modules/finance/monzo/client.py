@@ -24,7 +24,8 @@ EXPAND = "merchant"
 # replaced, so an echoed token can't reach a message.
 _CODE = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)*")
 _MAX_CODE_LENGTH = 100
-# A GET answered 429 or 5xx is retried after each of these waits, then the error is raised.
+# A GET answered 429 or 5xx, or failing in transport, is retried after each of these waits,
+# then the error is raised.
 RETRY_DELAYS = (2, 4, 8)
 # A Retry-After up to this many seconds is waited instead of the backoff.
 MAX_RETRY_AFTER = 30
@@ -114,16 +115,24 @@ class MonzoClient:
         params: Params = (),
         data: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        # Only reads are retried: repeating a write could apply it twice.
+        # Only reads are retried: repeating a write could apply it twice. A dropped connection
+        # or a timeout is as transient as a 503, so it is retried the same way.
         delays = iter(RETRY_DELAYS if method == "GET" else ())
         while True:
-            response = await self._http.request(
-                method,
-                f"{API}{path}",
-                params=list(params),
-                data=data,
-                headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
-            )
+            try:
+                response = await self._http.request(
+                    method,
+                    f"{API}{path}",
+                    params=list(params),
+                    data=data,
+                    headers={"Authorization": f"Bearer {self._access_token.reveal()}"},
+                )
+            except httpx.TransportError:
+                backoff = next(delays, None)
+                if backoff is None:
+                    raise
+                await self._sleep(backoff)
+                continue
             backoff = next(delays, None) if _transient(response) else None
             if backoff is None:
                 break
