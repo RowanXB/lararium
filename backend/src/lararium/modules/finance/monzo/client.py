@@ -7,6 +7,8 @@ response body, which an upstream could fill with anything it was sent.
 import asyncio
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -19,6 +21,36 @@ AUTH = "https://auth.monzo.com/"
 PAGE_SIZE = 100
 # GET /transactions expands each merchant id into the merchant object.
 EXPAND = "merchant"
+# The time range one GET /transactions covers. Checked against a real account on 2026-11-14:
+# 89 and 91 days are accepted; about 400 days is refused (400 bad_request.invalid_time_range).
+MAX_RANGE = timedelta(days=89)
+# A range at most this much longer is still one request, so the 89-day window of an
+# incremental sync, a few milliseconds old by the time it is sent, isn't split.
+RANGE_SLACK = timedelta(days=1)
+# Consecutive ranges overlap this much, so a transaction at a boundary isn't missed whichever
+# way Monzo compares `since` and `before`; one listed twice is the same transaction.
+RANGE_OVERLAP = timedelta(seconds=1)
+
+
+@dataclass(frozen=True)
+class TransactionsPage:
+    """One GET /transactions page, with the parameters that fetched it (to replay it)."""
+
+    params: dict[str, str]
+    transactions: list[dict[str, Any]]
+
+
+def _timestamp(value: str | None) -> datetime | None:
+    """`since` or `before` as a time, or None when it is absent or a transaction id."""
+    if value is None or value.startswith("tx_"):
+        return None
+    return datetime.fromisoformat(value).astimezone(UTC)
+
+
+def _iso(value: datetime) -> str:
+    value = value.astimezone(UTC)
+    return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
+
 
 # Monzo error codes look like "unauthorized.bad_access_token.expired"; anything else is
 # replaced, so an echoed token can't reach a message.
@@ -158,9 +190,36 @@ class MonzoClient:
 
     async def transactions(
         self, account_id: str, *, since: str | None, before: str | None = None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+    ) -> AsyncIterator[TransactionsPage]:
         """Yield pages of up to 100 transactions, oldest first, from `since` (a timestamp or a
-        transaction id) until a short page; each next page starts after the last id.
+        transaction id) to `before` (or now).
+
+        Without `since` Monzo lists only about the last month, and it refuses a range longer
+        than MAX_RANGE: a timestamp `since` further back is fetched range by range.
+        """
+        start, end = _timestamp(since), _timestamp(before)
+        if start is None:
+            async for page in self._pages(account_id, since=since, before=before):
+                yield page
+            return
+        stop = end or datetime.now(UTC)
+        while True:
+            range_end = start + MAX_RANGE
+            last = stop - start <= MAX_RANGE + RANGE_SLACK
+            async for page in self._pages(
+                account_id,
+                since=_iso(start),
+                before=before if last else _iso(range_end),
+            ):
+                yield page
+            if last:
+                return
+            start = range_end - RANGE_OVERLAP
+
+    async def _pages(
+        self, account_id: str, *, since: str | None, before: str | None
+    ) -> AsyncIterator[TransactionsPage]:
+        """Pages of one range, until a short page; each next page starts after the last id.
 
         A full page ending at a cursor already used would repeat forever (an upstream that
         ignores `since`), so it raises MonzoApiError(200, "pagination_stalled")."""
@@ -181,7 +240,7 @@ class MonzoClient:
             if len(page) >= PAGE_SIZE and page[-1]["id"] in used:
                 raise MonzoApiError(200, "pagination_stalled")
             if page:
-                yield page
+                yield TransactionsPage(dict(params), page)
             if len(page) < PAGE_SIZE:
                 return
             since = page[-1]["id"]

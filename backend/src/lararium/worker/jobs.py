@@ -119,7 +119,9 @@ async def run_sync(
         # command_context has rolled the failed sync back; record the failure on its own.
         rejected = isinstance(exc, CredentialRejectedError)
         error = _describe(exc)[:MAX_ERROR_LENGTH]
-        logger.warning("sync of connection %s failed: %s", connection_id, type(exc).__name__)
+        # The description only (a Monzo error's status and code, else the type), never the
+        # exception's text, which may quote a request.
+        logger.warning("sync of connection %s failed: %s", connection_id, error)
         backfill_failed = backfill and not rejected
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
             if backfill:

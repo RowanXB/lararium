@@ -38,6 +38,8 @@ from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_tra
 KEY = bytes(range(32))
 # What Monzo lists for /transactions without `since`.
 MONZO_DEFAULT_WINDOW = timedelta(days=30)
+# The longest range Monzo accepts for one /transactions request (somewhere past 89 days).
+MONZO_MAX_RANGE = timedelta(days=90)
 CONNECTOR = Actor("connector", "monzo")
 
 type Handler = Callable[[httpx.Request], httpx.Response]
@@ -67,18 +69,24 @@ class FakeMonzo:
             return httpx.Response(200, json={"pots": [make_pot()]})
         assert path == "/transactions", path
         since = request.url.params.get("since")
+        before = request.url.params.get("before")
+        end = datetime.fromisoformat(before) if before else datetime.now(UTC)
         ids = [t["id"] for t in self.transactions]
         if since in ids:
             listed = self.transactions[ids.index(since) + 1 :]
         else:
             # As Monzo does (checked against a real account on 2026-11-14): without `since`
-            # only about the last month, not all history; a timestamp `since` from then on.
+            # only about the last month, not all history; a timestamp `since` from then on,
+            # over a range of at most about 90 days.
             start = (
                 datetime.now(UTC) - MONZO_DEFAULT_WINDOW
                 if since is None
                 else datetime.fromisoformat(since)
             )
+            if end - start > MONZO_MAX_RANGE:
+                return httpx.Response(400, json={"code": "bad_request.invalid_time_range"})
             listed = [t for t in self.transactions if datetime.fromisoformat(t["created"]) >= start]
+        listed = [t for t in listed if datetime.fromisoformat(t["created"]) < end]
         limit = int(request.url.params["limit"])
         return httpx.Response(200, json={"transactions": listed[:limit]})
 
@@ -166,9 +174,12 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
     assert by_type["balance"].request == {"account_id": ACCOUNT_ID}
     assert by_type["pots"].request == {"current_account_id": ACCOUNT_ID}
     # Everything needed to replay the page request exactly.
+    requests = fake.transaction_requests()
+    assert requests[0].url.params["since"] == from_creation
+    # Range by range, from there to now; the page stored with the request that fetched it.
     assert by_type["transactions_page"].request == {
         "account_id": ACCOUNT_ID,
-        "since": from_creation,
+        "since": requests[-1].url.params["since"],
         "limit": "100",
         "expand[]": "merchant",
     }
@@ -176,7 +187,6 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
     state: Any = cursor["accounts"][ACCOUNT_ID]  # type: ignore[index]
     assert datetime.fromisoformat(state.pop("fetched_at")) <= datetime.now(UTC)
     assert state == {"last_created": _iso(created), "backfilled": True, "reconciled": True}
-    assert fake.transaction_requests()[0].url.params["since"] == from_creation
     after = await get_connection(session, connection.id)
     assert after.config["client_id"] == "oauth2client_TEST1"
 

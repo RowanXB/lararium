@@ -61,7 +61,7 @@ async def test_transactions_paginates_with_since_last_id() -> None:
 
     async with _http(handler) as http:
         client = MonzoClient(http, Secret(ACCESS))
-        pages = [page async for page in client.transactions(ACCOUNT_ID, since=None)]
+        pages = [p.transactions async for p in client.transactions(ACCOUNT_ID, since=None)]
 
     assert [len(page) for page in pages] == [100, 100, 50]
     assert [t["id"] for page in pages for t in page] == [t["id"] for t in history]
@@ -94,7 +94,7 @@ async def test_transactions_stops_on_a_repeated_page() -> None:
         pages: list[list[dict]] = []
         with pytest.raises(MonzoApiError) as raised:
             async for got in client.transactions(ACCOUNT_ID, since=None):
-                pages.append(got)
+                pages.append(got.transactions)
 
     assert (raised.value.status, raised.value.code) == (200, "pagination_stalled")
     assert len(requests) == 2
@@ -118,8 +118,39 @@ async def test_transactions_passes_since_and_before() -> None:
         ]
 
     assert pages == []
-    assert seen[0].url.params["since"] == "2026-01-01T00:00:00Z"
+    assert seen[0].url.params["since"] == "2026-01-01T00:00:00.000Z"
     assert seen[0].url.params["before"] == "2026-02-01T00:00:00Z"
+
+
+async def test_a_long_range_is_fetched_in_ranges_monzo_accepts() -> None:
+    # Monzo refuses a range much longer than about 90 days (invalid_time_range).
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        tx = make_transaction(id=f"tx_TEST{len(seen):04d}")
+        return httpx.Response(200, json={"transactions": [tx]})
+
+    async with _http(handler) as http:
+        client = MonzoClient(http, Secret(ACCESS))
+        pages = [
+            page
+            async for page in client.transactions(
+                ACCOUNT_ID, since="2026-01-01T00:00:00Z", before="2026-07-01T00:00:00Z"
+            )
+        ]
+
+    ranges = [(r.url.params["since"], r.url.params["before"]) for r in seen]
+    assert ranges == [
+        ("2026-01-01T00:00:00.000Z", "2026-03-31T00:00:00.000Z"),
+        ("2026-03-30T23:59:59.000Z", "2026-06-27T23:59:59.000Z"),
+        ("2026-06-27T23:59:58.000Z", "2026-07-01T00:00:00Z"),
+    ]
+    # Each page carries the parameters that fetched it, so it can be replayed.
+    assert [page.params["since"] for page in pages] == [since for since, _ in ranges]
+    assert all(
+        page.params["before"] == before for page, (_, before) in zip(pages, ranges, strict=True)
+    )
 
 
 class RecordingSleep:
@@ -146,7 +177,7 @@ async def test_get_retries_rate_limits_then_succeeds() -> None:
     sleep = RecordingSleep()
     async with _http(handler) as http:
         client = MonzoClient(http, Secret(ACCESS), sleep=sleep)
-        pages = [page async for page in client.transactions(ACCOUNT_ID, since=None)]
+        pages = [p.transactions async for p in client.transactions(ACCOUNT_ID, since=None)]
 
     assert pages == [history]
     assert len(requests) == 3
@@ -195,7 +226,7 @@ async def test_get_retries_dropped_connections_like_a_503() -> None:
     sleep = RecordingSleep()
     async with _http(handler) as http:
         client = MonzoClient(http, Secret(ACCESS), sleep=sleep)
-        pages = [page async for page in client.transactions(ACCOUNT_ID, since=None)]
+        pages = [p.transactions async for p in client.transactions(ACCOUNT_ID, since=None)]
 
     assert pages == [history]
     assert sleep.slept == [2, 4]

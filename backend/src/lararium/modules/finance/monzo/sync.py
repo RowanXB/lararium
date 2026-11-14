@@ -13,8 +13,6 @@ from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.monzo.auth import access_token_for
 from lararium.modules.finance.monzo.client import (
-    EXPAND,
-    PAGE_SIZE,
     AccessTokenExpiredError,
     MonzoApiError,
     MonzoClient,
@@ -221,17 +219,11 @@ class MonzoConnector:
                 await store("pots", {"current_account_id": account_id}, pots)
                 earliest: str | None = None
                 newest = last_created
-                page_since = since
                 async for page in client.transactions(account_id, since=since):
-                    page_request: dict[str, JSONValue] = {
-                        "account_id": account_id,
-                        "since": page_since,
-                        "limit": str(PAGE_SIZE),
-                        "expand[]": EXPAND,
-                    }
-                    await store("transactions_page", page_request, page)
-                    page_since = page[-1]["id"]
-                    created = [t["created"] for t in page]
+                    # The request exactly as sent, so the page can be replayed.
+                    page_request: dict[str, JSONValue] = dict(page.params)
+                    await store("transactions_page", page_request, page.transactions)
+                    created = [t["created"] for t in page.transactions]
                     earliest = min(created + ([earliest] if earliest else []), key=_parse)
                     newest = max(created + ([newest] if newest else []), key=_parse)
                 if await client.balance(account_id) == balance:
