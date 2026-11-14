@@ -315,8 +315,11 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U po
 make up
 ```
 
-On a fresh server, run `make up` first (it creates the roles and an empty, migrated
-database), then restore and swap as above.
+On a fresh server, first set `LARARIUM_MASTER_KEY` in `infra/.env` to the key of the server
+the dump came from (from your separate key backup, or `infra/.env.sops`), not a new one: the
+stored credentials in the dump were encrypted with it, and under any other key every
+connection would have to be added again. Then run `make up` (it creates the roles and an
+empty, migrated database), and restore and swap as above.
 
 ## License
 

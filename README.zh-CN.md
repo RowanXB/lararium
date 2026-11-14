@@ -286,8 +286,9 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U po
 make up
 ```
 
-在全新服务器上，先运行 `make up`（它会创建角色和一个已迁移的空数据库），再按上面的步骤
-恢复并交换。
+在全新服务器上，先把 `infra/.env` 里的 `LARARIUM_MASTER_KEY` 设成转储来源那台服务器的主密钥（从你单独
+备份的密钥或 `infra/.env.sops` 里取），不要新生成：转储里存的凭据是用它加密的，换了密钥，每个连接都得
+重新添加。然后运行 `make up`（它会创建角色和一个已迁移的空数据库），再按上面的步骤恢复并交换。
 
 ## 许可证
 
