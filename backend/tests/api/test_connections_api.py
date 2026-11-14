@@ -554,8 +554,9 @@ async def test_approval_window_expired(api, session, sessions, monzo, queue) -> 
 
     await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
 
-    # Every 10 s until 4 minutes after the tokens were saved: polls at 0, 10, ..., 230 s.
-    assert len(monzo.account_requests()) == 24
+    # Every 10 s until 4 minutes after the authorisation, and once more at the deadline:
+    # polls at 0, 10, ..., 240 s.
+    assert len(monzo.account_requests()) == 25
     assert sum(clock.slept) == 240
     connection = await get_connection(session, connection_id)
     assert (connection.status, connection.last_error) == ("needs_reauth", EXPIRED)
@@ -563,6 +564,20 @@ async def test_approval_window_expired(api, session, sessions, monzo, queue) -> 
     assert "My Monzo" in notifier.messages[0] and EXPIRED in notifier.messages[0]
     assert await session.scalar(text("select count(*) from finance.transactions")) == 0
     assert await session.scalar(text("select count(*) from finance.accounts")) == 0
+
+
+async def test_an_approval_just_before_the_deadline_is_still_checked(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = 24  # approved after the poll at 230 s, before the 4 minutes are up
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    assert sum(clock.slept) == 240
+    assert (await get_connection(session, connection_id)).status == "healthy"
+    assert notifier.messages == []
 
 
 async def test_await_approval_stops_when_no_longer_authorising(

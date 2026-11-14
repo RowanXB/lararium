@@ -48,6 +48,8 @@ MAX_ERROR_LENGTH = 500
 # full backfill inside the 5 minutes after approval in which Monzo serves all history.
 APPROVAL_POLL_SECONDS = 10
 APPROVAL_WINDOW = timedelta(minutes=4)
+# How long past the deadline one last approval check is still made (see run_await_approval).
+LAST_CHECK_GRACE = timedelta(seconds=30)
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
 
 
@@ -229,10 +231,14 @@ async def run_await_approval(
         authorised_at = connection.config.get(AUTHORISED_AT_KEY)
         if not isinstance(authorised_at, str):
             authorised_at = ""  # no window to wait in: it has expired
-        expired = (
-            not authorised_at or now() >= datetime.fromisoformat(authorised_at) + APPROVAL_WINDOW
+        deadline = (
+            datetime.fromisoformat(authorised_at) + APPROVAL_WINDOW if authorised_at else None
         )
-        if expired:
+        # Past the deadline by less than LAST_CHECK_GRACE, Monzo is asked once more: an
+        # approval given since the previous poll still counts, and its full-history window is
+        # still open. Long past it (a job run again after its worker died), it isn't.
+        expired = deadline is None or now() >= deadline
+        if deadline is None or now() >= deadline + LAST_CHECK_GRACE:
             await session.rollback()
             if await _end_approval(
                 session, connection_id, actor, args, APPROVAL_EXPIRED, authorised_at
@@ -269,6 +275,12 @@ async def run_await_approval(
         await session.rollback()
         if approved:
             break
+        if expired:
+            if await _end_approval(
+                session, connection_id, actor, args, APPROVAL_EXPIRED, authorised_at
+            ):
+                await _notify(notifier, f"{connection.display_name}: {APPROVAL_EXPIRED}")
+            return
         await sleep(APPROVAL_POLL_SECONDS)
 
     await run_sync(

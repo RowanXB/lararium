@@ -25,7 +25,9 @@ def main() -> None:
     # Fails with a clear message when the environment is incomplete.
     get_settings()
     # run_worker imports the app's import_paths (lararium.worker.jobs), which registers the tasks.
-    procrastinate_app.run_worker(concurrency=CONCURRENCY)
+    # Finished jobs are deleted, failed ones kept to inspect: periodic jobs run every
+    # minute, and kept they would grow the database (and every dump) without bound.
+    procrastinate_app.run_worker(concurrency=CONCURRENCY, delete_jobs="successful")
 
 
 if __name__ == "__main__":
