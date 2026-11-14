@@ -719,6 +719,36 @@ async def test_an_opening_the_connector_voided_is_posted_again_when_needed(sessi
     assert report.mismatches == []
 
 
+async def test_a_reversed_then_settled_earliest_transaction_leaves_the_opening_alone(
+    session, run
+) -> None:
+    connection = await _connection(run)
+    first = make_transaction(
+        id="tx_TEST0001", amount=10000, settled="", created="2026-03-01T12:00:00.000Z"
+    )
+    later = make_transaction(id="tx_TEST0002", amount=5000, created="2026-03-05T12:00:00.000Z")
+    # 250.00 against 150.00 of history: an opening of 100.00.
+    await _normalize(session, connection, transactions=[first, later], openings=[ACCOUNT_ID])
+
+    # The earliest transaction comes back reversed (the connector voids it)...
+    report = await _normalize(
+        session,
+        connection,
+        transactions=[first | {"amount": 0}, later],
+        balance=15000,
+        openings=[ACCOUNT_ID],
+    )
+    assert report.mismatches == []
+    # ...and then settled after all, under the same id.
+    settled = first | {"settled": "2026-03-02T06:00:00.000Z"}
+    report = await _normalize(
+        session, connection, transactions=[settled, later], openings=[ACCOUNT_ID]
+    )
+
+    assert (await _opening(session))[0] == Decimal("100.00")
+    assert report.mismatches == []
+
+
 async def test_reconciliation_keeps_other_warnings(session, run) -> None:
     connection = await _connection(run)
     await _normalize(session, connection, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID])
