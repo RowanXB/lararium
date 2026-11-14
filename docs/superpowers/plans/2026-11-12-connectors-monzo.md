@@ -1,9 +1,5 @@
 # Connector Framework and Monzo Implementation Plan
 
-**Languages:** English | [简体中文](./2026-11-12-connectors-monzo.zh-CN.md)
-
-The English version is authoritative; if the two versions differ, follow this one.
-
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Connect the owner's Monzo account through the official API so that accounts, pots, balances and transactions sync into the ledger automatically: on a schedule, and within a minute of a Monzo webhook. Notify the owner on Feishu when a connection breaks.
@@ -108,7 +104,7 @@ Choices the spec leaves open, made here so the tasks don't have to:
   - PostgreSQL 18;
   - `NUMERIC`/`Decimal`/strings, and the word `float` nowhere in `src/`;
   - UUIDv7; UTC `timestamptz` plus separate `date`;
-  - English UI copy; bilingual docs; AGPL-3.0-compatible dependencies only.
+  - English UI copy; docs in English (only the README also has `README.zh-CN.md`); AGPL-3.0-compatible dependencies only.
 - Branch `feat/claude-connectors-monzo`; commit messages `<type>: <summary>`; sign commits with the `local-signed-git-commit` skill.
 - **Layering.** `core` stays finance-agnostic. Connections, credentials, raw records, the inbox and the notifier live in `core`; everything Monzo-specific lives in `lararium.modules.finance.monzo`. The worker and the webhook receiver are top-level packages (`lararium.worker`, `lararium.webhook_in`). Add import-linter contracts: `lararium.webhook_in` may import only `lararium.config` and `lararium.db` from the project, and `core` still imports no module.
 - **Synthetic data only.** No real Monzo data in the repository: test fixtures are hand-written from the docs' shapes. Responses captured from the owner's account during Task 10 go to `private/monzo-samples/` only.
