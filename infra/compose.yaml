@@ -64,7 +64,8 @@ services:
       LARARIUM_FEISHU_SECRET: ${LARARIUM_FEISHU_SECRET:-}
     depends_on:
       migrate: { condition: service_completed_successfully }
-  # Webhook ingress, started only with `--profile webhook`. Compose interpolates inactive
+  # Webhook ingress, in the stack only with COMPOSE_PROFILES=webhook in infra/.env, so that
+  # `make up` rebuilds it and `make down` stops it like the rest. Compose interpolates inactive
   # services too, so their secrets can't be required (`:?`) without breaking a plain
   # `make up`; instead the receiver refuses to start without a valid secret, and
   # cloudflared without a token. The receiver can only insert

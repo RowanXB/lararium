@@ -195,12 +195,9 @@ URL。只有一个很小的接收器通过 Cloudflare Tunnel 暴露出去，服�
    not (http.request.method eq "POST" and starts_with(http.request.uri.path, "/monzo/"))
    ```
 
-4. 启动接收器和 tunnel（`worker` 和 `api` 也需要这三个变量，`make up` 会传给它们）：
-
-   ```bash
-   make up
-   docker compose -f infra/compose.yaml --env-file infra/.env --profile webhook up -d
-   ```
+4. 在 `infra/.env` 里设置 `COMPOSE_PROFILES=webhook`，然后运行 `make up`。有了这个 profile，接收器
+   和 tunnel 就成了整套服务的一部分：`make up` 会和其他服务一起构建、启动它们（`worker` 和 `api`
+   也需要这三个变量），`make down` 也会停掉它们。
 
    之后每次同步都会把 `https://hooks.example.com/monzo/<密钥>` 注册给 Monzo。接收器存下每次推送并
    立即应答；worker 在一分钟内把它变成一次同步。密钥错误会得到 404，和其他任何路径一样。
@@ -209,8 +206,8 @@ URL。只有一个很小的接收器通过 Cloudflare Tunnel 暴露出去，服�
 的日志或仪表盘。
 
 **已有的数据库。** `infra/postgres/roles.sql` 只在全新的卷上执行，所以在 webhook 接收器出现之前
-创建的数据库没有 `lararium_webhook_in` 角色，迁移 0011 也跳过了它的授权。在第一次
-`--profile webhook up` 之前执行一次：在 `infra/.env` 里设置 `LARARIUM_WEBHOOK_IN_PASSWORD`，运行
+创建的数据库没有 `lararium_webhook_in` 角色，迁移 0011 也跳过了它的授权。在设置
+`COMPOSE_PROFILES=webhook` 之前执行一次：在 `infra/.env` 里设置 `LARARIUM_WEBHOOK_IN_PASSWORD`，运行
 `make up`（这会带着该变量重建 `db`，数据保留），然后：
 
 ```bash
@@ -271,14 +268,16 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
   psql -U postgres -d lararium_restore -tAc "select count(*) from finance.instruments"
 ```
 
-要让恢复出的副本生效：停止 API，交换数据库名，再重新启动：
+要让恢复出的副本生效：停止所有连接数据库的服务（除 `db` 以外的全部），交换数据库名，再重新启动
+整套服务。有人连着数据库时，PostgreSQL 不允许给它改名。
 
 ```bash
-docker compose -f infra/compose.yaml --env-file infra/.env stop api
+docker compose -f infra/compose.yaml --env-file infra/.env stop
+docker compose -f infra/compose.yaml --env-file infra/.env start db
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U postgres \
   -c "ALTER DATABASE lararium RENAME TO lararium_old" \
   -c "ALTER DATABASE lararium_restore RENAME TO lararium"
-docker compose -f infra/compose.yaml --env-file infra/.env start api
+make up
 ```
 
 在全新服务器上，先运行 `make up`（它会创建角色和一个已迁移的空数据库），再按上面的步骤

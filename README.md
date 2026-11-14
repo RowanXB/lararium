@@ -215,13 +215,10 @@ port on your server is opened:
    not (http.request.method eq "POST" and starts_with(http.request.uri.path, "/monzo/"))
    ```
 
-4. Start the receiver and the tunnel (the `worker` and `api` also need the three variables;
-   `make up` passes them):
-
-   ```bash
-   make up
-   docker compose -f infra/compose.yaml --env-file infra/.env --profile webhook up -d
-   ```
+4. Set `COMPOSE_PROFILES=webhook` in `infra/.env`, then run `make up`. The profile makes the
+   receiver and the tunnel part of the stack, so `make up` builds and starts them with
+   everything else (the `worker` and `api` need the three variables too), and `make down`
+   stops them.
 
    Syncs then register `https://hooks.example.com/monzo/<secret>` with Monzo. The receiver
    stores each delivery and answers at once; the worker turns it into a sync within a minute.
@@ -232,7 +229,7 @@ way, and don't put the secret in your Cloudflare logs or dashboards.
 
 **Existing databases.** `infra/postgres/roles.sql` only runs on a fresh volume, so a database
 created before the webhook receiver has no `lararium_webhook_in` role, and migration 0011 skipped
-its grants. Once, before the first `--profile webhook up`: set `LARARIUM_WEBHOOK_IN_PASSWORD`
+its grants. Once, before setting `COMPOSE_PROFILES=webhook`: set `LARARIUM_WEBHOOK_IN_PASSWORD`
 in `infra/.env`, run `make up` (this recreates `db` with the variable; the data stays), then:
 
 ```bash
@@ -296,14 +293,17 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
   psql -U postgres -d lararium_restore -tAc "select count(*) from finance.instruments"
 ```
 
-To make the restored copy live, stop the API, swap the database names, and start it again:
+To make the restored copy live, stop everything that connects to the database (all services
+but `db`), swap the database names, and start the stack again. PostgreSQL won't rename a
+database while anyone is connected to it.
 
 ```bash
-docker compose -f infra/compose.yaml --env-file infra/.env stop api
+docker compose -f infra/compose.yaml --env-file infra/.env stop
+docker compose -f infra/compose.yaml --env-file infra/.env start db
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U postgres \
   -c "ALTER DATABASE lararium RENAME TO lararium_old" \
   -c "ALTER DATABASE lararium_restore RENAME TO lararium"
-docker compose -f infra/compose.yaml --env-file infra/.env start api
+make up
 ```
 
 On a fresh server, run `make up` first (it creates the roles and an empty, migrated
