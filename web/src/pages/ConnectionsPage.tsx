@@ -73,8 +73,9 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
       <CardContent className="space-y-3">
         {connection.status === "authorising" && (
           <p role="status" className="rounded-md border border-primary p-3 font-medium">
-            Open the Monzo app and approve the request now. Lararium has 4 minutes to fetch your
-            full history.
+            Open the Monzo app and approve the request now: Lararium can fetch your full history
+            only within 4 minutes of authorising. Once you approve, it fetches it, and this page
+            shows the result.
           </p>
         )}
         <p className="text-sm text-muted-foreground">
@@ -128,8 +129,10 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string>();
-  const callbackUrl =
-    redirectUri ?? `${window.location.origin}/api/v1/connections/oauth/monzo/callback`;
+  // Only the server's value is exact: it is built from LARARIUM_PUBLIC_BASE_URL, which need
+  // not match the address this page was opened at. Until a connection carries it, say how
+  // it is built instead of guessing.
+  const callbackPath = "/api/v1/connections/oauth/monzo/callback";
 
   const mutation = useMutation({
     // gcTime 0 plus the reset below drops the request variables (the secret) from the cache.
@@ -177,7 +180,14 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
           />
           <p className="text-sm text-muted-foreground sm:col-span-3">
             Create an OAuth client at developers.monzo.com and set its redirect URL to{" "}
-            <code>{callbackUrl}</code>.
+            {redirectUri ? (
+              <code>{redirectUri}</code>
+            ) : (
+              <>
+                your <code>LARARIUM_PUBLIC_BASE_URL</code> followed by <code>{callbackPath}</code>
+              </>
+            )}
+            .
           </p>
           <div className="flex items-center gap-3 sm:col-span-3">
             <Button type="submit" disabled={mutation.isPending}>

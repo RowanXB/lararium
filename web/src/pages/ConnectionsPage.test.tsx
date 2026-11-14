@@ -85,13 +85,14 @@ it("shows the server's error when adding fails", async () => {
   expect(await screen.findByText("Client ID rejected")).toBeInTheDocument();
 });
 
-it("shows this origin's callback URL before any connection exists", async () => {
+it("says how the callback URL is built before any connection exists", async () => {
   vi.mocked(listConnections).mockResolvedValue({ data: [] } as never);
-  vi.stubGlobal("location", { href: "", search: "", origin: "https://lararium.example" });
+  // The page's own origin may differ from LARARIUM_PUBLIC_BASE_URL: it is never shown as the URL.
+  vi.stubGlobal("location", { href: "", search: "", origin: "http://localhost:5173" });
   renderPage();
-  expect(
-    await screen.findByText("https://lararium.example/api/v1/connections/oauth/monzo/callback"),
-  ).toBeInTheDocument();
+  expect(await screen.findByText("LARARIUM_PUBLIC_BASE_URL")).toBeInTheDocument();
+  expect(screen.getByText("/api/v1/connections/oauth/monzo/callback")).toBeInTheDocument();
+  expect(screen.queryByText(/localhost:5173/)).not.toBeInTheDocument();
 });
 
 it("authorise redirects to the returned url", async () => {

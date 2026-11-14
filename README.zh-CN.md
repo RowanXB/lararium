@@ -29,6 +29,7 @@ make check
 docker run -d --name lararium-dev-db -p 127.0.0.1:5432:5432 \
   -e POSTGRES_PASSWORD=dev \
   -e LARARIUM_OWNER_PASSWORD=owner -e LARARIUM_BACKEND_PASSWORD=backend \
+  -e LARARIUM_WEBHOOK_IN_PASSWORD=webhook_in \
   -v "$PWD/infra/postgres:/lararium:ro" \
   -v "$PWD/infra/postgres/init:/docker-entrypoint-initdb.d:ro" \
   postgres:18
@@ -127,7 +128,7 @@ Monzo 是一个连接器：`worker` 服务每 30 分钟（以及点击「立即�
    创建连接。
 2. 在 [developers.monzo.com](https://developers.monzo.com) 创建一个 OAuth 客户端：类型选
    confidential，重定向 URI 填
-   `<LARARIUM_PUBLIC_BASE_URL>/api/v1/connections/oauth/monzo/callback`（连接页面会显示确切的值）。
+   `<LARARIUM_PUBLIC_BASE_URL>/api/v1/connections/oauth/monzo/callback`（添加过连接后，连接页面会显示确切的值）。
    记下它的 client ID 和 client secret。
 3. 在 Lararium 打开「连接」页面，用 client ID 和 secret 添加一个 Monzo 连接，然后点「授权」。
    浏览器会打开 Monzo，用邮件里的登录链接登录。
@@ -135,8 +136,8 @@ Monzo 是一个连接器：`worker` 服务每 30 分钟（以及点击「立即�
    Monzo 才会返回你的全部历史，所以 Lararium 最多会轮询 4 分钟等你批准，然后一次性回填全部历史。
    如果没有及时批准，或回填没有完成，连接上会提示；重新授权即可重试（在那个时间窗口之外只能拿到
    最近 90 天）。
-5. 之后连接会自动同步。worker 一次只跑一个任务（并发为 1），所以 4 分钟的批准等待会延后其他连接
-   的同步；只有一个 Monzo 连接时没有影响。
+5. 之后连接会自动同步。worker 最多同时跑 4 个任务，所以一个连接的批准等待不会拖住其他连接；
+   同一个连接的任务不会重叠。
 
 会同步的内容：你的账户（联名账户是单独的账户）、作为所属账户子账户的每个 pot、交易（被拒绝的会
 跳过；待处理的交易会在结算或被撤销时更新）以及余额快照。刷卡付款会匹配到商户；pot 转账变成账户

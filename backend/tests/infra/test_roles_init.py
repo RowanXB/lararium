@@ -17,6 +17,19 @@ BACKEND_PW = "b\"a:ck'end"
 WEBHOOK_IN_PW = "w$e b\\hook'in"
 
 
+REPO = Path(__file__).parents[3]
+
+
+@pytest.mark.parametrize("readme", ["README.md", "README.zh-CN.md"])
+def test_the_dev_database_command_passes_every_variable_the_script_requires(readme: str) -> None:
+    required = re.findall(r'"\$\{(\w+):\?', INIT_SCRIPT.read_text())
+    assert required
+    text = (REPO / readme).read_text()
+    command = text[text.index("docker run -d --name lararium-dev-db") :].split("postgres:18")[0]
+    for name in required:
+        assert f"-e {name}=" in command, f"{readme}: {name}"
+
+
 def test_passwords_are_not_on_the_psql_command_line() -> None:
     lines = INIT_SCRIPT.read_text().splitlines()
     psql_lines = [line for line in lines if re.match(r"\s*psql", line)]

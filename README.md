@@ -31,6 +31,7 @@ the deployment uses), migrate it, then start the API with auto-reload:
 docker run -d --name lararium-dev-db -p 127.0.0.1:5432:5432 \
   -e POSTGRES_PASSWORD=dev \
   -e LARARIUM_OWNER_PASSWORD=owner -e LARARIUM_BACKEND_PASSWORD=backend \
+  -e LARARIUM_WEBHOOK_IN_PASSWORD=webhook_in \
   -v "$PWD/infra/postgres:/lararium:ro" \
   -v "$PWD/infra/postgres/init:/docker-entrypoint-initdb.d:ro" \
   postgres:18
@@ -138,7 +139,8 @@ webhook) into the ledger. It only reads.
    refuses to create a connection.
 2. At [developers.monzo.com](https://developers.monzo.com) create an OAuth client: confidential,
    with the redirect URI `<LARARIUM_PUBLIC_BASE_URL>/api/v1/connections/oauth/monzo/callback`
-   (the Connections page shows the exact value). Note its client ID and client secret.
+   (once a connection exists, the Connections page shows the exact value). Note its client ID
+   and client secret.
 3. In Lararium open Connections, add a Monzo connection with the client ID and secret, and
    choose Authorise. Monzo opens in your browser; sign in with the emailed link.
 4. **Approve within 4 minutes.** Monzo asks you to approve the new access in the Monzo app.
@@ -146,9 +148,8 @@ webhook) into the ledger. It only reads.
    Lararium polls for your approval for up to 4 minutes and then backfills everything at once.
    If you don't approve in time, or the backfill doesn't finish, the connection says so;
    authorise again to retry (you only get the last 90 days outside that window).
-5. After that the connection syncs by itself. The worker runs one job at a time (concurrency
-   1), so the 4-minute approval wait delays other connections' syncs; that is fine with one
-   Monzo connection.
+5. After that the connection syncs by itself. The worker runs up to 4 jobs at once, so one
+   connection's approval wait doesn't hold up another's; one connection's jobs never overlap.
 
 What syncs: your accounts (a joint account is a separate account), each pot as a child account
 of its account, transactions (declined ones are skipped; pending ones are updated when they
