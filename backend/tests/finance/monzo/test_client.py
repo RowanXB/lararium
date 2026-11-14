@@ -576,3 +576,25 @@ async def test_refreshed_tokens_committed_before_use(
             finally:
                 await owner.dispose()
         await engine.dispose()
+
+
+async def test_an_implausibly_early_since_starts_when_monzo_did() -> None:
+    # An upstream `created` of year 1 must not make thousands of requests.
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"transactions": []})
+
+    async with _http(handler) as http:
+        client = MonzoClient(http, Secret(ACCESS))
+        pages = [
+            page
+            async for page in client.transactions(
+                ACCOUNT_ID, since="0001-01-01T00:00:00Z", before="2016-01-01T00:00:00Z"
+            )
+        ]
+
+    assert pages == []
+    assert seen[0].url.params["since"] == "2015-01-01T00:00:00.000Z"
+    assert len(seen) == 5  # 365 days in ranges of 89

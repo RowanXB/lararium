@@ -30,6 +30,9 @@ RANGE_SLACK = timedelta(days=1)
 # Consecutive ranges overlap this much, so a transaction at a boundary isn't missed whichever
 # way Monzo compares `since` and `before`; one listed twice is the same transaction.
 RANGE_OVERLAP = timedelta(seconds=1)
+# Monzo opened its first accounts in 2015, so no transaction is older. A `since` before it
+# (an implausible account `created`, say) starts here, which bounds the number of ranges.
+EARLIEST = datetime(2015, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -203,6 +206,7 @@ class MonzoClient:
                 yield page
             return
         stop = end or datetime.now(UTC)
+        start = max(start, EARLIEST)
         while True:
             range_end = start + MAX_RANGE
             last = stop - start <= MAX_RANGE + RANGE_SLACK
