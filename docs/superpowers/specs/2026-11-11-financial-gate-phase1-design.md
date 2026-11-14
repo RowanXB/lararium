@@ -213,7 +213,17 @@ Every object has an `owner` field, which defaults to the entity representing the
 ### 6.5 Time model
 
 - Machine timestamps are always stored in UTC (`timestamptz`).
-- Times with local meaning additionally store the IANA time zone, for example the time zone the user was in when a transaction occurred.
+- Times with local meaning additionally store the IANA time zone (e.g. `Europe/London`), for example the time zone the user was in when a transaction occurred. The zone must be stored rather than taken from the viewer: the browser only knows where the viewer is now, not where the event happened. Store the zone name, not just an offset like `+08:00`: an offset can display a past instant but cannot do calendar arithmetic across daylight-saving changes.
+- What to store depends on the kind of time:
+
+  | Kind | Examples | Stored as |
+  |---|---|---|
+  | Something that already happened | transactions, sleep samples, when a journal entry was written | UTC instant (`timestamptz`) + IANA zone |
+  | Planned or recurring | future calendar events, "every Monday 09:00" | local wall-clock time + IANA zone; the UTC instant is derived and recomputed when recurrence or tzdata changes it |
+  | Floating (follows the user) | "take medication at 08:00 wherever I am" | local wall-clock time, no zone |
+  | All-day | birthdays, all-day events, booking dates | `date` |
+
+  Planned times keep the wall clock because that is the user's intent: "every Monday 09:00 London" is 09:00 UTC in winter and 08:00 UTC in summer, and a fixed UTC instant would also drift if the zone's rules change before the event.
 - "Dates" and "instants" are stored separately: booking dates, value dates, and later all-day events are all `date`.
 - Every record has two times: occurrence time (when it happened in business terms) and ingestion time (when the system learned about it). This makes it possible both to replay "net worth as it was seen on a given day" and to make corrections after the fact.
 - Timestamps from a source must be parsed according to that source's own time zone rules. For example, the implementer needs to verify which time zone the IBKR Flex time fields use.
@@ -447,7 +457,7 @@ For these modules, Phase 1 must:
 1. Keep core and finance separate, with dependencies going one way only (§4.3).
 2. Keep the names and structures of common objects free of financial assumptions (§6.2).
 3. Include the "device push" and "outbound actions" capabilities, as well as external ID mapping, in the connector contract (§7.1).
-4. Follow the time model in §6.5. Future calendar, sleep and journal data must all store local time plus time zone; all-day events store a date.
+4. Follow the time model in §6.5. Future sleep and journal data store a UTC instant plus the IANA zone; planned and recurring calendar events store local wall-clock time plus the IANA zone; all-day events store a date.
 5. Give each module its own schema and database role; the future MCP is off by default for each module and is enabled one module at a time by the user. Health and journal data will also have to pass through an "AI gateway" later, which decides whether it may be sent to external models.
 6. Include "Agent" in the audit log's actor model. The future AI assistant module will be `modules/lares` (each domain agent is a "lar"); its agents act through this actor type and the AI gateway in item 5.
 7. Future device push goes to a receiving endpoint inside the Tailscale private network, with one token per device. The design of the webhook receiver and inbox must be reusable for this.
@@ -536,6 +546,10 @@ The roadmap after that:
 
 - **Automatic sync for UK banks** (only needed in Phase 2): Enable Banking's officially stated coverage is 30 EEA countries; the UK is not in the EEA, and whether UK banks are supported has not been confirmed. When Phase 2 comes, one can register and check the available banks by country in its console; if the UK is not supported, look for another aggregator that covers the UK and is available to individuals.
 - **Whether an eToro key can be set to read-only**: verify before implementing M8.
+- **TODO: ingress hardening.** The API trusts the `Tailscale-User-Login` header, so anything that reaches Caddy on `127.0.0.1:8080` without going through `tailscale serve` can claim to be the owner. Two things can reach it:
+  1. **Other machines on the LAN, when the host runs Linux with Docker Engine older than 28.** Those versions let the local network route to container addresses past a `127.0.0.1` binding. Docker Desktop (macOS, Windows) is not affected, because the LAN can't reach its VM. Before deploying on such a host (e.g. Synology's Docker 24), upgrade Docker or add a host firewall rule. Running Tailscale as a sidecar container would also remove the dependency on the host, but it adds an auth key, a state volume and another tailnet node, so do it only if host independence is wanted for its own sake. If it is built, keep it optional: a compose override file added with `-f` switches a deployment between the sidecar and the host's `tailscale serve`, using the same images and the same API code (both deliver the identity in the same header).
+  2. **Any process on the host itself.** Accepted on a single-user host.
+- **TODO: identity for non-browser clients.** When the first client runs on a tagged node (the AI assistant, MCP or scripts), verify whether `tailscale serve` sends identity headers for it. If it doesn't, choose then between Tailscale's whois and a per-client API token; a token doesn't tie the API further to Tailscale.
 
 ## 18. References
 
