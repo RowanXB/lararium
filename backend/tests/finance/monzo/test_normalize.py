@@ -596,6 +596,98 @@ async def test_backfills_never_absorb_a_manual_posting(
         assert "difference -30.00 GBP" in mismatch
 
 
+async def test_a_backfill_after_no_opening_was_needed_absorbs_nothing(session, run) -> None:
+    # The first backfill adds up exactly (as on the real account): no opening is posted.
+    connection = await _connection(run)
+    history = [
+        make_transaction(id="tx_TEST0001", amount=30000, created="2026-03-01T12:00:00.000Z"),
+        make_transaction(id="tx_TEST0002", amount=-5000, created="2026-03-05T12:00:00.000Z"),
+    ]
+    report = await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+    assert report.mismatches == []
+    (payment,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST0002"]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, payment.id)
+
+    # Authorised again: the same history. The void is the owner's, not older history.
+    report = await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+
+    assert not [r for r in await _transactions(session) if r.external_id.startswith("opening:")]
+    (mismatch,) = report.mismatches
+    assert "difference -50.00 GBP" in mismatch
+
+
+async def test_older_history_fetched_later_corrects_the_opening_past_a_manual_posting(
+    session, run
+) -> None:
+    connection = await _connection(run)
+    first = make_transaction(id="tx_TEST0002", amount=15000, created="2026-03-01T12:00:00.000Z")
+    await _normalize(session, connection, transactions=[first])  # creates the accounts
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    unassigned = await _unassigned(run)
+    gbp = await get_currency(session, "GBP")
+    # A manual posting dated before all of Monzo's history, then the first opening.
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
+            description="Manual",
+            postings=[
+                PostingInput(main, gbp.id, Decimal("30.00")),
+                PostingInput(unassigned, gbp.id, Decimal("-30.00")),
+            ],
+        ),
+    )
+    await _normalize(session, connection, transactions=[first], openings=[ACCOUNT_ID])
+    assert (await _opening(session))[0] == Decimal("70.00")
+
+    # A later backfill fetches older Monzo history, dated between the two.
+    older = make_transaction(id="tx_TEST0001", amount=4000, created="2026-02-01T12:00:00.000Z")
+    report = await _normalize(
+        session, connection, transactions=[older, first], openings=[ACCOUNT_ID]
+    )
+
+    assert (await _opening(session))[0] == Decimal("30.00")
+    assert report.mismatches == []
+
+
+async def test_a_reversed_pending_payment_presented_again_is_posted(session, run) -> None:
+    connection = await _connection(run)
+    pending = make_transaction(amount=-5000, settled="")
+    await _normalize(session, connection, transactions=[pending])
+    await _normalize(session, connection, transactions=[pending | {"amount": 0}])
+
+    # The capture arrives under the same id: the connector's own void gives way.
+    settled = pending | {"amount": -4500, "settled": "2026-03-02T06:00:00.000Z"}
+    await _normalize(session, connection, transactions=[settled])
+
+    (tx,) = await _transactions(session)
+    assert tx.status == "booked"
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert (await _postings(session, tx.id))[0][:2] == (main, Decimal("-45.00"))
+
+
+async def test_an_opening_the_connector_voided_is_posted_again_when_needed(session, run) -> None:
+    connection = await _connection(run)
+    recent = make_transaction(id="tx_TEST0002", amount=10000, created="2026-03-05T12:00:00.000Z")
+    # 250.00 against 100.00 of history: an opening of 150.00.
+    await _normalize(session, connection, transactions=[recent], openings=[ACCOUNT_ID])
+    # A backfill finds older history that explains it all: the connector voids it.
+    older = make_transaction(id="tx_TEST0001", amount=15000, created="2026-03-01T12:00:00.000Z")
+    report = await _normalize(
+        session, connection, transactions=[older, recent], openings=[ACCOUNT_ID]
+    )
+    assert report.voided == 1
+    # Even older history in the other direction: an opening is needed again.
+    oldest = make_transaction(id="tx_TEST0000", amount=-2000, created="2026-02-01T12:00:00.000Z")
+    report = await _normalize(
+        session, connection, transactions=[oldest, older, recent], openings=[ACCOUNT_ID]
+    )
+
+    assert (await _opening(session))[0] == Decimal("20.00")
+    assert report.mismatches == []
+
+
 async def test_reconciliation_keeps_other_warnings(session, run) -> None:
     connection = await _connection(run)
     await _normalize(session, connection, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID])
