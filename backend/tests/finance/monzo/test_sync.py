@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -21,7 +22,11 @@ from lararium.core.connections import (
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import NullNotifier
-from lararium.modules.finance.monzo.sync import MonzoConnector
+from lararium.modules.finance.monzo.sync import (
+    FETCH_ATTEMPTS,
+    BalanceKeptChangingError,
+    MonzoConnector,
+)
 from lararium.modules.finance.valuation import balances_asof
 
 from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_transaction
@@ -398,6 +403,58 @@ async def test_full_backfill_with_older_history_corrects_the_opening(session, ru
     assert ledger["balance"] == "250.00"
     assert ledger["net_worth"] == "300.00"
     assert (await get_connection(session, connection.id)).warnings == []
+
+
+class PaymentDuringFetch(FakeMonzo):
+    """A payment arrives after a balance read, before the transactions are fetched, on each
+    of the first `moves` attempts."""
+
+    def __init__(self, transactions: list[dict[str, Any]], account: dict[str, Any], moves: int):
+        super().__init__(transactions, account)
+        self.moves = moves
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        ids = {t["id"] for t in self.transactions}
+        first_page = request.url.path == "/transactions" and (
+            request.url.params.get("since") not in ids
+        )
+        if first_page and self.moves > 0:
+            self.moves -= 1
+            n = len(self.transactions)
+            created = _iso(datetime.now(UTC) - timedelta(minutes=1))
+            self.transactions.append(
+                make_transaction(id=f"tx_TEST_LIVE{n}", amount=-1000, created=created)
+            )
+            self.balance = make_balance(balance=self.balance["balance"] - 1000)
+        return super().__call__(request)
+
+
+async def test_a_payment_during_the_fetch_does_not_skew_the_opening(session, run) -> None:
+    payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
+    account = make_account(created=_iso(_noon(11)))
+    connection = await _connection(run, config={"backfill_requested": True})
+
+    await _sync(session, run, connection, PaymentDuringFetch([payment], account, moves=1))
+
+    ledger = await _ledger(session, connection)
+    # Monzo's balance after the payment, 240.00, is the ledger's, and the opening is still
+    # the 262.34 the earlier history needs (not 272.34, from the balance read before it).
+    assert ledger["balance"] == "240.00"
+    assert ledger["openings"] == [("booked", _noon(11).date(), "262.34")]
+    assert (await get_connection(session, connection.id)).warnings == []
+
+
+async def test_a_balance_that_keeps_moving_fails_the_sync(session, run) -> None:
+    payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
+    account = make_account(created=_iso(_noon(300)))
+    connection = await _connection(run, config={"backfill_requested": True})
+    fake = PaymentDuringFetch([payment], account, moves=100)
+
+    with pytest.raises(BalanceKeptChangingError):
+        await _sync(session, run, connection, fake)
+
+    balance_reads = [r for r in fake.requests if r.url.path == "/balance"]
+    assert len(balance_reads) == 2 * FETCH_ATTEMPTS
 
 
 async def test_full_backfill_drops_the_warnings_it_resolves(session, run) -> None:

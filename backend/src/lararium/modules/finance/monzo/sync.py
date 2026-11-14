@@ -29,6 +29,11 @@ MAX_LOOKBACK = timedelta(days=89)
 TRUNCATION_GRACE = timedelta(days=7)
 # Replaced on every sync: the warning is current until registration next succeeds.
 WEBHOOK_WARNING = "Monzo webhooks could not be updated"
+FETCH_ATTEMPTS = 3
+
+
+class BalanceKeptChangingError(Exception):
+    """An account's balance changed during each attempt to fetch its transactions."""
 
 
 def _parse(value: str) -> datetime:
@@ -143,9 +148,6 @@ class MonzoConnector:
             backfilled = state.backfilled if state else False
             reconciled = state.reconciled if state else False
 
-            await store("balance", {"account_id": account_id}, await client.balance(account_id))
-            await store("pots", {"current_account_id": account_id}, await client.pots(account_id))
-
             since: str | None = None
             if not full_backfill:
                 floor = datetime.now(UTC) - MAX_LOOKBACK
@@ -156,21 +158,37 @@ class MonzoConnector:
                     )
                 since = _format(max(wanted, floor))
 
-            earliest: str | None = None
-            newest = last_created
-            page_since = since
-            async for page in client.transactions(account_id, since=since):
-                page_request: dict[str, JSONValue] = {
-                    "account_id": account_id,
-                    "since": page_since,
-                    "limit": str(PAGE_SIZE),
-                    "expand[]": EXPAND,
-                }
-                await store("transactions_page", page_request, page)
-                page_since = page[-1]["id"]
-                created = [t["created"] for t in page]
-                earliest = min(created + ([earliest] if earliest else []), key=_parse)
-                newest = max(created + ([newest] if newest else []), key=_parse)
+            # The balance must describe the same moment as the transactions, or a payment
+            # arriving between the two requests would be absorbed into the opening adjustment
+            # (or show as a mismatch). It is read again after the transactions, and the
+            # attempt is kept only if it didn't change.
+            for _ in range(FETCH_ATTEMPTS):
+                attempt_start = len(fetched)
+                balance = await client.balance(account_id)
+                await store("balance", {"account_id": account_id}, balance)
+                pots = await client.pots(account_id)
+                await store("pots", {"current_account_id": account_id}, pots)
+                earliest: str | None = None
+                newest = last_created
+                page_since = since
+                async for page in client.transactions(account_id, since=since):
+                    page_request: dict[str, JSONValue] = {
+                        "account_id": account_id,
+                        "since": page_since,
+                        "limit": str(PAGE_SIZE),
+                        "expand[]": EXPAND,
+                    }
+                    await store("transactions_page", page_request, page)
+                    page_since = page[-1]["id"]
+                    created = [t["created"] for t in page]
+                    earliest = min(created + ([earliest] if earliest else []), key=_parse)
+                    newest = max(created + ([newest] if newest else []), key=_parse)
+                if await client.balance(account_id) == balance:
+                    break
+                # Stored all the same, as fetched; only the consistent attempt is normalised.
+                del fetched[attempt_start:]
+            else:
+                raise BalanceKeptChangingError(account_id)
 
             if full_backfill:
                 backfilled = True
