@@ -95,7 +95,7 @@ async def test_ensure_webhooks_replaces_stale_and_registers_missing() -> None:
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
         client = MonzoClient(http, Secret("at-TEST"))
-        await ensure_webhooks(client, [ACCOUNT_ID, OTHER_ACCOUNT], BASE, Secret(SECRET))
+        ours = await ensure_webhooks(client, [ACCOUNT_ID, OTHER_ACCOUNT], BASE, Secret(SECRET))
 
     assert sorted((h["account_id"], h["url"]) for h in fake.hooks) == sorted(
         [
@@ -110,6 +110,7 @@ async def test_ensure_webhooks_replaces_stale_and_registers_missing() -> None:
     # Already registered: nothing posted for the other account.
     posted = [parse_qs(r.content.decode()) for r in fake.requests if r.method == "POST"]
     assert posted == [{"account_id": [ACCOUNT_ID], "url": [OUR_URL]}]
+    assert ours == {h["id"] for h in fake.hooks if h["url"] == OUR_URL}
 
 
 async def _sync(
@@ -172,6 +173,39 @@ async def test_sync_without_webhook_settings_leaves_webhooks_alone(session, run)
     await _sync(session, connection, fake, webhook=False)
 
     assert fake.webhook_requests() == []
+
+
+async def test_our_webhook_under_an_old_base_url_is_deleted(session, run) -> None:
+    # Registered before the tunnel hostname changed: its URL is no longer under BASE.
+    old = _hook("webhook_OLD", f"https://hooks.old.example/monzo/{SECRET}")
+    fake = WebhookMonzo([old])
+    connection = await _connection(run)
+    await run(_set_cursor, connection, {"accounts": {}, "webhook_ids": ["webhook_OLD"]})
+
+    cursor: Any = await _sync(session, connection, fake)
+
+    assert [h["url"] for h in fake.hooks] == [OUR_URL]
+    assert cursor["webhook_ids"] == [fake.hooks[0]["id"]]
+    assert SECRET not in json.dumps(cursor)
+
+
+async def test_turning_webhooks_off_deletes_ours(session, run) -> None:
+    fake = WebhookMonzo()
+    connection = await _connection(run)
+    cursor: Any = await _sync(session, connection, fake)
+    await run(_set_cursor, connection, cursor)
+
+    cursor = await _sync(session, connection, fake, webhook=False)
+
+    assert fake.hooks == []
+    assert "webhook_ids" not in cursor
+
+
+async def _set_cursor(ctx, connection: ConnectionRecord, cursor: Any) -> None:
+    await ctx.session.execute(
+        text("update core.connections set cursor = cast(:c as jsonb) where id = :id"),
+        {"c": json.dumps(cursor), "id": connection.id},
+    )
 
 
 async def test_webhook_errors_warn_without_failing_the_sync(

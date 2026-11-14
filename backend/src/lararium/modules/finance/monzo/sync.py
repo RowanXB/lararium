@@ -150,12 +150,28 @@ class MonzoConnector:
 
         warnings: list[str] = []
         await store("accounts", {}, accounts)
-        if ctx.webhook is not None:
+        # The ids of the webhooks we registered, kept in the cursor (they carry no secret), so
+        # ours are known by what we registered, not guessed from the current base URL.
+        previous_cursor = connection.cursor
+        stored_ids = (
+            previous_cursor.get("webhook_ids") if isinstance(previous_cursor, dict) else None
+        )
+        known_ids = (
+            [i for i in stored_ids if isinstance(i, str)] if isinstance(stored_ids, list) else []
+        )
+        webhook_ids = known_ids
+        if ctx.webhook is not None or known_ids:
             # Not stored as raw records: the registered URLs carry the secret.
             open_accounts = [a["id"] for a in accounts if not a.get("closed")]
             try:
-                await ensure_webhooks(
-                    client, open_accounts, ctx.webhook.base_url, ctx.webhook.secret
+                webhook_ids = sorted(
+                    await ensure_webhooks(
+                        client,
+                        open_accounts,
+                        ctx.webhook.base_url if ctx.webhook else None,
+                        ctx.webhook.secret if ctx.webhook else None,
+                        ours=known_ids,
+                    )
                 )
             except Exception as exc:
                 # Best effort: without webhooks, syncs still run on the schedule. A
@@ -269,4 +285,7 @@ class MonzoConnector:
         merged = kept + [w for w in warnings if w not in kept]
         if merged != current.warnings:
             await set_warnings(ctx.command, connection.id, merged)
-        return {"accounts": cursor_accounts}
+        new_cursor: dict[str, JSONValue] = {"accounts": cursor_accounts}
+        if webhook_ids:
+            new_cursor["webhook_ids"] = list(webhook_ids)
+        return new_cursor
