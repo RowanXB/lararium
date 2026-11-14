@@ -2,7 +2,9 @@ import base64
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import BaseSettings
 
+from lararium import config
 from lararium.config import Settings, WebhookInSettings
 
 DATABASE_URL = "postgresql+psycopg://x@localhost/x"
@@ -117,3 +119,26 @@ def test_malformed_master_key_fails_at_startup(key: str, auth_mode: str) -> None
             master_key=key,  # pyright: ignore[reportArgumentType]
         )
     assert key not in str(raised.value)
+
+
+def test_every_settings_class_hides_values_in_errors() -> None:
+    classes = [
+        value
+        for value in vars(config).values()
+        if isinstance(value, type) and issubclass(value, BaseSettings) and value is not BaseSettings
+    ]
+    assert {c.__name__ for c in classes} >= {"Settings", "WebhookInSettings"}
+    for cls in classes:
+        assert cls.model_config.get("hide_input_in_errors") is True, cls.__name__
+
+
+def test_webhook_in_errors_quote_neither_the_secret_nor_the_database_password() -> None:
+    url = "postgresql+psycopg://lararium_webhook_in:DBPASSWORD@db/lararium"
+    with pytest.raises(ValidationError) as bad_secret:
+        WebhookInSettings(database_url=url, webhook_secret="has+plus/SECRETVALUE" + "a" * 32)
+    with pytest.raises(ValidationError) as missing:
+        WebhookInSettings(database_url=url)  # pyright: ignore[reportCallIssue]
+
+    for error in (bad_secret, missing):
+        text = str(error.value)
+        assert "SECRETVALUE" not in text and "DBPASSWORD" not in text

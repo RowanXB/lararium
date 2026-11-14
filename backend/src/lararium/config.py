@@ -46,9 +46,13 @@ def _check_webhook_secret(value: SecretStr | None) -> SecretStr | None:
     return value
 
 
+# For every settings class: errors name the field, never its value, as the values include
+# secrets (and a database URL carries its password).
+ENV_SETTINGS = SettingsConfigDict(env_prefix="LARARIUM_", hide_input_in_errors=True)
+
+
 class Settings(BaseSettings):
-    # Errors name the field, never its value: several fields hold secrets.
-    model_config = SettingsConfigDict(env_prefix="LARARIUM_", hide_input_in_errors=True)
+    model_config = ENV_SETTINGS
 
     database_url: str
     auth_mode: Literal["dev", "tailscale"] = "tailscale"
@@ -120,7 +124,7 @@ class WebhookInSettings(BaseSettings):
     master key nor anything else Settings requires (an owner login, say).
     """
 
-    model_config = SettingsConfigDict(env_prefix="LARARIUM_")
+    model_config = ENV_SETTINGS
 
     # The receiver's own role (lararium_webhook_in), which can only insert into the inbox.
     database_url: str
