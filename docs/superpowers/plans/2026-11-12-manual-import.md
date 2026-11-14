@@ -1,9 +1,5 @@
 # Manual Import Implementation Plan
 
-**Languages:** English | [简体中文](./2026-11-12-manual-import.zh-CN.md)
-
-The English version is authoritative; if the two versions differ, follow this one.
-
 > **Status: deferred (2026-11-12).** The owner mostly relies on the Monzo API and imports by hand only occasionally, so M3 (Monzo) comes first. When this plan is resumed:
 > - **Task 1 (documents)** is still needed: the M3 plan stores Monzo's small JSON responses as raw records and does not build documents. Check whether a later plan built them first.
 > - **Task 4 (OFX)** and the OFX parts of the other tasks are optional. None of the owner's banks currently provides OFX; skip them unless one does. These are `OfxProfileConfig`, `LEDGERBAL` in Decision 13, the OFX tests in Tasks 5 and 7, and the OFX example files.
@@ -59,7 +55,7 @@ Choices the spec leaves open, made here so the tasks don't have to:
 
 ## Global Constraints
 
-- Everything in plan 1's Global Constraints still applies: Python 3.13, uv with the lockfile enforced, ruff, pyright strict on `src/`, import-linter contracts, PostgreSQL 18, `NUMERIC`/`Decimal`/strings and the word `float` nowhere in `src/`, UUIDv7, UTC `timestamptz` plus separate `date`, English UI copy, bilingual docs (English primary, `*.zh-CN.md`), AGPL-3.0-compatible dependencies only.
+- Everything in plan 1's Global Constraints still applies: Python 3.13, uv with the lockfile enforced, ruff, pyright strict on `src/`, import-linter contracts, PostgreSQL 18, `NUMERIC`/`Decimal`/strings and the word `float` nowhere in `src/`, UUIDv7, UTC `timestamptz` plus separate `date`, English UI copy, docs in English (only the README also has `README.zh-CN.md`), AGPL-3.0-compatible dependencies only.
 - Branch `feat/claude-manual-import`; commit messages `<type>: <summary>`; sign commits with the `local-signed-git-commit` skill.
 - Every write goes through `command_context` (one audit row per request, events in the outbox). New write routes reuse `ActorDep`, so the cross-site check applies to uploads too.
 - **No real statements anywhere in the repository.** Example and test files are hand-written and synthetic, with the fictional institution "Example Bank". The owner's real exports stay in `private/`.
