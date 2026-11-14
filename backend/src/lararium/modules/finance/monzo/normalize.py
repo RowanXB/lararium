@@ -146,10 +146,11 @@ async def _ledger_balance(
     *,
     excluding: str | None = None,
     before: datetime | None = None,
+    connection_id: UUID | None = None,
 ) -> Decimal:
     """Everything posted to the account in the instrument, pending included, void excluded,
     and so is the transaction with the external id `excluding`; only what occurred before
-    `before`, when given."""
+    `before`, and only what the connection `connection_id` posted, when given."""
     t, p = models.Transaction, models.Posting
     query = (
         select(func.sum(p.quantity))
@@ -160,6 +161,8 @@ async def _ledger_balance(
         query = query.where(t.external_id.is_distinct_from(excluding))
     if before is not None:
         query = query.where(t.occurred_at < before)
+    if connection_id is not None:
+        query = query.where(t.connection_id == connection_id)
     total = await session.scalar(query)
     return total if total is not None else Decimal(0)
 
@@ -203,21 +206,27 @@ async def _posted(
 async def _earliest_posting(
     session: AsyncSession, account_id: UUID, *, excluding: str
 ) -> tuple[datetime, date] | None:
+    """The earliest time anything else on the account occurred, and its earliest booking
+    date, each on its own: a booking date needn't follow the time (one entered by hand, or
+    booked in another time zone), and the opening must precede both."""
     t, p = models.Transaction, models.Posting
     row = (
         await session.execute(
-            select(t.occurred_at, t.booking_date)
+            select(func.min(t.occurred_at), func.min(t.booking_date))
             .join(p, p.transaction_id == t.id)
             .where(
                 p.account_id == account_id,
                 t.status != "void",
                 t.external_id.is_distinct_from(excluding),
             )
-            .order_by(t.booking_date, t.occurred_at)
-            .limit(1)
         )
-    ).one_or_none()
-    return None if row is None else (row.occurred_at, row.booking_date)
+    ).one()
+    # min() over no rows is NULL.
+    occurred_at = cast(datetime | None, row[0])
+    booking_date = cast(date | None, row[1])
+    if occurred_at is None or booking_date is None:
+        return None  # nothing else on the account
+    return occurred_at, booking_date
 
 
 async def _snapshot_still_holds(
@@ -498,13 +507,16 @@ class _Normalizer:
             difference = balance - others
         else:
             placed, occurred_at = await _posted(self.session, existing[0], account_id)
-            # It was placed a day before the then earliest transaction.
+            # It was placed a day before anything then on the account occurred, so what this
+            # connection posted before that is history a later backfill fetched. A posting
+            # made by hand is never older history, however it is dated.
             older = await _ledger_balance(
                 self.session,
                 account_id,
                 currency.id,
                 excluding=external_id,
                 before=occurred_at + timedelta(days=1),
+                connection_id=self.connection_id,
             )
             difference = placed - older
         if difference == 0:

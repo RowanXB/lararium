@@ -527,7 +527,10 @@ async def test_disable_during_sync_is_kept(
             await _run_sync(session, connection, notifier, sessions)
 
         async with sessions() as fresh:
-            assert (await get_connection(fresh, connection_id)).status == "disabled"
+            after = await get_connection(fresh, connection_id)
+        # The status change wins, and the sync leaves nothing behind: an error recorded now
+        # would show on whatever comes next (an authorisation the owner starts, say).
+        assert (after.status, after.last_error, after.consecutive_failures) == ("disabled", None, 0)
         assert notifier.messages == []
     finally:
         if connection_id is not None:

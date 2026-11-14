@@ -124,25 +124,20 @@ async def run_sync(
         logger.warning("sync of connection %s failed: %s", connection_id, error)
         backfill_failed = backfill and not rejected
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
-            if backfill:
-                # The status first: a backfill superseded by a new authorisation records
-                # nothing, not even its error, which would show while the new one waits.
-                moved = await transition_status(
-                    ctx,
-                    connection_id,
-                    "needs_reauth",
-                    only_from=allowed,
-                    authorised_at=backfill_for,
-                )
-                if moved is not None:
-                    await record_sync_failure(
-                        ctx, connection_id, BACKFILL_FAILED if backfill_failed else error
-                    )
-                failures = 0
-            else:
-                failures = await record_sync_failure(ctx, connection_id, error)
-                moved = await transition_status(
-                    ctx, connection_id, "needs_reauth" if rejected else "failing", only_from=allowed
+            # The status first, and the failure only where it still applies: a sync whose
+            # connection was disabled, or authorised again, meanwhile records nothing, not
+            # even its error, which would show on the new authorisation while it waits.
+            moved = await transition_status(
+                ctx,
+                connection_id,
+                "needs_reauth" if rejected or backfill else "failing",
+                only_from=allowed,
+                authorised_at=backfill_for,
+            )
+            failures = 0
+            if moved is not None:
+                failures = await record_sync_failure(
+                    ctx, connection_id, BACKFILL_FAILED if backfill_failed else error
                 )
         if moved is None:
             return

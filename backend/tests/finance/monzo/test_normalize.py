@@ -540,6 +540,62 @@ async def test_reconciliation_counts_manual_postings(session, run) -> None:
     assert "(difference -5.00 GBP)" in warning
 
 
+async def _opening(session) -> tuple[Decimal, date]:
+    row = (
+        await session.execute(
+            text(
+                "select p.quantity, t.booking_date from finance.transactions t"
+                " join finance.postings p on p.transaction_id = t.id and p.position = 0"
+                f" where t.external_id = 'opening:{ACCOUNT_ID}' and t.status <> 'void'"
+            )
+        )
+    ).one()
+    return row.quantity, row.booking_date
+
+
+@pytest.mark.parametrize(
+    ("occurred_at", "booking_date"),
+    [
+        # Dated before the opening: still not history a backfill fetched.
+        (datetime(2025, 6, 1, 12, tzinfo=UTC), None),
+        # Booked years before it occurred: the opening is placed by the time things occur.
+        (datetime(2026, 4, 1, 12, tzinfo=UTC), date(2020, 1, 1)),
+    ],
+    ids=["dated-earlier", "booked-earlier"],
+)
+async def test_backfills_never_absorb_a_manual_posting(
+    session, run, occurred_at: datetime, booking_date: date | None
+) -> None:
+    connection = await _connection(run)
+    history = [
+        make_transaction(id="tx_TEST0001", amount=15000, created="2026-03-01T12:00:00.000Z"),
+        make_transaction(id="tx_TEST0002", amount=-5000, created="2026-03-05T12:00:00.000Z"),
+    ]
+    await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    unassigned = await _unassigned(run)
+    gbp = await get_currency(session, "GBP")
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=occurred_at,
+            booking_date=booking_date,
+            description="Manual",
+            postings=[
+                PostingInput(main, gbp.id, Decimal("30.00")),
+                PostingInput(unassigned, gbp.id, Decimal("-30.00")),
+            ],
+        ),
+    )
+
+    # Authorised again, three times: the same history each time.
+    for _ in range(3):
+        report = await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+        assert (await _opening(session))[0] == Decimal("150.00")
+        (mismatch,) = report.mismatches
+        assert "difference -30.00 GBP" in mismatch
+
+
 async def test_reconciliation_keeps_other_warnings(session, run) -> None:
     connection = await _connection(run)
     await _normalize(session, connection, reconciled=[ACCOUNT_ID], openings=[ACCOUNT_ID])
