@@ -29,6 +29,9 @@ OVERLAP = timedelta(days=14)
 # Outside the approval window Monzo serves 90 days; stay one day inside it.
 MAX_LOOKBACK = timedelta(days=89)
 TRUNCATION_GRACE = timedelta(days=7)
+# A full backfill starts this long before the account's creation, so nothing at that instant
+# is missed whichever way Monzo compares `since`.
+BACKFILL_MARGIN = timedelta(minutes=1)
 # Replaced on every sync: the warning is current until registration next succeeds.
 WEBHOOK_WARNING = "Monzo webhooks could not be updated"
 FETCH_ATTEMPTS = 3
@@ -176,7 +179,10 @@ class MonzoConnector:
             backfilled = state.backfilled if state else False
             reconciled = state.reconciled if state else False
 
-            since: str | None = None
+            # A full backfill asks from the account's creation: without `since` Monzo lists
+            # only about the last month, even inside the approval window (checked against a
+            # real account on 2026-11-14).
+            since: str | None = _format(_parse(account["created"]) - BACKFILL_MARGIN)
             if not full_backfill:
                 floor = datetime.now(UTC) - MAX_LOOKBACK
                 # From 14 days before the newest transaction seen, so recent ones that settle

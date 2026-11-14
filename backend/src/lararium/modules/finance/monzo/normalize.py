@@ -62,7 +62,12 @@ ACCOUNT_MAP_KEY = "account_map"
 NOTIFIED_KEY = "reconciliation_notified"
 OPENING_DESCRIPTION = "Opening balance adjustment"
 
-_ACCOUNT_NAMES = {"uk_retail": "Monzo", "uk_retail_joint": "Monzo Joint"}
+# By Monzo's account type; uk_rewards is the account Monzo pays rewards into.
+_ACCOUNT_NAMES = {
+    "uk_retail": "Monzo",
+    "uk_retail_joint": "Monzo Joint",
+    "uk_rewards": "Monzo Rewards",
+}
 
 
 @dataclass(frozen=True)

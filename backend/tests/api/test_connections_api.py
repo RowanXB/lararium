@@ -538,9 +538,10 @@ async def test_await_approval_backfills_on_first_success(
     assert connection.status == "healthy"
     assert connection.last_success_at is not None
     assert "account_map" in connection.config
-    # The full backfill: no `since`, so all history comes while the window is open.
+    # The full backfill asks from the account's creation, while the window is open.
     tx_requests = [r for r in monzo.requests if r.url.path == "/transactions"]
-    assert tx_requests and all("since" not in r.url.params for r in tx_requests)
+    created = datetime.fromisoformat(monzo.account["created"])
+    assert [r.url.params["since"] for r in tx_requests] == [_iso(created - timedelta(minutes=1))]
     assert await session.scalar(text("select count(*) from finance.transactions")) == 2
     assert connection.warnings == []
     assert notifier.messages == []

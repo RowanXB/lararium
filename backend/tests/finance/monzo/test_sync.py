@@ -36,6 +36,8 @@ from lararium.modules.finance.valuation import balances_asof
 from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_transaction
 
 KEY = bytes(range(32))
+# What Monzo lists for /transactions without `since`.
+MONZO_DEFAULT_WINDOW = timedelta(days=30)
 CONNECTOR = Actor("connector", "monzo")
 
 type Handler = Callable[[httpx.Request], httpx.Response]
@@ -66,12 +68,19 @@ class FakeMonzo:
         assert path == "/transactions", path
         since = request.url.params.get("since")
         ids = [t["id"] for t in self.transactions]
-        if since is None or since not in ids:
-            start = 0
+        if since in ids:
+            listed = self.transactions[ids.index(since) + 1 :]
         else:
-            start = ids.index(since) + 1
+            # As Monzo does (checked against a real account on 2026-11-14): without `since`
+            # only about the last month, not all history; a timestamp `since` from then on.
+            start = (
+                datetime.now(UTC) - MONZO_DEFAULT_WINDOW
+                if since is None
+                else datetime.fromisoformat(since)
+            )
+            listed = [t for t in self.transactions if datetime.fromisoformat(t["created"]) >= start]
         limit = int(request.url.params["limit"])
-        return httpx.Response(200, json={"transactions": self.transactions[start : start + limit]})
+        return httpx.Response(200, json={"transactions": listed[:limit]})
 
     def transaction_requests(self) -> list[httpx.Request]:
         return [r for r in self.requests if r.url.path == "/transactions"]
@@ -151,12 +160,15 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
         )
     ).all()
     by_type = {r.record_type: r for r in rows}
+    # A full backfill asks from the account's creation (a minute before): without `since`
+    # Monzo would list only the last month.
+    from_creation = _iso(datetime.fromisoformat(fake.account["created"]) - timedelta(minutes=1))
     assert by_type["balance"].request == {"account_id": ACCOUNT_ID}
     assert by_type["pots"].request == {"current_account_id": ACCOUNT_ID}
     # Everything needed to replay the page request exactly.
     assert by_type["transactions_page"].request == {
         "account_id": ACCOUNT_ID,
-        "since": None,
+        "since": from_creation,
         "limit": "100",
         "expand[]": "merchant",
     }
@@ -164,10 +176,20 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
     state: Any = cursor["accounts"][ACCOUNT_ID]  # type: ignore[index]
     assert datetime.fromisoformat(state.pop("fetched_at")) <= datetime.now(UTC)
     assert state == {"last_created": _iso(created), "backfilled": True, "reconciled": True}
-    # A full backfill sends no `since`.
-    assert "since" not in fake.transaction_requests()[0].url.params
+    assert fake.transaction_requests()[0].url.params["since"] == from_creation
     after = await get_connection(session, connection.id)
     assert after.config["client_id"] == "oauth2client_TEST1"
+
+
+async def test_the_rewards_account_is_named_for_what_it_is(session, run) -> None:
+    # As a real account lists it: type uk_rewards, with an opt-in id as its description.
+    rewards = make_account(type="uk_rewards", description="rewardsoptin_TEST1")
+    connection = await _connection(run)
+
+    await _sync(session, run, connection, FakeMonzo([], rewards), full_backfill=True)
+
+    names = (await session.execute(text("select name from finance.accounts"))).scalars().all()
+    assert "Monzo Rewards" in names
 
 
 async def test_incremental_sync_uses_14_day_overlap(session, run) -> None:
