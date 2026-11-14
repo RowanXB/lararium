@@ -18,7 +18,13 @@ async def get_or_create_organization(
 
     With an external id (scheme, value), an organization already carrying it wins over a name
     match, and the one returned is tagged with it unless it carries another for that scheme.
+
+    Concurrent callers are serialised on the name, so only one creates it; call it in a short
+    transaction, as the lock is held until it commits.
     """
+    await ctx.session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtext("organization:" + name.lower())))
+    )
     if external_id is not None:
         scheme, value = external_id
         tagged = await ctx.session.scalar(

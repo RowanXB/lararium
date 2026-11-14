@@ -8,14 +8,15 @@ from unittest.mock import ANY
 import httpx
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.core.actors import Actor
-from lararium.core.commands import CommandContext
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     ConnectionRecord,
     create_connection,
     get_connection,
+    set_status,
     set_warnings,
     store_credential,
     update_config,
@@ -23,6 +24,8 @@ from lararium.core.connections import (
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import NullNotifier
+from lararium.db import create_engine, make_sessionmaker
+from lararium.modules.finance.monzo import sync as monzo_sync
 from lararium.modules.finance.monzo.sync import (
     FETCH_ATTEMPTS,
     BalanceKeptChangingError,
@@ -578,3 +581,70 @@ async def _record_cursor(ctx: CommandContext, connection: ConnectionRecord, curs
         text("update core.connections set cursor = cast(:c as jsonb) where id = :id"),
         {"c": json.dumps(cursor), "id": connection.id},
     )
+
+
+async def test_disabling_does_not_wait_for_a_sync_that_changes_its_warnings(
+    backend_url: str, owner_url: str, migrated: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A full backfill that settles a warning, with real commits: while it normalises, the
+    # owner disables the connection. That must not wait for the sync to commit.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    owner = Actor("user", "dev")
+    async with sessions() as setup, command_context(setup, owner, "test.setup", {}) as ctx:
+        connection = await create_connection(
+            ctx,
+            connector="monzo",
+            display_name=f"Monzo {uuid.uuid4()}",
+            config={"client_id": "oauth2client_TEST1"},
+        )
+        await store_credential(
+            ctx,
+            KEY,
+            connection.id,
+            "access_token",
+            "at-TEST",
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        await set_warnings(ctx, connection.id, [BACKFILL_FAILED])
+    args = {"connection_id": str(connection.id)}
+    real_normalize = monzo_sync.normalize
+
+    async def disable_then_normalize(*a: Any, **k: Any) -> Any:
+        async with sessions() as other:
+            await other.execute(text("set lock_timeout = '2s'"))
+            async with command_context(other, owner, "disable_connection", args) as ctx:
+                await set_status(ctx, connection.id, "disabled")
+        return await real_normalize(*a, **k)
+
+    monkeypatch.setattr(monzo_sync, "normalize", disable_then_normalize)
+    payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
+    fake = FakeMonzo([payment], make_account(created=_iso(_noon(11))))
+    try:
+        async with engine.connect() as conn:
+            outer = await conn.begin()
+            session = AsyncSession(bind=conn, join_transaction_mode="create_savepoint")
+            # The sync's own writes are rolled back afterwards; the disable is committed.
+            await _sync(session, None, connection, fake, full_backfill=True)
+            await session.close()
+            await outer.rollback()
+        async with sessions() as fresh:
+            assert (await get_connection(fresh, connection.id)).status == "disabled"
+    finally:
+        async with engine.begin() as conn:
+            params = {"id": connection.id}
+            await conn.execute(text("delete from core.events where subject_id = :id"), params)
+            await conn.execute(text("delete from core.connections where id = :id"), params)
+        owner_engine = create_engine(owner_url)
+        try:
+            async with owner_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "delete from core.audit_log where args->>'connection_id' = :id"
+                        " or changes ? ('connection:' || :id)"
+                    ),
+                    {"id": str(connection.id)},
+                )
+        finally:
+            await owner_engine.dispose()
+        await engine.dispose()

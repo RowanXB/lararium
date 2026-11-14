@@ -1,6 +1,8 @@
 from typing import Literal
 from uuid import UUID
 
+from sqlalchemy import func, select
+
 from lararium.core.commands import CommandContext
 from lararium.core.errors import SettingNotFoundError
 from lararium.core.settings_store import get_setting, set_setting
@@ -16,8 +18,13 @@ _NAMES: dict[SystemAccountKey, str] = {
 
 async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKey) -> UUID:
     """The equity account standing in for the unknown side of a connector's transactions.
-    Equity accounts are outside net worth. Its id is remembered in finance.system_account.<key>."""
+    Equity accounts are outside net worth. Its id is remembered in finance.system_account.<key>.
+
+    Concurrent callers (syncs of different connections) are serialised on the key, so only
+    one creates it; call it in a short transaction, as the lock is held until it commits.
+    """
     setting_key = f"finance.system_account.{key}"
+    await ctx.session.execute(select(func.pg_advisory_xact_lock(func.hashtext(setting_key))))
     try:
         value = await get_setting(ctx.session, setting_key)
     except SettingNotFoundError:

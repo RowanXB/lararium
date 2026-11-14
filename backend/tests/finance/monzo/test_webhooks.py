@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -19,6 +20,7 @@ from lararium.core.connectors import SyncContext, WebhookTarget
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import NullNotifier
 from lararium.core.secrets import Secret
+from lararium.modules.finance.monzo import sync as monzo_sync
 from lararium.modules.finance.monzo.client import MonzoClient
 from lararium.modules.finance.monzo.sync import MonzoConnector
 from lararium.modules.finance.monzo.webhooks import ensure_webhooks, process_inbox
@@ -172,7 +174,14 @@ async def test_sync_without_webhook_settings_leaves_webhooks_alone(session, run)
     assert fake.webhook_requests() == []
 
 
-async def test_webhook_errors_warn_without_failing_the_sync(session, run) -> None:
+async def test_webhook_errors_warn_without_failing_the_sync(
+    session, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Monzo's 5xx answers are retried after 2, 4 and 8 s; here without the wait.
+    async def no_sleep(seconds: int) -> None:
+        return None
+
+    monkeypatch.setattr(monzo_sync, "MonzoClient", partial(MonzoClient, sleep=no_sleep))
     fake = WebhookMonzo()
     fake.webhook_status = 500
     connection = await _connection(run)

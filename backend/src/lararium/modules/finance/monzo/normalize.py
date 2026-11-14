@@ -17,7 +17,7 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 """
 
 import logging
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import get_or_create_organization
@@ -47,7 +48,10 @@ from lararium.modules.finance.ledger import (
 )
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.snapshots import record_snapshot
-from lararium.modules.finance.system_accounts import get_or_create_system_account
+from lararium.modules.finance.system_accounts import (
+    SystemAccountKey,
+    get_or_create_system_account,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +135,16 @@ async def _connector_transaction(
 
 
 async def _ledger_balance(
-    session: AsyncSession, account_id: UUID, instrument_id: UUID, *, excluding: str | None = None
+    session: AsyncSession,
+    account_id: UUID,
+    instrument_id: UUID,
+    *,
+    excluding: str | None = None,
+    before: datetime | None = None,
 ) -> Decimal:
     """Everything posted to the account in the instrument, pending included, void excluded,
-    and so is the transaction with the external id `excluding`."""
+    and so is the transaction with the external id `excluding`; only what occurred before
+    `before`, when given."""
     t, p = models.Transaction, models.Posting
     query = (
         select(func.sum(p.quantity))
@@ -143,6 +153,8 @@ async def _ledger_balance(
     )
     if excluding is not None:  # IS DISTINCT FROM NULL would drop manual postings (NULL id)
         query = query.where(t.external_id.is_distinct_from(excluding))
+    if before is not None:
+        query = query.where(t.occurred_at < before)
     total = await session.scalar(query)
     return total if total is not None else Decimal(0)
 
@@ -166,6 +178,21 @@ async def oldest_pending(
             p.account_id == UUID(account_id),
         )
     )
+
+
+async def _posted(
+    session: AsyncSession, transaction_id: UUID, account_id: UUID
+) -> tuple[Decimal, datetime]:
+    """What a transaction posted to the account, and when it occurred."""
+    t, p = models.Transaction, models.Posting
+    row = (
+        await session.execute(
+            select(p.quantity, t.occurred_at)
+            .join(t, t.id == p.transaction_id)
+            .where(t.id == transaction_id, p.account_id == account_id)
+        )
+    ).one()
+    return row.quantity, row.occurred_at
 
 
 async def _earliest_posting(
@@ -222,6 +249,7 @@ class _Normalizer:
     def __init__(self, ctx: SyncContext, tz: ZoneInfo, config: dict[str, JSONValue]) -> None:
         self.command = ctx.command
         self.session = ctx.command.session
+        self.session_factory = ctx.session_factory
         self.connection_id = ctx.connection.id
         self.tz = tz
         self.observed_at = datetime.now(UTC)
@@ -231,7 +259,7 @@ class _Normalizer:
         )
         self.report = NormalizeReport()
         self._currencies: dict[str, InstrumentRecord] = {}
-        self._unassigned: UUID | None = None
+        self._shared: dict[tuple[str, ...], UUID] = {}
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         self._deleted_pots: list[UUID] = []
@@ -242,9 +270,33 @@ class _Normalizer:
         return self._currencies[code]
 
     async def unassigned(self) -> UUID:
-        if self._unassigned is None:
-            self._unassigned = await get_or_create_system_account(self.command, "unassigned")
-        return self._unassigned
+        return await self.system_account("unassigned")
+
+    async def _shared_row(
+        self, key: tuple[str, ...], get_or_create: Callable[[CommandContext], Awaitable[UUID]]
+    ) -> UUID:
+        """A row other connections share (a system account, an organisation), found or created
+        in a short transaction of its own and committed at once. Its creation is serialised
+        across concurrent syncs, and the lock that does it must not be held until this sync,
+        which may take minutes, commits."""
+        if key not in self._shared:
+            async with (
+                self.session_factory() as session,
+                command_context(session, self.command.actor, "finance.shared_row", {}) as ctx,
+            ):
+                self._shared[key] = await get_or_create(ctx)
+        return self._shared[key]
+
+    async def system_account(self, key: SystemAccountKey) -> UUID:
+        return await self._shared_row(
+            ("system_account", key), lambda ctx: get_or_create_system_account(ctx, key)
+        )
+
+    async def organization(self, name: str, external_id: tuple[str, str] | None = None) -> UUID:
+        return await self._shared_row(
+            ("organization", name.lower(), *(external_id or ())),
+            lambda ctx: get_or_create_organization(ctx, name, external_id=external_id),
+        )
 
     def mapped(self, monzo_id: str) -> UUID | None:
         value = self.account_map.get(monzo_id)
@@ -307,7 +359,7 @@ class _Normalizer:
             ledger_type="asset",
             subtype="bank",
             balance_mode="transactions",
-            institution_entity_id=await get_or_create_organization(self.command, "Monzo"),
+            institution_entity_id=await self.organization("Monzo"),
             opened_on=local_date(_parse(account["created"]), self.tz),
             source_connection_id=self.connection_id,
         )
@@ -326,7 +378,7 @@ class _Normalizer:
                 subtype="savings_pot",
                 # Hybrid: its moves value it until the first snapshot, then postings after it.
                 balance_mode="hybrid",
-                institution_entity_id=await get_or_create_organization(self.command, "Monzo"),
+                institution_entity_id=await self.organization("Monzo"),
                 parent_account_id=self.require_mapped(parent_monzo_id),
                 opened_on=local_date(_parse(pot["created"]), self.tz),
                 source_connection_id=self.connection_id,
@@ -376,8 +428,7 @@ class _Normalizer:
         if isinstance(merchant, dict):
             merchant_fields = cast(dict[str, Any], merchant)
             if merchant_fields.get("name"):
-                counterparty = await get_or_create_organization(
-                    self.command,
+                counterparty = await self.organization(
                     str(merchant_fields["name"]),
                     external_id=("monzo_merchant", str(merchant_fields["id"])),
                 )
@@ -418,8 +469,14 @@ class _Normalizer:
 
     async def opening(self, monzo_account: dict[str, Any], minor_units: int, code: str) -> None:
         """Post the difference between Monzo's balance and the rest of the ledger, the day
-        before the earliest other transaction, replacing the opening posted before. An opening
-        the owner voided stays void; one no longer needed is voided."""
+        before the earliest other transaction. An opening the owner voided stays void; one no
+        longer needed is voided.
+
+        An existing opening is corrected only by history older than what it was placed
+        before, which a later backfill fetched (ruling R18): everything else that changed
+        since, such as a transaction the owner voided or posted by hand, is a reconciliation
+        mismatch to report, never absorbed into it.
+        """
         monzo_id: str = monzo_account["id"]
         external_id = f"opening:{monzo_id}"
         existing = await _connector_transaction(self.session, self.connection_id, external_id)
@@ -428,9 +485,23 @@ class _Normalizer:
             return
         account_id = self.require_mapped(monzo_id)
         currency = await self.currency(code)
-        balance = to_quantity(minor_units, currency.decimals)
-        others = await _ledger_balance(self.session, account_id, currency.id, excluding=external_id)
-        difference = balance - others
+        if existing is None:
+            balance = to_quantity(minor_units, currency.decimals)
+            others = await _ledger_balance(
+                self.session, account_id, currency.id, excluding=external_id
+            )
+            difference = balance - others
+        else:
+            placed, occurred_at = await _posted(self.session, existing[0], account_id)
+            # It was placed a day before the then earliest transaction.
+            older = await _ledger_balance(
+                self.session,
+                account_id,
+                currency.id,
+                excluding=external_id,
+                before=occurred_at + timedelta(days=1),
+            )
+            difference = placed - older
         if difference == 0:
             if existing is not None:
                 await void_transaction(self.command, existing[0])
@@ -453,7 +524,7 @@ class _Normalizer:
                 postings=[
                     PostingInput(account_id, currency.id, difference),
                     PostingInput(
-                        await get_or_create_system_account(self.command, "opening_balances"),
+                        await self.system_account("opening_balances"),
                         currency.id,
                         -difference,
                     ),

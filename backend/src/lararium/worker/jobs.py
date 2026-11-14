@@ -122,15 +122,26 @@ async def run_sync(
         logger.warning("sync of connection %s failed: %s", connection_id, type(exc).__name__)
         backfill_failed = backfill and not rejected
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
-            failures = await record_sync_failure(ctx, connection_id, error)
-            moved = await transition_status(
-                ctx,
-                connection_id,
-                "needs_reauth" if rejected or backfill else "failing",
-                only_from=allowed,
-                error=BACKFILL_FAILED if backfill_failed else None,
-                authorised_at=backfill_for,
-            )
+            if backfill:
+                # The status first: a backfill superseded by a new authorisation records
+                # nothing, not even its error, which would show while the new one waits.
+                moved = await transition_status(
+                    ctx,
+                    connection_id,
+                    "needs_reauth",
+                    only_from=allowed,
+                    authorised_at=backfill_for,
+                )
+                if moved is not None:
+                    await record_sync_failure(
+                        ctx, connection_id, BACKFILL_FAILED if backfill_failed else error
+                    )
+                failures = 0
+            else:
+                failures = await record_sync_failure(ctx, connection_id, error)
+                moved = await transition_status(
+                    ctx, connection_id, "needs_reauth" if rejected else "failing", only_from=allowed
+                )
         if moved is None:
             return
         if rejected:
@@ -426,7 +437,9 @@ async def retry_stalled(manager: JobManager) -> int:
     return len(stalled)
 
 
-@procrastinate_app.periodic(cron="*/5 * * * *")
+# Every minute: a stalled job holds its connection's sync lock until then, and an approval
+# job waiting behind it has only 4 minutes from its authorisation.
+@procrastinate_app.periodic(cron="* * * * *")
 @procrastinate_app.task(name="retry_stalled_jobs", queueing_lock="retry_stalled_jobs")
 async def retry_stalled_jobs(timestamp: int) -> int:
     retried = await retry_stalled(procrastinate_app.job_manager)

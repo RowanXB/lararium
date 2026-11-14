@@ -402,14 +402,39 @@ async def test_opening_recomputed_in_place(session, run) -> None:
     main = (await _account_map(session, connection))[ACCOUNT_ID]
     assert (await _postings(session, opening.id))[0] == (main, Decimal("150.00"), "")
 
-    # History that now adds up on its own needs no opening.
+    # A backfill that fetches the rest of the older history: it adds up on its own, and the
+    # opening is no longer needed.
+    oldest = make_transaction(id="tx_TEST0000", amount=15000, created="2026-01-01T12:00:00.000Z")
     report = await _normalize(
-        session, connection, transactions=[older, *recent], balance=10000, openings=[ACCOUNT_ID]
+        session, connection, transactions=[oldest, older, *recent], openings=[ACCOUNT_ID]
     )
     assert report.voided == 1
     assert report.mismatches == []
     statuses = {r.external_id: r.status for r in await _transactions(session)}
     assert statuses[f"opening:{ACCOUNT_ID}"] == "void"
+
+
+async def test_a_backfill_does_not_absorb_what_the_owner_voided(session, run) -> None:
+    connection = await _connection(run)
+    deposit = make_transaction(id="tx_TEST0001", amount=10000, created="2026-02-01T12:00:00.000Z")
+    payment = make_transaction(id="tx_TEST0002", amount=-5000, created="2026-02-20T12:00:00.000Z")
+    history = [deposit, payment]
+    await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+    (posted,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST0002"]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, posted.id)
+
+    # Authorised again: the backfill fetches the same history. The void is a difference
+    # Monzo doesn't know about, so it stays a mismatch rather than moving the opening.
+    report = await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+
+    (opening,) = [
+        r for r in await _transactions(session) if r.external_id == f"opening:{ACCOUNT_ID}"
+    ]
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert (await _postings(session, opening.id))[0] == (main, Decimal("200.00"), "")
+    (mismatch,) = report.mismatches
+    assert "difference -50.00 GBP" in mismatch
 
 
 async def test_opening_voided_by_the_owner_stays_void(session, run) -> None:

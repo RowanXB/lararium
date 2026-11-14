@@ -255,6 +255,10 @@ class MonzoConnector:
                 "reconciled": reconciled,
             }
 
+        await normalize(ctx, fetched, reconciled=reconciled_accounts, openings=openings)
+        # Only now, as the sync's last writes: an UPDATE of the connection row holds its lock
+        # until the sync commits, and disabling or authorising the connection must not wait
+        # for the whole normalisation. Read after normalize, which updates the warnings too.
         current = await get_connection(session, connection.id)
         kept = [w for w in current.warnings if not w.startswith(WEBHOOK_WARNING)]
         if full_backfill:
@@ -267,5 +271,4 @@ class MonzoConnector:
         merged = kept + [w for w in warnings if w not in kept]
         if merged != current.warnings:
             await set_warnings(ctx.command, connection.id, merged)
-        await normalize(ctx, fetched, reconciled=reconciled_accounts, openings=openings)
         return {"accounts": cursor_accounts}

@@ -180,9 +180,10 @@ async def _change_status(
     previous: ConnectionStatus,
     status: ConnectionStatus,
     error: str | None,
+    clear_error: bool = False,
 ) -> ConnectionRecord:
     values: dict[str, Any] = {"status": status}
-    if error is not None:
+    if error is not None or clear_error:
         values["last_error"] = error
     record = await _update(ctx, connection_id, **values)
     if previous != status:
@@ -210,9 +211,11 @@ async def transition_status(
     only_from: Collection[ConnectionStatus],
     error: str | None = None,
     authorised_at: str | None = None,
+    clear_error: bool = False,
 ) -> ConnectionStatus | None:
     """Set the status only if the current one, read under the row lock, is in `only_from`,
-    and, when `authorised_at` is given, the current authorisation is still that one.
+    and, when `authorised_at` is given, the current authorisation is still that one. Set
+    last_error to `error` when given, or clear it with `clear_error`.
 
     Return the status it had, or None when it was left alone: a change made meanwhile (the
     owner disabled the connection, or authorised it again, say) wins over one decided on an
@@ -229,7 +232,7 @@ async def transition_status(
         )
         if current != authorised_at:
             return None
-    await _change_status(ctx, connection_id, previous, status, error)
+    await _change_status(ctx, connection_id, previous, status, error, clear_error)
     return previous
 
 

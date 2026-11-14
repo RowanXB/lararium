@@ -366,7 +366,7 @@ async def test_periodic_schedules() -> None:
     assert crons == {
         "schedule_syncs": "*/30 * * * *",
         "process_webhook_inbox": "* * * * *",
-        "retry_stalled_jobs": "*/5 * * * *",
+        "retry_stalled_jobs": "* * * * *",
     }
 
 
@@ -576,7 +576,13 @@ async def test_a_new_authorisation_during_the_backfill_keeps_its_own_approval(
             await _run_sync(session, connection, notifier, sessions, backfill_for=AUTHORISED_AT)
 
         async with sessions() as fresh:
-            assert (await get_connection(fresh, connection_id)).status == "authorising"
+            after = await get_connection(fresh, connection_id)
+        # Nothing of the old authorisation's outcome, not even its error, shows on the new one.
+        assert (after.status, after.last_error, after.consecutive_failures) == (
+            "authorising",
+            None,
+            0,
+        )
         assert notifier.messages == []
     finally:
         if connection_id is not None:

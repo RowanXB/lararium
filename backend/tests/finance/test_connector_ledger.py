@@ -1,10 +1,15 @@
+import asyncio
+import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import exc, text
 
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
+from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import (
     PostingInput,
@@ -174,3 +179,55 @@ async def test_owner_void_is_sticky(session, run, make_account, gbp) -> None:
         text("select count(*) from core.events where type = 'finance.transaction.updated'")
     )
     assert updates == 0
+
+
+async def test_concurrent_callers_share_one_system_account(
+    backend_url: str, owner_url: str, migrated: None
+) -> None:
+    # Two connections syncing at once both ask for "Unassigned" before either commits: on
+    # PostgreSQL, with real commits, they must get the same account.
+    key = "finance.system_account.unassigned"
+    engine, owner = create_engine(backend_url), create_engine(owner_url)
+    sessions = make_sessionmaker(engine)
+    actor = Actor("connector", "test")
+
+    async def ask() -> uuid.UUID:
+        async with sessions() as s, command_context(s, actor, "test.shared_row", {}) as ctx:
+            account_id = await get_or_create_system_account(ctx, "unassigned")
+            # Still uncommitted while the other asks, as in a sync's transaction.
+            await asyncio.sleep(0.5)
+            return account_id
+
+    try:
+        async with owner.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("select count(*) from core.settings where key = :k"), {"k": key}
+                )
+                == 0
+            )
+        first, second = await asyncio.gather(ask(), ask())
+        assert first == second
+        async with owner.connect() as conn:
+            names = await conn.scalar(
+                text("select count(*) from finance.accounts where name = 'Unassigned'")
+            )
+        assert names == 1
+    finally:
+        async with owner.begin() as conn:
+            ids = [
+                r[0]
+                for r in await conn.execute(
+                    text("select id from finance.accounts where name = 'Unassigned'")
+                )
+            ]
+            await conn.execute(text("delete from core.settings where key = :k"), {"k": key})
+            await conn.execute(
+                text("delete from core.events where subject_id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(
+                text("delete from finance.accounts where id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(text("delete from core.audit_log where command = 'test.shared_row'"))
+        await engine.dispose()
+        await owner.dispose()

@@ -24,6 +24,7 @@ from lararium.core.connections import (
     get_connection,
     load_credential,
     set_status,
+    store_credential,
     update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED
@@ -419,6 +420,24 @@ async def test_callback_state_single_use_and_expiring(api, session, monzo, queue
     assert len(monzo.token_forms) == 1
 
 
+async def test_a_secret_from_another_master_key_asks_to_add_the_connection_again(
+    api, run, monzo, queue
+) -> None:
+    created = await _create(api)
+    # As after the master key was lost and replaced: the stored secret can't be decrypted.
+    await run(store_credential, bytes(32), created["id"], "client_secret", "s3cret", None)
+    state = await _authorize(api, created["id"])
+
+    response = await _callback(api, state)
+
+    assert (response.status_code, response.headers["location"]) == (
+        303,
+        "/connections?error=credentials",
+    )
+    assert monzo.token_forms == []
+    assert list(queue.jobs.values()) == []
+
+
 async def test_callback_exchanges_code_and_defers_approval(api, session, monzo, queue) -> None:
     created = await _create(api)
     state = await _authorize(api, created["id"])
@@ -612,6 +631,17 @@ async def test_a_rerun_after_the_window_closed_does_not_backfill(
     assert monzo.account_requests() == []
     assert not [r for r in monzo.requests if r.url.path == "/transactions"]
     assert len(notifier.messages) == 1
+
+
+async def test_a_new_authorisation_clears_the_previous_error(api, session, run, queue) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], "needs_reauth", error=EXPIRED)
+
+    state = await _authorize(api, created["id"])
+    assert (await _callback(api, state)).status_code == 303
+
+    connection = await get_connection(session, created["id"])
+    assert (connection.status, connection.last_error) == ("authorising", None)
 
 
 @pytest.mark.parametrize("syncing", ["healthy", "failing"])

@@ -21,6 +21,8 @@ const AUTHORISABLE = ["created", "needs_reauth", "authorising", "disabled"];
 const CALLBACK_ERRORS: Record<string, string> = {
   state: "The authorisation link expired or was already used. Click Authorise again.",
   exchange: "Monzo didn't accept the authorisation. Click Authorise to try again.",
+  credentials:
+    "This connection's client secret can't be read: it was stored under another master key. Add the connection again.",
   status:
     "This connection can't be authorised right now. Disable it first, or wait until it needs re-authorisation.",
 };

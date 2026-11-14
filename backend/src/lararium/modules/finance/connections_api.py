@@ -34,7 +34,11 @@ from lararium.core.connections import (
     transition_status,
     update_config,
 )
-from lararium.core.errors import ConnectionNotFoundError, CredentialRejectedError
+from lararium.core.errors import (
+    ConnectionNotFoundError,
+    CredentialDecryptError,
+    CredentialRejectedError,
+)
 from lararium.deps import (
     ActorDep,
     SessionDep,
@@ -259,7 +263,12 @@ async def monzo_oauth_callback(
     if connection.status not in AUTHORISABLE:
         return _done("status")
     client_id = connection.config.get("client_id")
-    client_secret = await load_credential(session, master_key, connection_id, "client_secret")
+    try:
+        client_secret = await load_credential(session, master_key, connection_id, "client_secret")
+    except CredentialDecryptError:
+        # Encrypted under another master key: no authorisation can use it, only adding the
+        # connection again (with its secret) can.
+        return _done("credentials")
     if not isinstance(client_id, str) or client_secret is None:
         return _done("exchange")
     try:
@@ -272,7 +281,10 @@ async def monzo_oauth_callback(
     async with command_context(session, actor, "monzo_oauth_callback", args) as ctx:
         # Under the row lock, and in one transaction: the tokens and the authorisation they
         # belong to are saved only if the connection can still be authorised, and together.
-        moved = await transition_status(ctx, connection_id, "authorising", only_from=AUTHORISABLE)
+        # The previous authorisation's error (approve in time, authorise again) no longer applies.
+        moved = await transition_status(
+            ctx, connection_id, "authorising", only_from=AUTHORISABLE, clear_error=True
+        )
         if moved is not None:
             await store_tokens(ctx, master_key, connection_id, pair)
             authorised_at = datetime.now(UTC).isoformat()
