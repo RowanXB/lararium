@@ -3,11 +3,36 @@
 import json
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from lararium.worker import jobs
+
 COMPOSE_FILE = Path(__file__).parents[3] / "infra" / "compose.yaml"
+
+
+def _config() -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "--profile",
+            "*",
+            "config",
+            "--no-interpolate",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def _services() -> dict[str, dict[str, object]]:
@@ -55,10 +80,18 @@ def test_worker_runs_the_worker_module_after_the_migrations() -> None:
     )
 
 
-def test_worker_may_finish_an_approval_wait_when_stopped() -> None:
-    # Longer than the 4-minute approval window: a job killed mid-run holds its sync lock
-    # until the stalled-job retry frees it.
-    assert _services()["worker"]["stop_grace_period"] == "5m"
+def test_worker_may_finish_an_approval_job_when_stopped() -> None:
+    # A job killed mid-run holds its sync lock until the stalled-job retry frees it. The
+    # longest is an approval job: the wait, one more check after the deadline (a poll's wait
+    # and a request's timeout), then a backfill that may run until Monzo's window closes.
+    longest = (
+        jobs.APPROVAL_WINDOW
+        + timedelta(seconds=jobs.APPROVAL_POLL_SECONDS + jobs.HTTP_TIMEOUT_SECONDS)
+        + jobs.FULL_HISTORY_WINDOW
+    )
+    grace = _services()["worker"]["stop_grace_period"]
+    assert isinstance(grace, str) and grace.endswith("m")
+    assert timedelta(minutes=int(grace[:-1])) >= longest
 
 
 def test_api_does_not_log_requests() -> None:
@@ -174,3 +207,18 @@ def test_internet_facing_services_cannot_reach_the_api() -> None:
             assert not networks(exposed) & networks(trusted), (exposed, trusted)
     assert networks("webhook-in") & networks("db")
     assert networks("cloudflared") & networks("webhook-in")
+
+
+def test_the_webhook_receiver_has_no_route_out() -> None:
+    # On Docker Desktop a container with a way out reaches the host's loopback, where web is
+    # published: only cloudflared, to reach Cloudflare, gets one, and the api isn't on it.
+    config = _config()
+    services, networks = config["services"], config["networks"]
+    for name in services["webhook-in"]["networks"]:
+        assert networks[name].get("internal") is True, name
+    outward = [n for n in services["cloudflared"]["networks"] if not networks[n].get("internal")]
+    assert outward
+    for name in outward:
+        assert [s for s, spec in services.items() if name in (spec.get("networks") or {})] == [
+            "cloudflared"
+        ]
