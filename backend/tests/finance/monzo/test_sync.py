@@ -3,6 +3,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import ANY
 
 import httpx
 import pytest
@@ -101,7 +102,9 @@ async def _connection(
     return await run(setup)
 
 
-async def _sync(session, run, connection: ConnectionRecord, fake: FakeMonzo) -> JSONValue:
+async def _sync(
+    session, run, connection: ConnectionRecord, fake: FakeMonzo, *, full_backfill: bool = False
+) -> JSONValue:
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
         ctx = CommandContext(session, CONNECTOR, uuid.uuid4())
         sync_ctx = SyncContext(
@@ -112,6 +115,7 @@ async def _sync(session, run, connection: ConnectionRecord, fake: FakeMonzo) -> 
             http=http,
             notifier=NullNotifier(),
             session_factory=async_sessionmaker(bind=session.bind),
+            full_backfill=full_backfill,
         )
         return await MonzoConnector().sync(sync_ctx)
 
@@ -133,9 +137,9 @@ def test_connector_identity() -> None:
 async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
     created = datetime.now(UTC) - timedelta(days=3)
     fake = FakeMonzo([make_transaction(id="tx_TEST0001", created=_iso(created))])
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    cursor = await _sync(session, run, connection, fake)
+    cursor = await _sync(session, run, connection, fake, full_backfill=True)
 
     assert await _raw_types(session) == ["accounts", "balance", "pots", "transactions_page"]
     rows = (
@@ -154,15 +158,12 @@ async def test_first_sync_stores_raw_records_per_endpoint(session, run) -> None:
         "expand[]": "merchant",
     }
     assert by_type["transactions_page"].content[0]["id"] == "tx_TEST0001"
-    assert cursor == {
-        "accounts": {
-            ACCOUNT_ID: {"last_created": _iso(created), "backfilled": True, "reconciled": True}
-        }
-    }
-    # A full backfill sends no `since`, and the request flag is cleared afterwards.
+    state: Any = cursor["accounts"][ACCOUNT_ID]  # type: ignore[index]
+    assert datetime.fromisoformat(state.pop("fetched_at")) <= datetime.now(UTC)
+    assert state == {"last_created": _iso(created), "backfilled": True, "reconciled": True}
+    # A full backfill sends no `since`.
     assert "since" not in fake.transaction_requests()[0].url.params
     after = await get_connection(session, connection.id)
-    assert "backfill_requested" not in after.config
     assert after.config["client_id"] == "oauth2client_TEST1"
 
 
@@ -179,7 +180,7 @@ async def test_incremental_sync_uses_14_day_overlap(session, run) -> None:
     (request,) = fake.transaction_requests()
     assert request.url.params["since"] == _iso(last_created - timedelta(days=14))
     assert request.url.params["limit"] == "100"
-    assert result == cursor
+    assert result == {"accounts": {ACCOUNT_ID: state | {"fetched_at": ANY}}}
     assert (await get_connection(session, connection.id)).warnings == []
 
 
@@ -206,9 +207,9 @@ async def test_backfill_truncation_warning(session, run) -> None:
     account = make_account(created=_iso(now - timedelta(days=400)))
     first = make_transaction(id="tx_TEST0001", created=_iso(now - timedelta(days=89)))
     fake = FakeMonzo([first], account)
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    await _sync(session, run, connection, fake)
+    await _sync(session, run, connection, fake, full_backfill=True)
 
     warnings = (await get_connection(session, connection.id)).warnings
     assert warnings == [f"Monzo account {ACCOUNT_ID}: history may be truncated"]
@@ -218,9 +219,9 @@ async def test_complete_backfill_has_no_truncation_warning(session, run) -> None
     now = datetime.now(UTC)
     account = make_account(created=_iso(now - timedelta(days=40)))
     first = make_transaction(id="tx_TEST0001", created=_iso(now - timedelta(days=39)))
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    await _sync(session, run, connection, FakeMonzo([first], account))
+    await _sync(session, run, connection, FakeMonzo([first], account), full_backfill=True)
 
     assert (await get_connection(session, connection.id)).warnings == []
 
@@ -258,9 +259,9 @@ async def test_paginates_and_keeps_closed_accounts(session, run) -> None:
         for i in range(150)
     ]
     fake = FakeMonzo(history, make_account(closed=True))
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    cursor = await _sync(session, run, connection, fake)
+    cursor = await _sync(session, run, connection, fake, full_backfill=True)
 
     assert (await _raw_types(session)).count("transactions_page") == 2
     assert cursor["accounts"][ACCOUNT_ID]["last_created"] == history[-1]["created"]  # type: ignore[index]
@@ -288,9 +289,9 @@ async def test_sync_normalizes_into_the_ledger(session, run) -> None:
         id="tx_TEST0001", amount=-1234, created=_iso(now - timedelta(days=3))
     )
     account = make_account(created=_iso(now - timedelta(days=4)))
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    await _sync(session, run, connection, FakeMonzo([payment], account))
+    await _sync(session, run, connection, FakeMonzo([payment], account), full_backfill=True)
 
     after = await get_connection(session, connection.id)
     account_map = after.config["account_map"]
@@ -394,8 +395,7 @@ async def test_full_backfill_with_older_history_corrects_the_opening(session, ru
     # Authorised again: the backfill now fetches older history too.
     older = make_transaction(id="tx_TEST0001", amount=10000, created=_iso(_noon(200)))
     await run(lambda ctx: _record_cursor(ctx, connection, cursor))
-    await run(update_config, connection.id, {"backfill_requested": True})
-    await _sync(session, run, connection, FakeMonzo([older, recent], account))
+    await _sync(session, run, connection, FakeMonzo([older, recent], account), full_backfill=True)
 
     ledger = await _ledger(session, connection)
     # Corrected in place, not added to: 162.34 + 100.00 - 12.34 is Monzo's 250.00.
@@ -432,9 +432,15 @@ class PaymentDuringFetch(FakeMonzo):
 async def test_a_payment_during_the_fetch_does_not_skew_the_opening(session, run) -> None:
     payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
     account = make_account(created=_iso(_noon(11)))
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
 
-    await _sync(session, run, connection, PaymentDuringFetch([payment], account, moves=1))
+    await _sync(
+        session,
+        run,
+        connection,
+        PaymentDuringFetch([payment], account, moves=1),
+        full_backfill=True,
+    )
 
     ledger = await _ledger(session, connection)
     # Monzo's balance after the payment, 240.00, is the ledger's, and the opening is still
@@ -447,25 +453,95 @@ async def test_a_payment_during_the_fetch_does_not_skew_the_opening(session, run
 async def test_a_balance_that_keeps_moving_fails_the_sync(session, run) -> None:
     payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
     account = make_account(created=_iso(_noon(300)))
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
     fake = PaymentDuringFetch([payment], account, moves=100)
 
     with pytest.raises(BalanceKeptChangingError):
-        await _sync(session, run, connection, fake)
+        await _sync(session, run, connection, fake, full_backfill=True)
 
     balance_reads = [r for r in fake.requests if r.url.path == "/balance"]
     assert len(balance_reads) == 2 * FETCH_ATTEMPTS
 
 
+async def test_an_old_pending_transaction_is_fetched_until_it_settles(session, run) -> None:
+    hold = make_transaction(id="tx_TEST_HOLD", amount=-20000, created=_iso(_noon(30)), settled="")
+    recent = make_transaction(id="tx_TEST0002", created=_iso(_noon(2)))
+    connection = await _connection(run)
+    fake = FakeMonzo([hold, recent], make_account(created=_iso(_noon(31))))
+    cursor = await _sync(session, run, connection, fake, full_backfill=True)
+    await run(lambda ctx: _record_cursor(ctx, connection, cursor))
+
+    # A hotel hold settles for less a month after it was made, long past the 14-day overlap
+    # behind the newest transaction.
+    settled = {"amount": -15000, "local_amount": -15000, "settled": _iso(_noon(1))}
+    fake.transactions = [hold | settled, recent]
+    fake.requests.clear()
+    await _sync(session, run, connection, fake)
+
+    (request,) = fake.transaction_requests()
+    assert datetime.fromisoformat(request.url.params["since"]) < _noon(30)
+    row = (
+        await session.execute(
+            text(
+                "select t.status, p.quantity from finance.transactions t"
+                " join finance.postings p on p.transaction_id = t.id and p.position = 0"
+                " where t.external_id = 'tx_TEST_HOLD'"
+            )
+        )
+    ).one()
+    assert (row.status, str(row.quantity)) == ("booked", "-150.00")
+
+
+async def test_a_quiet_account_synced_recently_has_no_gap_warning(session, run) -> None:
+    # Its newest transaction is 200 days old, but the last sync was half an hour ago.
+    state = {
+        "last_created": _iso(_noon(200)),
+        "fetched_at": _iso(datetime.now(UTC) - timedelta(minutes=30)),
+        "backfilled": False,
+        "reconciled": False,
+    }
+    connection = await _connection(run, cursor={"accounts": {ACCOUNT_ID: state}})
+
+    await _sync(session, run, connection, FakeMonzo([]))
+
+    assert (await get_connection(session, connection.id)).warnings == []
+
+
+async def test_a_pot_move_after_the_last_snapshot_gets_a_new_one(session, run) -> None:
+    payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
+    connection = await _connection(run)
+    fake = FakeMonzo([payment], make_account(created=_iso(_noon(11))))
+    cursor = await _sync(session, run, connection, fake, full_backfill=True)
+    await run(lambda ctx: _record_cursor(ctx, connection, cursor))
+
+    # 1.00 of interest lands in the pot and the owner moves 1.00 out: Monzo reports the
+    # same pot balance, but a move is posted after its last snapshot.
+    move = make_transaction(
+        id="tx_TEST_POT",
+        amount=100,
+        local_amount=100,
+        created=_iso(datetime.now(UTC)),
+        metadata={"pot_id": "pot_TEST1"},
+    )
+    fake.transactions = [payment, move]
+    await _sync(session, run, connection, fake)
+
+    account_map: Any = (await get_connection(session, connection.id)).config["account_map"]
+    pot = uuid.UUID(account_map["pot_TEST1"])
+    rows = await balances_asof(session, datetime.now(UTC).date() + timedelta(days=1))
+    assert [str(r.quantity) for r in rows if r.account_id == pot] == ["50.00"]
+
+
 async def test_full_backfill_drops_the_warnings_it_resolves(session, run) -> None:
     now = datetime.now(UTC)
     truncated = f"Monzo account {ACCOUNT_ID}: history may be truncated"
-    connection = await _connection(run, config={"backfill_requested": True})
-    await run(set_warnings, connection.id, [BACKFILL_FAILED, truncated, "something else"])
+    clamped = f"Monzo account {ACCOUNT_ID}: sync window limited to the last 89 days"
+    connection = await _connection(run)
+    await run(set_warnings, connection.id, [BACKFILL_FAILED, truncated, clamped, "something else"])
     account = make_account(created=_iso(now - timedelta(days=40)))
     first = make_transaction(id="tx_TEST0001", created=_iso(now - timedelta(days=39)))
 
-    await _sync(session, run, connection, FakeMonzo([first], account))
+    await _sync(session, run, connection, FakeMonzo([first], account), full_backfill=True)
 
     assert (await get_connection(session, connection.id)).warnings == ["something else"]
 
@@ -473,12 +549,12 @@ async def test_full_backfill_drops_the_warnings_it_resolves(session, run) -> Non
 async def test_full_backfill_keeps_a_truncation_that_still_applies(session, run) -> None:
     now = datetime.now(UTC)
     truncated = f"Monzo account {ACCOUNT_ID}: history may be truncated"
-    connection = await _connection(run, config={"backfill_requested": True})
+    connection = await _connection(run)
     await run(set_warnings, connection.id, [truncated])
     account = make_account(created=_iso(now - timedelta(days=400)))
     first = make_transaction(id="tx_TEST0001", created=_iso(now - timedelta(days=89)))
 
-    await _sync(session, run, connection, FakeMonzo([first], account))
+    await _sync(session, run, connection, FakeMonzo([first], account), full_backfill=True)
 
     assert (await get_connection(session, connection.id)).warnings == [truncated]
 

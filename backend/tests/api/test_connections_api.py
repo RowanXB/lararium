@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -69,6 +69,10 @@ class FakeMonzo:
         self.balance = -2468
         self.token_forms: list[dict[str, list[str]]] = []
         self.requests: list[httpx.Request] = []
+        # The access token the token endpoint hands out; tokens Monzo has revoked (401).
+        self.access_token = "at-TEST"
+        self.revoked: set[str] = set()
+        self.refresh_rejected = False
         now = datetime.now(UTC)
         self.account = make_account(created=_iso(now - timedelta(days=30)))
         self.transactions = [
@@ -80,11 +84,21 @@ class FakeMonzo:
         self.requests.append(request)
         path = request.url.path
         if path == "/oauth2/token":
-            self.token_forms.append(parse_qs(request.content.decode()))
+            form = parse_qs(request.content.decode())
+            self.token_forms.append(form)
+            if self.refresh_rejected and form["grant_type"] == ["refresh_token"]:
+                return httpx.Response(401, json={"error": "invalid_grant"})
             return httpx.Response(
                 200,
-                json={"access_token": "at-TEST", "refresh_token": "rt-TEST", "expires_in": 21600},
+                json={
+                    "access_token": self.access_token,
+                    "refresh_token": "rt-TEST",
+                    "expires_in": 21600,
+                },
             )
+        token = request.headers["Authorization"].removeprefix("Bearer ")
+        if token in self.revoked:
+            return httpx.Response(401, json={"code": "unauthorized.bad_access_token"})
         if path == "/accounts":
             polls = len(self.account_requests())
             if self.approve_after is None or polls <= self.approve_after:
@@ -116,16 +130,22 @@ class RecordingNotifier:
 
 
 class FakeClock:
-    def __init__(self) -> None:
-        self.now = 1000
-        self.slept: list[int] = []
+    """Wall-clock time that only moves when the approval job sleeps."""
 
-    def __call__(self) -> int:
+    def __init__(self) -> None:
+        self.now = datetime.now(UTC)
+        self.slept: list[int] = []
+        # Runs after each sleep, at the new time.
+        self.after_sleep: Callable[[], Awaitable[None]] | None = None
+
+    def __call__(self) -> datetime:
         return self.now
 
     async def sleep(self, seconds: int) -> None:
         self.slept.append(seconds)
-        self.now += seconds
+        self.now += timedelta(seconds=seconds)
+        if self.after_sleep is not None:
+            await self.after_sleep()
 
 
 @pytest.fixture
@@ -474,7 +494,7 @@ async def _await_approval(
             http=http,
             notifier=notifier,
             session_factory=sessions,
-            clock=clock,
+            now=clock,
             sleep=clock.sleep,
         )
 
@@ -492,7 +512,6 @@ async def test_await_approval_backfills_on_first_success(
     connection = await get_connection(session, connection_id)
     assert connection.status == "healthy"
     assert connection.last_success_at is not None
-    assert "backfill_requested" not in connection.config
     assert "account_map" in connection.config
     # The full backfill: no `since`, so all history comes while the window is open.
     tx_requests = [r for r in monzo.requests if r.url.path == "/transactions"]
@@ -509,8 +528,8 @@ async def test_approval_window_expired(api, session, sessions, monzo, queue) -> 
 
     await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
 
-    # Every 10 s for 4 minutes: polls at 0, 10, ..., 240 s.
-    assert len(monzo.account_requests()) == 25
+    # Every 10 s until 4 minutes after the tokens were saved: polls at 0, 10, ..., 230 s.
+    assert len(monzo.account_requests()) == 24
     assert sum(clock.slept) == 240
     connection = await get_connection(session, connection_id)
     assert (connection.status, connection.last_error) == ("needs_reauth", EXPIRED)
@@ -533,6 +552,59 @@ async def test_await_approval_stops_when_no_longer_authorising(
     assert monzo.account_requests() == []
     assert (await get_connection(session, connection_id)).status == "disabled"
     assert notifier.messages == []
+
+
+async def _token_saved_at(
+    sessions: async_sessionmaker[AsyncSession], connection_id: str, at: datetime
+) -> None:
+    """Pretend the access token was saved at `at`, as an authorisation then would have."""
+    async with sessions() as other, other.begin():
+        await other.execute(
+            text(
+                "update core.credentials set updated_at = :at"
+                " where connection_id = :id and purpose = 'access_token'"
+            ),
+            {"at": at, "id": uuid.UUID(connection_id)},
+        )
+
+
+async def test_authorising_again_mid_wait_gets_a_fresh_window(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    monzo.approve_after = 26  # approved during the poll at 260 s
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    async def reauthorise_at_200s() -> None:
+        if sum(clock.slept) == 200:
+            await _token_saved_at(sessions, connection_id, clock.now)
+
+    clock.after_sleep = reauthorise_at_200s
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    # Past the first authorisation's 4 minutes, but inside the second one's.
+    assert sum(clock.slept) == 260
+    assert (await get_connection(session, connection_id)).status == "healthy"
+    assert notifier.messages == []
+
+
+async def test_a_rerun_after_the_window_closed_does_not_backfill(
+    api, session, sessions, monzo, queue
+) -> None:
+    # The worker died mid-backfill and the job runs again later: Monzo no longer serves all
+    # history, so the connection needs authorising again instead of fetching part of it.
+    connection_id = await _authorising(api)
+    await _token_saved_at(sessions, connection_id, datetime.now(UTC) - timedelta(minutes=5))
+    notifier, clock = RecordingNotifier(), FakeClock()
+
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("needs_reauth", EXPIRED)
+    assert monzo.account_requests() == []
+    assert not [r for r in monzo.requests if r.url.path == "/transactions"]
+    assert len(notifier.messages) == 1
 
 
 @pytest.mark.parametrize("syncing", ["healthy", "failing"])
@@ -565,6 +637,56 @@ async def test_authorising_allowed_where_no_sync_runs(api, run, queue, status: s
     state = await _authorize(api, created["id"])
     response = await _callback(api, state)
     assert response.headers["location"] == "/connections"
+
+
+async def _sync_now(
+    session: AsyncSession,
+    sessions: async_sessionmaker[AsyncSession],
+    connection_id: str,
+    monzo: FakeMonzo,
+    notifier: RecordingNotifier,
+) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
+        await jobs.run_sync(
+            session,
+            uuid.UUID(connection_id),
+            settings=_settings(),
+            http=http,
+            notifier=notifier,
+            session_factory=sessions,
+        )
+
+
+async def test_a_token_revoked_before_its_expiry_is_refreshed(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    notifier, clock = RecordingNotifier(), FakeClock()
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+    # The owner removed the access in the Monzo app; the token's stored expiry is hours away.
+    monzo.revoked, monzo.access_token = {"at-TEST"}, "at-TEST2"
+
+    await _sync_now(session, sessions, connection_id, monzo, notifier)
+
+    connection = await get_connection(session, connection_id)
+    assert (connection.status, connection.last_error) == ("healthy", None)
+    assert monzo.token_forms[-1]["grant_type"] == ["refresh_token"]
+    assert notifier.messages == []
+
+
+async def test_a_revoked_token_that_cannot_be_refreshed_needs_authorising(
+    api, session, sessions, monzo, queue
+) -> None:
+    connection_id = await _authorising(api)
+    notifier, clock = RecordingNotifier(), FakeClock()
+    await _await_approval(session, sessions, connection_id, monzo, notifier, clock)
+    monzo.revoked, monzo.refresh_rejected = {"at-TEST"}, True
+
+    await _sync_now(session, sessions, connection_id, monzo, notifier)
+
+    # Not `failing` until the stored expiry: it can be authorised again at once.
+    assert (await get_connection(session, connection_id)).status == "needs_reauth"
+    assert len(notifier.messages) == 1
 
 
 @pytest.fixture
@@ -605,7 +727,6 @@ async def test_failed_backfill_needs_authorising_again(
     connection = await get_connection(session, connection_id)
     assert connection.status == "needs_reauth"
     assert connection.last_error == BACKFILL_FAILED
-    assert "backfill_requested" not in connection.config
     assert connection.warnings == []
     assert len(notifier.messages) == 1
     assert "My Monzo" in notifier.messages[0] and BACKFILL_FAILED in notifier.messages[0]

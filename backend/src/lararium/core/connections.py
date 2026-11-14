@@ -360,6 +360,17 @@ async def load_credential(
     return decrypt(master_key, row.nonce, row.ciphertext, _aad(connection_id, purpose))
 
 
+async def load_credential_saved_at(
+    session: AsyncSession, connection_id: UUID, purpose: str
+) -> datetime | None:
+    """When the stored credential was last saved; None if it doesn't exist."""
+    return await session.scalar(
+        select(Credential.updated_at).where(
+            Credential.connection_id == connection_id, Credential.purpose == purpose
+        )
+    )
+
+
 async def load_credential_expiry(
     session: AsyncSession, connection_id: UUID, purpose: str
 ) -> datetime | None:

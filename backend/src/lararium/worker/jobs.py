@@ -3,12 +3,14 @@ tasks that schedule them."""
 
 import asyncio
 import logging
-import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
+from procrastinate import exceptions as procrastinate_exceptions
+from procrastinate.jobs import Status
 from procrastinate.manager import JobManager
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,11 +19,12 @@ from lararium.config import Settings, get_settings, load_master_key
 from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
+    ConnectionStatus,
     get_connection,
+    load_credential_saved_at,
     record_sync_failure,
     record_sync_success,
     transition_status,
-    update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
 from lararium.core.errors import CredentialRejectedError
@@ -44,9 +47,8 @@ MAX_ERROR_LENGTH = 500
 # After the OAuth callback (Decision 7): poll every 10 s for up to 4 minutes, which leaves the
 # full backfill inside the 5 minutes after approval in which Monzo serves all history.
 APPROVAL_POLL_SECONDS = 10
-APPROVAL_WINDOW_SECONDS = 4 * 60
+APPROVAL_WINDOW = timedelta(minutes=4)
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
-BACKFILL_REQUESTED = "backfill_requested"
 
 
 async def _notify(notifier: Notifier, text: str) -> None:
@@ -65,14 +67,22 @@ async def run_sync(
     http: httpx.AsyncClient,
     notifier: Notifier,
     session_factory: async_sessionmaker[AsyncSession],
+    backfill: bool = False,
 ) -> None:
     """Sync one connection and record the outcome, notifying the owner when it matters.
 
     A failing sync is recorded on the connection, not raised: the schedule tries again. A
     status changed while the sync ran (the owner disabled the connection, say) is kept.
+
+    `backfill`: the full backfill right after the owner approved a new authorisation, the
+    only sync that fetches all history (run_await_approval). The connection is `authorising`
+    until it is stored, and then healthy. If it fails it can't be retried outside the window,
+    and syncing on with partial history (and no opening balance) would make the numbers wrong
+    without saying so, so the connection needs authorising again (ruling R18).
     """
     connection = await get_connection(session, connection_id)
-    if connection.status not in SYNCABLE:
+    allowed: tuple[ConnectionStatus, ...] = ("authorising",) if backfill else SYNCABLE
+    if connection.status not in allowed:
         logger.info("not syncing connection %s: status is %s", connection_id, connection.status)
         return
     master_key = _master_key(settings)
@@ -93,30 +103,34 @@ async def run_sync(
                     notifier=notifier,
                     session_factory=session_factory,
                     webhook=_webhook_target(settings),
+                    full_backfill=backfill,
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
-            recovered = (
-                await transition_status(ctx, connection_id, "healthy", only_from=("failing",))
-                is not None
-            )
+            from_ = ("authorising",) if backfill else ("failing",)
+            moved = await transition_status(ctx, connection_id, "healthy", only_from=from_)
+            recovered = moved == "failing"
     except Exception as exc:
         # command_context has rolled the failed sync back; record the failure on its own.
         rejected = isinstance(exc, CredentialRejectedError)
         error = _describe(exc)[:MAX_ERROR_LENGTH]
         logger.warning("sync of connection %s failed: %s", connection_id, type(exc).__name__)
+        backfill_failed = backfill and not rejected
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
             failures = await record_sync_failure(ctx, connection_id, error)
             moved = await transition_status(
                 ctx,
                 connection_id,
-                "needs_reauth" if rejected else "failing",
-                only_from=SYNCABLE,
+                "needs_reauth" if rejected or backfill else "failing",
+                only_from=allowed,
+                error=BACKFILL_FAILED if backfill_failed else None,
             )
         if moved is None:
             return
         if rejected:
             await _notify_reauth(notifier, connection.display_name, error)
+        elif backfill_failed:
+            await _notify(notifier, f"{connection.display_name}: {BACKFILL_FAILED}")
         elif failures == NOTIFY_AFTER_FAILURES:
             await _notify(
                 notifier,
@@ -160,10 +174,6 @@ async def _notify_reauth(notifier: Notifier, display_name: str, error: str) -> N
     await _notify(notifier, f"{display_name} needs to be authorised again: {error}")
 
 
-def _monotonic_seconds() -> int:
-    return time.monotonic_ns() // 1_000_000_000
-
-
 async def run_await_approval(
     session: AsyncSession,
     connection_id: UUID,
@@ -172,15 +182,15 @@ async def run_await_approval(
     http: httpx.AsyncClient,
     notifier: Notifier,
     session_factory: async_sessionmaker[AsyncSession],
-    clock: Callable[[], int] = _monotonic_seconds,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[int], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Wait for the owner to approve a newly authorised connection, then backfill it.
 
-    Polls every 10 s for up to 4 minutes while the connection is `authorising`. On the first
-    success it requests a full backfill, marks the connection healthy and syncs it at once,
-    inside the window in which all history can be fetched. On timeout, or if that backfill
-    fails, the connection needs authorising again, and the owner is told.
+    Polls every 10 s while the connection is `authorising`, until 4 minutes after its tokens
+    were saved. On the first success it runs the full backfill at once, inside the window in
+    which all history can be fetched (run_sync with backfill). On timeout the connection
+    needs authorising again, and the owner is told.
     """
     master_key = _master_key(settings)
     connection = await get_connection(session, connection_id)
@@ -188,7 +198,6 @@ async def run_await_approval(
     actor = Actor("connector", connector.name)
     args = {"connection_id": str(connection_id), "connector": connector.name}
     check_id: UUID = (await session.execute(select(func.uuidv7()))).scalar_one()
-    deadline = clock() + APPROVAL_WINDOW_SECONDS
 
     while True:
         connection = await get_connection(session, connection_id)
@@ -197,6 +206,15 @@ async def run_await_approval(
                 "approval of connection %s ended: status is %s", connection_id, connection.status
             )
             await session.rollback()
+            return
+        # The window belongs to the authorisation waited on, not to this job: it runs from
+        # when its tokens were saved. So authorising again mid-wait gets 4 fresh minutes, and
+        # a job re-run after its worker died (mid-backfill, say) doesn't backfill late.
+        saved_at = await load_credential_saved_at(session, connection_id, "access_token")
+        if saved_at is not None and now() >= saved_at + APPROVAL_WINDOW:
+            await session.rollback()
+            if await _end_approval(session, connection_id, actor, args, APPROVAL_EXPIRED):
+                await _notify(notifier, f"{connection.display_name}: {APPROVAL_EXPIRED}")
             return
         try:
             # check_access writes nothing through this context; a token it refreshes is
@@ -228,19 +246,8 @@ async def run_await_approval(
         await session.rollback()
         if approved:
             break
-        if clock() >= deadline:
-            if await _end_approval(session, connection_id, actor, args, APPROVAL_EXPIRED):
-                await _notify(notifier, f"{connection.display_name}: {APPROVAL_EXPIRED}")
-            return
         await sleep(APPROVAL_POLL_SECONDS)
 
-    async with command_context(session, actor, "connection.approved", args) as ctx:
-        moved = await transition_status(ctx, connection_id, "healthy", only_from=("authorising",))
-        if moved is not None:
-            # Read by the sync below, which removes it once the backfill is stored.
-            await update_config(ctx, connection_id, {BACKFILL_REQUESTED: True})
-    if moved is None:
-        return
     await run_sync(
         session,
         connection_id,
@@ -248,20 +255,8 @@ async def run_await_approval(
         http=http,
         notifier=notifier,
         session_factory=session_factory,
+        backfill=True,
     )
-    # A backfill that failed can't be retried outside the window, and syncing on with partial
-    # history (and no opening balance) would make the numbers wrong without saying so. So the
-    # connection needs authorising again, which opens a new window (ruling R18).
-    after = await get_connection(session, connection_id)
-    if after.config.get(BACKFILL_REQUESTED):
-        async with command_context(session, actor, "connection.backfill_failed", args) as ctx:
-            await update_config(ctx, connection_id, remove=[BACKFILL_REQUESTED])
-            # A rejection has already moved it to needs_reauth, and told the owner.
-            moved = await transition_status(
-                ctx, connection_id, "needs_reauth", only_from=SYNCABLE, error=BACKFILL_FAILED
-            )
-        if moved is not None:
-            await _notify(notifier, f"{after.display_name}: {BACKFILL_FAILED}")
 
 
 async def _end_approval(
@@ -368,10 +363,19 @@ async def process_webhook_inbox(timestamp: int) -> int:
 async def retry_stalled(manager: JobManager) -> int:
     """Put back to `todo` the jobs left `doing` by a worker that stopped sending heartbeats
     (killed mid-job, say); return how many. Until then such a job holds its lock, and so
-    blocks every later sync of its connection."""
+    blocks every later sync of its connection.
+
+    Only one job per queueing lock can be `todo`, and the stalled job doesn't hold it while
+    `doing`, so an equivalent job (a sync queued by a webhook meanwhile, say) may already be
+    waiting. Then the stalled one is closed as failed instead: that frees the lock, and the
+    waiting job does the same work.
+    """
     stalled = list(await manager.get_stalled_jobs())
     for job in stalled:
-        await manager.retry_job(job)
+        try:
+            await manager.retry_job(job)
+        except procrastinate_exceptions.UniqueViolation:
+            await manager.finish_job(job, status=Status.FAILED, delete_job=False)
     return len(stalled)
 
 

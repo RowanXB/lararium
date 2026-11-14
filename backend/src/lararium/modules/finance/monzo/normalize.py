@@ -147,6 +147,27 @@ async def _ledger_balance(
     return total if total is not None else Decimal(0)
 
 
+async def oldest_pending(
+    session: AsyncSession, connection_id: UUID, config: dict[str, JSONValue], monzo_id: str
+) -> datetime | None:
+    """When the oldest transaction the ledger still holds as pending on the Monzo account was
+    created; None if there is none. It must be fetched again until it settles or is voided."""
+    account_map = config.get(ACCOUNT_MAP_KEY)
+    account_id = account_map.get(monzo_id) if isinstance(account_map, dict) else None
+    if not isinstance(account_id, str):
+        return None
+    t, p = models.Transaction, models.Posting
+    return await session.scalar(
+        select(func.min(t.occurred_at))
+        .join(p, p.transaction_id == t.id)
+        .where(
+            t.connection_id == connection_id,
+            t.status == "pending",
+            p.account_id == UUID(account_id),
+        )
+    )
+
+
 async def _earliest_posting(
     session: AsyncSession, account_id: UUID, *, excluding: str
 ) -> tuple[datetime, date] | None:
@@ -211,6 +232,9 @@ class _Normalizer:
         self.report = NormalizeReport()
         self._currencies: dict[str, InstrumentRecord] = {}
         self._unassigned: UUID | None = None
+        # Recorded by finish(), once this sync's transactions are posted.
+        self._snapshots: list[tuple[UUID, int, str, datetime]] = []
+        self._deleted_pots: list[UUID] = []
 
     async def currency(self, code: str) -> InstrumentRecord:
         if code not in self._currencies:
@@ -232,11 +256,29 @@ class _Normalizer:
             raise ValueError(f"Monzo account {monzo_id} has no finance account")
         return account_id
 
-    async def snapshot(
+    def snapshot(
         self, account_id: UUID, minor_units: int, currency_code: str, as_of: datetime
     ) -> None:
-        """Record the balance reported at `as_of` (when it was fetched), unless the latest
-        snapshot already accounts for it."""
+        """Note the balance reported at `as_of` (when it was fetched), for finish()."""
+        self._snapshots.append((account_id, minor_units, currency_code, as_of))
+
+    async def finish(self) -> None:
+        """Record the noted snapshots, then close the deleted pots.
+
+        Only once this sync's transactions are posted: whether the latest snapshot still holds
+        depends on what was posted after it, and a pot is closed after its last moves.
+        """
+        for snapshot in self._snapshots:
+            await self._record_snapshot(*snapshot)
+        for account_id in self._deleted_pots:
+            if (await get_account(self.session, account_id)).status == "open":
+                await close_account(self.command, account_id, local_date(self.observed_at, self.tz))
+
+    async def _record_snapshot(
+        self, account_id: UUID, minor_units: int, currency_code: str, as_of: datetime
+    ) -> None:
+        """Record the balance reported at `as_of`, unless the latest snapshot already
+        accounts for it."""
         currency = await self.currency(currency_code)
         quantity = to_quantity(minor_units, currency.decimals)
         if await _snapshot_still_holds(self.session, account_id, currency.id, quantity):
@@ -291,9 +333,9 @@ class _Normalizer:
             )
             account_id = created.id
             self.account_map[pot_id] = str(account_id)
-        await self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
-        if pot.get("deleted") and (await get_account(self.session, account_id)).status == "open":
-            await close_account(self.command, account_id, local_date(self.observed_at, self.tz))
+        self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
+        if pot.get("deleted"):
+            self._deleted_pots.append(account_id)
 
     async def void_if_posted(self, external_id: str) -> bool:
         """Void the ledger transaction posted for this Monzo transaction; False if none."""
@@ -475,13 +517,14 @@ async def normalize(
         elif record_type == "balance":
             monzo_id = str(request["account_id"])
             balances[monzo_id] = content
-            await n.snapshot(
+            n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
     for record_type, request, _, content in responses:
         if record_type == "transactions_page":
             for tx in content:
                 await n.transaction(tx, str(request["account_id"]))
+    await n.finish()
 
     checked = set(reconciled) | set(openings)
     mismatches: dict[str, tuple[str, str] | None] = {}

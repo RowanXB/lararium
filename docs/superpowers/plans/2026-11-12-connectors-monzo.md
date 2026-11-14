@@ -48,11 +48,13 @@ Choices the spec leaves open, made here so the tasks don't have to:
    - `await_approval(connection_id)`, after the OAuth callback (Decision 7).
 
    Webhook-triggered syncs therefore start within about a minute.
+
+   A job left `doing` by a worker that died is put back to `todo` every 5 minutes (`retry_stalled_jobs`). If an equivalent job was queued meanwhile, which the queueing lock then allows, the stalled one is closed as failed instead, since only one job per queueing lock can wait.
 3. **Credentials** (spec §11.2).
    - **Encryption.** AES-256-GCM with a 32-byte master key from `LARARIUM_MASTER_KEY` (base64), used only in `core/secrets.py`. The associated data is `f"{connection_id}:{purpose}"`, so a ciphertext can't be moved to another connection. Each row records `key_version` (1) so the key can be rotated later.
    - **Handling plaintext.** Decrypted values travel in a `Secret` wrapper whose `repr` and `str` are `"Secret(***)"`. Code calls `.reveal()` only at the HTTP call site.
    - **Never shown.** Credentials never appear in logs, events, audit args, API responses or notifications.
-4. **Token rotation is crash-safe.** Because refresh tokens are single-use, the new token pair is encrypted and committed in its **own short transaction** before it is used. If anything later fails, the next run still holds a valid refresh token. A refresh that Monzo rejects (`invalid_grant`, or 401 on the token endpoint) moves the connection to `needs_reauth` and notifies the owner.
+4. **Token rotation is crash-safe.** Because refresh tokens are single-use, the new token pair is encrypted and committed in its **own short transaction** before it is used. If anything later fails, the next run still holds a valid refresh token. A refresh that Monzo rejects (`invalid_grant`, or 401 on the token endpoint) moves the connection to `needs_reauth` and notifies the owner. The stored expiry is only a hint: when the API answers 401 to a token before it (the owner removed the access, say), the token is refreshed regardless, once.
 5. **Ledger mapping.**
    - **Accounts.** Each Monzo account becomes a finance account: `asset`/`bank`, `source_kind='connection'`, balance mode `transactions`, named from `description` (`uk_retail` → "Monzo", `uk_retail_joint` → "Monzo Joint"). Each pot becomes a child account: `asset`/`savings_pot`, balance mode `hybrid`: its history comes from the pot moves before its first snapshot, then from the pot snapshot (kind `reported`) of `pots[].balance` that every sync records. A deleted pot is closed.
    - **Transactions.** Each non-declined transaction becomes one ledger transaction, keyed by `(connection_id, external_id = transaction id)`:
@@ -72,21 +74,21 @@ Choices the spec leaves open, made here so the tasks don't have to:
 7. **OAuth flow.**
    - `authorize_connection` stores `sha256(state)` and `expires_at = now + 10 min` in the connection's config and returns the Monzo URL.
    - The callback route exchanges the code, stores the tokens, sets status `authorising`, defers `await_approval`, and redirects (303) to `/connections`.
-   - `await_approval` polls `GET /accounts` every 10 s for up to 4 minutes. On the first success it immediately runs a **full backfill** (no `since`) inside the 5-minute window, then sets `healthy`. On timeout it sets `needs_reauth` with the message "Approve the Monzo request in the app within 4 minutes, then authorise again".
+   - `await_approval` polls `GET /accounts` every 10 s until 4 minutes after the tokens were saved, so the window belongs to the authorisation, not to the job: authorising again mid-wait gets fresh minutes, and a job re-run after its worker died doesn't backfill late. On the first success it immediately runs a **full backfill** (no `since`) inside the 5-minute window; the connection stays `authorising` until the backfill is stored and then becomes `healthy`. "Full backfill" is an argument of that one sync, never stored, so no other sync can fetch all history outside the window. On timeout it sets `needs_reauth` with the message "Approve the Monzo request in the app within 4 minutes, then authorise again".
    - **The callback is a cross-site navigation** coming from auth.monzo.com, which plan 1's cross-site rule refuses. This one route is exempt when the request is a top-level navigation (`Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`). It still requires the owner header and a matching, unexpired, single-use `state`.
 8. **Sync window and truncation checks.**
-   - **Incremental sync** fetches transactions from `last_seen_created − 14 days` (the overlap catches pending ones that settle or change), paging with `since=<last id>` and `limit=100`.
-   - **Outside the approval window**, a `since` older than 89 days is clamped to 89 days, and the clamp is recorded as a connection warning.
+   - **Incremental sync** fetches transactions from `last_seen_created − 14 days` (the overlap catches recent ones that settle or change), or from the oldest transaction the ledger still holds as pending, if that is earlier, so a pending one is fetched until it settles or is voided. It pages with `since=<last id>` and `limit=100`.
+   - **Outside the approval window**, a `since` older than 89 days is clamped to 89 days. The clamp is a connection warning only when something needed is lost: the last fetch (recorded per account in the cursor) or a pending transaction is older than 89 days. A quiet account whose newest transaction is old has lost nothing. A full backfill clears the warning.
    - **After the full backfill**, if the earliest transaction is more than 7 days after the account's `created`, the connection gets the warning "history may be truncated".
 9. **Opening balance and reconciliation.**
    - **Opening balance, set once.** After the first full backfill of an account, the ledger balance (including pending, excluding void) is compared with `GET /balance` `balance`. Any difference is posted once as an "Opening balance adjustment" transaction (`external_id = f"opening:{monzo_account_id}"`), booked the day before the earliest transaction, against the system account **"Opening balances"**. It is never silently changed after that.
    - **Reconciliation on every later sync.** A difference larger than the currency's tolerance is a **reconciliation mismatch**: it is recorded as a connection warning and sent to Feishu once per new value, never auto-corrected.
    - **The balance matches the transactions fetched with it.** A payment arriving between the balance request and the transaction requests would otherwise be absorbed into the opening adjustment. So each account's balance is read again after its transactions, and the fetch is repeated, up to 3 times, until both reads agree. If they never do, the sync fails and is retried later.
-   - **Snapshots.** The balance is also stored as a snapshot of kind `reported`, for the M9 reconciliation views.
+   - **Snapshots.** The balance is also stored as a snapshot of kind `reported`, for the M9 reconciliation views. Snapshots (pots' included) are recorded after the sync's transactions are posted, because whether the latest one still holds depends on what was posted after it.
 10. **System accounts** are generic: `get_or_create_system_account(ctx, key)` with key `"unassigned"` → "Unassigned" or `"opening_balances"` → "Opening balances". Both are `equity`/`other`/`transactions`, remembered in the settings `finance.system_account.<key>`. They never affect net worth. When the deferred M2 plan is resumed, it reuses these instead of its own "Unassigned (imports)".
 11. **Webhook receiver.** It is a separate Starlette app, `lararium.webhook_in`, running from the same image with its own database role `lararium_webhook_in`. That role has only `USAGE` on schema `core` and `INSERT` on `core.webhook_inbox` (no `SELECT`, so no `RETURNING`).
     - **Its one route.** `POST /monzo/{secret}` compares `secret` with `LARARIUM_WEBHOOK_SECRET` using `hmac.compare_digest`. A wrong secret gets 404. A body over 64 KiB gets 413, and a body that is not valid JSON gets 400. Otherwise it inserts `(source='monzo', body)` and returns 200 with no body.
-    - **Deployment.** The receiver and `cloudflared` run under the compose profile `webhook`, so a deployment without a domain simply leaves them out and relies on the 30-minute schedule.
+    - **Deployment.** The receiver and `cloudflared` run under the compose profile `webhook`, so a deployment without a domain simply leaves them out and relies on the 30-minute schedule. A deployment with one sets `COMPOSE_PROFILES=webhook` in `infra/.env`, so `make up` rebuilds them and `make down` stops them with the rest.
 12. **Webhook registration** happens on every sync when `LARARIUM_WEBHOOK_BASE_URL` is set. For each Monzo account, the sync lists the webhooks, deletes those that start with our base URL but don't match the current one, and registers `f"{base}/monzo/{secret}"` if it is missing.
 13. **Notifications** go through a `Notifier` interface; the only implementation is Feishu.
     - **Format.** A custom-bot text message: `{"msg_type": "text", "content": {"text": ...}}`. With a secret, it also carries `timestamp` and `sign = base64(HMAC-SHA256(key=f"{timestamp}\n{secret}", msg=b""))`.
@@ -346,8 +348,8 @@ Migration `0009`: apply `procrastinate.schema.SchemaManager.get_schema()` inside
 - Produces:
   - `class MonzoConnector` with `name="monzo"`, `version="monzo-sync-1"`, `capabilities={"balances", "transactions", "webhook"}`.
   - `async def sync(self, ctx: SyncContext) -> JSONValue` stores raw records of types `accounts`, `balance`, `pots` and `transactions_page`, each with its request parameters, and then calls `normalize(ctx)` (Task 6).
-  - The cursor shape is `{"accounts": {<monzo_account_id>: {"last_created": str, "reconciled": bool}}}`.
-  - `full_backfill: bool` comes from `ctx.connection.config.get("backfill_requested")`. Task 7 sets that flag and the sync clears it.
+  - The cursor shape is `{"accounts": {<monzo_account_id>: {"last_created": str, "fetched_at": str, "backfilled": bool, "reconciled": bool}}}`.
+  - `full_backfill: bool` comes from `ctx.full_backfill`, set only for the sync `await_approval` runs (Decision 7).
 
 Rules: Decision 8 (window, overlap, clamp, truncation warning). Closed Monzo accounts (`closed: true` in the response) are still synced, but no webhook is registered for them.
 
@@ -408,7 +410,7 @@ Rules: Decisions 5, 6 and 9. Accounts and pots are found or created by the setti
     - `POST "/{id}/sync"` `sync_connection_now` → 202. It defers `sync_connection`.
     - `POST "/{id}/disable"` `disable_connection`.
   - **`deps.get_actor_allowing_navigation`** behaves as `get_actor`, except that it accepts a cross-site request when `method == "GET"`, `Sec-Fetch-Mode == "navigate"` and `Sec-Fetch-Dest == "document"`. Only the callback uses it.
-  - **`worker.jobs.await_approval(connection_id)`**, per Decision 7. Before the backfill it sets `config["backfill_requested"] = True`.
+  - **`worker.jobs.await_approval(connection_id)`**, per Decision 7. It runs the backfill as `run_sync(..., backfill=True)`.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_create_connection_hides_secret`: neither the response nor the audit args contain the secret.
@@ -546,4 +548,4 @@ Changes:
   - `upsert_connector_transaction` (Task 3) is used by Task 6.
   - `CredentialRejectedError` (Task 1) is raised in Task 4 and handled in Task 2.
   - `config["account_map"]` is written in Task 6 and read in Task 8.
-  - `backfill_requested` is set in Task 7 and read in Task 5.
+  - `SyncContext.full_backfill` is set in Task 7 and read in Task 5.

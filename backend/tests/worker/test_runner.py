@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from procrastinate import PsycopgConnector
 from procrastinate import exceptions as procrastinate_exceptions
 from procrastinate import utils as procrastinate_utils
 from procrastinate.jobs import Status
@@ -21,10 +22,10 @@ from lararium.core.connections import (
     get_connection,
     set_status,
 )
-from lararium.core.connectors import Connector, SyncContext
+from lararium.core.connectors import BACKFILL_FAILED, Connector, SyncContext
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
-from lararium.db import create_engine, make_sessionmaker
+from lararium.db import create_engine, make_sessionmaker, psycopg_dsn
 from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.worker import jobs
@@ -89,7 +90,7 @@ async def _healthy_connection(run):
     return connection
 
 
-async def _run_sync(session, connection, notifier, session_factory=None) -> None:
+async def _run_sync(session, connection, notifier, session_factory=None, backfill=False) -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(404))
     ) as http:
@@ -100,6 +101,7 @@ async def _run_sync(session, connection, notifier, session_factory=None) -> None
             http=http,
             notifier=notifier,
             session_factory=session_factory or async_sessionmaker(bind=session.bind),
+            backfill=backfill,
         )
 
 
@@ -255,6 +257,48 @@ async def test_sync_skips_connections_that_cannot_sync(
     assert (await get_connection(session, connection.id)).status == status
 
 
+async def test_a_backfill_keeps_the_connection_authorising_until_stored(
+    session, run, fake, notifier
+) -> None:
+    connection = await run(create_connection, connector="fake", display_name="Fake bank", config={})
+    await run(set_status, connection.id, "authorising")
+    seen: list[str] = []
+
+    async def status_during() -> None:
+        seen.append((await get_connection(session, connection.id)).status)
+
+    fake.during = status_during
+
+    await _run_sync(session, connection, notifier, backfill=True)
+
+    assert seen == ["authorising"]
+    assert fake.seen[0].full_backfill
+    assert (await get_connection(session, connection.id)).status == "healthy"
+    assert notifier.messages == []
+
+
+async def test_a_failed_backfill_needs_authorising_again(session, run, fake, notifier) -> None:
+    connection = await run(create_connection, connector="fake", display_name="Fake bank", config={})
+    await run(set_status, connection.id, "authorising")
+    fake.error = RuntimeError("upstream down")
+
+    await _run_sync(session, connection, notifier, backfill=True)
+
+    after = await get_connection(session, connection.id)
+    assert (after.status, after.last_error) == ("needs_reauth", BACKFILL_FAILED)
+    assert len(notifier.messages) == 1 and BACKFILL_FAILED in notifier.messages[0]
+
+
+async def test_only_the_approval_backfill_fetches_all_history(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+
+    await _run_sync(session, connection, notifier)
+    # A backfill runs only for a connection waiting on its approval.
+    await _run_sync(session, connection, notifier, backfill=True)
+
+    assert [ctx.full_backfill for ctx in fake.seen] == [False]
+
+
 async def test_notifier_errors_never_fail_the_job(session, run, fake) -> None:
     class BrokenNotifier:
         async def send(self, text: str) -> None:
@@ -336,6 +380,72 @@ async def test_a_sync_left_doing_by_a_lost_worker_is_retried(worker_gone: str) -
         # The connection syncs again: a new sync can be queued and run.
         assert await defer_sync("c1")
         assert await manager.fetch_job(queues=None, worker_id=live) is not None
+
+
+async def test_a_stalled_sync_whose_replacement_is_queued_frees_the_lock(
+    backend_url: str, owner_url: str, migrated: None
+) -> None:
+    # On PostgreSQL, whose unique index allows one `todo` job per queueing lock: the
+    # in-memory connector doesn't enforce it.
+    connector = PsycopgConnector(
+        conninfo=psycopg_dsn(backend_url), kwargs={"options": "-c search_path=procrastinate"}
+    )
+    connection_id = f"stalled-{uuid.uuid4()}"
+    engine = create_engine(owner_url)
+    with procrastinate_app.replace_connector(connector) as app:
+        await app.open_async()
+        manager = app.job_manager
+        workers: list[int] = []
+        try:
+            assert await defer_sync(connection_id)
+            lost = await manager.register_worker()
+            workers.append(lost)
+            stalled = await manager.fetch_job(queues=None, worker_id=lost)
+            assert stalled is not None
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "update procrastinate.procrastinate_workers"
+                        " set last_heartbeat = now() - interval '5 minutes' where id = :id"
+                    ),
+                    {"id": lost},
+                )
+            # A webhook queues a sync while the stalled one still holds the lock.
+            assert await defer_sync(connection_id)
+
+            assert await jobs.retry_stalled(manager) == 1
+
+            live = await manager.register_worker()
+            workers.append(live)
+            replacement = await manager.fetch_job(queues=None, worker_id=live)
+            assert replacement is not None and replacement.id != stalled.id
+            async with engine.connect() as conn:
+                status = await conn.scalar(
+                    text("select status from procrastinate.procrastinate_jobs where id = :id"),
+                    {"id": stalled.id},
+                )
+            assert status == "failed"
+        finally:
+            async with engine.begin() as conn:
+                ids = (
+                    "select id from procrastinate.procrastinate_jobs"
+                    " where args->>'connection_id' = :c"
+                )
+                params = {"c": connection_id}
+                await conn.execute(
+                    text(f"delete from procrastinate.procrastinate_events where job_id in ({ids})"),
+                    params,
+                )
+                await conn.execute(
+                    text(f"delete from procrastinate.procrastinate_jobs where id in ({ids})"),
+                    params,
+                )
+                await conn.execute(
+                    text("delete from procrastinate.procrastinate_workers where id = any(:ids)"),
+                    {"ids": workers},
+                )
+            await app.close_async()
+            await engine.dispose()
 
 
 async def test_jobs_of_live_workers_are_not_retried() -> None:

@@ -127,15 +127,17 @@ async def save_tokens(
         )
 
 
-async def access_token_for(sync_ctx: SyncContext) -> Secret:
-    """A usable access token, refreshed (and committed) first when under 5 minutes remain."""
+async def access_token_for(sync_ctx: SyncContext, *, force_refresh: bool = False) -> Secret:
+    """A usable access token, refreshed (and committed) first when under 5 minutes remain, or
+    when `force_refresh` (Monzo rejected the stored one before its expiry)."""
     session = sync_ctx.command.session
     connection = sync_ctx.connection
     key = sync_ctx.master_key
     access = await load_credential(session, key, connection.id, "access_token")
     expires_at = await load_credential_expiry(session, connection.id, "access_token")
     if (
-        access is not None
+        not force_refresh
+        and access is not None
         and expires_at is not None
         and expires_at - datetime.now(UTC) >= REFRESH_MARGIN
     ):

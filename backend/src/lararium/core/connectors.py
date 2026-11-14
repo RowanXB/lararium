@@ -46,6 +46,9 @@ class SyncContext:
     session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
     # Set when webhooks are configured; the connector then registers them with the provider.
     webhook: WebhookTarget | None = None
+    # Fetch all history: only for the sync that runs right after the owner approves a new
+    # authorisation, the one time the provider serves it (see run_await_approval).
+    full_backfill: bool = False
 
 
 class Connector(Protocol):
