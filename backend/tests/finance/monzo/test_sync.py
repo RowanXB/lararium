@@ -360,7 +360,7 @@ async def test_account_first_seen_on_an_incremental_sync_gets_an_opening(session
     other = {"last_created": _iso(_noon(2)), "backfilled": True}
     connection = await _connection(run, cursor={"accounts": {"acc_TEST_OTHER": other}})
     payment = make_transaction(id="tx_TEST0001", created=_iso(_noon(10)))
-    fake = FakeMonzo([payment], make_account(created=_iso(_noon(300))))
+    fake = FakeMonzo([payment], make_account(created=_iso(_noon(60))))
 
     cursor = await _sync(session, run, connection, fake)
 
@@ -381,6 +381,19 @@ async def test_account_first_seen_on_an_incremental_sync_gets_an_opening(session
     (warning,) = (await get_connection(session, connection.id)).warnings
     assert warning.startswith(f"Monzo account {ACCOUNT_ID}: reconciliation mismatch")
     assert (await _ledger(session, connection))["openings"] == [("booked", day_before, "262.34")]
+
+
+async def test_an_account_first_seen_with_older_history_warns(session, run) -> None:
+    # Opened 300 days ago but seen first now, outside a backfill: Monzo serves only 89 days,
+    # so the opening absorbs the rest, and the owner is told.
+    other = {"last_created": _iso(_noon(2)), "backfilled": True}
+    connection = await _connection(run, cursor={"accounts": {"acc_TEST_OTHER": other}})
+    fake = FakeMonzo([], make_account(created=_iso(_noon(300))))
+
+    await _sync(session, run, connection, fake)
+
+    clamped = f"Monzo account {ACCOUNT_ID}: sync window limited to the last 89 days"
+    assert (await get_connection(session, connection.id)).warnings == [clamped]
 
 
 async def test_full_backfill_with_older_history_corrects_the_opening(session, run) -> None:

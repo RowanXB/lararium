@@ -192,9 +192,12 @@ class MonzoConnector:
                 wanted = min(starts, default=floor)
                 since = _format(max(wanted, floor))
                 # Something is lost only if what is needed is older than Monzo serves: the
-                # transactions since the last fetch, or a pending one. A quiet account whose
-                # newest transaction is old has lost nothing.
-                last_fetched = (state.fetched_at or state.last_created) if state else None
+                # transactions since the last fetch (since its creation, for an account never
+                # fetched), or a pending one. A quiet account whose newest transaction is old
+                # has lost nothing.
+                last_fetched = (
+                    (state.fetched_at or state.last_created) if state else account["created"]
+                )
                 needed = [d for d in (_parse(last_fetched) if last_fetched else None, pending) if d]
                 if any(d < floor for d in needed):
                     warnings.append(_clamped(account_id))

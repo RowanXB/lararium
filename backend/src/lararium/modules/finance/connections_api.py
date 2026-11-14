@@ -7,7 +7,7 @@ the OAuth code and state never reach a response, the audit log or the logs.
 import logging
 import secrets
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from lararium.config import Settings, load_master_key
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import (
+    AUTHORISED_AT_KEY,
     ConnectionRecord,
     ConnectionStatus,
     consume_oauth_state,
@@ -31,16 +32,16 @@ from lararium.core.connections import (
     store_credential,
     store_oauth_state,
     transition_status,
+    update_config,
 )
 from lararium.core.errors import ConnectionNotFoundError, CredentialRejectedError
 from lararium.deps import (
     ActorDep,
     SessionDep,
-    SessionFactoryDep,
     get_actor,
     get_actor_allowing_navigation,
 )
-from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, save_tokens
+from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.worker.app import defer_await_approval, defer_sync
 
@@ -51,9 +52,12 @@ CALLBACK_PATH = "/oauth/monzo/callback"
 STATE_VALID_FOR = timedelta(minutes=10)
 # Where the callback sends the browser back to: the web app's Connections page.
 DONE = "/connections"
-# Authorising may start only where no sync runs (run_sync syncs healthy and failing ones):
-# the new tokens are saved outside the sync lock, so a sync's refresh could overwrite them.
-# Disabled is included because authorising again is how a connection is re-enabled.
+# Authorising may start only where no regular sync runs (run_sync syncs healthy and failing
+# ones): the new tokens are saved outside the sync lock, so such a sync's refresh could
+# overwrite them. `authorising` covers the wait for approval and the backfill after it; a new
+# authorisation then replaces the one waited on, and every decision about the old one is
+# dropped (see AUTHORISED_AT_KEY). Disabled is included because authorising again is how a
+# connection is re-enabled.
 AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "authorising", "disabled")
 
 router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
@@ -234,7 +238,6 @@ async def authorize_connection(
 async def monzo_oauth_callback(
     request: Request,
     session: SessionDep,
-    session_factory: SessionFactoryDep,
     http: HttpDep,
     actor: Annotated[Actor, Depends(get_actor_allowing_navigation)],
     code: Annotated[str | None, Query(max_length=4096)] = None,
@@ -265,11 +268,15 @@ async def monzo_oauth_callback(
         # The type only: an HTTP error's text can include the request.
         logger.warning("Monzo code exchange failed: %s", type(exc).__name__)
         return _done("exchange")
-    await save_tokens(session_factory, master_key, connection_id, pair, actor=actor)
-
     args = {"connection_id": str(connection_id)}
     async with command_context(session, actor, "monzo_oauth_callback", args) as ctx:
+        # Under the row lock, and in one transaction: the tokens and the authorisation they
+        # belong to are saved only if the connection can still be authorised, and together.
         moved = await transition_status(ctx, connection_id, "authorising", only_from=AUTHORISABLE)
+        if moved is not None:
+            await store_tokens(ctx, master_key, connection_id, pair)
+            authorised_at = datetime.now(UTC).isoformat()
+            await update_config(ctx, connection_id, {AUTHORISED_AT_KEY: authorised_at})
     if moved is None:
         return _done("status")
     # After the commit, so the job finds the connection authorising.

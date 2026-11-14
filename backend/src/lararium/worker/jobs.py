@@ -19,9 +19,9 @@ from lararium.config import Settings, get_settings, load_master_key
 from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
+    AUTHORISED_AT_KEY,
     ConnectionStatus,
     get_connection,
-    load_credential_saved_at,
     record_sync_failure,
     record_sync_success,
     transition_status,
@@ -35,7 +35,7 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.monzo.webhooks import process_inbox
-from lararium.worker.app import defer_sync, procrastinate_app
+from lararium.worker.app import defer_await_approval, defer_sync, procrastinate_app
 
 logger = logging.getLogger(__name__)
 
@@ -67,19 +67,22 @@ async def run_sync(
     http: httpx.AsyncClient,
     notifier: Notifier,
     session_factory: async_sessionmaker[AsyncSession],
-    backfill: bool = False,
+    backfill_for: str | None = None,
 ) -> None:
     """Sync one connection and record the outcome, notifying the owner when it matters.
 
     A failing sync is recorded on the connection, not raised: the schedule tries again. A
     status changed while the sync ran (the owner disabled the connection, say) is kept.
 
-    `backfill`: the full backfill right after the owner approved a new authorisation, the
-    only sync that fetches all history (run_await_approval). The connection is `authorising`
-    until it is stored, and then healthy. If it fails it can't be retried outside the window,
-    and syncing on with partial history (and no opening balance) would make the numbers wrong
-    without saying so, so the connection needs authorising again (ruling R18).
+    `backfill_for`: the authorisation (its AUTHORISED_AT_KEY) whose approval this sync follows
+    with the full backfill, the only sync that fetches all history (run_await_approval). The
+    connection is `authorising` until the backfill is stored, and then healthy. If it fails it
+    can't be retried outside the window, and syncing on with partial history (and no opening
+    balance) would make the numbers wrong without saying so, so the connection needs
+    authorising again (ruling R18). Either outcome applies only while that authorisation is
+    still the current one: one made meanwhile has its own approval job.
     """
+    backfill = backfill_for is not None
     connection = await get_connection(session, connection_id)
     allowed: tuple[ConnectionStatus, ...] = ("authorising",) if backfill else SYNCABLE
     if connection.status not in allowed:
@@ -108,7 +111,9 @@ async def run_sync(
             )
             await record_sync_success(ctx, connection_id, cursor)
             from_ = ("authorising",) if backfill else ("failing",)
-            moved = await transition_status(ctx, connection_id, "healthy", only_from=from_)
+            moved = await transition_status(
+                ctx, connection_id, "healthy", only_from=from_, authorised_at=backfill_for
+            )
             recovered = moved == "failing"
     except Exception as exc:
         # command_context has rolled the failed sync back; record the failure on its own.
@@ -124,6 +129,7 @@ async def run_sync(
                 "needs_reauth" if rejected or backfill else "failing",
                 only_from=allowed,
                 error=BACKFILL_FAILED if backfill_failed else None,
+                authorised_at=backfill_for,
             )
         if moved is None:
             return
@@ -187,10 +193,15 @@ async def run_await_approval(
 ) -> None:
     """Wait for the owner to approve a newly authorised connection, then backfill it.
 
-    Polls every 10 s while the connection is `authorising`, until 4 minutes after its tokens
-    were saved. On the first success it runs the full backfill at once, inside the window in
-    which all history can be fetched (run_sync with backfill). On timeout the connection
+    Polls every 10 s while the connection is `authorising`, until 4 minutes after it was
+    authorised. On the first success it runs the full backfill at once, inside the window in
+    which all history can be fetched (run_sync with backfill_for). On timeout the connection
     needs authorising again, and the owner is told.
+
+    Everything here is about one authorisation, the current one when it is read: the window
+    runs from when it was made (not from when this job started), and no outcome is applied
+    once a newer one replaced it. So authorising again mid-wait gets fresh minutes, and a job
+    re-run after its worker died (mid-backfill, say) doesn't backfill late.
     """
     master_key = _master_key(settings)
     connection = await get_connection(session, connection_id)
@@ -207,13 +218,17 @@ async def run_await_approval(
             )
             await session.rollback()
             return
-        # The window belongs to the authorisation waited on, not to this job: it runs from
-        # when its tokens were saved. So authorising again mid-wait gets 4 fresh minutes, and
-        # a job re-run after its worker died (mid-backfill, say) doesn't backfill late.
-        saved_at = await load_credential_saved_at(session, connection_id, "access_token")
-        if saved_at is not None and now() >= saved_at + APPROVAL_WINDOW:
+        authorised_at = connection.config.get(AUTHORISED_AT_KEY)
+        if not isinstance(authorised_at, str):
+            authorised_at = ""  # no window to wait in: it has expired
+        expired = (
+            not authorised_at or now() >= datetime.fromisoformat(authorised_at) + APPROVAL_WINDOW
+        )
+        if expired:
             await session.rollback()
-            if await _end_approval(session, connection_id, actor, args, APPROVAL_EXPIRED):
+            if await _end_approval(
+                session, connection_id, actor, args, APPROVAL_EXPIRED, authorised_at
+            ):
                 await _notify(notifier, f"{connection.display_name}: {APPROVAL_EXPIRED}")
             return
         try:
@@ -233,7 +248,7 @@ async def run_await_approval(
         except CredentialRejectedError as exc:
             await session.rollback()
             error = str(exc)[:MAX_ERROR_LENGTH]
-            if await _end_approval(session, connection_id, actor, args, error):
+            if await _end_approval(session, connection_id, actor, args, error, authorised_at):
                 await _notify_reauth(notifier, connection.display_name, error)
             return
         except Exception as exc:
@@ -255,7 +270,7 @@ async def run_await_approval(
         http=http,
         notifier=notifier,
         session_factory=session_factory,
-        backfill=True,
+        backfill_for=authorised_at,
     )
 
 
@@ -265,11 +280,19 @@ async def _end_approval(
     actor: Actor,
     args: dict[str, str],
     error: str,
+    authorised_at: str,
 ) -> bool:
-    """Move an authorising connection to needs_reauth; False if its status changed meanwhile."""
+    """Move an authorising connection to needs_reauth; False if its status changed, or it was
+    authorised again, meanwhile."""
     async with command_context(session, actor, "connection.approval_failed", args) as ctx:
         moved = await transition_status(
-            ctx, connection_id, "needs_reauth", only_from=("authorising",), error=error
+            ctx,
+            connection_id,
+            "needs_reauth",
+            only_from=("authorising",),
+            error=error,
+            # A missing authorisation (no window to wait in) has nothing to compare.
+            authorised_at=authorised_at or None,
         )
     return moved is not None
 
@@ -288,6 +311,29 @@ async def defer_due_syncs(session: AsyncSession) -> int:
         .all()
     )
     return sum([await defer_sync(connection_id) for connection_id in ids])
+
+
+async def defer_due_approvals(session: AsyncSession) -> int:
+    """Queue the approval job for every connection still `authorising`; return how many were
+    newly queued.
+
+    Leaving `authorising` otherwise depends on the one job the callback queued running to the
+    end, which a failed statement or a lost defer can prevent. Run again, the job carries on
+    within the authorisation's window, or ends an expired one and tells the owner; a duplicate
+    of a queued job is dropped.
+    """
+    ids = (
+        (
+            await session.execute(
+                select(Connection.id)
+                .where(Connection.status == "authorising")
+                .order_by(Connection.display_name, Connection.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return sum([await defer_await_approval(connection_id) for connection_id in ids])
 
 
 @asynccontextmanager
@@ -340,7 +386,8 @@ async def schedule_syncs(timestamp: int) -> None:
     try:
         async with make_sessionmaker(engine)() as session:
             queued = await defer_due_syncs(session)
-        logger.info("queued %d connection syncs", queued)
+            approvals = await defer_due_approvals(session)
+        logger.info("queued %d connection syncs and %d approval checks", queued, approvals)
     finally:
         await engine.dispose()
 

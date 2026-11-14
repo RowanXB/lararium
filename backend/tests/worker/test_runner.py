@@ -21,10 +21,12 @@ from lararium.core.connections import (
     create_connection,
     get_connection,
     set_status,
+    update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED, Connector, SyncContext
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
+from lararium.core.raw_records import store_raw_record
 from lararium.db import create_engine, make_sessionmaker, psycopg_dsn
 from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
@@ -90,7 +92,9 @@ async def _healthy_connection(run):
     return connection
 
 
-async def _run_sync(session, connection, notifier, session_factory=None, backfill=False) -> None:
+async def _run_sync(
+    session, connection, notifier, session_factory=None, backfill_for: str | None = None
+) -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda r: httpx.Response(404))
     ) as http:
@@ -101,7 +105,7 @@ async def _run_sync(session, connection, notifier, session_factory=None, backfil
             http=http,
             notifier=notifier,
             session_factory=session_factory or async_sessionmaker(bind=session.bind),
-            backfill=backfill,
+            backfill_for=backfill_for,
         )
 
 
@@ -257,11 +261,24 @@ async def test_sync_skips_connections_that_cannot_sync(
     assert (await get_connection(session, connection.id)).status == status
 
 
+AUTHORISED_AT = "2026-11-14T08:00:00+00:00"
+
+
+async def _authorising_connection(run):
+    connection = await run(
+        create_connection,
+        connector="fake",
+        display_name="Fake bank",
+        config={"authorised_at": AUTHORISED_AT},
+    )
+    await run(set_status, connection.id, "authorising")
+    return connection
+
+
 async def test_a_backfill_keeps_the_connection_authorising_until_stored(
     session, run, fake, notifier
 ) -> None:
-    connection = await run(create_connection, connector="fake", display_name="Fake bank", config={})
-    await run(set_status, connection.id, "authorising")
+    connection = await _authorising_connection(run)
     seen: list[str] = []
 
     async def status_during() -> None:
@@ -269,7 +286,7 @@ async def test_a_backfill_keeps_the_connection_authorising_until_stored(
 
     fake.during = status_during
 
-    await _run_sync(session, connection, notifier, backfill=True)
+    await _run_sync(session, connection, notifier, backfill_for=AUTHORISED_AT)
 
     assert seen == ["authorising"]
     assert fake.seen[0].full_backfill
@@ -278,11 +295,10 @@ async def test_a_backfill_keeps_the_connection_authorising_until_stored(
 
 
 async def test_a_failed_backfill_needs_authorising_again(session, run, fake, notifier) -> None:
-    connection = await run(create_connection, connector="fake", display_name="Fake bank", config={})
-    await run(set_status, connection.id, "authorising")
+    connection = await _authorising_connection(run)
     fake.error = RuntimeError("upstream down")
 
-    await _run_sync(session, connection, notifier, backfill=True)
+    await _run_sync(session, connection, notifier, backfill_for=AUTHORISED_AT)
 
     after = await get_connection(session, connection.id)
     assert (after.status, after.last_error) == ("needs_reauth", BACKFILL_FAILED)
@@ -294,7 +310,7 @@ async def test_only_the_approval_backfill_fetches_all_history(session, run, fake
 
     await _run_sync(session, connection, notifier)
     # A backfill runs only for a connection waiting on its approval.
-    await _run_sync(session, connection, notifier, backfill=True)
+    await _run_sync(session, connection, notifier, backfill_for=AUTHORISED_AT)
 
     assert [ctx.full_backfill for ctx in fake.seen] == [False]
 
@@ -517,6 +533,127 @@ async def test_disable_during_sync_is_kept(
         if connection_id is not None:
             await _delete_connection(engine, owner_url, connection_id)
         await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [None, RuntimeError("upstream down"), CredentialRejectedError("rejected")],
+    ids=["success", "failure", "rejected"],
+)
+async def test_a_new_authorisation_during_the_backfill_keeps_its_own_approval(
+    backend_url: str, owner_url: str, migrated: None, fake, notifier, error: Exception | None
+) -> None:
+    # The owner authorises again while the backfill of the previous authorisation runs: its
+    # outcome is about the old one, so the connection stays authorising for the new one's job.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id = None
+    owner = Actor("user", "dev")
+    try:
+        async with sessions() as setup, command_context(setup, owner, "test.setup", {}) as ctx:
+            connection = await create_connection(
+                ctx,
+                connector="fake",
+                display_name=f"Fake {uuid.uuid4()}",
+                config={"authorised_at": AUTHORISED_AT},
+            )
+            connection_id = connection.id
+            await set_status(ctx, connection_id, "authorising")
+
+        async def authorise_again() -> None:
+            args = {"connection_id": str(connection_id)}
+            async with (
+                sessions() as other,
+                command_context(other, owner, "monzo_oauth_callback", args) as ctx,
+            ):
+                await update_config(
+                    ctx, connection.id, {"authorised_at": "2026-11-14T08:03:00+00:00"}
+                )
+            fake.error = error
+
+        fake.during = authorise_again
+        async with sessions() as session:
+            await _run_sync(session, connection, notifier, sessions, backfill_for=AUTHORISED_AT)
+
+        async with sessions() as fresh:
+            assert (await get_connection(fresh, connection_id)).status == "authorising"
+        assert notifier.messages == []
+    finally:
+        if connection_id is not None:
+            await _delete_connection(engine, owner_url, connection_id)
+        await engine.dispose()
+
+
+async def test_a_status_change_does_not_wait_for_a_running_sync(
+    backend_url: str, owner_url: str, migrated: None
+) -> None:
+    # A sync holds KEY SHARE locks on its connection's row (through its raw records' foreign
+    # key) until it commits; disabling the connection meanwhile must not wait for it.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connector = Actor("connector", "fake")
+    owner = Actor("user", "dev")
+    connection_id = None
+    try:
+        async with sessions() as setup, command_context(setup, owner, "test.setup", {}) as ctx:
+            connection = await create_connection(
+                ctx, connector="fake", display_name=f"Fake {uuid.uuid4()}", config={}
+            )
+            connection_id = connection.id
+            await set_status(ctx, connection_id, "healthy")
+
+        args = {"connection_id": str(connection_id)}
+        async with (
+            sessions() as syncing,
+            command_context(syncing, connector, "connection.sync", args) as sync_ctx,
+        ):
+            await store_raw_record(
+                sync_ctx,
+                connection_id=connection_id,
+                record_type="accounts",
+                request={},
+                content=[],
+                connector_version="1",
+                sync_id=uuid.uuid4(),
+            )
+            # The sync is still open: the owner disables the connection.
+            async with sessions() as other:
+                await other.execute(text("set lock_timeout = '2s'"))
+                async with command_context(other, owner, "disable_connection", args) as ctx:
+                    await set_status(ctx, connection_id, "disabled")
+
+        async with sessions() as fresh:
+            assert (await get_connection(fresh, connection_id)).status == "disabled"
+    finally:
+        if connection_id is not None:
+            # Raw records are append-only for the backend role.
+            owner_engine = create_engine(owner_url)
+            try:
+                async with owner_engine.begin() as conn:
+                    await conn.execute(
+                        text("delete from core.raw_records where connection_id = :id"),
+                        {"id": connection_id},
+                    )
+            finally:
+                await owner_engine.dispose()
+            await _delete_connection(engine, owner_url, connection_id)
+        await engine.dispose()
+
+
+async def test_schedule_resumes_connections_left_authorising(session, run) -> None:
+    waiting = await _authorising_connection(run)
+    await _healthy_connection(run)
+
+    with procrastinate_app.replace_connector(InMemoryConnector()) as app:
+        connector: InMemoryConnector = app.connector  # pyright: ignore[reportAssignmentType]
+        assert await jobs.defer_due_approvals(session) == 1
+        # Already queued: not queued twice.
+        assert await jobs.defer_due_approvals(session) == 0
+        queued = list(connector.jobs.values())
+
+    assert [(j["task_name"], j["args"]) for j in queued] == [
+        ("await_approval", {"connection_id": str(waiting.id)})
+    ]
 
 
 async def _delete_connection(engine, owner_url: str, connection_id: uuid.UUID) -> None:

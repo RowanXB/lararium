@@ -3,6 +3,7 @@
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -24,7 +25,7 @@ from lararium.modules.finance.monzo.webhooks import ensure_webhooks, process_inb
 from lararium.worker.app import defer_sync, procrastinate_app
 
 from .fixtures import ACCOUNT_ID, make_account
-from .test_sync import CONNECTOR, KEY, FakeMonzo, _connection
+from .test_sync import CONNECTOR, KEY, FakeMonzo, _connection, _iso
 
 BASE = "https://hooks.lararium.example"
 SECRET = "whsec-TEST-0123456789abcdef0123456789"
@@ -36,6 +37,10 @@ class WebhookMonzo(FakeMonzo):
     """FakeMonzo plus GET, POST and DELETE /webhooks over an in-memory list."""
 
     def __init__(self, hooks: list[dict[str, Any]] | None = None, **kwargs: Any) -> None:
+        # Opened recently: an account first seen with older history would get a gap warning.
+        kwargs.setdefault(
+            "account", make_account(created=_iso(datetime.now(UTC) - timedelta(days=30)))
+        )
         super().__init__([], **kwargs)
         self.hooks = list(hooks or [])
         self.webhook_status = 200

@@ -152,10 +152,22 @@ async def create_connection(
     return record
 
 
+# Row locks on a connection are FOR NO KEY UPDATE (key_share=True): they serialise its
+# writers, but not with the KEY SHARE locks a running sync holds through its foreign keys (raw
+# records, ledger rows) until it commits. FOR UPDATE would make every status change wait for
+# a whole sync.
+
+# When the current authorisation was made: written by the OAuth callback together with its
+# tokens. A token refresh doesn't change it, so it tells a new authorisation from a refresh.
+AUTHORISED_AT_KEY = "authorised_at"
+
+
 async def _locked_status(ctx: CommandContext, connection_id: UUID) -> ConnectionStatus:
     # Lock the row, so two concurrent changes can't both report the same "from".
     previous = await ctx.session.scalar(
-        select(Connection.status).where(Connection.id == connection_id).with_for_update()
+        select(Connection.status)
+        .where(Connection.id == connection_id)
+        .with_for_update(key_share=True)
     )
     if previous is None:
         raise ConnectionNotFoundError(str(connection_id))
@@ -197,15 +209,26 @@ async def transition_status(
     *,
     only_from: Collection[ConnectionStatus],
     error: str | None = None,
+    authorised_at: str | None = None,
 ) -> ConnectionStatus | None:
-    """Set the status only if the current one, read under the row lock, is in `only_from`.
+    """Set the status only if the current one, read under the row lock, is in `only_from`,
+    and, when `authorised_at` is given, the current authorisation is still that one.
 
     Return the status it had, or None when it was left alone: a change made meanwhile (the
-    owner disabled the connection, say) wins over one decided on an older reading.
+    owner disabled the connection, or authorised it again, say) wins over one decided on an
+    older reading.
     """
     previous = await _locked_status(ctx, connection_id)
     if previous not in only_from:
         return None
+    if authorised_at is not None:
+        current = await ctx.session.scalar(
+            select(Connection.config[AUTHORISED_AT_KEY].astext).where(
+                Connection.id == connection_id
+            )
+        )
+        if current != authorised_at:
+            return None
     await _change_status(ctx, connection_id, previous, status, error)
     return previous
 
@@ -293,7 +316,7 @@ async def consume_oauth_state(ctx: CommandContext, state: str) -> UUID | None:
         await ctx.session.execute(
             select(Connection.id, Connection.config[OAUTH_STATE_KEY]["expires_at"].astext)
             .where(stored_hash == _state_hash(state))
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
     ).one_or_none()
     if row is None:
@@ -358,17 +381,6 @@ async def load_credential(
     if row is None:
         return None
     return decrypt(master_key, row.nonce, row.ciphertext, _aad(connection_id, purpose))
-
-
-async def load_credential_saved_at(
-    session: AsyncSession, connection_id: UUID, purpose: str
-) -> datetime | None:
-    """When the stored credential was last saved; None if it doesn't exist."""
-    return await session.scalar(
-        select(Credential.updated_at).where(
-            Credential.connection_id == connection_id, Credential.purpose == purpose
-        )
-    )
 
 
 async def load_credential_expiry(

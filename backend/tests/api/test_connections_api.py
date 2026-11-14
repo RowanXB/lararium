@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
+from unittest.mock import ANY
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -321,7 +322,11 @@ async def test_config_writes_keep_the_account_map(api, session, run, queue) -> N
     assert (await _callback(api, state)).status_code == 303
 
     config = (await get_connection(session, created["id"])).config
-    assert config == {"client_id": "oauth2client_TEST1", "account_map": account_map}
+    assert config == {
+        "client_id": "oauth2client_TEST1",
+        "account_map": account_map,
+        "authorised_at": ANY,
+    }
 
 
 async def test_redirect_uri_ignores_a_trailing_slash(session, sessions, monzo) -> None:
@@ -435,9 +440,10 @@ async def test_callback_exchanges_code_and_defers_approval(api, session, monzo, 
     assert access is not None and access.reveal() == "at-TEST"
     assert refresh is not None and refresh.reveal() == "rt-TEST"
     assert (await get_connection(session, created["id"])).status == "authorising"
+    # Saved in the callback's own transaction, with the authorisation they belong to.
     saved_by = await session.scalar(
         text("select actor_type || ':' || actor_id from core.audit_log where command = :c"),
-        {"c": "connection.save_tokens"},
+        {"c": "monzo_oauth_callback"},
     )
     assert saved_by == "user:me@example.com"
 
@@ -554,17 +560,18 @@ async def test_await_approval_stops_when_no_longer_authorising(
     assert notifier.messages == []
 
 
-async def _token_saved_at(
+async def _authorised_at(
     sessions: async_sessionmaker[AsyncSession], connection_id: str, at: datetime
 ) -> None:
-    """Pretend the access token was saved at `at`, as an authorisation then would have."""
+    """Commit `at` as the current authorisation's time, as a callback then would have."""
     async with sessions() as other, other.begin():
         await other.execute(
             text(
-                "update core.credentials set updated_at = :at"
-                " where connection_id = :id and purpose = 'access_token'"
+                "update core.connections"
+                " set config = config || jsonb_build_object('authorised_at', cast(:at as text))"
+                " where id = :id"
             ),
-            {"at": at, "id": uuid.UUID(connection_id)},
+            {"at": at.isoformat(), "id": uuid.UUID(connection_id)},
         )
 
 
@@ -577,7 +584,7 @@ async def test_authorising_again_mid_wait_gets_a_fresh_window(
 
     async def reauthorise_at_200s() -> None:
         if sum(clock.slept) == 200:
-            await _token_saved_at(sessions, connection_id, clock.now)
+            await _authorised_at(sessions, connection_id, clock.now)
 
     clock.after_sleep = reauthorise_at_200s
 
@@ -595,7 +602,7 @@ async def test_a_rerun_after_the_window_closed_does_not_backfill(
     # The worker died mid-backfill and the job runs again later: Monzo no longer serves all
     # history, so the connection needs authorising again instead of fetching part of it.
     connection_id = await _authorising(api)
-    await _token_saved_at(sessions, connection_id, datetime.now(UTC) - timedelta(minutes=5))
+    await _authorised_at(sessions, connection_id, datetime.now(UTC) - timedelta(minutes=5))
     notifier, clock = RecordingNotifier(), FakeClock()
 
     await _await_approval(session, sessions, connection_id, monzo, notifier, clock)

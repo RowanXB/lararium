@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.core.actors import Actor
-from lararium.core.commands import command_context
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import load_credential, load_credential_expiry, store_credential
 from lararium.core.connectors import SyncContext
 from lararium.core.errors import CredentialRejectedError
@@ -100,6 +100,18 @@ async def refresh(
     )
 
 
+async def store_tokens(
+    ctx: CommandContext, master_key: bytes, connection_id: UUID, pair: TokenPair
+) -> None:
+    """Encrypt and store the pair in the command's transaction."""
+    await store_credential(
+        ctx, master_key, connection_id, "access_token", pair.access_token.reveal(), pair.expires_at
+    )
+    await store_credential(
+        ctx, master_key, connection_id, "refresh_token", pair.refresh_token.reveal(), None
+    )
+
+
 async def save_tokens(
     session_factory: async_sessionmaker[AsyncSession],
     master_key: bytes,
@@ -114,17 +126,7 @@ async def save_tokens(
         session_factory() as session,
         command_context(session, actor, "connection.save_tokens", args) as ctx,
     ):
-        await store_credential(
-            ctx,
-            master_key,
-            connection_id,
-            "access_token",
-            pair.access_token.reveal(),
-            pair.expires_at,
-        )
-        await store_credential(
-            ctx, master_key, connection_id, "refresh_token", pair.refresh_token.reveal(), None
-        )
+        await store_tokens(ctx, master_key, connection_id, pair)
 
 
 async def access_token_for(sync_ctx: SyncContext, *, force_refresh: bool = False) -> Secret:
