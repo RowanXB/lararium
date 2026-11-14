@@ -16,6 +16,7 @@ from lararium.core.connections import (
     create_connection,
     get_connection,
     set_warnings,
+    update_config,
 )
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
@@ -501,7 +502,7 @@ async def test_mismatch_notifies_once_per_value_and_clears(session, run) -> None
 async def test_reconciliation_counts_manual_postings(session, run) -> None:
     connection = await _connection(run)
     history = [make_transaction(id="tx_TEST0001", amount=15000, created="2026-03-01T12:00:00.000Z")]
-    await _normalize(session, connection, transactions=history)  # creates the accounts
+    await _normalize(session, connection)  # creates the accounts, with no history yet
     main = (await _account_map(session, connection))[ACCOUNT_ID]
     unassigned = await _unassigned(run)
     gbp = await get_currency(session, "GBP")
@@ -617,12 +618,42 @@ async def test_a_backfill_after_no_opening_was_needed_absorbs_nothing(session, r
     assert "difference -50.00 GBP" in mismatch
 
 
+@pytest.mark.parametrize("posted", [True, False], ids=["with-opening", "no-opening-needed"])
+async def test_an_account_from_before_boundaries_absorbs_nothing(
+    session, run, posted: bool
+) -> None:
+    # Reconciled before boundaries were recorded; its first sync after the upgrade is a
+    # re-authorisation's backfill.
+    connection = await _connection(run)
+    history = [
+        make_transaction(
+            id="tx_TEST0001", amount=10000 if posted else 30000, created="2026-03-01T12:00:00.000Z"
+        ),
+        make_transaction(id="tx_TEST0002", amount=-5000, created="2026-03-05T12:00:00.000Z"),
+    ]
+    await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+    await run(update_config, connection.id, remove=["opening_boundaries"])
+    (payment,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST0002"]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, payment.id)
+
+    report = await _normalize(session, connection, transactions=history, openings=[ACCOUNT_ID])
+
+    openings = [r for r in await _transactions(session) if r.external_id.startswith("opening:")]
+    if posted:
+        assert (await _opening(session))[0] == Decimal("200.00")
+    else:
+        assert openings == []
+    (mismatch,) = report.mismatches
+    assert "difference -50.00 GBP" in mismatch
+
+
 async def test_older_history_fetched_later_corrects_the_opening_past_a_manual_posting(
     session, run
 ) -> None:
     connection = await _connection(run)
     first = make_transaction(id="tx_TEST0002", amount=15000, created="2026-03-01T12:00:00.000Z")
-    await _normalize(session, connection, transactions=[first])  # creates the accounts
+    await _normalize(session, connection)  # creates the accounts, with no history yet
     main = (await _account_map(session, connection))[ACCOUNT_ID]
     unassigned = await _unassigned(run)
     gbp = await get_currency(session, "GBP")
