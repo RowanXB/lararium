@@ -201,7 +201,8 @@ Known gaps: a pending payment is fetched again until it settles or is voided, bu
 Monzo stops listing altogether stays pending; the reconciliation mismatch warning on the
 connection is the signal. And history a sync needs that is older than the 89 days Monzo serves
 outside the approval window (after a long outage, say) can't be fetched: the connection then
-shows a "sync window limited" warning, and authorising again backfills it.
+shows a "sync window limited" warning. To backfill it, disable the connection, then authorise
+it again and approve within 4 minutes (a healthy connection can't be authorised directly).
 
 ## Webhooks through Cloudflare Tunnel
 
