@@ -2,9 +2,17 @@ name: lararium
 # Required settings use ${VAR:?...}, so compose refuses to start when one is missing or
 # empty. The db init scripts can't be the check: they run once, after initdb has made the
 # volume permanent, and a failure there leaves a volume no later start can finish.
+# Networks keep the internet-facing services away from the api, which trusts the identity
+# header of whatever reaches it: the webhook receiver reaches only the db (as a role that can
+# only insert into the inbox), and cloudflared only the receiver.
+networks:
+  app: {}
+  inbox: {}
+  tunnel: {}
 services:
   db:
     image: postgres:18
+    networks: [app, inbox]
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
@@ -23,6 +31,7 @@ services:
       retries: 30
   migrate:
     build: ../backend
+    networks: [app]
     command: ["alembic", "upgrade", "head"]
     environment:
       LARARIUM_MIGRATION_DATABASE_URL: postgresql+psycopg://lararium_owner:${LARARIUM_OWNER_PASSWORD:?set LARARIUM_OWNER_PASSWORD in infra/.env}@db:5432/lararium
@@ -31,6 +40,7 @@ services:
   # No published ports: only Caddy (web) reaches the api, over the compose network.
   api:
     build: ../backend
+    networks: [app]
     restart: unless-stopped
     command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     environment:
@@ -47,6 +57,7 @@ services:
   # to the providers.
   worker:
     build: ../backend
+    networks: [app]
     restart: unless-stopped
     command: ["python", "-m", "lararium.worker"]
     # Time to finish a running job, including the 4-minute approval wait, before being
@@ -73,6 +84,7 @@ services:
   # uvicorn without access logs, which would otherwise record the secret in the URL path.
   webhook-in:
     build: ../backend
+    networks: [inbox, tunnel]
     restart: unless-stopped
     profiles: ["webhook"]
     command: ["python", "-m", "lararium.webhook_in"]
@@ -83,6 +95,7 @@ services:
       migrate: { condition: service_completed_successfully }
   cloudflared:
     image: cloudflare/cloudflared:2025.11.1
+    networks: [tunnel]
     restart: unless-stopped
     profiles: ["webhook"]
     command: ["tunnel", "--no-autoupdate", "run"]
@@ -94,6 +107,7 @@ services:
       context: ..
       dockerfile: web/Dockerfile
     restart: unless-stopped
+    networks: [app]
     # Loopback only: `tailscale serve` is the sole ingress and sets Tailscale-User-Login.
     ports: ["127.0.0.1:8080:80"]
     depends_on: [api]

@@ -159,3 +159,18 @@ def test_refuses_to_start_without_a_required_setting(name: str, value: str | Non
     result = _resolve(env)
     assert result.returncode != 0
     assert name in result.stderr
+
+
+def test_internet_facing_services_cannot_reach_the_api() -> None:
+    # The api trusts the identity header of whatever reaches it; the webhook receiver and
+    # cloudflared are what the internet reaches.
+    services = _services()
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or {})  # pyright: ignore[reportArgumentType]
+
+    for exposed in ("webhook-in", "cloudflared"):
+        for trusted in ("api", "web", "worker"):
+            assert not networks(exposed) & networks(trusted), (exposed, trusted)
+    assert networks("webhook-in") & networks("db")
+    assert networks("cloudflared") & networks("webhook-in")
