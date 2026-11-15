@@ -11,16 +11,24 @@ import pytest
 
 BACKUP_SCRIPT = Path(__file__).parents[3] / "infra" / "backup" / "backup.sh"
 
-# Stands in for `docker compose ... exec`: `db pg_dump` and `api tar` write to stdout. With
-# FAKE_API_DOWN set, the api exec fails the way compose does when the container isn't running.
+# Stands in for `docker compose ... exec`: `db pg_dump` writes to stdout, and the api's
+# command is run as given, with FAKE_TAR in place of tar. With FAKE_API_DOWN set, the api
+# exec fails the way compose does when the container isn't running (exit 1).
 FAKE_DOCKER = """#!/bin/sh
 case "$*" in
   *" db pg_dump "*) echo fake-dump ;;
-  *" api tar "*)
+  *" api sh -c "*)
     if [ -n "${FAKE_API_DOWN:-}" ]; then echo 'service "api" is not running' >&2; exit 1; fi
-    echo fake-tar ;;
+    while [ "$1" != api ]; do shift; done
+    shift
+    exec "$@" ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
+"""
+# tar inside the container: writes the archive, then exits with FAKE_TAR_STATUS.
+FAKE_TAR = """#!/bin/sh
+echo fake-tar
+exit "${FAKE_TAR_STATUS:-0}"
 """
 
 
@@ -28,7 +36,9 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _run(tmp_path: Path, *, existing_dir: bool = False, api_down: bool = False) -> int:
+def _run(
+    tmp_path: Path, *, existing_dir: bool = False, api_down: bool = False, tar_status: int = 0
+) -> int:
     infra = tmp_path / "infra"
     (infra / "backup").mkdir(parents=True)
     shutil.copy(BACKUP_SCRIPT, infra / "backup" / "backup.sh")
@@ -37,6 +47,8 @@ def _run(tmp_path: Path, *, existing_dir: bool = False, api_down: bool = False) 
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
+    (bin_dir / "tar").write_text(FAKE_TAR)
+    (bin_dir / "tar").chmod(0o755)
     if existing_dir:
         (tmp_path / "backups").mkdir(mode=0o755)
 
@@ -44,6 +56,7 @@ def _run(tmp_path: Path, *, existing_dir: bool = False, api_down: bool = False) 
     env |= {"PATH": f"{bin_dir}:{env['PATH']}"}
     if api_down:
         env["FAKE_API_DOWN"] = "1"
+    env["FAKE_TAR_STATUS"] = str(tar_status)
     return subprocess.run(
         ["bash", str(infra / "backup" / "backup.sh")],
         env=env,
@@ -83,10 +96,23 @@ def test_a_missing_api_fails_the_backup(tmp_path: Path) -> None:
     assert list((tmp_path / "backups").iterdir()) == []
 
 
+def test_an_upload_during_the_tar_keeps_the_backup(tmp_path: Path) -> None:
+    """Third review: GNU tar exits 1 when a directory changes while it is read, and set -e
+    then threw away that night's dump and tar."""
+    assert _run(tmp_path, tar_status=1) == 0
+    assert len(list((tmp_path / "backups").glob("documents-*.tar"))) == 1
+
+
+def test_a_failing_tar_fails_the_backup(tmp_path: Path) -> None:
+    assert _run(tmp_path, tar_status=2) != 0
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
 def test_script_tars_the_document_dir_through_partial_files() -> None:
     script = BACKUP_SCRIPT.read_text()
     # .tmp-* files are uploads being written (LocalDocumentStore renames them into place).
-    assert "exec -T api tar -C /var/lib/lararium/documents --exclude='.tmp-*' -cf - ." in script
+    assert "exec -T api sh -c" in script
+    assert 'tar -C /var/lib/lararium/documents --exclude=".tmp-*" -cf - .' in script
     umask = script.index("umask 077")
     for output in ('> "$out.partial"', '> "$out_docs.partial"'):
         assert umask < script.index(output), output
