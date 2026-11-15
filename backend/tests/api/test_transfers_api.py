@@ -79,6 +79,7 @@ async def _connector_tx(
         source=("connection", f"{connection_id}:{external_id}"),
         own_account_id=account.id,
         counterparty_identifier_id=identifier_id,
+        other_postings=0,
     )
     amount = Decimal(quantity)
     record, _ = await run(

@@ -244,7 +244,7 @@ README.md, README.zh-CN.md, docs/superpowers/specs/*.md                         
   - **`TransferSettings(window_before: timedelta, window_after: timedelta, overdue: timedelta)`** and `load_transfer_settings(session) -> TransferSettings` (Decision 4).
   - **`OwnLeg(account_id, instrument_id, quantity: Decimal, contra_account_id)`** and `own_leg(session, transaction_id) -> OwnLeg | None` (Decision 2).
   - **`source_ref(session, transaction_id) -> tuple[str, str]`** (Decision 3).
-  - **`transfer_contra(session, *, source: tuple[str, str] | None, own_account_id: UUID, counterparty_identifier_id: UUID | None) -> UUID`.** It returns the id of In transit or Unassigned per design §5.6 (`source=None` for a transaction not yet posted: steps 1 and 2 are skipped).
+  - **`transfer_contra(session, *, source: tuple[str, str] | None, own_account_id: UUID, counterparty_identifier_id: UUID | None, other_postings: int) -> UUID`.** It returns the id of In transit or Unassigned per design §5.6 (`source=None` for a transaction not yet posted: steps 1 and 2 are skipped; `other_postings`, the postings besides its own and the contra, above zero gives Unassigned).
   - **`TransferStatus`, `ReviewReason`, `TransferRecord`** (all columns, `amount: Decimal`).
   - **`match_transaction(ctx, transaction_id) -> None`** (Decision 6), **`heal_transfers(ctx) -> int`** (Decision 8; returns how many records it matched).
   - **`queries.get_transfer(session, transfer_id)`**, **`list_transfers(session, *, statuses: Collection[TransferStatus] | None = None) -> list[TransferRecord]`** (newest `opened_at` first), **`find_transfer_violations(session) -> list[UUID]`** (Decision 14).

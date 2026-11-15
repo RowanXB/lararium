@@ -139,6 +139,7 @@ async def test_receiver_without_identifier_matched_by_fallback(
             source=("connection", f"{c.connection_id}:in_1"),
             own_account_id=c.account.id,
             counterparty_identifier_id=None,
+            other_postings=0,
         )
         == ids.in_transit
     )
@@ -578,6 +579,7 @@ async def test_concurrent_heals_link_once(backend_url: str, owner_url: str, migr
                 source=("connection", f"{connection_id}:tx_1"),
                 own_account_id=account_id,
                 counterparty_identifier_id=identifier_id,
+                other_postings=0,
             )
             amount = Decimal(quantity)
             await upsert_connector_transaction(

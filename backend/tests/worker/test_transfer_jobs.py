@@ -117,6 +117,7 @@ class _PostingConnector:
             source=None,
             own_account_id=self.account_id,
             counterparty_identifier_id=self.identifier_id,
+            other_postings=0,
         )
         await upsert_connector_transaction(
             ctx.command,
@@ -258,6 +259,7 @@ async def _post(session, run, connection, account, quantity: str, *, external_id
         source=("connection", f"{connection.id}:{external_id}"),
         own_account_id=account.id,
         counterparty_identifier_id=identifier_id,
+        other_postings=0,
     )
     amount = Decimal(quantity)
     await run(

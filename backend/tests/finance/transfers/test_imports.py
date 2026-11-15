@@ -60,7 +60,11 @@ def import_row(session, run, gbp):
 
     async def _post(account, quantity: str = "100"):
         contra = await transfer_contra(
-            session, source=None, own_account_id=account.id, counterparty_identifier_id=None
+            session,
+            source=None,
+            own_account_id=account.id,
+            counterparty_identifier_id=None,
+            other_postings=0,
         )
         amount = Decimal(quantity)
         row = await run(
@@ -273,7 +277,11 @@ async def test_weekly_transfers_each_match_their_own_week(
     rows = []
     for k in weeks:
         contra = await transfer_contra(
-            session, source=None, own_account_id=b.id, counterparty_identifier_id=None
+            session,
+            source=None,
+            own_account_id=b.id,
+            counterparty_identifier_id=None,
+            other_postings=0,
         )
         rows.append(
             await run(
@@ -317,7 +325,11 @@ async def test_preview_match_reads_the_relation_matching_does(
         identifier_id=b_identifier,
     )
     contra = await transfer_contra(
-        session, source=None, own_account_id=b.id, counterparty_identifier_id=c_identifier
+        session,
+        source=None,
+        own_account_id=b.id,
+        counterparty_identifier_id=c_identifier,
+        other_postings=0,
     )
     await run(
         post_transaction,

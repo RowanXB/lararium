@@ -113,6 +113,12 @@ def names_source(t: type[models.Transaction], source: SourceRef) -> ColumnElemen
     return false()
 
 
+# A transfer's leg is exactly two postings, its own posting and its contra: one with others
+# besides (a fee, say) is no leg, so its contra stays on Unassigned. eligible_records and
+# transfer_contra both read this.
+LEG_POSTINGS = 2
+
+
 def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
     """Every transaction that can be a transfer's leg (an own record), with its own posting
     and its contra: not void, not derived, and exactly two postings, one on Unassigned or
@@ -148,7 +154,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .where(p.transaction_id == t.id)
         .having(
             and_(
-                func.count() == 2,
+                func.count() == LEG_POSTINGS,
                 func.count().filter(is_own) == 1,
                 func.count().filter(is_contra) == 1,
             )
@@ -382,22 +388,27 @@ async def transfer_contra(
     source: tuple[str, str] | None,
     own_account_id: UUID,
     counterparty_identifier_id: UUID | None,
+    other_postings: int,
 ) -> UUID:
     """The system account a record's contra belongs on: In transit for a transfer between
     own accounts, Unassigned otherwise (design §5.6).
 
-    In order: the owner's reject decision for `source` wins (Unassigned); a leg of a transfer
-    that is not rejected stays In transit; a counterparty bank account registered to another
-    own account makes it In transit. `source` is None for a transaction not yet posted, which
-    has neither. Both system accounts must exist already (get_or_create_system_account).
+    In order: the owner's reject decision for `source` wins (Unassigned); a transaction
+    with `other_postings` (postings besides its own and the contra, a fee say) can't be a
+    leg (LEG_POSTINGS), so Unassigned; a leg of a transfer that is not rejected stays In
+    transit; a counterparty bank account registered to another own account makes it In
+    transit. `source` is None for a transaction not yet posted, which has neither. Both
+    system accounts must exist already (get_or_create_system_account).
     """
     system = await system_account_ids(session)
     missing = [key for key in ("unassigned", "in_transit") if key not in system]
     if missing:
         raise LookupError(f"the system accounts {', '.join(missing)} have not been created yet")
+    if source is not None and await is_rejected(session, source):
+        return system["unassigned"]
+    if 2 + other_postings != LEG_POSTINGS:  # its own posting and the contra, and the others
+        return system["unassigned"]
     if source is not None:
-        if await is_rejected(session, source):
-            return system["unassigned"]
         transaction_id = await _transaction_of(session, source)
         if transaction_id is not None and await is_active_leg(session, transaction_id):
             return system["in_transit"]

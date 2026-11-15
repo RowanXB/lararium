@@ -439,10 +439,16 @@ class _Normalizer:
                 await set_counterparty_fields(self.command, row.id, await self._fields_of(tx))
 
     async def contra(
-        self, external_id: str, own_account_id: UUID, fields: CounterpartyFields
+        self,
+        external_id: str,
+        own_account_id: UUID,
+        fields: CounterpartyFields,
+        *,
+        other_postings: int,
     ) -> UUID:
         """Unassigned or In transit, by the owner's decisions, the transfer the transaction
-        is a leg of, and its counterparty's bank account (transfer_contra)."""
+        is a leg of, its counterparty's bank account, and the postings it has besides its
+        own and the contra (transfer_contra)."""
         await self.unassigned()  # both must exist for transfer_contra
         await self.system_account("in_transit")
         return await transfer_contra(
@@ -450,6 +456,7 @@ class _Normalizer:
             source=("connection", f"{self.connection_id}:{external_id}"),
             own_account_id=own_account_id,
             counterparty_identifier_id=fields.identifier_id,
+            other_postings=other_postings,
         )
 
     def mapped(self, monzo_id: str) -> UUID | None:
@@ -577,7 +584,8 @@ class _Normalizer:
         # A pot that was deleted before the connection existed has no account; its moves are
         # posted like any other payment.
         other = (self.mapped(pot_id) if isinstance(pot_id, str) else None) or (
-            await self.contra(external_id, own_account_id, fields)
+            # A payment posts its own posting and the contra, nothing besides.
+            await self.contra(external_id, own_account_id, fields, other_postings=0)
         )
         merchant = tx.get("merchant")
         counterparty: UUID | None = None

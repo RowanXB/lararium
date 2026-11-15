@@ -143,6 +143,7 @@ def connector_tx(
             source=("connection", f"{bank.connection_id}:{external_id}"),
             own_account_id=bank.account.id,
             counterparty_identifier_id=identifier_id,
+            other_postings=0,
         )
         amount = Decimal(quantity)
         record, _ = await run(

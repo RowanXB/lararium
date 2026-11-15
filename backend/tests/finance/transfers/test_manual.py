@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import insert, text
 
 from lararium.modules.finance import models
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import (
     assign_identifier,
     get_or_create_identifier,
@@ -20,6 +21,7 @@ from lararium.modules.finance.ledger import (
     upsert_connector_transaction,
 )
 from lararium.modules.finance.snapshots import record_snapshot
+from lararium.modules.finance.transfers import engine as transfer_engine
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
     list_transfers,
@@ -301,6 +303,7 @@ async def test_registering_later_matches_history(
             source=None,
             own_account_id=a.account.id,
             counterparty_identifier_id=identifier,
+            other_postings=0,
         )
         == ids.in_transit
     )
@@ -461,6 +464,7 @@ async def test_a_leg_that_gains_a_fee_posting_leaves_in_transit(
         source=("connection", f"{a.connection_id}:tx_1"),
         own_account_id=a.account.id,
         counterparty_identifier_id=identifier,
+        other_postings=0,
     )
     assert contra == ids.in_transit  # a leg keeps its contra on In transit
 
@@ -577,3 +581,74 @@ async def test_downgrading_0014_undoes_the_ledger_side(
     assert (await balances_on(session))[b.id] == Decimal(1000)
     assert await net_worth_on(session) == worth - 100
     assert await find_unbalanced_transactions(session) == []
+
+
+async def test_payment_with_a_fee_posting_stays_on_unassigned(
+    session, run, ids, gbp, connected_bank, manual_bank, heal, monkeypatch
+) -> None:
+    # A payment to the registered B with a fee posting besides its contra can't be a leg,
+    # so its contra is Unassigned from the start, and nothing re-points it on every sync.
+    a = await connected_bank("A")
+    await manual_bank("B")
+    fees = await run(
+        create_account,
+        name="Fees",
+        ledger_type="expense",
+        subtype="other",
+        balance_mode="transactions",
+    )
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+
+    async def upsert() -> tuple:
+        contra = await transfer_contra(
+            session,
+            source=("connection", f"{a.connection_id}:fee_1"),
+            own_account_id=a.account.id,
+            counterparty_identifier_id=identifier,
+            other_postings=1,
+        )
+        return await run(
+            upsert_connector_transaction,
+            TransactionInput(
+                occurred_at=WHEN,
+                description="Transfer",
+                origin="connector",
+                connection_id=a.connection_id,
+                external_id="fee_1",
+                postings=[
+                    PostingInput(a.account.id, gbp.id, Decimal(-101)),
+                    PostingInput(contra, gbp.id, Decimal(100)),
+                    PostingInput(fees.id, gbp.id, Decimal(1), is_fee=True),
+                ],
+                counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
+            ),
+        )
+
+    record, _ = await upsert()
+    assert await contra_account_of(session, record.id, ids) == ids.unassigned
+    repointed: list = []
+    real_repoint = transfer_engine.repoint_contra
+
+    async def spy(*args, **kwargs):
+        repointed.append(args)
+        return await real_repoint(*args, **kwargs)
+
+    monkeypatch.setattr(transfer_engine, "repoint_contra", spy)
+
+    await heal()
+
+    assert repointed == []
+    assert await list_transfers(session) == []
+    _, outcome = await upsert()
+    assert outcome == "unchanged"
+    await assert_consistent(session)
+
+
+async def contra_account_of(session, transaction_id, ids):
+    return await session.scalar(
+        text(
+            "select account_id from finance.postings where transaction_id = :t"
+            " and account_id in (:u, :i)"
+        ),
+        {"t": transaction_id, "u": ids.unassigned, "i": ids.in_transit},
+    )

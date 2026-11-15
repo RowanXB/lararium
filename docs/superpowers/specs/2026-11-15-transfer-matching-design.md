@@ -136,9 +136,9 @@ One row per transfer between two own accounts:
 
 ### 5.6 Deciding a transaction's contra
 
-One function, `transfer_contra(session, source, own account, counterparty registry row)`, used by every caller:
+One function, `transfer_contra(session, source, own account, counterparty registry row, other postings)`, used by every caller:
 
-1. a stored owner decision for this transaction's stable reference (§5.9) wins: rejected → Unassigned;
+1. a stored owner decision for this transaction's stable reference (§5.9) wins: rejected → Unassigned; and a transaction with postings besides its own and the contra (a fee) is no leg, so Unassigned (the caller passes how many; one rule, `LEG_POSTINGS`, shared with eligibility). Matching fee'd transfers, gross or net, is left to the change that adds fee postings;
 2. otherwise, if the transaction is already a leg of an active transfer → In transit;
 3. otherwise, if the transaction's counterparty registry row belongs to an own account other than the transaction's own account → In transit;
 4. otherwise → Unassigned.
