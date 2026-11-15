@@ -226,8 +226,9 @@ port on your server is opened:
 
 4. Set `COMPOSE_PROFILES=webhook` in `infra/.env`, then run `make up`. The profile makes the
    receiver and the tunnel part of the stack, so `make up` builds and starts them with
-   everything else (the `worker` and `api` need the three variables too), and `make down`
-   stops them.
+   everything else (the `worker` and `api` need the three variables too). To turn webhooks
+   off, clear the three variables and `COMPOSE_PROFILES`, then run `make down` and `make up`:
+   `make up` alone leaves the receiver and the tunnel running.
 
    Syncs then register `https://hooks.example.com/monzo/<secret>` with Monzo. The receiver
    stores each delivery and answers at once; the worker turns it into a sync within a minute.
@@ -303,11 +304,11 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db \
 ```
 
 To make the restored copy live, stop everything that connects to the database (all services
-but `db`), swap the database names, and start the stack again. PostgreSQL won't rename a
+but `db`, in every profile, so a receiver started under one since turned off stops too), swap the database names, and start the stack again. PostgreSQL won't rename a
 database while anyone is connected to it.
 
 ```bash
-docker compose -f infra/compose.yaml --env-file infra/.env stop
+docker compose -f infra/compose.yaml --env-file infra/.env --profile '*' stop
 docker compose -f infra/compose.yaml --env-file infra/.env start db
 docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U postgres \
   -c "ALTER DATABASE lararium RENAME TO lararium_old" \

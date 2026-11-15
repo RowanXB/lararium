@@ -97,6 +97,13 @@ def test_worker_may_finish_an_approval_job_when_stopped() -> None:
 def test_api_does_not_log_requests() -> None:
     # The OAuth callback URL carries ?code= and &state=.
     assert "--no-access-log" in _services()["api"]["command"]
+def test_make_down_stops_every_profile() -> None:
+    # Services started under a profile since turned off (the webhook receiver and tunnel
+    # after COMPOSE_PROFILES is cleared) are outside a plain `down`.
+    makefile = (Path(__file__).parents[3] / "Makefile").read_text()
+    assert "down:\n\t$(COMPOSE) --profile '*' down\n" in makefile
+
+
 
 
 @pytest.mark.parametrize("name", ["api", "worker"])
