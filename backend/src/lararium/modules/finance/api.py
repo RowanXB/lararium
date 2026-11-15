@@ -235,7 +235,8 @@ async def record_snapshot(
     account_id: UUID, body: SnapshotCreate, session: SessionDep, actor: ActorDep
 ) -> SnapshotOut:
     args = _args(body, account_id=account_id)
-    async with command_context(session, actor, "record_snapshot", args) as ctx:
+    # A manual hybrid account's first snapshot settles the transfers it contains (heal).
+    async with healing_command(session, actor, "record_snapshot", args) as ctx:
         record = await snapshots.record_snapshot(
             ctx,
             account_id=account_id,

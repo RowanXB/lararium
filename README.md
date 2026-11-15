@@ -235,7 +235,10 @@ balance:
 2. Save an opening snapshot: its balance in GBP as of a date, from a Bank A statement.
 
 A hybrid account's balance is its latest snapshot plus whatever is posted after it. Transfers
-dated before the snapshot are already in it, so they aren't counted twice. Don't use
+dated before the snapshot are already in it, so they aren't counted twice. A transfer dated at or
+before the account's first snapshot in that currency gets no inferred transaction at all: it is
+settled against Opening balances, so the account's history before the snapshot doesn't change
+either. Recording an earlier snapshot later moves the transfers after it back onto the account. Don't use
 Transactions mode for a manual account: its balance would be only the transfers Lararium has
 seen. A Snapshots account ignores postings, so it can't carry identifiers; its Identifiers
 section offers **Switch to hybrid** instead, which values it exactly as before (its latest

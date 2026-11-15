@@ -300,7 +300,9 @@ async def test_registering_later_matches_history(
     session, run, ids, connected_bank, manual_bank, connector_tx, heal
 ) -> None:
     a = await connected_bank("A")
-    b = await manual_bank("B", identifier=None)
+    # Opened before all three, so each gets its placeholder (test_manual_opening: those
+    # at or before the opening snapshot are settled instead).
+    b = await manual_bank("B", identifier=None, snapshot_at=WHEN - timedelta(days=90))
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     records = [
         await connector_tx(

@@ -50,8 +50,9 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 
 # What the ledger holds for the transfer: one own record waiting for the connected other
 # side's (awaiting), one plus a placeholder on the manual other side (inferred), both
-# (matched), one whose other side predates that account's history (before_history), or
-# the owner's word that it is not a transfer (rejected).
+# (matched), one whose other side predates that account's history (before_history: the
+# connected account's first record, or the manual account's first snapshot), or the
+# owner's word that it is not a transfer (rejected).
 TransferStatus = Literal["awaiting", "inferred", "matched", "before_history", "rejected"]
 # Why the rule could not decide, apart from the status ("needs review").
 ReviewReason = Literal["several_candidates", "amount_differs"]
@@ -272,6 +273,34 @@ def before_history(
     that day itself is still inside the window, and would pair."""
     _, latest = counterpart_window(r, settings)
     return func.coalesce(latest < starts_on, False)
+
+
+def manual_predates(
+    r: RecordColumns, counterpart_id: SQLColumnExpression[UUID]
+) -> ColumnElement[bool]:
+    """Whether the record is at or before the first snapshot, in its instrument, of the
+    manual hybrid account `counterpart_id`, so that the snapshot already contains its
+    counterpart: valuation (v1_balances_asof) counts a hybrid account's postings only after
+    its snapshot's as_of, and before its first one sums them from zero, so a placeholder
+    there would value the account at minus the transfer. It compares the record's own time,
+    which a placeholder carries, with valuation's own cut-off (occurred_at <= as_of). False
+    for any other account: a connected one (before_history), or a transactions-mode manual
+    one, whose snapshots valuation ignores."""
+    s = aliased(models.BalanceSnapshot, name="opening_snapshot")
+    a = aliased(models.Account, name="snapshot_account")
+    first = (
+        select(func.min(s.as_of))
+        .join(a, a.id == s.account_id)
+        .where(
+            s.account_id == counterpart_id,
+            s.instrument_id == r.instrument_id,
+            a.balance_mode == "hybrid",
+            a.source_connection_id.is_(None),
+        )
+        .correlate_except(s, a)
+        .scalar_subquery()
+    )
+    return func.coalesce(r.occurred_at <= first, False)
 
 
 # Why a record could be the transfer's missing side: a candidate of the same amount, a

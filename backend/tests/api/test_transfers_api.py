@@ -159,6 +159,28 @@ async def test_register_identifier_matches_history(client, session, inferred) ->
     assert len(await _transfers(client, status=["inferred", "matched"])) == 1
 
 
+async def test_opening_snapshot_settles_what_it_contains_at_once(client, session, inferred) -> None:
+    """Recording B's opening snapshot after the payment heals in its own command: the
+    snapshot already contains the 100, so the placeholder goes and the transfer is settled."""
+    _, b_id, _ = inferred
+    gbp = await get_currency(session, "GBP")
+    response = await client.post(
+        f"{FINANCE}/accounts/{b_id}/snapshots",
+        json={
+            "instrument_id": str(gbp.id),
+            "quantity": "1100",
+            "as_of": (WHEN + timedelta(hours=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 201
+    [transfer] = await _transfers(client)
+    assert (transfer["status"], transfer["placeholder_transaction_id"]) == ("before_history", None)
+    assert await _placeholders(session) == []
+    settlements = text("select count(*) from finance.transactions where origin = 'rule'")
+    assert await session.scalar(settlements) == 1
+
+
 async def test_remove_identifier_unmatches(client, session, inferred) -> None:
     _, b_id, _ = inferred
     [identifier] = (await client.get(f"{FINANCE}/accounts/{b_id}/identifiers")).json()

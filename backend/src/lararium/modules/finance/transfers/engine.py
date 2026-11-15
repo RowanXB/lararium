@@ -72,6 +72,7 @@ from lararium.modules.finance.transfers.queries import (
     before_history,
     history_start,
     load_transfers,
+    manual_predates,
     transfer_change_data,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
@@ -290,7 +291,8 @@ async def _post_settlement(
     ctx: CommandContext, record: OwnRecord, counterpart: AccountRecord, system: _System
 ) -> UUID:
     """Settle a counterpart that predates its account's history against Opening balances,
-    which that account's opening balance already contains it through."""
+    which that account's opening balance (a connector's adjustment, or a manual account's
+    first snapshot) already contains it through."""
     return await _post_mirror(
         ctx,
         record,
@@ -311,9 +313,11 @@ async def _open(
     review_reason: ReviewReason | None,
     previous: TransferRecord | None,
 ) -> None:
-    """Open the record's own transfer: inferred with a placeholder when the counterpart is
-    manual; else before_history with a settlement when the counterpart would predate that
-    account's history, or awaiting the counterpart's own record.
+    """Open the record's own transfer: before_history with a settlement when the
+    counterpart predates that account's history (a manual hybrid account's first snapshot,
+    manual_predates; a connected account's first record, before_history); else inferred
+    with a placeholder when the counterpart is manual, or awaiting the counterpart's own
+    record when it is connected.
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -323,8 +327,14 @@ async def _open(
     settlement_id: UUID | None = None
     status: TransferStatus = "awaiting"
     if counterpart.source_kind == "manual":
-        placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
-        status = "inferred"
+        if await session.scalar(
+            select(manual_predates(record.columns(), bound_id(counterpart.id)))
+        ):
+            settlement_id = await _post_settlement(ctx, record, counterpart, system)
+            status = "before_history"
+        else:
+            placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
+            status = "inferred"
     elif await session.scalar(
         select(
             before_history(

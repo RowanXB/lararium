@@ -127,7 +127,8 @@ async def test_heal_is_fast_on_a_large_ledger(
     heal: Heal,
 ) -> None:
     a = await connected_bank("A")
-    b = await manual_bank("B", identifier=None)
+    # Opened before the seeded history, so every transfer to B gets its placeholder.
+    b = await manual_bank("B", identifier=None, snapshot_at=WHEN - timedelta(days=301))
     await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     await _seed(
         session,

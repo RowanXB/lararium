@@ -20,6 +20,7 @@ from lararium.modules.finance.transfers.queries import (
     ReviewReason,
     before_history,
     history_starts,
+    manual_predates,
     stray_in_transit,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings
@@ -147,20 +148,40 @@ async def records_to_heal(
                     ),
                 )
             )
-            # (d) a lone record whose counterpart's account history now starts after the
-            # counterpart's latest booking date, or no longer does (older history was
-            # fetched).
+            # (d) a lone record whose connected counterpart's account history now starts
+            # after the counterpart's latest booking date, or no longer does (older
+            # history was fetched). An inner join: history holds connected accounts only,
+            # and a manual counterpart read here as not predating would be reopened, and
+            # settled again by the arm below, on every heal.
             predates = before_history(record_columns(own), history.c.starts_on, settings)
             queries.append(
                 select(own.c.transaction_id.label("id"), own.c.occurred_at)
                 .select_from(tr)
                 .join(own, own.c.transaction_id == leg)
-                .outerjoin(history, history.c.account_id == counterpart)
+                .join(history, history.c.account_id == counterpart)
                 .where(
                     other_leg.is_(None),
                     or_(
                         and_(tr.status == "before_history", ~predates),
                         and_(tr.status == "awaiting", predates),
+                    ),
+                )
+            )
+            # (d) a lone record whose manual counterpart's first snapshot (in its
+            # instrument) now contains it, or no longer does (an earlier one was recorded):
+            # the same manual_predates engine._open decides by.
+            manual = aliased(models.Account, name="manual_counterpart")
+            contained = manual_predates(record_columns(own), counterpart)
+            queries.append(
+                select(own.c.transaction_id.label("id"), own.c.occurred_at)
+                .select_from(tr)
+                .join(own, own.c.transaction_id == leg)
+                .join(manual, and_(manual.id == counterpart, manual.source_connection_id.is_(None)))
+                .where(
+                    other_leg.is_(None),
+                    or_(
+                        and_(tr.status == "before_history", ~contained),
+                        and_(tr.status == "inferred", contained),
                     ),
                 )
             )
