@@ -13,14 +13,20 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 - after each full backfill of an account, and when an account is first seen outside one,
   the difference from Monzo's balance is posted as its opening balance adjustment, replaced
   in place, so older history fetched later corrects it instead of adding to it (ruling R18);
-  any other difference is a warning, never corrected.
+  any other difference is a warning, never corrected;
+- what Monzo says about a transaction, its merchant, an account or a pot is stored typed, a
+  fee as a posting of its own, and a declined transaction outside the ledger (the
+  structured-fields plan, Decisions 5-11); a field in a shape not mapped yet stays in the raw
+  records, with a warning on the connection, and never fails the sync.
 """
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from numbers import Real
 from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -31,16 +37,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import SyncContext
-from lararium.core.entities import get_or_create_organization
+from lararium.core.entities import PlaceDetails, get_or_create_organization, get_or_create_place
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import get_raw_records
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
-from lararium.modules.finance.accounts import close_account, create_account, get_account
+from lararium.modules.finance.accounts import (
+    SourceDetails,
+    TaxWrapper,
+    close_account,
+    create_account,
+    get_account,
+    set_source_details,
+)
+from lararium.modules.finance.declined import DeclinedInput, upsert_declined
+from lararium.modules.finance.errors import UnknownCurrencyError
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency
 from lararium.modules.finance.ledger import (
+    CategorySplit,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     TransactionStatus,
     upsert_connector_transaction,
@@ -71,6 +88,9 @@ _ACCOUNT_NAMES = {
     "uk_retail_joint": "Monzo Joint",
     "uk_rewards": "Monzo Rewards",
 }
+
+# A pot's isa_wrapper, lowercased, as a tax wrapper; "" means none.
+_TAX_WRAPPERS: dict[str, TaxWrapper] = {"isa": "isa", "lisa": "lisa", "sipp": "sipp", "gia": "gia"}
 
 
 @dataclass(frozen=True)
@@ -116,6 +136,38 @@ def _parse(value: str) -> datetime:
 
 def _mismatch_prefix(monzo_account_id: str) -> str:
     return f"Monzo account {monzo_account_id}: reconciliation mismatch"
+
+
+def _unmapped_warning(name: str) -> str:
+    return f"Monzo field {name} is not stored yet; it stays in the raw records"
+
+
+def _fields(value: object) -> dict[str, Any]:
+    """A JSON object's fields; none for anything else, such as a missing or null object."""
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def _text(value: object) -> str | None:
+    """A JSON string; None when absent or empty."""
+    return value if isinstance(value, str) and value else None
+
+
+def _flag(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _minor_units(value: object) -> int | None:
+    """A JSON integer amount; a JSON true or false is not one (bool is an int in Python)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _number(value: object) -> Decimal | None:
+    """A JSON number as an exact decimal, made from its shortest form (the 51.5 the source
+    wrote), never from the binary fraction the JSON parser turned it into."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    number = Decimal(str(value))
+    return number if number.is_finite() else None
 
 
 def _description(tx: dict[str, Any]) -> str:
@@ -305,6 +357,8 @@ class _Normalizer:
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         self._deleted_pots: list[UUID] = []
+        # Fields seen in a shape not mapped yet (structured-fields Decision 10), by their name.
+        self.unmapped: set[str] = set()
 
     async def currency(self, code: str) -> InstrumentRecord:
         if code not in self._currencies:
@@ -317,10 +371,10 @@ class _Normalizer:
     async def _shared_row(
         self, key: tuple[str, ...], get_or_create: Callable[[CommandContext], Awaitable[UUID]]
     ) -> UUID:
-        """A row other connections share (a system account, an organisation), found or created
-        in a short transaction of its own and committed at once. Its creation is serialised
-        across concurrent syncs, and the lock that does it must not be held until this sync,
-        which may take minutes, commits."""
+        """A row other connections share (a system account, an organisation, a place), found
+        or created in a short transaction of its own and committed at once. Its creation is
+        serialised across concurrent syncs, and the lock that does it must not be held until
+        this sync, which may take minutes, commits."""
         if key not in self._shared:
             async with (
                 self.session_factory() as session,
@@ -388,31 +442,42 @@ class _Normalizer:
 
     async def account(self, account: dict[str, Any]) -> None:
         monzo_id: str = account["id"]
-        if self.mapped(monzo_id) is not None:
-            return
-        name = (
-            _ACCOUNT_NAMES.get(account.get("description", ""))
-            or _ACCOUNT_NAMES.get(account.get("type", ""))
-            or "Monzo"
-        )
-        created = await create_account(
+        account_id = self.mapped(monzo_id)
+        if account_id is None:
+            name = (
+                _ACCOUNT_NAMES.get(account.get("description", ""))
+                or _ACCOUNT_NAMES.get(account.get("type", ""))
+                or "Monzo"
+            )
+            created = await create_account(
+                self.command,
+                name=name,
+                ledger_type="asset",
+                subtype="bank",
+                balance_mode="transactions",
+                institution_entity_id=await self.organization("Monzo"),
+                opened_on=local_date(_parse(account["created"]), self.tz),
+                source_connection_id=self.connection_id,
+            )
+            account_id = created.id
+            self.account_map[monzo_id] = str(account_id)
+        # On every sync: what Monzo says now, written only when it differs.
+        await set_source_details(
             self.command,
-            name=name,
-            ledger_type="asset",
-            subtype="bank",
-            balance_mode="transactions",
-            institution_entity_id=await self.organization("Monzo"),
-            opened_on=local_date(_parse(account["created"]), self.tz),
-            source_connection_id=self.connection_id,
+            account_id,
+            SourceDetails(
+                product_type=_text(account.get("product_type")),
+                owner_type=_text(account.get("owner_type")),
+            ),
         )
-        self.account_map[monzo_id] = str(created.id)
 
     async def pot(self, pot: dict[str, Any], parent_monzo_id: str, fetched_at: datetime) -> None:
         pot_id: str = pot["id"]
         account_id = self.mapped(pot_id)
+        if account_id is None and pot.get("deleted"):
+            return  # gone before we ever saw it
+        details = await self._pot_details(pot)
         if account_id is None:
-            if pot.get("deleted"):
-                return  # gone before we ever saw it
             created = await create_account(
                 self.command,
                 name=str(pot.get("name") or "Pot"),
@@ -427,9 +492,36 @@ class _Normalizer:
             )
             account_id = created.id
             self.account_map[pot_id] = str(account_id)
+        # On every sync, as for an account.
+        await set_source_details(self.command, account_id, details)
         self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
         if pot.get("deleted"):
             self._deleted_pots.append(account_id)
+
+    async def _pot_details(self, pot: dict[str, Any]) -> SourceDetails:
+        goal = _minor_units(pot.get("goal_amount"))
+        currency = await self.currency(pot["currency"])
+        return SourceDetails(
+            product_type=_text(pot.get("type")),
+            goal_amount=None if goal is None else to_quantity(goal, currency.decimals),
+            locked=_flag(pot.get("locked")),
+            round_up=_flag(pot.get("round_up")),
+            round_up_multiplier=_number(pot.get("round_up_multiplier")),
+            tax_wrapper=self._tax_wrapper(pot.get("isa_wrapper")),
+        )
+
+    def _tax_wrapper(self, value: object) -> TaxWrapper | None:
+        """A pot's isa_wrapper as its tax wrapper: none when empty, else one Lararium knows by
+        name. None leaves the account's as it is: when Monzo says nothing, and when it says
+        something unknown, which warns instead of failing the sync."""
+        if value is None:
+            return None
+        if value == "":
+            return "none"
+        wrapper = _TAX_WRAPPERS.get(value.lower()) if isinstance(value, str) else None
+        if wrapper is None:
+            self.unmapped.add("isa_wrapper")
+        return wrapper
 
     async def void_if_posted(self, external_id: str) -> bool:
         """Void the ledger transaction posted for this Monzo transaction; False if none."""
@@ -449,31 +541,20 @@ class _Normalizer:
         if tx.get("decline_reason"):
             if not await self.void_if_posted(external_id):
                 self.report.skipped_declined += 1
+            await self.declined(tx, monzo_account_id)
             return
         if tx["amount"] == 0:
             # A reversed pending payment; a new zero-amount one moves no money.
             await self.void_if_posted(external_id)
             return
         currency = await self.currency(tx["currency"])
-        quantity = to_quantity(tx["amount"], currency.decimals)
-        metadata = tx.get("metadata")
-        pot_id = (
-            cast(dict[str, Any], metadata).get("pot_id") if isinstance(metadata, dict) else None
-        )
+        pot_id = _fields(tx.get("metadata")).get("pot_id")
         # A pot that was deleted before the connection existed has no account; its moves stay
         # unassigned, like any other transfer.
         other = (self.mapped(pot_id) if isinstance(pot_id, str) else None) or (
             await self.unassigned()
         )
-        merchant = tx.get("merchant")
-        counterparty: UUID | None = None
-        if isinstance(merchant, dict):
-            merchant_fields = cast(dict[str, Any], merchant)
-            if merchant_fields.get("name"):
-                counterparty = await self.organization(
-                    str(merchant_fields["name"]),
-                    external_id=("monzo_merchant", str(merchant_fields["id"])),
-                )
+        counterparty, place = await self.merchant(tx)
         created = _parse(tx["created"])
         settled = tx.get("settled") or ""
         _, outcome = await upsert_connector_transaction(
@@ -488,18 +569,184 @@ class _Normalizer:
                 origin="connector",
                 connection_id=self.connection_id,
                 external_id=external_id,
-                postings=[
-                    PostingInput(
-                        self.require_mapped(monzo_account_id),
-                        currency.id,
-                        quantity,
-                        memo=str(tx.get("notes") or ""),
-                    ),
-                    PostingInput(other, currency.id, -quantity),
-                ],
+                postings=self._postings(tx, currency, self.require_mapped(monzo_account_id), other),
+                details=await self._details(tx, currency, place),
             ),
         )
         self.count(outcome)
+
+    def _postings(
+        self, tx: dict[str, Any], currency: InstrumentRecord, account_id: UUID, other: UUID
+    ) -> list[PostingInput]:
+        """Monzo's amount is what reached the balance, after its fees (structured-fields
+        Decision 8): the account posts the amount before them, the other side -amount (at
+        position 1, where M4 expects it), and each fee is a posting of its own on the
+        account."""
+        fees = {
+            kind: amount
+            for kind, amount in sorted(self._amounts("fees", tx.get("fees")).items())
+            if amount != 0
+        }
+        before_fees = tx["amount"] - sum(fees.values())
+        if fees and before_fees == 0:
+            # All of it fees: the account's own posting would be zero, which none can be.
+            self.unmapped.add("fees")
+            fees, before_fees = {}, tx["amount"]
+        return [
+            PostingInput(
+                account_id,
+                currency.id,
+                to_quantity(before_fees, currency.decimals),
+                memo=str(tx.get("notes") or ""),
+            ),
+            PostingInput(other, currency.id, -to_quantity(tx["amount"], currency.decimals)),
+            *(
+                PostingInput(
+                    account_id,
+                    currency.id,
+                    to_quantity(amount, currency.decimals),
+                    is_fee=True,
+                    memo=kind,
+                )
+                for kind, amount in fees.items()
+            ),
+        ]
+
+    async def _details(
+        self, tx: dict[str, Any], currency: InstrumentRecord, place: UUID | None
+    ) -> TransactionDetails:
+        if tx.get("atm_fees_detailed") is not None:
+            # Always null so far: nothing shows its shape yet.
+            self.unmapped.add("atm_fees_detailed")
+        original_quantity, original_instrument_id = await self._original(tx)
+        return TransactionDetails(
+            original_quantity=original_quantity,
+            original_instrument_id=original_instrument_id,
+            category=_text(tx.get("category")),
+            labels=self._labels(tx.get("labels")),
+            include_in_spending=_flag(tx.get("include_in_spending")),
+            payment_scheme=_text(tx.get("scheme")),
+            place_entity_id=place,
+            category_splits=self._category_splits(tx, currency.decimals),
+        )
+
+    async def _original(self, tx: dict[str, Any]) -> tuple[Decimal | None, UUID | None]:
+        """The amount in the currency it was spent in, signed like the account's posting
+        (structured-fields Decision 5). A currency with no instrument leaves both out, with a
+        warning: its decimals, which the amount in minor units needs, are unknown."""
+        code, minor_units = _text(tx.get("local_currency")), _minor_units(tx.get("local_amount"))
+        if code is None or minor_units is None:
+            return None, None
+        try:
+            local = await self.currency(code)
+        except UnknownCurrencyError:
+            self.unmapped.add("local_currency")
+            return None, None
+        return to_quantity(minor_units, local.decimals), local.id
+
+    def _labels(self, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, list) and all(isinstance(v, str) for v in cast(list[object], value)):
+            return tuple(cast(list[str], value))
+        self.unmapped.add("labels")
+        return ()
+
+    def _amounts(self, name: str, value: object) -> dict[str, int]:
+        """A JSON object of name -> amount in minor units ({} when absent); any other shape
+        stays in the raw records, with a warning."""
+        if value is None:
+            return {}
+        fields = _fields(value)
+        amounts = {
+            key: amount
+            for key, item in fields.items()
+            if (amount := _minor_units(item)) is not None
+        }
+        if isinstance(value, dict) and len(amounts) == len(fields):
+            return amounts
+        self.unmapped.add(name)
+        return {}
+
+    def _category_splits(self, tx: dict[str, Any], decimals: int) -> tuple[CategorySplit, ...]:
+        """Monzo's split of the amount between categories, only when it is one
+        (structured-fields Decision 7): more than one entry, or one other than
+        {category: amount}, which is derivable."""
+        amounts = self._amounts("categories", tx.get("categories"))
+        if not amounts or amounts == {tx.get("category"): tx["amount"]}:
+            return ()
+        return tuple(
+            CategorySplit(category, to_quantity(amount, decimals))
+            for category, amount in sorted(amounts.items())
+        )
+
+    async def merchant(self, tx: dict[str, Any]) -> tuple[UUID | None, UUID | None]:
+        """The merchant's brand, an organization merged by name, and its place, one per Monzo
+        merchant id (structured-fields Decision 6): one name can cover several ids, each with
+        its own address, logo and online flag."""
+        merchant = _fields(tx.get("merchant"))
+        name, merchant_id = _text(merchant.get("name")), _text(merchant.get("id"))
+        if name is None:
+            return None, None
+        if merchant_id is None:
+            return await self.organization(name), None
+        external_id = ("monzo_merchant", merchant_id)
+        organization = await self.organization(name, external_id=external_id)
+        details = self._place_details(merchant, _fields(tx.get("metadata")))
+        place = await self._shared_row(
+            ("place", merchant_id),
+            lambda ctx: get_or_create_place(ctx, name, external_id=external_id, details=details),
+        )
+        return organization, place
+
+    def _place_details(self, merchant: dict[str, Any], metadata: dict[str, Any]) -> PlaceDetails:
+        """The merchant, with what the transaction's metadata says about where it was paid."""
+        address = _fields(merchant.get("address"))
+        return PlaceDetails(
+            address_street=_text(address.get("address")),
+            address_city=_text(address.get("city")),
+            address_region=_text(address.get("region")),
+            address_postcode=_text(address.get("postcode")),
+            address_country=_text(address.get("country")),
+            address_formatted=_text(address.get("formatted")),
+            latitude=_number(address.get("latitude")),
+            longitude=_number(address.get("longitude")),
+            location_approximate=_flag(address.get("approximate")),
+            online=_flag(merchant.get("online")),
+            mcc=self._mcc(metadata.get("mcc")),
+            website=_text(_fields(merchant.get("metadata")).get("website")),
+            card_acceptor_website=_text(metadata.get("card_acceptor_website")),
+            logo_url=_text(merchant.get("logo")),
+        )
+
+    def _mcc(self, value: object) -> str | None:
+        """The merchant category code: four ASCII digits, as the column's CHECK requires."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, str) and re.fullmatch("[0-9]{4}", value):
+            return value
+        self.unmapped.add("metadata.mcc")
+        return None
+
+    async def declined(self, tx: dict[str, Any], monzo_account_id: str) -> None:
+        """Record a declined payment, outside the ledger (structured-fields Decision 11)."""
+        currency = await self.currency(tx["currency"])
+        counterparty, place = await self.merchant(tx)
+        await upsert_declined(
+            self.command,
+            DeclinedInput(
+                connection_id=self.connection_id,
+                external_id=tx["id"],
+                account_id=self.require_mapped(monzo_account_id),
+                occurred_at=_parse(tx["created"]),
+                quantity=to_quantity(tx["amount"], currency.decimals),
+                instrument_id=currency.id,
+                description=_description(tx),
+                counterparty_entity_id=counterparty,
+                place_entity_id=place,
+                decline_reason=str(tx["decline_reason"]),
+            ),
+        )
 
     def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
         if outcome == "created":
@@ -714,6 +961,11 @@ async def normalize(
         for w in connection.warnings
         if not any(w.startswith(_mismatch_prefix(m)) for m in mismatches)
     ]
+    # Each unmapped field warns once, until the owner clears it. Added before the mismatch
+    # warnings, which are taken out and added again on each sync, so the order holds.
+    for name in sorted(n.unmapped):
+        if (warning := _unmapped_warning(name)) not in warnings:
+            warnings.append(warning)
     for monzo_id, mismatch in mismatches.items():
         if mismatch is None:
             notified.pop(monzo_id, None)

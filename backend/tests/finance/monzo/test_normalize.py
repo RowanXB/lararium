@@ -40,7 +40,14 @@ from lararium.modules.finance.monzo.normalize import (
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.valuation import balances_asof
 
-from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_transaction
+from .fixtures import (
+    ACCOUNT_ID,
+    make_account,
+    make_balance,
+    make_merchant,
+    make_pot,
+    make_transaction,
+)
 
 KEY = bytes(range(32))
 CONNECTOR = Actor("connector", "monzo")
@@ -73,6 +80,7 @@ async def _normalize(
     reconciled: Sequence[str] = (),
     openings: Sequence[str] = (),
     notifier: RecordingNotifier | None = None,
+    account: dict[str, Any] | None = None,
 ) -> NormalizeReport:
     """Store one sync's raw records (as MonzoConnector.sync would), then normalize them."""
     sync_id = uuid.uuid4()
@@ -91,7 +99,7 @@ async def _normalize(
             )
             fetched.append(FetchedRecord(record_id, request, datetime.now(UTC)))
 
-        await store("accounts", {}, [make_account()])
+        await store("accounts", {}, [account or make_account()])
         await store("balance", {"account_id": ACCOUNT_ID}, make_balance(balance=balance))
         await store("pots", {"current_account_id": ACCOUNT_ID}, list(pots))
         if transactions:
@@ -808,3 +816,552 @@ async def test_booking_date_uses_local_date(session, run) -> None:
 
     (tx,) = await _transactions(session)
     assert (tx.booking_date, tx.value_date) == (date(2026, 3, 30), None)
+
+
+# Typed source fields (plan Decisions 5-11).
+
+UNMAPPED = "Monzo field {} is not stored yet; it stays in the raw records"
+
+
+async def _details(session, transaction_id: uuid.UUID) -> Any:
+    return (
+        await session.execute(
+            text(
+                "select original_quantity, original_instrument_id, category, labels,"
+                " include_in_spending, payment_scheme, place_entity_id"
+                " from finance.transactions where id = :id"
+            ),
+            {"id": transaction_id},
+        )
+    ).one()
+
+
+async def _splits(session, transaction_id: uuid.UUID) -> list[tuple[str, Decimal]]:
+    rows = await session.execute(
+        text(
+            "select category, quantity from finance.transaction_category_splits"
+            " where transaction_id = :id order by position"
+        ),
+        {"id": transaction_id},
+    )
+    return [(r.category, r.quantity) for r in rows]
+
+
+async def _declined(session) -> list[Any]:
+    return list(
+        await session.execute(
+            text("select * from finance.declined_transactions order by occurred_at, id")
+        )
+    )
+
+
+async def _rows(session, table: str) -> list[str]:
+    """Every row of the table as JSON text, in a stable order."""
+    return list(
+        await session.scalars(text(f"select row_to_json(t)::text from {table} t order by 1"))
+    )
+
+
+async def test_transaction_details_are_stored(session, run) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(
+        amount=-850,
+        local_amount=-1000,
+        local_currency="USD",
+        category="groceries",
+        labels=["test-label"],
+        scheme="mastercard",
+        include_in_spending=True,
+        merchant=make_merchant(),
+        metadata={"mcc": "5411", "card_acceptor_website": "https://pay.test-grocer.example"},
+    )
+
+    await _normalize(session, connection, transactions=[payment])
+
+    (tx,) = await _transactions(session)
+    details = await _details(session, tx.id)
+    usd = await get_currency(session, "USD")
+    assert (details.original_quantity, details.original_instrument_id) == (
+        Decimal("-10.00"),
+        usd.id,
+    )
+    assert (
+        details.category,
+        details.labels,
+        details.include_in_spending,
+        details.payment_scheme,
+    ) == ("groceries", ["test-label"], True, "mastercard")
+    organization = await session.get_one(Entity, tx.counterparty_entity_id)
+    assert (organization.kind, organization.name) == ("organization", "Test Grocer")
+    place = await session.get_one(Entity, details.place_entity_id)
+    assert (place.kind, place.name, place.external_ids) == (
+        "place",
+        "Test Grocer",
+        {"monzo_merchant": "merch_TEST1"},
+    )
+    assert (
+        place.address_street,
+        place.address_city,
+        place.address_region,
+        place.address_postcode,
+        place.address_country,
+        place.address_formatted,
+    ) == (
+        "1 Test Street",
+        "Testford",
+        "Testshire",
+        "TE1 1ST",
+        "GBR",
+        "1 Test Street, Testford TE1 1ST",
+    )
+    assert place.latitude == Decimal("51.5")
+    # Exact: built from the number's shortest form, not from its binary fraction.
+    assert str(place.longitude) == "-0.1278"
+    assert (place.location_approximate, place.online, place.mcc) == (False, False, "5411")
+    assert (place.website, place.card_acceptor_website, place.logo_url) == (
+        "https://test-grocer.example",
+        "https://pay.test-grocer.example",
+        "https://logos.example/test-grocer.png",
+    )
+    assert await _warnings(session, connection) == []
+
+
+async def test_two_merchant_ids_one_name_two_places(session, run) -> None:
+    connection = await _connection(run)
+    town = make_merchant(id="merch_TEST1", name="Test Cafe")
+    station = make_merchant(
+        id="merch_TEST2",
+        name="Test Cafe",
+        online=True,
+        address=make_merchant()["address"] | {"address": "2 Station Road"},
+    )
+    payments = [
+        make_transaction(id="tx_TEST0001", merchant=town),
+        make_transaction(id="tx_TEST0002", merchant=station, created="2026-03-01T13:00:00.000Z"),
+    ]
+
+    await _normalize(session, connection, transactions=payments)
+
+    first, second = await _transactions(session)
+    assert first.counterparty_entity_id == second.counterparty_entity_id
+    places = [
+        await session.get_one(Entity, (await _details(session, r.id)).place_entity_id)
+        for r in (first, second)
+    ]
+    assert [
+        (p.kind, p.name, p.external_ids["monzo_merchant"], p.address_street, p.online)
+        for p in places
+    ] == [
+        ("place", "Test Cafe", "merch_TEST1", "1 Test Street", False),
+        ("place", "Test Cafe", "merch_TEST2", "2 Station Road", True),
+    ]
+    organizations = await session.scalar(
+        text(
+            "select count(*) from core.entities where kind = 'organization' and name = 'Test Cafe'"
+        )
+    )
+    assert organizations == 1
+
+
+async def test_cash_deposit_fee_is_a_separate_posting(session, run) -> None:
+    connection = await _connection(run)
+    deposit = make_transaction(
+        amount=12300, notes="cash in", fees={"deposit.cash": -100, "unused.fee": 0}
+    )
+
+    report = await _normalize(
+        session,
+        connection,
+        transactions=[deposit],
+        balance=12300,
+        reconciled=[ACCOUNT_ID],
+        openings=[ACCOUNT_ID],
+    )
+
+    assert report.mismatches == []
+    (tx,) = await _transactions(session)  # and no opening: the ledger agrees with Monzo
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    rows = await session.execute(
+        text(
+            "select account_id, quantity, is_fee, memo from finance.postings"
+            " where transaction_id = :id order by position"
+        ),
+        {"id": tx.id},
+    )
+    assert [tuple(r) for r in rows] == [
+        (main, Decimal("124.00"), False, "cash in"),
+        (await _unassigned(run), Decimal("-123.00"), False, ""),
+        (main, Decimal("-1.00"), True, "deposit.cash"),
+    ]
+    balance = await session.scalar(
+        text("select sum(quantity) from finance.postings where account_id = :id"), {"id": main}
+    )
+    assert balance == Decimal("123.00")
+
+
+async def test_split_categories_stored_only_when_split(session, run) -> None:
+    connection = await _connection(run)
+
+    def payment(n: int, amount: int, categories: Any) -> dict[str, Any]:
+        return make_transaction(
+            id=f"tx_TEST000{n}",
+            created=f"2026-03-01T12:0{n}:00.000Z",
+            amount=amount,
+            category="groceries",
+            categories=categories,
+        )
+
+    payments = [
+        payment(1, -1234, {"groceries": -1234}),  # the category itself: derivable
+        payment(2, -3000, {"household": -1000, "groceries": -2000}),
+        payment(3, -1500, {"shopping": -1500}),
+        payment(4, -1500, {"groceries": -1000}),
+        payment(5, -700, None),
+    ]
+
+    await _normalize(session, connection, transactions=payments)
+
+    assert [await _splits(session, r.id) for r in await _transactions(session)] == [
+        [],
+        [("groceries", Decimal("-20.00")), ("household", Decimal("-10.00"))],
+        [("shopping", Decimal("-15.00"))],
+        [("groceries", Decimal("-10.00"))],
+        [],
+    ]
+
+
+async def test_declined_recorded_not_posted(session, run) -> None:
+    connection = await _connection(run)
+    declined = make_transaction(
+        amount=-2500, settled="", decline_reason="INSUFFICIENT_FUNDS", merchant=make_merchant()
+    )
+
+    report = await _normalize(session, connection, transactions=[declined])
+
+    assert (report.created, report.skipped_declined) == (0, 1)
+    assert await _transactions(session) == []
+    (row,) = await _declined(session)
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    gbp = await get_currency(session, "GBP")
+    assert (
+        row.connection_id,
+        row.external_id,
+        row.account_id,
+        row.occurred_at,
+        row.quantity,
+        row.instrument_id,
+        row.description,
+        row.decline_reason,
+    ) == (
+        connection.id,
+        "tx_TEST0001",
+        main,
+        datetime(2026, 3, 1, 12, tzinfo=UTC),
+        Decimal("-25.00"),
+        gbp.id,
+        "Test Grocer",
+        "INSUFFICIENT_FUNDS",
+    )
+    organization = await session.get_one(Entity, row.counterparty_entity_id)
+    place = await session.get_one(Entity, row.place_entity_id)
+    assert (organization.kind, organization.name) == ("organization", "Test Grocer")
+    assert (place.kind, place.external_ids) == ("place", {"monzo_merchant": "merch_TEST1"})
+
+
+async def test_pending_then_declined_is_voided_and_recorded(session, run) -> None:
+    connection = await _connection(run)
+    pending = make_transaction(amount=-5000, settled="")
+    await _normalize(session, connection, transactions=[pending])
+
+    report = await _normalize(
+        session, connection, transactions=[pending | {"decline_reason": "CARD_INACTIVE"}]
+    )
+
+    assert (report.voided, report.skipped_declined) == (1, 0)
+    (tx,) = await _transactions(session)
+    assert tx.status == "void"
+    (row,) = await _declined(session)
+    assert (row.external_id, row.quantity, row.decline_reason) == (
+        "tx_TEST0001",
+        Decimal("-50.00"),
+        "CARD_INACTIVE",
+    )
+
+
+async def test_account_and_pot_details(session, run) -> None:
+    connection = await _connection(run)
+    pot = make_pot(
+        type="flexible_savings",
+        isa_wrapper="ISA",
+        goal_amount=100000,
+        locked=True,
+        round_up=True,
+        round_up_multiplier=2,
+    )
+
+    await _normalize(session, connection, pots=[pot])
+
+    account_map = await _account_map(session, connection)
+    main = await get_account(session, account_map[ACCOUNT_ID])
+    saved = await get_account(session, account_map["pot_TEST1"])
+    assert (main.product_type, main.owner_type, main.tax_wrapper) == (
+        "standard",
+        "personal",
+        "none",
+    )
+    assert (
+        saved.product_type,
+        saved.goal_amount,
+        saved.locked,
+        saved.round_up,
+        saved.round_up_multiplier,
+        saved.tax_wrapper,
+    ) == ("flexible_savings", Decimal("1000.00"), True, True, Decimal(2), "isa")
+
+    # Already mapped: what Monzo says now is written all the same, absence included.
+    await _normalize(
+        session,
+        connection,
+        account=make_account(product_type="", owner_type="business"),
+        pots=[make_pot(isa_wrapper="", locked=False, round_up=False)],
+    )
+
+    main = await get_account(session, account_map[ACCOUNT_ID])
+    saved = await get_account(session, account_map["pot_TEST1"])
+    assert (main.product_type, main.owner_type) == (None, "business")
+    assert (
+        saved.goal_amount,
+        saved.locked,
+        saved.round_up,
+        saved.round_up_multiplier,
+        saved.tax_wrapper,
+    ) == (None, False, False, None, "none")
+
+
+@pytest.mark.parametrize("isa_wrapper", ["JISA", 7], ids=["unknown-name", "number"])
+async def test_unknown_isa_wrapper_warns(session, run, isa_wrapper: object) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, pots=[make_pot(isa_wrapper="ISA")])
+
+    # The sync completes; the pot keeps the tax wrapper it had.
+    await _normalize(session, connection, pots=[make_pot(isa_wrapper=isa_wrapper)])
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    assert pot.tax_wrapper == "isa"
+    assert await _warnings(session, connection) == [UNMAPPED.format("isa_wrapper")]
+
+
+@pytest.mark.parametrize("isa_wrapper", ["missing", None], ids=["missing", "null"])
+async def test_pot_without_isa_wrapper_keeps_its_tax_wrapper(
+    session, run, isa_wrapper: object
+) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, pots=[make_pot(isa_wrapper="LISA")])
+    pot = make_pot()
+    if isa_wrapper == "missing":
+        del pot["isa_wrapper"]
+    else:
+        pot["isa_wrapper"] = isa_wrapper
+
+    await _normalize(session, connection, pots=[pot])
+
+    saved = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    assert saved.tax_wrapper == "lisa"
+    assert await _warnings(session, connection) == []
+
+
+async def test_atm_fees_detailed_warns_once(session, run) -> None:
+    connection = await _connection(run)
+    withdrawal = make_transaction(amount=-2000, atm_fees_detailed={"withdrawal": -150})
+
+    for _ in range(2):
+        report = await _normalize(session, connection, transactions=[withdrawal])
+
+    assert report.unchanged == 1  # posted all the same
+    assert await _warnings(session, connection) == [UNMAPPED.format("atm_fees_detailed")]
+    # It stays until the owner clears it, even when the field is gone again.
+    await _normalize(session, connection, transactions=[make_transaction(amount=-2000)])
+    assert await _warnings(session, connection) == [UNMAPPED.format("atm_fees_detailed")]
+
+
+async def test_unknown_local_currency_warns(session, run) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(amount=-1234, local_amount=-99000, local_currency="XTS")
+
+    report = await _normalize(session, connection, transactions=[payment])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    details = await _details(session, tx.id)
+    assert (details.original_quantity, details.original_instrument_id) == (None, None)
+    assert await _warnings(session, connection) == [UNMAPPED.format("local_currency")]
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [
+        ("labels", {"labels": "test-label"}),
+        ("labels", {"labels": ["test-label", 7]}),
+        ("fees", {"fees": {"deposit.cash": "-100"}}),
+        # A fee as large as the amount would leave a zero posting on the account.
+        ("fees", {"fees": {"test.fee": -1234}}),
+        ("categories", {"categories": ["groceries"]}),
+        ("categories", {"categories": {"groceries": True}}),
+        ("metadata.mcc", {"metadata": {"mcc": "54A1"}}),
+    ],
+    ids=[
+        "labels-text",
+        "labels-number",
+        "fees-text",
+        "fees-the-whole-amount",
+        "categories-list",
+        "categories-flag",
+        "mcc-not-digits",
+    ],
+)
+async def test_unexpected_shapes_warn_and_still_post(
+    session, run, name: str, overrides: dict[str, Any]
+) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(amount=-1234, merchant=make_merchant()) | overrides
+
+    report = await _normalize(session, connection, transactions=[payment])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert await _postings(session, tx.id) == [
+        (main, Decimal("-12.34"), ""),
+        (await _unassigned(run), Decimal("12.34"), ""),
+    ]
+    assert await _splits(session, tx.id) == []
+    details = await _details(session, tx.id)
+    assert details.labels == []
+    assert (await session.get_one(Entity, details.place_entity_id)).mcc is None
+    assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+async def test_transaction_without_new_keys_still_posts(session, run) -> None:
+    connection = await _connection(run)
+    bare = make_transaction(merchant=MERCHANT)
+    for key in ("local_amount", "local_currency", "category"):
+        del bare[key]
+
+    report = await _normalize(session, connection, transactions=[bare])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert await _postings(session, tx.id) == [
+        (main, Decimal("-12.34"), ""),
+        (await _unassigned(run), Decimal("12.34"), ""),
+    ]
+    details = await _details(session, tx.id)
+    assert tuple(details)[:6] == (None, None, None, [], None, None)
+    assert await _splits(session, tx.id) == []
+    place = await session.get_one(Entity, details.place_entity_id)
+    assert (place.kind, place.name, place.address_street, place.latitude, place.mcc) == (
+        "place",
+        "Test Grocer",
+        None,
+        None,
+        None,
+    )
+    assert await _warnings(session, connection) == []
+
+
+async def test_resync_with_details_writes_nothing(session, run) -> None:
+    connection = await _connection(run)
+    history = [
+        make_transaction(id="tx_TEST0001", amount=12300, fees={"deposit.cash": -100}),
+        make_transaction(
+            id="tx_TEST0002",
+            created="2026-03-01T13:00:00.000Z",
+            amount=-3000,
+            local_amount=-3600,
+            local_currency="USD",
+            categories={"groceries": -2000, "household": -1000},
+            labels=["test-label"],
+            scheme="mastercard",
+            include_in_spending=True,
+            merchant=make_merchant(),
+            metadata={"mcc": "5411"},
+        ),
+        make_transaction(
+            id="tx_TEST0003",
+            created="2026-03-01T14:00:00.000Z",
+            amount=-2500,
+            settled="",
+            decline_reason="INSUFFICIENT_FUNDS",
+            merchant=make_merchant(),
+        ),
+    ]
+    run_args: dict[str, Any] = {
+        "transactions": history,
+        "pots": [make_pot(isa_wrapper="ISA", goal_amount=100000)],
+        "reconciled": [ACCOUNT_ID],
+        "openings": [ACCOUNT_ID],
+    }
+    first = await _normalize(session, connection, **run_args)
+    assert (first.created, first.skipped_declined) == (3, 1)  # two and the opening
+
+    async def state() -> list[list[str]]:
+        tables = (
+            "finance.transactions",
+            "finance.postings",
+            "finance.transaction_category_splits",
+            "finance.declined_transactions",
+            "finance.accounts",
+            "core.entities",
+            "core.connections",
+            "core.events",
+        )
+        return [await _rows(session, table) for table in tables]
+
+    before = await state()
+
+    second = await _normalize(session, connection, **run_args)
+
+    assert second == NormalizeReport(unchanged=3, skipped_declined=1)
+    assert await state() == before
+
+
+async def test_device_fingerprint_and_ip_never_stored(session, run) -> None:
+    connection = await _connection(run)
+    secret = {"device_fingerprint": "fp-SYNTHETIC-5e1f", "ip_address_attempt": "198.51.100.77"}
+    metadata = {"mcc": "5411", **secret}
+    transactions = [
+        make_transaction(
+            id="tx_TEST0001",
+            merchant=make_merchant(),
+            metadata=metadata,
+            categories={"groceries": -1000, "household": -234},
+            fees={"test.fee": -10},
+        ),
+        make_transaction(
+            id="tx_TEST0002",
+            created="2026-03-01T13:00:00.000Z",
+            settled="",
+            decline_reason="INSUFFICIENT_FUNDS",
+            merchant=make_merchant(),
+            metadata=metadata,
+        ),
+    ]
+
+    await _normalize(session, connection, transactions=transactions, pots=[make_pot()])
+
+    tables = (
+        "finance.transactions",
+        "finance.postings",
+        "finance.declined_transactions",
+        "finance.transaction_category_splits",
+        "finance.accounts",
+        "core.entities",
+        "core.events",
+        "core.audit_log",
+    )
+    for table in tables:
+        rows = await _rows(session, table)
+        assert rows, table  # the search looks at something
+        for value in secret.values():
+            assert not [row for row in rows if value in row], (table, value)
