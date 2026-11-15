@@ -167,6 +167,31 @@ async def test_rollback_via_api(client) -> None:
     assert batch["id"] in {b["id"] for b in listed}
 
 
+async def test_imported_transaction_is_voided_only_by_rollback(client) -> None:
+    """Third review: a hand void left the import's row 'committed', so its openings never
+    re-aligned and later statements were refused as disagreeing."""
+    gbp_id = await _gbp_id(client)
+    account_id = await _account(client)
+    profile_id = await _profile(client, "Example Bank", _example_config("example-bank-csv.json"))
+    batch = (
+        await _upload(client, account_id, profile_id, _example("example-bank.csv"), "x.csv", gbp_id)
+    ).json()
+    assert (await client.post(f"{API}/imports/{batch['id']}/commit")).status_code == 200
+    rows = (await client.get(f"{API}/imports/{batch['id']}")).json()["rows"]
+    posted = [row["transaction_id"] for row in rows if row["transaction_id"] is not None]
+    assert posted
+
+    for transaction_id in (posted[0], posted[-1]):  # an adjustment and a statement row
+        response = await client.post(f"{API}/transactions/{transaction_id}/void")
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["error"] == "transaction_imported"
+        assert "x.csv" in response.json()["detail"]["message"]
+    assert await _balance(client, account_id) == Decimal("1676.37")
+
+    assert (await client.post(f"{API}/imports/{batch['id']}/rollback")).status_code == 200
+    assert await _balance(client, account_id) == 0
+
+
 async def test_discard_and_state_errors(client) -> None:
     account_id = await _account(client)
     profile_id = await _profile(client, "Example Bank QIF", QIF_CONFIG)

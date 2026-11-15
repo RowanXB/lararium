@@ -29,6 +29,7 @@ from lararium.modules.finance.errors import (
     ImportBatchNotFoundError,
     ImportNotAllowedError,
     NotACurrencyError,
+    TransactionImportedError,
     UnknownCurrencyError,
 )
 from lararium.modules.finance.importing import csv_parser, ofx_parser, pdf, qif_parser
@@ -431,6 +432,21 @@ async def batches_relying_on(session: AsyncSession, batch_id: UUID) -> list[tupl
         .order_by(b.filename, b.id)
     )
     return [(row.id, row.filename) for row in found]
+
+
+async def require_not_imported(session: AsyncSession, transaction_id: UUID) -> None:
+    """TransactionImportedError when a committed import's row (or adjustment) posted the
+    transaction. The import tables take a committed row's transaction to be live, so it is
+    voided only by rolling the import back (or by align_openings), never by hand."""
+    r, b = models.ImportRow, models.ImportBatch
+    filename = await session.scalar(
+        select(b.filename)
+        .join(r, r.batch_id == b.id)
+        .where(r.transaction_id == transaction_id, r.status == "committed")
+        .limit(1)
+    )
+    if filename is not None:
+        raise TransactionImportedError(filename)
 
 
 async def get_batch(session: AsyncSession, batch_id: UUID) -> ImportBatchRecord:

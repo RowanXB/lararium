@@ -86,6 +86,7 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.ImportBatchStateError: (status.HTTP_409_CONFLICT, "import_batch_state"),
     errors.ImportHasErrorsError: (status.HTTP_409_CONFLICT, "import_has_errors"),
     errors.ImportBatchStaleError: (status.HTTP_409_CONFLICT, "import_batch_stale"),
+    errors.TransactionImportedError: (status.HTTP_409_CONFLICT, "transaction_imported"),
 }
 _UPLOAD_CHUNK = 64 * 1024
 
@@ -295,6 +296,7 @@ async def void_transaction(
 ) -> TransactionOut:
     args = _args(transaction_id=transaction_id)
     async with command_context(session, actor, "void_transaction", args) as ctx:
+        await staging.require_not_imported(ctx.session, transaction_id)
         record = await ledger.void_transaction(ctx, transaction_id)
     return TransactionOut.model_validate(record)
 

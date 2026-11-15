@@ -84,6 +84,13 @@ class ImportNotAllowedError(FinanceError):
     """
 
 
+class TransactionImportedError(FinanceError):
+    """The transaction was posted by a committed import, so voiding it by hand would leave
+    the import's rows saying it stands (and its openings unaligned)."""
+
+    template = "this transaction was imported from {}: roll that import back instead"
+
+
 class ImportBatchNotFoundError(FinanceError):
     """No import batch has the given id."""
 
