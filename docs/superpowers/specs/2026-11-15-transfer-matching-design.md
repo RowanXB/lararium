@@ -130,7 +130,7 @@ One row per transfer between two own accounts:
 - `from_account_id`, `to_account_id`, `instrument_id`, `amount` (positive, as sent);
 - `out_transaction_id` (A's own record), `in_transaction_id` (B's own record), `placeholder_transaction_id`: each nullable, with at least one own record unless the transfer is `rejected` (a rejection outlives records rolled back, §5.9); a transaction is a leg of at most one transfer;
 - `status`: `awaiting` (one own record, the other side is connected and has not reported), `inferred` (one own record plus a placeholder), `matched` (both own records), `before_history` (the other side is connected but the transfer predates that account's history, §5.7), `rejected` (the owner said it is not a transfer); and, apart from the status, a `review_reason` (`several_candidates` or `amount_differs`) when the rule could not decide, which is what "needs review" means below;
-- `opened_at` (the first record's occurrence time), `matched_at`, `notified_at` (overdue alert sent).
+- `opened_at` (the earliest of its own records' occurrence times, whichever arrived first), `matched_at`, `notified_at` (overdue alert sent).
 
 **The invariant**, enforced in the service layer and checked by the integrity job: a transaction's contra leg is In transit if and only if it is a leg (out, in, or placeholder) of a transfer that is not `rejected`. Every other connector or import transaction's contra stays Unassigned. This covers every recorded transaction with a posting on In transit, whatever its shape: a leg that stops looking like one (a re-sync adds a fee posting, say) loses its transfer, and its In transit posting goes back to Unassigned.
 

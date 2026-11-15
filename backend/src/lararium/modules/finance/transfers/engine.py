@@ -195,6 +195,8 @@ async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> No
         .values(
             {
                 side: record.id,
+                # The earliest of its own records' times, whichever arrived first.
+                "opened_at": func.least(models.Transfer.opened_at, record.occurred_at),
                 "placeholder_transaction_id": None,
                 "settlement_transaction_id": None,
                 "status": "matched",

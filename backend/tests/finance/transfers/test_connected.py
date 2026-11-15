@@ -89,12 +89,44 @@ async def test_connected_both_orders_same_result(
         in_record.id,
     )
     assert transfer.matched_at is not None
+    # Opened when its earliest record occurred, whichever synced first.
+    assert transfer.opened_at == WHEN
     assert await contra_account(session, out_record.id, a.account.id) == ids.in_transit
     assert await contra_account(session, in_record.id, c.account.id) == ids.in_transit
     assert await in_transit_balance(session, ids) == 0
     assert await net_worth_on(session) == worth
     assert await placeholders(session) == []
     await assert_consistent(session)
+    assert await heal() == 0
+
+
+@pytest.mark.parametrize("receiver_offset", [timedelta(hours=2), timedelta(hours=-1)])
+@pytest.mark.parametrize("order", ["sender_first", "receiver_first", "one_heal"])
+async def test_opened_at_is_the_earliest_record(
+    session, a_and_c, connector_tx, heal, order, receiver_offset
+) -> None:
+    a, a_id, c, c_id = a_and_c
+
+    async def send():
+        await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+
+    async def receive():
+        await connector_tx(
+            c, "100", external_id="in_1", occurred_at=WHEN + receiver_offset, identifier_id=a_id
+        )
+
+    if order == "one_heal":
+        await send()
+        await receive()
+    else:
+        for post in (send, receive) if order == "sender_first" else (receive, send):
+            await post()
+            await heal()
+    await heal()
+
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "matched"
+    assert transfer.opened_at == min(WHEN, WHEN + receiver_offset)
     assert await heal() == 0
 
 
