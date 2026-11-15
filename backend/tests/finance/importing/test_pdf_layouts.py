@@ -266,13 +266,13 @@ def test_hsbc_period_across_new_year() -> None:
             pages=[
                 [HsbcRow("CR", ("EXAMPLE",), paid_in="5.00", date="02 Jan 27", balance="105.00")]
             ],
-            period="14 December to 13 January 2027",
-            brought_forward_date="13 Dec 26",
-            closing_day="13 Jan 27",
+            period="20 December to 19 January 2027",
+            brought_forward_date="19 Dec 26",
+            closing_day="19 Jan 27",
         )
     )
 
-    assert statement.period == (date(2026, 12, 14), date(2027, 1, 13))
+    assert statement.period == (date(2026, 12, 20), date(2027, 1, 19))
 
 
 def test_hsbc_rate_tier_after_the_table_refused() -> None:
