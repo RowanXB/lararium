@@ -471,7 +471,7 @@ async def _records_to_heal(session: AsyncSession) -> list[UUID]:
                     ),
                 )
             )
-        # (d) placeholders out of step with their record's dates.
+        # (d) placeholders out of step with their record: other dates, or void.
         mirrored, placeholder = aliased(t, name="mirrored"), aliased(t, name="placeholder")
         queries.append(
             select(mirrored.id.label("id"), mirrored.occurred_at)
@@ -484,6 +484,7 @@ async def _records_to_heal(session: AsyncSession) -> list[UUID]:
             .where(
                 active,
                 or_(
+                    placeholder.status == "void",
                     placeholder.occurred_at != mirrored.occurred_at,
                     placeholder.booking_date != mirrored.booking_date,
                 ),

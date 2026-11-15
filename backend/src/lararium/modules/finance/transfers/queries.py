@@ -133,7 +133,8 @@ async def list_transfers(
 async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
     """Ids of transactions that break the invariant (design §5.5): own records whose contra
     is In transit without being a leg of a transfer that is not rejected, or the reverse;
-    and placeholders and settlements whose transfer is gone."""
+    placeholders and settlements whose transfer is gone; and those of a transfer that is not
+    rejected which are void or don't post on In transit."""
     system = await system_account_ids(session)
     in_transit = system.get("in_transit")
     if in_transit is None:
@@ -164,5 +165,21 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             ),
         ),
     )
-    found = union(misplaced, orphaned).subquery()
+    # A transfer's placeholder or settlement that no longer moves money through In transit
+    # (voided, or re-posted elsewhere) leaves the transfer's own record alone in it.
+    broken = (
+        select(t.id.label("id"))
+        .join(
+            tr,
+            or_(tr.placeholder_transaction_id == t.id, tr.settlement_transaction_id == t.id),
+        )
+        .where(
+            active,
+            or_(
+                t.status == "void",
+                ~exists().where(p.transaction_id == t.id, p.account_id == in_transit),
+            ),
+        )
+    )
+    found = union(misplaced, orphaned, broken).subquery()
     return list(await session.scalars(select(found.c.id).order_by(found.c.id)))

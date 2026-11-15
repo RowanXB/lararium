@@ -336,3 +336,30 @@ async def test_registering_later_matches_history(
         assert await _contra(session, record.id, a.account.id) == ids.in_transit
     assert len(await _placeholders(session)) == 3
     await _consistent(session)
+
+
+async def test_voided_placeholder_is_a_violation_and_healed(
+    session, run, ids, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    a = await connected_bank("A")
+    b = await manual_bank("B")
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    await connector_tx(a, "-100", identifier_id=identifier)
+    assert await heal() == 1
+    [placeholder] = await _placeholders(session)
+
+    # void_transaction refuses it; a raw UPDATE stands in for anything that gets past that.
+    await session.execute(
+        text("update finance.transactions set status = 'void' where id = :t"),
+        {"t": placeholder.id},
+    )
+    assert await find_transfer_violations(session) == [placeholder.id]
+    assert (await _balances(session))[b.id] == Decimal("1000")
+
+    assert await heal() == 1
+    [fresh] = await _placeholders(session)
+    assert fresh.status == "inferred"
+    [transfer] = await list_transfers(session)
+    assert transfer.placeholder_transaction_id == fresh.id
+    assert (await _balances(session))[b.id] == Decimal("1100")
+    await _consistent(session)

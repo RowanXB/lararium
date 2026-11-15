@@ -577,8 +577,19 @@ async def delete_derived_transaction(ctx: CommandContext, transaction_id: UUID) 
 async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:
     """Void the transaction, recording who did. One already void is left as it is: the first
     void stands, so a connector acting on an older reading can't make the owner's void its
-    own (and so let a later sync undo it)."""
+    own (and so let a later sync undo it).
+
+    A transaction the ledger derived (a transfer's placeholder or settlement) is refused: it
+    follows its transfer, which deletes it when replaced or dissolved."""
     t = models.Transaction
+    origin = await ctx.session.scalar(select(t.origin).where(t.id == transaction_id))
+    if origin is None:
+        raise TransactionNotFoundError(str(transaction_id))
+    if origin in _DERIVED_ORIGINS:
+        raise FinanceValidationError(
+            f"transaction {transaction_id} was derived by the ledger for a transfer, so it"
+            " can't be voided; it goes when its transfer is rejected or its record voided"
+        )
     voided = await ctx.session.scalar(
         update(t)
         .where(t.id == transaction_id, t.status != "void")
@@ -586,9 +597,6 @@ async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> Transac
         .returning(t.id)
     )
     if voided is None:
-        exists = await ctx.session.scalar(select(t.id).where(t.id == transaction_id))
-        if exists is None:
-            raise TransactionNotFoundError(str(transaction_id))
         return await _load_transaction(ctx.session, transaction_id)
     record = await _load_transaction(ctx.session, transaction_id)
     _publish(ctx, "finance.transaction.voided", record)
