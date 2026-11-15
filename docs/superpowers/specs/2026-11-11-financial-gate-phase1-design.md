@@ -48,7 +48,7 @@ Why build it rather than use an existing open-source project: Firefly III leans 
 - Budgets, spending-category reports, tax calculation (e.g. UK Capital Gains Tax, CGT). But the data needed for tax must be recorded in full: the cost, fees and exchange rate at execution of every trade, and the account's tax wrapper type (ISA / SIPP / LISA / GIA).
 - Read-only MCP (letting agents such as Claude query the data). The interface is reserved and will be added later when needed (§10.3).
 - DeFi positions (assets in lending, liquidity pools, staking contracts). In Phase 1, wallets only count the coin and token balances held at addresses.
-- PDF statement parsing and LLM extraction (to be added later as a kind of import parser).
+- LLM extraction of statements. (Parsing the PDF statements of the owner's own banks moved into M2 on 2026-11-15, through per-bank layouts; see §7.8.)
 - Real-time intraday quotes. End-of-day valuation is enough.
 - Personal OS modules (to-dos, calendar, health, journal); only the interfaces are reserved.
 - Multi-user, native mobile apps, public internet access (except for the webhook receiver).
@@ -311,16 +311,16 @@ The implementer must first verify whether an eToro key can be restricted to read
 ### 7.8 Manual import
 
 - **Flow**: upload a file in the UI → the file is stored as a document → parsed with a "parse profile" → goes into the staging area → the user reviews it → committed to the ledger. A batch can be rolled back as a whole.
-- **Parse profiles** are per institution: column mapping, date format, sign convention, encoding. Profiles are stored as data, so adding an institution requires no code change. Phase 1 must provide a generic CSV mapper, plus OFX parsing. The example profiles shipped in the repository are paired only with synthetic example files.
+- **Parse profiles** are per institution: column mapping, date format, sign convention, encoding. Profiles are stored as data, so adding an institution requires no code change. Phase 1 must provide a generic CSV mapper, OFX and QIF parsing, the UK midata CSV, and the PDF statements of the owner's banks through per-bank layouts (decided 2026-11-15). Every format a bank offers is supported; for each bank the most information-complete one is recommended. The example profiles shipped in the repository are paired only with synthetic example files.
 - **Three kinds of handling, by export capability**:
-  - Banks that can export CSV or OFX: go through import.
-  - Accounts that only have PDF statements: handled as "balance snapshots only" (see below).
+  - Banks that can export CSV, OFX or QIF: go through import.
+  - Accounts that only have PDF statements: go through import when a layout for that bank's statement exists (HSBC UK, Lloyds); otherwise handled as "balance snapshots only" (see below) until a layout is written.
   - Fintech accounts whose statements can only be downloaded in the app: if CSV export is available, go through import; otherwise handle as balance snapshots. For multi-currency wallets, record a balance for each currency separately; mark accounts such as ISA and LISA with the corresponding tax wrapper.
 - **The staging area** shows: which rows are new, which are duplicates, and which can be paired with existing inferred postings (§8).
 - **Manual snapshots and manual assets**: for accounts with no transactions (fixed-term deposits, pensions, property, cars, etc.), enter the balance or valuation directly. Fixed-term deposits can record the interest rate and maturity date.
 - **Manual holdings are entered by quantity**: any instrument can be entered manually by quantity (e.g. 0.5 BTC, 100 shares of some ETF) and valued from a price source (§9); for instruments with no price source, a price can be entered manually, or the valuation can be entered directly in the reporting currency.
 - **The same applies to liabilities**: liability accounts such as credit cards and loans use the same import and snapshot flow as bank accounts.
-- **Accounts that can only export PDF**: in Phase 1 they are treated as "balance snapshots only" accounts. The transfer rule still generates inferred postings on them, which are then checked against manually entered balance snapshots; a difference beyond the tolerance triggers an alert. PDF parsing will be added later.
+- **Accounts that can only export PDF, from a bank without a layout yet**: treated as "balance snapshots only" accounts. The transfer rule still generates inferred postings on them, which are then checked against manually entered balance snapshots; a difference beyond the tolerance triggers an alert. A PDF layout is accepted only if it checks itself against the statement's own balances (see the M2 plan, `docs/superpowers/plans/2026-11-12-manual-import.md`).
 
 ### 7.9 Webhook receiver
 
@@ -464,7 +464,7 @@ For these modules, Phase 1 must:
 
 - **M0 Skeleton**: code repository, Docker Compose, Postgres and its roles, migrations, CI (ruff, pyright, tests, import-linter, OpenAPI consistency check), backup scripts.
 - **M1 Ledger core**: core and finance schemas; a ledger service with invariant checks; manual accounts, manual snapshots, manual holdings entered by quantity; the daily net worth view; a minimal usable UI.
-- **M2 Manual import**: generic CSV mapper, OFX parsing, staging review, batch rollback; at least one example parse profile (with synthetic data).
+- **M2 Manual import**: generic CSV mapper, OFX, QIF and midata parsing, PDF statements of the owner's banks (HSBC UK, Lloyds) through per-bank layouts, staging review, batch rollback; example profiles with synthetic data only.
 - **M3 Monzo**: OAuth, backfill within the 5-minute window, incremental sync, pots, the webhook receiver, re-authorisation reminders.
 - **M4 Transfer matching**: registry, inferred postings, the in-transit clearing account, intermediary institutions, review UI. The Monzo self-transfer rule works end to end at this step: tests in the repository use synthetic statements, and the user separately verifies it locally with their own real statements.
 - **M5 IBKR Flex**: positions, cash, trades, deposits and withdrawals; prices and FX rates; valuation; pairing with outgoing transfers from Monzo.
@@ -475,7 +475,7 @@ For these modules, Phase 1 must:
 
 The roadmap after that:
 
-- **Phase 2**: find an Open Banking aggregator that covers UK banks and is available to individuals, to sync all banks automatically (whether Enable Banking supports the UK is not yet confirmed; see §17); PDF statement parsing; user-defined rules; add read-only MCP as needed.
+- **Phase 2**: find an Open Banking aggregator that covers UK banks and is available to individuals, to sync all banks automatically (whether Enable Banking supports the UK is not yet confirmed; see §17); PDF layouts for further banks; user-defined rules; add read-only MCP as needed.
 - **Further out**: personal OS modules, in the order calendar and to-dos → health → journal.
 
 ## 14. Acceptance criteria
@@ -505,7 +505,8 @@ The roadmap after that:
 | All financial data sources are connected in Phase 1 | Confirmed |
 | Data layer design: raw data layer, double-entry ledger, event table, modular monolith | Confirmed |
 | eToro: connect directly to its API if a read-only key is available, otherwise go through SnapTrade | Default |
-| Accounts that can only export PDF are handled as balance snapshots in Phase 1 | Default |
+| Accounts that can only export PDF are handled as balance snapshots until their bank has a PDF layout; HSBC UK and Lloyds statements are parsed in M2 (changed 2026-11-15) | Confirmed |
+| Every export format a bank offers is supported; for each bank the most information-complete one is recommended (2026-11-15) | Confirmed |
 | Wallets support BTC and EVM chains by default in Phase 1; DeFi positions are out of scope | Default |
 | Add a crypto price source in Phase 1; any instrument can be entered manually by quantity | Default |
 | Transfers through an intermediary institution are handled as either the "own account" or the "conduit" case | Default |

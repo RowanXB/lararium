@@ -1,20 +1,22 @@
 # Manual Import Implementation Plan
 
-> **Status: deferred (2026-11-12).** The owner mostly relies on the Monzo API and imports by hand only occasionally, so M3 (Monzo) comes first. When this plan is resumed:
-> - **Task 1 (documents)** is still needed: the M3 plan stores Monzo's small JSON responses as raw records and does not build documents. Check whether a later plan built them first.
-> - **Task 4 (OFX)** and the OFX parts of the other tasks are optional. None of the owner's banks currently provides OFX; skip them unless one does. These are `OfxProfileConfig`, `LEDGERBAL` in Decision 13, the OFX tests in Tasks 5 and 7, and the OFX example files.
+> **Status: deferred (2026-11-12), scope widened (2026-11-15).** The owner mostly relies on the Monzo API, so M3 (Monzo) came first; it is now merged. When this plan is resumed:
+> - **Task 1 (documents)** is still needed: M3 stores Monzo's JSON responses as raw records and does not build documents.
+> - **Migrations are renumbered.** `main` now ends at `0012`, so this plan's `0008`, `0009` and `0010` become `0013`, `0014` and `0015`.
+> - **Every format the owner's banks export is supported** (Decision 14): CSV (with or without a header row), OFX (no longer optional: HSBC UK exports it), QIF, the UK midata CSV, and PDF statements through per-bank layouts (Task 4B). For each bank the most information-complete format is recommended. The owner's real exports were checked with throwaway prototypes on 2026-11-15; every format matched the others transaction by transaction over the dates they share. Only their structure is described here.
+> - **BOC UK** offers PDF e-statements in internet and mobile banking; no other export is documented. Its layout waits for sample statements.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Import bank statements (CSV through per-institution parse profiles, and OFX) into the ledger: upload a file, review the staged rows (new, duplicate, skipped, error), commit them as transactions, and roll a whole batch back.
+**Goal:** Import bank statements (CSV through per-institution parse profiles, OFX, QIF, and PDF statements through per-bank layouts) into the ledger: upload a file, review the staged rows (new, duplicate, skipped, error), commit them as transactions, and roll a whole batch back.
 
-**Architecture:** Uploaded files become content-addressed **documents** in `core` (a local directory behind a `DocumentStore` interface). A new `lararium.modules.finance.importing` package holds the parse profiles (stored as data), two pure parsers (CSV, OFX), the staging service (parse → dedupe → `finance.import_rows`) and the commit/rollback service, which turns each row into a two-posting transaction through the existing `ledger.post_transaction`. Parsing runs synchronously inside the API request; files are capped at 5 MiB.
+**Architecture:** Uploaded files become content-addressed **documents** in `core` (a local directory behind a `DocumentStore` interface). A new `lararium.modules.finance.importing` package holds the parse profiles (stored as data), the pure parsers (CSV, OFX, QIF, and PDF with one layout module per bank), the staging service (parse → dedupe → `finance.import_rows`) and the commit/rollback service, which turns each row into a two-posting transaction through the existing `ledger.post_transaction`. Parsing runs synchronously inside the API request; files are capped at 5 MiB.
 
-**Tech Stack:** as plan 1, plus `python-multipart` for uploads. No OFX library: OFX is parsed by a small hand-written tokenizer (see Decisions).
+**Tech Stack:** as plan 1, plus `python-multipart` for uploads and `pdfplumber` (MIT, with `pdfminer.six`, MIT) for PDF text with coordinates; `reportlab` (BSD) as a dev dependency to generate synthetic PDF statements in tests. No OFX library: OFX is parsed by a small hand-written tokenizer (see Decisions).
 
 **Spec:** `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (this plan covers M2: §7.8, plus the documents object from §6.2)
 
-**Builds on:** plan 1 (`docs/superpowers/plans/2026-11-11-foundation-ledger-core.md`) as merged in `main` (`aef64ee`), including migrations up to `0007`.
+**Builds on:** `main` at `bdcb64a` (plans 1 and 3: the ledger core and the Monzo connector), including migrations up to `0012`.
 
 ## Decisions
 
@@ -51,14 +53,41 @@ Choices the spec leaves open, made here so the tasks don't have to:
     - **When it doesn't apply.** Hybrid accounts skip the adjustment, because their snapshots anchor the balance; the chain check still runs. A file with neither balances nor `LEDGERBAL` gets the batch warning "This file has no balances, so its opening balance can't be checked".
     - **At commit.** The adjustment is recomputed. If the ledger moved since staging (another batch was committed), the commit is refused with `ImportBatchStaleError`, and the user uploads the file again.
 
-**Not in this plan:** pairing staged rows with inferred postings (needs M4), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), PDF parsing, background workers.
+14. **Formats, and one recommended format per bank.** Every format a bank exports is supported; the most information-complete one is recommended. A static catalog, `importing/catalog.py`, lists each institution's formats with a ready profile config and marks the recommended one; the UI offers "Add profile from catalog" and labels the recommended format. The catalog as checked against the owner's real exports:
+
+    | Institution | Format | Per transaction | Range | Recommended |
+    |---|---|---|---|---|
+    | HSBC UK | PDF statement | date, type code, full description, amount, day-end balance; statement summary | years | **yes** |
+    | HSBC UK | midata CSV | date, type code, description (many starred out), amount, balance after every row | 12 months ending 30 days ago | |
+    | HSBC UK | OFX | date, amount, `FITID`, name and memo; `TRNTYPE` always `OTHER`; one `LEDGERBAL` | last 12 months | |
+    | HSBC UK | CSV (transaction list, no header row) | date, description, signed amount | last 12 months | |
+    | HSBC UK | QIF | date, payee, signed amount | last 12 months | |
+    | Lloyds | CSV | date, type code, own sort code and account, description, debit/credit, balance | as chosen | **yes** |
+    | Lloyds | PDF statement | the same per row, plus the statement summary | per statement | |
+    | Lloyds | QIF | date, payee, signed amount | as chosen | |
+    | BOC UK | PDF statement | layout pending samples | | |
+
+    Generic formats (OFX, QIF, midata) are parsed once for every bank; bank-specific CSVs are profiles (data); PDF statements are layouts (code, Task 4B).
+15. **PDF statements are read by per-bank layouts that check themselves.** A PDF profile names a layout (`hsbc_uk_statement`, `lloyds_statement`); layouts are code, because the rules are positional. A layout reads words with their coordinates (`pdfplumber`) and must refuse the whole file (`FileFormatError` naming the failed check) unless every check holds:
+    - the statement summary (opening balance, money in, money out, closing balance) equals the parsed rows;
+    - every balance printed on the statement equals the running total;
+    - every row has exactly one amount, a date inside the statement period and a type code;
+    - every word inside the transaction table belongs to a row field (nothing is silently dropped).
+
+    A layout that misreads a changed design therefore fails loudly instead of posting wrong numbers. Observed layouts:
+    - **HSBC UK** (OpenText output): columns "Paid out", "Paid in" and "Balance" are told apart only by x position, measured from the table header. The date is printed only on a day's first row and is carried forward; the balance is printed only after a day's last row, with a trailing `D` when overdrawn (negative). Each row starts with a type code (`VIS`, `)))`, `CR`, `DR`, `BP`, `OBP`, …) and its description may span lines. Long statements continue on the next page between "BALANCE CARRIED FORWARD" and "BALANCE BROUGHT FORWARD"; a first statement has no brought-forward line, and its opening balance comes from the summary. The details column is set tight: word extraction needs `x_tolerance` below the default, or words run together.
+    - **Lloyds** (iText, tagged for screen readers): a second text layer of 0.1 pt white text repeats the column labels and writes empty cells as "blank."; it must be filtered out by size and colour before reading. Amount columns are positioned under the table header's "Money In", "Money Out" and "Balance".
+16. **Overlapping imports from different formats.** Dedupe keys (Decision 5) differ between formats, so a PDF statement and an OFX export covering the same days would both commit. Each committed batch therefore records the date range it covers (a PDF's statement period; otherwise its first to last row date). When a new batch's rows fall on days a committed batch of the same account already covers, they are matched to the committed rows of those days by `(booking_date, quantity)` as a multiset: matched rows become `duplicate`; an unmatched row is an `error` ("this period was already imported from another file, and this row is not in it"). This lets the owner import HSBC PDF statements for history and the OFX export for the weeks since the last statement, in either order.
+17. **The bank's transaction type is kept.** A mapped `type` column (CSV), the type code of a PDF row, or OFX `TRNTYPE` is stored in `import_rows.bank_type` and in `raw`. M4 uses it (e.g. `FPO`/`FPI` and `CR`/`BP` mark likely transfers).
+
+**Not in this plan:** pairing staged rows with inferred postings (needs M4), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), LLM extraction, PDF layouts for banks without sample statements (BOC UK), background workers.
 
 ## Global Constraints
 
 - Everything in plan 1's Global Constraints still applies: Python 3.13, uv with the lockfile enforced, ruff, pyright strict on `src/`, import-linter contracts, PostgreSQL 18, `NUMERIC`/`Decimal`/strings and the word `float` nowhere in `src/`, UUIDv7, UTC `timestamptz` plus separate `date`, English UI copy, docs in English (only the README also has `README.zh-CN.md`), AGPL-3.0-compatible dependencies only.
 - Branch `feat/claude-manual-import`; commit messages `<type>: <summary>`; sign commits with the `local-signed-git-commit` skill.
 - Every write goes through `command_context` (one audit row per request, events in the outbox). New write routes reuse `ActorDep`, so the cross-site check applies to uploads too.
-- **No real statements anywhere in the repository.** Example and test files are hand-written and synthetic, with the fictional institution "Example Bank". The owner's real exports stay in `private/`.
+- **No real statements anywhere in the repository.** Example and test files are hand-written and synthetic, with the fictional institution "Example Bank"; synthetic PDF statements for the HSBC UK and Lloyds layouts are generated in tests with `reportlab`, reproducing only the layout (positions, labels, the hidden text layer), with invented names and amounts. The owner's real exports stay outside the repository and are used only to verify layouts locally.
 - Amount limits: imported quantities and balances go through `money.require_amount` (at most 40 digits on each side of the point); a value that fails becomes a row error, never a 500.
 - Upload limit `MAX_IMPORT_BYTES = 5 * 1024 * 1024`; row limit `MAX_IMPORT_ROWS = 20_000`.
 - `core` stays finance-agnostic: `core.documents` knows nothing about imports, and the `source` it records is a free string (`"finance.import"`).
@@ -76,6 +105,16 @@ Inputs the spec implies but the main-path tests would not hit, most likely first
 - **Date-only rows across the BST change:** `booking_date` stays the date written in the file and is not shifted by UTC conversion (Task 5: `test_date_only_rows_keep_booking_date_across_dst`).
 - **Excel-style CSVs:** a UTF-8 BOM before the header and a cp1252 `£` decode correctly; a file that isn't valid in the profile's encoding is a clear file-level error, never mojibake (Task 3: `test_utf8_bom_header`, `test_cp1252_pound_sign`, `test_wrong_encoding_is_file_error`).
 
+Found by checking the owner's HSBC UK and Lloyds exports (2026-11-15):
+
+- **A CSV with no header row** (HSBC's transaction list) maps columns by position (Task 3: `test_headerless_csv`).
+- **A footer after the rows** (midata's "Arranged overdraft limit" line) is skipped, not an error that blocks the commit (Task 3: `test_footer_rows_skipped`).
+- **Amounts written `+£12.34` and `-£12.34`** (midata) and whole numbers without decimals (`85`, Lloyds CSV) parse (Task 3: `test_signed_pound_amounts`, `test_whole_number_amounts`).
+- **A PDF whose date or balance appears only on some rows** reads the carried date and checks the day-end balance (Task 4B: `test_hsbc_date_carried_and_day_end_balance`).
+- **A PDF with a hidden text layer** reads only the visible text (Task 4B: `test_lloyds_hidden_layer_ignored`).
+- **A PDF that doesn't add up** is refused as a whole, naming the failed check (Task 4B: `test_layout_refuses_when_summary_differs`).
+- **The same days imported from a PDF and from an OFX export** commit once (Task 6: `test_pdf_then_ofx_overlap_commits_once`, `test_ofx_then_pdf_overlap_commits_once`).
+
 ---
 
 ## File Structure
@@ -83,9 +122,9 @@ Inputs the spec implies but the main-path tests would not hit, most likely first
 ```
 backend/
   migrations/versions/
-    0008_core_documents.py          # Task 1
-    0009_finance_import_profiles.py # Task 2
-    0010_finance_import_batches.py  # Task 5
+    0013_core_documents.py          # Task 1
+    0014_finance_import_profiles.py # Task 2
+    0015_finance_import_batches.py  # Task 5
   src/lararium/
     config.py                       # + document_dir (Task 1)
     deps.py                         # + get_document_store (Task 7)
@@ -105,6 +144,13 @@ backend/
         parsed.py                   # Task 3: ParsedRow, RowError, amount/description helpers
         csv_parser.py               # Task 3
         ofx_parser.py               # Task 4
+        qif_parser.py               # Task 4A
+        pdf/                        # Task 4B
+          __init__.py               # parse_pdf, layout registry, the self-checks (Decision 15)
+          words.py                  # visible words with coordinates, grouped into lines
+          hsbc_uk.py
+          lloyds.py
+        catalog.py                  # Task 7: institutions, formats, recommended (Decision 14)
         staging.py                  # Task 5
         commit.py                   # Task 6
         examples/                   # Task 7: synthetic Example Bank files
@@ -112,10 +158,13 @@ backend/
           example-bank.csv
           example-bank-ofx.json
           example-bank.ofx
+          example-bank.qif
   tests/
     core/test_documents.py
     finance/importing/test_profiles.py, test_csv_parser.py, test_ofx_parser.py,
+                     test_qif_parser.py, test_pdf_layouts.py, test_catalog.py,
                      test_staging.py, test_commit.py
+    finance/importing/synthetic_pdfs.py  # reportlab builders for the layouts
     api/test_import_api.py
 web/src/
   pages/ImportsPage.tsx, ImportBatchPage.tsx, ImportProfilesPage.tsx (+ .test.tsx)
@@ -129,7 +178,7 @@ backend/Dockerfile                                                 # Task 9
 ### Task 1: Documents (core)
 
 **Files:**
-- Create: `backend/migrations/versions/0008_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
+- Create: `backend/migrations/versions/0013_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
 - Modify: `backend/src/lararium/core/models.py`, `backend/src/lararium/core/errors.py`, `backend/src/lararium/config.py`
 
 **Interfaces:**
@@ -143,7 +192,7 @@ backend/Dockerfile                                                 # Task 9
   - `async def read_document(session: AsyncSession, store: DocumentStore, document_id: UUID) -> bytes`: re-hashes and raises `DocumentIntegrityError` on mismatch or a missing file.
   - `Settings.document_dir: Path = Path("/var/lib/lararium/documents")` (env `LARARIUM_DOCUMENT_DIR`).
 
-Migration `0008`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT NULL UNIQUE CHECK (sha256 ~ '^[0-9a-f]{64}$'), size_bytes bigint NOT NULL CHECK (size_bytes >= 0), media_type text NOT NULL, original_filename text NOT NULL, source text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`, then `REVOKE UPDATE, DELETE ON core.documents FROM lararium_backend` (documents are immutable raw data, like the audit log).
+Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT NULL UNIQUE CHECK (sha256 ~ '^[0-9a-f]{64}$'), size_bytes bigint NOT NULL CHECK (size_bytes >= 0), media_type text NOT NULL, original_filename text NOT NULL, source text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`, then `REVOKE UPDATE, DELETE ON core.documents FROM lararium_backend` (documents are immutable raw data, like the audit log).
 
 - [ ] **Step 1: Write the failing tests** in `tests/core/test_documents.py`, using a `store` fixture `LocalDocumentStore(tmp_path)`:
   - `test_store_and_read_round_trip`: storing `b"date,amount\n"` with filename `a.csv` returns a record with `size_bytes == 12` and a 64-hex `sha256`, and `read_document` returns the same bytes.
@@ -159,18 +208,20 @@ Migration `0008`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
 ### Task 2: Parse profiles
 
 **Files:**
-- Create: `backend/migrations/versions/0009_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
+- Create: `backend/migrations/versions/0014_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
 - Modify: `backend/src/lararium/modules/finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
 - Produces (in `importing/profiles.py`). All config models are Pydantic models with `ConfigDict(extra="forbid", frozen=True)`:
   - `class AmountFormat`: `decimal_separator: Literal[".", ","] = "."`; `thousands_separator: Literal["", ",", ".", " ", "'"] = ""`. Validator: the two must differ.
-  - `class CsvColumns`: `date: str`; `description: list[str]` (min 1; joined with one space); `amount: str | None = None`; `inflow: str | None = None`; `outflow: str | None = None`; `balance: str | None = None`; `currency: str | None = None`; `external_id: str | None = None`; `fee: str | None = None`. Validator: exactly one of `amount`, or both `inflow` and `outflow`.
+  - `class CsvColumns`: `date: str`; `description: list[str]` (min 1; joined with one space); `amount: str | None = None`; `inflow: str | None = None`; `outflow: str | None = None`; `balance: str | None = None`; `currency: str | None = None`; `external_id: str | None = None`; `fee: str | None = None`; `type: str | None = None` (the bank's transaction type, Decision 17). Validator: exactly one of `amount`, or both `inflow` and `outflow`.
   - `class CsvProfileConfig`:
     - `format: Literal["csv"]`
     - `encoding: Literal["utf-8-sig", "utf-8", "cp1252", "latin-1"] = "utf-8-sig"`
     - `delimiter: str = ","` (exactly one character)
     - `skip_rows: int = 0` (0–50)
+    - `header: list[str] | None = None`: for a file without a header row (HSBC's transaction list), the column names to use, in order; `None` means the first row is the header
+    - `skip_footer_rows: int = 0` (0–20): trailing non-empty lines to drop, such as midata's "Arranged overdraft limit" line
     - `columns: CsvColumns`
     - `date_format: str`. Validated by formatting `datetime(2026, 12, 31, 23, 59, 58)` with it and parsing the result back: the parsed date must be 2026-12-31. A format with `%H`, `%I`, `%M`, `%S` or `%p` carries a time (property `has_time: bool`).
     - `timezone: str | None = None`, an IANA name checked with `ZoneInfo`
@@ -179,14 +230,16 @@ Migration `0008`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
     - `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`
     - `amount_format: AmountFormat = AmountFormat()`
   - `class OfxProfileConfig`: `format: Literal["ofx"]`; `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`; `timezone: str | None = None`.
-  - `type ProfileConfig = Annotated[CsvProfileConfig | OfxProfileConfig, Field(discriminator="format")]`.
-  - `@dataclass(frozen=True) class ImportProfileRecord`: `id: UUID, name: str, config: CsvProfileConfig | OfxProfileConfig, version: int, updated_at: datetime`.
-  - `async def create_profile(ctx, *, name: str, config: CsvProfileConfig | OfxProfileConfig) -> ImportProfileRecord`
-  - `async def update_profile(ctx, profile_id: UUID, *, name: str, config: CsvProfileConfig | OfxProfileConfig) -> ImportProfileRecord`: increments `version`.
+  - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `sign` as for OFX; `timezone: str | None = None`.
+  - `class PdfProfileConfig`: `format: Literal["pdf"]`; `layout: Literal["hsbc_uk_statement", "lloyds_statement"]`; `timezone: str | None = None`.
+  - `type ProfileConfig = Annotated[CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig, Field(discriminator="format")]`.
+  - `@dataclass(frozen=True) class ImportProfileRecord`: `id: UUID, name: str, config: ProfileConfigModel, version: int, updated_at: datetime`, where `ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig`.
+  - `async def create_profile(ctx, *, name: str, config: ProfileConfigModel) -> ImportProfileRecord`
+  - `async def update_profile(ctx, profile_id: UUID, *, name: str, config: ProfileConfigModel) -> ImportProfileRecord`: increments `version`.
   - `async def get_profile(session, profile_id: UUID) -> ImportProfileRecord`; `async def list_profiles(session) -> list[ImportProfileRecord]` (by name).
   - Errors in `finance/errors.py`: `ImportProfileNotFoundError`, `DuplicateProfileNameError`.
 
-Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name text NOT NULL, format text NOT NULL CHECK (format IN ('csv','ofx')), config jsonb NOT NULL, version integer NOT NULL DEFAULT 1 CHECK (version >= 1), owner_entity_id uuid NOT NULL REFERENCES core.entities, created_at/updated_at timestamptz NOT NULL DEFAULT now(), CHECK (config->>'format' = format))`, plus a unique index on `lower(btrim(name))`. Names are stripped on write, and an empty name is a `FinanceValidationError`.
+Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name text NOT NULL, format text NOT NULL CHECK (format IN ('csv','ofx','qif','pdf')), config jsonb NOT NULL, version integer NOT NULL DEFAULT 1 CHECK (version >= 1), owner_entity_id uuid NOT NULL REFERENCES core.entities, created_at/updated_at timestamptz NOT NULL DEFAULT now(), CHECK (config->>'format' = format))`, plus a unique index on `lower(btrim(name))`. Names are stripped on write, and an empty name is a `FinanceValidationError`.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_amount_xor_inflow_outflow`: `CsvColumns(date="D", description=["X"])` raises; giving `amount` together with `inflow`/`outflow` raises; `inflow` without `outflow` raises.
@@ -196,9 +249,11 @@ Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name tex
   - `test_timezone_and_filters_validated`: `timezone="Europe/Nowhere"` is rejected; `include_only={"State": []}` is rejected.
   - `test_update_bumps_version`: create → `version == 1`; update → `version == 2` with the new config.
   - `test_duplicate_name_case_insensitive`: creating `"Example Bank"` then `" example bank "` raises `DuplicateProfileNameError`.
+  - `test_header_names_need_no_header_row`: `header=["Date", "Description", "Amount"]` with `columns` naming those is accepted; a `columns` name missing from `header` is rejected.
+  - `test_qif_and_pdf_configs`: a QIF config without `date_format` and a PDF config with an unknown `layout` are rejected.
 - [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_profiles.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement** as specified. Store `config.model_dump(mode="json")`; load it back with a `TypeAdapter(ProfileConfig)`. Detect the duplicate name through the unique index, translating sqlstate `23505` for that index into `DuplicateProfileNameError`.
-- [ ] **Step 4: Run**; expected: 7 passed; `make backend-check` green.
+- [ ] **Step 4: Run**; expected: 9 passed; `make backend-check` green.
 - [ ] **Step 5: Commit** `feat: add import parse profiles stored as data`.
 
 ### Task 3: CSV parser
@@ -211,13 +266,13 @@ Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name tex
 - Consumes: `CsvProfileConfig`, `AmountFormat` (Task 2); `money.require_amount`.
 - Produces:
   - In `parsed.py`:
-    - `@dataclass(frozen=True) class ParsedRow`: `position: int, booking_date: date, occurred_at: datetime | None, description: str, quantity: Decimal, fee: Decimal, currency: str | None, balance: Decimal | None, external_id: str | None, raw: dict[str, str]`.
+    - `@dataclass(frozen=True) class ParsedRow`: `position: int, booking_date: date, occurred_at: datetime | None, description: str, quantity: Decimal, fee: Decimal, currency: str | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, raw: dict[str, str]`.
       - `quantity` is already in ledger sign (inflow positive).
       - `fee` is `Decimal(0)` when no fee is mapped or the cell is empty; the balance changes by `quantity - fee`.
       - `occurred_at` is aware when the source gives a time, else `None`.
     - `@dataclass(frozen=True) class RowError`: `position: int, message: str, raw: dict[str, str]`.
     - `@dataclass(frozen=True) class SkippedRow`: `position: int, reason: str, raw: dict[str, str]`. Used for rows the `include_only` filter leaves out.
-    - `@dataclass(frozen=True) class ParsedStatement`: `rows: list[ParsedRow | RowError | SkippedRow]`, `closing_balance: Decimal | None = None`, `closing_balance_date: date | None = None`. Only OFX sets the closing fields.
+    - `@dataclass(frozen=True) class ParsedStatement`: `rows: list[ParsedRow | RowError | SkippedRow]`, `closing_balance: Decimal | None = None`, `closing_balance_date: date | None = None`, `period: tuple[date, date] | None = None`. OFX sets the closing fields (and `period` from `DTSTART`/`DTEND`); PDF layouts set `period` and the closing fields from the statement.
     - `MAX_IMPORT_ROWS = 20_000`.
     - `def parse_amount(text: str, fmt: AmountFormat) -> Decimal`: strips whitespace; accepts one leading `+`/`-`, or wrapping parentheses meaning negative; strips one leading currency symbol from `£ $ €` after the sign; removes thousands separators; maps the decimal separator to `.`; then requires `^[0-9]+(\.[0-9]+)?$` with ASCII digits only and calls `require_amount`. Anything else raises `ValueError` with a message naming the text.
     - `def clean_description(parts: list[str]) -> str`: joins the parts with a space, collapses whitespace, strips, and truncates to 1000 characters.
@@ -225,7 +280,7 @@ Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name tex
 
 Rules for `parse_csv`:
 - Decode with `config.encoding`. `UnicodeDecodeError` raises `FileFormatError("the file is not valid <encoding>")`.
-- Drop `skip_rows` physical lines, then read with `csv.DictReader(delimiter=config.delimiter)`.
+- Drop `skip_rows` physical lines, then read with `csv.DictReader(delimiter=config.delimiter, fieldnames=config.header)` (with `header` set, the first line is data). After dropping all-empty lines, drop the last `skip_footer_rows` lines.
 - A header missing any mapped column, or any `include_only` column, raises `FileFormatError` naming the missing columns. A file with no data rows raises `FileFormatError("no rows")`. More than `MAX_IMPORT_ROWS` data rows raises `FileFormatError`.
 - Lines whose cells are all empty are ignored. `position` is the 0-based index among the remaining data rows.
 - `raw` is the row's mapped and `include_only` columns as written.
@@ -255,6 +310,11 @@ Rules for `parse_csv`:
   - `test_fee_column`: amount `-10.00` with fee `0.50` gives `quantity == -10.00` and `fee == 0.50`; an empty fee cell gives `fee == 0`.
   - `test_currency_symbol_in_quoted_amounts`: `"£12,345.67"` with `thousands_separator=","` gives `12345.67`.
   - `test_too_many_rows`: `MAX_IMPORT_ROWS + 1` rows raise `FileFormatError` (monkeypatch the limit to 3 to keep the test small).
+  - `test_headerless_csv`: `10/11/2026,Coffee,-3.50` with `header=["Date", "Description", "Amount"]` gives one row, not a header.
+  - `test_footer_rows_skipped`: a midata-shaped file (`Date,Type,Merchant/Description,Debit/Credit,Balance`, ISO dates, then a blank line and `Arranged overdraft limit,2026-11-01,+£100.00`) with `skip_footer_rows=1` gives only the transaction rows.
+  - `test_signed_pound_amounts`: `-£12.34` and `+£1,000.00` parse as `-12.34` and `1000.00`.
+  - `test_whole_number_amounts`: `85` in a debit column gives `-85`.
+  - `test_type_column_kept`: a mapped `type` column fills `ParsedRow.bank_type`.
 - [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_csv_parser.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement** `parsed.py` and `csv_parser.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -294,23 +354,70 @@ Rules:
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
 - [ ] **Step 5: Commit** `feat: parse OFX 1.x and 2.x statements`.
 
+### Task 4A: QIF parser
+
+**Files:**
+- Create: `.../importing/qif_parser.py`, `backend/tests/finance/importing/test_qif_parser.py`
+
+**Interfaces:**
+- Consumes: `ParsedRow`, `RowError`, `ParsedStatement`, `parse_amount`, `clean_description`, `MAX_IMPORT_ROWS`, `FileFormatError` (Task 3); `QifProfileConfig` (Task 2).
+- Produces: `PARSER_VERSION = "qif-1"`; `def parse_qif(content: bytes, config: QifProfileConfig, local_tz: ZoneInfo) -> ParsedStatement`.
+
+Rules:
+- Decode with `config.encoding`; strip `\r`. The first non-empty line must be `!Type:Bank`, `!Type:CCard` or `!Type:Cash` (any case, optional space after the colon), else `FileFormatError`. Another `!` line later is a `FileFormatError` ("one account per file").
+- A record runs to a line `^`. `D` is the date (parsed with `date_format`), `T` (or `U`) the signed amount, `P` the payee, `M` the memo, `N` a check number (kept in `raw`). Other tags are kept in `raw`. A record without `D` or `T`, or with an unparseable one, is a `RowError`.
+- The description is `clean_description([P, M])`; `bank_type`, `external_id`, `balance` and `fee` are empty. Signs as for OFX.
+
+- [ ] **Step 1: Write the failing tests:** `test_bank_records` (two records, `!Type:Bank`, dd/mm/yyyy); `test_header_variants` (`!Type: Bank`, `!type:bank`); `test_crlf`; `test_missing_amount_is_row_error`; `test_second_account_rejected`; `test_unknown_type_rejected`.
+- [ ] **Step 2: Run**; expected: FAIL.
+- [ ] **Step 3: Implement** `qif_parser.py`.
+- [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
+- [ ] **Step 5: Commit** `feat: parse QIF statements`.
+
+### Task 4B: PDF statements
+
+**Files:**
+- Create: `.../importing/pdf/__init__.py`, `pdf/words.py`, `pdf/hsbc_uk.py`, `pdf/lloyds.py`; `backend/tests/finance/importing/test_pdf_layouts.py`, `backend/tests/finance/importing/synthetic_pdfs.py`
+- Modify: `backend/pyproject.toml` + `uv.lock` (add `pdfplumber`; add `reportlab` to the dev group)
+
+**Interfaces:**
+- Consumes: `ParsedRow`, `ParsedStatement`, `FileFormatError` (Task 3); `PdfProfileConfig` (Task 2).
+- Produces:
+  - `PARSER_VERSION = "pdf-1"`; `def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> ParsedStatement`, which dispatches on `config.layout`.
+  - In `words.py`: `@dataclass(frozen=True) class Word: text: str, x0: float, x1: float, top: float, page: int`; `def visible_lines(content: bytes, *, x_tolerance: float) -> list[list[Word]]`: words of each page, dropping characters smaller than 1 pt or filled white (Lloyds' hidden layer), grouped into lines by `top` and sorted by `x0`.
+  - Each layout module: `def parse(lines: list[list[Word]]) -> LayoutResult`, a pure function returning the rows (with `bank_type` set), the statement period, the summary (opening, money in, money out, closing) and every printed balance with the row it follows, plus the words it could not place.
+  - In `__init__.py`: `def check(result: LayoutResult) -> None`, the self-checks of Decision 15, raising `FileFormatError` with the first failure ("the statement's money out is 120.00 but its rows add up to 117.50", "words outside any column on page 1"). `closing_balance`, `closing_balance_date` and `period` are set from the statement.
+
+Rules: as observed in Decision 15. Rows carry `balance` only where the statement prints one (HSBC: after the last row of a day; Lloyds: after every row), so the staging chain check (Decision 12) runs on them too. A file that is not a PDF, is encrypted, or has no text layer (a scan) raises `FileFormatError("this PDF has no text layer; scanned statements are not supported")`.
+
+`synthetic_pdfs.py` draws statements with `reportlab` at the positions each layout expects: invented names and amounts, the real labels and type codes, and for Lloyds the hidden 0.1 pt white layer with column labels and "blank." cells.
+
+- [ ] **Step 1: Write the failing tests** (all on synthetic PDFs):
+  - HSBC UK: `test_hsbc_rows_and_summary` (two days, three rows, summary agrees); `test_hsbc_date_carried_and_day_end_balance` (a day with two rows and one printed balance); `test_hsbc_overdrawn_balance` (a balance with `D` is negative); `test_hsbc_multipage_continuation` (carried and brought forward lines); `test_hsbc_first_statement_without_brought_forward`; `test_hsbc_multiline_description` (lines joined with spaces, words not run together).
+  - Lloyds: `test_lloyds_rows_and_summary`; `test_lloyds_hidden_layer_ignored` (no "blank." or column labels in any description).
+  - Self-checks: `test_layout_refuses_when_summary_differs`; `test_layout_refuses_when_printed_balance_differs`; `test_layout_refuses_unplaced_words` (a stray amount right of the columns); `test_scanned_pdf_refused` (an image-only page).
+- [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_pdf_layouts.py -q`; expected: FAIL.
+- [ ] **Step 3: Implement** `words.py`, the two layouts and the checks.
+- [ ] **Step 4: Run**; expected: all pass; `make backend-check` green. Then verify locally against the owner's real statements (outside the repository) with a throwaway script that prints only counts and check results.
+- [ ] **Step 5: Commit** `feat: parse HSBC UK and Lloyds PDF statements with self-checks`.
+
 ### Task 5: Staging
 
 **Files:**
-- Create: `backend/migrations/versions/0010_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
+- Create: `backend/migrations/versions/0015_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
 - Modify: `.../finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
 - Consumes:
   - from Task 1: `store_document`, `DocumentStore`;
   - from Task 2: `get_profile`;
-  - from Tasks 3 and 4: `parse_csv`, `parse_ofx`, `PARSER_VERSION`s;
+  - from Tasks 3, 4, 4A and 4B: `parse_csv`, `parse_ofx`, `parse_qif`, `parse_pdf`, `PARSER_VERSION`s;
   - from plan 1: `accounts.get_account`, `instruments.get_currency`, `instruments.get_instrument`, `get_timezone`, `to_plain_str`.
 - Produces (in `staging.py`):
   - `BatchStatus = Literal["staged", "committed", "discarded", "rolled_back"]`.
   - `RowStatus = Literal["new", "duplicate", "skipped", "error", "committed", "rolled_back"]`.
   - `RowKind = Literal["statement", "opening_adjustment"]`.
-  - `@dataclass(frozen=True) class ImportRowRecord`: `id, position, kind: RowKind, status: RowStatus, booking_date: date | None, occurred_at: datetime | None, description: str, quantity: Decimal | None, fee: Decimal | None, instrument_id: UUID | None, balance: Decimal | None, external_id: str | None, error: str | None, note: str | None, raw: dict[str, str], transaction_id: UUID | None`.
+  - `@dataclass(frozen=True) class ImportRowRecord`: `id, position, kind: RowKind, status: RowStatus, booking_date: date | None, occurred_at: datetime | None, description: str, quantity: Decimal | None, fee: Decimal | None, instrument_id: UUID | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, error: str | None, note: str | None, raw: dict[str, str], transaction_id: UUID | None`.
   - `@dataclass(frozen=True) class ImportBatchRecord`: `id, account_id, profile_id, profile_version: int, document_id, filename: str, status: BatchStatus, created_at, committed_at: datetime | None, rolled_back_at: datetime | None, counts: dict[RowStatus, int]` (every status present, zeros included), `warnings: list[str]`.
   - `OPENING_SETTING = "finance.opening_balance_account_id"`. `async def get_or_create_system_account(ctx, setting: str, name: str) -> UUID` creates or reuses an `equity`/`other`/`transactions` account remembered in that setting, and creates a new one if the setting points at a missing account. Task 6 uses it for both system accounts (Decisions 1 and 13).
   - `async def ledger_balance_before(session, account_id: UUID, instrument_id: UUID, day: date) -> Decimal`: the sum of the account's postings in that instrument whose transaction is not void and is booked before `day`.
@@ -321,9 +428,9 @@ Rules:
   - `async def get_batch(session, batch_id) -> ImportBatchRecord`; `async def list_batches(session) -> list[ImportBatchRecord]` (newest first); `async def list_batch_rows(session, batch_id) -> list[ImportRowRecord]` (by position).
   - Errors: `ImportNotAllowedError` (account not open, not manual, or balance mode `snapshots`), `ImportBatchNotFoundError`.
 
-Migration `0010`:
-- `finance.import_batches`. Columns: `id`; `account_id` FK; `profile_id` FK; `profile_version int`; `profile_config jsonb` (a snapshot of the profile at upload); `parser_version text`; `document_id` FK `core.documents`; `filename text`; `default_instrument_id` FK NULL; `status text CHECK IN (...)`; `warnings jsonb NOT NULL DEFAULT '[]'`; `owner_entity_id`; `created_at`; `committed_at NULL`; `rolled_back_at NULL`. CHECKs tie `committed_at` to statuses `committed`/`rolled_back` and `rolled_back_at` to `rolled_back`.
-- `finance.import_rows`. Columns: `id`; `batch_id` FK `ON DELETE CASCADE`; `account_id` FK (denormalised for the index); `position int`; `kind text NOT NULL DEFAULT 'statement' CHECK IN ('statement','opening_adjustment')`; `status text CHECK IN (...)`; `booking_date date`; `occurred_at timestamptz`; `occurred_tz text`; `description text NOT NULL DEFAULT ''`; `quantity numeric`; `fee numeric NOT NULL DEFAULT 0`; `instrument_id` FK; `balance numeric`; `external_id text`; `dedupe_key text`; `error text`; `note text`; `raw jsonb NOT NULL`; `transaction_id` FK `finance.transactions` NULL.
+Migration `0015`:
+- `finance.import_batches`. Columns: `id`; `account_id` FK; `profile_id` FK; `profile_version int`; `profile_config jsonb` (a snapshot of the profile at upload); `parser_version text`; `document_id` FK `core.documents`; `filename text`; `default_instrument_id` FK NULL; `status text CHECK IN (...)`; `warnings jsonb NOT NULL DEFAULT '[]'`; `covered_from date`, `covered_to date` (the dates the file covers, Decision 16; both or neither); `owner_entity_id`; `created_at`; `committed_at NULL`; `rolled_back_at NULL`. CHECKs tie `committed_at` to statuses `committed`/`rolled_back` and `rolled_back_at` to `rolled_back`.
+- `finance.import_rows`. Columns: `id`; `batch_id` FK `ON DELETE CASCADE`; `account_id` FK (denormalised for the index); `position int`; `kind text NOT NULL DEFAULT 'statement' CHECK IN ('statement','opening_adjustment')`; `status text CHECK IN (...)`; `booking_date date`; `occurred_at timestamptz`; `occurred_tz text`; `description text NOT NULL DEFAULT ''`; `quantity numeric`; `fee numeric NOT NULL DEFAULT 0`; `instrument_id` FK; `balance numeric`; `external_id text`; `bank_type text`; `dedupe_key text`; `error text`; `note text`; `raw jsonb NOT NULL`; `transaction_id` FK `finance.transactions` NULL.
   - Constraints:
     - `UNIQUE (batch_id, position)`;
     - `CHECK ((status = 'error') = (error IS NOT NULL))`;
@@ -345,6 +452,8 @@ Rules for `stage_import`:
    - `quantity == 0` and `fee == 0` becomes `skipped`, with the note "zero amount";
    - otherwise compute the key, with occurrence counting per Decision 5;
    - the row is `duplicate` if a committed row on the account has that key or an earlier row of this batch does; else `new`.
+   - **Covered days (Decision 16).** Rows still `new` whose `booking_date` falls in a committed batch's `covered_from..covered_to` on the same account are matched against that day's committed rows by `(booking_date, quantity)` as a multiset: a match is `duplicate` (note "already imported from <filename>"); a row left over is an `error`.
+   - `covered_from`/`covered_to` are the parsed `period` when present, else the first and last `booking_date` of the importable rows.
 6. **Balance chain.** Run `check_balance_chain` over the rows still `new` or `duplicate`, passing parse errors as resets. Each reported position becomes `error` with that message (Decision 12).
 7. **Opening adjustment.** For `transactions` accounts only, and only when the batch has no `error` rows, compare `opening_adjustments(...)` with `ledger_balance_before(...)` per instrument. Each difference adds a row per Decision 13: `kind='opening_adjustment'`, status `new`, and `dedupe_key = sha256("open", account, date, quantity, currency)`. `position` is `-1, -2, …` in instrument-symbol order. When balances are unavailable, add the batch warning from Decision 13 instead.
 8. **Times.** `occurred_at` is the row's value, or local midnight of `booking_date` in the local zone (step 4), with `occurred_tz` set to the zone name.
@@ -371,6 +480,8 @@ Add a `store` fixture (`LocalDocumentStore(tmp_path)`) and a `csv_profile` fixtu
   - `test_hybrid_account_has_no_adjustment` and `test_no_balances_adds_warning`.
   - `test_opening_from_ofx_ledgerbal`: an OFX file with `LEDGERBAL` and no running balances derives the opening balance from it.
   - `test_multi_currency_chains_separately`: a file with a currency column, where GBP and EUR rows each carry their own balance, raises no chain error and adds one adjustment per currency.
+  - `test_covered_days_match_across_formats`: with a committed CSV batch covering 1–30 Nov, staging an OFX file for 20 Nov–5 Dec marks the 20–30 Nov rows `duplicate` and the December rows `new`; an extra 25 Nov row in the OFX is an `error`.
+  - `test_bank_type_stored`: a CSV `type` column and a PDF row's type code reach `import_rows.bank_type`.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** the migration, the ORM models and `staging.py`. Keep `check_balance_chain` and `opening_adjustments` pure, and test them through `stage_import`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -397,6 +508,7 @@ Rules:
 - Every action first locks the batch row with `SELECT … FOR UPDATE`.
 - **`commit_batch`:**
   - The status must be `staged`.
+  - The covered-days matching (Decision 16) is repeated under the batch lock, as the duplicate check is, so two overlapping batches committed one after the other cannot both post a day.
   - There must be no `error` rows.
   - The account is re-checked with the same rule as staging, since its mode may have changed since.
   - For `transactions` accounts, the expected adjustment per instrument is recomputed with `opening_adjustments` over the batch's statement rows and `ledger_balance_before`. If it differs from the staged adjustment rows (including one appearing or disappearing), raise `ImportBatchStaleError("the account changed since this file was uploaded; discard it and upload again")`.
@@ -432,6 +544,9 @@ Rules:
   - `test_stale_batch_refused`: stage month 2 (which needs an adjustment because month 1 is missing), then stage and commit month 1, then commit month 2. It raises `ImportBatchStaleError`, and re-staging month 2 gives no adjustment.
   - `test_pending_then_completed_counted_once`: an export where a payment is `PENDING` (skipped), committed; then a later export where the same payment is `COMPLETED`. The second batch has it as `new`, and the account counts it exactly once.
   - `test_discard`: staged → discarded; committing it afterwards raises `ImportBatchStateError`.
+  - `test_pdf_then_ofx_overlap_commits_once`: commit a synthetic HSBC PDF statement, then stage and commit an OFX export overlapping its last week and running past it: only the later rows post, and the account ends at the OFX `LEDGERBAL`.
+  - `test_ofx_then_pdf_overlap_commits_once`: the same in the other order.
+  - `test_rollback_frees_covered_days`: after rolling back the PDF batch, the OFX rows for those days stage as `new`.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** `commit.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -441,7 +556,8 @@ Rules:
 
 **Files:**
 - Create:
-  - the example files `.../importing/examples/example-bank-csv.json`, `example-bank.csv`, `example-bank-ofx.json`, `example-bank.ofx`;
+  - the example files `.../importing/examples/example-bank-csv.json`, `example-bank.csv`, `example-bank-ofx.json`, `example-bank.ofx`, `example-bank.qif`;
+  - `.../importing/catalog.py` and `backend/tests/finance/importing/test_catalog.py`;
   - the test `backend/tests/api/test_import_api.py`.
 - Modify: `backend/pyproject.toml` + `uv.lock` (add `python-multipart`, Apache-2.0), `backend/src/lararium/api/app.py`, `backend/src/lararium/deps.py`, `.../finance/schemas.py`, `.../finance/api.py`, `web/openapi.json`, `web/src/api/*` (regenerated).
 
@@ -456,7 +572,7 @@ Rules:
     - `ImportProfileCreate { name: str (1–100 chars), config: ProfileConfig }`.
     - `ImportProfileOut { id, name, config, version, updated_at }`.
     - `ImportBatchOut { id, account_id, profile_id, profile_version, document_id, filename, status, created_at, committed_at, rolled_back_at, counts: dict[str, int], warnings: list[str] }`.
-    - `ImportRowOut { id, position, kind, status, booking_date, description, quantity: DecimalStr | None, fee: DecimalStr | None, instrument_id, balance: DecimalStr | None, external_id, error, note, raw: dict[str, str], transaction_id }`.
+    - `ImportRowOut { id, position, kind, status, booking_date, description, quantity: DecimalStr | None, fee: DecimalStr | None, instrument_id, balance: DecimalStr | None, external_id, bank_type, error, note, raw: dict[str, str], transaction_id }`.
     - `ImportBatchDetailOut(ImportBatchOut) { rows: list[ImportRowOut] }`.
   - **Routes.** The route name is the operationId:
 
@@ -471,6 +587,7 @@ Rules:
     | `POST /imports/{batch_id}/commit` | `commit_import` | |
     | `POST /imports/{batch_id}/discard` | `discard_import` | |
     | `POST /imports/{batch_id}/rollback` | `rollback_import` | |
+    | `GET /import-catalog` | `get_import_catalog` | the catalog of Decision 14: institution, format, label, config, `recommended` |
 
     `stage_import` takes multipart form fields `account_id`, `profile_id`, optional `instrument_id`, and `file`. Its audit args are those ids plus `filename`, `size_bytes` and `sha256`, never the content.
   - **Upload limit.** The route reads the upload in 64 KiB chunks and stops beyond `MAX_IMPORT_BYTES` with 413 `{"error": "file_too_large"}`. An empty file is 422 `file_format`.
@@ -492,6 +609,8 @@ Rules:
     - `example-bank-csv.json`: its profile.
     - `example-bank.ofx`: OFX 1.x SGML, GBP, 5 transactions with FITIDs.
     - `example-bank-ofx.json`: `{"format": "ofx"}`.
+    - `example-bank.qif`: `!Type:Bank`, 4 records.
+  - **Catalog** (`catalog.py`): the rows of Decision 14 with the profile config for each (e.g. HSBC transaction CSV: `header=["Date", "Description", "Amount"]`, `%d/%m/%Y`; midata: ISO dates, `amount="Debit/Credit"`, `balance="Balance"`, `type="Type"`, `row_order="newest_first"`, `skip_footer_rows=1`; Lloyds CSV: `inflow`/`outflow` = `Credit Amount`/`Debit Amount`, `type="Transaction Type"`, `row_order="newest_first"`). Every config validates as a `ProfileConfig`, and exactly one entry per institution with formats is `recommended` (`test_catalog.py`).
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_example_csv_end_to_end`: create the profile from `example-bank-csv.json`, create a manual `transactions` account, and upload `example-bank.csv` with GBP: 201, `counts.new` equals the number of non-zero rows, and `counts.skipped == 1`. Then commit: holdings show the account at the file's closing `Balance`. Upload again: all rows are `duplicate`.
@@ -500,7 +619,8 @@ Rules:
   - `test_upload_to_snapshots_account_is_422`: code `import_not_allowed`.
   - `test_profile_config_validation_is_422` and `test_duplicate_profile_name_is_409`.
   - `test_cross_site_upload_refused`: a multipart POST with `Sec-Fetch-Site: cross-site` gives 403.
-  - `test_import_operation_ids`: the nine names above appear in `render_openapi()`.
+  - `test_import_operation_ids`: the ten names above appear in `render_openapi()`.
+  - `test_example_qif_end_to_end`: the same flow with the QIF example (the batch warns that the file has no balances).
   - `test_rollback_via_api`: commit, then roll back: status `rolled_back`, and holdings are back to zero.
 - [ ] **Step 2: Run** `uv run --locked pytest tests/api/test_import_api.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement** the dependency (`uv add python-multipart`), the wiring, schemas, routes, error map and example files. Then run `make openapi`.
@@ -537,13 +657,13 @@ Behaviour:
     - "Discard" is available.
   - **When it is `committed`:** "Roll back" asks for confirmation first ("This voids N transactions").
   - **Queries:** after any action, invalidate `["imports"]`, `["import-batch", id]`, `["holdings"]` and `["net-worth"]`.
-- **`/import-profiles` (ImportProfilesPage).** A list of profiles, and a create/edit form with "Name" and a monospace "Config (JSON)" textarea whose placeholder is a minimal CSV config. Before sending, `JSON.parse` the config; a parse error shows "Config is not valid JSON" without sending. A server 422 shows its message.
+- **`/import-profiles` (ImportProfilesPage).** A list of profiles; "Add from catalog", which lists the catalog by institution with the recommended format first and labelled "Recommended", and creates a profile from the chosen entry; and a create/edit form with "Name" and a monospace "Config (JSON)" textarea whose placeholder is a minimal CSV config. Before sending, `JSON.parse` the config; a parse error shows "Config is not valid JSON" without sending. A server 422 shows its message.
 - **No `Number(...)` or `parseFloat` on amounts anywhere.**
 
 - [ ] **Step 1: Write the failing tests** (mock `../api` as the existing page tests do):
   - `ImportsPage`: `test_upload_sends_form_fields`: choosing an account, profile and file, then submitting, calls `stageImport` with `body` containing `account_id`, `profile_id`, `instrument_id` (GBP) and the `File`. `test_only_importable_accounts_listed`: a `snapshots` account and a closed account are not offered.
   - `ImportBatchPage`: `test_commit_disabled_with_errors`; `test_rollback_requires_confirmation`: `rollbackImport` is not called until the confirm button is clicked; `test_amounts_rendered_from_strings`: quantity `"-1234.56"` renders as `-£1,234.56`.
-  - `ImportProfilesPage`: `test_invalid_json_not_sent`; `test_server_validation_message_shown`.
+  - `ImportProfilesPage`: `test_invalid_json_not_sent`; `test_server_validation_message_shown`; `test_catalog_marks_recommended`.
 - [ ] **Step 2: Run** `cd web && pnpm test --run`; expected: FAIL.
 - [ ] **Step 3: Implement** the three pages and the routes, reusing `LabelledSelect`, `TextField` and the `ui/` components.
 - [ ] **Step 4: Run** `make check`; expected: green.
@@ -573,6 +693,7 @@ Changes:
     - the flow (upload → review → commit, roll back);
     - which accounts accept imports (Decision 3);
     - the profile format, with every key from Task 2;
+    - the supported formats per bank and the recommended one (Decision 14), and that PDF layouts refuse a statement that doesn't add up;
     - the inflow/outflow sign rule, with the credit-card example;
     - how duplicates are recognised (Decision 5);
     - the "Unassigned (imports)" account (Decision 1);
@@ -602,7 +723,9 @@ Changes:
   - File stored as a document: Task 1, Task 5.
   - Per-institution profiles stored as data: Task 2.
   - Generic CSV mapper: Task 3.
-  - OFX: Task 4.
+  - OFX: Task 4; QIF: Task 4A; midata and headerless CSVs: Task 3; PDF statements of the owner's banks: Task 4B (spec changed 2026-11-15).
+  - Every format supported, the most complete one recommended per bank: Decision 14, Tasks 7 and 8.
+  - The same days imported from two formats commit once: Decision 16, Tasks 5 and 6.
   - Staging that shows new, duplicate and error rows: Tasks 5 and 8.
   - Commit to the ledger: Task 6.
   - Batch rollback: Tasks 6, 7 and 8.
@@ -612,4 +735,4 @@ Changes:
   - Pairing with inferred postings is deferred to M4 (stated above).
 - **Spec coverage, §6.2 documents.** Content hash, media type, size, original filename and source, a local directory behind a swappable interface: Task 1.
 - **Spec coverage, §6.4 deduplication.** Decision 5, and Tasks 5 and 6.
-- **Types.** `ParsedRow`, `RowError` and `ParseResult` are defined once (Task 3) and used by Tasks 4 and 5. Record types are defined in Task 5 and returned by Task 6. API names match the Task 8 client names, since hey-api camel-cases the operationIds.
+- **Types.** `ParsedRow`, `RowError`, `SkippedRow` and `ParsedStatement` are defined once (Task 3) and used by Tasks 4, 4A, 4B and 5. Record types are defined in Task 5 and returned by Task 6. API names match the Task 8 client names, since hey-api camel-cases the operationIds.
