@@ -192,6 +192,14 @@ def _row(
     position: int, raw: dict[str, str], currency: str | None, config: OfxProfileConfig
 ) -> ParsedRow:
     """Raises ValueError with a message for the row's error."""
+    corrected = _optional(raw, "CORRECTFITID")
+    if corrected is not None or _optional(raw, "CORRECTACTION") is not None:
+        # A correction deletes or replaces another transaction, perhaps one an earlier file
+        # imported; booking it as a transaction of its own would count the money twice.
+        raise ValueError(
+            f"the transaction corrects transaction {corrected or '(unnamed)'}, and corrections "
+            "aren't supported: export the account again once the bank has settled it"
+        )
     posted = _optional(raw, "DTPOSTED")
     if posted is None:
         raise ValueError("the transaction has no DTPOSTED")

@@ -562,3 +562,16 @@ def test_large_amount_negated_exactly() -> None:
     )
     rows = _rows(_parse(_sgml(statement), sign="outflow_positive"))
     assert [row.quantity for row in rows] == [Decimal(f"-{big}")]
+
+
+@pytest.mark.parametrize(
+    "fields", [{"CORRECTFITID": "EXB0001", "CORRECTACTION": "DELETE"}, {"CORRECTACTION": "REPLACE"}]
+)
+def test_correction_record_is_row_error(fields: dict[str, str]) -> None:
+    """Review finding: a correction (it deletes or replaces another transaction) was booked
+    as a transaction of its own, counting the money twice."""
+    original = _transaction(DTPOSTED="20261110", TRNAMT="-50.00", FITID="EXB0001")
+    correction = _transaction(DTPOSTED="20261111", TRNAMT="-50.00", FITID="EXB0002", **fields)
+    row, error = _parse(_sgml(_sgml_statement(original + "\n" + correction))).rows
+    assert isinstance(row, ParsedRow)
+    assert isinstance(error, RowError) and "corrects transaction" in error.message
