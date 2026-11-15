@@ -65,9 +65,10 @@ services:
     command: ["python", "-m", "lararium.worker"]
     # Time to finish a running job before being killed: the longest is an approval job, which
     # polls for 4 minutes, checks once more, then backfills until Monzo's 5-minute window
-    # after the approval closes (about 9m40s). A job killed anyway is retried by the
-    # stalled-job task.
-    stop_grace_period: 10m
+    # after the approval closes (about 9m40s), and still has to write that history to the
+    # ledger and commit. A job killed anyway is retried by the stalled-job task, but a killed
+    # backfill can't be repeated outside the window, so the approval would be lost.
+    stop_grace_period: 15m
     environment:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale

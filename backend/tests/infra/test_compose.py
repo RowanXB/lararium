@@ -83,20 +83,20 @@ def test_worker_runs_the_worker_module_after_the_migrations() -> None:
 def test_worker_may_finish_an_approval_job_when_stopped() -> None:
     # A job killed mid-run holds its sync lock until the stalled-job retry frees it. The
     # longest is an approval job: the wait, one more check after the deadline (a poll's wait
-    # and a request's timeout), then a backfill that may run until Monzo's window closes.
+    # and a request's timeout), then a backfill that may run until Monzo's window closes,
+    # and then writing that history to the ledger and committing, which has no bound of its
+    # own: a few minutes are left for it.
     longest = (
         jobs.APPROVAL_WINDOW
         + timedelta(seconds=jobs.APPROVAL_POLL_SECONDS + jobs.HTTP_TIMEOUT_SECONDS)
         + jobs.FULL_HISTORY_WINDOW
+        + timedelta(minutes=5)
     )
     grace = _services()["worker"]["stop_grace_period"]
     assert isinstance(grace, str) and grace.endswith("m")
     assert timedelta(minutes=int(grace[:-1])) >= longest
 
 
-def test_api_does_not_log_requests() -> None:
-    # The OAuth callback URL carries ?code= and &state=.
-    assert "--no-access-log" in _services()["api"]["command"]
 def test_make_down_stops_every_profile() -> None:
     # Services started under a profile since turned off (the webhook receiver and tunnel
     # after COMPOSE_PROFILES is cleared) are outside a plain `down`.
@@ -104,6 +104,9 @@ def test_make_down_stops_every_profile() -> None:
     assert "down:\n\t$(COMPOSE) --profile '*' down\n" in makefile
 
 
+def test_api_does_not_log_requests() -> None:
+    # The OAuth callback URL carries ?code= and &state=.
+    assert "--no-access-log" in _services()["api"]["command"]
 
 
 @pytest.mark.parametrize("name", ["api", "worker"])
