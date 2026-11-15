@@ -31,6 +31,7 @@ from lararium.modules.finance.transfers import (
     heal_transfers,
     list_transfers,
     load_transfer_settings,
+    pair,
     transfer_contra,
 )
 from lararium.modules.finance.transfers import engine as transfer_engine
@@ -1054,3 +1055,43 @@ async def test_heal_holds_no_system_account_lock(
             )
         await engine.dispose()
         await owner.dispose()
+
+
+@pytest.mark.parametrize("sends", [True, False])
+async def test_review_counts_the_amount_twice_until_paired(
+    session, run, ids, a_and_c, connector_tx, heal, sends
+) -> None:
+    # Pins the accepted caveat (design §5.8, Known caveats). A's record names C, and C has
+    # two unidentified bank transfers of the amount: one is its other side, the other is
+    # unrelated. While the transfer needs review, A's In transit leg and the real
+    # counterpart both count, so net worth is off by the amount in the candidates'
+    # direction: over when they are inflows, under when they are outflows.
+    a, _, c, c_id = a_and_c
+    worth = await net_worth_on(session)
+    sign = 1 if sends else -1
+    await connector_tx(a, str(-sign * 500), external_id="a_1", identifier_id=c_id)
+    rows = [
+        await connector_tx(
+            c,
+            str(sign * 500),
+            external_id=f"c_{n}",
+            occurred_at=WHEN + timedelta(hours=n if sends else -n),
+        )
+        for n in (1, 2)
+    ]
+    await heal()
+    # The truth: A's 500 moved to or from C, and C's other row is a real 500 in or out.
+    truth = worth + sign * 500
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "several_candidates")
+    assert await net_worth_on(session) == truth + sign * 500
+    await assert_consistent(session)
+
+    await run(pair, transfer.id, rows[0].id)
+
+    [paired] = [t for t in await list_transfers(session) if t.status == "matched"]
+    assert rows[0].id in (paired.out_transaction_id, paired.in_transaction_id)
+    assert await in_transit_balance(session, ids) == 0
+    assert await net_worth_on(session) == truth
+    await assert_consistent(session)

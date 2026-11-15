@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When money moves between two of the owner's own accounts, both balances change and net worth never dips or double-counts. This works for every source, starting with Monzo, through one generic matching engine with a registry, an In transit account, inferred placeholders, a review page and the interface M2 imports will call.
+**Goal:** When money moves between two of the owner's own accounts, both balances change and net worth never dips or double-counts, except while a transfer needs review (design Known caveats, §5.8). This works for every source, starting with Monzo, through one generic matching engine with a registry, an In transit account, inferred placeholders, a review page and the interface M2 imports will call.
 
 **Architecture:**
 - **Records.** Each account keeps only its own institution's records. A record identified as a transfer posts its other leg against the asset account "In transit" instead of "Unassigned".
