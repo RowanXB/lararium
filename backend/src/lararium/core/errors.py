@@ -15,3 +15,11 @@ class CredentialRejectedError(Exception):
 
     The connection then needs the owner to authorise it again; retrying can't help.
     """
+
+
+class DocumentNotFoundError(Exception):
+    """Raised when no row in core.documents has the given id."""
+
+
+class DocumentIntegrityError(Exception):
+    """Raised when a document's stored file is missing or no longer matches its hash."""

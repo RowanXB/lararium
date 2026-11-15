@@ -2,6 +2,7 @@ import base64
 import binascii
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import SecretStr, field_validator, model_validator
@@ -68,6 +69,8 @@ class Settings(BaseSettings):
     # secret in its path. With both set, syncs register `{base}/monzo/{secret}` with Monzo.
     webhook_base_url: str | None = None
     webhook_secret: SecretStr | None = None
+    # Where uploaded documents are stored, by content hash (see lararium.core.documents).
+    document_dir: Path = Path("/var/lib/lararium/documents")
 
     @field_validator("webhook_base_url", "webhook_secret", mode="before")
     @classmethod
