@@ -40,7 +40,7 @@ const BADGE_CLASSES: Record<ImportRowOut["status"], string> = {
 };
 
 // The typed fields a file gave the row, beyond its date, description and amount.
-function rowDetails(row: ImportRowOut): string[] {
+function rowDetails(row: ImportRowOut, code: string | null): string[] {
   const counterparty = [
     row.counterparty_name,
     row.counterparty_sort_code,
@@ -50,6 +50,8 @@ function rowDetails(row: ImportRowOut): string[] {
     .filter(Boolean)
     .join(", ");
   const details: [string, string | null][] = [
+    // Charged on top of the amount: the balance moves by amount minus fee (Decision 11).
+    ["Fee", row.fee === null ? null : money(row.fee, code)],
     ["Value date", row.value_date],
     ["Payee", row.payee],
     ["Memo", row.memo],
@@ -117,9 +119,11 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
     queryFn: async () =>
       (await getImportBatch({ path: { batch_id: batchId }, throwOnError: true })).data,
   });
+  // A row's currency may be one hidden from the pickers; it still needs its code.
   const instruments = useQuery({
-    queryKey: ["instruments", { includeHidden: false }],
-    queryFn: async () => (await listInstruments({ throwOnError: true })).data,
+    queryKey: ["instruments", { includeHidden: true }],
+    queryFn: async () =>
+      (await listInstruments({ query: { include_hidden: true }, throwOnError: true })).data,
   });
   const accounts = useQuery({
     queryKey: ["accounts"],
@@ -250,8 +254,8 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
             <TableBody>
               {ordered(detail.rows).map((row) => {
                 const adjustment = row.kind === "opening_adjustment";
-                const details = rowDetails(row);
                 const code = codeOf(row.instrument_id);
+                const details = rowDetails(row, code);
                 return (
                   <TableRow key={row.id}>
                     <TableCell className="text-right tabular-nums">

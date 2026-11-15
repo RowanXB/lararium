@@ -9,6 +9,7 @@ import {
   getImportBatch,
   type ImportBatchDetailOut,
   type ImportRowOut,
+  listInstruments,
   rollbackImport,
 } from "../api";
 import { ImportBatchPage } from "./ImportBatchPage";
@@ -253,4 +254,34 @@ it("labels the adjustment as a gap when the server says it follows earlier histo
     await screen.findByText("Balance gap: a statement period may be missing"),
   ).toBeInTheDocument();
   expect(screen.queryByText("Opening balance adjustment")).toBeNull();
+});
+
+it("shows a row's fee in its details", async () => {
+  show(batch({ rows: [row(0, { quantity: "-100.00", fee: "1.50" })] }));
+  expect(await screen.findByText(/Fee: £1\.50/)).toBeInTheDocument();
+});
+
+it("formats rows in hidden currencies too", async () => {
+  vi.mocked(listInstruments).mockImplementationOnce((async (options?: {
+    query?: { include_hidden?: boolean };
+  }) => ({
+    data: [
+      {
+        id: "0190a0b0-0000-7000-8000-0000000000b2",
+        kind: "fiat",
+        symbol: "USD",
+        name: "US dollar",
+        decimals: 2,
+        quote_instrument_id: null,
+        hidden: true,
+        identifiers: [{ scheme: "iso4217", value: "USD" }],
+      },
+    ].filter((instrument) => options?.query?.include_hidden || !instrument.hidden),
+  })) as never);
+  show(
+    batch({
+      rows: [row(0, { quantity: "-12.30", instrument_id: "0190a0b0-0000-7000-8000-0000000000b2" })],
+    }),
+  );
+  expect(await screen.findByText("-US$12.30")).toBeInTheDocument();
 });
