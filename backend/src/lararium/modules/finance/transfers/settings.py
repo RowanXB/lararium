@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.errors import SettingNotFoundError
 from lararium.core.settings_store import get_setting
+from lararium.modules.finance.errors import TransferSettingsError
 
 SETTING_KEY = "finance.transfers"
 
@@ -32,16 +33,16 @@ _FIELDS = {
 async def load_transfer_settings(session: AsyncSession) -> TransferSettings:
     """The defaults, overridden by whatever the setting `finance.transfers` gives:
     `{"window_before_days", "window_after_days", "overdue_days"}`, each optional and a
-    positive whole number of days."""
+    positive whole number of days. A malformed setting raises TransferSettingsError."""
     try:
         value = await get_setting(session, SETTING_KEY)
     except SettingNotFoundError:
         return DEFAULTS
     if not isinstance(value, dict):
-        raise ValueError(f"{SETTING_KEY} must be an object, got {value!r}")
+        raise TransferSettingsError(f"{SETTING_KEY} must be an object, got {value!r}")
     unknown = set(value) - set(_FIELDS)
     if unknown:
-        raise ValueError(f"{SETTING_KEY} has unknown keys: {', '.join(sorted(unknown))}")
+        raise TransferSettingsError(f"{SETTING_KEY} has unknown keys: {', '.join(sorted(unknown))}")
     days = {
         "window_before": DEFAULTS.window_before,
         "window_after": DEFAULTS.window_after,
@@ -53,6 +54,8 @@ async def load_transfer_settings(session: AsyncSession) -> TransferSettings:
         given = value[key]
         # bool is an int subclass; true is not a number of days.
         if isinstance(given, bool) or not isinstance(given, int) or given <= 0:
-            raise ValueError(f"{SETTING_KEY}.{key} must be a positive integer, got {given!r}")
+            raise TransferSettingsError(
+                f"{SETTING_KEY}.{key} must be a positive integer, got {given!r}"
+            )
         days[field] = timedelta(days=given)
     return TransferSettings(**days)

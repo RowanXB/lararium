@@ -82,6 +82,11 @@ class TransferNotFoundError(FinanceError):
     template = "no transfer has the id {}"
 
 
+class TransferSettingsError(FinanceError, ValueError):
+    """The setting finance.transfers is malformed, so transfers can't be matched until the
+    owner fixes it. Raised with the whole message, which says what is wrong."""
+
+
 class LedgerImbalanceError(FinanceError):
     """Postings do not sum to zero per instrument; residuals maps instrument id to the sum."""
 

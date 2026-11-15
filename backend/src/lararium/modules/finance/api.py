@@ -44,6 +44,7 @@ from lararium.modules.finance.schemas import (
     TransactionCreate,
     TransactionOut,
 )
+from lararium.modules.finance.transfers_api import healing_command
 
 router = APIRouter(prefix="/api/v1/finance", tags=["finance"], dependencies=[Depends(get_actor)])
 
@@ -67,6 +68,11 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.AccountAlreadyClosedError: (status.HTTP_409_CONFLICT, "account_already_closed"),
     errors.FinanceValidationError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_input"),
     errors.UnknownCurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "unknown_currency"),
+    # Not the request's fault: matching can't run until the owner fixes the setting.
+    errors.TransferSettingsError: (
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "invalid_transfer_settings",
+    ),
     errors.NotACurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "not_a_currency"),
 }
 
@@ -274,8 +280,9 @@ async def post_transaction(
 async def void_transaction(
     transaction_id: UUID, session: SessionDep, actor: ActorDep
 ) -> TransactionOut:
+    """Void the transaction; a transfer it was a side of follows (heal)."""
     args = _args(transaction_id=transaction_id)
-    async with command_context(session, actor, "void_transaction", args) as ctx:
+    async with healing_command(session, actor, "void_transaction", args) as ctx:
         record = await ledger.void_transaction(ctx, transaction_id)
     return TransactionOut.model_validate(record)
 

@@ -1,0 +1,278 @@
+"""/api/v1/finance routes for transfers between own accounts and the registry of the
+owner's account identifiers. Each route's name is its OpenAPI operationId.
+
+Every route that changes identifiers, decisions or the ledger heals the transfers in its
+own transaction (Decision 9), waiting at most LOCK_TIMEOUT for a lock: the matching lock
+may be held by a sync's heal, which may itself wait on the rows a sync is writing.
+"""
+
+from collections.abc import AsyncGenerator, Collection
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, FastAPI, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from lararium.core.actors import Actor
+from lararium.core.commands import CommandContext, command_context
+from lararium.core.json_types import JSONValue
+from lararium.core.settings_store import get_timezone
+from lararium.deps import ActorDep, SessionDep, get_actor
+from lararium.modules.finance import accounts, errors, identifiers, instruments, transfers
+from lararium.modules.finance.schemas import (
+    AccountOut,
+    BalanceModeUpdate,
+    CandidateOut,
+    IdentifierCreate,
+    IdentifierOut,
+    SuggestionOut,
+    TransferOut,
+    TransferPair,
+)
+
+# A request gives up (503 query_timeout) rather than wait longer for a lock.
+LOCK_TIMEOUT = "5s"
+
+router = APIRouter(prefix="/api/v1/finance", tags=["finance"], dependencies=[Depends(get_actor)])
+
+
+def install(app: FastAPI) -> None:
+    # The finance errors' handlers are installed by api.install.
+    app.include_router(router)
+
+
+@asynccontextmanager
+async def healing_command(
+    session: AsyncSession, actor: Actor, command: str, args: dict[str, JSONValue]
+) -> AsyncGenerator[CommandContext]:
+    """command_context, with lock waits bounded by LOCK_TIMEOUT and heal_transfers run at
+    the end of the command, in its transaction."""
+    async with command_context(session, actor, command, args) as ctx:
+        await session.execute(select(func.set_config("lock_timeout", LOCK_TIMEOUT, True)))
+        yield ctx
+        await transfers.heal_transfers(ctx)
+
+
+def _args(body: JSONValue | None = None, **path: UUID) -> dict[str, JSONValue]:
+    args: dict[str, JSONValue] = {key: str(value) for key, value in path.items()}
+    if isinstance(body, dict):
+        args |= body
+    return args
+
+
+# Identifiers
+
+
+def _identifier_out(record: identifiers.IdentifierRecord) -> IdentifierOut:
+    sort_code, account_number = identifiers.uk_bank_account_parts(record.value)
+    return IdentifierOut(
+        id=record.id,
+        kind=record.kind,
+        value=record.value,
+        sort_code=sort_code,
+        account_number=account_number,
+        account_id=record.account_id,
+        dismissed_at=record.dismissed_at,
+        created_by=record.created_by,
+        created_at=record.created_at,
+    )
+
+
+@router.get("/accounts/{account_id}/identifiers", name="list_account_identifiers")
+async def list_account_identifiers(account_id: UUID, session: SessionDep) -> list[IdentifierOut]:
+    await accounts.get_account(session, account_id)  # 404 when there is no such account
+    found = await identifiers.list_identifiers(session, account_id=account_id)
+    return [_identifier_out(record) for record in found]
+
+
+@router.post(
+    "/accounts/{account_id}/identifiers",
+    name="add_account_identifier",
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_account_identifier(
+    account_id: UUID, body: IdentifierCreate, session: SessionDep, actor: ActorDep
+) -> IdentifierOut:
+    """Register one of the account's identifiers (a suggestion, too): every record naming
+    it is matched again."""
+    args = _args(body.model_dump(mode="json"), account_id=account_id)
+    async with healing_command(session, actor, "add_account_identifier", args) as ctx:
+        record = await identifiers.assign_identifier(ctx, account_id, body.kind, body.value)
+    return _identifier_out(record)
+
+
+@router.delete(
+    "/accounts/{account_id}/identifiers/{identifier_id}",
+    name="remove_account_identifier",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_account_identifier(
+    account_id: UUID, identifier_id: UUID, session: SessionDep, actor: ActorDep
+) -> None:
+    """Take the identifier off the account; the registry row stays, as transactions name
+    it, and the records naming it are matched again."""
+    args = _args(account_id=account_id, identifier_id=identifier_id)
+    async with healing_command(session, actor, "remove_account_identifier", args) as ctx:
+        await accounts.get_account(session, account_id)  # 404 when there is no such account
+        if await identifiers.identifier_account(session, identifier_id) != account_id:
+            raise errors.AccountIdentifierNotFoundError(str(identifier_id))
+        await transfers.unassign_identifier_and_rematch(ctx, identifier_id)
+
+
+@router.post("/accounts/{account_id}/balance-mode", name="set_account_balance_mode")
+async def set_account_balance_mode(
+    account_id: UUID, body: BalanceModeUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Switch a snapshots account to hybrid, so it can carry identifiers."""
+    args = _args(body.model_dump(mode="json"), account_id=account_id)
+    async with healing_command(session, actor, "set_account_balance_mode", args) as ctx:
+        record = await accounts.set_balance_mode(ctx, account_id, body.balance_mode)
+    return AccountOut.model_validate(record)
+
+
+# Transfers
+
+
+async def _transfers_out(
+    session: AsyncSession, found: Collection[transfers.TransferRecord]
+) -> list[TransferOut]:
+    # Loaded even for no transfers, so a malformed setting shows on the Transfers page.
+    settings = await transfers.load_transfer_settings(session)
+    names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    symbols = {
+        instrument.id: instrument.symbol
+        for instrument in await instruments.list_instruments(session, include_hidden=True)
+    }
+    now = datetime.now(UTC)
+    timezone = await get_timezone(session)
+    today = now.astimezone(timezone).date()
+    return [
+        TransferOut(
+            id=record.id,
+            from_account_id=record.from_account_id,
+            from_account_name=names[record.from_account_id],
+            to_account_id=record.to_account_id,
+            to_account_name=names[record.to_account_id],
+            instrument_id=record.instrument_id,
+            amount=record.amount,
+            currency=symbols[record.instrument_id],
+            status=record.status,
+            review_reason=record.review_reason,
+            opened_at=record.opened_at,
+            matched_at=record.matched_at,
+            days_in_transit=(
+                (today - record.opened_at.astimezone(timezone).date()).days
+                if record.status == "awaiting"
+                else None
+            ),
+            overdue=transfers.is_overdue(record, now, settings),
+            out_transaction_id=record.out_transaction_id,
+            in_transaction_id=record.in_transaction_id,
+            placeholder_transaction_id=record.placeholder_transaction_id,
+        )
+        for record in found
+    ]
+
+
+@router.get("/transfers", name="list_transfers")
+async def list_transfers(
+    session: SessionDep,
+    transfer_status: Annotated[list[transfers.TransferStatus] | None, Query(alias="status")] = None,
+) -> list[TransferOut]:
+    """Transfers, newest first; only those of the given statuses when any are given."""
+    found = await transfers.list_transfers(session, statuses=transfer_status)
+    return await _transfers_out(session, found)
+
+
+@router.get("/transfers/{transfer_id}/candidates", name="list_transfer_candidates")
+async def list_transfer_candidates(transfer_id: UUID, session: SessionDep) -> list[CandidateOut]:
+    """The own records that could be the transfer's missing side: those of the same amount
+    first, then those of another; empty for a transfer with both sides."""
+    found = await transfers.candidates(session, transfer_id)
+    names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    return [
+        CandidateOut(
+            transaction_id=c.transaction_id,
+            account_id=c.account_id,
+            account_name=names[c.account_id],
+            quantity=c.quantity,
+            occurred_at=c.occurred_at,
+            description=c.description,
+            reason=c.reason,
+        )
+        for c in found
+    ]
+
+
+@router.post("/transfers/{transfer_id}/reject", name="reject_transfer")
+async def reject_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDep) -> TransferOut:
+    """The owner says it is not a transfer: its records go back to Unassigned."""
+    args = _args(transfer_id=transfer_id)
+    async with healing_command(session, actor, "reject_transfer", args) as ctx:
+        record = await transfers.reject(ctx, transfer_id)
+    [out] = await _transfers_out(session, [record])
+    return out
+
+
+@router.post(
+    "/transfers/{transfer_id}/unreject",
+    name="unreject_transfer",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unreject_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDep) -> None:
+    """Withdraw a rejection; its records are matched again (under a new transfer id)."""
+    args = _args(transfer_id=transfer_id)
+    async with healing_command(session, actor, "unreject_transfer", args) as ctx:
+        await transfers.unreject(ctx, transfer_id)
+
+
+@router.post(
+    "/transfers/{transfer_id}/unpair",
+    name="unpair_transfer",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unpair_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDep) -> None:
+    """The owner says the matched transfer's two records are not one transfer; each is
+    matched again, never with the other."""
+    args = _args(transfer_id=transfer_id)
+    async with healing_command(session, actor, "unpair_transfer", args) as ctx:
+        await transfers.unpair(ctx, transfer_id)
+
+
+@router.post("/transfers/{transfer_id}/pair", name="pair_transfer")
+async def pair_transfer(
+    transfer_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
+) -> TransferOut:
+    """The owner picks the transfer's missing side among its candidates of the same amount."""
+    args = _args(body.model_dump(mode="json"), transfer_id=transfer_id)
+    async with healing_command(session, actor, "pair_transfer", args) as ctx:
+        record = await transfers.pair(ctx, transfer_id, body.transaction_id)
+    [out] = await _transfers_out(session, [record])
+    return out
+
+
+# Suggestions
+
+
+@router.get("/transfer-suggestions", name="list_transfer_suggestions")
+async def list_transfer_suggestions(session: SessionDep) -> list[SuggestionOut]:
+    """Bank accounts that own records name and that are neither registered nor dismissed,
+    most named first. Registering one is add_account_identifier."""
+    return [SuggestionOut.model_validate(s) for s in await transfers.suggestions(session)]
+
+
+@router.post(
+    "/transfer-suggestions/{identifier_id}/dismiss",
+    name="dismiss_transfer_suggestion",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_transfer_suggestion(
+    identifier_id: UUID, session: SessionDep, actor: ActorDep
+) -> None:
+    """The owner says the bank account is not one of theirs."""
+    args = _args(identifier_id=identifier_id)
+    async with healing_command(session, actor, "dismiss_transfer_suggestion", args) as ctx:
+        await identifiers.dismiss_identifier(ctx, identifier_id)

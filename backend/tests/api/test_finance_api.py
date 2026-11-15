@@ -251,7 +251,8 @@ async def test_fiat_without_iso4217_code_is_rejected(client) -> None:
 
 @pytest.mark.parametrize(
     "error_class",
-    [c for c in _ERRORS if c is not errors.FinanceValidationError],  # that one takes a sentence
+    # Those two take a sentence.
+    [c for c in _ERRORS if c not in (errors.FinanceValidationError, errors.TransferSettingsError)],
 )
 def test_every_error_message_explains_itself(error_class) -> None:
     # The web UI shows the message as is, so a bare id or code would explain nothing.

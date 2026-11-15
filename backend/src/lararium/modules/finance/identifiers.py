@@ -56,6 +56,12 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     return f"{found[1]}:{found[2]}"
 
 
+def uk_bank_account_parts(value: str) -> tuple[str, str]:
+    """(sort code, account number) of a stored UK bank account."""
+    sort_code, account_number = value.split(":")
+    return sort_code, account_number
+
+
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[IdentifierRecord]:
     """Identifiers matching all conditions, sorted by kind and value."""
     # Select columns, not ORM objects, so a stale identity map can't hide an update.

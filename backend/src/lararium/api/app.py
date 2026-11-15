@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from psycopg.errors import QueryCanceled, UniqueViolation
+from psycopg.errors import LockNotAvailable, QueryCanceled, UniqueViolation
 from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalError
 
 from lararium import __version__
@@ -38,7 +38,9 @@ def _database_error_response(exc: DBAPIError) -> tuple[int, str, str, str | None
     if isinstance(exc, DataError):
         message = "a value is malformed or out of range for the database"
         return status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_value", message, None
-    if isinstance(exc.orig, QueryCanceled):
+    # The statement timeout, or a lock_timeout (a request waiting on the transfer matching
+    # lock, say): both mean the database was busy for too long.
+    if isinstance(exc.orig, QueryCanceled | LockNotAvailable):
         message = "the request took too long and was stopped"
         return status.HTTP_503_SERVICE_UNAVAILABLE, "query_timeout", message, None
     message = "the database is unavailable"

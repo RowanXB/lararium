@@ -19,14 +19,17 @@ from lararium.modules.finance.transfers.engine import (
 from lararium.modules.finance.transfers.queries import (
     CandidateRecord,
     ReviewReason,
+    SuggestionRecord,
     TransferRecord,
     TransferStatus,
     candidates,
     due_notifications,
     find_transfer_violations,
     get_transfer,
+    is_overdue,
     list_transfers,
     mark_notified,
+    suggestions,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -34,6 +37,7 @@ __all__ = [
     "CandidateRecord",
     "OwnLeg",
     "ReviewReason",
+    "SuggestionRecord",
     "TransferRecord",
     "TransferSettings",
     "TransferStatus",
@@ -42,6 +46,7 @@ __all__ = [
     "find_transfer_violations",
     "get_transfer",
     "heal_transfers",
+    "is_overdue",
     "list_transfers",
     "load_transfer_settings",
     "lock_transfers",
@@ -52,6 +57,7 @@ __all__ = [
     "preview_match",
     "reject",
     "source_ref",
+    "suggestions",
     "transfer_contra",
     "unassign_identifier_and_rematch",
     "unlink_transaction",

@@ -2,7 +2,7 @@
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -30,6 +30,7 @@ from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import TransferNotFoundError
+from lararium.modules.finance.identifiers import uk_bank_account_parts
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
 from lararium.modules.finance.transfers.contra import (
@@ -515,6 +516,67 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
             for row in rows
         ]
     return found
+
+
+@dataclass(frozen=True)
+class SuggestionRecord:
+    """A bank account transactions name that isn't registered to an own account nor
+    dismissed: maybe one of the owner's."""
+
+    identifier_id: UUID
+    sort_code: str
+    account_number: str
+    names: tuple[str, ...]  # the distinct counterparty names it appeared under, sorted
+    outgoing: int  # own records paying it
+    incoming: int  # own records paid by it
+    latest: date  # the latest booking date of those records
+
+
+async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
+    """Unregistered, undismissed bank accounts that own records name, most named first,
+    then the most recently named."""
+    system = await system_account_ids(session)
+    e = eligible_records(system)
+    i, t = models.AccountIdentifier, models.Transaction
+    outgoing = func.count().filter(e.c.quantity < 0)
+    incoming = func.count().filter(e.c.quantity > 0)
+    latest = func.max(e.c.booking_date)
+    rows = await session.execute(
+        select(
+            i.id,
+            i.value,
+            func.array_agg(t.counterparty_name.distinct()).label("names"),
+            outgoing.label("outgoing"),
+            incoming.label("incoming"),
+            latest.label("latest"),
+        )
+        .join(e, e.c.counterparty_identifier_id == i.id)
+        .join(t, t.id == e.c.transaction_id)
+        .where(i.account_id.is_(None), i.dismissed_at.is_(None))
+        .group_by(i.id, i.value)
+        .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
+    )
+    found: list[SuggestionRecord] = []
+    for row in rows:
+        sort_code, account_number = uk_bank_account_parts(row.value)
+        found.append(
+            SuggestionRecord(
+                identifier_id=row.id,
+                sort_code=sort_code,
+                account_number=account_number,
+                names=tuple(sorted(name for name in row.names if name)),
+                outgoing=row.outgoing,
+                incoming=row.incoming,
+                latest=row.latest,
+            )
+        )
+    return found
+
+
+def is_overdue(transfer: TransferRecord, now: datetime, settings: TransferSettings) -> bool:
+    """Whether an awaiting transfer has been in transit too long, as due_notifications
+    judges it."""
+    return transfer.status == "awaiting" and transfer.opened_at < now - settings.overdue
 
 
 async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
