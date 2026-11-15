@@ -146,18 +146,9 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
         # New rows have these (the table's CHECK).
         assert row.booking_date is not None and row.occurred_at is not None
         assert row.quantity is not None and row.instrument_id is not None
-        original = await session.scalar(
-            select(r.id).where(
-                r.account_id == account_id,
-                r.status == "committed",
-                r.dedupe_key == row.dedupe_key,
-            )
-        )
-        if original is not None:
-            await session.execute(
-                update(r).where(r.id == row.id).values(status="duplicate", duplicate_of=original)
-            )
-            continue
+        # No per-row key lookup: recheck_duplicates already turned the rows whose key a
+        # committed row has into duplicates, under the account lock, and a file can't repeat
+        # a key. import_rows_committed_once is the database backstop.
         if row.kind == "opening_adjustment":
             if opening_id is None:
                 opening_id = await get_or_create_system_account(ctx, "opening_balances")

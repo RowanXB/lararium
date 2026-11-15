@@ -469,9 +469,14 @@ async def test_rollback_skips_already_void_transactions(
     assert first.transaction_id is not None
     await run(void_transaction, first.transaction_id)
 
-    await rollback(batch.id)
+    rolled_back = await rollback(batch.id)
 
+    assert _statuses(await _rows(session, rolled_back)) == ["rolled_back", "rolled_back"]
+    assert rolled_back.counts["rolled_back"] == 2
     e = core_models.Event
+    event = await session.scalar(select(e).where(e.type == "finance.import.rolled_back"))
+    assert event is not None and event.data["batch_id"] == str(batch.id)
+    assert event.data["counts"]["rolled_back"] == 2
     voids = await session.scalar(
         select(func.count()).where(
             e.type == "finance.transaction.voided", e.subject_id == first.transaction_id
