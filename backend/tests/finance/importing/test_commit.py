@@ -649,3 +649,48 @@ async def test_hybrid_commit_has_no_adjustment(
 
     assert _adjustments(await _rows(session, batch)) == []
     assert await _balance(session, hybrid.id) == Decimal("-20.00")
+
+
+# An export for 1-15 Jun with a 4 Jun row the statement doesn't list.
+CONTRADICTING = _ofx(
+    [("20270603", "-40.00", "A"), ("20270604", "-5.00", "X"), ("20270612", "-8.00", "B")],
+    start="20270601",
+    end="20270615",
+    extra="<LEDGERBAL>\n<BALAMT>1275.45\n<DTASOF>20270615\n</LEDGERBAL>",
+)
+
+
+async def test_committed_row_missing_from_new_file_refused(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """Decision 16 both ways: on a day both files cover, every committed row must be in the
+    new file too, or the ledger would contradict one of the two statements."""
+    account_id, pdf, ofx = await _pdf_and_ofx(run, stage, make_account)
+    await commit((await stage(ofx, CONTRADICTING, account_id=account_id, filename="export.ofx")).id)
+
+    with pytest.raises(ImportNotAllowedError) as raised:
+        await stage(
+            pdf,
+            hsbc_pdf(HsbcStatement(pages=[PDF_ROWS])),
+            account_id=account_id,
+            default=None,
+            filename="statement.pdf",
+        )
+    message = str(raised.value)
+    assert "export.ofx" in message and "2027-06-04" in message and "-5.00" in message
+    assert "roll export.ofx back first" in message
+    assert await _balance(session, account_id) == Decimal("1275.45")
+
+
+async def test_commit_refuses_a_committed_row_missing_from_the_file(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    account_id, pdf, ofx = await _pdf_and_ofx(run, stage, make_account)
+    statement = await stage(
+        pdf, hsbc_pdf(HsbcStatement(pages=[PDF_ROWS])), account_id=account_id, default=None
+    )
+    await commit((await stage(ofx, CONTRADICTING, account_id=account_id, filename="export.ofx")).id)
+
+    with pytest.raises(ImportBatchStaleError):
+        await commit(statement.id)
+    assert await _balance(session, account_id) == Decimal("1275.45")

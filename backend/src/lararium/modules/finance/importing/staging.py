@@ -1024,11 +1024,49 @@ async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: lis
             row.fail(OUTSIDE_COVERED_DAY, real=True)
 
 
+async def _missing_committed_row(
+    session: AsyncSession,
+    account_id: UUID,
+    rows: list[_Row],
+    covered: tuple[date | None, date | None],
+) -> str | None:
+    """Decision 16 the other way: on the days this file covers, every committed statement
+    row must have been matched by a row of this file. Otherwise the ledger would contradict
+    one of the two files; returns the message naming the first such row, or None."""
+    start, end = covered
+    if start is None or end is None:
+        return None
+    matched = {row.duplicate_of for row in rows if row.duplicate_of is not None}
+    r, b = models.ImportRow, models.ImportBatch
+    found = await session.execute(
+        select(r.id, r.booking_date, r.quantity, b.filename)
+        .join(b, b.id == r.batch_id)
+        .where(
+            r.account_id == account_id,
+            r.status == "committed",
+            r.kind == "statement",
+            b.status == "committed",
+            r.booking_date.between(start, end),
+        )
+        .order_by(r.booking_date, r.position)
+    )
+    for row_id, day, quantity, filename in found:
+        if row_id in matched:
+            continue
+        assert day is not None and quantity is not None  # committed rows have them
+        return (
+            f"{filename} has {to_plain_str(quantity)} on {day.isoformat()}, which this file "
+            f"doesn't list; if this file is right, roll {filename} back first"
+        )
+    return None
+
+
 async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
     """Commit's re-run of the duplicate and covered-day checks (Decisions 5 and 16), for
     rows other batches committed or rolled back since staging. Rows that became duplicates,
-    or whose committed original is gone, are updated. Returns how many rows would now be
-    errors (an uncovered row on a covered day); those are left as they are."""
+    or whose committed original is gone, are updated. Returns how many problems there now
+    are, left as they are: rows that would be errors (an unmatched row on a covered day), plus
+    one when a committed row on this batch's days is missing from it."""
     r, b = models.ImportRow, models.ImportBatch
     account_id = await session.scalar(select(b.account_id).where(b.id == batch_id))
     assert account_id is not None
@@ -1079,7 +1117,11 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
         )
     await _mark_duplicates(session, account_id, [row for row in rows if row.status == "new"])
     await _match_covered_days(session, account_id, rows)
+    covered = await session.execute(select(b.covered_from, b.covered_to).where(b.id == batch_id))
     errors = 0
+    covered_from, covered_to = covered.one()
+    if await _missing_committed_row(session, account_id, rows, (covered_from, covered_to)):
+        errors += 1
     for row, original in zip(rows, stored, strict=True):
         if row.status == "error":
             errors += 1
@@ -1331,6 +1373,9 @@ async def stage_import(
     await _match_covered_days(session, account_id, rows)
     _check_chain(rows, row_order)
     covered_from, covered_to = _covered(statement, rows)
+    missing = await _missing_committed_row(session, account_id, rows, (covered_from, covered_to))
+    if missing is not None:
+        raise ImportNotAllowedError(missing)
 
     b = models.ImportBatch
     batch_id = await session.scalar(
