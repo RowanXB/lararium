@@ -5,11 +5,27 @@
 		Content-Security-Policy "frame-ancestors 'none'"
 		X-Frame-Options "DENY"
 	}
+	# API responses are left uncompressed: they are small, and compressing them would put
+	# response secrets and request input in one compressed body (the BREACH pattern).
 	handle /api/* {
 		reverse_proxy api:8000
 	}
+	# Vite names each built file by its content hash, so a changed file gets a new name and
+	# one that exists can be cached for good. No fallback here: a missing asset is a 404,
+	# never index.html cached under its name.
+	handle /assets/* {
+		root * /srv
+		encode zstd gzip
+		@built file
+		header @built Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+	# index.html and the rest: checked again on every load, so a new deployment shows at
+	# once (an unchanged file still answers 304).
 	handle {
 		root * /srv
+		encode zstd gzip
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}
