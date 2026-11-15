@@ -481,6 +481,30 @@ def test_boc_digits_outside_known_shapes_are_not_typed() -> None:
     ]
 
 
+def test_boc_sort_code_before_a_bank_name() -> None:
+    # A 6-digit group right before a bank's legal name is that bank's sort code.
+    row_with_bank = BocRow(
+        "21/05/27",
+        "21/05/27",
+        (
+            "/PTG2I02600000003//Local",
+            "Clearing And Outward",
+            "Remittance Alex Example",
+            "401234 EXAMPLE BANK PLC",
+            "Online Banking rent",
+        ),
+        paid_out="6.00",
+    )
+    row = _rows(_boc(BocStatement(opening="10.00", pages=[[row_with_bank]])))[0]
+
+    assert row.counterparty == Counterparty(
+        name="Alex Example",
+        sort_code="401234",
+        bank="EXAMPLE BANK PLC",
+        reference="Online Banking rent",
+    )
+
+
 def test_boc_lone_six_digits_are_not_a_sort_code() -> None:
     # Only a sort code printed with an account number fills the counterparty's account.
     lone = BocRow(

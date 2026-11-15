@@ -84,12 +84,13 @@ _TAG = re.compile(r"/([A-Z]{3,4})/([^/]*)")
 _INTERNATIONAL = re.compile(
     r"(?P<name>.*?)\s*REFED-NO:\s*(?P<reference>\S*?)\s*BUSIN-NO:\s*(?P<business>\S+)\s*(?P<rest>.*)"
 )
-# A sort code counts only when an account number is printed after it; a 6-digit run alone
-# could be anything (an invoice number), so it is kept in raw only.
+# A sort code counts only where its meaning is printed: followed by the account number, or
+# directly by the bank's name ending in its legal form ("401234 EXAMPLE BANK PLC"). Any
+# other 6-digit run could be anything (an invoice number), so it is kept in raw only.
 _SORT_CODE_ACCOUNT = re.compile(
     r"(?P<name>.+?) (?P<sort_code>\d{6}) (?P<account>\d{8}) (?P<rest>.+)"
 )
-_SIX_DIGITS = re.compile(r"(?P<name>.+?) \d{6} (?P<rest>.+)")
+_SIX_DIGITS = re.compile(r"(?P<name>.+?) (?P<sort_code>\d{6}) (?P<rest>.+)")
 # Between the statement's own accounts: the name, a number whose meaning isn't printed (kept
 # in raw only), then the statement's own branch.
 _INTERNAL = re.compile(r"(?P<name>.+?) \d+ (?P<rest>.+)")
@@ -311,9 +312,14 @@ def _payment(details: str, branch: str | None) -> _Payment:
                 bank=bank,
                 reference=reference,
             )
-        elif (unconfirmed := _SIX_DIGITS.fullmatch(rest)) is not None:
-            bank, reference = _bank_and_reference(unconfirmed["rest"])
-            counterparty = _counterparty(name=unconfirmed["name"], bank=bank, reference=reference)
+        elif (six := _SIX_DIGITS.fullmatch(rest)) is not None:
+            bank, reference = _bank_and_reference(six["rest"])
+            counterparty = _counterparty(
+                name=six["name"],
+                sort_code=six["sort_code"] if bank is not None else None,
+                bank=bank,
+                reference=reference,
+            )
     elif kind in _TRANSFERS and branch:
         internal = _INTERNAL.fullmatch(rest)
         if internal is not None and internal["rest"].startswith(branch):
