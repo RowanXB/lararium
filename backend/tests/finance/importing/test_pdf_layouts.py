@@ -251,6 +251,30 @@ def test_hsbc_credit_interest_not_paid() -> None:
     assert [rate.kind for rate in statement.rates] == ["Overdraft Interest Rates"] * 2
 
 
+def test_hsbc_period_rolled_back_to_29_february_refused() -> None:
+    # The start's year is the end's, minus one when the start is later in the year; a
+    # 29 February start rolled back into a common year is not a date.
+    content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], period="29 February to 28 January 2028"))
+
+    with pytest.raises(FileFormatError, match="the period's start is not a date"):
+        _parse(content, "hsbc_uk_statement")
+
+
+def test_hsbc_period_across_new_year() -> None:
+    statement = _hsbc(
+        HsbcStatement(
+            pages=[
+                [HsbcRow("CR", ("EXAMPLE",), paid_in="5.00", date="02 Jan 27", balance="105.00")]
+            ],
+            period="14 December to 13 January 2027",
+            brought_forward_date="13 Dec 26",
+            closing_day="13 Jan 27",
+        )
+    )
+
+    assert statement.period == (date(2026, 12, 14), date(2027, 1, 13))
+
+
 def test_hsbc_rate_tier_after_the_table_refused() -> None:
     # The table ends at the first gap of more than 20 pt; a tier below it isn't dropped.
     content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], late_tier=True))

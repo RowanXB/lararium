@@ -66,10 +66,15 @@ def _period(lines: list[list[Word]]) -> tuple[date, date]:
             continue
         start_day, start_month, start_year, end_day, end_month, end_year = match.groups()
         end = parse_date(f"{end_day} {end_month} {end_year}", "%d %B %Y", "the period's end")
-        year = int(start_year) if start_year else end.year
+        if start_year:
+            year = int(start_year)
+        else:
+            # No year: the end's, or the year before when the start falls later in the year
+            # (compared in a leap year, so 29 February is a day to compare).
+            day = parse_date(f"{start_day} {start_month} 2000", "%d %B %Y", "the period's start")
+            later = (day.month, day.day) > (end.month, end.day)
+            year = end.year - 1 if later else end.year
         start = parse_date(f"{start_day} {start_month} {year}", "%d %B %Y", "the period's start")
-        if start > end and not start_year:
-            start = start.replace(year=year - 1)
         return start, end
     raise FileFormatError('the statement has no period ("… to …")')
 
