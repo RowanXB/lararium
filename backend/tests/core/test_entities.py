@@ -1,8 +1,16 @@
+from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import select
+
 from lararium.core.commands import CommandContext
-from lararium.core.entities import get_or_create_organization, get_self_entity_id
-from lararium.core.models import Entity
+from lararium.core.entities import (
+    PlaceDetails,
+    get_or_create_organization,
+    get_or_create_place,
+    get_self_entity_id,
+)
+from lararium.core.models import AuditLogEntry, Entity
 
 
 async def test_organization_matched_case_insensitively(run) -> None:
@@ -38,3 +46,82 @@ async def test_organization_found_and_tagged_by_external_id(session, run) -> Non
     assert other == tagged
     await session.refresh(entity)
     assert entity.external_ids == {"shop": "m_1"}
+
+
+async def test_place_created_then_found_by_external_id(session, run) -> None:
+    details = PlaceDetails(address_city="Testville", latitude=Decimal("51.5"), online=False)
+    first = await run(get_or_create_place, "Test Cafe", external_id=("loc", "p_1"), details=details)
+    again = await run(get_or_create_place, "Test Cafe", external_id=("loc", "p_1"), details=details)
+    assert first == again
+    entity = await session.get_one(Entity, first)
+    await session.refresh(entity)
+    assert (entity.kind, entity.external_ids) == ("place", {"loc": "p_1"})
+    assert (entity.address_city, entity.latitude, entity.online) == (
+        "Testville",
+        Decimal("51.5"),
+        False,
+    )
+    assert entity.owner_entity_id == await get_self_entity_id(session)
+
+
+async def test_place_details_updated_when_changed(session, run) -> None:
+    place = await run(
+        get_or_create_place,
+        "Test Cafe",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Testville", mcc="5814"),
+    )
+    await run(
+        get_or_create_place,
+        "Test Cafe 2",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Otherton", longitude=Decimal("-0.25")),
+    )
+    entity = await session.get_one(Entity, place)
+    await session.refresh(entity)
+    assert entity.name == "Test Cafe 2"
+    # The mcc was not given the second time, so the stored one stays.
+    assert (entity.address_city, entity.longitude, entity.mcc) == (
+        "Otherton",
+        Decimal("-0.25"),
+        "5814",
+    )
+
+
+async def _entity_changes(session, entity_id: UUID) -> int:
+    rows = (await session.execute(select(AuditLogEntry.changes))).scalars().all()
+    return sum(f"entity:{entity_id}" in changes for changes in rows)
+
+
+async def test_place_detail_not_given_keeps_the_stored_one(session, run) -> None:
+    place = await run(
+        get_or_create_place,
+        "Test Cafe",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Testville", mcc="5814"),
+    )
+    recorded = await _entity_changes(session, place)
+
+    again = await run(
+        get_or_create_place,
+        "Test Cafe",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Testville", mcc=None),
+    )
+
+    assert again == place
+    entity = await session.get_one(Entity, place)
+    await session.refresh(entity)
+    assert entity.mcc == "5814"
+    assert await _entity_changes(session, place) == recorded == 1
+
+
+async def test_place_not_confused_with_organization(run) -> None:
+    organization = await run(get_or_create_organization, "Same", external_id=("loc", "x"))
+    place = await run(get_or_create_place, "Same", external_id=("loc", "x"), details=PlaceDetails())
+    assert organization != place
+    assert await run(get_or_create_organization, "Same", external_id=("loc", "x")) == organization
+    assert (
+        await run(get_or_create_place, "Same", external_id=("loc", "x"), details=PlaceDetails())
+        == place
+    )
