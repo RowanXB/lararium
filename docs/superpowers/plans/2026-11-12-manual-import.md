@@ -4,7 +4,7 @@
 > - **Task 1 (documents)** is still needed: M3 stores Monzo's JSON responses as raw records and does not build documents.
 > - **Migrations are renumbered.** `main` now ends at `0012`, so this plan's `0008`, `0009` and `0010` become `0013`, `0014` and `0015`.
 > - **Every format the owner's banks export is supported** (Decision 14): CSV (with or without a header row), OFX (no longer optional: HSBC UK exports it), QIF, the UK midata CSV, and PDF statements through per-bank layouts (Task 4B). For each bank the most information-complete format is recommended. The owner's real exports were checked with throwaway prototypes on 2026-11-15; every format matched the others transaction by transaction over the dates they share. Only their structure is described here.
-> - **BOC UK** offers PDF e-statements in internet and mobile banking; no other export is documented. Its layout waits for sample statements.
+> - **BOC UK** offers only PDF e-statements in internet and mobile banking. Its statements were checked the same way on 2026-11-15 and get a layout (Task 4B).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -65,22 +65,23 @@ Choices the spec leaves open, made here so the tasks don't have to:
     | Lloyds | CSV | date, type code, own sort code and account, description, debit/credit, balance | as chosen | **yes** |
     | Lloyds | PDF statement | the same per row, plus the statement summary | per statement | |
     | Lloyds | QIF | date, payee, signed amount | as chosen | |
-    | BOC UK | PDF statement | layout pending samples | | |
+    | BOC UK | PDF statement | trade and value date, details (counterparty name, bank and account), amount, balance after every row; summary with payment counts | per statement | **yes** (only format) |
 
     Generic formats (OFX, QIF, midata) are parsed once for every bank; bank-specific CSVs are profiles (data); PDF statements are layouts (code, Task 4B).
-15. **PDF statements are read by per-bank layouts that check themselves.** A PDF profile names a layout (`hsbc_uk_statement`, `lloyds_statement`); layouts are code, because the rules are positional. A layout reads words with their coordinates (`pdfplumber`) and must refuse the whole file (`FileFormatError` naming the failed check) unless every check holds:
-    - the statement summary (opening balance, money in, money out, closing balance) equals the parsed rows;
+15. **PDF statements are read by per-bank layouts that check themselves.** A PDF profile names a layout (`hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement`); layouts are code, because the rules are positional. A layout reads words with their coordinates (`pdfplumber`) and must refuse the whole file (`FileFormatError` naming the failed check) unless every check holds:
+    - the statement summary (opening balance, money in, money out, closing balance, and the payment counts where printed) equals the parsed rows;
     - every balance printed on the statement equals the running total;
     - every row has exactly one amount, a date inside the statement period and a type code;
     - every word inside the transaction table belongs to a row field (nothing is silently dropped).
 
     A layout that misreads a changed design therefore fails loudly instead of posting wrong numbers. Observed layouts:
     - **HSBC UK** (OpenText output): columns "Paid out", "Paid in" and "Balance" are told apart only by x position, measured from the table header. The date is printed only on a day's first row and is carried forward; the balance is printed only after a day's last row, with a trailing `D` when overdrawn (negative). Each row starts with a type code (`VIS`, `)))`, `CR`, `DR`, `BP`, `OBP`, …) and its description may span lines. Long statements continue on the next page between "BALANCE CARRIED FORWARD" and "BALANCE BROUGHT FORWARD"; a first statement has no brought-forward line, and its opening balance comes from the summary. The details column is set tight: word extraction needs `x_tolerance` below the default, or words run together.
+    - **BOC UK** (iTextSharp, bilingual English/Chinese labels): the statement period ("From/起始日期", "To/截止日期"), a per-currency summary with opening and closing balance, money in and out **and the number of payments each way**, then a table with trade date, value date (both dd/mm/yy), details over several lines, "Paid out", "Paid in" and a balance on every row, between horizontal rules. Amount columns are positioned under the header labels. Pages after the last "Page N of M" are terms and conditions. A statement holds one currency; a statement with several currency sections is refused until one is seen.
     - **Lloyds** (iText, tagged for screen readers): a second text layer of 0.1 pt white text repeats the column labels and writes empty cells as "blank."; it must be filtered out by size and colour before reading. Amount columns are positioned under the table header's "Money In", "Money Out" and "Balance".
 16. **Overlapping imports from different formats.** Dedupe keys (Decision 5) differ between formats, so a PDF statement and an OFX export covering the same days would both commit. Each committed batch therefore records the date range it covers (a PDF's statement period; otherwise its first to last row date). When a new batch's rows fall on days a committed batch of the same account already covers, they are matched to the committed rows of those days by `(booking_date, quantity)` as a multiset: matched rows become `duplicate`; an unmatched row is an `error` ("this period was already imported from another file, and this row is not in it"). This lets the owner import HSBC PDF statements for history and the OFX export for the weeks since the last statement, in either order.
 17. **The bank's transaction type is kept.** A mapped `type` column (CSV), the type code of a PDF row, or OFX `TRNTYPE` is stored in `import_rows.bank_type` and in `raw`. M4 uses it (e.g. `FPO`/`FPI` and `CR`/`BP` mark likely transfers).
 
-**Not in this plan:** pairing staged rows with inferred postings (needs M4), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), LLM extraction, PDF layouts for banks without sample statements (BOC UK), background workers.
+**Not in this plan:** pairing staged rows with inferred postings (needs M4), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), LLM extraction, PDF layouts for further banks, background workers.
 
 ## Global Constraints
 
@@ -150,6 +151,7 @@ backend/
           words.py                  # visible words with coordinates, grouped into lines
           hsbc_uk.py
           lloyds.py
+          boc_uk.py
         catalog.py                  # Task 7: institutions, formats, recommended (Decision 14)
         staging.py                  # Task 5
         commit.py                   # Task 6
@@ -231,7 +233,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
     - `amount_format: AmountFormat = AmountFormat()`
   - `class OfxProfileConfig`: `format: Literal["ofx"]`; `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`; `timezone: str | None = None`.
   - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `sign` as for OFX; `timezone: str | None = None`.
-  - `class PdfProfileConfig`: `format: Literal["pdf"]`; `layout: Literal["hsbc_uk_statement", "lloyds_statement"]`; `timezone: str | None = None`.
+  - `class PdfProfileConfig`: `format: Literal["pdf"]`; `layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]`; `timezone: str | None = None`.
   - `type ProfileConfig = Annotated[CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig, Field(discriminator="format")]`.
   - `@dataclass(frozen=True) class ImportProfileRecord`: `id: UUID, name: str, config: ProfileConfigModel, version: int, updated_at: datetime`, where `ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig`.
   - `async def create_profile(ctx, *, name: str, config: ProfileConfigModel) -> ImportProfileRecord`
@@ -377,7 +379,7 @@ Rules:
 ### Task 4B: PDF statements
 
 **Files:**
-- Create: `.../importing/pdf/__init__.py`, `pdf/words.py`, `pdf/hsbc_uk.py`, `pdf/lloyds.py`; `backend/tests/finance/importing/test_pdf_layouts.py`, `backend/tests/finance/importing/synthetic_pdfs.py`
+- Create: `.../importing/pdf/__init__.py`, `pdf/words.py`, `pdf/hsbc_uk.py`, `pdf/lloyds.py`, `pdf/boc_uk.py`; `backend/tests/finance/importing/test_pdf_layouts.py`, `backend/tests/finance/importing/synthetic_pdfs.py`
 - Modify: `backend/pyproject.toml` + `uv.lock` (add `pdfplumber`; add `reportlab` to the dev group)
 
 **Interfaces:**
@@ -388,18 +390,19 @@ Rules:
   - Each layout module: `def parse(lines: list[list[Word]]) -> LayoutResult`, a pure function returning the rows (with `bank_type` set), the statement period, the summary (opening, money in, money out, closing) and every printed balance with the row it follows, plus the words it could not place.
   - In `__init__.py`: `def check(result: LayoutResult) -> None`, the self-checks of Decision 15, raising `FileFormatError` with the first failure ("the statement's money out is 120.00 but its rows add up to 117.50", "words outside any column on page 1"). `closing_balance`, `closing_balance_date` and `period` are set from the statement.
 
-Rules: as observed in Decision 15. Rows carry `balance` only where the statement prints one (HSBC: after the last row of a day; Lloyds: after every row), so the staging chain check (Decision 12) runs on them too. A file that is not a PDF, is encrypted, or has no text layer (a scan) raises `FileFormatError("this PDF has no text layer; scanned statements are not supported")`.
+Rules: as observed in Decision 15. Rows carry `balance` only where the statement prints one (HSBC: after the last row of a day; Lloyds and BOC UK: after every row), so the staging chain check (Decision 12) runs on them too. A file that is not a PDF, is encrypted, or has no text layer (a scan) raises `FileFormatError("this PDF has no text layer; scanned statements are not supported")`.
 
 `synthetic_pdfs.py` draws statements with `reportlab` at the positions each layout expects: invented names and amounts, the real labels and type codes, and for Lloyds the hidden 0.1 pt white layer with column labels and "blank." cells.
 
 - [ ] **Step 1: Write the failing tests** (all on synthetic PDFs):
   - HSBC UK: `test_hsbc_rows_and_summary` (two days, three rows, summary agrees); `test_hsbc_date_carried_and_day_end_balance` (a day with two rows and one printed balance); `test_hsbc_overdrawn_balance` (a balance with `D` is negative); `test_hsbc_multipage_continuation` (carried and brought forward lines); `test_hsbc_first_statement_without_brought_forward`; `test_hsbc_multiline_description` (lines joined with spaces, words not run together).
   - Lloyds: `test_lloyds_rows_and_summary`; `test_lloyds_hidden_layer_ignored` (no "blank." or column labels in any description).
+  - BOC UK: `test_boc_rows_summary_and_counts` (payment counts checked); `test_boc_multiline_details` (details lines joined; value date kept in `raw`); `test_boc_terms_pages_ignored`; `test_boc_several_currencies_refused`.
   - Self-checks: `test_layout_refuses_when_summary_differs`; `test_layout_refuses_when_printed_balance_differs`; `test_layout_refuses_unplaced_words` (a stray amount right of the columns); `test_scanned_pdf_refused` (an image-only page).
 - [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_pdf_layouts.py -q`; expected: FAIL.
-- [ ] **Step 3: Implement** `words.py`, the two layouts and the checks.
+- [ ] **Step 3: Implement** `words.py`, the three layouts and the checks.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green. Then verify locally against the owner's real statements (outside the repository) with a throwaway script that prints only counts and check results.
-- [ ] **Step 5: Commit** `feat: parse HSBC UK and Lloyds PDF statements with self-checks`.
+- [ ] **Step 5: Commit** `feat: parse HSBC UK, Lloyds and BOC UK PDF statements with self-checks`.
 
 ### Task 5: Staging
 
@@ -723,7 +726,7 @@ Changes:
   - File stored as a document: Task 1, Task 5.
   - Per-institution profiles stored as data: Task 2.
   - Generic CSV mapper: Task 3.
-  - OFX: Task 4; QIF: Task 4A; midata and headerless CSVs: Task 3; PDF statements of the owner's banks: Task 4B (spec changed 2026-11-15).
+  - OFX: Task 4; QIF: Task 4A; midata and headerless CSVs: Task 3; PDF statements of the owner's banks (HSBC UK, Lloyds, BOC UK): Task 4B (spec changed 2026-11-15).
   - Every format supported, the most complete one recommended per bank: Decision 14, Tasks 7 and 8.
   - The same days imported from two formats commit once: Decision 16, Tasks 5 and 6.
   - Staging that shows new, duplicate and error rows: Tasks 5 and 8.

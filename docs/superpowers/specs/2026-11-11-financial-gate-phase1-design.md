@@ -314,7 +314,7 @@ The implementer must first verify whether an eToro key can be restricted to read
 - **Parse profiles** are per institution: column mapping, date format, sign convention, encoding. Profiles are stored as data, so adding an institution requires no code change. Phase 1 must provide a generic CSV mapper, OFX and QIF parsing, the UK midata CSV, and the PDF statements of the owner's banks through per-bank layouts (decided 2026-11-15). Every format a bank offers is supported; for each bank the most information-complete one is recommended. The example profiles shipped in the repository are paired only with synthetic example files.
 - **Three kinds of handling, by export capability**:
   - Banks that can export CSV, OFX or QIF: go through import.
-  - Accounts that only have PDF statements: go through import when a layout for that bank's statement exists (HSBC UK, Lloyds); otherwise handled as "balance snapshots only" (see below) until a layout is written.
+  - Accounts that only have PDF statements: go through import when a layout for that bank's statement exists (HSBC UK, Lloyds, BOC UK); otherwise handled as "balance snapshots only" (see below) until a layout is written.
   - Fintech accounts whose statements can only be downloaded in the app: if CSV export is available, go through import; otherwise handle as balance snapshots. For multi-currency wallets, record a balance for each currency separately; mark accounts such as ISA and LISA with the corresponding tax wrapper.
 - **The staging area** shows: which rows are new, which are duplicates, and which can be paired with existing inferred postings (§8).
 - **Manual snapshots and manual assets**: for accounts with no transactions (fixed-term deposits, pensions, property, cars, etc.), enter the balance or valuation directly. Fixed-term deposits can record the interest rate and maturity date.
@@ -464,7 +464,7 @@ For these modules, Phase 1 must:
 
 - **M0 Skeleton**: code repository, Docker Compose, Postgres and its roles, migrations, CI (ruff, pyright, tests, import-linter, OpenAPI consistency check), backup scripts.
 - **M1 Ledger core**: core and finance schemas; a ledger service with invariant checks; manual accounts, manual snapshots, manual holdings entered by quantity; the daily net worth view; a minimal usable UI.
-- **M2 Manual import**: generic CSV mapper, OFX, QIF and midata parsing, PDF statements of the owner's banks (HSBC UK, Lloyds) through per-bank layouts, staging review, batch rollback; example profiles with synthetic data only.
+- **M2 Manual import**: generic CSV mapper, OFX, QIF and midata parsing, PDF statements of the owner's banks (HSBC UK, Lloyds, BOC UK) through per-bank layouts, staging review, batch rollback; example profiles with synthetic data only.
 - **M3 Monzo**: OAuth, backfill within the 5-minute window, incremental sync, pots, the webhook receiver, re-authorisation reminders.
 - **M4 Transfer matching**: registry, inferred postings, the in-transit clearing account, intermediary institutions, review UI. The Monzo self-transfer rule works end to end at this step: tests in the repository use synthetic statements, and the user separately verifies it locally with their own real statements.
 - **M5 IBKR Flex**: positions, cash, trades, deposits and withdrawals; prices and FX rates; valuation; pairing with outgoing transfers from Monzo.
@@ -505,7 +505,7 @@ The roadmap after that:
 | All financial data sources are connected in Phase 1 | Confirmed |
 | Data layer design: raw data layer, double-entry ledger, event table, modular monolith | Confirmed |
 | eToro: connect directly to its API if a read-only key is available, otherwise go through SnapTrade | Default |
-| Accounts that can only export PDF are handled as balance snapshots until their bank has a PDF layout; HSBC UK and Lloyds statements are parsed in M2 (changed 2026-11-15) | Confirmed |
+| Accounts that can only export PDF are handled as balance snapshots until their bank has a PDF layout; HSBC UK, Lloyds and BOC UK statements are parsed in M2 (changed 2026-11-15) | Confirmed |
 | Every export format a bank offers is supported; for each bank the most information-complete one is recommended (2026-11-15) | Confirmed |
 | Wallets support BTC and EVM chains by default in Phase 1; DeFi positions are out of scope | Default |
 | Add a crypto price source in Phase 1; any instrument can be entered manually by quantity | Default |
