@@ -456,7 +456,8 @@ async def test_opening_from_ofx_ledgerbal(session: AsyncSession, run: Run, stage
 
     (adjustment,) = _adjustments(await _rows(session, batch))
     assert adjustment.quantity == Decimal("500.00")
-    assert adjustment.booking_date == date(2026, 11, 9)
+    # It lists 2-29 Nov in full, so its opening is the balance as 2 Nov starts.
+    assert adjustment.booking_date == date(2026, 11, 1)
     assert batch.warnings == []
     assert batch.statement is not None
     assert batch.statement.closing_balance == Decimal("2496.50")

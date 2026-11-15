@@ -334,12 +334,13 @@ async def list_batch_rows(session: AsyncSession, batch_id: UUID) -> list[ImportR
         if batch.id != batch_id
     ]
     claims = await _claims(session, [*others, await _batch_info(session, batch_id)])
-    # This statement's first date, and the earliest of another committed one, per instrument.
-    mine = {claim.instrument_id: claim.first_day for claim in claims.get(batch_id, [])}
+    # Where this statement's opening sits, and the earliest another committed one's does,
+    # per instrument (OpeningClaim.opens_on).
+    mine = {claim.instrument_id: claim.opens_on for claim in claims.get(batch_id, [])}
     earliest: dict[UUID, date] = {}
     for claim in (c for owner, found in claims.items() if owner != batch_id for c in found):
-        known = earliest.get(claim.instrument_id, claim.first_day)
-        earliest[claim.instrument_id] = min(known, claim.first_day)
+        known = earliest.get(claim.instrument_id, claim.opens_on)
+        earliest[claim.instrument_id] = min(known, claim.opens_on)
 
     def is_gap(row: models.ImportRow) -> bool | None:
         # A superseded (rolled back) adjustment is no longer a balance gap, or anything.
@@ -502,14 +503,24 @@ class OpeningClaim:
     first_source: UUID | None = None
 
     @property
-    def adjustment_day(self) -> date:
-        """Where its adjustment is dated: before its first day when it lists that day in
-        full (the gap is before the day starts); on it otherwise, after whatever another
-        file lists of that day, so the adjustment never lands inside a day another file
-        lists in full."""
-        if self.first_day_in_full:
-            return self.first_day - timedelta(days=1)
+    def opens_on(self) -> date:
+        """The day its opening sits in, the one place the walk order, the dating and the
+        gap flag all take it from. A claim listing its first day in full opens at the start
+        of its first day listed in full (vouched_from: no movement lies between that and
+        its first row); one listing it in part opens partway through its first day."""
+        if self.first_day_in_full and self.vouched_from is not None:
+            return self.vouched_from
         return self.first_day
+
+    @property
+    def adjustment_day(self) -> date:
+        """Where its adjustment is dated: the day before opens_on when the opening is a
+        start of day (the gap is before that day starts); on it otherwise, after whatever
+        another file lists of that day, so the adjustment never lands inside a day another
+        file lists in full."""
+        if self.first_day_in_full:
+            return self.opens_on - timedelta(days=1)
+        return self.opens_on
 
 
 @dataclass(frozen=True)
@@ -525,11 +536,15 @@ class Movement:
 type Movements = dict[UUID, list[Movement]]
 
 
-def _walk_order(claim: OpeningClaim) -> tuple[date, bool, datetime, UUID]:
-    """By first date, then committed before the staged batch, then by commit time."""
+def _walk_order(claim: OpeningClaim) -> tuple[date, bool, bool, datetime, UUID]:
+    """By where its opening sits: the day (opens_on), a start of day before partway
+    through it; only then committed before the staged batch, and by commit time. So the
+    order, and with it each adjustment's day and owner, never depends on import order
+    where the files say when their openings are."""
     staged = claim.committed_at is None
     return (
-        claim.first_day,
+        claim.opens_on,
+        not claim.first_day_in_full,
         staged,
         claim.committed_at or datetime.min.replace(tzinfo=UTC),
         claim.batch_id,
@@ -672,15 +687,24 @@ async def _claims(
     }
     defaults = {batch.id: batch.default_instrument_id for batch in batches}
     closings: dict[UUID, tuple[Decimal, date, UUID]] = {}
-    for batch_id, balance, day, code in await session.execute(
-        select(s.batch_id, s.closing_balance, s.closing_balance_date, s.currency).where(
-            s.batch_id.in_(ids)
-        )
+    for batch_id, balance, day, code, period_to in await session.execute(
+        select(
+            s.batch_id, s.closing_balance, s.closing_balance_date, s.currency, s.period_to
+        ).where(s.batch_id.in_(ids))
     ):
         # The closing is in the statement's currency, or the one picked at upload, as the
-        # rows are (_resolve_currencies): it anchors that instrument's chain only.
+        # rows are (_resolve_currencies): it anchors that instrument's chain only. And only
+        # if the file lists everything up to it: an OFX LEDGERBAL is often the balance when
+        # it was downloaded, after its period, and would take movements the file never
+        # lists into the opening.
         instrument_id = (await get_currency(session, code)).id if code else defaults[batch_id]
-        if balance is not None and day is not None and instrument_id is not None:
+        after_period = period_to is not None and day is not None and day > period_to
+        if (
+            balance is not None
+            and day is not None
+            and instrument_id is not None
+            and not after_period
+        ):
             closings[batch_id] = (balance, day, instrument_id)
     stored: dict[UUID, list[models.ImportRow]] = defaultdict(list)
     for row in await session.scalars(

@@ -112,3 +112,24 @@ def test_closing_anchors_only_its_own_currency() -> None:
     assert opening_adjustments(rows, lambda _: GBP, closing, "oldest_first") == {
         GBP: (Decimal("530"), _day(5), 0)
     }
+
+
+def test_same_first_day_walk_order_follows_where_openings_sit() -> None:
+    """Fifth review: a first-day tie was broken by commit time, so which batch held the
+    adjustment, and its day, depended on import order. A statement listing its days in full
+    opens at the start of its period; an export opening partway through the day comes after."""
+    pdf, csv, row = uuid4(), uuid4(), uuid4()
+    movements = [Movement(_day(3), Decimal("-5"), row)]
+    plans = []
+    for pdf_first in (True, False):
+        statement = replace(
+            _claim(pdf, "110", 3, committed=1 if pdf_first else 2, own=frozenset({row})),
+            first_day_in_full=True,
+            vouched_from=_day(1),
+            vouched_to=_day(30),
+        )
+        export = _claim(csv, "110", 3, committed=2 if pdf_first else 1, own=frozenset({row}))
+        plans.append(plan_openings([statement, export], {EUR: movements}))
+        assert opening_conflicts([statement, export], plans[-1]) == []
+        assert (statement.opens_on, statement.adjustment_day) == (_day(1), date(2026, 10, 31))
+    assert plans[0] == plans[1] == {(pdf, EUR): Decimal("110"), (csv, EUR): Decimal("0")}

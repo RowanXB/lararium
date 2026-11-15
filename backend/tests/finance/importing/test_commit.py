@@ -1094,7 +1094,8 @@ async def test_all_duplicate_statement_still_lists_its_days_in_full(
     statement = await stage(
         pdf, hsbc_pdf(HsbcStatement(pages=[PDF_ROWS])), account_id=account_id, default=None
     )
-    assert set(_statuses(await _rows(session, statement))) == {"duplicate"}
+    statement_rows = [row for row in await _rows(session, statement) if row.kind == "statement"]
+    assert {row.status for row in statement_rows} == {"duplicate"}
     await commit(statement.id)
 
     extra = _ofx(
@@ -1102,3 +1103,20 @@ async def test_all_duplicate_statement_still_lists_its_days_in_full(
     )
     rows = await _rows(session, await stage(ofx, extra, account_id=account_id))
     assert _statuses(rows)[0] == "error"
+
+
+async def test_closing_after_the_period_is_not_an_opening_anchor(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Fifth review: an OFX LEDGERBAL as of the download day, after DTEND, became the opening
+    anchor, taking movements the file never lists into the opening."""
+    ofx = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261005", "-100.00", "A")],
+        start="20261001",
+        end="20261031",
+        extra="<LEDGERBAL>\n<BALAMT>850.00\n<DTASOF>20261115\n</LEDGERBAL>",
+    )
+    staged = await stage(ofx, content, filename="october.ofx")
+    assert _adjustments(await _rows(session, staged)) == []
+    assert staged.warnings == ["This file has no balances, so its opening balance can't be checked"]
