@@ -238,6 +238,10 @@
             "title": "Subtype",
             "type": "string"
           },
+          "system": {
+            "title": "System",
+            "type": "boolean"
+          },
           "tax_wrapper": {
             "enum": [
               "none",
@@ -264,7 +268,8 @@
           "source_connection_id",
           "status",
           "opened_on",
-          "closed_on"
+          "closed_on",
+          "system"
         ],
         "title": "AccountOut",
         "type": "object"

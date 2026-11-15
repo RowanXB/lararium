@@ -13,7 +13,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
-from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.accounts import get_account, require_owner_account
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.money import require_amount, to_plain_str
@@ -79,7 +79,8 @@ async def record_snapshot(
         raise FinanceValidationError("as_of needs a timezone")
     require_amount("quantity", quantity)
     session = ctx.session
-    await get_account(session, account_id)  # raises AccountNotFoundError if missing
+    # get_account raises AccountNotFoundError if missing.
+    require_owner_account(await get_account(session, account_id), "given a snapshot")
     await get_instrument(session, instrument_id)  # raises InstrumentNotFoundError if missing
     snapshot_id = (
         await session.execute(

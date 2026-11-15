@@ -9,6 +9,7 @@ from lararium.core.errors import SettingNotFoundError
 from lararium.core.models import Setting
 from lararium.core.settings_store import get_setting, set_setting
 from lararium.modules.finance.accounts import (
+    SYSTEM_ACCOUNT_SETTING_PREFIX,
     AccountSubtype,
     BalanceMode,
     LedgerType,
@@ -40,13 +41,14 @@ async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKe
     """An account the ledger itself keeps: Unassigned and Opening balances, equity accounts
     (outside net worth) standing in for the unknown side of a connector's transactions, and
     In transit, the asset holding a transfer between own accounts until both sides are in.
-    Its id is remembered in finance.system_account.<key>.
+    Its id is remembered in finance.system_account.<key>, which makes it a system account
+    (AccountRecord.system).
 
     Concurrent callers (syncs of different connections) creating it are serialised on the
     key, so only one creates it, and the lock is held until that transaction commits. Once
     it exists, it is read without a lock, so a long transaction (a heal) holds none.
     """
-    setting_key = f"finance.system_account.{key}"
+    setting_key = f"{SYSTEM_ACCOUNT_SETTING_PREFIX}{key}"
     found = await _existing(ctx.session, setting_key)
     if found is not None:
         return found
@@ -65,7 +67,7 @@ async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKe
 async def system_account_ids(session: AsyncSession) -> dict[SystemAccountKey, UUID]:
     """The system accounts created so far, by key; reading needs no command."""
     by_setting: dict[str, SystemAccountKey] = {
-        f"finance.system_account.{key}": key for key in _ACCOUNTS
+        f"{SYSTEM_ACCOUNT_SETTING_PREFIX}{key}": key for key in _ACCOUNTS
     }
     rows = await session.execute(
         select(Setting.key, Setting.value).where(Setting.key.in_(list(by_setting)))

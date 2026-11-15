@@ -536,3 +536,74 @@ async def test_identifier_on_a_system_account_refused(client, run) -> None:
         "error": "invalid_input",
         "message": "a system account can't have identifiers",
     }
+
+
+async def test_owner_commands_refuse_the_system_accounts(client, session, run) -> None:
+    # A payment from A to the connected C is awaiting, so In transit holds its 100.
+    a, c = await _connected(run, "A"), await _connected(run, "C")
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", C_IDENTIFIER)
+    await _connector_tx(session, run, a, "-100", identifier_id=c_identifier)
+    assert (await _register(client, str(c[1].id), C_IDENTIFIER)).status_code == 201
+    [transfer] = await _transfers(client, status="awaiting")
+    day = WHEN.date().isoformat()
+    params = {"start": day, "end": day}
+    worth = (await client.get(f"{FINANCE}/net-worth", params=params)).json()
+    gbp = await get_currency(session, "GBP")
+    system = [
+        await run(get_or_create_system_account, key)
+        for key in ("unassigned", "opening_balances", "in_transit")
+    ]
+    listed = (await client.get(f"{FINANCE}/accounts")).json()
+    assert {account["id"] for account in listed if account["system"]} == {str(s) for s in system}
+    by_id = {account["id"]: account for account in listed}
+
+    for account_id in system:
+        assert by_id[str(account_id)]["system"] is True
+        calls = [
+            client.post(f"{FINANCE}/accounts/{account_id}/close", json={"closed_on": day}),
+            client.patch(f"{FINANCE}/accounts/{account_id}", json={"name": "Lloyds"}),
+            client.post(
+                f"{FINANCE}/accounts/{account_id}/snapshots",
+                json={"instrument_id": str(gbp.id), "quantity": "5", "as_of": WHEN.isoformat()},
+            ),
+        ]
+        for call in calls:
+            response = await call
+            assert response.status_code == 422
+            assert response.json()["detail"]["error"] == "invalid_input"
+    assert (await client.get(f"{FINANCE}/accounts")).json() == listed
+    snapshots = text("select count(*) from finance.balance_snapshots where account_id = any(:a)")
+    assert await session.scalar(snapshots, {"a": system}) == 0
+
+    # In transit stays open, so the awaiting transfer's 100 stays in net worth.
+    assert (await client.get(f"{FINANCE}/net-worth", params=params)).json() == worth
+    assert [t["id"] for t in await _transfers(client, status="awaiting")] == [transfer["id"]]
+
+
+async def test_an_owner_account_of_subtype_in_transit_is_the_owners(client) -> None:
+    body = {
+        "name": "Cash in the post",
+        "ledger_type": "asset",
+        "subtype": "in_transit",
+        "balance_mode": "hybrid",
+    }
+    created = await client.post(f"{FINANCE}/accounts", json=body)
+    assert created.status_code == 201
+    account = created.json()
+    assert account["system"] is False
+
+    assert (await _register(client, account["id"], B_IDENTIFIER)).status_code == 201
+    renamed = await client.patch(f"{FINANCE}/accounts/{account['id']}", json={"name": "Post"})
+    assert (renamed.status_code, renamed.json()["system"]) == (200, False)
+    closed = await client.post(
+        f"{FINANCE}/accounts/{account['id']}/close", json={"closed_on": WHEN.date().isoformat()}
+    )
+    assert (closed.status_code, closed.json()["status"]) == (200, "closed")
+
+
+async def test_balance_mode_response_says_whether_the_account_is_the_ledgers(client) -> None:
+    b_id = await _manual(client, balance_mode="snapshots")
+    response = await client.post(
+        f"{FINANCE}/accounts/{b_id}/balance-mode", json={"balance_mode": "hybrid"}
+    )
+    assert (response.status_code, response.json()["system"]) == (200, False)

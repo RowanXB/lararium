@@ -96,6 +96,7 @@ vi.mock("../api", () => ({
         subtype: "bank",
         balance_mode: "transactions",
         status: "open",
+        system: false,
       },
       {
         id: BANK_A,
@@ -104,6 +105,7 @@ vi.mock("../api", () => ({
         subtype: "bank",
         balance_mode: "hybrid",
         status: "open",
+        system: false,
       },
       {
         id: "0190a0b0-0000-7000-8000-000000000004",
@@ -112,6 +114,16 @@ vi.mock("../api", () => ({
         subtype: "in_transit",
         balance_mode: "transactions",
         status: "open",
+        system: true,
+      },
+      {
+        id: "0190a0b0-0000-7000-8000-000000000005",
+        name: "Cash in the post",
+        ledger_type: "asset",
+        subtype: "in_transit",
+        balance_mode: "hybrid",
+        status: "open",
+        system: false,
       },
       {
         id: "0190a0b0-0000-7000-8000-000000000003",
@@ -120,6 +132,7 @@ vi.mock("../api", () => ({
         subtype: "other",
         balance_mode: "transactions",
         status: "open",
+        system: false,
       },
     ],
   })),
@@ -244,8 +257,10 @@ it("registers a suggestion against an account", async () => {
   await user.click(await suggestions.findByRole("combobox", { name: "Account" }));
   // Only asset and liability accounts can own a bank account.
   expect(screen.queryByRole("option", { name: "Groceries" })).toBeNull();
-  // In transit is the ledger's own account, which can't have identifiers.
+  // In transit is the ledger's own account, which can't have identifiers; an owner's
+  // account of the same subtype can.
   expect(screen.queryByRole("option", { name: "In transit" })).toBeNull();
+  expect(screen.getByRole("option", { name: "Cash in the post" })).toBeInTheDocument();
   await user.click(await screen.findByRole("option", { name: "Bank A" }));
   await user.click(suggestions.getByRole("button", { name: "Register" }));
 

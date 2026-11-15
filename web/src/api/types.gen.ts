@@ -109,6 +109,10 @@ export type AccountOut = {
      */
     subtype: 'bank' | 'savings_pot' | 'broker' | 'exchange' | 'wallet' | 'in_transit' | 'manual_asset' | 'other';
     /**
+     * System
+     */
+    system: boolean;
+    /**
      * Tax Wrapper
      */
     tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';

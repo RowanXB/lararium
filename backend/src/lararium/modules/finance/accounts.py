@@ -3,12 +3,14 @@ from datetime import date
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, exists, insert, select, update
+from sqlalchemy import ColumnElement, Text, exists, func, insert, select, update
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
+from lararium.core.models import Setting
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import (
     AccountAlreadyClosedError,
@@ -24,6 +26,10 @@ TaxWrapper = Literal["none", "isa", "sipp", "lisa", "gia"]
 BalanceMode = Literal["transactions", "snapshots", "hybrid"]
 SourceKind = Literal["manual", "connection"]
 AccountStatus = Literal["open", "closed"]
+
+# The settings remembering the ledger's own accounts (system_accounts): an account is one
+# when a setting under this prefix holds its id.
+SYSTEM_ACCOUNT_SETTING_PREFIX = "finance.system_account."
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,9 @@ class AccountRecord:
     status: AccountStatus
     opened_on: date | None
     closed_on: date | None
+    # One the ledger keeps for itself (Unassigned, Opening balances, In transit): the owner
+    # can't close, rename or snapshot it.
+    system: bool
 
 
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[AccountRecord]:
@@ -64,6 +73,12 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             a.status,
             a.opened_on,
             a.closed_on,
+            exists()
+            .where(
+                Setting.key.startswith(SYSTEM_ACCOUNT_SETTING_PREFIX),
+                Setting.value == func.to_jsonb(sql_cast(a.id, Text)),
+            )
+            .label("system"),
         )
         .where(*conditions)
         .order_by(a.name, a.id)
@@ -84,6 +99,7 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             status=cast(AccountStatus, row.status),
             opened_on=row.opened_on,
             closed_on=row.closed_on,
+            system=row.system,
         )
         for row in rows
     ]
@@ -126,6 +142,14 @@ async def get_account(session: AsyncSession, account_id: UUID) -> AccountRecord:
 
 async def list_accounts(session: AsyncSession) -> list[AccountRecord]:
     return await _load(session)
+
+
+def require_owner_account(record: AccountRecord, action: str) -> None:
+    """Refuse an owner's command on one of the ledger's own accounts."""
+    if record.system:
+        raise FinanceValidationError(
+            f"{record.name} belongs to the ledger, which keeps it; it can't be {action}"
+        )
 
 
 async def create_account(
@@ -171,6 +195,7 @@ async def create_account(
 
 
 async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> AccountRecord:
+    require_owner_account(await get_account(ctx.session, account_id), "renamed")
     updated = await ctx.session.scalar(
         update(models.Account)
         .where(models.Account.id == account_id)
@@ -185,6 +210,8 @@ async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> Ac
 
 
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
+    # Closing In transit would drop the transfers it holds from net worth.
+    require_owner_account(await get_account(ctx.session, account_id), "closed")
     # Conditional update, so two concurrent closes can't both succeed.
     closed = await ctx.session.scalar(
         update(models.Account)

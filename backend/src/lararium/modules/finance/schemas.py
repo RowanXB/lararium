@@ -139,6 +139,8 @@ class AccountOut(_Out):
     status: AccountStatus
     opened_on: date | None
     closed_on: date | None
+    # One the ledger keeps for itself (Unassigned, Opening balances, In transit).
+    system: bool
 
 
 class SnapshotCreate(BaseModel):

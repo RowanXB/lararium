@@ -26,7 +26,6 @@ from lararium.modules.finance.errors import (
     DuplicateAccountIdentifierError,
     FinanceValidationError,
 )
-from lararium.modules.finance.system_accounts import system_account_ids
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +169,7 @@ async def get_or_create_identifier(ctx: CommandContext, kind: IdentifierKind, va
 
 async def _require_can_carry_identifiers(session: AsyncSession, account_id: UUID) -> None:
     account = await get_account(session, account_id)  # raises AccountNotFoundError if missing
-    if account_id in (await system_account_ids(session)).values():
+    if account.system:
         # In transit is an asset, but it is the ledger's own: a record naming it would be a
         # "transfer" parked there for good.
         raise FinanceValidationError("a system account can't have identifiers")
