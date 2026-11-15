@@ -14,6 +14,7 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     post_transaction,
+    upsert_connector_transaction,
 )
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.transfers import (
@@ -437,5 +438,87 @@ async def test_identifier_unassigned_then_moved(
     assert await contra_account(session, record.id, a.account.id) == ids.in_transit
     balances = await balances_on(session)
     assert (balances[b.id], balances[b2.id]) == (Decimal("1000"), Decimal("1100"))
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_leg_that_gains_a_fee_posting_leaves_in_transit(
+    session, run, gbp, ids, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    """A re-synced leg with a fee posting besides (3 postings, 2 on the own account) is no
+    longer shaped like a leg: its transfer goes, and so does its posting on In transit."""
+    a = await connected_bank("A")
+    await manual_bank("B")
+    worth_before = await net_worth_on(session)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    record = await connector_tx(a, "-100", identifier_id=identifier)
+    assert await heal() == 1
+    contra = await transfer_contra(
+        session,
+        source=("connection", f"{a.connection_id}:tx_1"),
+        own_account_id=a.account.id,
+        counterparty_identifier_id=identifier,
+    )
+    assert contra == ids.in_transit  # a leg keeps its contra on In transit
+
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=WHEN,
+            description="Transfer",
+            status="booked",
+            origin="connector",
+            connection_id=a.connection_id,
+            external_id="tx_1",
+            postings=[
+                PostingInput(a.account.id, gbp.id, Decimal("-100")),
+                PostingInput(a.account.id, gbp.id, Decimal("-0.50"), is_fee=True),
+                PostingInput(contra, gbp.id, Decimal("100.50")),
+            ],
+            counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
+        ),
+    )
+
+    assert await heal() == 1
+
+    assert await list_transfers(session) == []
+    assert await placeholders(session) == []
+    assert await postings_of(session, record.id) == {
+        (a.account.id, Decimal("-100")),
+        (a.account.id, Decimal("-0.50")),
+        (ids.unassigned, Decimal("100.50")),
+    }
+    assert await net_worth_on(session) == worth_before - Decimal("100.50")
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_any_stray_in_transit_posting_is_found_and_repaired(
+    session, run, gbp, ids, connected_bank, heal
+) -> None:
+    """The invariant covers every recorded transaction posting on In transit, whatever its
+    shape: one that is no transfer's leg is a violation, and heal re-points that posting."""
+    a = await connected_bank("A")
+    stray, _ = await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=WHEN,
+            description="Transfer",
+            status="booked",
+            origin="connector",
+            connection_id=a.connection_id,
+            external_id="tx_1",
+            postings=[
+                PostingInput(a.account.id, gbp.id, Decimal("-100")),
+                PostingInput(a.account.id, gbp.id, Decimal("-0.50"), is_fee=True),
+                PostingInput(ids.in_transit, gbp.id, Decimal("100.50")),
+            ],
+        ),
+    )
+    assert await find_transfer_violations(session) == [stray.id]
+
+    assert await heal() == 1
+
+    assert (ids.unassigned, Decimal("100.50")) in await postings_of(session, stray.id)
     await assert_consistent(session)
     assert await heal() == 0

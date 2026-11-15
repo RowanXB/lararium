@@ -4,11 +4,12 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Select,
     SQLColumnExpression,
     and_,
     case,
@@ -318,9 +319,26 @@ def is_overdue(transfer: TransferRecord, now: datetime, settings: TransferSettin
     return transfer.status == "awaiting" and transfer.opened_at < now - settings.overdue
 
 
+def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
+    """(id, occurred_at) of the recorded transactions (not void, not derived) posting on In
+    transit without being a leg of a transfer that is not rejected, whatever their shape:
+    one with a fee posting besides is no leg, yet its posting there still counts."""
+    t, p, tr = models.Transaction, models.Posting, models.Transfer
+    return select(t.id.label("id"), t.occurred_at).where(
+        t.status != "void",
+        t.origin.not_in(DERIVED_ORIGINS),
+        exists().where(p.transaction_id == t.id, p.account_id == in_transit),
+        ~exists().where(
+            tr.status != "rejected",
+            or_(tr.out_transaction_id == t.id, tr.in_transaction_id == t.id),
+        ),
+    )
+
+
 async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
-    """Ids of transactions that break the invariant (design §5.5): own records whose contra
-    is In transit without being a leg of a transfer that is not rejected, or the reverse;
+    """Ids of transactions that break the invariant (design §5.5): recorded transactions
+    posting on In transit without being a leg of a transfer that is not rejected, whatever
+    their shape, and own records that are such a leg with their contra elsewhere;
     placeholders and settlements whose transfer is gone; those of a transfer that is not
     rejected which are void or don't post on In transit; and the own record of a transfer
     whose placeholder or settlement is missing."""
@@ -337,9 +355,9 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             tr.out_transaction_id == e.c.transaction_id, tr.in_transaction_id == e.c.transaction_id
         ),
     )
-    in_transit_contra = e.c.contra_account_id == in_transit
-    misplaced = select(e.c.transaction_id.label("id")).where(
-        or_(and_(in_transit_contra, ~is_leg), and_(~in_transit_contra, is_leg))
+    stray = stray_in_transit(in_transit).subquery()
+    elsewhere = select(e.c.transaction_id.label("id")).where(
+        e.c.contra_account_id != in_transit, is_leg
     )
     t, p = models.Transaction, models.Posting
     orphaned = select(t.id.label("id")).where(
@@ -378,7 +396,7 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
         )
     )
-    found = union(misplaced, orphaned, broken, missing).subquery()
+    found = union(select(stray.c.id), elsewhere, orphaned, broken, missing).subquery()
     return list(await session.scalars(select(found.c.id).order_by(found.c.id)))
 
 

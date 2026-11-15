@@ -45,6 +45,7 @@ from lararium.modules.finance.system_accounts import (
     system_account_ids,
 )
 from lararium.modules.finance.transfers.contra import (
+    DERIVED_ORIGINS,
     OwnRecord,
     bound_id,
     is_active_leg,
@@ -358,6 +359,31 @@ async def _open(
     )
 
 
+async def _release_stray(ctx: CommandContext, transaction_id: UUID, system: _System) -> None:
+    """Re-point the In transit posting of a recorded transaction that can't be a leg (one
+    with a fee posting besides, say) back to Unassigned: only a transfer's leg posts there
+    (design §5.5). Its transfer, if it had one, is dissolved already."""
+    t, p = models.Transaction, models.Posting
+    on_in_transit = await ctx.session.scalar(
+        select(func.count())
+        .select_from(p)
+        .join(t, t.id == p.transaction_id)
+        .where(
+            p.transaction_id == transaction_id,
+            p.account_id == system.in_transit,
+            t.status != "void",
+            t.origin.not_in(DERIVED_ORIGINS),
+        )
+    )
+    if not on_in_transit or await is_active_leg(ctx.session, transaction_id):
+        return
+    if on_in_transit > 1:
+        # Which one is the contra is ambiguous; find_transfer_violations reports it.
+        logger.warning("transaction %s posts on In transit more than once", transaction_id)
+        return
+    await repoint_contra(ctx, transaction_id, system.in_transit, system.unassigned)
+
+
 async def _waiting_transfer(session: AsyncSession, record_id: UUID) -> TransferRecord | None:
     """The open transfer the record is the only own record of, if any."""
     tr = models.Transfer
@@ -424,7 +450,10 @@ async def _match_one(
     ids = await system_account_ids(session)
     record = await load_own_record(session, ids, transaction_id)
     if record is None:
-        return others, set()  # void, derived or not shaped like a transfer's leg
+        # Void, derived or not shaped like a transfer's leg: no transfer, so nothing of it
+        # stays on In transit.
+        await _release_stray(ctx, transaction_id, system)
+        return others, set()
     # 1. The owner said it is not a transfer.
     if await is_rejected(session, record.source):
         await _set_contra(ctx, record, system.unassigned)

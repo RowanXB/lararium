@@ -15,6 +15,7 @@ from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
     before_history,
+    stray_in_transit,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings
 
@@ -81,12 +82,6 @@ async def records_to_heal(
         models.Transaction,
     )
     active = tr.status != "rejected"
-    is_leg = exists().where(
-        active,
-        or_(
-            tr.out_transaction_id == e.c.transaction_id, tr.in_transaction_id == e.c.transaction_id
-        ),
-    )
     identified = exists().where(
         i.id == e.c.counterparty_identifier_id,
         i.account_id.is_not(None),
@@ -102,12 +97,9 @@ async def records_to_heal(
         )
     ]
     if in_transit is not None:
-        # (a) in In transit without a transfer.
-        queries.append(
-            select(e.c.transaction_id.label("id"), e.c.occurred_at).where(
-                e.c.contra_account_id == in_transit, ~is_leg
-            )
-        )
+        # (a) posting on In transit without being a transfer's leg, whatever its shape (a
+        # leg that gained a fee posting included).
+        queries.append(stray_in_transit(in_transit))
         for side in ("out", "in"):
             leg, other_leg = (
                 (tr.out_transaction_id, tr.in_transaction_id)
