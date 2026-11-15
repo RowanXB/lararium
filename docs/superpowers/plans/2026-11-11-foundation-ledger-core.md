@@ -1,9 +1,5 @@
 # Foundation and Ledger Core Implementation Plan
 
-**Languages:** English | [简体中文](./2026-11-11-foundation-ledger-core.zh-CN.md)
-
-The English version is authoritative; if the two versions differ, follow this one.
-
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the skeleton and ledger core of Lararium: create accounts by hand, enter balance snapshots and holding quantities, record double-entry transactions, enter prices and FX rates, and see net worth for any day in the web UI.
@@ -41,7 +37,7 @@ Of the spec's shared objects, this plan builds only the ones the ledger core nee
 - Branch name `feat/claude-…`; commit message format `<type>: <summary>`, where type is one of feat, fix, chore, refactor, docs, style, perf, test. Use the `local-signed-git-commit` skill to handle signing when committing.
 - Development environment requirements: Docker (with buildx, daemon running), uv, Node 24, pnpm 11, Python 3.13, git.
 - Open source: license AGPL-3.0-or-later (stated in both `pyproject.toml` and `web/package.json`). No real personal data in the repository: all test data is hand-written and synthetic, and no credentials are built into the code; personal notes go in `private/`, which is not tracked by git. Confirm that any new dependency's license is compatible with AGPL-3.0.
-- Docs are bilingual: English is primary; Chinese translations live alongside as `*.zh-CN.md`. UI copy is English.
+- Docs are in English. Only the README also has a Chinese translation, `README.zh-CN.md`. UI copy is English.
 
 ## Review Focus
 

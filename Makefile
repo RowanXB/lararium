@@ -40,8 +40,10 @@ web-check: web-install
 up:
 	$(COMPOSE) up -d --build
 
+# Every profile, so services started under one since turned off (the webhook receiver and
+# tunnel after COMPOSE_PROFILES is cleared) are stopped too.
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile '*' down
 
 backup:
 	infra/backup/backup.sh

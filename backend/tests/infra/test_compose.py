@@ -3,11 +3,36 @@
 import json
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from lararium.worker import jobs
+
 COMPOSE_FILE = Path(__file__).parents[3] / "infra" / "compose.yaml"
+
+
+def _config() -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "--profile",
+            "*",
+            "config",
+            "--no-interpolate",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def _services() -> dict[str, dict[str, object]]:
@@ -17,6 +42,8 @@ def _services() -> dict[str, dict[str, object]]:
             "compose",
             "-f",
             str(COMPOSE_FILE),
+            "--profile",
+            "*",
             "config",
             "--no-interpolate",
             "--format",
@@ -36,15 +63,107 @@ def test_long_running_services_restart_unless_stopped() -> None:
         "db": "unless-stopped",
         "migrate": None,
         "api": "unless-stopped",
+        "worker": "unless-stopped",
         "web": "unless-stopped",
+        "webhook-in": "unless-stopped",
+        "cloudflared": "unless-stopped",
     }
+
+
+def test_worker_runs_the_worker_module_after_the_migrations() -> None:
+    worker = _services()["worker"]
+    assert worker["command"] == ["python", "-m", "lararium.worker"]
+    assert worker["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+    assert "profiles" not in worker
+    assert worker["environment"]["LARARIUM_DATABASE_URL"].startswith(
+        "postgresql+psycopg://lararium_backend:"
+    )
+
+
+def test_worker_may_finish_an_approval_job_when_stopped() -> None:
+    # A job killed mid-run holds its sync lock until the stalled-job retry frees it. The
+    # longest is an approval job: the wait, one more check after the deadline (a poll's wait
+    # and a request's timeout), then a backfill that may run until Monzo's window closes,
+    # and then writing that history to the ledger and committing, which has no bound of its
+    # own: a few minutes are left for it.
+    longest = (
+        jobs.APPROVAL_WINDOW
+        + timedelta(seconds=jobs.APPROVAL_POLL_SECONDS + jobs.HTTP_TIMEOUT_SECONDS)
+        + jobs.FULL_HISTORY_WINDOW
+        + timedelta(minutes=5)
+    )
+    grace = _services()["worker"]["stop_grace_period"]
+    assert isinstance(grace, str) and grace.endswith("m")
+    assert timedelta(minutes=int(grace[:-1])) >= longest
+
+
+def test_make_down_stops_every_profile() -> None:
+    # Services started under a profile since turned off (the webhook receiver and tunnel
+    # after COMPOSE_PROFILES is cleared) are outside a plain `down`.
+    makefile = (Path(__file__).parents[3] / "Makefile").read_text()
+    assert "down:\n\t$(COMPOSE) --profile '*' down\n" in makefile
+
+
+def test_api_does_not_log_requests() -> None:
+    # The OAuth callback URL carries ?code= and &state=.
+    assert "--no-access-log" in _services()["api"]["command"]
+
+
+@pytest.mark.parametrize("name", ["api", "worker"])
+def test_api_and_worker_get_the_connector_settings(name: str) -> None:
+    environment = _services()[name]["environment"]
+    for variable in (
+        "LARARIUM_MASTER_KEY",
+        "LARARIUM_PUBLIC_BASE_URL",
+        "LARARIUM_WEBHOOK_BASE_URL",
+        "LARARIUM_WEBHOOK_SECRET",
+    ):
+        assert variable in environment, variable
+    if name == "worker":
+        assert "LARARIUM_FEISHU_WEBHOOK_URL" in environment
+        assert "LARARIUM_FEISHU_SECRET" in environment
+
+
+@pytest.mark.parametrize("name", ["webhook-in", "cloudflared"])
+def test_ingress_services_are_only_in_the_webhook_profile(name: str) -> None:
+    assert _services()[name]["profiles"] == ["webhook"]
+
+
+def test_webhook_receiver_runs_without_access_logs() -> None:
+    # `python -m lararium.webhook_in` turns uvicorn's access log off: the secret is in the path.
+    assert _services()["webhook-in"]["command"] == ["python", "-m", "lararium.webhook_in"]
+
+
+def test_webhook_receiver_connects_as_its_own_role() -> None:
+    environment = _services()["webhook-in"]["environment"]
+    assert environment["LARARIUM_DATABASE_URL"].startswith(
+        "postgresql+psycopg://lararium_webhook_in:"
+    )
+    assert "LARARIUM_WEBHOOK_SECRET" in environment
+    assert "LARARIUM_MASTER_KEY" not in environment
+
+
+def test_cloudflared_runs_a_pinned_tunnel() -> None:
+    cloudflared = _services()["cloudflared"]
+    assert cloudflared["command"] == ["tunnel", "--no-autoupdate", "run"]
+    assert "TUNNEL_TOKEN" in cloudflared["environment"]
+    image = cloudflared["image"]
+    assert image.startswith("cloudflare/cloudflared:")
+    assert image.split(":", 1)[1] not in ("", "latest")
+
+
+def test_only_web_publishes_a_port() -> None:
+    published = {name for name, service in _services().items() if service.get("ports")}
+    assert published == {"web"}
 
 
 REQUIRED_SETTINGS = {
     "POSTGRES_PASSWORD": "pg",
     "LARARIUM_OWNER_PASSWORD": "owner",
     "LARARIUM_BACKEND_PASSWORD": "backend",
+    "LARARIUM_WEBHOOK_IN_PASSWORD": "webhook_in",
     "LARARIUM_OWNER_LOGIN": "me@example.com",
+    "LARARIUM_MASTER_KEY": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 }
 
 
@@ -63,6 +182,14 @@ def test_resolves_with_every_required_setting() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_webhook_settings_are_optional_without_the_profile() -> None:
+    # Interpolation covers services outside the active profile: requiring their settings
+    # would stop a deployment that doesn't use webhooks.
+    environment = _services()["webhook-in"]["environment"]
+    assert environment["LARARIUM_WEBHOOK_SECRET"] == "${LARARIUM_WEBHOOK_SECRET:-}"
+    assert _resolve(REQUIRED_SETTINGS).returncode == 0
+
+
 @pytest.mark.parametrize("name", REQUIRED_SETTINGS)
 @pytest.mark.parametrize("value", [None, ""])
 def test_refuses_to_start_without_a_required_setting(name: str, value: str | None) -> None:
@@ -75,3 +202,33 @@ def test_refuses_to_start_without_a_required_setting(name: str, value: str | Non
     result = _resolve(env)
     assert result.returncode != 0
     assert name in result.stderr
+
+
+def test_internet_facing_services_cannot_reach_the_api() -> None:
+    # The api trusts the identity header of whatever reaches it; the webhook receiver and
+    # cloudflared are what the internet reaches.
+    services = _services()
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or {})  # pyright: ignore[reportArgumentType]
+
+    for exposed in ("webhook-in", "cloudflared"):
+        for trusted in ("api", "web", "worker"):
+            assert not networks(exposed) & networks(trusted), (exposed, trusted)
+    assert networks("webhook-in") & networks("db")
+    assert networks("cloudflared") & networks("webhook-in")
+
+
+def test_the_webhook_receiver_has_no_route_out() -> None:
+    # On Docker Desktop a container with a way out reaches the host's loopback, where web is
+    # published: only cloudflared, to reach Cloudflare, gets one, and the api isn't on it.
+    config = _config()
+    services, networks = config["services"], config["networks"]
+    for name in services["webhook-in"]["networks"]:
+        assert networks[name].get("internal") is True, name
+    outward = [n for n in services["cloudflared"]["networks"] if not networks[n].get("internal")]
+    assert outward
+    for name in outward:
+        assert [s for s, spec in services.items() if name in (spec.get("networks") or {})] == [
+            "cloudflared"
+        ]

@@ -31,6 +31,8 @@ def postgres() -> Iterator[PostgresContainer]:
                 "owner_pw=owner",
                 "-v",
                 "backend_pw=backend",
+                "-v",
+                "webhook_in_pw=webhook_in",
                 "-U",
                 container.username,
                 "-f",
@@ -55,6 +57,11 @@ def owner_url(postgres: PostgresContainer) -> str:
 @pytest.fixture(scope="session")
 def backend_url(postgres: PostgresContainer) -> str:
     return _url(postgres, "lararium_backend", "backend")
+
+
+@pytest.fixture(scope="session")
+def webhook_in_url(postgres: PostgresContainer) -> str:
+    return _url(postgres, "lararium_webhook_in", "webhook_in")
 
 
 @pytest.fixture(scope="session")
