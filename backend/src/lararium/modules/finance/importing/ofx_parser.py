@@ -386,9 +386,36 @@ def _period(statement: _Aggregate) -> tuple[date, date] | None:
     return period
 
 
+def _check_status(tree: _Aggregate) -> None:
+    """Every STATUS (the sign-on's and the statement response's) must be CODE 0: anything
+    else is the bank saying the response failed or is incomplete."""
+    for status in tree.find(frozenset({"STATUS"})):
+        code = status.leaf("CODE")
+        if code != "0":
+            severity = status.leaf("SEVERITY") or "no severity"
+            raise FileFormatError(
+                f"the bank's response has status {code or 'without a code'} ({severity}): "
+                "export the statement again"
+            )
+
+
+def _generated_on(tree: _Aggregate) -> date | None:
+    """The day the bank made the file (SONRS's DTSERVER), as written."""
+    signon = tree.find(frozenset({"SONRS"}))
+    written = signon[0].leaf("DTSERVER") if signon else None
+    if written is None:
+        return None
+    try:
+        return _datetime(written, "DTSERVER")[0]
+    except ValueError as error:
+        raise FileFormatError(f"SONRS: {error}") from None
+
+
 @parsed.exact_decimals
 def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
-    statements = _tree(_decode(content)).find(_STATEMENTS)
+    tree = _tree(_decode(content))
+    _check_status(tree)
+    statements = tree.find(_STATEMENTS)
     if len(statements) != 1:
         found = "no statement" if not statements else f"{len(statements)} statements"
         raise FileFormatError(f"the file has {found}: export one account per file")
@@ -421,4 +448,5 @@ def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
         available_balance_date=available_balance_date,
         account=_account(statement),
         currency=currency,
+        document_date=_generated_on(tree),
     )

@@ -635,3 +635,19 @@ def test_cdata_value_is_read() -> None:
     )
     (row,) = _rows(_parse(_sgml(_sgml_statement(transaction))))
     assert row.memo == "Rent & <bills>" and row.raw["MEMO"] == "Rent & <bills>"
+
+
+def test_generation_day_is_the_document_date() -> None:
+    # SONRS's DTSERVER: the day the bank made the file.
+    assert _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS))).document_date == date(2026, 11, 30)
+
+
+@pytest.mark.parametrize("where", ["SONRS", "STMTTRNRS"])
+def test_failed_response_status_is_file_error(where: str) -> None:
+    """A STATUS other than CODE 0 is the bank saying the response failed or is incomplete."""
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).decode()
+    position = content.index("<CODE>0", content.index(f"<{where}>"))
+    content = content[:position] + "<CODE>2000\n<SEVERITY>ERROR" + content[position + 7 :]
+    content = content.replace("<SEVERITY>ERROR\n<SEVERITY>INFO", "<SEVERITY>ERROR", 1)
+    with pytest.raises(FileFormatError, match="status 2000 \\(ERROR\\)"):
+        _parse(content.encode())
