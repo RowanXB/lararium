@@ -59,7 +59,9 @@ UPGRADE = [
       notified_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now(),
       CHECK (from_account_id <> to_account_id),
-      CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT NULL)
+      -- A rejection outlives its records: rolled back, they come back into it when they
+      -- are imported again (their decisions name it), and its Undo stays.
+      CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT NULL OR status = 'rejected')
     )
     """,
     """
@@ -70,8 +72,11 @@ UPGRADE = [
       subject_ref text NOT NULL,
       other_kind text,
       other_ref text,
+      -- A reject belongs to the rejected transfer it was made on, and goes with it.
+      transfer_id uuid REFERENCES finance.transfers (id) ON DELETE CASCADE,
       created_at timestamptz NOT NULL DEFAULT now(),
       CHECK ((kind IN ('never_pair', 'pair')) = (other_kind IS NOT NULL)),
+      CHECK ((kind = 'reject') = (transfer_id IS NOT NULL)),
       CHECK ((other_kind IS NULL) = (other_ref IS NULL)),
       UNIQUE NULLS NOT DISTINCT (kind, subject_kind, subject_ref, other_kind, other_ref)
     )

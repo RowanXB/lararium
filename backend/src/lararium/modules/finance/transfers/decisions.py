@@ -1,10 +1,12 @@
 """The owner's decisions about transfers (design §5.9): this is not a transfer (reject),
 these two are not one transfer (unpair), and these two are (pair).
 
-Decisions are keyed by the records' source references, never by the transfer: matching
-dissolves and reopens transfers (a new id each time), while a record's reference holds
-across re-syncs. So each function finds the transfer's records when it is called, stores
-what it decides about them, and lets matching bring the ledger in line."""
+Decisions are keyed by the records' source references: matching dissolves and reopens
+transfers (a new id each time), while a record's reference holds across re-syncs. So each
+function finds the transfer's records when it is called, stores what it decides about
+them, and lets matching bring the ledger in line. A reject also names its rejected
+transfer, which matching never dissolves: a record rolled back and imported again goes
+back into it, and its Undo withdraws exactly that rejection's decisions."""
 
 from uuid import UUID
 
@@ -45,22 +47,31 @@ async def _store(
     kind: str,
     subject: tuple[str, str],
     other: tuple[str, str] | None = None,
+    *,
+    transfer_id: UUID | None = None,
 ) -> None:
-    """Store a decision, unless the same one is stored already."""
+    """Store a decision, unless the same one is stored already. A reject (with the
+    rejected transfer it is made on) is one per record: storing it again moves it to the
+    new transfer, so a leftover can never leave a new rejection without its record."""
     other_kind, other_ref = (None, None) if other is None else other
     d = models.TransferDecision
-    stored = await ctx.session.scalar(
-        insert(d)
-        .values(
-            kind=kind,
-            subject_kind=subject[0],
-            subject_ref=subject[1],
-            other_kind=other_kind,
-            other_ref=other_ref,
-        )
-        .on_conflict_do_nothing()
-        .returning(d.id)
+    statement = insert(d).values(
+        kind=kind,
+        subject_kind=subject[0],
+        subject_ref=subject[1],
+        other_kind=other_kind,
+        other_ref=other_ref,
+        transfer_id=transfer_id,
     )
+    if kind == "reject":
+        statement = statement.on_conflict_do_update(
+            index_elements=[d.kind, d.subject_kind, d.subject_ref, d.other_kind, d.other_ref],
+            set_={"transfer_id": statement.excluded.transfer_id},
+            where=d.transfer_id.is_distinct_from(statement.excluded.transfer_id),
+        )
+    else:
+        statement = statement.on_conflict_do_nothing()
+    stored = await ctx.session.scalar(statement.returning(d.id))
     if stored is not None:
         ctx.record_change(
             decision_change_key(kind, subject, (other_kind, other_ref)),
@@ -79,7 +90,7 @@ async def reject(ctx: CommandContext, transfer_id: UUID) -> TransferRecord:
         raise FinanceValidationError("the transfer is already rejected")
     records = _records(transfer)
     for record_id in records:
-        await _store(ctx, "reject", await source_ref(session, record_id))
+        await _store(ctx, "reject", await source_ref(session, record_id), transfer_id=transfer_id)
     tr = models.Transfer
     await session.execute(
         update(tr)
@@ -103,17 +114,32 @@ async def reject(ctx: CommandContext, transfer_id: UUID) -> TransferRecord:
     return await get_transfer(session, transfer_id)
 
 
+async def _forget_rejection(ctx: CommandContext, transfer_id: UUID) -> None:
+    """Delete the rejected transfer's reject decisions, those of records rolled back since
+    included."""
+    d = models.TransferDecision
+    deleted = await ctx.session.execute(
+        delete(d)
+        .where(d.kind == "reject", d.transfer_id == transfer_id)
+        .returning(d.id, d.subject_kind, d.subject_ref)
+    )
+    for row in deleted:
+        ctx.record_change(
+            decision_change_key("reject", (row.subject_kind, row.subject_ref), (None, None)),
+            {"before": {"id": str(row.id), "kind": "reject"}, "after": None},
+        )
+
+
 async def unreject(ctx: CommandContext, transfer_id: UUID) -> None:
-    """Withdraw a rejection: its decisions and the rejected transfer go, and its records
-    are matched again."""
+    """Withdraw a rejection: its decisions (every one naming it) and the rejected transfer
+    go, and its records are matched again."""
     await lock_transfers(ctx)
     session = ctx.session
     transfer = await get_transfer(session, transfer_id)
     if transfer.status != "rejected":
         raise FinanceValidationError("only a rejected transfer can be unrejected")
     records = _records(transfer)
-    for record_id in records:
-        await forget_decisions(ctx, "reject", await source_ref(session, record_id))
+    await _forget_rejection(ctx, transfer_id)
     tr = models.Transfer
     await session.execute(delete(tr).where(tr.id == transfer_id))
     publish_transfer(ctx, "finance.transfer.unrejected", transfer_id, transfer, None)

@@ -9,10 +9,12 @@ from lararium.modules.finance.errors import FinanceValidationError, TransferNotF
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.transfers import (
     candidates,
+    decisions,
     get_transfer,
     list_transfers,
     pair,
     reject,
+    source_ref,
     unpair,
     unreject,
 )
@@ -93,6 +95,30 @@ async def test_reject_survives_heal(session, run, ids, inferred, connector_tx, h
 
     with pytest.raises(FinanceValidationError):
         await run(reject, transfer.id)
+
+
+async def test_a_reject_stored_again_names_the_new_rejection(session, run, inferred) -> None:
+    # One reject per record: storing it again (a leftover the engine never leaves) moves it
+    # to the new rejection rather than being dropped.
+    _, _, _, record, transfer = inferred
+    await run(reject, transfer.id)
+    ref = await source_ref(session, record.id)
+    other = await session.scalar(
+        text(
+            "insert into finance.transfers"
+            " (from_account_id, to_account_id, instrument_id, amount, status, opened_at)"
+            " select from_account_id, to_account_id, instrument_id, amount, 'rejected', opened_at"
+            " from finance.transfers where id = :t returning id"
+        ),
+        {"t": transfer.id},
+    )
+
+    await run(decisions._store, "reject", ref, transfer_id=other)
+
+    named = await session.execute(
+        text("select transfer_id from finance.transfer_decisions where kind = 'reject'")
+    )
+    assert [r.transfer_id for r in named] == [other]
 
 
 async def test_unreject_restores(session, run, ids, inferred, heal) -> None:

@@ -9,7 +9,11 @@ from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
 from lararium.modules.finance.system_accounts import system_account_ids
-from lararium.modules.finance.transfers.contra import record_columns, snapshot_own_records
+from lararium.modules.finance.transfers.contra import (
+    record_columns,
+    rejoins,
+    snapshot_own_records,
+)
 from lararium.modules.finance.transfers.pairs import PairRelation
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
@@ -88,7 +92,21 @@ async def records_to_heal(
         # (b) identified, still on Unassigned, not rejected.
         select(own.c.transaction_id.label("id"), own.c.occurred_at).where(
             own.c.contra_account_id == unassigned, identified, ~rejected
+        ),
+        # (f) rejected, but not yet back in the rejection its decision names (a row rolled
+        # back and imported again).
+        select(own.c.transaction_id.label("id"), own.c.occurred_at)
+        .select_from(own)
+        .join(
+            d,
+            and_(
+                d.kind == "reject",
+                d.subject_kind == own.c.source_kind,
+                d.subject_ref == own.c.source_ref,
+            ),
         )
+        .join(tr, tr.id == d.transfer_id)
+        .where(rejoins(own.c.transaction_id, own.c.quantity, own.c.account_id)),
     ]
     if in_transit is not None:
         # (a) posting on In transit without being a transfer's leg, whatever its shape (a

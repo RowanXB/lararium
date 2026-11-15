@@ -153,24 +153,45 @@ async def test_identifier_of_own_account_is_not_a_transfer(
 
 
 async def test_rejected_record_stays_unassigned(
-    session, run, ids, connected_bank, manual_bank, connector_tx, heal
+    session, run, ids, gbp, connected_bank, manual_bank, connector_tx, heal
 ) -> None:
     a = await connected_bank("A")
-    await manual_bank("B")
+    b = await manual_bank("B")
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     source = ("connection", f"{a.connection_id}:tx_1")
-    # Writing decisions is a later task; the engine only has to honour one.
+    # A rejection whose record is gone (rolled back, say), and the record coming back.
+    rejection = await session.scalar(
+        insert(models.Transfer)
+        .values(
+            from_account_id=a.account.id,
+            to_account_id=b.id,
+            instrument_id=gbp.id,
+            amount=Decimal(100),
+            status="rejected",
+            opened_at=WHEN,
+        )
+        .returning(models.Transfer.id)
+    )
     await session.execute(
         insert(models.TransferDecision).values(
-            kind="reject", subject_kind=source[0], subject_ref=source[1]
+            kind="reject", subject_kind=source[0], subject_ref=source[1], transfer_id=rejection
         )
     )
 
     record = await connector_tx(a, "-100", identifier_id=identifier)
     assert await source_ref(session, record.id) == source
     assert await contra_account(session, record.id, a.account.id) == ids.unassigned
+    # Heal puts it back into its rejection, and the second writes nothing.
+    assert await heal() == 1
+    [transfer] = await list_transfers(session)
+    assert (transfer.id, transfer.status, transfer.out_transaction_id) == (
+        rejection,
+        "rejected",
+        record.id,
+    )
+    assert await contra_account(session, record.id, a.account.id) == ids.unassigned
+    assert await placeholders(session) == []
     assert await heal() == 0
-    assert await list_transfers(session) == []
     await assert_consistent(session)
 
 

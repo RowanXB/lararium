@@ -30,6 +30,7 @@ from sqlalchemy import (
     func,
     insert,
     literal,
+    or_,
     select,
     text,
     true,
@@ -358,6 +359,37 @@ async def is_rejected(session: AsyncSession, source: tuple[str, str]) -> bool:
                 )
             )
         )
+    )
+
+
+async def rejection_of(session: AsyncSession, source: tuple[str, str]) -> UUID | None:
+    """The rejected transfer the owner's reject decision for this reference names, if
+    there is one."""
+    d = models.TransferDecision
+    return await session.scalar(
+        select(d.transfer_id).where(
+            d.kind == "reject", d.subject_kind == source[0], d.subject_ref == source[1]
+        )
+    )
+
+
+def rejoins(
+    record_id: SQLColumnExpression[UUID],
+    quantity: SQLColumnExpression[Decimal],
+    account_id: SQLColumnExpression[UUID],
+) -> ColumnElement[bool]:
+    """Whether a rejected record goes back into the rejected transfer (models.Transfer)
+    its reject decision names: it is no own record of it yet, and the side for its role
+    is free and on its account. Matching (engine._rejoin) and heal read this one rule."""
+    tr = models.Transfer
+    return and_(
+        tr.status == "rejected",
+        tr.out_transaction_id.is_distinct_from(record_id),
+        tr.in_transaction_id.is_distinct_from(record_id),
+        or_(
+            and_(quantity < 0, tr.out_transaction_id.is_(None), tr.from_account_id == account_id),
+            and_(quantity > 0, tr.in_transaction_id.is_(None), tr.to_account_id == account_id),
+        ),
     )
 
 

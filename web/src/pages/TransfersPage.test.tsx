@@ -10,6 +10,7 @@ import {
   pairTransfer,
   rejectTransfer,
   unpairTransfer,
+  unrejectTransfer,
 } from "../api";
 import { TransfersPage } from "./TransfersPage";
 
@@ -203,6 +204,25 @@ it("rejects a transfer", async () => {
   await user.click(within(matched).getByRole("button", { name: "Unpair" }));
   expect(unpairTransfer).toHaveBeenCalledWith(
     expect.objectContaining({ path: { transfer_id: "0190a0b0-0000-7000-8000-0000000000f4" } }),
+  );
+});
+
+it("undoes a rejection whose records were all rolled back", async () => {
+  const rejected = transfer({
+    id: "0190a0b0-0000-7000-8000-0000000000f5",
+    status: "rejected",
+    out_transaction_id: null,
+    in_transaction_id: null,
+  });
+  vi.mocked(listTransfers).mockResolvedValue({ data: [rejected] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const recent = await section("Recent");
+  await user.click(await recent.findByText("Recent (1)"));
+  const item = recent.getByText("Monzo → Bank A · 100.00 GBP · rejected").closest("li")!;
+  await user.click(within(item).getByRole("button", { name: "Undo" }));
+  expect(unrejectTransfer).toHaveBeenCalledWith(
+    expect.objectContaining({ path: { transfer_id: "0190a0b0-0000-7000-8000-0000000000f5" } }),
   );
 });
 

@@ -377,6 +377,9 @@ async def test_transfer_needs_a_leg_and_distinct_accounts(session, run, make_acc
         with pytest.raises(exc.IntegrityError, match="check constraint"):
             async with session.begin_nested():
                 await session.execute(insert, valid | broken)
+    # A rejection may outlive its records (rolled back), and nothing else may.
+    async with session.begin_nested():
+        await session.execute(insert, valid | {"out": None, "status": "rejected"})
     async with session.begin_nested():
         await session.execute(insert, valid)
     # A transaction is a leg of at most one transfer.
@@ -391,21 +394,41 @@ async def test_transfer_needs_a_leg_and_distinct_accounts(session, run, make_acc
             )
 
 
-async def test_decisions_are_unique_with_nulls(session) -> None:
+async def test_decisions_are_unique_with_nulls(session, make_account, gbp) -> None:
+    a, b = await make_account(name="A"), await make_account(name="B")
+    rejection = await session.scalar(
+        text(
+            "insert into finance.transfers"
+            " (from_account_id, to_account_id, instrument_id, amount, status, opened_at)"
+            " values (:f, :t, :i, 100, 'rejected', now()) returning id"
+        ),
+        {"f": a.id, "t": b.id, "i": gbp.id},
+    )
     insert = text(
-        "insert into finance.transfer_decisions (kind, subject_kind, subject_ref)"
-        " values ('reject', 'connection', 'c:tx_1')"
+        "insert into finance.transfer_decisions (kind, subject_kind, subject_ref, transfer_id)"
+        " values ('reject', 'connection', 'c:tx_1', :r)"
     )
     async with session.begin_nested():
-        await session.execute(insert)
+        await session.execute(insert, {"r": rejection})
     with pytest.raises(exc.IntegrityError, match="unique constraint"):
         async with session.begin_nested():
-            await session.execute(insert)
-    with pytest.raises(exc.IntegrityError, match="check constraint"):
-        async with session.begin_nested():
-            await session.execute(
-                text(
-                    "insert into finance.transfer_decisions (kind, subject_kind, subject_ref)"
-                    " values ('pair', 'connection', 'c:tx_2')"
+            await session.execute(insert, {"r": rejection})
+    # A reject names its rejected transfer, and only a reject names one.
+    for broken in (
+        "('reject', 'connection', 'c:tx_3', NULL, NULL, NULL)",
+        "('never_pair', 'connection', 'c:tx_3', 'connection', 'c:tx_4', :r)",
+        "('pair', 'connection', 'c:tx_2', NULL, NULL, NULL)",
+    ):
+        with pytest.raises(exc.IntegrityError, match="check constraint"):
+            async with session.begin_nested():
+                await session.execute(
+                    text(
+                        "insert into finance.transfer_decisions"
+                        " (kind, subject_kind, subject_ref, other_kind, other_ref, transfer_id)"
+                        f" values {broken}"
+                    ),
+                    {"r": rejection},
                 )
-            )
+    # The decisions go with their rejection.
+    await session.execute(text("delete from finance.transfers where id = :r"), {"r": rejection})
+    assert await session.scalar(text("select count(*) from finance.transfer_decisions")) == 0

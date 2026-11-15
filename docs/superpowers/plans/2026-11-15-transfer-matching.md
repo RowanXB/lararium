@@ -39,7 +39,7 @@ Choices the design leaves to the builder, made here so tasks don't have to:
    - `status` is one of `awaiting | inferred | matched | before_history | rejected` and describes the ledger state.
    - `review_reason` is `several_candidates | amount_differs | NULL` and is orthogonal to it (the design's "needs review").
 6. **Matching one record R** (`match_transaction`). First dissolve R's current non-rejected transfer, if any: delete its placeholder and settlement, delete the row, and queue its other own record for matching too. Then:
-   1. **Rejected.** R has a `reject` decision: ensure its contra is Unassigned. Done.
+   1. **Rejected.** R has a `reject` decision: ensure its contra is Unassigned, and that R is an own record of the rejected transfer the decision names (a row rolled back and imported again goes back into it, when the side for its role is free). Done.
    2. **Paired by the owner.** R has a `pair` decision with S, and S is eligible, opposite in sign, same instrument and amount: dissolve S's transfer, link R and S as `matched`. Done.
    3. **Identified through the registry.** R's `counterparty_identifier_id` points at a registry row whose `account_id` X is an own account other than R's own account. Collect the candidates, excluding any with a `never_pair` decision against R:
       - **(i)** transfers between R's account and X in R's role, same instrument and amount, missing R's side, with status `awaiting`, `inferred` or `before_history`, whose other record fits the window;
@@ -68,7 +68,8 @@ Choices the design leaves to the builder, made here so tasks don't have to:
    - (b) eligible with contra Unassigned, identified through the registry, no `reject` decision;
    - (c) eligible with contra Unassigned, `bank_transfer`, not linked, with a fallback candidate as in 6.4;
    - (d) legs that are void or ineligible, or whose amount, instrument or accounts no longer fit their transfer, and placeholders whose dates differ from their record's;
-   - (e) `pair` decisions not yet realised.
+   - (e) `pair` decisions not yet realised;
+   - (f) eligible with a `reject` decision, not yet back in the rejected transfer it names.
 
    Repeat until a pass finds nothing (at most 5 passes, then log an error and stop). A second `heal_transfers` right after one writes nothing.
 9. **When heal runs.**
@@ -207,11 +208,11 @@ README.md, README.zh-CN.md, docs/superpowers/specs/*.md                         
       - `id`, `from_account_id`, `to_account_id` (`CHECK from <> to`), `instrument_id`, `amount numeric CHECK (amount > 0)`;
       - `status` with the Decision 5 CHECK, `review_reason` with its CHECK;
       - `out_transaction_id`, `in_transaction_id`, `placeholder_transaction_id`, `settlement_transaction_id`, each `UNIQUE` and `REFERENCES finance.transactions` with no cascade;
-      - `CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT NULL)`;
+      - `CHECK (out_transaction_id IS NOT NULL OR in_transaction_id IS NOT NULL OR status = 'rejected')`;
       - `opened_at timestamptz NOT NULL`, `matched_at`, `notified_at`, `created_at`.
     - `finance.transfer_decisions`:
       - `id`, `kind CHECK IN ('reject','never_pair','pair')`;
-      - `subject_kind`, `subject_ref` (NOT NULL), `other_kind`, `other_ref` (NULL unless `never_pair`/`pair`), `created_at`;
+      - `subject_kind`, `subject_ref` (NOT NULL), `other_kind`, `other_ref` (NULL unless `never_pair`/`pair`), `transfer_id` (`REFERENCES finance.transfers ON DELETE CASCADE`, NOT NULL exactly for `reject`), `created_at`;
       - `UNIQUE NULLS NOT DISTINCT (kind, subject_kind, subject_ref, other_kind, other_ref)`.
   - **`ledger.CounterpartyFields`**: frozen; `identifier_id: UUID | None = None`, `name: str | None = None`, `reference: str | None = None`, `bank_transfer: bool = False`.
   - **`ledger.TransactionInput.counterparty: CounterpartyFields = CounterpartyFields()`.** `post_transaction` writes its four columns; `upsert_connector_transaction` compares them with the other fields, so a change is an update. `TransactionRecord` gains `counterparty: CounterpartyFields`.
@@ -310,12 +311,12 @@ README.md, README.zh-CN.md, docs/superpowers/specs/*.md                         
 **Interfaces:**
 - Consumes: Tasks 3 and 4.
 - Produces:
-  - **`reject(ctx, transfer_id) -> TransferRecord`.** It stores `reject` for every own record. The status becomes `rejected`, the placeholder and settlement are deleted, and the contras are re-pointed to Unassigned.
-  - **`unreject(ctx, transfer_id) -> None`.** It deletes those decisions and the row, then matches the records again.
+  - **`reject(ctx, transfer_id) -> TransferRecord`.** It stores `reject`, naming the transfer, for every own record. The status becomes `rejected`, the placeholder and settlement are deleted, and the contras are re-pointed to Unassigned.
+  - **`unreject(ctx, transfer_id) -> None`.** It deletes every decision naming the transfer and the row, then matches the records again.
   - **`unpair(ctx, transfer_id) -> None`.** Only for `matched` transfers with two own records; it stores `never_pair` both ways, dissolves the transfer and matches each record again.
   - **`pair(ctx, transfer_id, transaction_id) -> TransferRecord`.** The transaction must be among `candidates()` with reason `exact`; it stores `pair` and matches.
   - All of them raise `TransferNotFoundError` (404), or `FinanceValidationError` (422) when not allowed in the transfer's state, and end with `heal_transfers`.
-  - **`unlink_transaction(ctx, transaction_id) -> None`.** For a caller about to delete a row: it dissolves the row's transfer, then matches the transfer's other records. Its placeholder comes back if needed.
+  - **`unlink_transaction(ctx, transaction_id) -> None`.** For a caller about to delete a row: it dissolves the row's transfer, then matches the transfer's other records. Its placeholder comes back if needed. A rejected transfer only loses the row, and keeps its decisions.
   - **`preview_match(session, *, account_id, instrument_id, quantity: Decimal, occurred_at: datetime, counterparty: CounterpartyFields) -> TransferRecord | None`.** It answers which open transfer a row not yet posted would link to (Decision 6 steps 3 and 4 without writing). It returns None when there is none, or more than one.
   - **`unassign_identifier`** (Task 1) is wrapped in the engine as `unassign_identifier_and_rematch(ctx, identifier_id)`, which matches every record naming that identifier again.
 

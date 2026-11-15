@@ -210,4 +210,8 @@ class TransferDecision(Base):
     # The other transaction, for never_pair and pair; NULL for reject.
     other_kind: Mapped[str | None] = mapped_column(Text)
     other_ref: Mapped[str | None] = mapped_column(Text)
+    # The rejected transfer a reject was made on; NULL for the other kinds.
+    transfer_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transfers.id", ondelete="CASCADE")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

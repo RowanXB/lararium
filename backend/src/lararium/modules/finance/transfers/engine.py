@@ -11,10 +11,12 @@ from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Numeric,
     and_,
     delete,
     func,
     insert,
+    literal,
     or_,
     select,
     update,
@@ -51,9 +53,9 @@ from lararium.modules.finance.transfers.contra import (
     SourceRef,
     bound_id,
     is_active_leg,
-    is_rejected,
     load_own_record,
-    source_ref,
+    rejection_of,
+    rejoins,
 )
 from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.pairs import (
@@ -473,9 +475,11 @@ async def _match_one(
         # stays on In transit.
         await _release_stray(ctx, transaction_id, system)
         return others, set()
-    # 1. The owner said it is not a transfer.
-    if await is_rejected(session, record.source):
+    # 1. The owner said it is not a transfer: it is an own record of the rejection.
+    rejection = await rejection_of(session, record.source)
+    if rejection is not None:
         await _set_contra(ctx, record, system.unassigned)
+        await _rejoin(ctx, rejection, record)
         return others, set()
     # 2, 3 and 4. Paired by the owner, by the registry, or by amount and date: link a
     # unique pair.
@@ -616,11 +620,9 @@ async def forget_decisions(
 
 
 async def _release_rejected(ctx: CommandContext, transaction_id: UUID) -> None:
-    """Take the transaction out of a rejected transfer: the transfer keeps its other own
-    record, or goes when it has none. When the transfer stays, the transaction's reject
-    decision goes, so a row imported again under the same reference comes back under the
-    transfer's current state (unrejecting it could no longer withdraw that decision); when
-    the transfer goes, the decision stays, keyed by reference."""
+    """Take the transaction out of a rejected transfer, which stays, with its decisions,
+    even with no own record left: a row imported again under the same reference goes back
+    into it (_rejoin), and its Undo still withdraws the rejection."""
     session = ctx.session
     tr = models.Transfer
     for transfer in await load_transfers(
@@ -628,23 +630,51 @@ async def _release_rejected(ctx: CommandContext, transaction_id: UUID) -> None:
         tr.status == "rejected",
         or_(tr.out_transaction_id == transaction_id, tr.in_transaction_id == transaction_id),
     ):
-        if transfer.out_transaction_id == transaction_id:
-            side, other = "out_transaction_id", transfer.in_transaction_id
-        else:
-            side, other = "in_transaction_id", transfer.out_transaction_id
-        if other is None:
-            await session.execute(delete(tr).where(tr.id == transfer.id))
-            publish_transfer(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
-        else:
-            await session.execute(update(tr).where(tr.id == transfer.id).values({side: None}))
-            await forget_decisions(ctx, "reject", await source_ref(session, transaction_id))
-            publish_transfer(
-                ctx,
-                "finance.transfer.unlinked",
-                transfer.id,
-                transfer,
-                await _get(session, transfer.id),
-            )
+        side = (
+            "out_transaction_id"
+            if transfer.out_transaction_id == transaction_id
+            else "in_transaction_id"
+        )
+        await session.execute(update(tr).where(tr.id == transfer.id).values({side: None}))
+        publish_transfer(
+            ctx,
+            "finance.transfer.unlinked",
+            transfer.id,
+            transfer,
+            await _get(session, transfer.id),
+        )
+
+
+async def _rejoin(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> None:
+    """Put a rejected record back into the rejection its decision names (a row rolled back
+    and imported again under the same reference), when the side for its role is free."""
+    session = ctx.session
+    tr = models.Transfer
+    before = await _get(session, transfer_id)
+    side = "out_transaction_id" if record.role == "out" else "in_transaction_id"
+    rejoined = await session.scalar(
+        update(tr)
+        .where(
+            tr.id == transfer_id,
+            rejoins(
+                bound_id(record.id),
+                literal(record.quantity, Numeric()),
+                bound_id(record.account_id),
+            ),
+        )
+        .values({side: record.id})
+        .returning(tr.id)
+    )
+    if rejoined is not None:
+        publish_transfer(
+            ctx, "finance.transfer.relinked", transfer_id, before, await _get(session, transfer_id)
+        )
+    elif record.id not in (before.out_transaction_id, before.in_transaction_id):
+        logger.warning(
+            "rejected transaction %s does not fit the rejection %s its decision names",
+            record.id,
+            transfer_id,
+        )
 
 
 async def unlink_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
