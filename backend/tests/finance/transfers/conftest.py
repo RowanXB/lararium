@@ -226,3 +226,43 @@ async def postings_of(session: AsyncSession, transaction_id: UUID) -> set[tuple[
 async def assert_consistent(session: AsyncSession) -> None:
     assert await find_transfer_violations(session) == []
     assert await find_unbalanced_transactions(session) == []
+
+
+A_IDENTIFIER = "445566:11112222"
+C_IDENTIFIER = "778899:33334444"
+
+
+@pytest.fixture
+def registered(run: Run, connected_bank: MakeConnected):
+    """A connected bank account with its own identifier registered to it."""
+
+    async def _make(name: str, value: str) -> tuple[Connected, UUID]:
+        bank = await connected_bank(name)
+        identifier = await run(assign_identifier, bank.account.id, "uk_bank_account", value)
+        return bank, identifier.id
+
+    return _make
+
+
+@pytest.fixture
+async def a_and_c(registered: Any) -> tuple[Connected, UUID, Connected, UUID]:
+    """A and C, each on a connection of its own and each registered."""
+    a, a_id = await registered("A", A_IDENTIFIER)
+    c, c_id = await registered("C", C_IDENTIFIER)
+    return a, a_id, c, c_id
+
+
+async def history(connector_tx: ConnectorTx, bank: Connected, days_before: int = 10) -> Any:
+    """A card payment on the account's connection, so its history starts days_before WHEN."""
+    return await connector_tx(
+        bank,
+        "-5",
+        external_id="card_1",
+        occurred_at=WHEN - timedelta(days=days_before),
+        bank_transfer=False,
+        description="Coffee",
+    )
+
+
+async def in_transit_balance(session: AsyncSession, ids: SystemIds) -> Decimal:
+    return (await balances_on(session)).get(ids.in_transit, Decimal(0))

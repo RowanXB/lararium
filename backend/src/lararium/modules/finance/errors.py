@@ -76,6 +76,12 @@ class TransactionNotFoundError(FinanceError):
     template = "no transaction has the id {}"
 
 
+class TransferNotFoundError(FinanceError):
+    """No transfer has the given id."""
+
+    template = "no transfer has the id {}"
+
+
 class LedgerImbalanceError(FinanceError):
     """Postings do not sum to zero per instrument; residuals maps instrument id to the sum."""
 

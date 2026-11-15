@@ -54,6 +54,7 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.AccountNotFoundError: (status.HTTP_404_NOT_FOUND, "account_not_found"),
     errors.InstrumentNotFoundError: (status.HTTP_404_NOT_FOUND, "instrument_not_found"),
     errors.TransactionNotFoundError: (status.HTTP_404_NOT_FOUND, "transaction_not_found"),
+    errors.TransferNotFoundError: (status.HTTP_404_NOT_FOUND, "transfer_not_found"),
     errors.AccountIdentifierNotFoundError: (
         status.HTTP_404_NOT_FOUND,
         "account_identifier_not_found",

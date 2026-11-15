@@ -7,7 +7,14 @@ from lararium.modules.finance.transfers.contra import (
     source_ref,
     transfer_contra,
 )
-from lararium.modules.finance.transfers.engine import heal_transfers, match_transaction
+from lararium.modules.finance.transfers.decisions import pair, reject, unpair, unreject
+from lararium.modules.finance.transfers.engine import (
+    heal_transfers,
+    match_transaction,
+    preview_match,
+    unassign_identifier_and_rematch,
+    unlink_transaction,
+)
 from lararium.modules.finance.transfers.queries import (
     CandidateRecord,
     ReviewReason,
@@ -35,6 +42,13 @@ __all__ = [
     "load_transfer_settings",
     "match_transaction",
     "own_leg",
+    "pair",
+    "preview_match",
+    "reject",
     "source_ref",
     "transfer_contra",
+    "unassign_identifier_and_rematch",
+    "unlink_transaction",
+    "unpair",
+    "unreject",
 ]

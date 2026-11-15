@@ -11,19 +11,23 @@ from sqlalchemy import (
     ColumnElement,
     Select,
     SQLColumnExpression,
+    Subquery,
     and_,
     case,
     exists,
     func,
+    literal,
     or_,
     select,
     union,
+    union_all,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
+from lararium.modules.finance.errors import TransferNotFoundError
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
 from lararium.modules.finance.transfers.contra import (
@@ -136,9 +140,11 @@ def transfer_change_data(record: TransferRecord) -> dict[str, JSONValue]:
     }
 
 
-async def get_transfer(session: AsyncSession, transfer_id: UUID) -> TransferRecord | None:
+async def get_transfer(session: AsyncSession, transfer_id: UUID) -> TransferRecord:
     found = await load_transfers(session, models.Transfer.id == transfer_id)
-    return found[0] if found else None
+    if not found:
+        raise TransferNotFoundError(str(transfer_id))
+    return found[0]
 
 
 async def list_transfers(
@@ -200,44 +206,127 @@ def _amount_fits(
     return given == wanted if exact else given != wanted
 
 
-def pair_candidates(
-    system: Mapping[SystemAccountKey, UUID], settings: TransferSettings, *, exact: bool
-) -> Select[*tuple[Any, ...]]:
-    """Every pair of own records that could be one transfer's two sides, both ways round
-    (record_id, candidate_id): the single definition matching, heal and review all use.
+# How strong the evidence is that two records are one transfer, strongest first: the
+# owner paired them; each names the other's account; only one names the other's account
+# (the other is a bank transfer naming nobody).
+type Tier = Literal[1, 2, 3]
+DECIDED: Tier = 1
+MUTUAL: Tier = 2
+ONE_SIDED: Tier = 3
 
-    It depends only on the records and the owner's decisions, never on which transfers
-    exist, so it gives the same answer whatever synced first. Two records pair when they
-    are on different accounts, in the same instrument, of opposite sign and, if exact, the
-    same amount (else a different one); the receiving one occurs in the sending one's
-    window; at least one is identified through the registry; each identified one names the
-    other's account; each other one is a bank transfer; and neither is rejected nor
-    decided never to pair with the other."""
+
+def _rejected(x: RecordColumns) -> ColumnElement[bool]:
+    d = aliased(models.TransferDecision, name="rejected")
+    return (
+        exists()
+        .where(d.kind == "reject", d.subject_kind == x.source_kind, d.subject_ref == x.source_ref)
+        .correlate_except(d)
+    )
+
+
+def _identified_terms(
+    r: RecordColumns,
+    c: RecordColumns,
+    *,
+    r_holder: SQLColumnExpression[UUID | None],
+    c_holder: SQLColumnExpression[UUID | None],
+    r_bank_transfer: SQLColumnExpression[bool],
+    c_bank_transfer: SQLColumnExpression[bool],
+    settings: TransferSettings,
+    exact: bool,
+) -> tuple[list[ColumnElement[bool]], ColumnElement[int]]:
+    """When the registry pairs two records, and the pair's tier. A holder is the account
+    the record's counterparty bank account is registered to (NULL when none)."""
+    # Identified: its counterparty bank account is registered to another own account.
+    r_identified = and_(r_holder.is_not(None), r_holder != r.account_id)
+    c_identified = and_(c_holder.is_not(None), c_holder != c.account_id)
+    conditions = [
+        c.account_id != r.account_id,
+        c.instrument_id == r.instrument_id,
+        _amount_fits(c.quantity, -r.quantity, exact),
+        (c.quantity < 0) != (r.quantity < 0),
+        c.occurred_at.between(*counterpart_window(r, settings)),
+        or_(r_identified, c_identified),
+        or_(~r_identified, r_holder == c.account_id),
+        or_(~c_identified, c_holder == r.account_id),
+        or_(r_identified, r_bank_transfer),
+        or_(c_identified, c_bank_transfer),
+    ]
+    tier = case((and_(r_identified, c_identified), literal(MUTUAL)), else_=literal(ONE_SIDED))
+    return conditions, tier
+
+
+def _not_excluded(rows: Subquery, excluding: Collection[UUID]) -> list[ColumnElement[bool]]:
+    return [rows.c.transaction_id.not_in(list(excluding))] if excluding else []
+
+
+def _identified_pairs(
+    system: Mapping[SystemAccountKey, UUID],
+    settings: TransferSettings,
+    *,
+    exact: bool,
+    excluding: Collection[UUID],
+) -> Select[*tuple[Any, ...]]:
+    """(record_id, candidate_id, tier) of the pairs the registry gives, both ways round."""
     r_rows, c_rows = eligible_records(system, "record"), eligible_records(system, "candidate")
     r_named = aliased(models.AccountIdentifier, name="record_named")
     c_named = aliased(models.AccountIdentifier, name="candidate_named")
-    r_holder, c_holder = r_named.account_id, c_named.account_id
-    # Identified: its counterparty bank account is registered to another own account.
-    r_identified = and_(r_holder.is_not(None), r_holder != r_rows.c.account_id)
-    c_identified = and_(c_holder.is_not(None), c_holder != c_rows.c.account_id)
     r, c = record_columns(r_rows), record_columns(c_rows)
-    d = aliased(models.TransferDecision, name="rejected")
+    conditions, tier = _identified_terms(
+        r,
+        c,
+        r_holder=r_named.account_id,
+        c_holder=c_named.account_id,
+        r_bank_transfer=r_rows.c.bank_transfer,
+        c_bank_transfer=c_rows.c.bank_transfer,
+        settings=settings,
+        exact=exact,
+    )
+    return (
+        select(
+            r_rows.c.transaction_id.label("record_id"),
+            c_rows.c.transaction_id.label("candidate_id"),
+            tier.label("tier"),
+        )
+        .select_from(r_rows)
+        .join(c_rows, c_rows.c.instrument_id == r_rows.c.instrument_id)
+        .outerjoin(r_named, r_named.id == r_rows.c.counterparty_identifier_id)
+        .outerjoin(c_named, c_named.id == c_rows.c.counterparty_identifier_id)
+        .where(
+            *conditions,
+            ~_rejected(r),
+            ~_rejected(c),
+            ~_never_paired(r, c.source_kind, c.source_ref),
+            *_not_excluded(r_rows, excluding),
+            *_not_excluded(c_rows, excluding),
+        )
+    )
 
-    def rejected(x: RecordColumns) -> ColumnElement[bool]:
-        return (
-            exists()
-            .where(
-                d.kind == "reject",
-                d.subject_kind == x.source_kind,
-                d.subject_ref == x.source_ref,
-            )
-            .correlate_except(d)
+
+def _decided_pairs(
+    system: Mapping[SystemAccountKey, UUID], excluding: Collection[UUID]
+) -> Select[*tuple[Any, ...]]:
+    """(record_id, candidate_id, tier) of the pairs the owner made (Decision 6 step 2),
+    both ways round: still on different accounts, in the same instrument and of opposite
+    sign and the same amount; the window does not apply."""
+    r_rows = eligible_records(system, "decided_record")
+    c_rows = eligible_records(system, "decided_candidate")
+    r, c = record_columns(r_rows), record_columns(c_rows)
+    d = aliased(models.TransferDecision, name="paired")
+
+    def names(subject: RecordColumns, other: RecordColumns) -> ColumnElement[bool]:
+        return and_(
+            d.subject_kind == subject.source_kind,
+            d.subject_ref == subject.source_ref,
+            d.other_kind == other.source_kind,
+            d.other_ref == other.source_ref,
         )
 
     return (
         select(
             r_rows.c.transaction_id.label("record_id"),
             c_rows.c.transaction_id.label("candidate_id"),
+            literal(DECIDED).label("tier"),
         )
         .select_from(r_rows)
         .join(
@@ -245,23 +334,109 @@ def pair_candidates(
             and_(
                 c_rows.c.account_id != r_rows.c.account_id,
                 c_rows.c.instrument_id == r_rows.c.instrument_id,
+                c_rows.c.quantity == -r_rows.c.quantity,
+                (c_rows.c.quantity < 0) != (r_rows.c.quantity < 0),
             ),
         )
-        .outerjoin(r_named, r_named.id == r_rows.c.counterparty_identifier_id)
-        .outerjoin(c_named, c_named.id == c_rows.c.counterparty_identifier_id)
+        .join(d, and_(d.kind == "pair", or_(names(r, c), names(c, r))))
         .where(
-            _amount_fits(c.quantity, -r.quantity, exact),
-            (c.quantity < 0) != (r.quantity < 0),
-            c.occurred_at.between(*counterpart_window(r, settings)),
-            or_(r_identified, c_identified),
-            or_(~r_identified, r_holder == c_rows.c.account_id),
-            or_(~c_identified, c_holder == r_rows.c.account_id),
-            or_(r_identified, r_rows.c.bank_transfer),
-            or_(c_identified, c_rows.c.bank_transfer),
-            ~rejected(r),
-            ~rejected(c),
+            ~_rejected(r),
+            ~_rejected(c),
             ~_never_paired(r, c.source_kind, c.source_ref),
+            *_not_excluded(r_rows, excluding),
+            *_not_excluded(c_rows, excluding),
         )
+    )
+
+
+def tiered_pairs(
+    system: Mapping[SystemAccountKey, UUID],
+    settings: TransferSettings,
+    *,
+    excluding: Collection[UUID] = (),
+) -> Select[*tuple[Any, ...]]:
+    """Every pair of own records of the same amount that could be one transfer's two
+    sides, both ways round, with the strongest tier of evidence for it:
+    (record_id, candidate_id, tier)."""
+    edges = union_all(
+        _identified_pairs(system, settings, exact=True, excluding=excluding),
+        _decided_pairs(system, excluding),
+    ).subquery()
+    return select(
+        edges.c.record_id, edges.c.candidate_id, func.min(edges.c.tier).label("tier")
+    ).group_by(edges.c.record_id, edges.c.candidate_id)
+
+
+def pair_candidates(
+    system: Mapping[SystemAccountKey, UUID],
+    settings: TransferSettings,
+    *,
+    exact: bool,
+    excluding: Collection[UUID] = (),
+) -> Select[*tuple[Any, ...]]:
+    """The own records each record could be one transfer with, both ways round
+    (record_id, candidate_id): the single definition matching, heal and review all use.
+
+    It depends only on the records and the owner's decisions, never on which transfers
+    exist, so it gives the same answer whatever synced first. The registry pairs two
+    records when they are on different accounts, in the same instrument, of opposite sign
+    and, if exact, the same amount (else a different one); the receiving one occurs in the
+    sending one's window; at least one is identified through the registry; each identified
+    one names the other's account; each other one is a bank transfer; and neither is
+    rejected nor decided never to pair with the other. The owner pairs two records with a
+    pair decision.
+
+    Of the same amount, a record's candidates are those in the strongest tier it has any
+    in (DECIDED, then MUTUAL, then ONE_SIDED), and only those for which that is also their
+    own strongest tier: weaker evidence never makes a stronger pair ambiguous. Of another
+    amount, only a record naming the other's account is a candidate (MUTUAL): a payment
+    naming nobody is no evidence of a differing transfer.
+
+    `excluding` leaves records out as if they were gone (a row about to be deleted)."""
+    if not exact:
+        edges = _identified_pairs(system, settings, exact=False, excluding=excluding).subquery()
+        return select(edges.c.record_id, edges.c.candidate_id).where(edges.c.tier == MUTUAL)
+    pairs = tiered_pairs(system, settings, excluding=excluding).subquery()
+    ranked = select(
+        pairs.c.record_id,
+        pairs.c.candidate_id,
+        pairs.c.tier,
+        func.min(pairs.c.tier).over(partition_by=pairs.c.record_id).label("record_best"),
+        func.min(pairs.c.tier).over(partition_by=pairs.c.candidate_id).label("candidate_best"),
+    ).subquery()
+    return select(ranked.c.record_id, ranked.c.candidate_id).where(
+        ranked.c.tier == ranked.c.record_best, ranked.c.tier == ranked.c.candidate_best
+    )
+
+
+def unposted_pairs(
+    system: Mapping[SystemAccountKey, UUID],
+    settings: TransferSettings,
+    record: RecordColumns,
+    *,
+    holder: SQLColumnExpression[UUID | None],
+    bank_transfer: SQLColumnExpression[bool],
+) -> Select[*tuple[Any, ...]]:
+    """(candidate_id, tier) of the own records the registry pairs a row not yet posted
+    with, at the same amount. Such a row has no decisions, so none apply to it."""
+    c_rows = eligible_records(system, "candidate")
+    c_named = aliased(models.AccountIdentifier, name="candidate_named")
+    c = record_columns(c_rows)
+    conditions, tier = _identified_terms(
+        record,
+        c,
+        r_holder=holder,
+        c_holder=c_named.account_id,
+        r_bank_transfer=bank_transfer,
+        c_bank_transfer=c_rows.c.bank_transfer,
+        settings=settings,
+        exact=True,
+    )
+    return (
+        select(c_rows.c.transaction_id.label("candidate_id"), tier.label("tier"))
+        .select_from(c_rows)
+        .outerjoin(c_named, c_named.id == c_rows.c.counterparty_identifier_id)
+        .where(*conditions, ~_rejected(c))
     )
 
 
@@ -307,7 +482,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     review (pair_candidates of its own record): those of the same amount first, then those
     whose amount differs, each oldest first. Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
-    if transfer is None or transfer.status not in OPEN_STATUSES:
+    if transfer.status not in OPEN_STATUSES:
         return []
     present_id = transfer.out_transaction_id or transfer.in_transaction_id
     if present_id is None:

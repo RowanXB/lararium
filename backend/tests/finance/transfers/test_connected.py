@@ -30,54 +30,17 @@ from lararium.modules.finance.transfers import (
 )
 
 from .conftest import (
+    A_IDENTIFIER,
+    C_IDENTIFIER,
     WHEN,
-    Connected,
     assert_consistent,
-    balances_on,
     contra_account,
+    history,
+    in_transit_balance,
     net_worth_on,
     placeholders,
     postings_of,
 )
-
-A_IDENTIFIER = "445566:11112222"
-C_IDENTIFIER = "778899:33334444"
-
-
-@pytest.fixture
-def registered(run, connected_bank):
-    """A connected bank account with its own identifier registered to it."""
-
-    async def _make(name: str, value: str) -> tuple[Connected, UUID]:
-        bank = await connected_bank(name)
-        identifier = await run(assign_identifier, bank.account.id, "uk_bank_account", value)
-        return bank, identifier.id
-
-    return _make
-
-
-@pytest.fixture
-async def a_and_c(registered) -> tuple[Connected, UUID, Connected, UUID]:
-    """A and C, each on a connection of its own and each registered."""
-    a, a_id = await registered("A", A_IDENTIFIER)
-    c, c_id = await registered("C", C_IDENTIFIER)
-    return a, a_id, c, c_id
-
-
-async def _history(connector_tx, bank: Connected, days_before: int = 10):
-    """A card payment on the account's connection, so its history starts days_before WHEN."""
-    return await connector_tx(
-        bank,
-        "-5",
-        external_id="card_1",
-        occurred_at=WHEN - timedelta(days=days_before),
-        bank_transfer=False,
-        description="Coffee",
-    )
-
-
-async def _in_transit(session, ids) -> Decimal:
-    return (await balances_on(session)).get(ids.in_transit, Decimal(0))
 
 
 @pytest.mark.parametrize("sender_first", [True, False])
@@ -99,7 +62,9 @@ async def test_connected_both_orders_same_result(
     assert await heal() == 1
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.review_reason) == ("awaiting", None)
-    assert await _in_transit(session, ids) == (Decimal(100) if sender_first else Decimal(-100))
+    assert await in_transit_balance(session, ids) == (
+        Decimal(100) if sender_first else Decimal(-100)
+    )
     assert await net_worth_on(session) == worth
 
     second = await (receive() if sender_first else send())
@@ -119,7 +84,7 @@ async def test_connected_both_orders_same_result(
     assert transfer.matched_at is not None
     assert await contra_account(session, out_record.id, a.account.id) == ids.in_transit
     assert await contra_account(session, in_record.id, c.account.id) == ids.in_transit
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     assert await net_worth_on(session) == worth
     assert await placeholders(session) == []
     await assert_consistent(session)
@@ -157,7 +122,7 @@ async def test_receiver_without_identifier_matched_by_fallback(
         in_record.id,
     )
     assert await contra_account(session, in_record.id, c.account.id) == ids.in_transit
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
     assert await heal() == 0
     # The next sync computes the same contra, so it writes nothing.
@@ -243,7 +208,7 @@ async def test_never_pair_with_another_record_still_links(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c)
+    await history(connector_tx, c)
     await session.execute(
         insert(models.TransferDecision).values(
             kind="never_pair",
@@ -269,7 +234,7 @@ async def test_never_pair_with_another_record_still_links(
 
 async def test_outside_window_not_linked(session, ids, a_and_c, connector_tx, heal) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c)
+    await history(connector_tx, c)
     await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
     assert await heal() == 1
     late = await connector_tx(c, "100", external_id="in_1", occurred_at=WHEN + timedelta(days=8))
@@ -283,7 +248,7 @@ async def test_outside_window_not_linked(session, ids, a_and_c, connector_tx, he
 
 async def test_two_candidates_need_review(session, ids, a_and_c, connector_tx, heal) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c)
+    await history(connector_tx, c)
     loose = [
         await connector_tx(
             c,
@@ -304,7 +269,7 @@ async def test_two_candidates_need_review(session, ids, a_and_c, connector_tx, h
     # Nothing re-pointed on the candidates: they are not legs until the owner pairs one.
     for record in loose:
         assert await contra_account(session, record.id, c.account.id) == ids.unassigned
-    assert await _in_transit(session, ids) == Decimal(100)
+    assert await in_transit_balance(session, ids) == Decimal(100)
     found = await candidates(session, transfer.id)
     assert [(f.transaction_id, f.account_id, f.quantity, f.reason) for f in found] == [
         (record.id, c.account.id, Decimal(100), "exact") for record in loose
@@ -321,7 +286,7 @@ async def test_fallback_with_two_transfers_flags_both(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c)
+    await history(connector_tx, c)
     for n in (1, 2):
         await connector_tx(
             a,
@@ -349,7 +314,7 @@ async def test_fallback_with_two_transfers_flags_both(
 
 async def test_different_amount_needs_review(session, ids, a_and_c, connector_tx, heal) -> None:
     a, a_id, c, c_id = a_and_c
-    await _history(connector_tx, c)
+    await history(connector_tx, c)
     out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
     assert await heal() == 1
     in_record = await connector_tx(
@@ -377,7 +342,7 @@ async def test_different_amount_needs_review(session, ids, a_and_c, connector_tx
         "amount_differs",
     )
     # Both sit in In transit, so net worth does not move during review.
-    assert await _in_transit(session, ids) == Decimal(10)
+    assert await in_transit_balance(session, ids) == Decimal(10)
     await assert_consistent(session)
     assert await heal() == 0
 
@@ -386,7 +351,7 @@ async def test_before_history_settles_against_opening_balances(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, a_id, c, c_id = a_and_c
-    await _history(connector_tx, c, days_before=0)
+    await history(connector_tx, c, days_before=0)
     sent_at = WHEN - timedelta(days=30)
     out_record = await connector_tx(
         a, "-100", external_id="out_1", occurred_at=sent_at, identifier_id=c_id
@@ -406,7 +371,7 @@ async def test_before_history_settles_against_opening_balances(
         (ids.in_transit, Decimal(-100)),
         (ids.opening_balances, Decimal(100)),
     }
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
     assert await heal() == 0
 
@@ -422,7 +387,7 @@ async def test_before_history_settles_against_opening_balances(
         in_record.id,
     )
     assert await placeholders(session, origin="rule") == []
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
     assert await heal() == 0
 
@@ -431,7 +396,7 @@ async def test_older_history_without_the_counterpart_reopens_awaiting(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c, days_before=0)
+    await history(connector_tx, c, days_before=0)
     sent_at = WHEN - timedelta(days=30)
     await connector_tx(a, "-100", external_id="out_1", occurred_at=sent_at, identifier_id=c_id)
     assert await heal() == 1
@@ -446,7 +411,7 @@ async def test_older_history_without_the_counterpart_reopens_awaiting(
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.settlement_transaction_id) == ("awaiting", None)
     assert await placeholders(session, origin="rule") == []
-    assert await _in_transit(session, ids) == Decimal(100)
+    assert await in_transit_balance(session, ids) == Decimal(100)
     await assert_consistent(session)
     assert await heal() == 0
 
@@ -468,7 +433,7 @@ async def test_voided_settlement_is_a_violation_and_healed(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c, days_before=0)
+    await history(connector_tx, c, days_before=0)
     await connector_tx(
         a, "-100", external_id="out_1", occurred_at=WHEN - timedelta(days=30), identifier_id=c_id
     )
@@ -480,14 +445,14 @@ async def test_voided_settlement_is_a_violation_and_healed(
         {"t": settlement.id},
     )
     assert await find_transfer_violations(session) == [settlement.id]
-    assert await _in_transit(session, ids) == Decimal(100)
+    assert await in_transit_balance(session, ids) == Decimal(100)
 
     assert await heal() == 1
     [fresh] = await placeholders(session, origin="rule")
     assert fresh.status == "booked"
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.settlement_transaction_id) == ("before_history", fresh.id)
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
 
 
@@ -495,7 +460,7 @@ async def test_missing_settlement_is_a_violation_and_healed(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:
     a, _, c, c_id = a_and_c
-    await _history(connector_tx, c, days_before=0)
+    await history(connector_tx, c, days_before=0)
     out_record = await connector_tx(
         a, "-100", external_id="out_1", occurred_at=WHEN - timedelta(days=30), identifier_id=c_id
     )
@@ -513,7 +478,7 @@ async def test_missing_settlement_is_a_violation_and_healed(
     [fresh] = await placeholders(session, origin="rule")
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.settlement_transaction_id) == ("before_history", fresh.id)
-    assert await _in_transit(session, ids) == 0
+    assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
 
 
@@ -691,7 +656,7 @@ async def _ledger(session, ids) -> tuple:
             (row.external_id, "in_transit" if row.account_id == ids.in_transit else "unassigned")
             for row in contras
         ),
-        await _in_transit(session, ids),
+        await in_transit_balance(session, ids),
     )
 
 
@@ -792,7 +757,9 @@ async def test_amount_differs_in_either_order(
         await step()
         await heal()
 
-    expected = [("awaiting", "amount_differs", "out_1", None)]
+    # Only a record naming A's account is evidence of a differing amount: an unidentified
+    # bank payment of another amount is just another payment.
+    expected = [("awaiting", "amount_differs" if receiver_identified else None, "out_1", None)]
     if receiver_identified:
         expected.append(("awaiting", "amount_differs", None, "in_1"))
     receiver_contra = "in_transit" if receiver_identified else "unassigned"
@@ -837,5 +804,59 @@ async def test_later_arrival_makes_a_match_ambiguous(
         sorted((t.status, t.review_reason) for t in transfers)
         == [("awaiting", "several_candidates")] * 2
     )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+@pytest.mark.parametrize("receipt_first", [True, False])
+async def test_mutual_pair_holds_against_an_unidentified_receipt(
+    session, ids, a_and_c, connector_tx, heal, receipt_first
+) -> None:
+    # Each record names the other's account: that pair is stronger evidence than a receipt
+    # on C that names nobody, so the receipt does not make it ambiguous.
+    a, a_id, c, c_id = a_and_c
+
+    async def receipt():
+        return await connector_tx(
+            c, "100", external_id="in_2", occurred_at=WHEN + timedelta(hours=1)
+        )
+
+    if receipt_first:
+        stray = await receipt()
+        await heal()
+    out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    await heal()
+    in_record = await connector_tx(
+        c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=2), identifier_id=a_id
+    )
+    await heal()
+    if not receipt_first:
+        stray = await receipt()
+        await heal()
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.review_reason) == ("matched", None)
+    assert (transfer.out_transaction_id, transfer.in_transaction_id) == (
+        out_record.id,
+        in_record.id,
+    )
+    assert await contra_account(session, stray.id, c.account.id) == ids.unassigned
+    assert await in_transit_balance(session, ids) == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_unidentified_payment_of_another_amount_is_no_evidence(
+    session, ids, a_and_c, connector_tx, heal
+) -> None:
+    a, _, c, c_id = a_and_c
+    await history(connector_tx, c)
+    await connector_tx(c, "90", external_id="in_1", occurred_at=WHEN + timedelta(hours=1))
+    await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    await heal()
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", None)
+    assert await candidates(session, transfer.id) == []
     await assert_consistent(session)
     assert await heal() == 0

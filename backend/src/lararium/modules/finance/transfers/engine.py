@@ -3,15 +3,24 @@ identified record, and keeping placeholders and settlements in step with the rec
 mirror."""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Numeric,
+    String,
+    Uuid,
     and_,
     delete,
+    exists,
     func,
     insert,
+    literal,
     or_,
     select,
     update,
@@ -22,8 +31,13 @@ from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
-from lararium.modules.finance.identifiers import identifier_account
+from lararium.modules.finance.identifiers import (
+    IdentifierRecord,
+    identifier_account,
+    unassign_identifier,
+)
 from lararium.modules.finance.ledger import (
+    CounterpartyFields,
     PostingInput,
     TransactionInput,
     TransactionOrigin,
@@ -39,6 +53,7 @@ from lararium.modules.finance.system_accounts import (
 )
 from lararium.modules.finance.transfers.contra import (
     OwnRecord,
+    RecordColumns,
     bound_id,
     is_active_leg,
     is_rejected,
@@ -53,7 +68,9 @@ from lararium.modules.finance.transfers.queries import (
     before_history,
     load_transfers,
     pair_candidates,
+    tiered_pairs,
     transfer_change_data,
+    unposted_pairs,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -72,7 +89,8 @@ class _System:
     in_transit: UUID
 
 
-async def _lock(ctx: CommandContext) -> None:
+async def lock_transfers(ctx: CommandContext) -> None:
+    """Take the matching lock for the rest of the transaction (re-entrant)."""
     await ctx.session.execute(select(func.pg_advisory_xact_lock(func.hashtext(_LOCK_KEY))))
 
 
@@ -83,7 +101,7 @@ async def _system(ctx: CommandContext) -> _System:
     )
 
 
-def _publish(
+def publish_transfer(
     ctx: CommandContext,
     event_type: str,
     transfer_id: UUID,
@@ -120,7 +138,7 @@ async def _dissolve(ctx: CommandContext, transaction_id: UUID) -> list[UUID]:
         for derived in (transfer.placeholder_transaction_id, transfer.settlement_transaction_id):
             if derived is not None:
                 await delete_derived_transaction(ctx, derived)
-        _publish(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
+        publish_transfer(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
         others += [
             leg
             for leg in (transfer.out_transaction_id, transfer.in_transaction_id)
@@ -178,7 +196,9 @@ async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> No
     for derived in (before.placeholder_transaction_id, before.settlement_transaction_id):
         if derived is not None:
             await delete_derived_transaction(ctx, derived)
-    _publish(ctx, "finance.transfer.matched", transfer_id, before, await _get(session, transfer_id))
+    publish_transfer(
+        ctx, "finance.transfer.matched", transfer_id, before, await _get(session, transfer_id)
+    )
 
 
 async def _link_records(ctx: CommandContext, record: OwnRecord, partner: OwnRecord) -> None:
@@ -201,7 +221,7 @@ async def _link_records(ctx: CommandContext, record: OwnRecord, partner: OwnReco
         .returning(tr.id)
     )
     assert transfer_id is not None
-    _publish(
+    publish_transfer(
         ctx, "finance.transfer.matched", transfer_id, None, await _get(ctx.session, transfer_id)
     )
 
@@ -312,7 +332,9 @@ async def _open(
         .returning(tr.id)
     )
     assert transfer_id is not None
-    _publish(ctx, "finance.transfer.opened", transfer_id, None, await _get(session, transfer_id))
+    publish_transfer(
+        ctx, "finance.transfer.opened", transfer_id, None, await _get(session, transfer_id)
+    )
 
 
 async def _pair_candidates(
@@ -322,9 +344,10 @@ async def _pair_candidates(
     transaction_id: UUID,
     *,
     exact: bool,
+    excluding: Collection[UUID] = (),
 ) -> list[UUID]:
     """The own records the record could pair with (queries.pair_candidates)."""
-    pairs = pair_candidates(ids, settings, exact=exact).subquery()
+    pairs = pair_candidates(ids, settings, exact=exact, excluding=excluding).subquery()
     return list(
         await session.scalars(
             select(pairs.c.candidate_id)
@@ -377,7 +400,11 @@ async def _link_pair(
 
 
 async def _match_one(
-    ctx: CommandContext, transaction_id: UUID, settings: TransferSettings, system: _System
+    ctx: CommandContext,
+    transaction_id: UUID,
+    settings: TransferSettings,
+    system: _System,
+    excluding: Collection[UUID],
 ) -> tuple[list[UUID], set[UUID]]:
     """Match one record from scratch; returns other records left without their transfer,
     and the own record it was linked with, if any.
@@ -395,11 +422,14 @@ async def _match_one(
     if await is_rejected(session, record.source):
         await _set_contra(ctx, record, system.unassigned)
         return others, set()
-    # 3 and 4. Paired by the registry, or by amount and date: link a unique pair.
-    found = await _pair_candidates(session, ids, settings, record.id, exact=True)
-    if len(found) == 1 and await _pair_candidates(session, ids, settings, found[0], exact=True) == [
-        record.id
-    ]:
+    # 2, 3 and 4. Paired by the owner, by the registry, or by amount and date: link a
+    # unique pair.
+    found = await _pair_candidates(
+        session, ids, settings, record.id, exact=True, excluding=excluding
+    )
+    if len(found) == 1 and await _pair_candidates(
+        session, ids, settings, found[0], exact=True, excluding=excluding
+    ) == [record.id]:
         more, linked = await _link_pair(ctx, ids, record, found[0], system)
         return others + more, linked
     counterpart_id = await _registry_counterpart(session, record)
@@ -413,7 +443,9 @@ async def _match_one(
     review_reason: ReviewReason | None = None
     if found:
         review_reason = "several_candidates"
-    elif await _pair_candidates(session, ids, settings, record.id, exact=False):
+    elif await _pair_candidates(
+        session, ids, settings, record.id, exact=False, excluding=excluding
+    ):
         review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
     await _open(ctx, record, counterpart, system, settings, review_reason)
@@ -421,22 +453,27 @@ async def _match_one(
 
 
 async def _match(
-    ctx: CommandContext, transaction_id: UUID, settings: TransferSettings, system: _System
+    ctx: CommandContext,
+    transaction_id: UUID,
+    settings: TransferSettings,
+    system: _System,
+    excluding: Collection[UUID] = (),
 ) -> set[UUID]:
     """match_transaction under the lock; returns every record this matched afresh or
-    linked, all of which then agree with the rule."""
+    linked, all of which then agree with the rule. Records in `excluding` are treated as
+    gone: never matched, and never anyone's candidate."""
     session = ctx.session
     seen: set[UUID] = set()
     linked: set[UUID] = set()
     queue = [transaction_id]
     while queue:
         current = queue.pop(0)
-        if current in seen:
+        if current in seen or current in excluding:
             continue
         seen.add(current)
         if current != transaction_id and await is_active_leg(session, current):
             continue
-        others, partners = await _match_one(ctx, current, settings, system)
+        others, partners = await _match_one(ctx, current, settings, system, excluding)
         queue += others
         linked |= partners
     return seen | linked
@@ -450,7 +487,7 @@ async def match_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
     t = models.Transaction
     if await ctx.session.scalar(select(t.id).where(t.id == transaction_id)) is None:
         raise TransactionNotFoundError(str(transaction_id))
-    await _lock(ctx)
+    await lock_transfers(ctx)
     settings = await load_transfer_settings(ctx.session)
     await _match(ctx, transaction_id, settings, await _system(ctx))
 
@@ -458,7 +495,7 @@ async def match_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
 async def heal_transfers(ctx: CommandContext) -> int:
     """Match every record whose state disagrees with the rule, until none does; returns how
     many records it matched. Right after one heal, another writes nothing."""
-    await _lock(ctx)
+    await lock_transfers(ctx)
     settings = await load_transfer_settings(ctx.session)
     matched = 0
     for _ in range(_MAX_HEAL_PASSES):
@@ -475,3 +512,125 @@ async def heal_transfers(ctx: CommandContext) -> int:
             matched += 1
     logger.error("transfers still disagree with the rule after %d heal passes", _MAX_HEAL_PASSES)
     return matched
+
+
+async def _release_rejected(ctx: CommandContext, transaction_id: UUID) -> None:
+    """Take the transaction out of a rejected transfer: the transfer keeps its other own
+    record, or goes when it has none. The reject decisions stay, keyed by reference."""
+    session = ctx.session
+    tr = models.Transfer
+    for transfer in await load_transfers(
+        session,
+        tr.status == "rejected",
+        or_(tr.out_transaction_id == transaction_id, tr.in_transaction_id == transaction_id),
+    ):
+        if transfer.out_transaction_id == transaction_id:
+            side, other = "out_transaction_id", transfer.in_transaction_id
+        else:
+            side, other = "in_transaction_id", transfer.out_transaction_id
+        if other is None:
+            await session.execute(delete(tr).where(tr.id == transfer.id))
+            publish_transfer(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
+        else:
+            await session.execute(update(tr).where(tr.id == transfer.id).values({side: None}))
+            publish_transfer(
+                ctx,
+                "finance.transfer.unlinked",
+                transfer.id,
+                transfer,
+                await _get(session, transfer.id),
+            )
+
+
+async def unlink_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
+    """Make a row about to be deleted (an import being rolled back) no transfer's leg: its
+    transfer is dissolved, its contra goes back to Unassigned, and the transfer's other own
+    record is matched again as if the row were gone, so a placeholder is posted again where
+    one is due. The caller deletes the row next; heal_transfers after that settles the
+    rest (it would link the row again if it ran before the delete)."""
+    session = ctx.session
+    t = models.Transaction
+    if await session.scalar(select(t.id).where(t.id == transaction_id)) is None:
+        raise TransactionNotFoundError(str(transaction_id))
+    await lock_transfers(ctx)
+    others = await _dissolve(ctx, transaction_id)
+    await _release_rejected(ctx, transaction_id)
+    system = await _system(ctx)
+    record = await load_own_record(session, await system_account_ids(session), transaction_id)
+    if record is not None:
+        await _set_contra(ctx, record, system.unassigned)
+    settings = await load_transfer_settings(session)
+    for other in others:
+        await _match(ctx, other, settings, system, excluding={transaction_id})
+
+
+async def preview_match(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    instrument_id: UUID,
+    quantity: Decimal,
+    occurred_at: datetime,
+    counterparty: CounterpartyFields,
+) -> TransferRecord | None:
+    """The open transfer a row not yet posted would complete if it were posted now
+    (Decision 6 steps 3 and 4, without writing): None when it would complete none, or
+    could complete more than one. It reads the same pair relation matching does, with the
+    row added: its one candidate in its strongest tier, which has no other candidate as
+    strong."""
+    system = await system_account_ids(session)
+    settings = await load_transfer_settings(session)
+    holder = (
+        None
+        if counterparty.identifier_id is None
+        else await identifier_account(session, counterparty.identifier_id)
+    )
+    row = RecordColumns(
+        transaction_id=literal(None, Uuid()),  # not posted yet
+        account_id=bound_id(account_id),
+        instrument_id=bound_id(instrument_id),
+        quantity=literal(quantity, Numeric),
+        occurred_at=literal(occurred_at, DateTime(timezone=True)),
+        source_kind=literal(None, String),
+        source_ref=literal(None, String),
+    )
+    found = unposted_pairs(
+        system,
+        settings,
+        row,
+        holder=literal(holder, Uuid()),
+        bank_transfer=literal(counterparty.bank_transfer, Boolean),
+    ).subquery()
+    tiers = {r.candidate_id: r.tier for r in await session.execute(select(found))}
+    if not tiers:
+        return None
+    best = min(tiers.values())
+    partners = [candidate for candidate, tier in tiers.items() if tier == best]
+    if len(partners) != 1:
+        return None
+    [partner] = partners
+    pairs = tiered_pairs(system, settings).subquery()
+    if await session.scalar(
+        select(exists().where(pairs.c.record_id == partner, pairs.c.tier <= best))
+    ):
+        return None  # the row would make the partner's pair ambiguous, or lose to another
+    return await _waiting_transfer(session, partner)
+
+
+async def unassign_identifier_and_rematch(
+    ctx: CommandContext, identifier_id: UUID
+) -> IdentifierRecord:
+    """unassign_identifier, then match again every record naming that bank account, which
+    no longer identifies one of the owner's accounts."""
+    record = await unassign_identifier(ctx, identifier_id)
+    await lock_transfers(ctx)
+    t = models.Transaction
+    naming = await ctx.session.scalars(
+        select(t.id)
+        .where(t.counterparty_identifier_id == identifier_id)
+        .order_by(t.occurred_at, t.id)
+    )
+    for transaction_id in list(naming):
+        await match_transaction(ctx, transaction_id)
+    await heal_transfers(ctx)
+    return record
