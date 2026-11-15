@@ -45,8 +45,9 @@ def initialised() -> Iterator[PostgresContainer]:
         .with_env("LARARIUM_OWNER_PASSWORD", OWNER_PW)
         .with_env("LARARIUM_BACKEND_PASSWORD", BACKEND_PW)
         .with_env("LARARIUM_WEBHOOK_IN_PASSWORD", WEBHOOK_IN_PW)
-        .with_volume_mapping(str(INFRA_POSTGRES), "/lararium", mode="ro")
-        .with_volume_mapping(str(INFRA_POSTGRES / "init"), "/docker-entrypoint-initdb.d", mode="ro")
+        # Copied in rather than bind-mounted, so this also runs against a remote Docker host.
+        .with_copy_into_container(INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql")
+        .with_copy_into_container(INIT_SCRIPT, "/docker-entrypoint-initdb.d/00-roles.sh", 0o755)
     )
     with container:
         yield container

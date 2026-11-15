@@ -18,8 +18,9 @@ INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
 
 @pytest.fixture(scope="session")
 def postgres() -> Iterator[PostgresContainer]:
-    container = PostgresContainer("postgres:18").with_volume_mapping(
-        str(INFRA_POSTGRES), "/lararium", mode="ro"
+    # Copied in rather than bind-mounted, so the suite also runs against a remote Docker host.
+    container = PostgresContainer("postgres:18").with_copy_into_container(
+        INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql"
     )
     with container:
         result = container.exec(

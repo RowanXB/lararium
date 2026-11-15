@@ -1,7 +1,8 @@
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, Text, func, text
+from sqlalchemy import DateTime, ForeignKey, LargeBinary, Numeric, Text, func, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -35,6 +36,21 @@ class Entity(Base):
     external_ids: Mapped[dict[str, JSONValue]] = mapped_column(JSONB, server_default=text("'{}'"))
     is_self: Mapped[bool] = mapped_column(server_default=text("false"))
     owner_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    # What a source says about a place (a merchant location); NULL for people and organizations.
+    address_street: Mapped[str | None] = mapped_column(Text)
+    address_city: Mapped[str | None] = mapped_column(Text)
+    address_region: Mapped[str | None] = mapped_column(Text)
+    address_postcode: Mapped[str | None] = mapped_column(Text)
+    address_country: Mapped[str | None] = mapped_column(Text)
+    address_formatted: Mapped[str | None] = mapped_column(Text)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric)
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric)
+    location_approximate: Mapped[bool | None]
+    online: Mapped[bool | None]
+    mcc: Mapped[str | None] = mapped_column(Text)
+    website: Mapped[str | None] = mapped_column(Text)
+    card_acceptor_website: Mapped[str | None] = mapped_column(Text)
+    logo_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
