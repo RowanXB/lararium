@@ -103,6 +103,7 @@ class HsbcStatement:
     sheet: str = "7"
     closing_day: str = "05 Jun 27"
     credit_rate: bool = False
+    late_tier: bool = False  # a tier printed after a gap below the table
     extra: list[Extra] = field(default_factory=list[Extra])
 
 
@@ -258,6 +259,10 @@ def hsbc_pdf(statement: HsbcStatement) -> bytes:
             pdf.text(409.7, rates + 38, "over", size=7)
             pdf.text(507.4, rates + 38, "50", size=7, right=True)
             pdf.text(557.7, rates + 38, "35.00%", size=7, right=True)
+            if statement.late_tier:
+                pdf.text(409.7, rates + 70, "over", size=7)
+                pdf.text(507.4, rates + 70, "500", size=7, right=True)
+                pdf.text(557.7, rates + 70, "45.00%", size=7, right=True)
         pdf.text(52.4, 809, "1 Example Square Exampletown EX1 1AA", size=9)
         pdf.extras(statement.extra)
         if not last:

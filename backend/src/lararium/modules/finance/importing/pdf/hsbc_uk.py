@@ -172,28 +172,46 @@ def _rate(words: list[Word], kind: str, annual_equivalent: bool) -> StatementRat
     )
 
 
+def _tier(words: list[Word]) -> bool:
+    """Whether the words look like a tier: "upto 50 0.00%"."""
+    return len(words) == 3 and words[0].text in _BANDS and words[2].text.endswith("%")
+
+
 def _rates(lines: list[list[Word]]) -> list[StatementRate]:
-    """The credit and overdraft interest tiers (outside the transaction table)."""
+    """The credit and overdraft interest tiers (outside the transaction table).
+
+    The table starts on the line holding "Credit Interest Rates" and both column headers. It
+    ends before the first line more than 20 pt below the one above it, or on the next page.
+    Every line inside must parse as a tier or as "Credit interest is not paid", and a line
+    shaped like a tier further down the page refuses the file instead of being dropped.
+    """
     rates: list[StatementRate] = []
     for index, line in enumerate(lines):
         start = find(line, "Credit Interest Rates")
         if start is None:
             continue
+        page = line[0].page
         overdraft = find(line[start + 3 :], "Interest Rates")
         if overdraft is None:
-            raise FileFormatError(
-                f"the rate table on page {line[0].page + 1} has no overdraft rates"
-            )
+            raise FileFormatError(f"the rate table on page {page + 1} has no overdraft rates")
         split = line[start + 3 + overdraft].x0 - Decimal(5)
         previous = line
         credit: list[StatementRate] = []
         overdrawn: list[StatementRate] = []
+        inside = True
         for row in lines[index + 1 :]:
-            if row[0].page != line[0].page or row[0].top - previous[0].top > _RATE_ROW_GAP:
+            if row[0].page != page:
                 break
+            inside = inside and row[0].top - previous[0].top <= _RATE_ROW_GAP
             previous = row
             left = [w for w in row if w.x0 < split]
             right = [w for w in row if w.x0 >= split]
+            if not inside:
+                if _tier(left) or _tier(right):
+                    raise FileFormatError(
+                        f"the rate table on page {page + 1} has a tier below its end"
+                    )
+                continue
             if left and (rate := _rate(left, "Credit Interest Rates", False)) is not None:
                 credit.append(rate)
             if right and (rate := _rate(right, "Overdraft Interest Rates", True)) is not None:

@@ -251,6 +251,14 @@ def test_hsbc_credit_interest_not_paid() -> None:
     assert [rate.kind for rate in statement.rates] == ["Overdraft Interest Rates"] * 2
 
 
+def test_hsbc_rate_tier_after_the_table_refused() -> None:
+    # The table ends at the first gap of more than 20 pt; a tier below it isn't dropped.
+    content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], late_tier=True))
+
+    with pytest.raises(FileFormatError, match="rate table on page 1 has a tier below its end"):
+        _parse(content, "hsbc_uk_statement")
+
+
 # Lloyds --------------------------------------------------------------------------------
 
 
