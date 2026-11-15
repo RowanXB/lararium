@@ -142,6 +142,25 @@ async def test_set_source_details_keeps_tax_wrapper_when_none(session, run, make
     assert (await get_account(session, acc.id)).product_type is None
 
 
+async def test_set_source_details_keeps_unknown_fields(session, run, make_account) -> None:
+    acc = await make_account(name="Pot")
+    stated = SourceDetails(product_type="flex", goal_amount=Decimal("500.00"), locked=True)
+    await run(set_source_details, acc.id, stated)
+    before = await _updated_events(session)
+
+    # Fields the source states in a shape that cannot be read keep what is stored.
+    unread = SourceDetails(product_type="flex", unknown=frozenset({"goal_amount", "locked"}))
+    assert await run(set_source_details, acc.id, unread) is False
+    assert await _updated_events(session) == before
+    got = await get_account(session, acc.id)
+    assert (got.goal_amount, got.locked) == (Decimal("500.00"), True)
+
+    every = frozenset(
+        {"product_type", "owner_type", "goal_amount", "locked", "round_up", "round_up_multiplier"}
+    )
+    assert await run(set_source_details, acc.id, SourceDetails(unknown=every)) is False
+
+
 async def test_set_source_details_unknown_account(run) -> None:
     with pytest.raises(AccountNotFoundError):
         await run(set_source_details, uuid.uuid4(), SourceDetails())

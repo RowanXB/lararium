@@ -1,5 +1,5 @@
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -1042,6 +1042,7 @@ async def test_non_string_category_does_not_fail_the_sync(session, run) -> None:
     assert (await _details(session, posted.id)).category is None
     # Not derivable from a category it cannot read, so the split is kept.
     assert await _splits(session, posted.id) == [("groceries", Decimal("-12.34"))]
+    assert await _warnings(session, connection) == [UNMAPPED.format("category")]
 
 
 async def test_split_categories_stored_only_when_split(session, run) -> None:
@@ -1193,7 +1194,7 @@ async def test_unknown_isa_wrapper_warns(session, run, isa_wrapper: object) -> N
 
     pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
     assert pot.tax_wrapper == "isa"
-    assert await _warnings(session, connection) == [UNMAPPED.format("isa_wrapper")]
+    assert await _warnings(session, connection) == [UNMAPPED.format("pot.isa_wrapper")]
 
 
 @pytest.mark.parametrize("isa_wrapper", ["missing", None], ids=["missing", "null"])
@@ -1284,6 +1285,126 @@ async def test_unexpected_shapes_warn_and_still_post(
     assert details.labels == []
     assert (await session.get_one(Entity, details.place_entity_id)).mcc is None
     assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+def _set(path: str, value: object) -> Callable[[dict[str, Any]], None]:
+    """Set the value at a dotted path of a transaction (made from make_transaction)."""
+
+    def change(tx: dict[str, Any]) -> None:
+        *parents, key = path.split(".")
+        target = tx
+        for parent in parents:
+            target = target[parent]
+        target[key] = value
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "column"),
+    [
+        ("category", {"id": "x"}, "tx.category"),
+        ("scheme", 7, "tx.payment_scheme"),
+        ("include_in_spending", "yes", "tx.include_in_spending"),
+        ("local_amount", "-1234", "tx.original_quantity"),
+        ("local_currency", 826, "tx.original_instrument_id"),
+        ("merchant", "merch_TEST1", "tx.place_entity_id"),
+        ("merchant.name", 7, "tx.place_entity_id"),
+        ("merchant.id", 7, "tx.place_entity_id"),
+        ("merchant.address", "1 Test Street", "place.address_street"),
+        ("merchant.address.city", 7, "place.address_city"),
+        ("merchant.address.latitude", "north", "place.latitude"),
+        ("merchant.address.approximate", "yes", "place.location_approximate"),
+        ("merchant.online", "yes", "place.online"),
+        ("merchant.logo", 7, "place.logo_url"),
+        ("merchant.metadata", "x", "place.website"),
+        ("merchant.metadata.website", 7, "place.website"),
+        ("metadata.card_acceptor_website", 7, "place.card_acceptor_website"),
+    ],
+)
+async def test_unreadable_transaction_fields_warn_and_read_as_unknown(
+    session, run, name: str, value: object, column: str
+) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(
+        amount=-1234,
+        local_amount=-1234,
+        local_currency="GBP",
+        category="groceries",
+        scheme="mastercard",
+        include_in_spending=True,
+        merchant=make_merchant(),
+        metadata={"mcc": "5411", "card_acceptor_website": "www.example.test"},
+    )
+    _set(name, value)(payment)
+
+    report = await _normalize(session, connection, transactions=[payment])
+
+    assert report.created == 1
+    assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+    (tx,) = await _transactions(session)
+    details = await _details(session, tx.id)
+    table, field_name = column.split(".")
+    if table == "tx":
+        assert getattr(details, field_name) is None
+    else:
+        place = await session.get_one(Entity, details.place_entity_id)
+        assert getattr(place, field_name) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "field_name"),
+    [
+        ("account.product_type", {"account": {"product_type": 7}}, "product_type"),
+        ("account.owner_type", {"account": {"owner_type": ["personal"]}}, "owner_type"),
+        ("pot.type", {"pot": {"type": 7}}, "product_type"),
+        ("pot.goal_amount", {"pot": {"goal_amount": "1000"}}, "goal_amount"),
+        ("pot.locked", {"pot": {"locked": "no"}}, "locked"),
+        ("pot.round_up", {"pot": {"round_up": 1}}, "round_up"),
+        ("pot.round_up_multiplier", {"pot": {"round_up_multiplier": "x"}}, "round_up_multiplier"),
+    ],
+)
+async def test_unreadable_account_and_pot_fields_keep_their_value(
+    session, run, name: str, change: dict[str, dict[str, object]], field_name: str
+) -> None:
+    connection = await _connection(run)
+    stated: dict[str, object] = {
+        "type": "flexible_savings",
+        "goal_amount": 100000,
+        "locked": True,
+        "round_up": True,
+        "round_up_multiplier": 2,
+    }
+    await _normalize(session, connection, pots=[make_pot(**stated)])
+    account_map = await _account_map(session, connection)
+    target = account_map[ACCOUNT_ID] if name.startswith("account.") else account_map["pot_TEST1"]
+    kept = getattr(await get_account(session, target), field_name)
+    assert kept is not None
+
+    await _normalize(
+        session,
+        connection,
+        account=make_account(**change.get("account", {})),
+        pots=[make_pot(**(stated | change.get("pot", {})))],
+    )
+
+    assert getattr(await get_account(session, target), field_name) == kept
+    assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+async def test_a_reversed_transaction_still_records_its_merchant(session, run) -> None:
+    connection = await _connection(run)
+    reversed_payment = make_transaction(amount=0, settled="", merchant=make_merchant())
+
+    report = await _normalize(session, connection, transactions=[reversed_payment])
+
+    assert report == NormalizeReport()
+    assert await _transactions(session) == []
+    places = await session.scalar(
+        text("select count(*) from core.entities where kind = 'place' and name = :name"),
+        {"name": make_merchant()["name"]},
+    )
+    assert places == 1
 
 
 async def test_transaction_without_new_keys_still_posts(session, run) -> None:
@@ -1441,6 +1562,7 @@ async def _before_structured_fields(ctx: CommandContext, connection: ConnectionR
         " include_in_spending = null, payment_scheme = null, place_entity_id = null",
         "delete from finance.transaction_category_splits",
         "delete from finance.declined_transactions",
+        "delete from core.entities where kind = 'place'",
     ):
         await ctx.session.execute(text(statement))
     await update_config(ctx, connection.id, remove=[NORMALIZER_VERSION_KEY])
@@ -1667,6 +1789,36 @@ async def test_replay_runs_when_an_older_version_is_stored(session, run) -> None
     assert replayed == NormalizeReport(updated=1)
     config = (await get_connection(session, connection.id)).config
     assert config[NORMALIZER_VERSION_KEY] == NORMALIZER_VERSION
+
+
+async def test_replay_records_places_seen_only_on_reversed_copies(session, run) -> None:
+    connection = await _connection(run)
+    posted = make_transaction(
+        settled="", merchant=make_merchant(id="merch_TEST1"), updated="2026-03-01T12:00:00.000Z"
+    )
+    await _normalize(session, connection, transactions=[posted])
+    await run(_before_structured_fields, connection)
+    reversed_later = posted | {"amount": 0, "updated": "2026-03-02T12:00:00.000Z"}
+    never_posted = make_transaction(
+        id="tx_TEST0002",
+        amount=0,
+        settled="",
+        merchant=make_merchant(id="merch_TEST2", name="Test Kiosk"),
+        created="2026-03-01T13:00:00.000Z",
+    )
+    await _store_page(run, connection, [reversed_later, never_posted])
+
+    await _normalize(session, connection)
+
+    (tx,) = await _transactions(session)
+    assert tx.status == "void"
+    ids = await session.scalars(
+        text(
+            "select external_ids ->> 'monzo_merchant' from core.entities"
+            " where kind = 'place' order by 1"
+        )
+    )
+    assert list(ids) == ["merch_TEST1", "merch_TEST2"]
 
 
 async def test_replay_keeps_owner_void(session, run) -> None:

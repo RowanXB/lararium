@@ -49,7 +49,9 @@ class AccountRecord:
 
 @dataclass(frozen=True)
 class SourceDetails:
-    """What a source says about an account; None clears a field, except tax_wrapper (kept)."""
+    """What a source says about an account. None clears a field, except tax_wrapper, which it
+    leaves as it is; so does every field named in `unknown`: one the source states in a shape
+    that cannot be read."""
 
     product_type: str | None = None
     owner_type: str | None = None
@@ -58,6 +60,7 @@ class SourceDetails:
     round_up: bool | None = None
     round_up_multiplier: Decimal | None = None
     tax_wrapper: TaxWrapper | None = None
+    unknown: frozenset[str] = frozenset()
 
 
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[AccountRecord]:
@@ -229,8 +232,15 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
         "round_up": details.round_up,
         "round_up_multiplier": details.round_up_multiplier,
     }
+    if not details.unknown <= values.keys():
+        raise ValueError(f"not source detail fields: {sorted(details.unknown - values.keys())}")
+    for name in details.unknown:
+        del values[name]
     if details.tax_wrapper is not None:
         values["tax_wrapper"] = details.tax_wrapper
+    if not values:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
     differs = or_(*(getattr(a, name).is_distinct_from(value) for name, value in values.items()))
     written = await ctx.session.scalar(
         update(a).where(a.id == account_id, differs).values(**values).returning(a.id)
