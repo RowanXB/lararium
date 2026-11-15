@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lararium.core.json_types import JSONValue
@@ -56,6 +56,12 @@ class Account(Base):
     status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
     opened_on: Mapped[date | None]
     closed_on: Mapped[date | None]
+    product_type: Mapped[str | None] = mapped_column(Text)
+    owner_type: Mapped[str | None] = mapped_column(Text)
+    goal_amount: Mapped[Decimal | None] = mapped_column(Numeric)
+    locked: Mapped[bool | None]
+    round_up: Mapped[bool | None]
+    round_up_multiplier: Mapped[Decimal | None] = mapped_column(Numeric)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -77,9 +83,55 @@ class Transaction(Base):
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     connection_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.connections.id"))
     external_id: Mapped[str | None] = mapped_column(Text)
+    # The amount in the source's own currency, signed like the account's posting; both or neither.
+    original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
+    original_instrument_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.instruments.id")
+    )
+    category: Mapped[str | None] = mapped_column(Text)
+    labels: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    include_in_spending: Mapped[bool | None]
+    payment_scheme: Mapped[str | None] = mapped_column(Text)
+    place_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class TransactionCategorySplit(Base):
+    __tablename__ = "transaction_category_splits"
+    __table_args__ = FINANCE_SCHEMA
+
+    transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(Text)
+    quantity: Mapped[Decimal] = mapped_column(Numeric)
+
+
+class DeclinedTransaction(Base):
+    """A card payment the source declined: recorded for reference, outside the ledger."""
+
+    __tablename__ = "declined_transactions"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"))
+    external_id: Mapped[str] = mapped_column(Text)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    quantity: Mapped[Decimal] = mapped_column(Numeric)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    description: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    counterparty_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    place_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    decline_reason: Mapped[str] = mapped_column(Text)
+    owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Posting(Base):

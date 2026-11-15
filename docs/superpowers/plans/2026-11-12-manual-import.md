@@ -2,7 +2,7 @@
 
 > **Status: deferred (2026-11-12), scope widened (2026-11-15).** The owner mostly relies on the Monzo API, so M3 (Monzo) came first; it is now merged. When this plan is resumed:
 > - **Task 1 (documents)** is still needed: M3 stores Monzo's JSON responses as raw records and does not build documents.
-> - **Migrations are renumbered.** `main` now ends at `0012`, so this plan's `0008`, `0009` and `0010` become `0013`, `0014` and `0015`.
+> - **Migrations are renumbered.** `main` now ends at `0013` (structured source fields, PR #11), so this plan's `0008`, `0009` and `0010` become `0014`, `0015` and `0016`.
 > - **Every format the owner's banks export is supported** (Decision 14): CSV (with or without a header row), OFX (no longer optional: HSBC UK exports it), QIF, the UK midata CSV, and PDF statements through per-bank layouts (Task 4B). For each bank the most information-complete format is recommended. The owner's real exports were checked with throwaway prototypes on 2026-11-15; every format matched the others transaction by transaction over the dates they share. Only their structure is described here.
 > - **BOC UK** offers only PDF e-statements in internet and mobile banking. Its statements were checked the same way on 2026-11-15 and get a layout (Task 4B).
 > - **Implementation rulings (2026-11-15).**
@@ -173,9 +173,9 @@ Found by checking the owner's HSBC UK and Lloyds exports (2026-11-15):
 ```
 backend/
   migrations/versions/
-    0013_core_documents.py          # Task 1
-    0014_finance_import_profiles.py # Task 2
-    0015_finance_import_batches.py  # Task 5
+    0014_core_documents.py          # Task 1
+    0015_finance_import_profiles.py # Task 2
+    0016_finance_import_batches.py  # Task 5
   src/lararium/
     config.py                       # + document_dir (Task 1)
     deps.py                         # + get_document_store (Task 7)
@@ -230,7 +230,7 @@ backend/Dockerfile                                                 # Task 9
 ### Task 1: Documents (core)
 
 **Files:**
-- Create: `backend/migrations/versions/0013_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
+- Create: `backend/migrations/versions/0014_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
 - Modify: `backend/src/lararium/core/models.py`, `backend/src/lararium/core/errors.py`, `backend/src/lararium/config.py`
 
 **Interfaces:**
@@ -261,7 +261,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
 ### Task 2: Parse profiles
 
 **Files:**
-- Create: `backend/migrations/versions/0014_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
+- Create: `backend/migrations/versions/0015_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
 - Modify: `backend/src/lararium/modules/finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
@@ -505,7 +505,7 @@ Rows carry `balance` only where the statement prints one (HSBC: after the last r
 ### Task 5: Staging
 
 **Files:**
-- Create: `backend/migrations/versions/0015_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
+- Create: `backend/migrations/versions/0016_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
 - Modify: `.../finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
