@@ -35,6 +35,7 @@ from lararium.modules.finance.monzo.normalize import (
     NORMALIZER_VERSION,
     NORMALIZER_VERSION_KEY,
     FetchedRecord,
+    MonzoFieldError,
     NormalizeReport,
     _readable_time,  # pyright: ignore[reportPrivateUsage]
     normalize,
@@ -84,8 +85,10 @@ async def _normalize(
     openings: Sequence[str] = (),
     notifier: RecordingNotifier | None = None,
     account: dict[str, Any] | None = None,
+    balance_record: dict[str, Any] | None = None,
 ) -> NormalizeReport:
-    """Store one sync's raw records (as MonzoConnector.sync would), then normalize them."""
+    """Store one sync's raw records (as MonzoConnector.sync would), then normalize them.
+    `balance_record`, when given, is the balance response in place of one of `balance`."""
     sync_id = uuid.uuid4()
     async with command_context(session, CONNECTOR, "connection.sync", {}) as command:
         fetched: list[FetchedRecord] = []
@@ -103,7 +106,11 @@ async def _normalize(
             fetched.append(FetchedRecord(record_id, request, datetime.now(UTC)))
 
         await store("accounts", {}, [account or make_account()])
-        await store("balance", {"account_id": ACCOUNT_ID}, make_balance(balance=balance))
+        await store(
+            "balance",
+            {"account_id": ACCOUNT_ID},
+            make_balance(balance=balance) if balance_record is None else balance_record,
+        )
         await store("pots", {"current_account_id": ACCOUNT_ID}, list(pots))
         if transactions:
             await store("transactions_page", {"account_id": ACCOUNT_ID}, list(transactions))
@@ -1424,6 +1431,291 @@ async def test_a_decline_with_an_unreadable_reason_is_recorded_not_posted(sessio
         ("tx_TEST0001", "")
     ]
     assert await _warnings(session, connection) == [UNMAPPED.format("decline_reason")]
+
+
+# The fields read before the reader existed, through it now (reader-everywhere plan).
+
+
+def _pot_move(**overrides: Any) -> dict[str, Any]:
+    """A settled move into pot_TEST1, described by its counterparty, with a memo."""
+    return (
+        make_transaction(
+            amount=-5000,
+            counterparty={"name": "A Friend"},
+            notes="weekly shop",
+            metadata={"pot_id": "pot_TEST1"},
+        )
+        | overrides
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "change", "read_as"),
+    [
+        ("settled", {"settled": False}, {"status": "pending"}),
+        ("settled", {"settled": 0}, {"status": "pending"}),
+        ("settled", {"settled": "not a time"}, {"status": "pending"}),
+        ("settled", {"settled": "2026-03-02T06:00:00"}, {"status": "pending"}),
+        ("metadata", {"metadata": "pot_TEST1"}, {"pot": False}),
+        ("metadata.pot_id", {"metadata": {"pot_id": 7}}, {"pot": False}),
+        ("merchant.name", {"merchant": make_merchant(name=7)}, {}),
+        ("counterparty", {"counterparty": "A Friend"}, {"description": "TEST SHOP LONDON"}),
+        ("counterparty.name", {"counterparty": {"name": 7}}, {"description": "TEST SHOP LONDON"}),
+        ("description", {"counterparty": {}, "description": 7}, {"description": ""}),
+        ("notes", {"notes": 7}, {"memo": ""}),
+        ("updated", {"merchant": make_merchant(), "updated": 7}, {"description": "Test Grocer"}),
+    ],
+    ids=[
+        "settled-false",
+        "settled-zero",
+        "settled-text",
+        "settled-no-offset",
+        "metadata-text",
+        "pot-id-number",
+        "merchant-name-number",
+        "counterparty-text",
+        "counterparty-name-number",
+        "description-number",
+        "notes-number",
+        "updated-number",
+    ],
+)
+async def test_older_transaction_fields_warn_and_read_as_unknown(
+    session, run, path: str, change: dict[str, Any], read_as: dict[str, object]
+) -> None:
+    connection = await _connection(run)
+    expected = {
+        "status": "booked",
+        "description": "A Friend",
+        "memo": "weekly shop",
+        "pot": True,
+    } | read_as
+
+    report = await _normalize(
+        session, connection, transactions=[_pot_move(**change)], pots=[make_pot()]
+    )
+
+    assert report.created == 1
+    assert await _warnings(session, connection) == [UNMAPPED.format(path)]
+    (tx,) = await _transactions(session)
+    booked = expected["status"] == "booked"
+    assert (tx.status, tx.value_date, tx.description) == (
+        expected["status"],
+        date(2026, 3, 2) if booked else None,
+        expected["description"],
+    )
+    account_map = await _account_map(session, connection)
+    other = account_map["pot_TEST1"] if expected["pot"] else await _unassigned(run)
+    assert await _postings(session, tx.id) == [
+        (account_map[ACCOUNT_ID], Decimal("-50.00"), expected["memo"]),
+        (other, Decimal("50.00"), ""),
+    ]
+
+
+async def test_a_declined_description_reads_through_the_reader(session, run) -> None:
+    connection = await _connection(run)
+    declined = make_transaction(
+        settled="",
+        decline_reason="INSUFFICIENT_FUNDS",
+        merchant=make_merchant(name=7),
+        counterparty={"name": "A Friend"},
+    )
+
+    await _normalize(session, connection, transactions=[declined])
+
+    assert [r.description for r in await _declined(session)] == ["A Friend"]
+    assert await _warnings(session, connection) == [UNMAPPED.format("merchant.name")]
+
+
+@pytest.mark.parametrize("key", ["fees", "categories", "labels", "atm_fees_detailed"])
+async def test_an_empty_string_reads_as_absent(session, run, key: str) -> None:
+    connection = await _connection(run)
+
+    report = await _normalize(session, connection, transactions=[make_transaction(**{key: ""})])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    assert len(await _postings(session, tx.id)) == 2
+    assert await _warnings(session, connection) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "change", "name"),
+    [
+        (
+            "account.description",
+            {"description": ["uk_retail"], "type": "uk_retail_joint"},
+            "Monzo Joint",
+        ),
+        ("account.type", {"description": "user_TEST1", "type": {"name": "uk_retail"}}, "Monzo"),
+    ],
+    ids=["description", "type"],
+)
+async def test_an_account_name_it_cannot_read_falls_back(
+    session, run, path: str, change: dict[str, object], name: str
+) -> None:
+    connection = await _connection(run)
+
+    await _normalize(session, connection, account=make_account(**change))
+
+    account = await get_account(session, (await _account_map(session, connection))[ACCOUNT_ID])
+    assert account.name == name
+    assert await _warnings(session, connection) == [UNMAPPED.format(path)]
+
+
+@pytest.mark.parametrize(
+    ("path", "change"),
+    [
+        ("pot.name", {"name": 7}),
+        ("pot.created", {"created": "not a time"}),
+        ("pot.created", {"created": 7}),
+        ("pot.deleted", {"deleted": "false"}),
+    ],
+    ids=["name-number", "created-text", "created-number", "deleted-text"],
+)
+async def test_a_new_pot_with_unreadable_fields_is_still_opened(
+    session, run, path: str, change: dict[str, object]
+) -> None:
+    connection = await _connection(run)
+
+    await _normalize(session, connection, pots=[make_pot(**change)])
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    assert (pot.name, pot.status, pot.opened_on) == (
+        "Pot" if path == "pot.name" else "Savings",
+        "open",
+        None if path == "pot.created" else date(2024, 2, 1),
+    )
+    assert await _warnings(session, connection) == [UNMAPPED.format(path)]
+
+
+async def test_an_unreadable_deleted_flag_never_closes_a_pot(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, pots=[make_pot()])
+
+    await _normalize(session, connection, pots=[make_pot(deleted="true")])
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    assert pot.status == "open"
+    assert await _warnings(session, connection) == [UNMAPPED.format("pot.deleted")]
+
+
+async def _snapshots(session, account_id: uuid.UUID) -> list[Decimal]:
+    return list(
+        await session.scalars(
+            text(
+                "select quantity from finance.balance_snapshots where account_id = :id"
+                " order by as_of"
+            ),
+            {"id": account_id},
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "change"),
+    [
+        ("pot.balance", {"balance": True}),
+        ("pot.balance", {"balance": "6000"}),
+        ("pot.balance", {"balance": 10**43}),
+        ("pot.currency", {"currency": 826}),
+        ("pot.currency", {"currency": "XTS"}),
+    ],
+    ids=[
+        "balance-flag",
+        "balance-text",
+        "balance-too-large",
+        "currency-number",
+        "currency-unknown",
+    ],
+)
+async def test_a_pot_balance_it_cannot_read_records_no_snapshot(
+    session, run, path: str, change: dict[str, object]
+) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, pots=[make_pot(goal_amount=100000)])
+    pot_id = (await _account_map(session, connection))["pot_TEST1"]
+
+    await _normalize(
+        session, connection, pots=[make_pot(goal_amount=100000, balance=6000) | change]
+    )
+
+    assert await _snapshots(session, pot_id) == [Decimal("50.00")]
+    # A goal in a currency it cannot read keeps the stored one.
+    assert (await get_account(session, pot_id)).goal_amount == Decimal("1000.00")
+    assert await _warnings(session, connection) == [UNMAPPED.format(path)]
+
+
+_MISSING = object()
+
+
+def _core(path: str, record: str, key: str, value: object, label: str) -> Any:
+    return pytest.param(path, record, key, value, id=f"{path}-{label}")
+
+
+@pytest.mark.parametrize(
+    ("path", "record", "key", "value"),
+    [
+        _core("id", "transaction", "id", _MISSING, "missing"),
+        _core("id", "transaction", "id", 7, "number"),
+        _core("amount", "transaction", "amount", _MISSING, "missing"),
+        _core("amount", "transaction", "amount", True, "flag"),
+        _core("amount", "transaction", "amount", 12.5, "fraction"),
+        _core("amount", "transaction", "amount", "-1234", "text"),
+        _core("currency", "transaction", "currency", _MISSING, "missing"),
+        _core("currency", "transaction", "currency", 826, "number"),
+        _core("created", "transaction", "created", _MISSING, "missing"),
+        _core("created", "transaction", "created", "not a time", "text"),
+        _core("created", "transaction", "created", "2026-03-01T12:00:00", "no-offset"),
+        _core("currency", "declined", "currency", 826, "declined-number"),
+        _core("created", "declined", "created", "not a time", "declined-text"),
+        _core("account.id", "account", "id", 7, "number"),
+        _core("account.created", "account", "created", _MISSING, "missing"),
+        _core("account.created", "account", "created", "2024-01-15", "date-only"),
+        _core("pot.id", "pot", "id", _MISSING, "missing"),
+        _core("balance.balance", "balance", "balance", _MISSING, "missing"),
+        _core("balance.balance", "balance", "balance", True, "flag"),
+        _core("balance.currency", "balance", "currency", 826, "number"),
+    ],
+)
+async def test_core_fields_fail_loudly(
+    session, run, path: str, record: str, key: str, value: object
+) -> None:
+    connection = await _connection(run)
+    records = {
+        "transaction": make_transaction(),
+        "declined": make_transaction(settled="", decline_reason="INSUFFICIENT_FUNDS"),
+        "account": make_account(),
+        "pot": make_pot(),
+        "balance": make_balance(),
+    }
+    if value is _MISSING:
+        del records[record][key]
+    else:
+        records[record][key] = value
+
+    with pytest.raises(MonzoFieldError) as raised:
+        await _normalize(
+            session,
+            connection,
+            transactions=[records["declined" if record == "declined" else "transaction"]],
+            account=records["account"],
+            pots=[records["pot"]],
+            balance_record=records["balance"],
+        )
+
+    assert raised.value.path == path
+    assert str(raised.value) == f"Monzo field {path} is missing or unreadable"
+
+
+async def test_a_reversed_transaction_needs_no_currency_or_creation(session, run) -> None:
+    connection = await _connection(run)
+    reversed_payment = make_transaction(amount=0, settled="", created="not a time")
+    del reversed_payment["currency"]
+
+    report = await _normalize(session, connection, transactions=[reversed_payment])
+
+    assert report == NormalizeReport()
 
 
 def _statement(n: int, day: int, **merchant: object) -> dict[str, Any]:

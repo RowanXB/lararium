@@ -30,6 +30,7 @@ from lararium.core.raw_records import store_raw_record
 from lararium.db import create_engine, make_sessionmaker, psycopg_dsn
 from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
+from lararium.modules.finance.monzo.normalize import MonzoFieldError
 from lararium.worker import jobs
 from lararium.worker.app import defer_sync, procrastinate_app
 
@@ -232,6 +233,19 @@ async def test_last_error_names_the_monzo_error_code(session, run, fake, notifie
 
     after = await get_connection(session, connection.id)
     assert after.last_error == "MonzoApiError: Monzo API error 500: internal_service"
+
+
+async def test_last_error_names_the_monzo_field(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+    # Its message names the field's path only, never its value.
+    fake.error = MonzoFieldError("balance.currency")
+
+    await _run_sync(session, connection, notifier)
+
+    after = await get_connection(session, connection.id)
+    assert after.last_error == (
+        "MonzoFieldError: Monzo field balance.currency is missing or unreadable"
+    )
 
 
 async def test_credential_rejected_sets_needs_reauth(session, run, fake, notifier) -> None:

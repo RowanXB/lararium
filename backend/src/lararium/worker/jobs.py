@@ -34,6 +34,7 @@ from lararium.core.secrets import Secret
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
+from lararium.modules.finance.monzo.normalize import MonzoFieldError
 from lararium.modules.finance.monzo.webhooks import process_inbox
 from lararium.worker.app import defer_await_approval, defer_sync, procrastinate_app
 
@@ -164,11 +165,12 @@ def _describe(exc: Exception) -> str:
     """What last_error (and the owner's notification) says about a failed sync.
 
     Raw exception text can quote anything, an upstream response included, so only messages
-    written to be shown are: a rejection's, and a MonzoApiError's (its status and code).
+    written to be shown are: a rejection's, a MonzoApiError's (its status and code), and a
+    MonzoFieldError's (the path of the field, never its value).
     """
     if isinstance(exc, CredentialRejectedError):
         return str(exc)
-    if isinstance(exc, MonzoApiError):
+    if isinstance(exc, MonzoApiError | MonzoFieldError):
         return f"{type(exc).__name__}: {exc}"
     return type(exc).__name__
 
