@@ -1525,9 +1525,6 @@ async def stage_import(
     require_importable(account)
     default_currency = await _default_currency(session, default_instrument_id)
     profile = await get_profile(session, profile_id)
-    document = await store_document(
-        ctx, store, content, filename=filename, media_type=media_type, source="finance.import"
-    )
     zone = profile.config.timezone
     local_tz = ZoneInfo(zone) if zone is not None else await get_timezone(session)
     statement, parser_version = _parse(content, profile.config, local_tz)
@@ -1546,6 +1543,10 @@ async def stage_import(
     if missing is not None:
         raise ImportNotAllowedError(missing)
 
+    # Only now that nothing refuses the file: a refused one leaves no bank statement on disk.
+    document = await store_document(
+        ctx, store, content, filename=filename, media_type=media_type, source="finance.import"
+    )
     b = models.ImportBatch
     batch_id = await session.scalar(
         insert(b)

@@ -1,6 +1,7 @@
 import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -164,14 +165,20 @@ async def test_default_instrument_must_be_fiat(
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", default=btc.id)
 
 
+def _files(root: Path) -> list[Path]:
+    return [path for path in root.rglob("*") if path.is_file()]
+
+
 async def test_file_format_error_persists_nothing(
-    session: AsyncSession, stage: Stage, csv_profile: ImportProfileRecord
+    session: AsyncSession, stage: Stage, csv_profile: ImportProfileRecord, tmp_path: Path
 ) -> None:
     with pytest.raises(FileFormatError):
         await stage(csv_profile, "Foo,Bar\n1,2\n")
 
     assert await session.scalar(select(func.count()).select_from(models.ImportBatch)) == 0
     assert await session.scalar(select(func.count()).select_from(core_models.Document)) == 0
+    # Review finding: the refused statement's bytes stayed on disk, and in every backup.
+    assert _files(tmp_path) == []
 
 
 async def test_currency_resolution(
