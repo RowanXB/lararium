@@ -1,11 +1,20 @@
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import insert, text
 
 from lararium.modules.finance import models
-from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.identifiers import (
+    assign_identifier,
+    get_or_create_identifier,
+    unassign_identifier,
+)
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+)
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
@@ -13,53 +22,18 @@ from lararium.modules.finance.transfers import (
     source_ref,
     transfer_contra,
 )
-from lararium.modules.finance.valuation import balances_asof, net_worth_series
 
-from .conftest import B_IDENTIFIER, WHEN
-
-DAY = date(2026, 11, 3)
-
-
-async def _balances(session, day: date = DAY) -> dict:
-    return {r.account_id: r.quantity for r in await balances_asof(session, day)}
-
-
-async def _net_worth(session, day: date = DAY) -> Decimal:
-    [point] = await net_worth_series(session, day, day)
-    return point.value
-
-
-async def _contra(session, transaction_id, own_account_id):
-    return await session.scalar(
-        text(
-            "select account_id from finance.postings"
-            " where transaction_id = :t and account_id <> :own"
-        ),
-        {"t": transaction_id, "own": own_account_id},
-    )
-
-
-async def _placeholders(session) -> list:
-    rows = await session.execute(
-        text(
-            "select t.id, t.description, t.status, t.occurred_at, t.booking_date"
-            " from finance.transactions t where t.origin = 'inference' order by t.occurred_at"
-        )
-    )
-    return list(rows)
-
-
-async def _postings(session, transaction_id) -> set[tuple]:
-    rows = await session.execute(
-        text("select account_id, quantity from finance.postings where transaction_id = :t"),
-        {"t": transaction_id},
-    )
-    return {(r.account_id, r.quantity) for r in rows}
-
-
-async def _consistent(session) -> None:
-    assert await find_transfer_violations(session) == []
-    assert await find_unbalanced_transactions(session) == []
+from .conftest import (
+    B_IDENTIFIER,
+    DAY,
+    WHEN,
+    assert_consistent,
+    balances_on,
+    contra_account,
+    net_worth_on,
+    placeholders,
+    postings_of,
+)
 
 
 async def test_outgoing_to_manual_account(
@@ -67,24 +41,24 @@ async def test_outgoing_to_manual_account(
 ) -> None:
     a = await connected_bank("A")
     b = await manual_bank("B")
-    worth_before = await _net_worth(session)
+    worth_before = await net_worth_on(session)
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
 
     record = await connector_tx(a, "-100", identifier_id=identifier)
     # Identified through the registry, so it sits in In transit before matching runs.
-    assert await _contra(session, record.id, a.account.id) == ids.in_transit
-    assert await _net_worth(session) == worth_before
+    assert await contra_account(session, record.id, a.account.id) == ids.in_transit
+    assert await net_worth_on(session) == worth_before
 
     assert await heal() == 1
 
-    assert await _contra(session, record.id, a.account.id) == ids.in_transit
-    [placeholder] = await _placeholders(session)
+    assert await contra_account(session, record.id, a.account.id) == ids.in_transit
+    [placeholder] = await placeholders(session)
     assert (placeholder.description, placeholder.status) == ("Transfer from A", "inferred")
     assert (placeholder.occurred_at, placeholder.booking_date) == (
         record.occurred_at,
         record.booking_date,
     )
-    assert await _postings(session, placeholder.id) == {
+    assert await postings_of(session, placeholder.id) == {
         (b.id, Decimal("100")),
         (ids.in_transit, Decimal("-100")),
     }
@@ -101,11 +75,11 @@ async def test_outgoing_to_manual_account(
         transfer.placeholder_transaction_id,
     ) == (record.id, None, placeholder.id)
     assert transfer.opened_at == record.occurred_at
-    balances = await _balances(session)
+    balances = await balances_on(session)
     assert balances[ids.in_transit] == 0
     assert balances[b.id] == Decimal("1100")
-    assert await _net_worth(session) == worth_before
-    await _consistent(session)
+    assert await net_worth_on(session) == worth_before
+    await assert_consistent(session)
 
 
 async def test_incoming_from_manual_account(
@@ -113,16 +87,16 @@ async def test_incoming_from_manual_account(
 ) -> None:
     a = await connected_bank("A")
     b = await manual_bank("B")
-    worth_before = await _net_worth(session)
+    worth_before = await net_worth_on(session)
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
 
     record = await connector_tx(a, "100", identifier_id=identifier)
     assert await heal() == 1
 
-    assert await _contra(session, record.id, a.account.id) == ids.in_transit
-    [placeholder] = await _placeholders(session)
+    assert await contra_account(session, record.id, a.account.id) == ids.in_transit
+    [placeholder] = await placeholders(session)
     assert placeholder.description == "Transfer to A"
-    assert await _postings(session, placeholder.id) == {
+    assert await postings_of(session, placeholder.id) == {
         (b.id, Decimal("-100")),
         (ids.in_transit, Decimal("100")),
     }
@@ -133,11 +107,11 @@ async def test_incoming_from_manual_account(
         a.account.id,
     )
     assert (transfer.out_transaction_id, transfer.in_transaction_id) == (None, record.id)
-    balances = await _balances(session)
+    balances = await balances_on(session)
     assert balances[ids.in_transit] == 0
     assert balances[b.id] == Decimal("900")
-    assert await _net_worth(session) == worth_before
-    await _consistent(session)
+    assert await net_worth_on(session) == worth_before
+    await assert_consistent(session)
 
 
 async def test_unidentified_stays_unassigned(
@@ -152,10 +126,10 @@ async def test_unidentified_stays_unassigned(
     assert await heal() == 0
 
     for record in (named, unnamed):
-        assert await _contra(session, record.id, a.account.id) == ids.unassigned
+        assert await contra_account(session, record.id, a.account.id) == ids.unassigned
     assert await list_transfers(session) == []
-    assert await _placeholders(session) == []
-    await _consistent(session)
+    assert await placeholders(session) == []
+    await assert_consistent(session)
 
 
 async def test_identifier_of_own_account_is_not_a_transfer(
@@ -167,9 +141,9 @@ async def test_identifier_of_own_account_is_not_a_transfer(
     record = await connector_tx(a, "-100", identifier_id=own.id)
     assert await heal() == 0
 
-    assert await _contra(session, record.id, a.account.id) == ids.unassigned
+    assert await contra_account(session, record.id, a.account.id) == ids.unassigned
     assert await list_transfers(session) == []
-    await _consistent(session)
+    await assert_consistent(session)
 
 
 async def test_rejected_record_stays_unassigned(
@@ -188,10 +162,10 @@ async def test_rejected_record_stays_unassigned(
 
     record = await connector_tx(a, "-100", identifier_id=identifier)
     assert await source_ref(session, record.id) == source
-    assert await _contra(session, record.id, a.account.id) == ids.unassigned
+    assert await contra_account(session, record.id, a.account.id) == ids.unassigned
     assert await heal() == 0
     assert await list_transfers(session) == []
-    await _consistent(session)
+    await assert_consistent(session)
 
 
 async def test_heal_twice_writes_nothing(
@@ -240,12 +214,12 @@ async def test_placeholder_follows_its_record(
     # The upstream reports another amount and a later time for the same payment.
     later = WHEN + timedelta(hours=3)
     record = await connector_tx(a, "-120", identifier_id=identifier, occurred_at=later)
-    assert await _contra(session, record.id, a.account.id) == ids.in_transit
+    assert await contra_account(session, record.id, a.account.id) == ids.in_transit
     assert await heal() == 1
 
-    [placeholder] = await _placeholders(session)
+    [placeholder] = await placeholders(session)
     assert placeholder.occurred_at == later
-    assert await _postings(session, placeholder.id) == {
+    assert await postings_of(session, placeholder.id) == {
         (b.id, Decimal("120")),
         (ids.in_transit, Decimal("-120")),
     }
@@ -255,18 +229,18 @@ async def test_placeholder_follows_its_record(
         "inferred",
         record.id,
     )
-    assert (await _balances(session))[b.id] == Decimal("1120")
-    await _consistent(session)
+    assert (await balances_on(session))[b.id] == Decimal("1120")
+    await assert_consistent(session)
 
     # Voided upstream: the placeholder and the transfer go, and B is back where it was.
     await connector_tx(a, "-120", identifier_id=identifier, occurred_at=later, status="void")
     assert await heal() == 1
     assert await list_transfers(session) == []
-    assert await _placeholders(session) == []
-    balances = await _balances(session)
+    assert await placeholders(session) == []
+    balances = await balances_on(session)
     assert balances[b.id] == Decimal("1000")
     assert balances.get(ids.in_transit, Decimal(0)) == 0
-    await _consistent(session)
+    await assert_consistent(session)
 
 
 async def test_placeholder_before_snapshot_absorbed(
@@ -277,7 +251,7 @@ async def test_placeholder_before_snapshot_absorbed(
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     await connector_tx(a, "-100", identifier_id=identifier)
     assert await heal() == 1
-    worth = await _net_worth(session)
+    worth = await net_worth_on(session)
 
     # The owner reads B's balance a day later: the 100 is already in it.
     await run(
@@ -288,11 +262,11 @@ async def test_placeholder_before_snapshot_absorbed(
         as_of=WHEN + timedelta(days=1),
     )
     day = DAY + timedelta(days=1)
-    balances = await _balances(session, day)
+    balances = await balances_on(session, day)
     assert balances[b.id] == Decimal("1100")
     assert balances[ids.in_transit] == 0
-    assert await _net_worth(session, day) == worth
-    await _consistent(session)
+    assert await net_worth_on(session, day) == worth
+    await assert_consistent(session)
 
 
 async def test_registering_later_matches_history(
@@ -313,7 +287,7 @@ async def test_registering_later_matches_history(
     ]
     assert await heal() == 0
     for record in records:
-        assert await _contra(session, record.id, a.account.id) == ids.unassigned
+        assert await contra_account(session, record.id, a.account.id) == ids.unassigned
 
     await run(assign_identifier, b.id, "uk_bank_account", B_IDENTIFIER)
     # The next sync computes the same contra as the engine now gives the records.
@@ -333,9 +307,9 @@ async def test_registering_later_matches_history(
     # Newest first.
     assert [t.out_transaction_id for t in transfers] == [r.id for r in records]
     for record in records:
-        assert await _contra(session, record.id, a.account.id) == ids.in_transit
-    assert len(await _placeholders(session)) == 3
-    await _consistent(session)
+        assert await contra_account(session, record.id, a.account.id) == ids.in_transit
+    assert len(await placeholders(session)) == 3
+    await assert_consistent(session)
 
 
 async def test_voided_placeholder_is_a_violation_and_healed(
@@ -346,7 +320,7 @@ async def test_voided_placeholder_is_a_violation_and_healed(
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     await connector_tx(a, "-100", identifier_id=identifier)
     assert await heal() == 1
-    [placeholder] = await _placeholders(session)
+    [placeholder] = await placeholders(session)
 
     # void_transaction refuses it; a raw UPDATE stands in for anything that gets past that.
     await session.execute(
@@ -354,12 +328,114 @@ async def test_voided_placeholder_is_a_violation_and_healed(
         {"t": placeholder.id},
     )
     assert await find_transfer_violations(session) == [placeholder.id]
-    assert (await _balances(session))[b.id] == Decimal("1000")
+    assert (await balances_on(session))[b.id] == Decimal("1000")
 
     assert await heal() == 1
-    [fresh] = await _placeholders(session)
+    [fresh] = await placeholders(session)
     assert fresh.status == "inferred"
     [transfer] = await list_transfers(session)
     assert transfer.placeholder_transaction_id == fresh.id
-    assert (await _balances(session))[b.id] == Decimal("1100")
-    await _consistent(session)
+    assert (await balances_on(session))[b.id] == Decimal("1100")
+    await assert_consistent(session)
+
+
+async def test_own_record_of_manual_account_replaces_placeholder(
+    session, run, ids, gbp, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    a = await connected_bank("A")
+    a_identifier = await run(assign_identifier, a.account.id, "uk_bank_account", "445566:11112222")
+    b = await manual_bank("B")
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    out_record = await connector_tx(a, "-100", identifier_id=identifier)
+    assert await heal() == 1
+    [placeholder] = await placeholders(session)
+
+    # B's own record arrives (as an import would post it), naming A's bank account.
+    in_record = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=WHEN + timedelta(hours=5),
+            description="From A",
+            postings=[
+                PostingInput(b.id, gbp.id, Decimal("100")),
+                PostingInput(ids.unassigned, gbp.id, Decimal("-100")),
+            ],
+            counterparty=CounterpartyFields(identifier_id=a_identifier.id, bank_transfer=True),
+        ),
+    )
+    assert await heal() == 1
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
+    assert transfer.placeholder_transaction_id is None
+    assert await placeholders(session) == []
+    assert (
+        await session.scalar(
+            text("select count(*) from finance.transactions where id = :t"), {"t": placeholder.id}
+        )
+        == 0
+    )
+    assert await contra_account(session, in_record.id, b.id) == ids.in_transit
+    balances = await balances_on(session)
+    assert balances[b.id] == Decimal("1100")  # once, not twice
+    assert balances[ids.in_transit] == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_placeholder_follows_a_date_only_change(
+    session, run, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    a = await connected_bank("A")
+    b = await manual_bank("B")
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    await connector_tx(a, "-100", identifier_id=identifier)
+    assert await heal() == 1
+
+    later = WHEN + timedelta(days=1, hours=2)
+    record = await connector_tx(a, "-100", identifier_id=identifier, occurred_at=later)
+    assert await heal() == 1
+
+    [placeholder] = await placeholders(session)
+    assert (placeholder.occurred_at, placeholder.booking_date) == (later, record.booking_date)
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.placeholder_transaction_id) == ("inferred", placeholder.id)
+    day = later.date()
+    assert (await balances_on(session, day))[b.id] == Decimal("1100")
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_identifier_unassigned_then_moved(
+    session, run, ids, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    a = await connected_bank("A")
+    b = await manual_bank("B")
+    b2 = await manual_bank("B2", identifier=None)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    record = await connector_tx(a, "-100", identifier_id=identifier)
+    assert await heal() == 1
+
+    # No longer one of the owner's accounts: not a transfer.
+    await run(unassign_identifier, identifier)
+    assert await heal() == 1
+    assert await list_transfers(session) == []
+    assert await placeholders(session) == []
+    assert await contra_account(session, record.id, a.account.id) == ids.unassigned
+    assert (await balances_on(session))[b.id] == Decimal("1000")
+    await assert_consistent(session)
+
+    # Registered to another account: a transfer to that one.
+    await run(assign_identifier, b2.id, "uk_bank_account", B_IDENTIFIER)
+    assert await heal() == 1
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.to_account_id) == ("inferred", b2.id)
+    assert await contra_account(session, record.id, a.account.id) == ids.in_transit
+    balances = await balances_on(session)
+    assert (balances[b.id], balances[b2.id]) == (Decimal("1000"), Decimal("1100"))
+    await assert_consistent(session)
+    assert await heal() == 0

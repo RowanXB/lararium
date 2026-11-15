@@ -3,13 +3,19 @@ account their contra belongs on."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    DateTime,
+    Numeric,
+    SQLColumnExpression,
     String,
     Subquery,
+    Uuid,
     and_,
     case,
     cast,
@@ -51,7 +57,7 @@ def source_columns(
     return kind, ref
 
 
-def eligible_records(system: Mapping[SystemAccountKey, UUID]) -> Subquery:
+def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
     """Every transaction that can be a transfer's leg (an own record), with its own posting
     and its contra: not void, not derived, and exactly two postings, one on Unassigned or
     In transit and the other on an account that is not a system account.
@@ -88,7 +94,98 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID]) -> Subquery:
             own.account_id.not_in(list(system.values())),
             posting_count == 2,
         )
-        .subquery("eligible")
+        .subquery(name)
+    )
+
+
+def bound_id(value: UUID) -> SQLColumnExpression[UUID]:
+    """An id as a bound SQL value, for the queries that also take columns."""
+    return literal(value, Uuid())
+
+
+@dataclass(frozen=True)
+class RecordColumns:
+    """An own record's facts as SQL expressions: columns of eligible_records, or bound values
+    of a record already loaded, so one query serves both."""
+
+    transaction_id: SQLColumnExpression[UUID]
+    account_id: SQLColumnExpression[UUID]
+    instrument_id: SQLColumnExpression[UUID]
+    quantity: SQLColumnExpression[Decimal]
+    occurred_at: SQLColumnExpression[datetime]
+    source_kind: SQLColumnExpression[str]
+    source_ref: SQLColumnExpression[str]
+
+
+def record_columns(e: Subquery) -> RecordColumns:
+    """The columns of an eligible_records subquery."""
+    return RecordColumns(
+        transaction_id=e.c.transaction_id,
+        account_id=e.c.account_id,
+        instrument_id=e.c.instrument_id,
+        quantity=e.c.quantity,
+        occurred_at=e.c.occurred_at,
+        source_kind=e.c.source_kind,
+        source_ref=e.c.source_ref,
+    )
+
+
+@dataclass(frozen=True)
+class OwnRecord:
+    """An own record (see eligible_records) with what matching needs."""
+
+    id: UUID
+    occurred_at: datetime
+    booking_date: date
+    account_id: UUID
+    instrument_id: UUID
+    quantity: Decimal
+    contra_account_id: UUID
+    counterparty_identifier_id: UUID | None
+    bank_transfer: bool
+    source: tuple[str, str]
+
+    @property
+    def role(self) -> Literal["out", "in"]:
+        return "out" if self.quantity < 0 else "in"
+
+    @property
+    def amount(self) -> Decimal:
+        return self.quantity.copy_abs()
+
+    def columns(self) -> RecordColumns:
+        return RecordColumns(
+            transaction_id=bound_id(self.id),
+            account_id=bound_id(self.account_id),
+            instrument_id=bound_id(self.instrument_id),
+            quantity=literal(self.quantity, Numeric),
+            occurred_at=literal(self.occurred_at, DateTime(timezone=True)),
+            source_kind=literal(self.source[0], String),
+            source_ref=literal(self.source[1], String),
+        )
+
+
+async def load_own_record(
+    session: AsyncSession, system: Mapping[SystemAccountKey, UUID], transaction_id: UUID
+) -> OwnRecord | None:
+    """The transaction as an own record, or None when it can't be a transfer's leg."""
+    e = eligible_records(system)
+    row = (
+        await session.execute(select(e).where(e.c.transaction_id == transaction_id))
+    ).one_or_none()
+    if row is None:
+        return None
+    return OwnRecord(
+        id=row.transaction_id,
+        occurred_at=row.occurred_at,
+        booking_date=row.booking_date,
+        account_id=row.account_id,
+        instrument_id=row.instrument_id,
+        quantity=row.quantity,
+        contra_account_id=row.contra_account_id,
+        counterparty_identifier_id=row.counterparty_identifier_id,
+        bank_transfer=row.bank_transfer,
+        source=(row.source_kind, row.source_ref),
     )
 
 

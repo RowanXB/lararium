@@ -1,11 +1,12 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.actors import Actor
@@ -20,13 +21,20 @@ from lararium.modules.finance.ledger import (
     TransactionInput,
     TransactionRecord,
     TransactionStatus,
+    find_unbalanced_transactions,
     upsert_connector_transaction,
 )
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.system_accounts import get_or_create_system_account
-from lararium.modules.finance.transfers import heal_transfers, transfer_contra
+from lararium.modules.finance.transfers import (
+    find_transfer_violations,
+    heal_transfers,
+    transfer_contra,
+)
+from lararium.modules.finance.valuation import balances_asof, net_worth_series
 
 WHEN = datetime(2026, 11, 2, 12, tzinfo=UTC)
+DAY = date(2026, 11, 3)  # the day after WHEN
 B_IDENTIFIER = "112233:12345678"
 
 type Run = Callable[..., Awaitable[Any]]
@@ -174,3 +182,47 @@ def heal(session: AsyncSession) -> Heal:
             return await heal_transfers(ctx)
 
     return _heal
+
+
+async def balances_on(session: AsyncSession, day: date = DAY) -> dict[UUID, Decimal]:
+    return {r.account_id: r.quantity for r in await balances_asof(session, day)}
+
+
+async def net_worth_on(session: AsyncSession, day: date = DAY) -> Decimal:
+    [point] = await net_worth_series(session, day, day)
+    return point.value
+
+
+async def contra_account(session: AsyncSession, transaction_id: UUID, own_account_id: UUID) -> Any:
+    return await session.scalar(
+        text(
+            "select account_id from finance.postings"
+            " where transaction_id = :t and account_id <> :own"
+        ),
+        {"t": transaction_id, "own": own_account_id},
+    )
+
+
+async def placeholders(session: AsyncSession, origin: str = "inference") -> list[Any]:
+    """The derived transactions of one origin: placeholders, or settlements ("rule")."""
+    rows = await session.execute(
+        text(
+            "select t.id, t.description, t.status, t.occurred_at, t.booking_date"
+            " from finance.transactions t where t.origin = :origin order by t.occurred_at"
+        ),
+        {"origin": origin},
+    )
+    return list(rows)
+
+
+async def postings_of(session: AsyncSession, transaction_id: UUID) -> set[tuple[UUID, Decimal]]:
+    rows = await session.execute(
+        text("select account_id, quantity from finance.postings where transaction_id = :t"),
+        {"t": transaction_id},
+    )
+    return {(r.account_id, r.quantity) for r in rows}
+
+
+async def assert_consistent(session: AsyncSession) -> None:
+    assert await find_transfer_violations(session) == []
+    assert await find_unbalanced_transactions(session) == []

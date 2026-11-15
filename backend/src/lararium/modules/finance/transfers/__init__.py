@@ -9,9 +9,11 @@ from lararium.modules.finance.transfers.contra import (
 )
 from lararium.modules.finance.transfers.engine import heal_transfers, match_transaction
 from lararium.modules.finance.transfers.queries import (
+    CandidateRecord,
     ReviewReason,
     TransferRecord,
     TransferStatus,
+    candidates,
     find_transfer_violations,
     get_transfer,
     list_transfers,
@@ -19,11 +21,13 @@ from lararium.modules.finance.transfers.queries import (
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
 __all__ = [
+    "CandidateRecord",
     "OwnLeg",
     "ReviewReason",
     "TransferRecord",
     "TransferSettings",
     "TransferStatus",
+    "candidates",
     "find_transfer_violations",
     "get_transfer",
     "heal_transfers",
