@@ -9,12 +9,13 @@ from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
 from lararium.modules.finance.system_accounts import system_account_ids
-from lararium.modules.finance.transfers.contra import eligible_records, record_columns
+from lararium.modules.finance.transfers.contra import record_columns, snapshot_own_records
 from lararium.modules.finance.transfers.pairs import PairRelation
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
     before_history,
+    history_starts,
     stray_in_transit,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings
@@ -74,32 +75,26 @@ async def records_to_heal(
     in_transit, unassigned = system.get("in_transit"), system.get("unassigned")
     if unassigned is None:
         return []  # no connector has posted anything yet
-    e = eligible_records(system)
-    tr, i, d, t = (
-        models.Transfer,
-        models.AccountIdentifier,
-        models.TransferDecision,
-        models.Transaction,
-    )
+    # The own records once, with statistics, for the arms below to join: re-derived in each
+    # arm from the ledger's tables, the plan rests on their statistics, which may be stale.
+    own = await snapshot_own_records(session, system)
+    tr, d, t = models.Transfer, models.TransferDecision, models.Transaction
     active = tr.status != "rejected"
-    identified = exists().where(
-        i.id == e.c.counterparty_identifier_id,
-        i.account_id.is_not(None),
-        i.account_id != e.c.account_id,
-    )
+    identified = and_(own.c.holder.is_not(None), own.c.holder != own.c.account_id)
     rejected = exists().where(
-        d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
+        d.kind == "reject", d.subject_kind == own.c.source_kind, d.subject_ref == own.c.source_ref
     )
     queries = [
         # (b) identified, still on Unassigned, not rejected.
-        select(e.c.transaction_id.label("id"), e.c.occurred_at).where(
-            e.c.contra_account_id == unassigned, identified, ~rejected
+        select(own.c.transaction_id.label("id"), own.c.occurred_at).where(
+            own.c.contra_account_id == unassigned, identified, ~rejected
         )
     ]
     if in_transit is not None:
         # (a) posting on In transit without being a transfer's leg, whatever its shape (a
         # leg that gained a fee posting included).
         queries.append(stray_in_transit(in_transit))
+        history = history_starts()
         for side in ("out", "in"):
             leg, other_leg = (
                 (tr.out_transaction_id, tr.in_transaction_id)
@@ -112,34 +107,36 @@ async def records_to_heal(
                 else (tr.to_account_id, tr.from_account_id)
             )
             quantity = -tr.amount if side == "out" else tr.amount
-            # (d) legs that no longer fit their transfer.
+            # (d) legs that no longer fit their transfer. A leg that is no own record any
+            # more (void, say) has no snapshot row: its time is looked up by id.
+            occurred_at = select(t.occurred_at).where(t.id == leg).scalar_subquery()
             queries.append(
-                select(t.id.label("id"), t.occurred_at)
+                select(leg.label("id"), occurred_at.label("occurred_at"))
                 .select_from(tr)
-                .join(t, t.id == leg)
-                .outerjoin(e, e.c.transaction_id == leg)
-                .outerjoin(i, i.id == e.c.counterparty_identifier_id)
+                .outerjoin(own, own.c.transaction_id == leg)
                 .where(
                     active,
+                    leg.is_not(None),
                     or_(
-                        e.c.transaction_id.is_(None),  # void, or no longer shaped like a leg
-                        e.c.account_id != own_account,
-                        e.c.instrument_id != tr.instrument_id,
-                        e.c.quantity != quantity,
-                        e.c.contra_account_id != in_transit,
+                        own.c.transaction_id.is_(None),  # void, or no longer shaped like a leg
+                        own.c.account_id != own_account,
+                        own.c.instrument_id != tr.instrument_id,
+                        own.c.quantity != quantity,
+                        own.c.contra_account_id != in_transit,
                         # A transfer with one own record stands on that record naming the
                         # other account; it no longer does once the identifier moves.
-                        and_(other_leg.is_(None), i.account_id.is_distinct_from(counterpart)),
+                        and_(other_leg.is_(None), own.c.holder.is_distinct_from(counterpart)),
                     ),
                 )
             )
             # (d) a lone record whose counterpart's account history now starts after the
             # counterpart's latest time, or no longer does (older history was fetched).
-            predates = before_history(record_columns(e), counterpart, settings)
+            predates = before_history(record_columns(own), history.c.starts_at, settings)
             queries.append(
-                select(e.c.transaction_id.label("id"), e.c.occurred_at)
+                select(own.c.transaction_id.label("id"), own.c.occurred_at)
                 .select_from(tr)
-                .join(e, e.c.transaction_id == leg)
+                .join(own, own.c.transaction_id == leg)
+                .outerjoin(history, history.c.account_id == counterpart)
                 .where(
                     other_leg.is_(None),
                     or_(
@@ -149,28 +146,29 @@ async def records_to_heal(
                 )
             )
         # (d) placeholders and settlements out of step with their record: other dates,
-        # void, or missing.
-        mirrored, derived = aliased(t, name="mirrored"), aliased(t, name="derived")
+        # void, or missing. A record that is no own record any more is due as a leg above.
+        derived = aliased(t, name="derived")
+        derived_id = func.coalesce(tr.placeholder_transaction_id, tr.settlement_transaction_id)
+        in_step = exists().where(
+            derived.id == derived_id,
+            derived.status != "void",
+            derived.occurred_at == own.c.occurred_at,
+            derived.booking_date == own.c.booking_date,
+        )
         queries.append(
-            select(mirrored.id.label("id"), mirrored.occurred_at)
+            select(own.c.transaction_id.label("id"), own.c.occurred_at)
             .select_from(tr)
             .join(
-                mirrored,
-                mirrored.id == func.coalesce(tr.out_transaction_id, tr.in_transaction_id),
-            )
-            .outerjoin(
-                derived,
-                derived.id
-                == func.coalesce(tr.placeholder_transaction_id, tr.settlement_transaction_id),
+                own,
+                own.c.transaction_id == func.coalesce(tr.out_transaction_id, tr.in_transaction_id),
             )
             .where(
                 active,
                 or_(
                     and_(tr.status == "inferred", tr.placeholder_transaction_id.is_(None)),
                     and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
-                    derived.status == "void",
-                    derived.occurred_at != mirrored.occurred_at,
-                    derived.booking_date != mirrored.booking_date,
+                    # Under OR, so it stays a lookup per transfer rather than a join.
+                    and_(derived_id.is_not(None), ~in_step),
                 ),
             )
         )

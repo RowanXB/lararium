@@ -1,14 +1,17 @@
 """Heal stays fast on a ledger of realistic size: the pair relation is computed once per
-heal pass over the records that can pair at all, so card payments cost nothing."""
+heal pass over the records that can pair at all, so card payments cost nothing, and the
+plans hold up whatever the planner's statistics say."""
 
 import time
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.entities import get_self_entity_id
+from lararium.db import create_engine
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.transfers import list_transfers
@@ -17,16 +20,24 @@ from .conftest import B_IDENTIFIER, WHEN, Heal, MakeConnected, MakeManual, Run, 
 
 CARD_PAYMENTS = 9_900
 TRANSFERS_TO_B = 100
-# Measured on docker-test through its ssh tunnel: a heal with nothing due takes about
-# 0.1 s (two set-wise scans of the own records); healing 100 newly identified transfers
-# about 2.6 s, nearly all of it the ~27 small indexed statements each record's own matching
-# runs (its contra, its transfer, its placeholder, their audit). Before the pair relation
-# was computed set-wise, finding what was due alone took 26 s here. The bounds leave room
-# for a slower link and still fail long before the 30 s statement timeout would. The
-# tables have no planner statistics here (the backend role can't ANALYZE them), so the
-# plans must hold up without them.
-NOTHING_DUE_BOUND = 2.0
-REGISTERED_BOUND = 10.0
+# Measured on docker-test through its ssh tunnel, either way the statistics stand: a heal
+# with nothing due takes about 0.3 s (two set-wise scans of the own records, one into a
+# snapshot); healing 100 newly identified transfers about 2.5 s, nearly all of it the ~27
+# small indexed statements each record's own matching runs (its contra, its transfer, its
+# placeholder, their audit). Before the snapshot, with stale statistics, finding what was
+# due alone hit the 30 s statement timeout (and took 26 s before the pair relation was
+# computed set-wise). The bounds allow a CI runner several times slower and still fail
+# long before that timeout would.
+NOTHING_DUE_BOUND = 3.0
+REGISTERED_BOUND = 15.0
+TABLES = ("transactions", "postings", "account_identifiers", "accounts", "transfers")
+
+# The planner's statistics on the seeded tables. The backend role can't ANALYZE them, and
+# the seed is uncommitted, so they can be: none, as on a fresh database; or stale, as when
+# autovacuum analyzes them while the bulk insert is uncommitted (it happened on CI): the
+# rows are invisible to it, so it records the pages they fill as holding none, and every
+# estimate on the tables collapses to one row.
+type Statistics = Literal["none", "stale"]
 
 
 async def _seed(
@@ -91,7 +102,22 @@ async def _seed(
     )
 
 
+async def _analyze_elsewhere(owner_url: str) -> None:
+    """ANALYZE the tables from another connection, as autovacuum would."""
+    engine = create_engine(owner_url)
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for table in TABLES:
+                await conn.execute(text(f"ANALYZE finance.{table}"))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("statistics", ["none", "stale"])
 async def test_heal_is_fast_on_a_large_ledger(
+    statistics: Statistics,
+    owner_url: str,
     session: AsyncSession,
     run: Run,
     gbp: InstrumentRecord,
@@ -110,6 +136,8 @@ async def test_heal_is_fast_on_a_large_ledger(
         gbp=gbp.id,
         unassigned=ids.unassigned,
     )
+    if statistics == "stale":
+        await _analyze_elsewhere(owner_url)
 
     started = time.monotonic()
     assert await heal() == 0

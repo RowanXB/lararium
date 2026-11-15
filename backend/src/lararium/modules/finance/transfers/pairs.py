@@ -18,7 +18,6 @@ from uuid import UUID
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
 from lararium.modules.finance.system_accounts import SystemAccountKey
@@ -128,7 +127,6 @@ async def _load_records(
     account (the registry's), and those the owner paired. A card payment is neither."""
     e = eligible_records(system)
     t = models.Transaction
-    named = aliased(models.AccountIdentifier, name="named")
     decided = {source for pair in decisions.paired for source in pair}
     decided_ids = (
         select(t.id).where(or_(*(names_source(t, source) for source in decided)))
@@ -138,21 +136,17 @@ async def _load_records(
     can_pair = [e.c.bank_transfer, e.c.counterparty_identifier_id.is_not(None)]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
-    query = (
-        select(
-            e.c.transaction_id,
-            e.c.source_kind,
-            e.c.source_ref,
-            e.c.account_id,
-            e.c.instrument_id,
-            e.c.quantity,
-            e.c.occurred_at,
-            named.account_id.label("holder"),
-            e.c.bank_transfer,
-        )
-        .outerjoin(named, named.id == e.c.counterparty_identifier_id)
-        .where(or_(*can_pair))
-    )
+    query = select(
+        e.c.transaction_id,
+        e.c.source_kind,
+        e.c.source_ref,
+        e.c.account_id,
+        e.c.instrument_id,
+        e.c.quantity,
+        e.c.occurred_at,
+        e.c.holder,
+        e.c.bank_transfer,
+    ).where(or_(*can_pair))
     if excluding:
         query = query.where(e.c.transaction_id.not_in(list(excluding)))
     return [

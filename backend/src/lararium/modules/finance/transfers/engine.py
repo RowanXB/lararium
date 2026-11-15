@@ -67,6 +67,7 @@ from lararium.modules.finance.transfers.queries import (
     TransferRecord,
     TransferStatus,
     before_history,
+    history_start,
     load_transfers,
     transfer_change_data,
 )
@@ -320,7 +321,7 @@ async def _open(
         placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
         status = "inferred"
     elif await session.scalar(
-        select(before_history(record.columns(), bound_id(counterpart.id), settings))
+        select(before_history(record.columns(), history_start(bound_id(counterpart.id)), settings))
     ):
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"

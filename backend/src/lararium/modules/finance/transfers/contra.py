@@ -5,16 +5,22 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
+    Column,
     ColumnElement,
+    Date,
     DateTime,
+    FromClause,
+    MetaData,
     Numeric,
     SQLColumnExpression,
     String,
     Subquery,
+    Table,
     Uuid,
     and_,
     case,
@@ -22,12 +28,17 @@ from sqlalchemy import (
     exists,
     false,
     func,
+    insert,
     literal,
     select,
+    text,
     true,
+    type_coerce,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.types import TypeEngine
 
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import TransactionNotFoundError
@@ -108,42 +119,109 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     In transit and the other on an account that is not a system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
-    contra_account_id, counterparty_identifier_id, bank_transfer, source_kind, source_ref.
+    contra_account_id, counterparty_identifier_id, holder (the account that bank account is
+    registered to), bank_transfer, source_kind, source_ref.
     """
-    t = models.Transaction
-    own, contra = aliased(models.Posting, name="own"), aliased(models.Posting, name="contra")
-    third = aliased(models.Posting, name="third")
+    t, i = models.Transaction, models.AccountIdentifier
+    p = aliased(models.Posting, name="leg_posting")
     contras = [system[key] for key in ("unassigned", "in_transit") if key in system]
+    is_own = p.account_id.not_in(list(system.values()))
+    is_contra = p.account_id.in_(contras)
+
+    def only(
+        column: SQLColumnExpression[Any], item: TypeEngine[Any], where: ColumnElement[bool]
+    ) -> ColumnElement[Any]:
+        """The column (of SQL type `item`) of the one posting that `where` holds for."""
+        return type_coerce(func.array_agg(column).filter(where), ARRAY(item))[1]
+
+    # The transaction's postings, summarised by a lateral aggregate: for each transaction
+    # an index lookup of its own postings, whatever the planner estimates. A self-join of
+    # postings, which this replaces, turns quadratic when the estimates are wrong: with
+    # statistics taken while a bulk insert was uncommitted, the tables look empty.
+    legs = (
+        select(
+            only(p.account_id, Uuid(), is_own).label("account_id"),
+            only(p.instrument_id, Uuid(), is_own).label("instrument_id"),
+            only(p.quantity, Numeric(), is_own).label("quantity"),
+            only(p.account_id, Uuid(), is_contra).label("contra_account_id"),
+        )
+        .where(p.transaction_id == t.id)
+        .having(
+            and_(
+                func.count() == 2,
+                func.count().filter(is_own) == 1,
+                func.count().filter(is_contra) == 1,
+            )
+        )
+        .lateral("legs")
+    )
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
             t.id.label("transaction_id"),
             t.occurred_at,
             t.booking_date,
-            own.account_id,
-            own.instrument_id,
-            own.quantity,
-            contra.account_id.label("contra_account_id"),
+            legs.c.account_id,
+            legs.c.instrument_id,
+            legs.c.quantity,
+            legs.c.contra_account_id,
             t.counterparty_identifier_id,
+            # A lookup per record too, not a join, for the same reason.
+            select(i.account_id)
+            .where(i.id == t.counterparty_identifier_id)
+            .scalar_subquery()
+            .label("holder"),
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
-        .join(own, own.transaction_id == t.id)
-        .join(contra, contra.transaction_id == t.id)
-        .where(
-            t.status != "void",
-            t.origin.not_in(DERIVED_ORIGINS),
-            contra.account_id.in_(contras),
-            own.account_id.not_in(list(system.values())),
-            # Exactly two postings: no third besides these. An anti-join, not a count per
-            # row, so the planner sees how many rows qualify.
-            ~exists().where(
-                third.transaction_id == t.id, third.id != own.id, third.id != contra.id
-            ),
-        )
+        .join(legs, true())
+        .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )
+
+
+# eligible_records copied for one statement that reads it several times (heal), with a
+# primary key and statistics of its own, so the planner knows its size whatever it knows of
+# the ledger's tables. Temporary: each connection has its own, gone at the end of the
+# transaction.
+_OWN_RECORDS = Table(
+    "transfer_own_records",
+    MetaData(),
+    Column("transaction_id", Uuid, primary_key=True),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("booking_date", Date, nullable=False),
+    Column("account_id", Uuid, nullable=False),
+    Column("instrument_id", Uuid, nullable=False),
+    Column("quantity", Numeric, nullable=False),
+    Column("contra_account_id", Uuid, nullable=False),
+    Column("counterparty_identifier_id", Uuid),
+    Column("holder", Uuid),
+    Column("bank_transfer", Boolean, nullable=False),
+    Column("source_kind", String, nullable=False),
+    Column("source_ref", String, nullable=False),
+    prefixes=["TEMPORARY"],
+    postgresql_on_commit="DROP",
+)
+
+
+async def snapshot_own_records(
+    session: AsyncSession, system: Mapping[SystemAccountKey, UUID]
+) -> Table:
+    """eligible_records as the ledger stands now, as a temporary table with the same
+    columns, replacing the previous snapshot. Matching changes contras, so a snapshot is
+    stale once anything is matched."""
+    await session.execute(text(f"DROP TABLE IF EXISTS pg_temp.{_OWN_RECORDS.name}"))
+    await session.run_sync(lambda sync: _OWN_RECORDS.create(sync.connection()))
+    e = eligible_records(system)
+    columns = [c.name for c in _OWN_RECORDS.c]
+    await session.execute(
+        insert(_OWN_RECORDS).from_select(columns, select(*(e.c[name] for name in columns)))
+    )
+    # The session's role owns its temporary tables, so it may analyze them (not the
+    # ledger's).
+    await session.execute(text(f"ANALYZE pg_temp.{_OWN_RECORDS.name}"))
+    return _OWN_RECORDS
 
 
 def bound_id(value: UUID) -> SQLColumnExpression[UUID]:
@@ -165,8 +243,8 @@ class RecordColumns:
     source_ref: SQLColumnExpression[str]
 
 
-def record_columns(e: Subquery) -> RecordColumns:
-    """The columns of an eligible_records subquery."""
+def record_columns(e: FromClause) -> RecordColumns:
+    """The columns of an eligible_records subquery or snapshot."""
     return RecordColumns(
         transaction_id=e.c.transaction_id,
         account_id=e.c.account_id,

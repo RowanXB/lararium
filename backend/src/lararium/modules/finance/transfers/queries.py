@@ -8,10 +8,14 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import (
+    CTE,
     ColumnElement,
+    ScalarSelect,
     Select,
     SQLColumnExpression,
+    Uuid,
     and_,
+    any_,
     case,
     exists,
     func,
@@ -20,6 +24,8 @@ from sqlalchemy import (
     union,
     update,
 )
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -176,29 +182,72 @@ def counterpart_window(
     return earliest, latest
 
 
-def history_start(account_id: SQLColumnExpression[UUID]) -> SQLColumnExpression[datetime]:
+def _in_ids(
+    id_column: SQLColumnExpression[UUID],
+    source: Any,  # a table, alias or subquery
+    column: SQLColumnExpression[UUID],
+    *where: ColumnElement[bool],
+) -> ColumnElement[bool]:
+    """Whether id_column is one of `column`'s values (of `source`, where `where` holds,
+    correlated with any enclosing query): those are gathered into one array first, and each
+    is then looked up by index. IN (subquery), or a join, leaves the plan to the planner's
+    estimates instead, and it turns quadratic when they are wrong: with statistics taken
+    while a bulk insert was uncommitted, the tables look empty."""
+    ids = (
+        select(func.array_agg(column))
+        .select_from(source)
+        .where(*where)
+        .correlate_except(source)
+        .scalar_subquery()
+    )
+    # The cast makes it ANY (array), not ANY (subquery), which would be a semi-join.
+    return id_column == any_(sql_cast(ids, ARRAY(Uuid)))
+
+
+def history_start(account_id: SQLColumnExpression[UUID]) -> ScalarSelect[datetime]:
     """When the account's history from its connection starts: its earliest non-void record
     from that connection; NULL for a manual account or one that has synced nothing."""
-    t = aliased(models.Transaction, name="history")
+    t = models.Transaction
     p = aliased(models.Posting, name="history_posting")
     a = aliased(models.Account, name="history_account")
-    # Joins, not nested subqueries, so account_id correlates with the enclosing query.
+    connection = (
+        select(a.source_connection_id)
+        .where(a.id == account_id)
+        .correlate_except(a)
+        .scalar_subquery()
+    )
     return (
         select(func.min(t.occurred_at))
-        .join(a, a.source_connection_id == t.connection_id)
-        .join(p, p.transaction_id == t.id)
-        .where(a.id == account_id, p.account_id == account_id, t.status != "void")
+        .where(
+            _in_ids(t.id, p, p.transaction_id, p.account_id == account_id),
+            t.connection_id == connection,
+            t.status != "void",
+        )
+        .correlate_except(t)
         .scalar_subquery()
     )
 
 
+def history_starts() -> CTE:
+    """Every connected account's history_start, computed once per statement: columns
+    account_id, starts_at."""
+    a = aliased(models.Account, name="connected")
+    return (
+        select(a.id.label("account_id"), history_start(a.id).label("starts_at"))
+        .where(a.source_connection_id.is_not(None))
+        .cte("history_starts")
+        .prefix_with("MATERIALIZED")
+    )
+
+
 def before_history(
-    r: RecordColumns, counterpart_id: SQLColumnExpression[UUID], settings: TransferSettings
+    r: RecordColumns, starts_at: SQLColumnExpression[datetime], settings: TransferSettings
 ) -> ColumnElement[bool]:
     """Whether the record's counterpart would have to occur before the counterpart
-    account's history starts, so that it is already inside that account's opening balance."""
+    account's history starts (`starts_at`, its history_start), so that it is already inside
+    that account's opening balance."""
     _, latest = counterpart_window(r, settings)
-    return func.coalesce(latest < history_start(counterpart_id), False)
+    return func.coalesce(latest < starts_at, False)
 
 
 # Why a record could be the transfer's missing side: a candidate of the same amount, a
@@ -375,14 +424,16 @@ def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
     transit without being a leg of a transfer that is not rejected, whatever their shape:
     one with a fee posting besides is no leg, yet its posting there still counts."""
     t, p, tr = models.Transaction, models.Posting, models.Transfer
+    # Set-wise on ids, then a lookup of each (_in_ids).
+    legs = [
+        select(leg).where(tr.status != "rejected", leg.is_not(None))
+        for leg in (tr.out_transaction_id, tr.in_transaction_id)
+    ]
+    stray = select(p.transaction_id).where(p.account_id == in_transit).except_(*legs).subquery()
     return select(t.id.label("id"), t.occurred_at).where(
+        _in_ids(t.id, stray, stray.c.transaction_id),
         t.status != "void",
         t.origin.not_in(DERIVED_ORIGINS),
-        exists().where(p.transaction_id == t.id, p.account_id == in_transit),
-        ~exists().where(
-            tr.status != "rejected",
-            or_(tr.out_transaction_id == t.id, tr.in_transaction_id == t.id),
-        ),
     )
 
 
