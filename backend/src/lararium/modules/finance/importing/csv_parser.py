@@ -3,6 +3,7 @@
 import csv
 import io
 import re
+from collections.abc import Iterable
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -28,6 +29,20 @@ _CURRENCY = re.compile(r"[A-Z]{3}")
 
 
 type _Lines = list[list[str]]
+
+
+def _raw(header: list[str], line: list[str], used: Iterable[str]) -> dict[str, str]:
+    """The row's cells by header name. Only cells the file has are kept, less the empty
+    ones under an unnamed header cell (a spreadsheet pads both with commas), so the raw row
+    stays as large as the line; the mapped columns a short row leaves out are empty."""
+    raw = keyed(
+        (name, cell)
+        for name, cell in zip(header, line, strict=False)
+        if name.strip() or cell.strip()
+    )
+    for name in used:
+        raw.setdefault(name, "")
+    return raw
 
 
 def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Lines, _Lines]:
@@ -109,11 +124,23 @@ def _quantity(raw: dict[str, str], config: CsvProfileConfig) -> Decimal:
         amount = _amount(raw, columns.amount, config)
         return amount if config.sign == "inflow_positive" else Decimal(0) - amount
     assert columns.inflow is not None and columns.outflow is not None
-    inflow = _optional_amount(raw, columns.inflow, config)
-    outflow = _optional_amount(raw, columns.outflow, config)
+    inflow = _unsigned(raw, columns.inflow, config)
+    outflow = _unsigned(raw, columns.outflow, config)
     if inflow is None and outflow is None:
         raise ValueError(f"both {columns.inflow} and {columns.outflow} are empty")
     return (inflow or Decimal(0)) - (outflow or Decimal(0))
+
+
+def _unsigned(raw: dict[str, str], column: str, config: CsvProfileConfig) -> Decimal | None:
+    """An inflow or outflow cell (Decision 2: the column itself is the sign). A negative
+    value is an error rather than flipping the row's direction."""
+    amount = _optional_amount(raw, column, config)
+    if amount is not None and amount < 0:
+        raise ValueError(
+            f"{column}: {raw[column].strip()!r} is negative, but the column holds unsigned "
+            "amounts; map a signed amount column instead"
+        )
+    return amount
 
 
 def _currency(raw: dict[str, str], config: CsvProfileConfig) -> str | None:
@@ -215,13 +242,17 @@ def _overdraft(
 def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz: the profile's timezone when set; the caller resolves it."""
     header, lines, footer = _read_rows(content, config)
+    used = [*config.columns.names(), *config.include_only]
     overdraft_limit, overdraft_limit_date = _overdraft(footer, config, local_tz)
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()
     for position, line in enumerate(lines):
-        # Short rows are padded: a trailing empty cell is often left out.
-        # A repeated header name keeps every column ("Note", "Note#2").
-        raw = keyed(zip(header, line + [""] * (len(header) - len(line)), strict=False))
+        # A short row is read as it is: a trailing empty cell is often left out. Empty cells
+        # past the header are padding too. A repeated header name keeps every column
+        # ("Note", "Note#2").
+        if not any(cell.strip() for cell in line[len(header) :]):
+            line = line[: len(header)]
+        raw = _raw(header, line, used)
         if len(line) > len(header):
             message = f"the row has {len(line)} cells, the header {len(header)}"
             rows.append(RowError(position=position, message=message, raw=raw))

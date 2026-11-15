@@ -1,3 +1,4 @@
+import time
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -70,6 +71,45 @@ def test_inflow_outflow_columns() -> None:
         )
     )
     assert [row.quantity for row in rows] == [Decimal("-1234.56")]
+
+
+@pytest.mark.parametrize("cell", ["-12.00", "(12.00)"])
+def test_signed_cell_in_unsigned_column_is_row_error(cell: str) -> None:
+    """Review finding: a negative outflow was subtracted, booking a debit as a credit."""
+    content = f"Date,Description,Paid in,Paid out\n10/11/2026,Shop,,{cell}\n".encode()
+    columns = {"date": "Date", "description": ["Description"]}
+    (row,) = _parse(content, columns=columns | {"inflow": "Paid in", "outflow": "Paid out"}).rows
+    assert isinstance(row, RowError)
+    assert "Paid out" in row.message and "negative" in row.message
+
+
+def test_wide_padded_header_stays_linear() -> None:
+    """Review finding: every short row was padded to the header's width, so a header with
+    thousands of empty trailing cells cost gigabytes for a small file."""
+    header = b"Date,Description,Amount" + b"," * 16_381 + b"\n"
+    content = header + b"10/11/2026,Coffee,-3.50\n" * 2_000
+    started = time.perf_counter()
+    rows = _rows(_parse(content))
+    assert time.perf_counter() - started < 2
+    assert rows[0].raw == {"Date": "10/11/2026", "Description": "Coffee", "Amount": "-3.50"}
+
+
+def test_padded_row_under_short_header() -> None:
+    """A spreadsheet's trailing empty cells past the header are padding, not extra data."""
+    rows = _rows(_parse(b"Date,Description,Amount\n10/11/2026,Coffee,-3.50,,,\n"))
+    assert rows[0].quantity == Decimal("-3.50")
+
+
+def test_short_row_has_its_mapped_columns() -> None:
+    content = b"Date,Description,Amount,Balance,Note\n10/11/2026,Coffee,-3.50\n"
+    rows = _rows(_parse(content, columns=_config().columns.model_dump() | {"balance": "Balance"}))
+    assert rows[0].balance is None
+    assert rows[0].raw == {
+        "Date": "10/11/2026",
+        "Description": "Coffee",
+        "Amount": "-3.50",
+        "Balance": "",
+    }
 
 
 def test_parentheses_and_currency_symbol() -> None:
