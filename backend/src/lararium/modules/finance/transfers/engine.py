@@ -5,24 +5,18 @@ mirror."""
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
-    Select,
     and_,
     delete,
-    exists,
     func,
     insert,
     or_,
     select,
-    union,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
@@ -46,21 +40,20 @@ from lararium.modules.finance.system_accounts import (
 from lararium.modules.finance.transfers.contra import (
     OwnRecord,
     bound_id,
-    eligible_records,
     is_active_leg,
     is_rejected,
     load_own_record,
-    record_columns,
 )
+from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.queries import (
+    OPEN_STATUSES,
     ReviewReason,
     TransferRecord,
     TransferStatus,
     before_history,
     load_transfers,
-    loose_matches,
+    pair_candidates,
     transfer_change_data,
-    transfer_matches,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -110,10 +103,6 @@ def _publish(
 async def _get(session: AsyncSession, transfer_id: UUID) -> TransferRecord:
     [record] = await load_transfers(session, models.Transfer.id == transfer_id)
     return record
-
-
-async def _any(session: AsyncSession, query: Select[*tuple[Any, ...]]) -> bool:
-    return bool(await session.scalar(select(query.exists())))
 
 
 async def _dissolve(ctx: CommandContext, transaction_id: UUID) -> list[UUID]:
@@ -166,9 +155,9 @@ def _accounts(record: OwnRecord, counterpart_id: UUID) -> tuple[UUID, UUID]:
     return counterpart_id, record.account_id
 
 
-async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> UUID:
+async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> None:
     """Make the record the transfer's missing side: matched, with its placeholder or
-    settlement gone. Returns the transfer's other own record."""
+    settlement gone."""
     session = ctx.session
     before = await _get(session, transfer_id)
     side = "out_transaction_id" if record.role == "out" else "in_transaction_id"
@@ -190,9 +179,6 @@ async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> UU
         if derived is not None:
             await delete_derived_transaction(ctx, derived)
     _publish(ctx, "finance.transfer.matched", transfer_id, before, await _get(session, transfer_id))
-    other = before.in_transaction_id if record.role == "out" else before.out_transaction_id
-    assert other is not None  # an open transfer has the other side
-    return other
 
 
 async def _link_records(ctx: CommandContext, record: OwnRecord, partner: OwnRecord) -> None:
@@ -329,101 +315,76 @@ async def _open(
     _publish(ctx, "finance.transfer.opened", transfer_id, None, await _get(session, transfer_id))
 
 
-async def _match_identified(
-    ctx: CommandContext,
+async def _pair_candidates(
+    session: AsyncSession,
     ids: _SystemIds,
-    record: OwnRecord,
-    counterpart_id: UUID,
     settings: TransferSettings,
-    system: _System,
-) -> set[UUID]:
-    """Decision 6 step 3: the record names a bank account of another own account. Returns
-    the own record it was linked with, if any."""
-    session = ctx.session
-    counterpart = await get_account(session, counterpart_id)
-    r, cp = record.columns(), bound_id(counterpart_id)
-    open_transfers = (
-        await session.execute(transfer_matches(ids, r, settings, counterpart_id=cp, exact=True))
-    ).all()
-    loose = (await session.execute(loose_matches(ids, r, cp, settings, exact=True))).all()
-    if not await _set_contra(ctx, record, system.in_transit):
-        return set()
-    if len(open_transfers) + len(loose) == 1:
-        if open_transfers:
-            return {await _link(ctx, open_transfers[0].transfer_id, record)}
-        partner = await load_own_record(session, ids, loose[0].transaction_id)
-        if partner is not None and await _set_contra(ctx, partner, system.in_transit):
-            await _link_records(ctx, record, partner)
-            return {partner.id}
-    review_reason: ReviewReason | None = None
-    if len(open_transfers) + len(loose) >= 2:
-        # No choice may depend on which side synced first, so it needs review.
-        review_reason = "several_candidates"
-    elif await _any(
-        session, transfer_matches(ids, r, settings, counterpart_id=cp, exact=False)
-    ) or await _any(session, loose_matches(ids, r, cp, settings, exact=False)):
-        review_reason = "amount_differs"
-    await _open(ctx, record, counterpart, system, settings, review_reason)
-    return set()
-
-
-@dataclass(frozen=True)
-class _FallbackPlan:
-    """What step 4 does with a record: link it to one transfer, or mark the transfers it
-    could complete as needing review."""
-
-    link: UUID | None
-    flag: tuple[UUID, ...]  # the candidate transfers not yet marked several_candidates
-
-
-async def _fallback_plan(
-    session: AsyncSession, ids: _SystemIds, record: OwnRecord, settings: TransferSettings
-) -> _FallbackPlan | None:
-    """Decision 6 step 4 for a record no registry row identifies; None when it does not
-    apply. A link needs a single candidate seen from both sides: the one transfer, whose
-    other own record has this record as its only loose candidate."""
-    if not record.bank_transfer:
-        return None
-    found = (
-        await session.execute(
-            transfer_matches(ids, record.columns(), settings, counterpart_id=None, exact=True)
+    transaction_id: UUID,
+    *,
+    exact: bool,
+) -> list[UUID]:
+    """The own records the record could pair with (queries.pair_candidates)."""
+    pairs = pair_candidates(ids, settings, exact=exact).subquery()
+    return list(
+        await session.scalars(
+            select(pairs.c.candidate_id)
+            .where(pairs.c.record_id == transaction_id)
+            .order_by(pairs.c.candidate_id)
         )
-    ).all()
-    if not found:
-        return None
-    if len(found) == 1:
-        [row] = found
-        present = await load_own_record(session, ids, row.transaction_id)
-        if present is not None:
-            loose = loose_matches(
-                ids, present.columns(), bound_id(record.account_id), settings, exact=True
-            )
-            if list(await session.scalars(loose)) == [record.id]:
-                return _FallbackPlan(link=row.transfer_id, flag=())
-    return _FallbackPlan(
-        link=None,
-        flag=tuple(r.transfer_id for r in found if r.review_reason != "several_candidates"),
     )
 
 
-async def _flag(ctx: CommandContext, transfer_ids: tuple[UUID, ...]) -> None:
-    """Mark transfers as needing review: a record could complete each of them."""
-    for transfer_id in transfer_ids:
-        before = await _get(ctx.session, transfer_id)
-        await ctx.session.execute(
-            update(models.Transfer)
-            .where(models.Transfer.id == transfer_id)
-            .values(review_reason="several_candidates")
-        )
-        after = await _get(ctx.session, transfer_id)
-        _publish(ctx, "finance.transfer.review_needed", transfer_id, before, after)
+async def _waiting_transfer(session: AsyncSession, record_id: UUID) -> TransferRecord | None:
+    """The open transfer the record is the only own record of, if any."""
+    tr = models.Transfer
+    found = await load_transfers(
+        session,
+        tr.status.in_(OPEN_STATUSES),
+        or_(
+            and_(tr.out_transaction_id == record_id, tr.in_transaction_id.is_(None)),
+            and_(tr.in_transaction_id == record_id, tr.out_transaction_id.is_(None)),
+        ),
+    )
+    return found[0] if found else None
+
+
+async def _link_pair(
+    ctx: CommandContext, ids: _SystemIds, record: OwnRecord, partner_id: UUID, system: _System
+) -> tuple[list[UUID], set[UUID]]:
+    """Link the record with its unique partner: into the partner's open transfer when it
+    has one between the same accounts (so that transfer's placeholder or settlement goes),
+    else as a new matched transfer after dissolving whatever the partner was in. Returns
+    the records left without their transfer, and the partner."""
+    session = ctx.session
+    partner = await load_own_record(session, ids, partner_id)
+    assert partner is not None  # pair_candidates found it eligible
+    others: list[UUID] = []
+    waiting = await _waiting_transfer(session, partner.id)
+    if waiting is None or (waiting.from_account_id, waiting.to_account_id) != _accounts(
+        record, partner.account_id
+    ):
+        others = await _dissolve(ctx, partner.id)
+        waiting = None
+    if not await _set_contra(ctx, partner, system.in_transit):
+        return others, set()
+    if not await _set_contra(ctx, record, system.in_transit):
+        return others, set()
+    if waiting is not None:
+        await _link(ctx, waiting.id, record)
+    else:
+        await _link_records(ctx, record, partner)
+    return others, {partner.id}
 
 
 async def _match_one(
     ctx: CommandContext, transaction_id: UUID, settings: TransferSettings, system: _System
 ) -> tuple[list[UUID], set[UUID]]:
     """Match one record from scratch; returns other records left without their transfer,
-    and the own record it was linked with, if any."""
+    and the own record it was linked with, if any.
+
+    Order independence: a record is linked only with a partner it pairs with uniquely, and
+    which pairs uniquely with it (queries.pair_candidates both ways). That outcome, and the
+    review reason, depend on the records alone, never on which arrived first."""
     session = ctx.session
     others = await _dissolve(ctx, transaction_id)
     ids = await system_account_ids(session)
@@ -434,20 +395,28 @@ async def _match_one(
     if await is_rejected(session, record.source):
         await _set_contra(ctx, record, system.unassigned)
         return others, set()
-    # 3. Identified through the registry.
+    # 3 and 4. Paired by the registry, or by amount and date: link a unique pair.
+    found = await _pair_candidates(session, ids, settings, record.id, exact=True)
+    if len(found) == 1 and await _pair_candidates(session, ids, settings, found[0], exact=True) == [
+        record.id
+    ]:
+        more, linked = await _link_pair(ctx, ids, record, found[0], system)
+        return others + more, linked
     counterpart_id = await _registry_counterpart(session, record)
-    if counterpart_id is not None:
-        return others, await _match_identified(ctx, ids, record, counterpart_id, settings, system)
-    # 4. Found by amount and date.
-    plan = await _fallback_plan(session, ids, record, settings)
-    if plan is not None and plan.link is not None:
-        if not await _set_contra(ctx, record, system.in_transit):
-            return others, set()
-        return others, {await _link(ctx, plan.link, record)}
-    # 5. Not a transfer (yet).
-    await _set_contra(ctx, record, system.unassigned)
-    if plan is not None and plan.flag:
-        await _flag(ctx, plan.flag)
+    if counterpart_id is None:
+        # 5. Not a transfer, or not one yet: a candidate's own transfer carries the review.
+        await _set_contra(ctx, record, system.unassigned)
+        return others, set()
+    # 3. Identified, with no unique partner: its own transfer, for review if it has any.
+    if not await _set_contra(ctx, record, system.in_transit):
+        return others, set()
+    review_reason: ReviewReason | None = None
+    if found:
+        review_reason = "several_candidates"
+    elif await _pair_candidates(session, ids, settings, record.id, exact=False):
+        review_reason = "amount_differs"
+    counterpart = await get_account(session, counterpart_id)
+    await _open(ctx, record, counterpart, system, settings, review_reason)
     return others, set()
 
 
@@ -476,167 +445,14 @@ async def _match(
 async def match_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
     """Bring one record in line with the rule (Decision 6): dissolve its current transfer,
     then decide afresh. The dissolved transfer's other own record is matched too, unless
-    this cascade has linked it again meanwhile."""
+    this cascade has linked it again meanwhile. Other records whose review reason this
+    record changes are left to heal_transfers, which every caller runs afterwards."""
     t = models.Transaction
     if await ctx.session.scalar(select(t.id).where(t.id == transaction_id)) is None:
         raise TransactionNotFoundError(str(transaction_id))
     await _lock(ctx)
     settings = await load_transfer_settings(ctx.session)
     await _match(ctx, transaction_id, settings, await _system(ctx))
-
-
-async def _fallback_due(
-    session: AsyncSession,
-    ids: _SystemIds,
-    settings: TransferSettings,
-    query: Select[*tuple[Any, ...]],
-) -> list[tuple[UUID, datetime]]:
-    """Of the (id, occurred_at) rows, those step 4 would change: link, or newly flag."""
-    due: list[tuple[UUID, datetime]] = []
-    for row in await session.execute(query):
-        record = await load_own_record(session, ids, row.id)
-        if record is None:
-            continue
-        plan = await _fallback_plan(session, ids, record, settings)
-        if plan is not None and (plan.link is not None or plan.flag):
-            due.append((row.id, row.occurred_at))
-    return due
-
-
-async def _records_to_heal(session: AsyncSession, settings: TransferSettings) -> list[UUID]:
-    """Records whose ledger state disagrees with the rule (Decision 8), in occurrence order."""
-    system = await system_account_ids(session)
-    in_transit, unassigned = system.get("in_transit"), system.get("unassigned")
-    if unassigned is None:
-        return []  # no connector has posted anything yet
-    e = eligible_records(system)
-    tr, i, d, t = (
-        models.Transfer,
-        models.AccountIdentifier,
-        models.TransferDecision,
-        models.Transaction,
-    )
-    active = tr.status != "rejected"
-    is_leg = exists().where(
-        active,
-        or_(
-            tr.out_transaction_id == e.c.transaction_id, tr.in_transaction_id == e.c.transaction_id
-        ),
-    )
-    identified = exists().where(
-        i.id == e.c.counterparty_identifier_id,
-        i.account_id.is_not(None),
-        i.account_id != e.c.account_id,
-    )
-    rejected = exists().where(
-        d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
-    )
-    queries = [
-        # (b) identified, still on Unassigned, not rejected.
-        select(e.c.transaction_id.label("id"), e.c.occurred_at).where(
-            e.c.contra_account_id == unassigned, identified, ~rejected
-        )
-    ]
-    # (c) a bank transfer on Unassigned that an open transfer may be waiting for; which of
-    # them step 4 would change is decided below, by the same code that changes them.
-    fallback = select(e.c.transaction_id.label("id"), e.c.occurred_at).where(
-        e.c.contra_account_id == unassigned,
-        e.c.bank_transfer,
-        ~is_leg,
-        ~identified,
-        ~rejected,
-        transfer_matches(
-            system, record_columns(e), settings, counterpart_id=None, exact=True
-        ).exists(),
-    )
-    if in_transit is not None:
-        # (a) in In transit without a transfer.
-        queries.append(
-            select(e.c.transaction_id.label("id"), e.c.occurred_at).where(
-                e.c.contra_account_id == in_transit, ~is_leg
-            )
-        )
-        for side in ("out", "in"):
-            leg, other_leg = (
-                (tr.out_transaction_id, tr.in_transaction_id)
-                if side == "out"
-                else (tr.in_transaction_id, tr.out_transaction_id)
-            )
-            own_account, counterpart = (
-                (tr.from_account_id, tr.to_account_id)
-                if side == "out"
-                else (tr.to_account_id, tr.from_account_id)
-            )
-            quantity = -tr.amount if side == "out" else tr.amount
-            # (d) legs that no longer fit their transfer.
-            queries.append(
-                select(t.id.label("id"), t.occurred_at)
-                .select_from(tr)
-                .join(t, t.id == leg)
-                .outerjoin(e, e.c.transaction_id == leg)
-                .outerjoin(i, i.id == e.c.counterparty_identifier_id)
-                .where(
-                    active,
-                    or_(
-                        e.c.transaction_id.is_(None),  # void, or no longer shaped like a leg
-                        e.c.account_id != own_account,
-                        e.c.instrument_id != tr.instrument_id,
-                        e.c.quantity != quantity,
-                        e.c.contra_account_id != in_transit,
-                        # A transfer with one own record stands on that record naming the
-                        # other account; it no longer does once the identifier moves.
-                        and_(other_leg.is_(None), i.account_id.is_distinct_from(counterpart)),
-                    ),
-                )
-            )
-            # (d) a lone record whose counterpart's account history now starts after the
-            # counterpart's latest time, or no longer does (older history was fetched).
-            predates = before_history(record_columns(e), counterpart, settings)
-            queries.append(
-                select(e.c.transaction_id.label("id"), e.c.occurred_at)
-                .select_from(tr)
-                .join(e, e.c.transaction_id == leg)
-                .where(
-                    other_leg.is_(None),
-                    or_(
-                        and_(tr.status == "before_history", ~predates),
-                        and_(tr.status == "awaiting", predates),
-                    ),
-                )
-            )
-        # (d) placeholders and settlements out of step with their record: other dates,
-        # void, or missing.
-        mirrored, derived = aliased(t, name="mirrored"), aliased(t, name="derived")
-        queries.append(
-            select(mirrored.id.label("id"), mirrored.occurred_at)
-            .select_from(tr)
-            .join(
-                mirrored,
-                mirrored.id == func.coalesce(tr.out_transaction_id, tr.in_transaction_id),
-            )
-            .outerjoin(
-                derived,
-                derived.id
-                == func.coalesce(tr.placeholder_transaction_id, tr.settlement_transaction_id),
-            )
-            .where(
-                active,
-                or_(
-                    and_(tr.status == "inferred", tr.placeholder_transaction_id.is_(None)),
-                    and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
-                    derived.status == "void",
-                    derived.occurred_at != mirrored.occurred_at,
-                    derived.booking_date != mirrored.booking_date,
-                ),
-            )
-        )
-    due = union(*queries).subquery()
-    rows = {
-        (row.id, row.occurred_at)
-        for row in await session.execute(select(due.c.id, due.c.occurred_at))
-    }
-    rows.update(await _fallback_due(session, system, settings, fallback))
-    return [transaction_id for transaction_id, _ in sorted(rows, key=lambda r: (r[1], r[0]))]
 
 
 async def heal_transfers(ctx: CommandContext) -> int:
@@ -646,7 +462,7 @@ async def heal_transfers(ctx: CommandContext) -> int:
     settings = await load_transfer_settings(ctx.session)
     matched = 0
     for _ in range(_MAX_HEAL_PASSES):
-        due = await _records_to_heal(ctx.session, settings)
+        due = await records_to_heal(ctx.session, settings)
         if not due:
             return matched
         system = await _system(ctx)

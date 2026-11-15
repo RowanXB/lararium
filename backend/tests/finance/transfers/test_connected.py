@@ -332,7 +332,8 @@ async def test_fallback_with_two_transfers_flags_both(
         )
     assert await heal() == 2
     record = await connector_tx(c, "100", external_id="in_1", occurred_at=WHEN + timedelta(1))
-    assert await heal() == 1
+    # Each transfer C's record could complete is matched again, now for review.
+    assert await heal() == 2
 
     transfers = await list_transfers(session)
     assert [(t.status, t.review_reason) for t in transfers] == [
@@ -354,12 +355,13 @@ async def test_different_amount_needs_review(session, ids, a_and_c, connector_tx
     in_record = await connector_tx(
         c, "90", external_id="in_1", occurred_at=WHEN + timedelta(1), identifier_id=a_id
     )
-    assert await heal() == 1
+    # C's record opens its transfer for review, and A's is matched again to join it.
+    assert await heal() == 2
 
     sent, received = sorted(await list_transfers(session), key=lambda t: t.opened_at)
     assert (sent.status, sent.review_reason, sent.out_transaction_id) == (
         "awaiting",
-        None,
+        "amount_differs",
         out_record.id,
     )
     assert (received.status, received.review_reason, received.in_transaction_id) == (
@@ -661,3 +663,179 @@ async def test_concurrent_heals_link_once(backend_url: str, owner_url: str, migr
             )
         await engine.dispose()
         await owner.dispose()
+
+
+async def _ledger(session, ids) -> tuple:
+    """The matching outcome by external id: each transfer's status, review reason and
+    legs, each record's contra kind, and In transit's balance."""
+    transfers = await session.execute(
+        text(
+            "select tr.status, tr.review_reason, o.external_id as out_ext, i.external_id as in_ext"
+            " from finance.transfers tr"
+            " left join finance.transactions o on o.id = tr.out_transaction_id"
+            " left join finance.transactions i on i.id = tr.in_transaction_id"
+        )
+    )
+    contras = await session.execute(
+        text(
+            "select t.external_id, p.account_id from finance.transactions t"
+            " join finance.postings p on p.transaction_id = t.id"
+            " where t.external_id is not null and t.status <> 'void'"
+            " and p.account_id in (:unassigned, :in_transit)"
+        ),
+        {"unassigned": ids.unassigned, "in_transit": ids.in_transit},
+    )
+    return (
+        sorted((tuple(row) for row in transfers), key=lambda row: tuple(map(str, row))),
+        sorted(
+            (row.external_id, "in_transit" if row.account_id == ids.in_transit else "unassigned")
+            for row in contras
+        ),
+        await _in_transit(session, ids),
+    )
+
+
+# Two identical payments from A to C an hour apart, and one receipt on C.
+_ORDERS = {
+    "senders_first": ["out_1", "out_2", "in_1"],
+    "receiver_first": ["in_1", "out_1", "out_2"],
+    "interleaved": ["out_1", "in_1", "out_2"],
+    "one_sync": None,  # all posted, then one heal
+}
+
+
+@pytest.mark.parametrize("receiver_identified", [False, True])
+@pytest.mark.parametrize("order", list(_ORDERS))
+async def test_same_ledger_in_every_order(
+    session, ids, a_and_c, connector_tx, heal, order, receiver_identified
+) -> None:
+    a, a_id, c, c_id = a_and_c
+
+    async def post(external_id: str, status: str = "booked"):
+        if external_id.startswith("out"):
+            hours = int(external_id[-1]) - 1
+            return await connector_tx(
+                a,
+                "-100",
+                external_id=external_id,
+                occurred_at=WHEN + timedelta(hours=hours),
+                identifier_id=c_id,
+                status=status,
+            )
+        return await connector_tx(
+            c,
+            "100",
+            external_id=external_id,
+            occurred_at=WHEN + timedelta(hours=3),
+            identifier_id=a_id if receiver_identified else None,
+        )
+
+    steps = _ORDERS[order]
+    if steps is None:
+        for external_id in ("out_1", "out_2", "in_1"):
+            await post(external_id)
+        await heal()
+    else:
+        for external_id in steps:
+            await post(external_id)
+            await heal()
+
+    # One receipt could be either payment: every side needs review, nothing is linked.
+    expected = [
+        ("awaiting", "several_candidates", "out_1", None),
+        ("awaiting", "several_candidates", "out_2", None),
+    ]
+    if receiver_identified:
+        expected.append(("awaiting", "several_candidates", None, "in_1"))
+    receiver_contra = "in_transit" if receiver_identified else "unassigned"
+    assert await _ledger(session, ids) == (
+        sorted(expected, key=lambda row: tuple(map(str, row))),
+        [("in_1", receiver_contra), ("out_1", "in_transit"), ("out_2", "in_transit")],
+        Decimal(200) if not receiver_identified else Decimal(100),
+    )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    # The second payment is voided upstream: the pair is unique now.
+    await post("out_2", status="void")
+    await heal()
+    assert await _ledger(session, ids) == (
+        [("matched", None, "out_1", "in_1")],
+        [("in_1", "in_transit"), ("out_1", "in_transit")],
+        Decimal(0),
+    )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+@pytest.mark.parametrize("receiver_identified", [False, True])
+@pytest.mark.parametrize("sender_first", [True, False])
+async def test_amount_differs_in_either_order(
+    session, ids, a_and_c, connector_tx, heal, sender_first, receiver_identified
+) -> None:
+    a, a_id, c, c_id = a_and_c
+
+    async def send():
+        return await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+
+    async def receive(status: str = "booked"):
+        return await connector_tx(
+            c,
+            "90",
+            external_id="in_1",
+            occurred_at=WHEN + timedelta(1),
+            identifier_id=a_id if receiver_identified else None,
+            status=status,
+        )
+
+    for step in (send, receive) if sender_first else (receive, send):
+        await step()
+        await heal()
+
+    expected = [("awaiting", "amount_differs", "out_1", None)]
+    if receiver_identified:
+        expected.append(("awaiting", "amount_differs", None, "in_1"))
+    receiver_contra = "in_transit" if receiver_identified else "unassigned"
+    assert await _ledger(session, ids) == (
+        sorted(expected, key=lambda row: tuple(map(str, row))),
+        [("in_1", receiver_contra), ("out_1", "in_transit")],
+        Decimal(10) if receiver_identified else Decimal(100),
+    )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    # The differing record is voided: nothing left to review.
+    await receive(status="void")
+    await heal()
+    assert await _ledger(session, ids) == (
+        [("awaiting", None, "out_1", None)],
+        [("out_1", "in_transit")],
+        Decimal(100),
+    )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_later_arrival_makes_a_match_ambiguous(
+    session, ids, a_and_c, connector_tx, heal
+) -> None:
+    # A matched pair is only as good as its uniqueness: a second identical payment in the
+    # window turns it into a case for review, as if all three had arrived together.
+    a, _, c, c_id = a_and_c
+    await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    await connector_tx(c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=3))
+    await heal()
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "matched"
+
+    await connector_tx(
+        a, "-100", external_id="out_2", occurred_at=WHEN + timedelta(hours=1), identifier_id=c_id
+    )
+    await heal()
+    transfers = await list_transfers(session)
+    assert (
+        sorted((t.status, t.review_reason) for t in transfers)
+        == [("awaiting", "several_candidates")] * 2
+    )
+    await assert_consistent(session)
+    assert await heal() == 0

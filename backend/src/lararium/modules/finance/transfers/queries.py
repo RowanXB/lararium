@@ -29,9 +29,8 @@ from lararium.modules.finance.system_accounts import SystemAccountKey, system_ac
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
     RecordColumns,
-    bound_id,
     eligible_records,
-    load_own_record,
+    record_columns,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -197,117 +196,72 @@ def _never_paired(r: RecordColumns, kind: SQLColumnExpression[str], ref: SQLColu
 def _amount_fits(
     given: SQLColumnExpression[Decimal], wanted: SQLColumnExpression[Decimal], exact: bool
 ):
-    """Equal when exact, else of the same sign but different."""
-    if exact:
-        return given == wanted
-    return and_(given != wanted, (given < 0) == (wanted < 0))
+    """Equal when exact, else different."""
+    return given == wanted if exact else given != wanted
 
 
-def transfer_matches(
-    system: Mapping[SystemAccountKey, UUID],
-    r: RecordColumns,
-    settings: TransferSettings,
-    *,
-    counterpart_id: SQLColumnExpression[UUID] | None,
-    exact: bool,
+def pair_candidates(
+    system: Mapping[SystemAccountKey, UUID], settings: TransferSettings, *, exact: bool
 ) -> Select[*tuple[Any, ...]]:
-    """Open transfers the record could complete (candidate (i), and the fallback's when
-    `counterpart_id` is None): missing the record's side on the record's account, with the
-    same instrument and, if exact, amount (else a different one), whose own record fits the
-    window and was not decided never to pair with it. Columns: transfer_id, review_reason
-    and the present own record's transaction_id, account_id, quantity, occurred_at,
-    description; oldest transfer first."""
-    tr = models.Transfer
-    present = eligible_records(system, "present")
-    described = aliased(models.Transaction, name="described")
-    sends = r.quantity < 0
-    conditions: list[ColumnElement[bool]] = [
-        or_(
-            and_(sends, tr.out_transaction_id.is_(None), tr.from_account_id == r.account_id),
-            and_(~sends, tr.in_transaction_id.is_(None), tr.to_account_id == r.account_id),
-        ),
-        tr.instrument_id == r.instrument_id,
-        _amount_fits(tr.amount, func.abs(r.quantity), exact),
-        tr.status.in_(OPEN_STATUSES),
-        present.c.occurred_at.between(*counterpart_window(r, settings)),
-        ~_never_paired(r, present.c.source_kind, present.c.source_ref),
-    ]
-    if counterpart_id is not None:
-        conditions.append(
-            case((sends, tr.to_account_id), else_=tr.from_account_id) == counterpart_id
-        )
-    return (
-        select(
-            tr.id.label("transfer_id"),
-            tr.review_reason,
-            present.c.transaction_id,
-            present.c.account_id,
-            present.c.quantity,
-            present.c.occurred_at,
-            described.description,
-        )
-        .join(
-            present,
-            present.c.transaction_id == func.coalesce(tr.out_transaction_id, tr.in_transaction_id),
-        )
-        .join(described, described.id == present.c.transaction_id)
-        .where(*conditions)
-        .order_by(tr.opened_at, tr.id)
-    )
+    """Every pair of own records that could be one transfer's two sides, both ways round
+    (record_id, candidate_id): the single definition matching, heal and review all use.
 
-
-def loose_matches(
-    system: Mapping[SystemAccountKey, UUID],
-    r: RecordColumns,
-    counterpart_id: SQLColumnExpression[UUID],
-    settings: TransferSettings,
-    *,
-    exact: bool,
-) -> Select[*tuple[Any, ...]]:
-    """Candidate (ii): own records on the counterpart account that are no transfer's leg,
-    of the opposite sign, the same instrument and, if exact, amount (else a different one),
-    fitting the window, neither rejected nor decided never to pair with the record, and
-    either a bank transfer or naming the record's account (and no third one). Columns:
-    transaction_id, account_id, quantity, occurred_at, description; oldest first."""
-    loose = eligible_records(system, "loose")
-    described = aliased(models.Transaction, name="described")
-    named = aliased(models.AccountIdentifier, name="named")
-    tr = aliased(models.Transfer, name="linked")
+    It depends only on the records and the owner's decisions, never on which transfers
+    exist, so it gives the same answer whatever synced first. Two records pair when they
+    are on different accounts, in the same instrument, of opposite sign and, if exact, the
+    same amount (else a different one); the receiving one occurs in the sending one's
+    window; at least one is identified through the registry; each identified one names the
+    other's account; each other one is a bank transfer; and neither is rejected nor
+    decided never to pair with the other."""
+    r_rows, c_rows = eligible_records(system, "record"), eligible_records(system, "candidate")
+    r_named = aliased(models.AccountIdentifier, name="record_named")
+    c_named = aliased(models.AccountIdentifier, name="candidate_named")
+    r_holder, c_holder = r_named.account_id, c_named.account_id
+    # Identified: its counterparty bank account is registered to another own account.
+    r_identified = and_(r_holder.is_not(None), r_holder != r_rows.c.account_id)
+    c_identified = and_(c_holder.is_not(None), c_holder != c_rows.c.account_id)
+    r, c = record_columns(r_rows), record_columns(c_rows)
     d = aliased(models.TransferDecision, name="rejected")
-    holder = named.account_id
+
+    def rejected(x: RecordColumns) -> ColumnElement[bool]:
+        return (
+            exists()
+            .where(
+                d.kind == "reject",
+                d.subject_kind == x.source_kind,
+                d.subject_ref == x.source_ref,
+            )
+            .correlate_except(d)
+        )
+
     return (
         select(
-            loose.c.transaction_id,
-            loose.c.account_id,
-            loose.c.quantity,
-            loose.c.occurred_at,
-            described.description,
+            r_rows.c.transaction_id.label("record_id"),
+            c_rows.c.transaction_id.label("candidate_id"),
         )
-        .join(described, described.id == loose.c.transaction_id)
-        .outerjoin(named, named.id == loose.c.counterparty_identifier_id)
+        .select_from(r_rows)
+        .join(
+            c_rows,
+            and_(
+                c_rows.c.account_id != r_rows.c.account_id,
+                c_rows.c.instrument_id == r_rows.c.instrument_id,
+            ),
+        )
+        .outerjoin(r_named, r_named.id == r_rows.c.counterparty_identifier_id)
+        .outerjoin(c_named, c_named.id == c_rows.c.counterparty_identifier_id)
         .where(
-            loose.c.account_id == counterpart_id,
-            loose.c.instrument_id == r.instrument_id,
-            _amount_fits(loose.c.quantity, -r.quantity, exact),
-            loose.c.occurred_at.between(*counterpart_window(r, settings)),
-            ~exists().where(
-                tr.status != "rejected",
-                or_(
-                    tr.out_transaction_id == loose.c.transaction_id,
-                    tr.in_transaction_id == loose.c.transaction_id,
-                ),
-            ),
-            ~exists().where(
-                d.kind == "reject",
-                d.subject_kind == loose.c.source_kind,
-                d.subject_ref == loose.c.source_ref,
-            ),
-            ~_never_paired(r, loose.c.source_kind, loose.c.source_ref),
-            or_(loose.c.bank_transfer, holder == r.account_id),
-            # One naming a third own account is that account's transfer.
-            or_(holder.is_(None), holder == loose.c.account_id, holder == r.account_id),
+            _amount_fits(c.quantity, -r.quantity, exact),
+            (c.quantity < 0) != (r.quantity < 0),
+            c.occurred_at.between(*counterpart_window(r, settings)),
+            or_(r_identified, c_identified),
+            or_(~r_identified, r_holder == c_rows.c.account_id),
+            or_(~c_identified, c_holder == r_rows.c.account_id),
+            or_(r_identified, r_rows.c.bank_transfer),
+            or_(c_identified, c_rows.c.bank_transfer),
+            ~rejected(r),
+            ~rejected(c),
+            ~_never_paired(r, c.source_kind, c.source_ref),
         )
-        .order_by(loose.c.occurred_at, loose.c.transaction_id)
     )
 
 
@@ -350,34 +304,28 @@ class CandidateRecord:
 
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:
     """The own records that could complete a transfer missing one side, for the owner's
-    review: those of the same amount first, then those whose amount differs, each oldest
-    first. Empty for a transfer that has both sides (or none it could be found by)."""
+    review (pair_candidates of its own record): those of the same amount first, then those
+    whose amount differs, each oldest first. Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
-    if transfer is None:
+    if transfer is None or transfer.status not in OPEN_STATUSES:
         return []
     present_id = transfer.out_transaction_id or transfer.in_transaction_id
-    if present_id is None or transfer.status not in OPEN_STATUSES:
+    if present_id is None:
         return []
     system = await system_account_ids(session)
-    present = await load_own_record(session, system, present_id)
-    if present is None:
-        return []
-    counterpart = (
-        transfer.to_account_id
-        if present_id == transfer.out_transaction_id
-        else transfer.from_account_id
-    )
     settings = await load_transfer_settings(session)
-    r, counterpart_id = present.columns(), bound_id(counterpart)
+    e = eligible_records(system)
+    t = models.Transaction
     found: list[CandidateRecord] = []
     for exact in (True, False):
-        rows = [
-            *await session.execute(
-                transfer_matches(system, r, settings, counterpart_id=counterpart_id, exact=exact)
-            ),
-            *await session.execute(loose_matches(system, r, counterpart_id, settings, exact=exact)),
-        ]
-        rows.sort(key=lambda row: (row.occurred_at, row.transaction_id))
+        pairs = pair_candidates(system, settings, exact=exact).subquery()
+        rows = await session.execute(
+            select(e.c.transaction_id, e.c.account_id, e.c.quantity, e.c.occurred_at, t.description)
+            .join(pairs, pairs.c.candidate_id == e.c.transaction_id)
+            .join(t, t.id == e.c.transaction_id)
+            .where(pairs.c.record_id == present_id)
+            .order_by(e.c.occurred_at, e.c.transaction_id)
+        )
         found += [
             CandidateRecord(
                 transaction_id=row.transaction_id,
