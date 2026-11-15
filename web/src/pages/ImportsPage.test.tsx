@@ -56,6 +56,13 @@ vi.mock("../api", () => ({
       account("0190a0b0-0000-7000-8000-000000000005", "Connected Example", {
         source_kind: "connection",
       }),
+      // A system account an import posts its other legs to (equity): never a target.
+      account("0190a0b0-0000-7000-8000-000000000006", "Opening balances", {
+        ledger_type: "equity",
+      }),
+      account("0190a0b0-0000-7000-8000-000000000007", "Example Card", {
+        ledger_type: "liability",
+      }),
     ],
   })),
   listInstruments: vi.fn(async () => ({
@@ -193,7 +200,7 @@ it("test_only_importable_accounts_listed", async () => {
   await user.click(form.getByRole("combobox", { name: "Account" }));
   const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
 
-  expect(options).toEqual(["Example Bank current", "Example Bank savings"]);
+  expect(options).toEqual(["Example Bank current", "Example Bank savings", "Example Card"]);
 });
 
 it("shows the server message when staging fails", async () => {

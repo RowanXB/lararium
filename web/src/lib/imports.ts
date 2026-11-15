@@ -32,11 +32,14 @@ export function countsSummary(counts: Record<string, number>): string {
     .join(" · ");
 }
 
-// Valuation ignores transactions on snapshots accounts, so only these accept imports.
+// The server's rule (require_importable): open, manual, valued by transactions (valuation
+// ignores them on snapshots accounts), and an asset or liability, as a statement is a bank
+// account's or a card's (the system accounts imports post their other legs to are equity).
 export function isImportable(account: AccountOut): boolean {
   return (
     account.status === "open" &&
     account.source_kind === "manual" &&
+    (account.ledger_type === "asset" || account.ledger_type === "liability") &&
     (account.balance_mode === "transactions" || account.balance_mode === "hybrid")
   );
 }
