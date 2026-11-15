@@ -481,6 +481,20 @@ def test_boc_digits_outside_known_shapes_are_not_typed() -> None:
     ]
 
 
+def test_boc_lone_six_digits_are_not_a_sort_code() -> None:
+    # Only a sort code printed with an account number fills the counterparty's account.
+    lone = BocRow(
+        "21/05/27",
+        "21/05/27",
+        ("///Local Clearing And Outward", "Remittance Alex Example", "202701 rent"),
+        paid_out="6.00",
+    )
+    row = _rows(_boc(BocStatement(opening="10.00", pages=[[lone]])))[0]
+
+    assert row.description == ("///Local Clearing And Outward Remittance Alex Example 202701 rent")
+    assert row.counterparty == Counterparty(name="Alex Example", reference="rent")
+
+
 def test_boc_terms_pages_ignored() -> None:
     # The terms page after the last numbered page holds amounts and payment kinds.
     with_terms = _boc(BocStatement(pages=[[LOCAL_OUT]], terms=True))
