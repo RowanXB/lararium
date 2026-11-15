@@ -75,7 +75,7 @@ tailscale serve --bg 8080
 `lararium_owner` (`migrate`), then starts the API as `lararium_backend` (`api`), the
 background worker (`worker`: connection syncs and periodic jobs) and Caddy
 serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
-`lararium_pgdata` volume.
+`lararium_pgdata` volume, and uploaded statement files in `lararium_documents`.
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
@@ -264,6 +264,121 @@ the signing secret into `LARARIUM_FEISHU_WEBHOOK_URL` and `LARARIUM_FEISHU_SECRE
 `infra/.env`; `make up` passes them to the worker). With neither set there are no notifications.
 Messages never contain credentials.
 
+## Importing statements
+
+For accounts no connector syncs, upload the statement files your bank exports. Nothing reaches
+the ledger until you have reviewed it.
+
+1. **Upload.** On Imports, choose the account, a profile (how to read this bank's file; see
+   below) and the file, and optionally a currency for files that don't state one. Files are at
+   most 5 MiB and 20,000 rows. The file is kept as a document (in the `documents` volume) and
+   never deleted.
+2. **Review.** The batch page lists every row as **new**, **duplicate** (already in the
+   ledger), **skipped** (a zero amount, or left out by the profile's `include_only`; the reason
+   is shown) or **error** (couldn't be read, or breaks the running balance). Any error blocks
+   the commit: fix the profile or the file, discard the batch and upload again. Warnings above
+   the rows say when the file has no balances, or when committing it would change another
+   import's opening adjustment.
+3. **Commit.** Each new row becomes a transaction; duplicates and skipped rows never do.
+   Discard instead to drop a staged batch.
+4. **Roll back.** Rolling back a committed batch voids its transactions (nothing is deleted),
+   so the same file can be imported again. A batch whose rows another committed batch skipped
+   as already imported can't be rolled back until that other batch is: the error names it.
+
+**Which accounts take imports.** Only open, manual accounts (not synced from a connection) whose
+balance mode is `transactions` or `hybrid`. A `snapshots` account's balance ignores
+transactions, so imports into it are refused rather than silently not counting.
+
+**The other side of each row.** A bank row has one side; the ledger is double-entry. The other
+leg goes to the **Unassigned** system account, the same one Monzo uses, which never changes net
+worth. A statement rarely starts on the account's first day, so on a `transactions` account the
+import also adds an **opening adjustment** (against **Opening balances**) the day before the
+statement's first row, so the balance after it matches what the statement says. When a
+statement for an earlier period arrives later, the adjustments of every import into that account
+are re-aligned at commit and at rollback, so an opening balance is never counted twice; the
+review page warns you first. A later import that needs an adjustment usually means a statement
+period is missing: discard it and import the gap first. Hybrid accounts take no adjustment,
+because their snapshots anchor the balance.
+
+**Everything the file says is stored.** Each row keeps its date and value date, payee and memo,
+cheque number, the bank's type code, counterparty name, sort code, account number and payment
+reference, and further fields where a statement prints them (payment kind, bank reference,
+purpose code, remittance text, counterparty bank), each in its own column, plus the whole source
+row. Each statement keeps its period, opening and closing balance, money in and out, payment
+counts, reference number and date, the account as printed (type, name, sort code, account
+number, IBAN, BIC, customer number, branch), the arranged overdraft limit and its interest rate
+table. The account a file names must agree with the earlier imports into the same ledger
+account, or the upload is refused (the message shows only the last four digits).
+
+### Formats
+
+Under Import profiles, **Add from catalog** creates a ready profile for each bank format below;
+for each bank use the recommended one, which carries the most information.
+
+| Bank | Format | Recommended |
+|---|---|---|
+| HSBC UK | PDF statement | yes |
+| HSBC UK | midata CSV, OFX, CSV (transaction list, no header row), QIF | |
+| Lloyds | CSV | yes |
+| Lloyds | PDF statement, QIF | |
+| BOC UK | PDF statement | yes (the only format) |
+
+A PDF statement is read by a layout written for that bank, which checks itself: the summary
+(opening and closing balance, money in and out, payment counts) must equal the rows, every
+printed balance must follow from the amounts, and every word in the table must belong to a row.
+A statement that doesn't add up is refused as a whole, naming the failed check, rather than
+imported with wrong numbers. You can import different formats of the same account over
+overlapping days, for example PDF statements for the past and the OFX export for the weeks
+since, in either order: rows on days an earlier import already covers are matched against it.
+
+### Profiles
+
+A profile is JSON, checked by the server when you save it. `format` is `csv`, `ofx`, `qif` or
+`pdf`; every format takes an optional `timezone` (an IANA name such as `Europe/London`; the
+default is Lararium's time zone), which turns dates into times without moving the date written
+in the file.
+
+- **`csv`**: `columns` (below), `date_format` (a `strptime` format such as `%d/%m/%Y`; one with
+  a time such as `%d %b, %Y %H:%M` keeps the time of day), `encoding` (`utf-8-sig`, the default,
+  `utf-8`, `cp1252` or `latin-1`), `delimiter` (`,`), `skip_rows` (lines before the header,
+  0–50), `header` (the column names in order, for a file without a header row),
+  `skip_footer_rows` (0–20) and `overdraft_footer_label` (the first cell of the footer line
+  with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
+  another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
+  `newest_first`), `sign` (below) and `amount_format` (`decimal_separator`, `.` or `,`;
+  `thousands_separator`, none by default, or `,` `.` space `'`).
+- **`columns`** names the file's columns: `date`, `description` (a list; several are joined
+  with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
+  `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
+  `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
+  `counterparty_account_number`, `reference` (the payment reference), and the statement's own
+  `account_sort_code` and `account_number`.
+- **`ofx`**: `sign`.
+- **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
+- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement` or `boc_uk_statement`.
+
+**Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
+one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
+`outflow_positive`; with `inflow` and `outflow` columns the amount is inflow minus outflow. On
+a credit card (a liability) a purchase is an outflow, making the balance more negative, and a
+payment to the card is an inflow, bringing it back towards zero. So a card export that lists
+purchases as positive numbers needs `"sign": "outflow_positive"`.
+
+**Duplicates.** A row is a duplicate when a committed row of the same account has the same key:
+its external ID (an OFX `FITID`, or a mapped `external_id` column) when it has one; otherwise its
+date, amount, currency, description and running balance; otherwise those without the balance
+plus how many identical rows come before it in the same file, so two real identical purchases on
+one day are both imported, and both are duplicates when the file comes again. Files in different
+formats don't share keys, so on days an earlier import already covers, rows are matched to that
+import's rows by date and amount instead: the matched ones are duplicates and any other is an
+error. A file that lacks a row the earlier import has on those days is refused at upload; if
+the new file is right, roll the earlier import back first.
+
+**Example files.** `backend/src/lararium/modules/finance/importing/examples/` holds synthetic
+Example Bank files (`example-bank.csv`, `.ofx`, `.qif`) and the profiles for the first two
+(`example-bank-csv.json`, `example-bank-ofx.json`). Paste a profile's JSON into a new profile,
+pick GBP at upload, and import into a manual `transactions` account to try the flow.
+
 ## Secrets: encrypting `infra/.env` with SOPS + age
 
 `infra/.env` holds every credential and is ignored by git. To keep an encrypted copy
@@ -294,10 +409,13 @@ make backup   # or: infra/backup/backup.sh
 ```
 
 This writes `$BACKUP_DIR/lararium-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
-`BACKUP_DIR` is relative to the repository root). If `RESTIC_REPOSITORY` is set in
-`infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using `RESTIC_PASSWORD`; the
-`restic` binary must be installed on the host. To run it nightly, add a cron entry such
-as `0 3 * * * cd /path/to/lararium && make backup`.
+`BACKUP_DIR` is relative to the repository root) and, with the same timestamp,
+`documents-<UTC timestamp>.tar`: the uploaded statement files from the `lararium_documents`
+volume, read through the `api` container. The stack must be running: without the `api`
+container the backup fails rather than leave a dump without its documents. If
+`RESTIC_REPOSITORY` is set in `infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using
+`RESTIC_PASSWORD`; the `restic` binary must be installed on the host. To run it nightly, add a
+cron entry such as `0 3 * * * cd /path/to/lararium && make backup`.
 
 Restore a dump into a new database (the script refuses to overwrite an existing one):
 
@@ -318,6 +436,13 @@ docker compose -f infra/compose.yaml --env-file infra/.env exec -T db psql -U po
   -c "ALTER DATABASE lararium RENAME TO lararium_old" \
   -c "ALTER DATABASE lararium_restore RENAME TO lararium"
 make up
+```
+
+Restore the documents into the `lararium_documents` volume (the dump's rows refer to them by
+hash; files already there are overwritten with identical copies):
+
+```bash
+docker run --rm -v lararium_documents:/d -i alpine tar -C /d -xf - < backups/documents-20260101T030000Z.tar
 ```
 
 On a fresh server, first set `LARARIUM_MASTER_KEY` in `infra/.env` to the key of the server

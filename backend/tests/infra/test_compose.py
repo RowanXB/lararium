@@ -232,3 +232,35 @@ def test_the_webhook_receiver_has_no_route_out() -> None:
         assert [s for s, spec in services.items() if name in (spec.get("networks") or {})] == [
             "cloudflared"
         ]
+
+
+DOCUMENT_DIR = "/var/lib/lararium/documents"
+
+
+def _volume_mounts(service: dict[str, Any]) -> dict[str, str]:
+    """Named volumes mounted by a service, as {volume: target}."""
+    return {
+        mount["source"]: mount["target"]
+        for mount in service.get("volumes") or []
+        if mount["type"] == "volume"
+    }
+
+
+def test_api_keeps_documents_in_their_own_volume() -> None:
+    config = _config()
+    api = config["services"]["api"]
+    assert _volume_mounts(api)["documents"] == DOCUMENT_DIR
+    assert api["environment"]["LARARIUM_DOCUMENT_DIR"] == DOCUMENT_DIR
+    # A named volume of its own (lararium_documents, which the README's restore names).
+    assert "documents" in config["volumes"]
+
+
+def test_only_the_api_mounts_the_documents() -> None:
+    # Uploaded statements are read and written by the api alone: migrate and web (and the
+    # internet-facing services) have no business with them.
+    mounting = {
+        name
+        for name, service in _config()["services"].items()
+        if "documents" in _volume_mounts(service)
+    }
+    assert mounting == {"api"}

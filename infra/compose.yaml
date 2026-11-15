@@ -41,10 +41,13 @@ services:
     depends_on:
       db: { condition: service_healthy }
   # No published ports: only Caddy (web) reaches the api, over the compose network.
+  # Uploaded statements are kept in the `documents` volume; only the api mounts it.
   api:
     build: ../backend
     networks: [app]
     restart: unless-stopped
+    volumes:
+      - documents:/var/lib/lararium/documents
     command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     environment:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
@@ -54,6 +57,7 @@ services:
       LARARIUM_PUBLIC_BASE_URL: ${LARARIUM_PUBLIC_BASE_URL:-}
       LARARIUM_WEBHOOK_BASE_URL: ${LARARIUM_WEBHOOK_BASE_URL:-}
       LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
+      LARARIUM_DOCUMENT_DIR: /var/lib/lararium/documents
     depends_on:
       migrate: { condition: service_completed_successfully }
   # Runs the connection syncs and the periodic jobs. No ports; it only talks to the db and
@@ -119,3 +123,4 @@ services:
     depends_on: [api]
 volumes:
   pgdata: {}
+  documents: {}

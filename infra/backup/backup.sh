@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Dump the lararium database to $BACKUP_DIR/lararium-<UTC timestamp>.dump (pg_dump custom
-# format), then, when RESTIC_REPOSITORY is set, back $BACKUP_DIR up with restic.
+# format) and the uploaded documents to $BACKUP_DIR/documents-<same timestamp>.tar, then,
+# when RESTIC_REPOSITORY is set, back $BACKUP_DIR up with restic.
 set -euo pipefail
-# Dumps hold every balance and transaction: everything this script creates is owner-only.
+# Dumps hold every balance and transaction, and the documents are bank statements:
+# everything this script creates is owner-only.
 umask 077
 
 infra="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,11 +23,18 @@ esac
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"  # mkdir -p leaves an existing directory's mode alone
 
-out="$BACKUP_DIR/lararium-$(date -u +%Y%m%dT%H%M%SZ).dump"
-# Write to a temporary name first so a failed dump never looks like a good backup.
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+out="$BACKUP_DIR/lararium-$stamp.dump"
+out_docs="$BACKUP_DIR/documents-$stamp.tar"
+# Write to temporary names first so a failed dump never looks like a good backup. Both are
+# moved into place only once both are written: without the api container (stopped, say) the
+# exec fails, and set -e stops here rather than leave a dump without its documents.
 "${compose[@]}" exec -T db pg_dump -U postgres -d lararium --format=custom > "$out.partial"
+"${compose[@]}" exec -T api tar -C /var/lib/lararium/documents -cf - . > "$out_docs.partial"
 mv "$out.partial" "$out"
+mv "$out_docs.partial" "$out_docs"
 echo "wrote $out"
+echo "wrote $out_docs"
 
 if [ -n "${RESTIC_REPOSITORY:-}" ]; then
   restic backup "$BACKUP_DIR"
