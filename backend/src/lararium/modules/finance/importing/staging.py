@@ -484,6 +484,8 @@ class OpeningClaim:
     # The first day its opening is vouched for from (final review C1): its first day listed
     # in full when that is not after first_day, else first_day.
     vouched_from: date | None = None
+    # It lists first_day in full: no other movement that day can be before its opening.
+    first_day_in_full: bool = False
 
 
 @dataclass(frozen=True)
@@ -520,11 +522,12 @@ def plan_openings(
     listed row, minus the adjustments assigned to the claims before it.
 
     Before its first listed row means by what the file lists, not by date alone: every
-    movement up to and including its first day except those it lists itself. Its own rows
-    and the originals its duplicates stand for come after its opening even when a duplicate's
-    original is dated earlier (an id matched across days); and another file's movement on its
-    first day that it doesn't list came before it (an export may start partway through a
-    day; on a day it lists in full there is none, as staging refuses that).
+    movement before its first day, except those it lists itself. Its own rows and the
+    originals its duplicates stand for come after its opening even when a duplicate's
+    original is dated earlier (an id matched across days). On a first day it lists only in
+    part (an export may start partway through a day), another file's movement it doesn't
+    list came before it too; on a first day it lists in full there is no such movement
+    (staging refuses one), and none is counted.
     """
 
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)
@@ -535,7 +538,11 @@ def plan_openings(
                 (
                     movement.amount
                     for movement in movements.get(claim.instrument_id, [])
-                    if movement.day <= claim.first_day and movement.source not in claim.own
+                    if movement.source not in claim.own
+                    and (
+                        movement.day < claim.first_day
+                        or (movement.day == claim.first_day and not claim.first_day_in_full)
+                    )
                 ),
                 Decimal(0),
             )
@@ -614,6 +621,7 @@ class _BatchInfo:
     timezone: str | None
     vouched_to: date | None
     complete_from: date | None
+    complete_to: date | None
 
 
 def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
@@ -687,7 +695,7 @@ async def _claims(
             closings.get(batch.id),
             row_order if isinstance(row_order, str) else "oldest_first",
         )
-        start = batch.complete_from
+        start, end = batch.complete_from, batch.complete_to
         claims[batch.id] = [
             OpeningClaim(
                 batch.id,
@@ -697,6 +705,9 @@ async def _claims(
                 batch.committed_at,
                 own=own,
                 vouched_from=start if start is not None and start <= first_day else first_day,
+                first_day_in_full=start is not None
+                and end is not None
+                and start <= first_day <= end,
             )
             for instrument_id, (opening, first_day) in openings.items()
         ]
@@ -737,7 +748,7 @@ async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_B
         ).where(b.account_id == account_id, b.status == "committed")
     )
     return [
-        _BatchInfo(id, name, at, zone, _vouched_to(start, end), complete_from)
+        _BatchInfo(id, name, at, zone, _vouched_to(start, end), complete_from, end)
         for id, name, at, zone, start, complete_from, end in found
     ]
 
@@ -831,6 +842,7 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
             None,
             _vouched_to(staged.covered_from, staged.complete_to),
             staged.complete_from,
+            staged.complete_to,
         ),
     ]
     claims = await _claims(session, batches)
