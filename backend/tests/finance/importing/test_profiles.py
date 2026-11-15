@@ -1,9 +1,14 @@
+import uuid
 from typing import Any
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from lararium.modules.finance.errors import DuplicateProfileNameError
+from lararium.modules.finance.errors import (
+    DuplicateProfileNameError,
+    FinanceValidationError,
+    ImportProfileNotFoundError,
+)
 from lararium.modules.finance.importing.profiles import (
     AmountFormat,
     CsvColumns,
@@ -63,7 +68,8 @@ def test_date_format_must_round_trip() -> None:
         config = PROFILE_CONFIG.validate_python(_csv(date_format=date_format))
         assert isinstance(config, CsvProfileConfig)
         assert config.has_time is has_time
-    for date_format in ["%d/%m", "not a date"]:
+    # "%d/%d/%m/%Y" repeats a directive, which makes strptime's regex invalid.
+    for date_format in ["%d/%m", "not a date", "%d/%d/%m/%Y"]:
         with pytest.raises(ValidationError):
             PROFILE_CONFIG.validate_python(_csv(date_format=date_format))
 
@@ -73,8 +79,10 @@ def test_timezone_and_filters_validated() -> None:
         _csv(timezone="Europe/London", include_only={"State": ["COMPLETED"]})
     )
     assert config.timezone == "Europe/London"
-    with pytest.raises(ValidationError):
-        PROFILE_CONFIG.validate_python(_csv(timezone="Europe/Nowhere"))
+    # "Europe" is a directory of the time zone database, not a zone.
+    for timezone in ["Europe/Nowhere", "Europe"]:
+        with pytest.raises(ValidationError):
+            PROFILE_CONFIG.validate_python(_csv(timezone=timezone))
     with pytest.raises(ValidationError):
         PROFILE_CONFIG.validate_python(_csv(include_only={"State": []}))
 
@@ -114,3 +122,35 @@ async def test_duplicate_name_case_insensitive(run) -> None:
     await run(create_profile, name="Example Bank", config=config)
     with pytest.raises(DuplicateProfileNameError):
         await run(create_profile, name=" example bank ", config=config)
+
+
+def test_delimiter_rejects_quote_and_line_breaks() -> None:
+    assert PROFILE_CONFIG.validate_python(_csv(delimiter=";")).delimiter == ";"
+    for delimiter in ['"', "\n", "\r"]:
+        with pytest.raises(ValidationError):
+            PROFILE_CONFIG.validate_python(_csv(delimiter=delimiter))
+
+
+async def test_duplicate_name_on_update(run) -> None:
+    config = PROFILE_CONFIG.validate_python({"format": "ofx"})
+    await run(create_profile, name="Example Bank", config=config)
+    other = await run(create_profile, name="Example Bank OFX", config=config)
+    with pytest.raises(DuplicateProfileNameError):
+        await run(update_profile, other.id, name="EXAMPLE BANK", config=config)
+
+
+async def test_missing_profile_and_empty_name(session, run) -> None:
+    config = PROFILE_CONFIG.validate_python({"format": "ofx"})
+    with pytest.raises(ImportProfileNotFoundError):
+        await get_profile(session, uuid.uuid4())
+    with pytest.raises(ImportProfileNotFoundError):
+        await run(update_profile, uuid.uuid4(), name="Example Bank", config=config)
+    with pytest.raises(FinanceValidationError):
+        await run(create_profile, name="   ", config=config)
+
+
+async def test_list_orders_names_case_insensitively(session, run) -> None:
+    config = PROFILE_CONFIG.validate_python({"format": "ofx"})
+    for name in ["beta", "Alpha", "Gamma"]:
+        await run(create_profile, name=name, config=config)
+    assert [p.name for p in await list_profiles(session)] == ["Alpha", "beta", "Gamma"]

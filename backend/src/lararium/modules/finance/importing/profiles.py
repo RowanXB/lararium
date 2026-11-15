@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from psycopg.errors import UniqueViolation
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -27,27 +27,33 @@ from lararium.modules.finance.errors import (
 )
 
 _NAME_INDEX = "import_profiles_name_unique"
+# The csv module quotes with '"' and splits records on line breaks.
+_FORBIDDEN_DELIMITERS = frozenset({'"', "\n", "\r"})
 _TIME_DIRECTIVES = ("%H", "%I", "%M", "%S", "%p")
 # Formatted with a date format and parsed back: the format must keep day, month and year.
 _PROBE = datetime(2026, 12, 31, 23, 59, 58, tzinfo=UTC)
 
 
 def _check_timezone(name: str) -> str:
+    # Pydantic reports only ValueError as a validation error; ZoneInfo can also raise
+    # OSError (a directory such as "Europe") and more, so any failure means "not a zone".
     try:
         ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except Exception:
         raise ValueError(f"unknown time zone: {name}") from None
     return name
 
 
 def _check_date_format(date_format: str) -> str:
+    # Any failure means "not a usable format", and must surface as a ValueError: strptime
+    # also raises re.error (a repeated directive), and a year-less format warns (and may
+    # raise from Python 3.15).
     try:
-        # A format without a year warns (and may raise from Python 3.15); either way it fails.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             text = _PROBE.strftime(date_format)
             parsed = datetime.strptime(text, date_format).replace(tzinfo=UTC)
-    except ValueError:
+    except Exception:
         parsed = None
     if parsed is None or parsed.date() != _PROBE.date():
         raise ValueError(f"the date format {date_format!r} doesn't keep the day, month and year")
@@ -56,6 +62,15 @@ def _check_date_format(date_format: str) -> str:
 
 type TimezoneName = Annotated[str, AfterValidator(_check_timezone)]
 type DateFormat = Annotated[str, AfterValidator(_check_date_format)]
+
+
+def _check_delimiter(delimiter: str) -> str:
+    if delimiter in _FORBIDDEN_DELIMITERS:
+        raise ValueError("the delimiter can't be a quote or a line break")
+    return delimiter
+
+
+type Delimiter = Annotated[str, Field(min_length=1, max_length=1), AfterValidator(_check_delimiter)]
 type Encoding = Literal["utf-8-sig", "utf-8", "cp1252", "latin-1"]
 type Sign = Literal["inflow_positive", "outflow_positive"]
 
@@ -120,7 +135,7 @@ class CsvProfileConfig(BaseModel):
 
     format: Literal["csv"]
     encoding: Encoding = "utf-8-sig"
-    delimiter: str = Field(default=",", min_length=1, max_length=1)
+    delimiter: Delimiter = ","
     skip_rows: int = Field(default=0, ge=0, le=50)
     # Column names, in order, for a file without a header row; None: the first row is the header.
     header: list[str] | None = Field(default=None, min_length=1)
@@ -200,12 +215,12 @@ class ImportProfileRecord:
 async def _load(
     session: AsyncSession, *conditions: ColumnElement[bool]
 ) -> list[ImportProfileRecord]:
-    """Profiles matching all conditions, sorted by name (then id)."""
+    """Profiles matching all conditions, sorted by name ignoring case (then id)."""
     p = models.ImportProfile
     rows = await session.execute(
         select(p.id, p.name, p.config, p.version, p.updated_at)
         .where(*conditions)
-        .order_by(p.name, p.id)
+        .order_by(func.lower(p.name), p.id)
     )
     return [
         ImportProfileRecord(
