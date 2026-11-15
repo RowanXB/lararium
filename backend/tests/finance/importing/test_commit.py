@@ -27,6 +27,7 @@ from lararium.modules.finance.valuation import balances_asof, net_worth_series
 
 from .staging_helpers import (
     BALANCE_COLUMNS,
+    BALANCE_HEADER,
     DECEMBER,
     HEADER,
     HSBC_ROWS,
@@ -397,6 +398,39 @@ async def test_rollback_realigns_adjustments(
     assert adjustment.booking_date == date(2026, 11, 30)
     assert adjustment.position == -1
     assert await _balance(session, account.id) == Decimal("1450.00")
+
+
+async def test_gap_flag_when_an_earlier_statement_is_staged_after_a_later_one(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    profile = await _csv_profile(run)
+    december = await commit((await stage(profile, DECEMBER, filename="december.csv")).id)
+    (adjustment,) = _adjustments(await _rows(session, december))
+    assert adjustment.is_gap is False  # nothing earlier: the account's opening
+
+    november = await stage(profile, NOVEMBER, filename="november.csv")
+    (adjustment,) = _adjustments(await _rows(session, november))
+    assert adjustment.is_gap is False  # earlier than every committed statement
+    statement_rows = [row for row in await _rows(session, november) if row.kind == "statement"]
+    assert {row.is_gap for row in statement_rows} == {None}
+
+
+async def test_gap_flag_when_the_first_statement_is_viewed_after_later_ones(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    profile = await _csv_profile(run)
+    november = await commit((await stage(profile, NOVEMBER, filename="november.csv")).id)
+    # December's balance doesn't follow from November's closing 1480.00: a period is missing.
+    gap = BALANCE_HEADER + "01/12/2026,Rent,-30.00,1400.00\n"
+    december = await stage(profile, gap, filename="december.csv")
+    (adjustment,) = _adjustments(await _rows(session, december))
+    assert adjustment.is_gap is True
+    await commit(december.id)
+
+    (opening,) = _adjustments(await _rows(session, november))
+    assert opening.is_gap is False
+    (adjustment,) = _adjustments(await _rows(session, december))
+    assert adjustment.is_gap is True
 
 
 # Pending rows, discard, rollback ------------------------------------------------------

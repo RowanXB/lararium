@@ -1486,6 +1486,17 @@
             ],
             "title": "Instrument Id"
           },
+          "is_gap": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Gap"
+          },
           "kind": {
             "enum": [
               "statement",
@@ -1674,7 +1685,8 @@
           "note",
           "raw",
           "transaction_id",
-          "duplicate_of"
+          "duplicate_of",
+          "is_gap"
         ],
         "title": "ImportRowOut",
         "type": "object"

@@ -373,6 +373,9 @@ class ImportRowOut(_Out):
     raw: dict[str, str]
     transaction_id: UUID | None
     duplicate_of: UUID | None  # the committed row this one duplicates (Decision 16)
+    # Adjustment rows: True when the adjustment follows earlier imported history (a likely
+    # missing period), False when it is the account's opening; None on statement rows.
+    is_gap: bool | None
 
 
 class ImportBatchDetailOut(ImportBatchOut):

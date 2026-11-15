@@ -708,6 +708,10 @@ export type ImportRowOut = {
      */
     instrument_id: string | null;
     /**
+     * Is Gap
+     */
+    is_gap: boolean | null;
+    /**
      * Kind
      */
     kind: 'statement' | 'opening_adjustment';

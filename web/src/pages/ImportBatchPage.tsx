@@ -9,7 +9,6 @@ import {
   type ImportRowOut,
   type ImportStatementOut,
   listAccounts,
-  listImportBatches,
   listInstruments,
   rollbackImport,
 } from "../api";
@@ -118,10 +117,6 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
     queryFn: async () =>
       (await getImportBatch({ path: { batch_id: batchId }, throwOnError: true })).data,
   });
-  const batches = useQuery({
-    queryKey: ["imports"],
-    queryFn: async () => (await listImportBatches({ throwOnError: true })).data,
-  });
   const instruments = useQuery({
     queryKey: ["instruments", { includeHidden: false }],
     queryFn: async () => (await listInstruments({ throwOnError: true })).data,
@@ -147,7 +142,7 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
     },
   });
 
-  const error = batch.error ?? batches.error ?? instruments.error ?? accounts.error;
+  const error = batch.error ?? instruments.error ?? accounts.error;
   const detail = batch.data;
   if (!detail) {
     return error ? <p className="text-sm text-destructive">{errorMessage(error)}</p> : null;
@@ -157,14 +152,6 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
     const instrument = instruments.data?.find((i) => i.id === instrumentId);
     return instrument ? isoCode(instrument) : null;
   };
-  // A later statement's adjustment usually means a period between it and the account's
-  // existing imports is missing, rather than the account's opening balance.
-  const hasHistory = (batches.data ?? []).some(
-    (other) =>
-      other.account_id === detail.account_id &&
-      other.id !== detail.id &&
-      other.status === "committed",
-  );
   const errors = detail.counts.error ?? 0;
   const transactions = detail.rows.filter(
     (row) => row.status === "committed" && row.transaction_id !== null,
@@ -273,7 +260,7 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
                     <TableCell className="tabular-nums">{row.booking_date}</TableCell>
                     <TableCell className="whitespace-normal">
                       <p className={cn(adjustment && "font-medium")}>
-                        {adjustment ? (hasHistory ? GAP_LABEL : OPENING_LABEL) : row.description}
+                        {adjustment ? (row.is_gap ? GAP_LABEL : OPENING_LABEL) : row.description}
                       </p>
                       {details.length > 0 && (
                         <p className="text-xs text-muted-foreground">{details.join(" · ")}</p>

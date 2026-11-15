@@ -8,9 +8,7 @@ import {
   commitImport,
   getImportBatch,
   type ImportBatchDetailOut,
-  type ImportBatchOut,
   type ImportRowOut,
-  listImportBatches,
   rollbackImport,
 } from "../api";
 import { ImportBatchPage } from "./ImportBatchPage";
@@ -25,7 +23,6 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../api", () => ({
   getImportBatch: vi.fn(),
-  listImportBatches: vi.fn(async () => ({ data: [] })),
   listAccounts: vi.fn(async () => ({ data: [] })),
   listInstruments: vi.fn(async () => ({
     data: [
@@ -75,6 +72,7 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     instrument_id: GBP_ID,
     external_id: null,
     duplicate_of: null,
+    is_gap: null,
     error: null,
     note: null,
     raw: {},
@@ -103,19 +101,9 @@ function batch(overrides: Partial<ImportBatchDetailOut> = {}): ImportBatchDetail
   };
 }
 
-function otherCommittedBatch(): ImportBatchOut {
-  const { rows: _rows, ...rest } = batch({
-    id: "0190a0b0-0000-7000-8000-0000000000e0",
-    filename: "example-september.csv",
-    status: "committed",
-  });
-  return rest;
-}
-
 beforeEach(() => {
   vi.mocked(commitImport).mockClear();
   vi.mocked(rollbackImport).mockClear();
-  vi.mocked(listImportBatches).mockResolvedValue({ data: [] } as never);
 });
 
 function show(detail: ImportBatchDetailOut) {
@@ -249,6 +237,7 @@ const adjustment = row(-1, {
   description: "Opening balance adjustment",
   quantity: "250.00",
   booking_date: "2026-09-30",
+  is_gap: false,
 });
 
 it("shows the opening adjustment first", async () => {
@@ -258,9 +247,8 @@ it("shows the opening adjustment first", async () => {
   expect(within(body).getAllByRole("row")[0]).toHaveTextContent("Opening balance adjustment");
 });
 
-it("labels the adjustment as a gap once the account has imported history", async () => {
-  vi.mocked(listImportBatches).mockResolvedValue({ data: [otherCommittedBatch()] } as never);
-  show(batch({ rows: [row(0), adjustment] }));
+it("labels the adjustment as a gap when the server says it follows earlier history", async () => {
+  show(batch({ rows: [row(0), { ...adjustment, is_gap: true }] }));
   expect(
     await screen.findByText("Balance gap: a statement period may be missing"),
   ).toBeInTheDocument();

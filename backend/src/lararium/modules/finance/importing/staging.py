@@ -103,6 +103,9 @@ class ImportRowRecord:
     raw: dict[str, str]
     transaction_id: UUID | None
     duplicate_of: UUID | None  # the committed row this one duplicates (Decision 16)
+    # Adjustment rows only: True when a committed statement of the account starts earlier,
+    # so the adjustment points at a missing period rather than the opening (Decision 13).
+    is_gap: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -293,21 +296,51 @@ async def ledger_balance_before(
     return Decimal(total)
 
 
-def _row_record(row: models.ImportRow) -> ImportRowRecord:
-    values = {f.name: getattr(row, f.name) for f in fields(ImportRowRecord)}
-    return ImportRowRecord(**values)
+def _row_record(row: models.ImportRow, is_gap: bool | None = None) -> ImportRowRecord:
+    values = {f.name: getattr(row, f.name) for f in fields(ImportRowRecord) if f.name != "is_gap"}
+    return ImportRowRecord(**values, is_gap=is_gap)
 
 
 async def list_batch_rows(session: AsyncSession, batch_id: UUID) -> list[ImportRowRecord]:
-    """The batch's rows by position (opening adjustments first)."""
+    """The batch's rows by position (opening adjustments first).
+
+    An adjustment row's is_gap is worked out here, at read time, so it follows commits and
+    rollbacks of the account's other batches.
+    """
     r = models.ImportRow
-    rows = await session.scalars(
-        select(r)
-        .where(r.batch_id == batch_id)
-        .order_by(r.position)
-        .execution_options(populate_existing=True)
+    rows = list(
+        await session.scalars(
+            select(r)
+            .where(r.batch_id == batch_id)
+            .order_by(r.position)
+            .execution_options(populate_existing=True)
+        )
     )
-    return [_row_record(row) for row in rows]
+    adjustments = [row for row in rows if row.kind == "opening_adjustment"]
+    if not adjustments:
+        return [_row_record(row) for row in rows]
+    others = [
+        batch
+        for batch in await _committed_batches(session, adjustments[0].account_id)
+        if batch.id != batch_id
+    ]
+    # The earliest first date of another committed statement, per instrument.
+    earliest: dict[UUID, date] = {}
+    claims: dict[UUID, list[OpeningClaim]] = await _claims(session, others) if others else {}
+    for claim in (claim for batch_claims in claims.values() for claim in batch_claims):
+        known = earliest.get(claim.instrument_id, claim.first_day)
+        earliest[claim.instrument_id] = min(known, claim.first_day)
+
+    def is_gap(row: models.ImportRow) -> bool | None:
+        if row.kind != "opening_adjustment":
+            return None
+        # An adjustment is dated the day before its statement's first date.
+        assert row.booking_date is not None and row.instrument_id is not None
+        first_day = row.booking_date + timedelta(days=1)
+        other = earliest.get(row.instrument_id)
+        return other is not None and other < first_day
+
+    return [_row_record(row, is_gap(row)) for row in rows]
 
 
 async def _load_batches(
