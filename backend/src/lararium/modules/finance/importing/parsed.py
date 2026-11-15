@@ -151,6 +151,9 @@ class ParsedStatement:
     closing_balance: Decimal | None = None
     closing_balance_date: date | None = None
     period: tuple[date, date] | None = None
+    # The source lists every transaction of the whole period (a closed, self-checked PDF
+    # statement), not just what had posted when the file was taken (Decision 16).
+    period_complete: bool = False
     opening_balance: Decimal | None = None
     money_in: Decimal | None = None
     money_out: Decimal | None = None

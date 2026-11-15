@@ -39,12 +39,18 @@ UPGRADE = [
       warnings jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(warnings) = 'array'),
       covered_from date,
       covered_to date,
+      -- The covered days the file lists in full (Decision 16).
+      complete_from date,
+      complete_to date,
       owner_entity_id uuid NOT NULL REFERENCES core.entities (id),
       created_at timestamptz NOT NULL DEFAULT now(),
       committed_at timestamptz,
       rolled_back_at timestamptz,
       CHECK ((covered_from IS NULL) = (covered_to IS NULL)),
       CHECK (covered_from <= covered_to),
+      CHECK ((complete_from IS NULL) = (complete_to IS NULL)),
+      CHECK (complete_from <= complete_to),
+      CHECK (complete_from >= covered_from AND complete_to <= covered_to),
       CHECK ((committed_at IS NOT NULL) = (status IN ('committed', 'rolled_back'))),
       CHECK ((rolled_back_at IS NOT NULL) = (status = 'rolled_back')),
       -- The target of import_rows' (batch_id, account_id) key.

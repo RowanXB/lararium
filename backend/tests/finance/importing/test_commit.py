@@ -169,8 +169,9 @@ async def test_commit_rechecks_covered_days(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
 ) -> None:
     # Both staged before either is committed: the OFX's 20 Nov row is only matched at commit,
-    # and its extra row on a now-covered day makes the batch stale.
-    csv = await stage(csv_profile, HEADER + "20/11/2026,Cafe,-3.50\n", filename="nov.csv")
+    # and its extra row on a day the CSV now lists in full makes the batch stale.
+    rows = "19/11/2026,Shop,-1.00\n20/11/2026,Cafe,-3.50\n21/11/2026,Shop,-2.00\n"
+    csv = await stage(csv_profile, HEADER + rows, filename="nov.csv")
     ofx = await _profile(run, format="ofx")
     matched = await stage(
         ofx,
@@ -457,6 +458,50 @@ async def test_pending_then_completed_counted_once(
     assert _statuses(await _rows(session, later)) == ["duplicate", "new"]
     await commit(later.id)
     assert await _balance(session, account.id) == Decimal("80.00")
+
+
+async def test_pending_mid_file_then_completed_counted_once(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """Review finding: a pending row between completed ones left its day covered, so the
+    next export's completed copy was refused as an unmatched row on a covered day."""
+    profile = await _csv_profile(
+        run,
+        columns={"date": "Date", "description": ["Description"], "amount": "Amount"},
+        include_only={"State": ["COMPLETED"]},
+    )
+    header = "Date,Description,Amount,State\n"
+    first = header + (
+        "01/11/2026,Pay,100.00,COMPLETED\n03/11/2026,Hotel,-20.00,PENDING\n"
+        "05/11/2026,Shop,-1.00,COMPLETED\n"
+    )
+    await commit((await stage(profile, first)).id)
+
+    later = await stage(profile, first.replace("PENDING", "COMPLETED"))
+    assert _statuses(await _rows(session, later)) == ["duplicate", "new", "duplicate"]
+    await commit(later.id)
+    assert await _balance(session, account.id) == Decimal("79.00")
+
+
+async def test_export_taken_mid_day_then_rest_of_day_counted_once(
+    session: AsyncSession,
+    stage: Stage,
+    commit: Commit,
+    account: AccountRecord,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    """Review finding: an export's last day may be partial, so a later export's extra row
+    on that day is new, not an error."""
+    morning = HEADER + "01/11/2026,Pay,100.00\n03/11/2026,Coffee,-3.00\n05/11/2026,Bus,-2.00\n"
+    await commit((await stage(csv_profile, morning)).id)
+
+    later = await stage(
+        csv_profile,
+        HEADER + "05/11/2026,Bus,-2.00\n05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n",
+    )
+    assert _statuses(await _rows(session, later)) == ["duplicate", "new", "new"]
+    await commit(later.id)
+    assert await _balance(session, account.id) == Decimal("86.00")
 
 
 async def test_discard(

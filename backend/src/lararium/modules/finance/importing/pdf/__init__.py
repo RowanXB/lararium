@@ -115,6 +115,7 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
         closing_balance=result.closing_balance,
         closing_balance_date=result.period[1],
         period=result.period,
+        period_complete=True,
         opening_balance=result.opening_balance,
         money_in=result.money_in,
         money_out=result.money_out,

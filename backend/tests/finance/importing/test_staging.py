@@ -773,7 +773,8 @@ async def test_covered_range_includes_rows_outside_the_period(
     session: AsyncSession, run: Run, stage: Stage
 ) -> None:
     """A file covers its stated period and every day it has a row on (OFX's DTSTART/DTEND
-    don't bound its rows the way a PDF's period does)."""
+    don't bound its rows the way a PDF's period does). An export may be taken partway
+    through a day, so it lists in full only the days between its first and last."""
     profile = await _profile(run, format="ofx")
     content = _ofx(
         [("20261120", "-3.50", "A"), ("20261127", "-1.00", "B"), ("20261203", "-2.00", "C")],
@@ -784,6 +785,40 @@ async def test_covered_range_includes_rows_outside_the_period(
 
     b = models.ImportBatch
     covered = (
-        await session.execute(select(b.covered_from, b.covered_to).where(b.id == batch.id))
+        await session.execute(
+            select(b.covered_from, b.covered_to, b.complete_from, b.complete_to).where(
+                b.id == batch.id
+            )
+        )
     ).one()
-    assert tuple(covered) == (date(2026, 11, 20), date(2026, 12, 3))
+    assert tuple(covered) == (
+        date(2026, 11, 20),
+        date(2026, 12, 3),
+        date(2026, 11, 21),
+        date(2026, 12, 2),
+    )
+
+
+async def test_filtered_export_lists_no_day_in_full(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    profile = await _csv_profile(
+        run,
+        columns={"date": "Date", "description": ["Description"], "amount": "Amount"},
+        include_only={"State": ["COMPLETED"]},
+    )
+    content = (
+        "Date,Description,Amount,State\n01/11/2026,Pay,100.00,COMPLETED\n"
+        "03/11/2026,Hotel,-20.00,PENDING\n05/11/2026,Shop,-1.00,COMPLETED\n"
+    )
+    batch = await stage(profile, content)
+
+    b = models.ImportBatch
+    covered = (
+        await session.execute(
+            select(b.covered_from, b.covered_to, b.complete_from, b.complete_to).where(
+                b.id == batch.id
+            )
+        )
+    ).one()
+    assert tuple(covered) == (date(2026, 11, 1), date(2026, 11, 5), None, None)

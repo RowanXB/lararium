@@ -1077,27 +1077,48 @@ async def _mark_duplicates(session: AsyncSession, account_id: UUID, keyed: list[
 type _DayKey = tuple[date, UUID, Decimal]
 
 
-async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: list[_Row]) -> None:
-    """Decision 16: new rows on days a committed batch covers must be among that day's
-    committed rows, matched by (date, instrument, quantity) as a multiset."""
-    b, r = models.ImportBatch, models.ImportRow
-    ranges = [
-        (start, end)
-        for start, end in await session.execute(
-            select(b.covered_from, b.covered_to).where(
-                b.account_id == account_id, b.status == "committed"
-            )
-        )
-        if start is not None and end is not None
-    ]
+type _Range = tuple[date | None, date | None]
 
-    def covered(day: date) -> bool:
-        return any(start <= day <= end for start, end in ranges)
+
+@dataclass(frozen=True)
+class _Coverage:
+    """Decision 16: the days a file covers (its period and its rows' days, first to last),
+    and among them the days it lists in full."""
+
+    covered: _Range
+    complete: _Range
+
+
+async def _match_covered_days(
+    session: AsyncSession, account_id: UUID, rows: list[_Row], own: _Coverage
+) -> None:
+    """Decision 16: on a day this file or a committed batch covers, new rows are matched
+    with that day's committed rows by (date, instrument, quantity) as a multiset. A new row
+    left unmatched on a day a committed batch lists in full contradicts that file, so it is
+    an error; anywhere else it is new (one listing a day partly may lack it). The other
+    direction is _missing_committed_row's."""
+    b, r = models.ImportBatch, models.ImportRow
+    covers: list[_Range] = [own.covered]
+    complete: list[_Range] = []
+    for covered_from, covered_to, complete_from, complete_to in await session.execute(
+        select(b.covered_from, b.covered_to, b.complete_from, b.complete_to).where(
+            b.account_id == account_id, b.status == "committed"
+        )
+    ):
+        covers.append((covered_from, covered_to))
+        complete.append((complete_from, complete_to))
+
+    def within(day: date, ranges: list[_Range]) -> bool:
+        return any(
+            start is not None and end is not None and start <= day <= end for start, end in ranges
+        )
 
     days = {
         row.parsed.booking_date
         for row in rows
-        if row.parsed is not None and row.status == "new" and covered(row.parsed.booking_date)
+        if row.parsed is not None
+        and row.status == "new"
+        and within(row.parsed.booking_date, covers)
     }
     if not days:
         return
@@ -1135,7 +1156,7 @@ async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: lis
             row_id, filename = matches.pop(0)
             row.status, row.duplicate_of = "duplicate", row_id
             row.note = f"already imported from {filename}"
-        else:
+        elif within(row.parsed.booking_date, complete):
             row.fail(OUTSIDE_COVERED_DAY, real=True)
 
 
@@ -1143,12 +1164,12 @@ async def _missing_committed_row(
     session: AsyncSession,
     account_id: UUID,
     rows: list[_Row],
-    covered: tuple[date | None, date | None],
+    complete: _Range,
 ) -> str | None:
-    """Decision 16 the other way: on the days this file covers, every committed statement
-    row must have been matched by a row of this file. Otherwise the ledger would contradict
+    """Decision 16 the other way: on the days this file lists in full, every committed
+    statement row must have been matched by a row of this file. Otherwise the ledger would contradict
     one of the two files; returns the message naming the first such row, or None."""
-    start, end = covered
+    start, end = complete
     if start is None or end is None:
         return None
     matched = {row.duplicate_of for row in rows if row.duplicate_of is not None}
@@ -1231,11 +1252,14 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
             )
         )
     await _mark_duplicates(session, account_id, [row for row in rows if row.status == "new"])
-    await _match_covered_days(session, account_id, rows)
-    covered = await session.execute(select(b.covered_from, b.covered_to).where(b.id == batch_id))
+    found = await session.execute(
+        select(b.covered_from, b.covered_to, b.complete_from, b.complete_to).where(b.id == batch_id)
+    )
+    covered_from, covered_to, complete_from, complete_to = found.one()
+    own = _Coverage((covered_from, covered_to), (complete_from, complete_to))
+    await _match_covered_days(session, account_id, rows, own)
     errors = 0
-    covered_from, covered_to = covered.one()
-    if await _missing_committed_row(session, account_id, rows, (covered_from, covered_to)):
+    if await _missing_committed_row(session, account_id, rows, own.complete):
         errors += 1
     for row, original in zip(rows, stored, strict=True):
         if row.status == "error":
@@ -1371,9 +1395,15 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
     return values
 
 
-def _covered(statement: ParsedStatement, rows: list[_Row]) -> tuple[date | None, date | None]:
-    """Decision 16: the days a file covers, the union of its stated period and its importable
-    rows' days. A period alone isn't enough: OFX rows may fall outside DTSTART..DTEND."""
+def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
+    """Decision 16: the days a file covers, its stated period and its importable rows' days
+    together (OFX rows may fall outside DTSTART..DTEND), and the days it lists in full.
+
+    A statement whose source vouches for its period (a closed, self-checked PDF statement)
+    lists all of it. An export may be taken partway through a day, so it lists in full only
+    the days strictly between its first and last; and one whose include_only filter left
+    rows out (a pending payment, say, that later appears completed) lists no day in full.
+    """
     days = [
         row.parsed.booking_date
         for row in rows
@@ -1384,7 +1414,16 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> tuple[date | None,
     ]
     if statement.period is not None:
         days += list(statement.period)
-    return (min(days), max(days)) if days else (None, None)
+    if not days:
+        return _Coverage((None, None), (None, None))
+    first, last = min(days), max(days)
+    if statement.period_complete:
+        return _Coverage((first, last), (first, last))
+    filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
+    start, end = first + timedelta(days=1), last - timedelta(days=1)
+    if filtered or start > end:
+        return _Coverage((first, last), (None, None))
+    return _Coverage((first, last), (start, end))
 
 
 async def _stage_openings(
@@ -1488,10 +1527,10 @@ async def stage_import(
     rows = _classify(statement)
     instruments = await _resolve_currencies(session, rows, default_currency)
     await _deduplicate(session, account_id, rows)
-    await _match_covered_days(session, account_id, rows)
+    coverage = _covered(statement, rows)
+    await _match_covered_days(session, account_id, rows, coverage)
     _check_chain(rows, row_order)
-    covered_from, covered_to = _covered(statement, rows)
-    missing = await _missing_committed_row(session, account_id, rows, (covered_from, covered_to))
+    missing = await _missing_committed_row(session, account_id, rows, coverage.complete)
     if missing is not None:
         raise ImportNotAllowedError(missing)
 
@@ -1507,8 +1546,10 @@ async def stage_import(
             document_id=document.id,
             filename=filename,
             default_instrument_id=default_instrument_id,
-            covered_from=covered_from,
-            covered_to=covered_to,
+            covered_from=coverage.covered[0],
+            covered_to=coverage.covered[1],
+            complete_from=coverage.complete[0],
+            complete_to=coverage.complete[1],
             owner_entity_id=await get_self_entity_id(session),
         )
         .returning(b.id)

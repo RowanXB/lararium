@@ -180,6 +180,8 @@ class ImportBatch(Base):
     warnings: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'"))
     covered_from: Mapped[date | None]
     covered_to: Mapped[date | None]
+    complete_from: Mapped[date | None]
+    complete_to: Mapped[date | None]
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
