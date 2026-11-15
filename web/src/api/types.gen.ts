@@ -802,6 +802,14 @@ export type ImportStatementOut = {
      */
     account_type: string | null;
     /**
+     * Address
+     */
+    address: string | null;
+    /**
+     * Addressee
+     */
+    addressee: string | null;
+    /**
      * Available Balance
      */
     available_balance: string | null;

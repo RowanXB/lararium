@@ -1745,6 +1745,28 @@
             ],
             "title": "Account Type"
           },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "addressee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addressee"
+          },
           "available_balance": {
             "anyOf": [
               {
@@ -2029,6 +2051,8 @@
           "customer_number",
           "clearing_account_number",
           "branch",
+          "addressee",
+          "address",
           "overdraft_limit",
           "overdraft_limit_date",
           "available_balance",

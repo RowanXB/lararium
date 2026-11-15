@@ -82,6 +82,8 @@ UPGRADE = [
       customer_number text,
       clearing_account_number text,
       branch text,
+      addressee text,
+      address text,
       overdraft_limit numeric {_finite("overdraft_limit")},
       overdraft_limit_date date,
       available_balance numeric {_finite("available_balance")},

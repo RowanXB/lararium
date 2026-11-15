@@ -87,6 +87,10 @@ class StatementAccount:
     customer_number: str | None = None
     clearing_account_number: str | None = None
     branch: str | None = None  # name and address as one text
+    # Whom the statement is addressed to, and their postal address (its lines joined with
+    # ", "), as the mailing block prints them.
+    addressee: str | None = None
+    address: str | None = None
 
     def __post_init__(self) -> None:
         _blank_as_absent(self)

@@ -318,6 +318,8 @@ class ImportStatementOut(_Out):
     customer_number: str | None
     clearing_account_number: str | None
     branch: str | None
+    addressee: str | None
+    address: str | None
     overdraft_limit: DecimalStr | None
     overdraft_limit_date: date | None
     available_balance: DecimalStr | None

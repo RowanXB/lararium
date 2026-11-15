@@ -20,6 +20,7 @@ from lararium.modules.finance.importing.pdf.layout import (
     amount,
     find,
     last_word_of,
+    mailing_block,
     nearest,
     pages,
     parse_date,
@@ -241,9 +242,23 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
     summary = _header(above)
     sort_code = _labelled(above, "Sort Code")
     account_number = _labelled(above, "Account Number")
+    # The mailing block below "Document requested by:"; the right column starts past x 300.
+    requested = next(
+        (n for n, line in enumerate(above) if find(line, "Document requested by:") is not None),
+        None,
+    )
+    addressee, address = (
+        mailing_block(above, requested + 1, Decimal(300))
+        if requested is not None and requested + 1 < len(above)
+        else (None, None)
+    )
     try:
         account = StatementAccount(
-            sort_code=sort_code, account_number=account_number, account_type=summary.product
+            sort_code=sort_code,
+            account_number=account_number,
+            account_type=summary.product,
+            addressee=addressee,
+            address=address,
         )
     except ValueError as error:
         raise FileFormatError(f"the statement's account: {error}") from None

@@ -207,6 +207,8 @@ it("shows warnings, the statement summary and row details", async () => {
         available_balance_date: null,
         bic: null,
         branch: null,
+        addressee: null,
+        address: null,
         clearing_account_number: null,
         customer_number: null,
         document_date: null,

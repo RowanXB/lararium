@@ -28,6 +28,7 @@ from lararium.modules.finance.importing.pdf.layout import (
     amount,
     find,
     last_word_of,
+    mailing_block,
     nearest,
     pages,
     parse_date,
@@ -109,6 +110,10 @@ def _below(lines: list[list[Word]], index: int, start: Decimal, end: Decimal | N
     return text(words) or None
 
 
+# The page's right column (the summary, IBAN and BIC) starts past this.
+_MAILING_X_LIMIT = Decimal(300)
+
+
 def _account(lines: list[list[Word]]) -> StatementAccount | None:
     values: dict[str, str | None] = {}
     margin = Decimal(5)
@@ -131,6 +136,20 @@ def _account(lines: list[list[Word]]) -> StatementAccount | None:
         values["account_number"] = _below(lines, index, number.x0 - margin, sheet.x0 - margin)
     if not values:
         return None
+    # The mailing block: the left column's first lines below "Your Statement".
+    titled = next(
+        (n for n, line in enumerate(lines) if find(line, "Your Statement") is not None), None
+    )
+    start = (
+        None
+        if titled is None
+        else next(
+            (n for n in range(titled + 1, len(lines)) if lines[n][0].x0 < _MAILING_X_LIMIT), None
+        )
+    )
+    addressee, address = (
+        (None, None) if start is None else mailing_block(lines, start, _MAILING_X_LIMIT)
+    )
     try:
         return StatementAccount(
             sort_code=values.get("sort_code"),
@@ -138,6 +157,8 @@ def _account(lines: list[list[Word]]) -> StatementAccount | None:
             iban=values.get("iban"),
             bic=values.get("bic"),
             name=values.get("name"),
+            addressee=addressee,
+            address=address,
         )
     except ValueError as error:
         raise FileFormatError(f"the statement's account: {error}") from None

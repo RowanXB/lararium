@@ -137,6 +137,8 @@ class StatementRecord:
     customer_number: str | None
     clearing_account_number: str | None
     branch: str | None
+    addressee: str | None
+    address: str | None
     overdraft_limit: Decimal | None
     overdraft_limit_date: date | None
     available_balance: Decimal | None
@@ -1590,6 +1592,8 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
         "customer_number": account.customer_number,
         "clearing_account_number": account.clearing_account_number,
         "branch": account.branch,
+        "addressee": account.addressee,
+        "address": account.address,
         "overdraft_limit": statement.overdraft_limit,
         "overdraft_limit_date": statement.overdraft_limit_date,
         "available_balance": statement.available_balance,

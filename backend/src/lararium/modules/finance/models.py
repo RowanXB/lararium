@@ -218,6 +218,8 @@ class ImportStatement(Base):
     customer_number: Mapped[str | None] = mapped_column(Text)
     clearing_account_number: Mapped[str | None] = mapped_column(Text)
     branch: Mapped[str | None] = mapped_column(Text)
+    addressee: Mapped[str | None] = mapped_column(Text)
+    address: Mapped[str | None] = mapped_column(Text)
     overdraft_limit: Mapped[Decimal | None] = mapped_column(Numeric)
     overdraft_limit_date: Mapped[date | None]
     available_balance: Mapped[Decimal | None] = mapped_column(Numeric)

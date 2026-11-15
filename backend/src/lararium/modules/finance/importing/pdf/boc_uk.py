@@ -12,7 +12,7 @@ mid-word when a single word is wider than the column.
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from lararium.modules.finance.errors import FileFormatError
@@ -28,6 +28,7 @@ from lararium.modules.finance.importing.pdf.layout import (
     PrintedBalance,
     amount,
     last_word_of,
+    mailing_block,
     nearest,
     pages,
     parse_date,
@@ -498,7 +499,11 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
         parse_date(values["start"], "%d/%m/%Y", "the statement's start"),
         parse_date(values["end"], "%d/%m/%Y", "the statement's end"),
     )
-    account = _account(values)
+    # The mailing block opens page 1.
+    addressee, address = (
+        mailing_block(lines, 0, Decimal(300)) if lines and lines[0][0].page == 0 else (None, None)
+    )
+    account = replace(_account(values), addressee=addressee, address=address)
     table = _Table(currency=values.get("currency"), branch=values.get("branch"))
     by_page = pages(lines)
     for number in sorted(by_page):

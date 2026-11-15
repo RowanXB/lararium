@@ -569,6 +569,8 @@ def test_statement_account_and_summary_fields() -> None:
         iban="GB99EXAM40123412345678",
         bic="EXAMGB2L",
         name="Mr A Example",
+        addressee="Mr A Example",
+        address="1 Example Street, Exampletown, EX1 2MP",
     )
     assert hsbc.currency == "GBP"
     assert hsbc.statement_reference == "7"
@@ -576,7 +578,11 @@ def test_statement_account_and_summary_fields() -> None:
 
     lloyds = _lloyds(LloydsStatement(rows=LLOYDS_ROWS))
     assert lloyds.account == StatementAccount(
-        sort_code="301234", account_number="12345678", account_type="EXAMPLE CURRENT"
+        sort_code="301234",
+        account_number="12345678",
+        account_type="EXAMPLE CURRENT",
+        addressee="Mr A Example",
+        address="1 Example Street, Exampletown, EX1 2MP",
     )
     assert lloyds.currency == "GBP"
     assert lloyds.document_date == date(2027, 7, 2)
@@ -594,6 +600,8 @@ def test_statement_account_and_summary_fields() -> None:
         branch=(
             "Example Bank (UK) Limited, Example Branch, 1 Example Street, Exampletown, EX1 1AA"
         ),
+        addressee="MR A EXAMPLE",
+        address="1 EXAMPLE STREET, EXAMPLETOWN, EX1 2MP",
     )
     assert boc.currency == "GBP"
     assert boc.statement_reference == "2031007"

@@ -137,6 +137,29 @@ def nearest(word: Word, right_edges: dict[str, Decimal], within: Decimal) -> str
     return column if abs(edge - word.x1) <= within else None
 
 
+def mailing_block(
+    lines: list[list[Word]], start: int, x_limit: Decimal
+) -> tuple[str | None, str | None]:
+    """(addressee, address) from the mailing block whose first line is lines[start]: the
+    run of lines that begin where it begins, each close below the last, read up to x_limit
+    (the statement's other column shares some of those lines). The first line is the
+    addressee; the rest, less lines with nothing but punctuation, the address."""
+    first = lines[start][0]
+    block: list[str] = []
+    previous = first.top
+    for line in lines[start:]:
+        head = line[0]
+        if head.page != first.page or abs(head.x0 - first.x0) > 1 or head.top - previous > 20:
+            break
+        previous = head.top
+        printed = text([word for word in line if word.x0 < x_limit])
+        if any(character.isalnum() for character in printed):
+            block.append(printed)
+    if not block:
+        return None, None
+    return block[0], ", ".join(block[1:]) or None
+
+
 def pages(lines: list[list[Word]]) -> dict[int, list[list[Word]]]:
     by_page: dict[int, list[list[Word]]] = {}
     for line in lines:

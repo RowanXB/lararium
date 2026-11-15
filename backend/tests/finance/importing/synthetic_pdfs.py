@@ -446,6 +446,9 @@ def boc_pdf(statement: BocStatement) -> bytes:
     total = len(statement.pages) + 1
     pdf.text(44.8, 150, "MR A EXAMPLE", size=10, font="Helvetica")
     pdf.text(44.8, 164, "1 EXAMPLE STREET", size=10, font="Helvetica")
+    pdf.text(44.8, 178.5, "EXAMPLETOWN", size=10, font="Helvetica")
+    pdf.text(44.8, 193, ".", size=10, font="Helvetica")  # an empty address line, as BOC prints it
+    pdf.text(44.8, 207.5, "EX1 2MP", size=10, font="Helvetica")
     _boc_label(pdf, 161.1, 309, "Example Bank (UK) Limited/示例银行(英国)有限公司")
     _boc_label(pdf, 211.0, 324, "ACCOUNT STATEMENT/对账单")
     _rule(pdf, 338)
