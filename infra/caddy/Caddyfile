@@ -7,7 +7,13 @@
 	}
 	# API responses are left uncompressed: they are small, and compressing them would put
 	# response secrets and request input in one compressed body (the BREACH pattern).
+	# The api reads a whole request body before it can refuse one (an upload is spooled to
+	# disk before the cross-site check runs), so the body is capped here: a little above
+	# the largest import file (5 MiB) and its multipart framing.
 	handle /api/* {
+		request_body {
+			max_size 6MB
+		}
 		reverse_proxy api:8000
 	}
 	# Vite names each built file by its content hash, so a changed file gets a new name and
