@@ -76,6 +76,13 @@ class DuplicateProfileNameError(FinanceError):
     template = "another import profile is already named {}"
 
 
+class FileFormatError(FinanceError):
+    """An imported file can't be read as a whole (wrong encoding, missing columns, no rows).
+
+    Raised with the whole message, which says what is wrong with the file.
+    """
+
+
 class LedgerImbalanceError(FinanceError):
     """Postings do not sum to zero per instrument; residuals maps instrument id to the sum."""
 

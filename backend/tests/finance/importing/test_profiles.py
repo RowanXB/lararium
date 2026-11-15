@@ -154,3 +154,29 @@ async def test_list_orders_names_case_insensitively(session, run) -> None:
     for name in ["beta", "Alpha", "Gamma"]:
         await run(create_profile, name=name, config=config)
     assert [p.name for p in await list_profiles(session)] == ["Alpha", "beta", "Gamma"]
+
+
+def test_typed_field_columns_checked_against_header() -> None:
+    typed = {
+        "value_date": "Value Date",
+        "payee": "Payee",
+        "memo": "Memo",
+        "check_number": "Cheque",
+        "counterparty_name": "Name",
+        "counterparty_sort_code": "Their Sort Code",
+        "counterparty_account_number": "Their Account",
+        "reference": "Reference",
+        "account_sort_code": "Sort Code",
+        "account_number": "Account Number",
+    }
+    base = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    columns = CsvColumns.model_validate(base | typed)
+    assert set(typed.values()) <= set(columns.names())
+    header = ["Date", "Description", "Amount", *typed.values()]
+    config = PROFILE_CONFIG.validate_python(_csv(columns=base | typed, header=header))
+    assert config.columns.reference == "Reference"
+    for name in typed.values():
+        with pytest.raises(ValidationError, match=name):
+            PROFILE_CONFIG.validate_python(
+                _csv(columns=base | typed, header=[h for h in header if h != name])
+            )

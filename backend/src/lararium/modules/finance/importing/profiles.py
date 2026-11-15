@@ -105,6 +105,17 @@ class CsvColumns(BaseModel):
     external_id: str | None = None
     fee: str | None = None
     type: str | None = None  # the bank's transaction type
+    value_date: str | None = None
+    payee: str | None = None
+    memo: str | None = None
+    check_number: str | None = None
+    counterparty_name: str | None = None
+    counterparty_sort_code: str | None = None
+    counterparty_account_number: str | None = None
+    reference: str | None = None  # the payment's reference, part of the counterparty
+    # The statement's own account; every row must name the same one.
+    account_sort_code: str | None = None
+    account_number: str | None = None
 
     @model_validator(mode="after")
     def _amount_xor_inflow_outflow(self) -> Self:
@@ -126,6 +137,16 @@ class CsvColumns(BaseModel):
             self.external_id,
             self.fee,
             self.type,
+            self.value_date,
+            self.payee,
+            self.memo,
+            self.check_number,
+            self.counterparty_name,
+            self.counterparty_sort_code,
+            self.counterparty_account_number,
+            self.reference,
+            self.account_sort_code,
+            self.account_number,
         ]
         return [self.date, *self.description, *(name for name in optional if name is not None)]
 

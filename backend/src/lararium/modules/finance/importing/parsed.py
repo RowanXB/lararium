@@ -1,0 +1,152 @@
+"""What a parser reads from a statement file, before staging: shared by every format."""
+
+import re
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+
+from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.importing.profiles import AmountFormat
+from lararium.modules.finance.money import require_amount
+
+MAX_IMPORT_ROWS = 20_000
+MAX_DESCRIPTION_LENGTH = 1000
+
+_CURRENCY_SYMBOLS = ("£", "$", "€")
+_PLAIN_AMOUNT = re.compile(r"[0-9]+(\.[0-9]+)?")
+_DIGITS = re.compile(r"[0-9]+")
+# Written between digit groups, e.g. "12-34-56" or "1234 5678"; a leading "'" is how
+# spreadsheets mark a cell as text.
+_ACCOUNT_SEPARATORS = re.compile(r"[ -]")
+
+
+def _digits(text: str, what: str) -> str:
+    digits = _ACCOUNT_SEPARATORS.sub("", text.strip().removeprefix("'"))
+    if not _DIGITS.fullmatch(digits):
+        raise ValueError(f"not {what}: {text!r}")
+    return digits
+
+
+def normalise_sort_code(text: str | None) -> str | None:
+    """Six digits with no separators."""
+    if text is None:
+        return None
+    digits = _digits(text, "a sort code")
+    if len(digits) != 6:
+        raise ValueError(f"not a sort code: {text!r}")
+    return digits
+
+
+def normalise_account_number(text: str | None) -> str | None:
+    """The account number's digits."""
+    return None if text is None else _digits(text, "an account number")
+
+
+@dataclass(frozen=True)
+class Counterparty:
+    """The other side of a payment, as the file states it (M4's counterparty details)."""
+
+    name: str | None = None
+    sort_code: str | None = None
+    account_number: str | None = None
+    reference: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
+        object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
+
+
+@dataclass(frozen=True)
+class StatementAccount:
+    """The account a statement is for, as the file states it."""
+
+    sort_code: str | None
+    account_number: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
+        object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
+
+
+@dataclass(frozen=True)
+class ParsedRow:
+    """One transaction. quantity is in ledger sign (inflow positive); the account's balance
+    changes by quantity - fee. occurred_at is aware when the file gives a time, else None."""
+
+    position: int
+    booking_date: date
+    occurred_at: datetime | None
+    description: str
+    quantity: Decimal
+    fee: Decimal
+    currency: str | None
+    balance: Decimal | None
+    external_id: str | None
+    bank_type: str | None
+    raw: dict[str, str]
+    value_date: date | None = None
+    payee: str | None = None
+    memo: str | None = None
+    check_number: str | None = None
+    counterparty: Counterparty | None = None
+
+
+@dataclass(frozen=True)
+class RowError:
+    position: int
+    message: str
+    raw: dict[str, str]
+
+
+@dataclass(frozen=True)
+class SkippedRow:
+    """A row the profile's include_only filter leaves out."""
+
+    position: int
+    reason: str
+    raw: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ParsedStatement:
+    rows: list[ParsedRow | RowError | SkippedRow]
+    closing_balance: Decimal | None = None
+    closing_balance_date: date | None = None
+    period: tuple[date, date] | None = None
+    opening_balance: Decimal | None = None
+    money_in: Decimal | None = None
+    money_out: Decimal | None = None
+    payments_in: int | None = None
+    payments_out: int | None = None
+    account: StatementAccount | None = None
+
+
+def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
+    """An amount as a bank writes it: "-£1,234.50", "(12.00)", "+85"; ValueError otherwise."""
+    body = text.strip()
+    negative = False
+    if body.startswith("(") and body.endswith(")"):
+        negative = True
+        body = body[1:-1]
+    elif body[:1] in ("+", "-"):
+        negative = body[0] == "-"
+        body = body[1:]
+    if body.startswith(_CURRENCY_SYMBOLS):
+        body = body[1:]
+    if fmt.thousands_separator:
+        body = body.replace(fmt.thousands_separator, "")
+    if fmt.decimal_separator != ".":
+        body = body.replace(fmt.decimal_separator, ".")
+    if not _PLAIN_AMOUNT.fullmatch(body):
+        raise ValueError(f"not an amount: {text!r}")
+    value = Decimal(body)
+    try:
+        require_amount("an amount", value)
+    except FinanceValidationError as error:
+        raise ValueError(f"not an amount: {text!r} ({error})") from None
+    # 0 - value, not -value: keeps "(0.00)" from becoming -0.00.
+    return Decimal(0) - value if negative else value
+
+
+def clean_description(parts: list[str]) -> str:
+    return " ".join(" ".join(parts).split())[:MAX_DESCRIPTION_LENGTH]
