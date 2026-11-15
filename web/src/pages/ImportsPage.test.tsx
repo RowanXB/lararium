@@ -10,6 +10,7 @@ import { ImportsPage } from "./ImportsPage";
 const GBP_ID = "0190a0b0-0000-7000-8000-0000000000b1";
 const CURRENT_ID = "0190a0b0-0000-7000-8000-000000000001";
 const PROFILE_ID = "0190a0b0-0000-7000-8000-0000000000d1";
+const PDF_PROFILE_ID = "0190a0b0-0000-7000-8000-0000000000d2";
 const BATCH_ID = "0190a0b0-0000-7000-8000-0000000000e1";
 
 const navigate = vi.fn();
@@ -104,6 +105,13 @@ vi.mock("../api", () => ({
           columns: { date: "Date", description: ["Description"], amount: "Amount" },
           date_format: "%d/%m/%Y",
         },
+      },
+      {
+        id: "0190a0b0-0000-7000-8000-0000000000d2",
+        name: "Example Bank PDF",
+        version: 1,
+        updated_at: "2026-11-01T10:00:00Z",
+        config: { format: "pdf", layout: "boc_uk_statement" },
       },
     ],
   })),
@@ -211,4 +219,34 @@ it("lists batches with their account and counts", async () => {
   expect(cells.getByText("Example Bank current")).toBeInTheDocument();
   expect(cells.getByText("Committed")).toBeInTheDocument();
   expect(cells.getByText("12 committed · 1 duplicate")).toBeInTheDocument();
+});
+
+it("leaves the currency to the file for a PDF profile", async () => {
+  const user = userEvent.setup();
+  const form = await uploadForm();
+  await choose(form, "Account", "Example Bank current");
+  await choose(form, "Profile", "Example Bank PDF");
+  await choose(form, "Currency", "From the file");
+  const file = new File(["%PDF-1.4"], "example.pdf", { type: "application/pdf" });
+  await user.upload(form.getByLabelText("File"), file);
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  expect(stageImport).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: { account_id: CURRENT_ID, profile_id: PDF_PROFILE_ID, file },
+    }),
+  );
+});
+
+it("falls back to the reporting currency for a profile that can't state one", async () => {
+  const form = await uploadForm();
+  await choose(form, "Profile", "Example Bank PDF");
+  await choose(form, "Currency", "From the file");
+  await choose(form, "Profile", "Example Bank CSV");
+
+  const currency = form.getByRole("combobox", { name: "Currency" });
+  expect(currency).toHaveTextContent("GBP");
+  const user = userEvent.setup();
+  await user.click(currency);
+  expect(screen.queryByRole("option", { name: "From the file" })).toBeNull();
 });

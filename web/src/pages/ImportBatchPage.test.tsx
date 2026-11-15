@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 import {
   commitImport,
+  discardImport,
   getImportBatch,
   type ImportBatchDetailOut,
   type ImportRowOut,
@@ -104,6 +105,7 @@ function batch(overrides: Partial<ImportBatchDetailOut> = {}): ImportBatchDetail
 
 beforeEach(() => {
   vi.mocked(commitImport).mockClear();
+  vi.mocked(discardImport).mockClear();
   vi.mocked(rollbackImport).mockClear();
 });
 
@@ -284,4 +286,23 @@ it("formats rows in hidden currencies too", async () => {
     }),
   );
   expect(await screen.findByText("-US$12.30")).toBeInTheDocument();
+});
+
+it("discards a staged batch", async () => {
+  const user = userEvent.setup();
+  show(batch());
+  await user.click(await screen.findByRole("button", { name: "Discard" }));
+  expect(discardImport).toHaveBeenCalledWith(
+    expect.objectContaining({ path: { batch_id: BATCH_ID } }),
+  );
+});
+
+it("shows the note on a skipped row", async () => {
+  show(
+    batch({
+      counts: { skipped: 1 },
+      rows: [row(0, { status: "skipped", quantity: "0.00", note: "zero amount" })],
+    }),
+  );
+  expect(await screen.findByText("zero amount")).toBeInTheDocument();
 });
