@@ -77,16 +77,34 @@ def test_documents_share_the_dumps_timestamp(tmp_path: Path) -> None:
 
 def test_a_missing_api_fails_the_backup(tmp_path: Path) -> None:
     # Without the api container the documents can't be read: no finished backup may claim
-    # to be complete, neither the dump nor the tar.
+    # to be complete, neither the dump nor the tar, and the partial files are removed, so
+    # restic never backs up a half-written one.
     assert _run(tmp_path, api_down=True) != 0
-    finished = [p.name for p in (tmp_path / "backups").iterdir() if not p.name.endswith(".partial")]
-    assert finished == []
+    assert list((tmp_path / "backups").iterdir()) == []
 
 
 def test_script_tars_the_document_dir_through_partial_files() -> None:
     script = BACKUP_SCRIPT.read_text()
-    assert "exec -T api tar -C /var/lib/lararium/documents -cf - ." in script
+    # .tmp-* files are uploads being written (LocalDocumentStore renames them into place).
+    assert "exec -T api tar -C /var/lib/lararium/documents --exclude='.tmp-*' -cf - ." in script
     umask = script.index("umask 077")
     for output in ('> "$out.partial"', '> "$out_docs.partial"'):
         assert umask < script.index(output), output
     assert script.index('> "$out_docs.partial"') < script.index('mv "$out_docs.partial"')
+
+
+def test_tmp_exclude_skips_files_being_written(tmp_path: Path) -> None:
+    # The pattern the script passes to tar leaves out a half-written upload in a shard dir.
+    shard = tmp_path / "ab" / "cd"
+    shard.mkdir(parents=True)
+    (shard / ("ab" * 32)).write_bytes(b"done")
+    (shard / ".tmp-x1y2").write_bytes(b"half")
+    listing = subprocess.run(
+        ["tar", "-C", str(tmp_path), "--exclude=.tmp-*", "-cf", "-", "."],
+        capture_output=True,
+        check=True,
+    ).stdout
+    names = subprocess.run(
+        ["tar", "-tf", "-"], input=listing, capture_output=True, check=True
+    ).stdout.decode()
+    assert "ab" * 32 in names and ".tmp-" not in names

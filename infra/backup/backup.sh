@@ -28,9 +28,14 @@ out="$BACKUP_DIR/lararium-$stamp.dump"
 out_docs="$BACKUP_DIR/documents-$stamp.tar"
 # Write to temporary names first so a failed dump never looks like a good backup. Both are
 # moved into place only once both are written: without the api container (stopped, say) the
-# exec fails, and set -e stops here rather than leave a dump without its documents.
+# exec fails, and set -e stops here rather than leave a dump without its documents. A failed
+# run removes its partial files, so restic never backs one up; after the moves, rm finds
+# nothing.
+trap 'rm -f "$out.partial" "$out_docs.partial"' EXIT
 "${compose[@]}" exec -T db pg_dump -U postgres -d lararium --format=custom > "$out.partial"
-"${compose[@]}" exec -T api tar -C /var/lib/lararium/documents -cf - . > "$out_docs.partial"
+# .tmp-* files are uploads still being written; LocalDocumentStore renames them into place.
+"${compose[@]}" exec -T api tar -C /var/lib/lararium/documents --exclude='.tmp-*' -cf - . \
+  > "$out_docs.partial"
 mv "$out.partial" "$out"
 mv "$out_docs.partial" "$out_docs"
 echo "wrote $out"
