@@ -10,7 +10,11 @@ from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
-from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.modules.finance.errors import (
+    AccountAlreadyClosedError,
+    AccountNotFoundError,
+    FinanceValidationError,
+)
 
 LedgerType = Literal["asset", "liability", "income", "expense", "equity"]
 AccountSubtype = Literal[
@@ -193,4 +197,33 @@ async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) 
         raise AccountAlreadyClosedError(str(account_id))
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.closed", record)
+    return record
+
+
+async def set_balance_mode(
+    ctx: CommandContext, account_id: UUID, mode: BalanceMode
+) -> AccountRecord:
+    """Switch a snapshots account to hybrid, the only change allowed.
+
+    Hybrid values it exactly as before (the latest snapshot) plus whatever is posted after
+    it; any other change would revalue its history. The current mode is a no-op.
+    """
+    record = await get_account(ctx.session, account_id)
+    if record.balance_mode == mode:
+        return record
+    if (record.balance_mode, mode) != ("snapshots", "hybrid"):
+        raise FinanceValidationError(
+            f"an account can only switch from snapshots to hybrid, not from"
+            f" {record.balance_mode} to {mode}"
+        )
+    # Conditional update, so a concurrent switch can't apply twice.
+    switched = await ctx.session.scalar(
+        update(models.Account)
+        .where(models.Account.id == account_id, models.Account.balance_mode == "snapshots")
+        .values(balance_mode=mode)
+        .returning(models.Account.id)
+    )
+    record = await get_account(ctx.session, account_id)
+    if switched is not None:
+        _publish(ctx, "finance.account.updated", record)
     return record

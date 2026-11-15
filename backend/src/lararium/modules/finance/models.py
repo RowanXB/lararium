@@ -57,6 +57,19 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AccountIdentifier(Base):
+    __tablename__ = "account_identifiers"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    kind: Mapped[str] = mapped_column(Text)
+    value: Mapped[str] = mapped_column(Text)
+    # The actor type that registered it (the owner's "user", or a "connector").
+    created_by: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = FINANCE_SCHEMA

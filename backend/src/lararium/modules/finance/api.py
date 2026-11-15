@@ -54,7 +54,15 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.AccountNotFoundError: (status.HTTP_404_NOT_FOUND, "account_not_found"),
     errors.InstrumentNotFoundError: (status.HTTP_404_NOT_FOUND, "instrument_not_found"),
     errors.TransactionNotFoundError: (status.HTTP_404_NOT_FOUND, "transaction_not_found"),
+    errors.AccountIdentifierNotFoundError: (
+        status.HTTP_404_NOT_FOUND,
+        "account_identifier_not_found",
+    ),
     errors.DuplicateIdentifierError: (status.HTTP_409_CONFLICT, "duplicate_identifier"),
+    errors.DuplicateAccountIdentifierError: (
+        status.HTTP_409_CONFLICT,
+        "duplicate_account_identifier",
+    ),
     errors.AccountAlreadyClosedError: (status.HTTP_409_CONFLICT, "account_already_closed"),
     errors.FinanceValidationError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_input"),
     errors.UnknownCurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "unknown_currency"),

@@ -52,6 +52,18 @@ class AccountNotFoundError(FinanceError):
     template = "no account has the id {}"
 
 
+class DuplicateAccountIdentifierError(FinanceError):
+    """An account identifier (kind, value) already belongs to an account, given by name."""
+
+    template = "this identifier already belongs to the account {}"
+
+
+class AccountIdentifierNotFoundError(FinanceError):
+    """No account identifier has the given id."""
+
+    template = "no account identifier has the id {}"
+
+
 class AccountAlreadyClosedError(FinanceError):
     """The account is already closed."""
 
