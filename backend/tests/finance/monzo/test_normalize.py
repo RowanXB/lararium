@@ -1309,7 +1309,6 @@ def _set(path: str, value: object) -> Callable[[dict[str, Any]], None]:
         ("local_amount", "-1234", "tx.original_quantity"),
         ("local_currency", 826, "tx.original_instrument_id"),
         ("merchant", "merch_TEST1", "tx.place_entity_id"),
-        ("merchant.name", 7, "tx.place_entity_id"),
         ("merchant.id", 7, "tx.place_entity_id"),
         ("merchant.address", "1 Test Street", "place.address_street"),
         ("merchant.address.city", 7, "place.address_city"),
@@ -1390,6 +1389,85 @@ async def test_unreadable_account_and_pot_fields_keep_their_value(
 
     assert getattr(await get_account(session, target), field_name) == kept
     assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+@pytest.mark.parametrize("name", [7, None], ids=["unreadable", "absent"])
+async def test_a_merchant_without_a_readable_name_still_gets_its_place(
+    session, run, name: object
+) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(merchant=make_merchant(id="merch_TEST1", name=name))
+
+    await _normalize(session, connection, transactions=[payment])
+
+    (tx,) = await _transactions(session)
+    assert tx.counterparty_entity_id is None  # a brand is known by its name
+    place = await session.get_one(Entity, (await _details(session, tx.id)).place_entity_id)
+    assert (place.name, place.address_street) == ("merch_TEST1", "1 Test Street")
+    warned = [UNMAPPED.format("merchant.name")] if name is not None else []
+    assert await _warnings(session, connection) == warned
+
+
+async def test_a_decline_with_an_unreadable_reason_is_recorded_not_posted(session, run) -> None:
+    connection = await _connection(run)
+    declined = make_transaction(settled="", decline_reason={"code": "INSUFFICIENT_FUNDS"})
+
+    report = await _normalize(session, connection, transactions=[declined])
+
+    assert report == NormalizeReport(skipped_declined=1)
+    assert await _transactions(session) == []
+    assert [(r.external_id, r.decline_reason) for r in await _declined(session)] == [
+        ("tx_TEST0001", "")
+    ]
+    assert await _warnings(session, connection) == [UNMAPPED.format("decline_reason")]
+
+
+async def test_the_newest_statement_about_a_merchant_wins(session, run) -> None:
+    connection = await _connection(run)
+
+    def payment(n: int, day: int, mcc: str) -> dict[str, Any]:
+        return make_transaction(
+            id=f"tx_TEST000{n}",
+            created=f"2026-03-0{day}T12:00:00.000Z",
+            updated=f"2026-03-0{day}T12:00:00.000Z",
+            merchant=make_merchant(),
+            metadata={"mcc": mcc},
+        )
+
+    # The older one first: the order a sync meets them in does not decide.
+    await _normalize(
+        session, connection, transactions=[payment(1, 2, "5411"), payment(2, 3, "5499")]
+    )
+    (first, _) = await _transactions(session)
+    place = await session.get_one(
+        Entity, (await _details(session, first.id)).place_entity_id, populate_existing=True
+    )
+    assert place.mcc == "5499"
+
+
+async def test_the_replay_does_not_override_newer_merchant_facts(session, run) -> None:
+    connection = await _connection(run)
+    older = make_transaction(
+        merchant=make_merchant(), metadata={"mcc": "5411"}, updated="2026-03-01T12:00:00.000Z"
+    )
+    await _normalize(session, connection, transactions=[older])
+    await run(_before_structured_fields, connection)
+    newer = make_transaction(
+        id="tx_TEST0002",
+        created="2026-03-05T12:00:00.000Z",
+        updated="2026-03-05T12:00:00.000Z",
+        merchant=make_merchant(),
+        metadata={"mcc": "5499"},
+    )
+
+    # The replay meets the older copy before this sync's own page.
+    await _normalize(session, connection, transactions=[newer])
+
+    place_ids = {
+        (await _details(session, r.id)).place_entity_id for r in await _transactions(session)
+    }
+    (place_id,) = place_ids
+    assert (await session.get_one(Entity, place_id, populate_existing=True)).mcc == "5499"
 
 
 async def test_a_reversed_transaction_still_records_its_merchant(session, run) -> None:

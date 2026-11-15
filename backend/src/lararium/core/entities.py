@@ -101,13 +101,18 @@ def _details_of(place: Entity) -> PlaceDetails:
 
 
 async def get_or_create_place(
-    ctx: CommandContext, name: str, *, external_id: tuple[str, str], details: PlaceDetails
+    ctx: CommandContext,
+    name: str | None,
+    *,
+    external_id: tuple[str, str],
+    details: PlaceDetails,
 ) -> UUID:
     """Return the place carrying the external id (scheme, value), creating it if none.
 
     The name and the details the source gives are brought in line with what it now says,
-    recording a change when they differ; a detail given as None keeps the stored value. A place
-    is never matched to an organization, or by name.
+    recording a change when they differ; a name or detail given as None keeps the stored
+    value (a new place without a name is named by its external id). A place is identified by
+    its external id alone: never matched to an organization, or by name.
 
     Concurrent callers are serialised on the external id; call it in a short transaction, as
     the lock is held until it commits.
@@ -129,15 +134,18 @@ async def get_or_create_place(
     if place is None:
         place = Entity(
             kind="place",
-            name=name,
+            name=name if name is not None else value,
             external_ids={scheme: value},
             owner_entity_id=await get_self_entity_id(ctx.session),
             **asdict(details),
         )
         ctx.session.add(place)
         await ctx.session.flush()
-    elif place.name != name or any(getattr(place, field) != new for field, new in given.items()):
-        place.name = name
+    elif (name is not None and place.name != name) or any(
+        getattr(place, field) != new for field, new in given.items()
+    ):
+        if name is not None:
+            place.name = name
         for field, new in given.items():
             setattr(place, field, new)
         await ctx.session.flush()
