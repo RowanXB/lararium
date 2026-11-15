@@ -8,7 +8,7 @@ what it decides about them, and lets matching bring the ledger in line."""
 
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, delete, or_, update
+from sqlalchemy import and_, delete, or_, update
 from sqlalchemy.dialects.postgresql import insert
 
 from lararium.core.commands import CommandContext
@@ -17,6 +17,8 @@ from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import delete_derived_transaction
 from lararium.modules.finance.transfers.contra import source_ref
 from lararium.modules.finance.transfers.engine import (
+    decision_change_key,
+    forget_decisions,
     heal_transfers,
     lock_transfers,
     match_transaction,
@@ -36,10 +38,6 @@ def _records(transfer: TransferRecord) -> list[UUID]:
     return [
         leg for leg in (transfer.out_transaction_id, transfer.in_transaction_id) if leg is not None
     ]
-
-
-def _change_key(kind: str, subject: tuple[str, str], other: tuple[str | None, str | None]) -> str:
-    return f"transfer_decision:{kind}:{subject[0]}:{subject[1]}:{other[0]}:{other[1]}"
 
 
 async def _store(
@@ -65,36 +63,8 @@ async def _store(
     )
     if stored is not None:
         ctx.record_change(
-            _change_key(kind, subject, (other_kind, other_ref)),
+            decision_change_key(kind, subject, (other_kind, other_ref)),
             {"before": None, "after": {"id": str(stored), "kind": kind}},
-        )
-
-
-async def _forget(
-    ctx: CommandContext, kind: str, first: tuple[str, str], second: tuple[str, str] | None = None
-) -> None:
-    """Delete the decisions of this kind about the record (reject), or about the two
-    records either way round (pair, never_pair)."""
-    d = models.TransferDecision
-
-    def about(subject: tuple[str, str], other: tuple[str, str] | None) -> ColumnElement[bool]:
-        condition = and_(d.subject_kind == subject[0], d.subject_ref == subject[1])
-        if other is None:
-            return condition
-        return and_(condition, d.other_kind == other[0], d.other_ref == other[1])
-
-    which = (
-        about(first, None) if second is None else or_(about(first, second), about(second, first))
-    )
-    deleted = await ctx.session.execute(
-        delete(d)
-        .where(d.kind == kind, which)
-        .returning(d.id, d.subject_kind, d.subject_ref, d.other_kind, d.other_ref)
-    )
-    for row in deleted:
-        ctx.record_change(
-            _change_key(kind, (row.subject_kind, row.subject_ref), (row.other_kind, row.other_ref)),
-            {"before": {"id": str(row.id), "kind": kind}, "after": None},
         )
 
 
@@ -143,7 +113,7 @@ async def unreject(ctx: CommandContext, transfer_id: UUID) -> None:
         raise FinanceValidationError("only a rejected transfer can be unrejected")
     records = _records(transfer)
     for record_id in records:
-        await _forget(ctx, "reject", await source_ref(session, record_id))
+        await forget_decisions(ctx, "reject", await source_ref(session, record_id))
     tr = models.Transfer
     await session.execute(delete(tr).where(tr.id == transfer_id))
     publish_transfer(ctx, "finance.transfer.unrejected", transfer_id, transfer, None)
@@ -162,7 +132,7 @@ async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
         raise FinanceValidationError("only a matched transfer of two own records can be unpaired")
     sent, received = _records(transfer)
     sent_ref, received_ref = await source_ref(session, sent), await source_ref(session, received)
-    await _forget(ctx, "pair", sent_ref, received_ref)
+    await forget_decisions(ctx, "pair", sent_ref, received_ref)
     await _store(ctx, "never_pair", sent_ref, received_ref)
     await _store(ctx, "never_pair", received_ref, sent_ref)
     # Matching the sender dissolves the transfer, and matches the receiver after it.
@@ -195,7 +165,7 @@ async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> 
         await source_ref(session, present),
         await source_ref(session, transaction_id),
     )
-    await _forget(ctx, "never_pair", present_ref, chosen_ref)
+    await forget_decisions(ctx, "never_pair", present_ref, chosen_ref)
     await _store(ctx, "pair", present_ref, chosen_ref)
     await match_transaction(ctx, present)
     await heal_transfers(ctx)

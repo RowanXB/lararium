@@ -5,9 +5,10 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import insert, text
 from sqlalchemy.exc import IntegrityError
 
+from lararium.modules.finance import models
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -28,6 +29,7 @@ from lararium.modules.finance.transfers import (
 
 from .conftest import (
     B_IDENTIFIER,
+    C_IDENTIFIER,
     WHEN,
     assert_consistent,
     balances_on,
@@ -298,3 +300,110 @@ async def test_weekly_transfers_each_match_their_own_week(
     assert await placeholders(session) == []
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_preview_match_reads_the_relation_matching_does(
+    session, run, gbp, inferred, registered, connector_tx, import_row, heal
+) -> None:
+    _, b, b_identifier, sent, transfer = inferred
+    # C's payment to B is already matched with B's row naming C (mutually identified), so
+    # its strongest pair is that one, and a new row naming nobody pairs only with A's.
+    c, c_identifier = await registered("C", C_IDENTIFIER)
+    await connector_tx(
+        c,
+        "-100",
+        external_id="c_out",
+        occurred_at=WHEN + timedelta(hours=1),
+        identifier_id=b_identifier,
+    )
+    contra = await transfer_contra(
+        session, source=None, own_account_id=b.id, counterparty_identifier_id=c_identifier
+    )
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=WHEN + timedelta(hours=2),
+            description="Faster payment from C",
+            origin="manual",
+            postings=[
+                PostingInput(b.id, gbp.id, Decimal(100)),
+                PostingInput(contra, gbp.id, Decimal(-100)),
+            ],
+            counterparty=CounterpartyFields(identifier_id=c_identifier, bank_transfer=True),
+        ),
+    )
+    await heal()
+    assert sorted(t.status for t in await list_transfers(session)) == ["inferred", "matched"]
+
+    previewed = await preview_match(
+        session,
+        account_id=b.id,
+        instrument_id=gbp.id,
+        quantity=Decimal(100),
+        occurred_at=ROW_AT,
+        counterparty=CounterpartyFields(bank_transfer=True),
+    )
+
+    assert previewed == transfer
+    # Posting the row does link it into A's transfer, as previewed.
+    row = await import_row(b)
+    await heal()
+    [linked] = [t for t in await list_transfers(session) if t.out_transaction_id == sent.id]
+    assert (linked.status, linked.in_transaction_id) == ("matched", row.id)
+
+
+async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) -> None:
+    *_, sent, transfer = inferred
+    ref = ("import", "statement_1:row_7")  # the stable reference a re-imported row keeps
+
+    async def preview(source=ref):
+        return await preview_match(
+            session,
+            account_id=inferred[1].id,
+            instrument_id=gbp.id,
+            quantity=Decimal(100),
+            occurred_at=ROW_AT,
+            counterparty=CounterpartyFields(bank_transfer=True),
+            source=source,
+        )
+
+    assert await preview() == transfer
+    d = models.TransferDecision
+    sent_ref = await source_ref(session, sent.id)
+    never = await session.scalar(
+        insert(d)
+        .values(
+            kind="never_pair",
+            subject_kind=sent_ref[0],
+            subject_ref=sent_ref[1],
+            other_kind=ref[0],
+            other_ref=ref[1],
+        )
+        .returning(d.id)
+    )
+    assert await preview() is None  # the owner unpaired them
+    assert await preview(source=None) == transfer  # another row is not
+    await session.execute(
+        text("delete from finance.transfer_decisions where id = :d"), {"d": never}
+    )
+    await session.execute(insert(d).values(kind="reject", subject_kind=ref[0], subject_ref=ref[1]))
+    assert await preview() is None  # the owner said the row is no transfer
+
+
+async def test_unlink_from_a_rejected_transfer_drops_the_rows_rejection(
+    session, run, imported
+) -> None:
+    _, _, _, record, row = imported
+    [transfer] = await list_transfers(session)
+    await run(reject, transfer.id)
+    record_ref = await source_ref(session, record.id)
+
+    await run(unlink_transaction, row.id)
+
+    # A re-imported row comes back under the transfer's current state, not its old reject.
+    rejected = await session.execute(
+        text(
+            "select subject_kind, subject_ref from finance.transfer_decisions where kind = 'reject'"
+        )
+    )
+    assert [tuple(r) for r in rejected] == [record_ref]

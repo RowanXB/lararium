@@ -26,25 +26,34 @@ _ACCOUNTS: dict[SystemAccountKey, tuple[str, LedgerType, AccountSubtype, Balance
 }
 
 
+async def _existing(session: AsyncSession, setting_key: str) -> UUID | None:
+    try:
+        value = await get_setting(session, setting_key)
+    except SettingNotFoundError:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{setting_key} must be an account id string, got {value!r}")
+    return UUID(value)
+
+
 async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKey) -> UUID:
     """An account the ledger itself keeps: Unassigned and Opening balances, equity accounts
     (outside net worth) standing in for the unknown side of a connector's transactions, and
     In transit, the asset holding a transfer between own accounts until both sides are in.
     Its id is remembered in finance.system_account.<key>.
 
-    Concurrent callers (syncs of different connections) are serialised on the key, so only
-    one creates it; call it in a short transaction, as the lock is held until it commits.
+    Concurrent callers (syncs of different connections) creating it are serialised on the
+    key, so only one creates it, and the lock is held until that transaction commits. Once
+    it exists, it is read without a lock, so a long transaction (a heal) holds none.
     """
     setting_key = f"finance.system_account.{key}"
+    found = await _existing(ctx.session, setting_key)
+    if found is not None:
+        return found
     await ctx.session.execute(select(func.pg_advisory_xact_lock(func.hashtext(setting_key))))
-    try:
-        value = await get_setting(ctx.session, setting_key)
-    except SettingNotFoundError:
-        pass
-    else:
-        if not isinstance(value, str):
-            raise ValueError(f"{setting_key} must be an account id string, got {value!r}")
-        return UUID(value)
+    found = await _existing(ctx.session, setting_key)
+    if found is not None:
+        return found
     name, ledger_type, subtype, balance_mode = _ACCOUNTS[key]
     account = await create_account(
         ctx, name=name, ledger_type=ledger_type, subtype=subtype, balance_mode=balance_mode

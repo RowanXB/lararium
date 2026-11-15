@@ -278,6 +278,7 @@ async def pair_relation(
     settings: TransferSettings,
     *,
     excluding: Collection[UUID] = (),
+    adding: Collection[Pairable] = (),
 ) -> PairRelation:
     """The pair relation as the ledger stands: the single definition matching, heal and
     review all use.
@@ -288,9 +289,11 @@ async def pair_relation(
     account; each other one is a bank transfer; and neither is rejected nor decided never
     to pair with the other. The owner pairs two records with a pair decision.
 
-    `excluding` leaves records out as if they were gone (a row about to be deleted)."""
+    `excluding` leaves records out as if they were gone (a row about to be deleted);
+    `adding` puts records in as if they were posted (a row being staged), decisions about
+    their references included."""
     decisions = await _load_decisions(session)
-    records = await _load_records(session, system, decisions, excluding)
+    records = await _load_records(session, system, decisions, excluding) + list(adding)
     same, differing = _registry_edges(records, settings, decisions)
     _decided_edges(records, decisions, same)
     best = {r: min(found.values()) for r, found in same.tiers.items()}

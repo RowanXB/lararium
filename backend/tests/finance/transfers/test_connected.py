@@ -1,13 +1,13 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import insert, text
 
 from lararium.core.actors import Actor
-from lararium.core.commands import command_context
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import create_connection
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance import models
@@ -19,15 +19,22 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     upsert_connector_transaction,
+    void_transaction,
 )
-from lararium.modules.finance.system_accounts import get_or_create_system_account
+from lararium.modules.finance.system_accounts import (
+    get_or_create_system_account,
+    system_account_ids,
+)
 from lararium.modules.finance.transfers import (
     candidates,
     find_transfer_violations,
     heal_transfers,
     list_transfers,
+    load_transfer_settings,
     transfer_contra,
 )
+from lararium.modules.finance.transfers import engine as transfer_engine
+from lararium.modules.finance.transfers.pairs import pair_relation
 
 from .conftest import (
     A_IDENTIFIER,
@@ -898,3 +905,118 @@ async def test_unidentified_payment_of_another_amount_is_no_evidence(
     assert await candidates(session, transfer.id) == []
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_partner_gone_since_the_relation_is_left_to_the_next_pass(
+    session, run, a_and_c, connector_tx, heal
+) -> None:
+    a, a_id, c, c_id = a_and_c
+    sent = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    received = await connector_tx(c, "100", external_id="in_1", identifier_id=a_id)
+
+    async def match_with_a_stale_relation(ctx) -> None:
+        settings = await load_transfer_settings(ctx.session)
+        relation = await pair_relation(ctx.session, await system_account_ids(ctx.session), settings)
+        assert relation.partner(sent.id) == received.id
+        # A sync voids the partner after the heal pass computed its relation.
+        await void_transaction(ctx, received.id)
+        system = await transfer_engine._system(ctx)
+        await transfer_engine._match(ctx, sent.id, settings, system, relation, {})
+
+    await run(match_with_a_stale_relation)  # does not raise
+
+    await heal()
+    [transfer] = await list_transfers(session)
+    assert (transfer.out_transaction_id, transfer.in_transaction_id) == (sent.id, None)
+    await assert_consistent(session)
+
+
+async def test_heal_holds_no_system_account_lock(
+    backend_url: str, owner_url: str, migrated: None
+) -> None:
+    # A long heal must not hold up a sync, whose first step looks up the system accounts in
+    # a short transaction of its own.
+    engine, owner = create_engine(backend_url), create_engine(owner_url)
+    sessions = make_sessionmaker(engine)
+    command = "test.system_account_lock"
+    async with owner.connect() as conn:
+        started = await conn.scalar(text("select clock_timestamp()"))
+        existing = set(
+            await conn.scalars(
+                text("select key from core.settings where key like 'finance.system_account.%'")
+            )
+        )
+
+    async def get(key) -> UUID:
+        async with (
+            sessions() as s,
+            command_context(s, Actor("connector", "test"), command, {}) as ctx,
+        ):
+            await s.execute(text("set local lock_timeout = '1s'"))
+            return await get_or_create_system_account(ctx, key)
+
+    try:
+        unassigned = await get("unassigned")
+        await get("in_transit")
+        async with sessions() as s:
+            # A heal with something to match (all rolled back at the end): A's payment to B.
+            ctx = CommandContext(s, Actor("system", "transfers"), uuid4())
+            gbp = await get_currency(s, "GBP")
+            connection = await create_connection(
+                ctx, connector="monzo", display_name="Lock A", config={}
+            )
+            a = await create_account(
+                ctx,
+                name="Lock A",
+                ledger_type="asset",
+                subtype="bank",
+                balance_mode="transactions",
+                source_connection_id=connection.id,
+            )
+            b = await create_account(
+                ctx, name="Lock B", ledger_type="asset", subtype="bank", balance_mode="hybrid"
+            )
+            b_identifier = await assign_identifier(ctx, b.id, "uk_bank_account", C_IDENTIFIER)
+            await upsert_connector_transaction(
+                ctx,
+                TransactionInput(
+                    occurred_at=WHEN,
+                    description="Transfer",
+                    origin="connector",
+                    connection_id=connection.id,
+                    external_id="tx_1",
+                    postings=[
+                        PostingInput(a.id, gbp.id, Decimal(-100)),
+                        PostingInput(await get("in_transit"), gbp.id, Decimal(100)),
+                    ],
+                    counterparty=CounterpartyFields(
+                        identifier_id=b_identifier.id, bank_transfer=True
+                    ),
+                ),
+            )
+            assert await heal_transfers(ctx) == 1
+            # The heal is still uncommitted while the sync asks.
+            assert await get("unassigned") == unassigned
+            await s.rollback()
+    finally:
+        async with owner.begin() as conn:
+            created = await conn.execute(
+                text(
+                    "delete from core.settings"
+                    " where key like 'finance.system_account.%' and not (key = any(:existing))"
+                    " returning value #>> '{}'"
+                ),
+                {"existing": list(existing)},
+            )
+            system = [UUID(row[0]) for row in created]
+            await conn.execute(
+                text("delete from finance.accounts where id = any(:ids)"), {"ids": system}
+            )
+            await conn.execute(
+                text("delete from core.events where occurred_at >= :t"), {"t": started}
+            )
+            await conn.execute(
+                text("delete from core.audit_log where command = :c"), {"c": command}
+            )
+        await engine.dispose()
+        await owner.dispose()

@@ -10,6 +10,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
+    ColumnElement,
     and_,
     delete,
     func,
@@ -47,19 +48,18 @@ from lararium.modules.finance.system_accounts import (
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
     OwnRecord,
+    SourceRef,
     bound_id,
     is_active_leg,
     is_rejected,
     load_own_record,
+    source_ref,
 )
 from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.pairs import (
     Pairable,
     PairRelation,
-    Tier,
-    counterpart_bounds,
     pair_relation,
-    registry_tier,
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
@@ -419,10 +419,19 @@ async def _link_pair(
     """Link the record with its unique partner: into the partner's open transfer when it
     has one between the same accounts (so that transfer's placeholder or settlement goes),
     else as a new matched transfer after dissolving whatever the partner was in. Returns
-    the records left without their transfer, and the partner."""
+    the records left without their transfer, and the partner (none linked when the partner
+    changed under us)."""
     session = ctx.session
     partner = await load_own_record(session, ids, partner_id)
-    assert partner is not None  # pair_candidates found it eligible
+    if partner is None:
+        # The pass's relation found it eligible, but a concurrent sync has since voided or
+        # reshaped it; the heal after that sync, or the next pass, matches the record again.
+        logger.warning(
+            "transaction %s changed while %s was matched; left for the next heal",
+            partner_id,
+            record.id,
+        )
+        return [], set()
     others: list[UUID] = []
     waiting = await _waiting_transfer(session, partner.id)
     if waiting is None or (waiting.from_account_id, waiting.to_account_id) != _accounts(
@@ -570,9 +579,48 @@ async def heal_transfers(ctx: CommandContext) -> int:
     return matched
 
 
+def decision_change_key(
+    kind: str, subject: tuple[str, str], other: tuple[str | None, str | None]
+) -> str:
+    return f"transfer_decision:{kind}:{subject[0]}:{subject[1]}:{other[0]}:{other[1]}"
+
+
+async def forget_decisions(
+    ctx: CommandContext, kind: str, first: tuple[str, str], second: tuple[str, str] | None = None
+) -> None:
+    """Delete the decisions of this kind about the record (reject), or about the two
+    records either way round (pair, never_pair)."""
+    d = models.TransferDecision
+
+    def about(subject: tuple[str, str], other: tuple[str, str] | None) -> ColumnElement[bool]:
+        condition = and_(d.subject_kind == subject[0], d.subject_ref == subject[1])
+        if other is None:
+            return condition
+        return and_(condition, d.other_kind == other[0], d.other_ref == other[1])
+
+    which = (
+        about(first, None) if second is None else or_(about(first, second), about(second, first))
+    )
+    deleted = await ctx.session.execute(
+        delete(d)
+        .where(d.kind == kind, which)
+        .returning(d.id, d.subject_kind, d.subject_ref, d.other_kind, d.other_ref)
+    )
+    for row in deleted:
+        ctx.record_change(
+            decision_change_key(
+                kind, (row.subject_kind, row.subject_ref), (row.other_kind, row.other_ref)
+            ),
+            {"before": {"id": str(row.id), "kind": kind}, "after": None},
+        )
+
+
 async def _release_rejected(ctx: CommandContext, transaction_id: UUID) -> None:
     """Take the transaction out of a rejected transfer: the transfer keeps its other own
-    record, or goes when it has none. The reject decisions stay, keyed by reference."""
+    record, or goes when it has none. When the transfer stays, the transaction's reject
+    decision goes, so a row imported again under the same reference comes back under the
+    transfer's current state (unrejecting it could no longer withdraw that decision); when
+    the transfer goes, the decision stays, keyed by reference."""
     session = ctx.session
     tr = models.Transfer
     for transfer in await load_transfers(
@@ -589,6 +637,7 @@ async def _release_rejected(ctx: CommandContext, transaction_id: UUID) -> None:
             publish_transfer(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
         else:
             await session.execute(update(tr).where(tr.id == transfer.id).values({side: None}))
+            await forget_decisions(ctx, "reject", await source_ref(session, transaction_id))
             publish_transfer(
                 ctx,
                 "finance.transfer.unlinked",
@@ -633,15 +682,17 @@ async def preview_match(
     quantity: Decimal,
     occurred_at: datetime,
     counterparty: CounterpartyFields,
+    source: SourceRef | None = None,
 ) -> TransferRecord | None:
     """The open transfer a row not yet posted would complete if it were posted now
     (Decision 6 steps 3 and 4, without writing): None when it would complete none, or
-    could complete more than one. It reads the same pair relation matching does, with the
-    row added: its one candidate in its strongest tier, which has no other candidate as
-    strong. Such a row has no decisions, so none apply to it."""
+    could complete more than one. It reads the pair relation matching does, with the row
+    added: the row's unique partner, when that is the transfer's present record.
+
+    `source`: the reference the row will have once posted (a re-imported row keeps its
+    own), so the owner's decisions about it apply; None for a row with none yet."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
-    relation = await pair_relation(session, system, settings)
     holder = (
         None
         if counterparty.identifier_id is None
@@ -649,7 +700,7 @@ async def preview_match(
     )
     row = Pairable(
         id=_UNPOSTED,
-        source=("unposted", ""),
+        source=("unposted", "") if source is None else source,
         account_id=account_id,
         instrument_id=instrument_id,
         quantity=quantity,
@@ -657,27 +708,9 @@ async def preview_match(
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
     )
-    earliest, latest = counterpart_bounds(row, settings)
-    tiers: dict[UUID, Tier] = {}
-    for c in relation.records.values():
-        if (
-            c.id not in relation.rejected
-            and c.instrument_id == instrument_id
-            and c.quantity == -quantity
-            and earliest <= c.occurred_at <= latest
-            and (tier := registry_tier(row, c)) is not None
-        ):
-            tiers[c.id] = tier
-    if not tiers:
-        return None
-    best = min(tiers.values())
-    partners = [candidate for candidate, tier in tiers.items() if tier == best]
-    if len(partners) != 1:
-        return None
-    [partner] = partners
-    if any(tier <= best for tier in relation.tiers.get(partner, {}).values()):
-        return None  # the row would make the partner's pair ambiguous, or lose to another
-    return await _waiting_transfer(session, partner)
+    relation = await pair_relation(session, system, settings, adding=[row])
+    partner = relation.partner(row.id)
+    return None if partner is None else await _waiting_transfer(session, partner)
 
 
 async def unassign_identifier_and_rematch(
