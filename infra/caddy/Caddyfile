@@ -16,6 +16,11 @@
 		}
 		reverse_proxy api:8000
 	}
+	# Caddy's own 413 has no body; answer in the api's error shape so the page can say why.
+	handle_errors 413 {
+		header Content-Type application/json
+		respond `{"detail":{"error":"file_too_large","message":"the upload is larger than 6 MB"}}` 413
+	}
 	# Vite names each built file by its content hash, so a changed file gets a new name and
 	# one that exists can be cached for good. No fallback here: a missing asset is a 404,
 	# never index.html cached under its name.
