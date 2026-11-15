@@ -843,3 +843,28 @@ async def test_duplicate_that_breaks_the_balance_chain_is_an_error(
     rows = await _rows(session, await stage(csv, content))
     assert _statuses(rows) == ["duplicate", "error"]
     assert rows[1].duplicate_of is None and rows[1].note is None
+
+    # Second review: on a day this file lists in full (10 Nov, between 9 and 30 Nov), the
+    # failed row was taken for one the file doesn't list, refusing the whole file.
+    content += "30/11/2026,Refund,1.00,91.00\n"
+    rows = await _rows(session, await stage(csv, content))
+    assert _statuses(rows) == ["duplicate", "error", "duplicate"]
+
+
+async def test_each_currency_speaks_for_its_own_days(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    csv_profile: ImportProfileRecord,
+    eur: InstrumentRecord,
+) -> None:
+    """Second review: the days a file lists in full were the account's, whatever the
+    currency, so a multi-currency account's per-currency statements refused each other."""
+    month = HEADER + "01/11/2026,Pay,100.00\n10/11/2026,Cafe,-3.50\n30/11/2026,Shop,-1.00\n"
+    await commit((await stage(csv_profile, month, default=eur.id, filename="eur.csv")).id)
+
+    gbp_month = HEADER + "01/11/2026,Pay,50.00\n12/11/2026,Bus,-2.00\n30/11/2026,Tea,-1.50\n"
+    rows = await _rows(session, await stage(csv_profile, gbp_month, filename="gbp.csv"))
+    assert _statuses(rows) == ["new", "new", "new"]
+    assert [row.note for row in rows] == [None, None, None]

@@ -509,6 +509,43 @@ async def test_export_taken_mid_day_then_rest_of_day_counted_once(
     assert await _balance(session, account.id) == Decimal("86.00")
 
 
+async def test_next_export_after_a_partial_last_day_takes_an_adjustment(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """Second review: an export vouched for the balance through its partial last day, so a
+    payment later that day, in neither file, refused the next export as a disagreement."""
+    profile = await _csv_profile(run)
+    january = BALANCE_HEADER + (
+        "01/01/2027,Pay,100.00,100.00\n05/01/2027,Shop,-10.00,90.00\n"
+        "31/01/2027,Coffee,-5.00,85.00\n"
+    )
+    await commit((await stage(profile, january, filename="jan.csv")).id)
+
+    february = BALANCE_HEADER + "01/02/2027,Bus,-1.00,64.00\n"
+    staged = await stage(profile, february, filename="feb.csv")
+    adjustment, _ = await _rows(session, staged)
+    assert (adjustment.kind, adjustment.quantity) == ("opening_adjustment", Decimal("-20.00"))
+    await commit(staged.id)
+    assert await _balance(session, account.id) == Decimal("64.00")
+
+
+async def test_row_newly_on_a_partly_listed_day_at_commit_is_stale(
+    session: AsyncSession, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
+) -> None:
+    """Second review: a file committed after staging made a row overlap a day it lists only
+    in part, and commit posted it without the review its note asks for."""
+    later = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n")
+    morning = HEADER + "01/11/2026,Pay,100.00\n03/11/2026,Coffee,-3.00\n05/11/2026,Bus,-2.00\n"
+    await commit((await stage(csv_profile, morning)).id)
+
+    with pytest.raises(ImportBatchStaleError):
+        await commit(later.id)
+    restaged = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n")
+    first, _ = await _rows(session, restaged)
+    assert first.note is not None and "only in part" in first.note
+    await commit(restaged.id)
+
+
 async def test_discard(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
 ) -> None:

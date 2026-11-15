@@ -521,15 +521,15 @@ class OpeningConflict:
 def opening_conflicts(
     claims: Sequence[OpeningClaim],
     needed: dict[tuple[UUID, UUID], Decimal],
-    covered_to: dict[UUID, date | None],
+    vouched_to: dict[UUID, date | None],
 ) -> list[OpeningConflict]:
     """Final review C1: an adjustment is legitimate only where no other statement vouches
     for the balance (a gap, or the account's first statement).
 
     An earlier claim in the walk (in the same instrument) vouches for the balance before
-    every day from its first date to the day after its file's last covered day: its opening
-    holds at its first date, and its rows carry it through what it covers. So a claim that
-    starts there, the same day included, must need nothing.
+    every day from its first date to the day after its file's vouched_to (see _vouched_to):
+    its opening holds at its first date, and its rows carry it through the days it lists in
+    full. So a claim that starts there, the same day included, must need nothing.
     """
     earlier: dict[UUID, list[OpeningClaim]] = defaultdict(list)
     conflicts: list[OpeningConflict] = []
@@ -538,7 +538,7 @@ def opening_conflicts(
             need = needed[(claim.batch_id, claim.instrument_id)]
             if need != 0:
                 for prior in earlier[claim.instrument_id]:
-                    end = covered_to.get(prior.batch_id)
+                    end = vouched_to.get(prior.batch_id)
                     if end is not None and claim.first_day <= end + timedelta(days=1):
                         conflicts.append(
                             OpeningConflict(
@@ -571,7 +571,7 @@ class _BatchInfo:
     filename: str
     committed_at: datetime | None
     timezone: str | None
-    covered_to: date | None
+    vouched_to: date | None
 
 
 def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
@@ -640,14 +640,31 @@ async def _claims(
     return claims
 
 
+def _vouched_to(covered_from: date | None, complete_to: date | None) -> date | None:
+    """The last day a batch's rows carry its balance through (Decision 13, with Decision
+    16's days listed in full): the end of the days it lists in full. One that lists no day
+    in full vouches only for its opening, the day before its first."""
+    if complete_to is not None:
+        return complete_to
+    return None if covered_from is None else covered_from - timedelta(days=1)
+
+
 async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_BatchInfo]:
     b = models.ImportBatch
     found = await session.execute(
         select(
-            b.id, b.filename, b.committed_at, b.profile_config["timezone"].astext, b.covered_to
+            b.id,
+            b.filename,
+            b.committed_at,
+            b.profile_config["timezone"].astext,
+            b.covered_from,
+            b.complete_to,
         ).where(b.account_id == account_id, b.status == "committed")
     )
-    return [_BatchInfo(*row) for row in found]
+    return [
+        _BatchInfo(id, name, at, zone, _vouched_to(start, end))
+        for id, name, at, zone, start, end in found
+    ]
 
 
 async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
@@ -721,7 +738,7 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     b, r = models.ImportBatch, models.ImportRow
     staged = (
         await session.execute(
-            select(b.account_id, b.filename, b.covered_to).where(b.id == batch_id)
+            select(b.account_id, b.filename, b.covered_from, b.complete_to).where(b.id == batch_id)
         )
     ).one()
     account_id = staged.account_id
@@ -729,7 +746,13 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
         return OpeningPreview(needed={}, changes=[], conflicts=[])
     batches = [
         *(batch for batch in await _committed_batches(session, account_id) if batch.id != batch_id),
-        _BatchInfo(batch_id, staged.filename, None, None, staged.covered_to),
+        _BatchInfo(
+            batch_id,
+            staged.filename,
+            None,
+            None,
+            _vouched_to(staged.covered_from, staged.complete_to),
+        ),
     ]
     claims = await _claims(session, batches)
     movements = await _movements(session, account_id)
@@ -748,7 +771,7 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     conflicts = [
         _conflict_message(conflict, names)
         for conflict in opening_conflicts(
-            flat, plan, {batch.id: batch.covered_to for batch in batches}
+            flat, plan, {batch.id: batch.vouched_to for batch in batches}
         )
     ]
     changes: list[OpeningChange] = []
@@ -962,6 +985,8 @@ class _Row:
     duplicate_of: UUID | None = None
     # An error that still has a valid amount (counts in the balance chain).
     real_error: bool = False
+    # New on a day another committed file lists only in part: the owner should see it.
+    review: bool = False
 
     def fail(self, message: str, *, real: bool = False) -> None:
         # What a duplicate or skipped row carries goes with its status (import_rows' CHECK
@@ -1092,6 +1117,39 @@ class _Coverage:
     complete: _Range
 
 
+@dataclass(frozen=True)
+class _CommittedCoverage:
+    filename: str
+    coverage: _Coverage
+    instruments: frozenset[UUID]  # what it has rows in: it speaks for those alone
+
+
+async def _committed_coverage(session: AsyncSession, account_id: UUID) -> list[_CommittedCoverage]:
+    """The account's committed batches' days (Decision 16), oldest commit first."""
+    b, r = models.ImportBatch, models.ImportRow
+    instruments: dict[UUID, set[UUID]] = defaultdict(set)
+    for batch_id, instrument_id in await session.execute(
+        select(r.batch_id, r.instrument_id)
+        .distinct()
+        .where(r.account_id == account_id, r.status == "committed", r.kind == "statement")
+    ):
+        assert instrument_id is not None  # committed rows have one (the table's CHECK)
+        instruments[batch_id].add(instrument_id)
+    found = await session.execute(
+        select(b.id, b.filename, b.covered_from, b.covered_to, b.complete_from, b.complete_to)
+        .where(b.account_id == account_id, b.status == "committed")
+        .order_by(b.committed_at, b.id)
+    )
+    return [
+        _CommittedCoverage(
+            name,
+            _Coverage((covered_from, covered_to), (complete_from, complete_to)),
+            frozenset(instruments[batch_id]),
+        )
+        for batch_id, name, covered_from, covered_to, complete_from, complete_to in found
+    ]
+
+
 async def _match_covered_days(
     session: AsyncSession, account_id: UUID, rows: list[_Row], own: _Coverage
 ) -> None:
@@ -1103,16 +1161,8 @@ async def _match_covered_days(
     The other direction is _missing_committed_row's."""
     b, r = models.ImportBatch, models.ImportRow
     covers: list[_Range] = [own.covered]
-    complete: list[_Range] = []
-    partly: list[tuple[_Range, str]] = []
-    for covered_from, covered_to, complete_from, complete_to, name in await session.execute(
-        select(b.covered_from, b.covered_to, b.complete_from, b.complete_to, b.filename)
-        .where(b.account_id == account_id, b.status == "committed")
-        .order_by(b.committed_at, b.id)
-    ):
-        covers.append((covered_from, covered_to))
-        complete.append((complete_from, complete_to))
-        partly.append(((covered_from, covered_to), name))
+    committed = await _committed_coverage(session, account_id)
+    covers += [batch.coverage.covered for batch in committed]
 
     def within(day: date, ranges: list[_Range]) -> bool:
         return any(
@@ -1162,13 +1212,18 @@ async def _match_covered_days(
             row_id, filename = matches.pop(0)
             row.status, row.duplicate_of = "duplicate", row_id
             row.note = f"already imported from {filename}"
-        elif within(row.parsed.booking_date, complete):
+            continue
+        day, instrument_id = row.parsed.booking_date, row.instrument_id
+        # A file speaks only for the instruments it has rows in: one currency's statement
+        # says nothing about another's days.
+        mine = [batch for batch in committed if instrument_id in batch.instruments]
+        if within(day, [batch.coverage.complete for batch in mine]):
             row.fail(OUTSIDE_COVERED_DAY, real=True)
-        else:
-            day = row.parsed.booking_date
-            names = [name for covered, name in partly if within(day, [covered])]
-            if names:
-                row.note = f"not in {names[0]}, which lists {day.isoformat()} only in part"
+            continue
+        names = [batch.filename for batch in mine if within(day, [batch.coverage.covered])]
+        if names:
+            row.note = f"not in {names[0]}, which lists {day.isoformat()} only in part"
+            row.review = True
 
 
 async def _missing_committed_row(
@@ -1184,6 +1239,12 @@ async def _missing_committed_row(
     start, end = complete
     if start is None or end is None:
         return None
+    # It lists in full only the instruments it has rows in (see _match_covered_days).
+    instruments = {
+        row.instrument_id
+        for row in rows
+        if row.kind == "statement" and row.status != "skipped" and row.instrument_id is not None
+    }
     matched = {row.duplicate_of for row in rows if row.duplicate_of is not None}
     r, b = models.ImportRow, models.ImportBatch
     found = await session.execute(
@@ -1195,6 +1256,7 @@ async def _missing_committed_row(
             r.kind == "statement",
             b.status == "committed",
             r.booking_date.between(start, end),
+            r.instrument_id.in_(instruments),
         )
         .order_by(r.booking_date, r.position)
     )
@@ -1213,8 +1275,9 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
     """Commit's re-run of the duplicate and covered-day checks (Decisions 5 and 16), for
     rows other batches committed or rolled back since staging. Rows that became duplicates,
     or whose committed original is gone, are updated. Returns how many problems there now
-    are, left as they are: rows that would be errors (an unmatched row on a covered day), plus
-    one when a committed row on this batch's days is missing from it."""
+    are, left as they are: rows that would be errors (an unmatched row on a day another file
+    lists in full), rows newly on a day another file lists only in part (to be reviewed),
+    plus one when a committed row on this batch's days is missing from it."""
     r, b = models.ImportRow, models.ImportBatch
     account_id = await session.scalar(select(b.account_id).where(b.id == batch_id))
     assert account_id is not None
@@ -1274,7 +1337,8 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
     if await _missing_committed_row(session, account_id, rows, own.complete):
         errors += 1
     for row, original in zip(rows, stored, strict=True):
-        if row.status == "error":
+        # A row that now overlaps a file committed since staging was never reviewed as such.
+        if row.status == "error" or (row.review and row.note != original.note):
             errors += 1
             continue
         change = (row.status, row.duplicate_of, row.note)
@@ -1538,10 +1602,11 @@ async def stage_import(
     await _deduplicate(session, account_id, rows)
     coverage = _covered(statement, rows)
     await _match_covered_days(session, account_id, rows, coverage)
-    _check_chain(rows, row_order)
+    # Before the chain check: a matched row it fails is still listed by this file.
     missing = await _missing_committed_row(session, account_id, rows, coverage.complete)
     if missing is not None:
         raise ImportNotAllowedError(missing)
+    _check_chain(rows, row_order)
 
     document = await record_document(
         ctx, content, filename=filename, media_type=media_type, source="finance.import"
