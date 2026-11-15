@@ -561,11 +561,11 @@ def _migration(name: str):
     return module
 
 
-async def test_downgrading_0014_undoes_the_ledger_side(
+async def test_downgrading_0015_undoes_the_ledger_side(
     session, run, ids, connected_bank, manual_bank, connector_tx, heal
 ) -> None:
     # A payment to a manual account (placeholder) and one before a connected account's
-    # history (settlement), both healed; then 0014's downgrade, up to its schema changes.
+    # history (settlement), both healed; then 0015's downgrade, up to its schema changes.
     a = await connected_bank("A")
     b = await manual_bank("B")
     c = await connected_bank("C")
@@ -585,7 +585,7 @@ async def test_downgrading_0014_undoes_the_ledger_side(
     assert sorted(t.status for t in await list_transfers(session)) == ["before_history", "inferred"]
     worth = await net_worth_on(session)
 
-    migration = _migration("0014_finance_transfers")
+    migration = _migration("0015_finance_transfers")
     for statement in migration.LEDGER_UNDO:
         await session.execute(text(statement))
 
@@ -597,7 +597,7 @@ async def test_downgrading_0014_undoes_the_ledger_side(
         text("select count(*) from finance.postings where account_id = :a"), {"a": ids.in_transit}
     )
     assert on_in_transit == 0
-    # As the code before 0014 left it: B without the placeholder's 100, A's payments gone to
+    # As the code before 0015 left it: B without the placeholder's 100, A's payments gone to
     # Unassigned (the settled 30 was outside net worth already, on Opening balances).
     assert (await balances_on(session))[b.id] == Decimal(1000)
     assert await net_worth_on(session) == worth - 100

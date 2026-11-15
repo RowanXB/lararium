@@ -2,8 +2,8 @@
 gives, the transfers linking a sending and a receiving record, and the owner's decisions
 about them.
 
-Revision ID: 0014
-Revises: 0013
+Revision ID: 0015
+Revises: 0014
 Create Date: 2026-11-15
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0014"
-down_revision: str | None = "0013"
+revision: str = "0015"
+down_revision: str | None = "0014"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -84,7 +84,7 @@ UPGRADE = [
     FORGET_COUNTERPARTY_BACKFILL,
 ]
 
-# The code before 0014 posts every contra against Unassigned and knows no derived rows, so
+# The code before 0015 posts every contra against Unassigned and knows no derived rows, so
 # the ledger goes back to that before the tables go: the placeholders and settlements are
 # deleted (their postings cascade), and every recorded posting on In transit moves back to
 # Unassigned. The system accounts are found by their settings; In transit itself stays,

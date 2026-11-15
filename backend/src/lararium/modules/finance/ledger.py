@@ -63,6 +63,26 @@ class CounterpartyFields:
 
 
 @dataclass(frozen=True)
+class CategorySplit:
+    category: str
+    quantity: Decimal
+
+
+@dataclass(frozen=True)
+class TransactionDetails:
+    """Typed fields a source reports about a transaction, beyond its postings."""
+
+    original_quantity: Decimal | None = None  # the amount in the original instrument
+    original_instrument_id: UUID | None = None
+    category: str | None = None
+    labels: tuple[str, ...] = ()
+    include_in_spending: bool | None = None
+    payment_scheme: str | None = None
+    place_entity_id: UUID | None = None
+    category_splits: tuple[CategorySplit, ...] = ()
+
+
+@dataclass(frozen=True)
 class TransactionInput:
     occurred_at: datetime  # must have a timezone
     description: str
@@ -76,6 +96,7 @@ class TransactionInput:
     connection_id: UUID | None = None
     external_id: str | None = None
     counterparty: CounterpartyFields = CounterpartyFields()
+    details: TransactionDetails = TransactionDetails()
 
 
 @dataclass(frozen=True)
@@ -103,6 +124,7 @@ class TransactionRecord:
     origin: TransactionOrigin
     counterparty: CounterpartyFields
     postings: tuple[PostingRecord, ...]  # sorted by position
+    details: TransactionDetails
 
 
 def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
@@ -138,6 +160,19 @@ def _validate_posting(posting: PostingInput) -> None:
                 f"a posting can't be weighed in its own instrument: {leg}_instrument_id"
                 " equals instrument_id"
             )
+
+
+async def _validate_details(session: AsyncSession, details: TransactionDetails) -> None:
+    if (details.original_quantity is None) != (details.original_instrument_id is None):
+        raise FinanceValidationError(
+            "original_quantity and original_instrument_id are set together or not at all"
+        )
+    if details.original_quantity is not None:
+        require_amount("original_quantity", details.original_quantity)
+    if details.original_instrument_id is not None:
+        await get_instrument(session, details.original_instrument_id)
+    for split in details.category_splits:
+        require_amount("category split quantity", split.quantity)
 
 
 async def _resolve_references(
@@ -188,6 +223,13 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.counterparty_name,
                 t.payment_reference,
                 t.bank_transfer,
+                t.original_quantity,
+                t.original_instrument_id,
+                t.category,
+                t.labels,
+                t.include_in_spending,
+                t.payment_scheme,
+                t.place_entity_id,
             ).where(t.id == transaction_id)
         )
     ).one_or_none()
@@ -209,6 +251,12 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
         )
         .where(p.transaction_id == transaction_id)
         .order_by(p.position)
+    )
+    s = models.TransactionCategorySplit
+    split_rows = await session.execute(
+        select(s.category, s.quantity)
+        .where(s.transaction_id == transaction_id)
+        .order_by(s.position)
     )
     return TransactionRecord(
         id=row.id,
@@ -239,6 +287,16 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             )
             for r in posting_rows
         ),
+        details=TransactionDetails(
+            original_quantity=row.original_quantity,
+            original_instrument_id=row.original_instrument_id,
+            category=row.category,
+            labels=tuple(row.labels),
+            include_in_spending=row.include_in_spending,
+            payment_scheme=row.payment_scheme,
+            place_entity_id=row.place_entity_id,
+            category_splits=tuple(CategorySplit(r.category, r.quantity) for r in split_rows),
+        ),
     )
 
 
@@ -248,6 +306,22 @@ def _optional_str(value: object | None) -> str | None:
     if isinstance(value, Decimal):
         return to_plain_str(value)
     return str(value)
+
+
+def _details_data(details: TransactionDetails) -> dict[str, JSONValue]:
+    return {
+        "original_quantity": _optional_str(details.original_quantity),
+        "original_instrument_id": _optional_str(details.original_instrument_id),
+        "category": details.category,
+        "labels": list(details.labels),
+        "include_in_spending": details.include_in_spending,
+        "payment_scheme": details.payment_scheme,
+        "place_entity_id": _optional_str(details.place_entity_id),
+        "category_splits": [
+            {"category": split.category, "quantity": to_plain_str(split.quantity)}
+            for split in details.category_splits
+        ],
+    }
 
 
 def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
@@ -280,6 +354,7 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
             }
             for posting in record.postings
         ],
+        "details": _details_data(record.details),
     }
 
 
@@ -305,6 +380,7 @@ async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> 
         raise FinanceValidationError("a transaction needs at least two postings")
     for posting in tx.postings:
         _validate_posting(posting)
+    await _validate_details(session, tx.details)
     instruments = await _resolve_references(session, tx.postings)
     residuals = compute_residuals(tx.postings)
     for instrument_id, residual in residuals.items():
@@ -341,6 +417,38 @@ async def _insert_postings(
     )
 
 
+def _details_values(details: TransactionDetails) -> dict[str, object]:
+    return {
+        "original_quantity": details.original_quantity,
+        "original_instrument_id": details.original_instrument_id,
+        "category": details.category,
+        "labels": list(details.labels),
+        "include_in_spending": details.include_in_spending,
+        "payment_scheme": details.payment_scheme,
+        "place_entity_id": details.place_entity_id,
+    }
+
+
+async def _insert_splits(
+    session: AsyncSession, transaction_id: UUID, splits: Sequence[CategorySplit]
+) -> None:
+    if not splits:
+        return
+    await session.execute(
+        insert(models.TransactionCategorySplit).values(
+            [
+                {
+                    "transaction_id": transaction_id,
+                    "position": position,
+                    "category": split.category,
+                    "quantity": split.quantity,
+                }
+                for position, split in enumerate(splits)
+            ]
+        )
+    )
+
+
 async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> TransactionRecord:
     """Write a transaction whose postings balance per instrument, within that instrument's
     tolerance; otherwise raise LedgerImbalanceError before anything is written."""
@@ -360,6 +468,7 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
                 origin=tx.origin,
                 connection_id=tx.connection_id,
                 external_id=tx.external_id,
+                **_details_values(tx.details),
                 owner_entity_id=await get_self_entity_id(session),
                 **_counterparty_values(tx.counterparty),
             )
@@ -367,6 +476,7 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
         )
     ).scalar_one()
     await _insert_postings(session, transaction_id, tx.postings)
+    await _insert_splits(session, transaction_id, tx.details.category_splits)
     record = await _load_transaction(session, transaction_id)
     _publish(ctx, "finance.transaction.posted", record)
     return record
@@ -445,10 +555,13 @@ async def upsert_connector_transaction(
         and existing.payment_reference == tx.counterparty.reference
         and existing.bank_transfer == tx.counterparty.bank_transfer
     )
+    details_unchanged = before.details == tx.details
     # Postings compare by position: the connector emits them in a stable order.
-    if fields_unchanged and [_posting_key(p) for p in before.postings] == [
-        _posting_key(p) for p in tx.postings
-    ]:
+    if (
+        fields_unchanged
+        and details_unchanged
+        and [_posting_key(p) for p in before.postings] == [_posting_key(p) for p in tx.postings]
+    ):
         return before, "unchanged"
     # The decision above was made on an unlocked read: the UPDATE checks it again, so a void
     # the owner commits meanwhile isn't overwritten (no row is updated, and nothing changes).
@@ -466,6 +579,7 @@ async def upsert_connector_transaction(
             status=tx.status,
             voided_by=ctx.actor.type if tx.status == "void" else None,
             **_counterparty_values(tx.counterparty),
+            **_details_values(tx.details),
         )
         .returning(t.id)
     )
@@ -475,6 +589,12 @@ async def upsert_connector_transaction(
         delete(models.Posting).where(models.Posting.transaction_id == existing.id)
     )
     await _insert_postings(session, existing.id, tx.postings)
+    await session.execute(
+        delete(models.TransactionCategorySplit).where(
+            models.TransactionCategorySplit.transaction_id == existing.id
+        )
+    )
+    await _insert_splits(session, existing.id, tx.details.category_splits)
     record = await _load_transaction(session, existing.id)
     _publish_update(ctx, before, record)
     return record, "updated"

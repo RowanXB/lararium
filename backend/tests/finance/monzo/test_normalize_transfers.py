@@ -29,12 +29,14 @@ from lararium.modules.finance.identifiers import assign_identifier, list_identif
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.monzo.normalize import (
     NORMALIZER_VERSION,
+    NORMALIZER_VERSION_KEY,
     FetchedRecord,
     NormalizeReport,
     normalize,
 )
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.system_accounts import get_or_create_system_account
+from lararium.modules.finance.transfers import engine as transfer_engine
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
     heal_transfers,
@@ -221,7 +223,7 @@ async def count_events(session: AsyncSession, event_type: str) -> int:
 
 
 def test_normalizer_version() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-2"
+    assert NORMALIZER_VERSION == "monzo-norm-3"
 
 
 async def test_faster_payment_to_registered_account(session, run) -> None:
@@ -428,6 +430,119 @@ async def test_existing_history_gets_fields_once(session, run) -> None:
     assert (await transaction_row(session, "tx_FPS0001")).counterparty_name is None
 
 
+async def test_payment_with_fees_stays_on_unassigned(session, run, monkeypatch) -> None:
+    # Monzo's fees are postings of their own on the account, besides its posting and the
+    # contra: such a payment can't be a transfer's leg (LEG_POSTINGS), even to an own account.
+    gbp = await get_currency(session, "GBP")
+    await manual_bank(run, gbp.id, identifier=B_IDENTIFIER)
+    connection = await monzo_connection(run)
+    payment = faster_payment(-10100, fees={"test.fee": -100})
+
+    report = await sync_monzo(session, connection, transactions={ACCOUNT_ID: [payment]})
+
+    assert report.created == 1
+    row = await transaction_row(session, "tx_FPS0001")
+    monzo = (await account_map(session, connection))[ACCOUNT_ID]
+    postings = (
+        await session.execute(
+            text(
+                "select account_id, quantity, is_fee from finance.postings"
+                " where transaction_id = :t order by position"
+            ),
+            {"t": row.id},
+        )
+    ).all()
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    assert [tuple(p) for p in postings] == [
+        (monzo, Decimal("-100.00"), False),
+        (unassigned, Decimal("101.00"), False),
+        (monzo, Decimal("-1.00"), True),
+    ]
+    assert row.counterparty_identifier_id == (await identifier_row(session, B_IDENTIFIER)).id
+
+    repointed: list[Any] = []
+    real_repoint = transfer_engine.repoint_contra
+
+    async def spy(*args: Any, **kwargs: Any) -> bool:
+        repointed.append(args)
+        return await real_repoint(*args, **kwargs)
+
+    monkeypatch.setattr(transfer_engine, "repoint_contra", spy)
+    await heal(session)
+    assert repointed == []
+    assert await list_transfers(session) == []
+
+    report = await sync_monzo(session, connection, transactions={ACCOUNT_ID: [payment]})
+    assert (report.created, report.updated, report.unchanged) == (0, 0, 1)
+    assert await contra(session, row.id, monzo) == unassigned
+    assert await find_transfer_violations(session) == []
+
+
+async def test_replay_and_counterparty_backfill_agree(session, run) -> None:
+    # A connection the structured-fields normalizer last ran (an older NORMALIZER_VERSION)
+    # with transactions posted before counterparty fields existed: its next sync runs both
+    # the counterparty backfill and the version replay. They read the same latest copy, so
+    # the replay finds the backfill's fields and leaves the transfer's In transit leg alone.
+    gbp = await get_currency(session, "GBP")
+    await manual_bank(run, gbp.id, identifier=B_IDENTIFIER)
+    connection = await monzo_connection(run)
+    first = faster_payment(-10000, notes="NEW REF", updated="2026-03-01T12:00:00.000Z")
+    await sync_monzo(session, connection, transactions={ACCOUNT_ID: [first]})
+    await heal(session)
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "inferred"
+    row = await transaction_row(session, "tx_FPS0001")
+    monzo = (await account_map(session, connection))[ACCOUNT_ID]
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    assert await contra(session, row.id, monzo) == in_transit
+
+    await _clear_fields(session)
+    await run(
+        update_config,
+        connection.id,
+        {NORMALIZER_VERSION_KEY: "monzo-norm-2"},
+        remove=["counterparty_fields_v1"],
+    )
+    # A copy fetched later that Monzo updated earlier: the latest is by Monzo's `updated`,
+    # for the backfill as for the replay, so both read the posted copy, not this one.
+    stale = first | {"notes": "STALE REF", "updated": "2026-02-28T12:00:00.000Z"}
+    async with command_context(session, CONNECTOR, "connection.sync", {}) as command:
+        await store_raw_record(
+            command,
+            connection_id=connection.id,
+            record_type="transactions_page",
+            request={"account_id": ACCOUNT_ID},
+            content=[stale],
+            connector_version="monzo-sync-1",
+            sync_id=uuid.uuid4(),
+        )
+    updates = await count_events(session, "finance.transaction.updated")
+
+    report = await sync_monzo(session, connection)
+
+    row = await transaction_row(session, "tx_FPS0001")
+    identifier = await identifier_row(session, B_IDENTIFIER)
+    assert (
+        row.counterparty_identifier_id,
+        row.counterparty_name,
+        row.payment_reference,
+        row.bank_transfer,
+    ) == (identifier.id, "Test Owner", "NEW REF", True)
+    # The backfill wrote the fields; the replay found them, and the transaction, unchanged.
+    assert await count_events(session, "finance.transaction.updated") == updates + 1
+    assert (report.updated, report.unchanged) == (0, 1)
+    assert await contra(session, row.id, monzo) == in_transit
+    config = (await get_connection(session, connection.id)).config
+    assert (config["counterparty_fields_v1"], config[NORMALIZER_VERSION_KEY]) == (
+        True,
+        NORMALIZER_VERSION,
+    )
+    await heal(session)
+    [after] = await list_transfers(session)
+    assert (after.id, after.status) == (transfer.id, "inferred")
+    assert await find_transfer_violations(session) == []
+
+
 def _migration(name: str) -> Any:
     path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
@@ -437,7 +552,7 @@ def _migration(name: str) -> Any:
     return module
 
 
-async def test_reupgrading_0014_fills_the_fields_again(session, run) -> None:
+async def test_reupgrading_0015_fills_the_fields_again(session, run) -> None:
     gbp = await get_currency(session, "GBP")
     await manual_bank(run, gbp.id, identifier=B_IDENTIFIER)
     connection = await monzo_connection(run)
@@ -445,9 +560,9 @@ async def test_reupgrading_0014_fills_the_fields_again(session, run) -> None:
     await sync_monzo(session, connection, transactions={ACCOUNT_ID: [faster_payment(-10000)]})
     assert (await get_connection(session, connection.id)).config["counterparty_fields_v1"] is True
 
-    # A downgrade and re-upgrade of 0014: the columns come back empty, and both ends of it
+    # A downgrade and re-upgrade of 0015: the columns come back empty, and both ends of it
     # forget the note that they were filled.
-    migration = _migration("0014_finance_transfers")
+    migration = _migration("0015_finance_transfers")
     assert migration.FORGET_COUNTERPARTY_BACKFILL in migration.UPGRADE
     assert migration.FORGET_COUNTERPARTY_BACKFILL in migration.LEDGER_UNDO
     await _clear_fields(session)

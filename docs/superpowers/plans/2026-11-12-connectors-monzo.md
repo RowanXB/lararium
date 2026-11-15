@@ -384,6 +384,8 @@ Rules: Decision 8 (window, overlap, clamp, truncation warning). Closed Monzo acc
 
 Rules: Decisions 5, 6 and 9. Accounts and pots are found or created by the setting `config["account_map"]`: Monzo id → finance account id, kept in the connection's config.
 
+The normalizer also stores Monzo's structured fields: original amount and currency, category and splits, labels, include_in_spending, payment scheme and fee postings; one place entity per Monzo merchant id; account and pot settings; and declined transactions in `finance.declined_transactions` (see `docs/superpowers/plans/2026-11-15-structured-monzo-fields.md`). Bumping `NORMALIZER_VERSION` makes the next sync replay the latest raw record of each Monzo transaction through the normalizer, which never posts one the ledger does not already hold; that is how existing history gets the new fields. Monzo-internal plumbing, the device fingerprint and the IP address stay only in the raw records.
+
 - [ ] **Step 1: Write the failing tests** (each one stages raw records with the fixture builders, then normalizes):
   - `test_creates_accounts_and_pot_children`: a pot account has the main account as its `parent_account_id`, is in mode `hybrid`, and has a snapshot equal to the pot balance.
   - `test_card_payment_posts_against_unassigned`: `-1234` minor GBP gives `-12.34`; the counterparty is the merchant entity; the status is `booked` when settled.
