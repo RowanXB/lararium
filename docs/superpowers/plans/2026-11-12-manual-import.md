@@ -261,7 +261,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
     - `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`
     - `amount_format: AmountFormat = AmountFormat()`
   - `class OfxProfileConfig`: `format: Literal["ofx"]`; `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`; `timezone: str | None = None`.
-  - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `sign` as for OFX; `timezone: str | None = None`.
+  - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `amount_format: AmountFormat = AmountFormat(thousands_separator=",")` (QIF amounts are written in the bank's locale); `sign` as for OFX; `timezone: str | None = None`.
   - `class PdfProfileConfig`: `format: Literal["pdf"]`; `layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]`; `timezone: str | None = None`.
   - `type ProfileConfig = Annotated[CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig, Field(discriminator="format")]`.
   - `@dataclass(frozen=True) class ImportProfileRecord`: `id: UUID, name: str, config: ProfileConfigModel, version: int, updated_at: datetime`, where `ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig`.
@@ -307,7 +307,7 @@ Migration `0014`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name tex
     - `@dataclass(frozen=True) class SkippedRow`: `position: int, reason: str, raw: dict[str, str]`. Used for rows the `include_only` filter leaves out.
     - `@dataclass(frozen=True) class ParsedStatement`: `rows: list[ParsedRow | RowError | SkippedRow]`, `closing_balance: Decimal | None = None`, `closing_balance_date: date | None = None`, `period: tuple[date, date] | None = None`, and (Decision 18) `opening_balance: Decimal | None = None`, `money_in: Decimal | None = None`, `money_out: Decimal | None = None`, `payments_in: int | None = None`, `payments_out: int | None = None`, `account: StatementAccount | None = None`. OFX sets the closing fields, `period` from `DTSTART`/`DTEND`, and `account` from `BANKACCTFROM`/`CCACCTFROM`. PDF layouts set every statement field they print.
     - `MAX_IMPORT_ROWS = 20_000`.
-    - `def parse_amount(text: str, fmt: AmountFormat) -> Decimal`: strips whitespace; accepts one leading `+`/`-`, or wrapping parentheses meaning negative; strips one leading currency symbol from `£ $ €` after the sign; removes thousands separators; maps the decimal separator to `.`; then requires `^[0-9]+(\.[0-9]+)?$` with ASCII digits only and calls `require_amount`. Anything else raises `ValueError` with a message naming the text.
+    - `def parse_amount(text: str, fmt: AmountFormat) -> Decimal`: strips whitespace; accepts one leading `+`/`-`, or wrapping parentheses meaning negative; strips one leading currency symbol from `£ $ €` after the sign; removes thousands separators, which must group the integer part in threes (`1,234.56`; `12,50` with `,` as thousands separator is an error, never `1250`); maps the decimal separator to `.`; then requires `^[0-9]+(\.[0-9]+)?$` with ASCII digits only and calls `require_amount`. Anything else raises `ValueError` with a message naming the text.
     - `def clean_description(parts: list[str]) -> str`: joins the parts with a space, collapses whitespace, strips, and truncates to 1000 characters.
   - In `csv_parser.py`: `PARSER_VERSION = "csv-1"`; `def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement`. `local_tz` is the profile's `timezone` when set; the caller resolves it.
 
@@ -365,7 +365,7 @@ Rules for `parse_csv`:
 **Interfaces (Decision 18, the owner's follow-up):**
 - `StatementAccount` gains `iban: str | None = None` (upper-cased, spaces removed), `bic: str | None = None`, `name: str | None = None`, `account_type: str | None = None`, `customer_number: str | None = None`, `clearing_account_number: str | None = None` and `branch: str | None = None`. `sort_code` and `account_number` get defaults of `None`.
 - `@dataclass(frozen=True) class StatementRate`: `kind: str, band_from: Decimal | None, band_to: Decimal | None, rate: Decimal, ear: Decimal | None`.
-- `ParsedStatement` gains `currency: str | None = None`, `statement_reference: str | None = None`, `document_date: date | None = None`, `overdraft_limit: Decimal | None = None`, `overdraft_limit_date: date | None = None` and `rates: list[StatementRate] = field(default_factory=list)`.
+- `ParsedStatement` gains `currency: str | None = None`, `statement_reference: str | None = None`, `document_date: date | None = None`, `available_balance: Decimal | None = None`, `available_balance_date: date | None = None`, `overdraft_limit: Decimal | None = None`, `overdraft_limit_date: date | None = None` and `rates: list[StatementRate] = field(default_factory=list)`.
 - `Counterparty` gains `bank: str | None = None`. `ParsedRow` gains `payment_kind`, `bank_reference`, `purpose_code` and `remittance_info`, each `str | None = None`.
 - `CsvProfileConfig` gains `overdraft_footer_label: str | None = None`. When it is set, a footer line among the dropped `skip_footer_rows` whose first cell equals the label (after stripping) gives `overdraft_limit` and `overdraft_limit_date`. The date is the first cell that parses with `date_format`; the amount is the last cell, through `parse_amount`. Any other footer line is still dropped. A labelled line that doesn't parse raises `FileFormatError`.
 
@@ -388,7 +388,8 @@ Rules:
 - **Decoding.** Decode as UTF-8 when the header says `ENCODING:UTF-8` or the XML declaration says `encoding="UTF-8"`, otherwise as cp1252. Undecodable bytes raise `FileFormatError`.
 - **Tokenizing.** Tokenize everything after the header with `<(/?)([A-Za-z0-9.]+)>([^<]*)`. A leaf's value is the stripped text after its opening tag, with `html.unescape` applied. Aggregates (`STMTTRN`, `STMTRS`, `CCSTMTRS`, `BANKTRANLIST`) are closed in both OFX 1.x and 2.x.
 - **One statement per file.** Exactly one `STMTRS` or `CCSTMTRS` is allowed; zero or several raise `FileFormatError` ("export one account per file").
-- **Currency.** Each row's currency is the statement's `CURDEF`, overridden by a transaction-level `CURRENCY/CURSYM` or `ORIGCURRENCY/CURSYM` when present.
+- **Currency.** Each row's currency is the statement's `CURDEF`, overridden by a transaction-level `CURRENCY/CURSYM` when present. `ORIGCURRENCY` does not override it: per the OFX spec, `TRNAMT` is then already in `CURDEF`, and `ORIGCURRENCY` only records the original currency (kept in `raw`).
+- **Statement fields.** `DTSTART`/`DTEND` → `period` (by their written dates); `AVAILBAL/BALAMT` and `DTASOF` → `available_balance` and `available_balance_date` (same sign rule as `LEDGERBAL`).
 - **Fields of each `STMTTRN`.** `DTPOSTED` is required. `TRNAMT` is required and parsed with `parse_amount` using `AmountFormat()`. `FITID` becomes `external_id` (`None` when missing). The description is `clean_description([NAME, MEMO])`, skipping missing parts. `raw` holds every leaf of the transaction.
 - **`DTPOSTED`.** The format is `YYYYMMDD[HHMMSS[.XXX]][[±H[H][.MM]][:TZ]]`. `booking_date` comes from the first 8 characters. `occurred_at` is `None` without a time part; with one, it is aware, using the bracketed offset or UTC when there is none. A malformed value is a `RowError`.
 - **Signs.** `TRNAMT` is already from the account holder's view, so `inflow_positive` uses it as written and `outflow_positive` negates it.
@@ -513,7 +514,8 @@ Migration `0015`:
   - `sort_code text CHECK (~ '^[0-9]{6}$')`, `account_number text CHECK (~ '^[0-9]+$')`;
   - `iban text CHECK (~ '^[A-Z]{2}[0-9]{2}[A-Z0-9]{1,30}$')`, `bic text`;
   - `customer_number`, `clearing_account_number`, `branch text`;
-  - `overdraft_limit numeric`, `overdraft_limit_date date`.
+  - `overdraft_limit numeric`, `overdraft_limit_date date`;
+  - `available_balance numeric`, `available_balance_date date` (OFX `AVAILBAL`).
 
   It also carries NaN/Infinity CHECKs on the numeric columns.
 - `finance.import_statement_rates`: `id`, `batch_id` FK `import_statements ON DELETE CASCADE`, `position int` (`UNIQUE (batch_id, position)`), `kind text NOT NULL`, `band_from numeric`, `band_to numeric`, `rate numeric NOT NULL`, `ear numeric`.
