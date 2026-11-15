@@ -398,7 +398,9 @@ async def test_rollback_realigns_adjustments(
 
     (adjustment,) = _adjustments(await _rows(session, december))
     assert (adjustment.status, adjustment.quantity) == ("committed", Decimal("1480.00"))
-    assert adjustment.booking_date == date(2026, 11, 30)
+    assert adjustment.booking_date == date(
+        2026, 12, 1
+    )  # an export's first day is partial: dated on it
     assert adjustment.position == -1
     assert await _balance(session, account.id) == Decimal("1450.00")
 

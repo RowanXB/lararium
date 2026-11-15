@@ -243,19 +243,22 @@ def check_balance_chain(
 def opening_adjustments(
     rows: list[ParsedRow],
     instrument_of: Callable[[ParsedRow], UUID],
-    closing: tuple[Decimal, date] | None,
+    closing: tuple[Decimal, date, UUID] | None,
     row_order: str,
-) -> dict[UUID, tuple[Decimal, date]]:
-    """Decision 13: the statement's opening balance and first date per instrument.
+) -> dict[UUID, tuple[Decimal, date, int]]:
+    """Decision 13: the statement's opening balance, first date and first row's position
+    per instrument.
 
-    From the chronologically first row with a balance, else from the closing balance, which
-    a file states for its one currency, so it is used only when every row is in one
-    instrument and it is dated on or after the last row. Instruments with neither are absent.
+    From the chronologically first row with a balance, else from the closing balance
+    (amount, date, its instrument). That is the account's balance in the statement's
+    currency, so it is used only when every row is in that one instrument (a row in another
+    currency is in it too, converted), and when it is dated on or after the last row.
+    Instruments with neither are absent.
     """
     chains: dict[UUID, list[ParsedRow]] = defaultdict(list)
     for row in _chronological(rows, row_order):
         chains[instrument_of(row)].append(row)
-    openings: dict[UUID, tuple[Decimal, date]] = {}
+    openings: dict[UUID, tuple[Decimal, date, int]] = {}
     with localcontext(prec=MAX_PREC):
         for instrument, chain in chains.items():
             first_day = min(row.booking_date for row in chain)
@@ -271,12 +274,12 @@ def opening_adjustments(
             if (
                 opening is None
                 and closing is not None
-                and len(chains) == 1
+                and chains.keys() == {closing[2]}
                 and closing[1] >= last_day
             ):
                 opening = closing[0] - sum((row.quantity - row.fee for row in chain), Decimal(0))
             if opening is not None:
-                openings[instrument] = (opening, first_day)
+                openings[instrument] = (opening, first_day, chain[0].position)
     return openings
 
 
@@ -330,10 +333,11 @@ async def list_batch_rows(session: AsyncSession, batch_id: UUID) -> list[ImportR
         for batch in await _committed_batches(session, adjustments[0].account_id)
         if batch.id != batch_id
     ]
-    # The earliest first date of another committed statement, per instrument.
+    claims = await _claims(session, [*others, await _batch_info(session, batch_id)])
+    # This statement's first date, and the earliest of another committed one, per instrument.
+    mine = {claim.instrument_id: claim.first_day for claim in claims.get(batch_id, [])}
     earliest: dict[UUID, date] = {}
-    claims: dict[UUID, list[OpeningClaim]] = await _claims(session, others) if others else {}
-    for claim in (claim for batch_claims in claims.values() for claim in batch_claims):
+    for claim in (c for owner, found in claims.items() if owner != batch_id for c in found):
         known = earliest.get(claim.instrument_id, claim.first_day)
         earliest[claim.instrument_id] = min(known, claim.first_day)
 
@@ -341,11 +345,9 @@ async def list_batch_rows(session: AsyncSession, batch_id: UUID) -> list[ImportR
         # A superseded (rolled back) adjustment is no longer a balance gap, or anything.
         if row.kind != "opening_adjustment" or row.status == "rolled_back":
             return None
-        # An adjustment is dated the day before its statement's first date.
-        assert row.booking_date is not None and row.instrument_id is not None
-        first_day = row.booking_date + timedelta(days=1)
-        other = earliest.get(row.instrument_id)
-        return other is not None and other < first_day
+        assert row.instrument_id is not None
+        first_day, other = mine.get(row.instrument_id), earliest.get(row.instrument_id)
+        return first_day is not None and other is not None and other < first_day
 
     return [_row_record(row, is_gap(row)) for row in rows]
 
@@ -491,6 +493,23 @@ class OpeningClaim:
     vouched_from: date | None = None
     # It lists first_day in full: no other movement that day can be before its opening.
     first_day_in_full: bool = False
+    # The last day its rows carry its balance through in this instrument: the end of the
+    # days it lists in full, or, when they end before its first row (or there are none),
+    # just its opening (the day before first_day). Per claim, never per batch.
+    vouched_to: date | None = None
+    # The movement its first listed row stands for: the point its opening is the balance
+    # before, which another file listing that row speaks of too.
+    first_source: UUID | None = None
+
+    @property
+    def adjustment_day(self) -> date:
+        """Where its adjustment is dated: before its first day when it lists that day in
+        full (the gap is before the day starts); on it otherwise, after whatever another
+        file lists of that day, so the adjustment never lands inside a day another file
+        lists in full."""
+        if self.first_day_in_full:
+            return self.first_day - timedelta(days=1)
+        return self.first_day
 
 
 @dataclass(frozen=True)
@@ -571,17 +590,18 @@ class OpeningConflict:
 
 
 def opening_conflicts(
-    claims: Sequence[OpeningClaim],
-    needed: dict[tuple[UUID, UUID], Decimal],
-    vouched_to: dict[UUID, date | None],
+    claims: Sequence[OpeningClaim], needed: dict[tuple[UUID, UUID], Decimal]
 ) -> list[OpeningConflict]:
     """Final review C1: an adjustment is legitimate only where no other statement vouches
     for the balance (a gap, or the account's first statement).
 
-    An earlier claim in the walk (in the same instrument) vouches for the balance before
-    every day from its first date to the day after its file's vouched_to (see _vouched_to):
-    its opening holds at its first date, and its rows carry it through the days it lists in
-    full. So a claim that starts there, the same day included, must need nothing.
+    An earlier claim in the walk (in the same instrument) vouches for the balance at the
+    start of every day from its first date to the day after its vouched_to: its opening
+    holds at its first date, and its rows carry it through the days it lists in full. A
+    claim whose opening is such a start of day (it lists its first day in full) must then
+    need nothing. One whose first day it lists only in part opens partway through that
+    day, before its first row: the earlier claim vouches for that only if it lists the
+    whole day, or lists that row too (then both give the balance before the same row).
     """
     earlier: dict[UUID, list[OpeningClaim]] = defaultdict(list)
     conflicts: list[OpeningConflict] = []
@@ -591,8 +611,15 @@ def opening_conflicts(
             if need != 0:
                 start = claim.vouched_from or claim.first_day
                 for prior in earlier[claim.instrument_id]:
-                    end = vouched_to.get(prior.batch_id)
-                    if end is not None and start <= end + timedelta(days=1):
+                    end = prior.vouched_to
+                    if end is None:
+                        continue
+                    if claim.first_day_in_full:
+                        vouched = start <= end + timedelta(days=1)
+                    else:
+                        shared = claim.first_source is not None and claim.first_source in prior.own
+                        vouched = claim.first_day <= end or shared
+                    if vouched:
                         conflicts.append(
                             OpeningConflict(
                                 claim.batch_id,
@@ -624,9 +651,9 @@ class _BatchInfo:
     filename: str
     committed_at: datetime | None
     timezone: str | None
-    vouched_to: date | None
     complete_from: date | None
     complete_to: date | None
+    default_instrument_id: UUID | None  # the closing balance's when the file states none
 
 
 def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
@@ -643,13 +670,18 @@ async def _claims(
         row.id: row.profile_config
         for row in await session.execute(select(b.id, b.profile_config).where(b.id.in_(ids)))
     }
-    closings = {
-        batch_id: (balance, day)
-        for batch_id, balance, day in await session.execute(
-            select(s.batch_id, s.closing_balance, s.closing_balance_date).where(s.batch_id.in_(ids))
+    defaults = {batch.id: batch.default_instrument_id for batch in batches}
+    closings: dict[UUID, tuple[Decimal, date, UUID]] = {}
+    for batch_id, balance, day, code in await session.execute(
+        select(s.batch_id, s.closing_balance, s.closing_balance_date, s.currency).where(
+            s.batch_id.in_(ids)
         )
-        if balance is not None and day is not None
-    }
+    ):
+        # The closing is in the statement's currency, or the one picked at upload, as the
+        # rows are (_resolve_currencies): it anchors that instrument's chain only.
+        instrument_id = (await get_currency(session, code)).id if code else defaults[batch_id]
+        if balance is not None and day is not None and instrument_id is not None:
+            closings[batch_id] = (balance, day, instrument_id)
     stored: dict[UUID, list[models.ImportRow]] = defaultdict(list)
     for row in await session.scalars(
         select(r)
@@ -701,6 +733,7 @@ async def _claims(
             row_order if isinstance(row_order, str) else "oldest_first",
         )
         start, end = batch.complete_from, batch.complete_to
+        source_at = {row.position: _movement_source(row, original_of) for row in stored[batch.id]}
         claims[batch.id] = [
             OpeningClaim(
                 batch.id,
@@ -713,8 +746,14 @@ async def _claims(
                 first_day_in_full=start is not None
                 and end is not None
                 and start <= first_day <= end,
+                vouched_to=(
+                    first_day - timedelta(days=1)
+                    if end is None
+                    else max(first_day - timedelta(days=1), end)
+                ),
+                first_source=source_at.get(first_position),
             )
-            for instrument_id, (opening, first_day) in openings.items()
+            for instrument_id, (opening, first_day, first_position) in openings.items()
         ]
     return claims
 
@@ -730,32 +769,32 @@ def _movement_source(row: models.ImportRow, original_of: dict[UUID, UUID]) -> UU
     return original_of.get(row.id)
 
 
-def _vouched_to(covered_from: date | None, complete_to: date | None) -> date | None:
-    """The last day a batch's rows carry its balance through (Decision 13, with Decision
-    16's days listed in full): the end of the days it lists in full. One that lists no day
-    in full vouches only for its opening, the day before its first."""
-    if complete_to is not None:
-        return complete_to
-    return None if covered_from is None else covered_from - timedelta(days=1)
+def _batch_info_columns() -> tuple[Any, ...]:
+    b = models.ImportBatch
+    return (
+        b.id,
+        b.filename,
+        b.committed_at,
+        b.profile_config["timezone"].astext,
+        b.complete_from,
+        b.complete_to,
+        b.default_instrument_id,
+    )
+
+
+async def _batch_info(session: AsyncSession, batch_id: UUID) -> _BatchInfo:
+    found = await session.execute(
+        select(*_batch_info_columns()).where(models.ImportBatch.id == batch_id)
+    )
+    return _BatchInfo(*found.one())
 
 
 async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_BatchInfo]:
     b = models.ImportBatch
     found = await session.execute(
-        select(
-            b.id,
-            b.filename,
-            b.committed_at,
-            b.profile_config["timezone"].astext,
-            b.covered_from,
-            b.complete_from,
-            b.complete_to,
-        ).where(b.account_id == account_id, b.status == "committed")
+        select(*_batch_info_columns()).where(b.account_id == account_id, b.status == "committed")
     )
-    return [
-        _BatchInfo(id, name, at, zone, _vouched_to(start, end), complete_from, end)
-        for id, name, at, zone, start, complete_from, end in found
-    ]
+    return [_BatchInfo(*row) for row in found]
 
 
 async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
@@ -816,6 +855,8 @@ class OpeningPreview:
     an opening in (zero when none is needed); changes: what it does to the other batches."""
 
     needed: dict[UUID, Decimal]
+    # Where each of its adjustments is dated (OpeningClaim.adjustment_day).
+    days: dict[UUID, date]
     changes: list[OpeningChange]
     # Final review C1: where the batch and another statement disagree about a balance.
     conflicts: list[str]
@@ -827,28 +868,17 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
 
     Only transactions accounts take adjustments: for any other mode, nothing is needed.
     """
-    b, r = models.ImportBatch, models.ImportRow
-    staged = (
-        await session.execute(
-            select(b.account_id, b.filename, b.covered_from, b.complete_from, b.complete_to).where(
-                b.id == batch_id
-            )
-        )
-    ).one()
-    account_id = staged.account_id
+    r = models.ImportRow
+    account_id = await session.scalar(
+        select(models.ImportBatch.account_id).where(models.ImportBatch.id == batch_id)
+    )
+    assert account_id is not None
     if (await get_account(session, account_id)).balance_mode != "transactions":
-        return OpeningPreview(needed={}, changes=[], conflicts=[])
+        return OpeningPreview(needed={}, days={}, changes=[], conflicts=[])
+    staged = await _batch_info(session, batch_id)
     batches = [
         *(batch for batch in await _committed_batches(session, account_id) if batch.id != batch_id),
-        _BatchInfo(
-            batch_id,
-            staged.filename,
-            None,
-            None,
-            _vouched_to(staged.covered_from, staged.complete_to),
-            staged.complete_from,
-            staged.complete_to,
-        ),
+        replace(staged, committed_at=None),  # previewed as if committed after the others
     ]
     claims = await _claims(session, batches)
     movements = await _movements(session, account_id)
@@ -864,12 +894,7 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     plan = plan_openings(flat, movements)
     live = await _live_adjustments(session, account_id)
     names = {batch.id: batch.filename for batch in batches}
-    conflicts = [
-        _conflict_message(conflict, names)
-        for conflict in opening_conflicts(
-            flat, plan, {batch.id: batch.vouched_to for batch in batches}
-        )
-    ]
+    conflicts = [_conflict_message(conflict, names) for conflict in opening_conflicts(flat, plan)]
     changes: list[OpeningChange] = []
     for owner, instrument_id in sorted(plan.keys() | live.keys(), key=str):
         if owner == batch_id:
@@ -882,7 +907,8 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     needed = {
         instrument_id: need for (owner, instrument_id), need in plan.items() if owner == batch_id
     }
-    return OpeningPreview(needed=needed, changes=changes, conflicts=conflicts)
+    days = {claim.instrument_id: claim.adjustment_day for claim in claims.get(batch_id, [])}
+    return OpeningPreview(needed=needed, days=days, changes=changes, conflicts=conflicts)
 
 
 async def _post_adjustment(
@@ -934,7 +960,7 @@ async def align_openings(ctx: CommandContext, account_id: UUID) -> None:
     flat = [claim for found in claims.values() for claim in found]
     plan = plan_openings(flat, await _movements(session, account_id))
     live = await _live_adjustments(session, account_id)
-    first_days = {(c.batch_id, c.instrument_id): c.first_day for c in flat}
+    days = {(c.batch_id, c.instrument_id): c.adjustment_day for c in flat}
     zones = {batch.id: batch.timezone for batch in batches}
     default_tz = await get_timezone(session)
     r = models.ImportRow
@@ -957,7 +983,7 @@ async def align_openings(ctx: CommandContext, account_id: UUID) -> None:
             continue
         zone = zones.get(batch_id)
         local_tz = ZoneInfo(zone) if zone else default_tz
-        day = first_days[key] - timedelta(days=1)
+        day = days[key]
         currency = _iso_code(await get_instrument(session, instrument_id))
         transaction_id = await _post_adjustment(ctx, account_id, instrument_id, need, day, local_tz)
         values: dict[str, Any] = {
@@ -997,7 +1023,15 @@ def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
 
 
 def require_importable(account: AccountRecord) -> None:
-    """Decision 3: only open, manual accounts whose balance comes from transactions."""
+    """Decision 3: only open, manual accounts whose balance comes from transactions, and
+    only assets and liabilities: a statement is a bank account's or a card's, never an
+    income, expense or equity account's (the system accounts an import posts its other
+    legs to are equity)."""
+    if account.ledger_type not in ("asset", "liability"):
+        raise ImportNotAllowedError(
+            f"this is an {account.ledger_type} account; statements import into a bank, card "
+            "or other asset or liability account"
+        )
     if account.status != "open":
         raise ImportNotAllowedError("this account is closed, so it can't take imports")
     if account.source_kind != "manual":
@@ -1202,11 +1236,13 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
 async def _mark_duplicates(session: AsyncSession, account_id: UUID, keyed: list[_Row]) -> None:
     """A key that repeats among the rows is an error; a key a committed row has makes the row
     that row's duplicate."""
-    r = models.ImportRow
-    committed: dict[str | None, UUID] = {
-        key: row_id
-        for key, row_id in await session.execute(
-            select(r.dedupe_key, r.id).where(
+    r, b = models.ImportRow, models.ImportBatch
+    committed: dict[str | None, tuple[UUID, Decimal | None, UUID | None, str]] = {
+        key: (row_id, quantity, instrument_id, filename)
+        for key, row_id, quantity, instrument_id, filename in await session.execute(
+            select(r.dedupe_key, r.id, r.quantity, r.instrument_id, b.filename)
+            .join(b, b.id == r.batch_id)
+            .where(
                 r.account_id == account_id,
                 r.status == "committed",
                 r.dedupe_key.in_([row.dedupe_key for row in keyed]),
@@ -1227,7 +1263,19 @@ async def _mark_duplicates(session: AsyncSession, account_id: UUID, keyed: list[
                 "and balance"
             )
         elif row.dedupe_key in committed:
-            row.status, row.duplicate_of = "duplicate", committed[row.dedupe_key]
+            row_id, quantity, instrument_id, filename = committed[row.dedupe_key]
+            # Only an external id's key leaves the amount out; a row it matches may still
+            # move on another day (a pending date), but never by another amount.
+            if (quantity, instrument_id) != (row.parsed.quantity, row.instrument_id):
+                row.fail(
+                    f"transaction id {row.parsed.external_id} was imported from {filename} "
+                    f"as {to_plain_str(quantity or Decimal(0))}; this file gives "
+                    f"{to_plain_str(row.parsed.quantity)}"
+                    + ("" if instrument_id == row.instrument_id else " in another currency"),
+                    real=True,
+                )
+            else:
+                row.status, row.duplicate_of = "duplicate", row_id
         seen.add(row.dedupe_key)
 
 
@@ -1661,13 +1709,7 @@ async def _stage_openings(
         need = preview.needed[instrument_id]
         if need == 0:
             continue
-        day = min(
-            row.parsed.booking_date
-            for row in rows
-            if row.parsed is not None
-            and row.instrument_id == instrument_id
-            and row.status in ("new", "duplicate")
-        ) - timedelta(days=1)
+        day = preview.days[instrument_id]
         currency = _iso_code(instruments[instrument_id])
         position = -(len(adjustments) + 1)
         adjustment = ParsedRow(

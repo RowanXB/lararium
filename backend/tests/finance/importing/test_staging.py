@@ -327,7 +327,9 @@ async def test_opening_adjustment_from_first_balance(
     assert adjustment.position == -1
     assert adjustment.status == "new"
     assert adjustment.quantity == Decimal("1500.00")
-    assert adjustment.booking_date == date(2026, 11, 1)
+    assert adjustment.booking_date == date(
+        2026, 11, 2
+    )  # an export's first day is partial: dated on it
     assert adjustment.description == "Opening balance adjustment"
     assert adjustment.instrument_id == gbp.id
     assert batch.counts["new"] == 3
@@ -357,7 +359,9 @@ async def test_gap_creates_adjustment(
     (adjustment,) = _adjustments(await _rows(session, await stage(profile, january)))
 
     assert adjustment.quantity == Decimal("-75.00")  # 1405.00 opening, 1480.00 in the ledger
-    assert adjustment.booking_date == date(2027, 1, 4)
+    assert adjustment.booking_date == date(
+        2027, 1, 5
+    )  # an export's first day is partial: dated on it
 
 
 async def test_older_statement_after_newer_realigns(
@@ -877,3 +881,29 @@ async def test_nul_character_refuses_the_file_naming_its_row(
     content = HEADER + "10/11/2026,Coffee,-3.50\n11/11/2026,Example\x00Shop,-1.00\n"
     with pytest.raises(FileFormatError, match="row 2 has a NUL character"):
         await stage(csv_profile, content)
+
+
+async def test_same_id_with_another_amount_is_an_error(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Fourth review: a row matched by external id became a duplicate whatever its amount,
+    so a settled amount that differed from the pending one left the ledger 10.00 out."""
+    ofx = await _profile(run, format="ofx")
+    first = _ofx([("20261105", "-50.00", "T1")], start="20261101", end="20261130")
+    await commit((await stage(ofx, first, filename="a.ofx")).id)
+    again = _ofx([("20261105", "-60.00", "T1")], start="20261101", end="20261130")
+    (row,) = await _rows(session, await stage(ofx, again, filename="b.ofx"))
+    assert row.status == "error" and row.error is not None
+    assert "T1" in row.error and "a.ofx" in row.error and "-60.00" in row.error
+
+
+async def test_only_assets_and_liabilities_take_imports(
+    stage: Stage, csv_profile: ImportProfileRecord, make_account: MakeAccount
+) -> None:
+    """Fourth review: the system 'Opening balances' account (equity) could be chosen, so its
+    adjustment posted to itself and the walk counted money that moved nowhere."""
+    equity = await make_account(
+        name="Example Equity", ledger_type="equity", balance_mode="transactions"
+    )
+    with pytest.raises(ImportNotAllowedError, match="equity"):
+        await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", account_id=equity.id)
