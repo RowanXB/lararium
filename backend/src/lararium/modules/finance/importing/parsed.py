@@ -22,10 +22,15 @@ _DIGITS = re.compile(r"[0-9]+")
 _ACCOUNT_SEPARATORS = re.compile(r"[ -]")
 
 
+def _masked(text: str) -> str:
+    """An identifier as a message may show it: its last four characters only."""
+    return repr("…" + text.strip()[-4:])
+
+
 def _digits(text: str, what: str) -> str:
     digits = _ACCOUNT_SEPARATORS.sub("", text.strip().removeprefix("'"))
     if not _DIGITS.fullmatch(digits):
-        raise ValueError(f"not {what}: {text!r}")
+        raise ValueError(f"not {what}: {_masked(text)}")
     return digits
 
 
@@ -35,7 +40,7 @@ def normalise_sort_code(text: str | None) -> str | None:
         return None
     digits = _digits(text, "a sort code")
     if len(digits) != 6:
-        raise ValueError(f"not a sort code: {text!r}")
+        raise ValueError(f"not a sort code: {_masked(text)}")
     return digits
 
 

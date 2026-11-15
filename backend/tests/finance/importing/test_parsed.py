@@ -1,9 +1,15 @@
 import time
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from lararium.modules.finance.importing.parsed import StatementRate, keyed
+from lararium.modules.finance.importing.parsed import (
+    StatementRate,
+    keyed,
+    normalise_account_number,
+    normalise_sort_code,
+)
 
 
 def test_keyed_numbers_repeated_keys() -> None:
@@ -29,3 +35,21 @@ def test_statement_rate_needs_a_rate_or_an_ear() -> None:
     assert StatementRate("Credit", None, Decimal(50), rate=Decimal("1.25"), ear=None).rate
     with pytest.raises(ValueError, match="a rate or an EAR"):
         StatementRate("Overdraft", None, Decimal(50), rate=None, ear=None)
+
+
+@pytest.mark.parametrize(
+    ("normalise", "text"),
+    [
+        (normalise_account_number, "1234x5678"),
+        (normalise_sort_code, "40-12-3x"),
+        (normalise_sort_code, "40123456789"),
+    ],
+)
+def test_bad_identifiers_show_only_their_last_four(normalise: Any, text: str) -> None:
+    """Row errors are shown on the batch page: a malformed account number or sort code is
+    named by its last four characters only, like every other identifier in a message."""
+    with pytest.raises(ValueError) as raised:
+        normalise(text)
+    message = str(raised.value)
+    assert repr("…" + text[-4:]) in message
+    assert text not in message and text[:4] not in message
