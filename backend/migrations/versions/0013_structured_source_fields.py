@@ -98,6 +98,9 @@ UPGRADE = [
 ]
 
 DOWNGRADE = [
+    # Forget the replay marker, so that the first sync after upgrading again backfills the
+    # columns dropped here (structured-fields Decision 12).
+    "UPDATE core.connections SET config = config - 'normalizer_version' WHERE connector = 'monzo'",
     "DROP TABLE finance.declined_transactions",
     "DROP TABLE finance.transaction_category_splits",
     """

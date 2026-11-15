@@ -19,8 +19,9 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   structured-fields plan, Decisions 5-11); a field in a shape not mapped yet stays in the raw
   records, with a warning on the connection, and never fails the sync;
 - the first sync under a new NORMALIZER_VERSION first replays the latest raw record of every
-  transaction the connection ever fetched (structured-fields Decision 12), so what a new
-  version stores is filled in for the history an older one posted too.
+  transaction the connection ever posted, or whose latest record is declined
+  (structured-fields Decision 12), so what a new version stores is filled in for the history
+  an older one posted too; the replay never posts a transaction anew.
 """
 
 import logging
@@ -34,7 +35,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, column, func, select, true
+from sqlalchemy import DateTime, and_, case, column, exists, func, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,7 +80,7 @@ logger = logging.getLogger(__name__)
 
 NORMALIZER_VERSION = "monzo-norm-2"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
-# makes the next sync replay the history already fetched (see _Normalizer.replay).
+# makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
 
 ACCOUNT_MAP_KEY = "account_map"
@@ -205,23 +206,37 @@ async def _connector_transaction(
     return row.id, cast(TransactionStatus, row.status), row.voided_by
 
 
+# A time as Monzo writes it (ISO 8601, with its offset). Anything else in `updated`, such as
+# PostgreSQL's "infinity" or "now", is read as none.
+_ISO_TIME = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
+    r"(Z|[+-][0-9]{2}:?[0-9]{2})$"
+)
+
+
 async def _latest_transactions(
     session: AsyncSession, connection_id: UUID
 ) -> list[tuple[dict[str, Any], str]]:
-    """The latest raw copy of every Monzo transaction the connection fetched, with the Monzo
-    account its page was fetched for.
+    """The latest raw copy of each Monzo transaction the connection fetched and has posted
+    (void or not), or whose latest copy is declined, with the Monzo account its page was
+    fetched for. The others are left out: a replay backfills, and never posts what no sync
+    posted, such as a pending payment in the pages of a discarded attempt.
 
-    The latest has the greatest Monzo `updated` (none counts as the oldest), then fetch time,
-    then record id: the fetch time alone would mislead, as a page fetched again keeps its
-    first one. Picked by the database, so memory grows with the transactions, not with the
-    copies of them each sync stores again. Most recently fetched first: a merchant's place
-    takes its details from the first transaction a sync sees for it.
+    The latest has the greatest Monzo `updated` (none counts as the oldest, and so does one
+    that is not a valid time in that form), then fetch time, then record id: the fetch time
+    alone would mislead, as a page fetched again keeps its first one. Picked by the database,
+    so memory grows with the transactions, not with the copies of them each sync stores again.
+    Most recently fetched first: a merchant's place takes its details from the first
+    transaction a sync sees for it.
     """
-    r = RawRecord
+    r, t = RawRecord, models.Transaction
     elements = func.jsonb_array_elements(r.content).table_valued(column("value", JSONB))
     tx = elements.c.value
     monzo_id = tx["id"].astext
-    updated = func.nullif(tx["updated"].astext, "").cast(DateTime(timezone=True))
+    stated = tx["updated"].astext
+    # Never a cast that can fail: one malformed copy must not fail the sync.
+    readable = and_(stated.regexp_match(_ISO_TIME), func.pg_input_is_valid(stated, "timestamptz"))
+    updated = case((readable, stated.cast(DateTime(timezone=True))))
     latest = (
         select(tx.label("tx"), r.request["account_id"].astext.label("account"), r.fetched_at, r.id)
         .select_from(r)
@@ -231,10 +246,16 @@ async def _latest_transactions(
         .order_by(monzo_id, updated.desc().nulls_last(), r.fetched_at.desc(), r.id.desc())
         .subquery()
     )
+    posted = exists().where(
+        t.connection_id == connection_id, t.external_id == latest.c.tx["id"].astext
+    )
+    # Declined in Monzo's shape, a non-empty string, which transaction() records as a decline.
+    reason = latest.c.tx["decline_reason"]
+    declined = and_(func.jsonb_typeof(reason) == "string", reason.astext != "")
     rows = await session.execute(
-        select(latest.c.tx, latest.c.account).order_by(
-            latest.c.fetched_at.desc(), latest.c.id.desc(), latest.c.tx["id"].astext
-        )
+        select(latest.c.tx, latest.c.account)
+        .where(or_(posted, declined))
+        .order_by(latest.c.fetched_at.desc(), latest.c.id.desc(), latest.c.tx["id"].astext)
     )
     return [(row.tx, row.account) for row in rows]
 
@@ -618,10 +639,10 @@ class _Normalizer:
         self.count(outcome)
 
     async def replay(self, skipping: Collection[str]) -> None:
-        """Run the latest raw copy of every Monzo transaction this connection ever fetched
-        through transaction(), except those in `skipping` (structured-fields Decision 12).
-        Through its upserts, an owner's void survives and an unchanged transaction is not
-        written."""
+        """Run the latest raw copy of every Monzo transaction this connection ever posted, or
+        whose latest copy is declined, through transaction(), except those in `skipping`
+        (structured-fields Decision 12). Through its upserts, an owner's void survives and an
+        unchanged transaction is not written; nothing is posted anew."""
         for tx, monzo_account_id in await _latest_transactions(self.session, self.connection_id):
             if tx["id"] not in skipping:
                 await self.transaction(tx, monzo_account_id)

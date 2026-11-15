@@ -1,5 +1,3 @@
-import hashlib
-import json
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -23,7 +21,7 @@ from lararium.core.connections import (
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity, RawRecord
-from lararium.core.raw_records import store_raw_record
+from lararium.core.raw_records import _content_hash, store_raw_record
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
@@ -1430,7 +1428,6 @@ async def _store_page(
             )
             return
         fetched_at, record_id = copy
-        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
         await ctx.session.execute(
             insert(RawRecord).values(
                 id=uuid.UUID(int=record_id),
@@ -1440,7 +1437,7 @@ async def _store_page(
                 request=request,
                 fetched_at=fetched_at,
                 content=content,
-                content_hash=digest,
+                content_hash=_content_hash(content),
                 connector_version="monzo-sync-1",
             )
         )
@@ -1487,21 +1484,21 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:
     connection = await _connection(run)
-    await _normalize(session, connection)
     newest = make_transaction(amount=-1234, updated="2026-03-02T06:00:00.000Z")
+    await _normalize(session, connection, transactions=[newest])
     # Stored after the newest: a page seen before keeps its first fetch time, so the order of
     # fetching does not tell which is newer.
     older = make_transaction(
         amount=-1500, settled="", category="shopping", updated="2026-03-01T12:00:05.000Z"
     )
     undated = make_transaction(amount=-999, settled="", category="eating_out")  # the oldest
-    for tx in (newest, older, undated):
+    for tx in (older, undated):
         await _store_page(run, connection, [tx])
     await run(_before_structured_fields, connection)
 
     report = await _normalize(session, connection)
 
-    assert report == NormalizeReport(created=1)
+    assert report == NormalizeReport(updated=1)
     (tx,) = await _transactions(session)
     main = (await _account_map(session, connection))[ACCOUNT_ID]
     assert (tx.status, tx.value_date) == ("booked", date(2026, 3, 2))
@@ -1511,17 +1508,20 @@ async def test_replay_uses_the_latest_by_updated(session, run) -> None:
 
 async def test_replay_breaks_ties_by_fetch_time_then_id(session, run) -> None:
     connection = await _connection(run)
-    await _normalize(session, connection)
     early, late = datetime(2026, 3, 2, 7, tzinfo=UTC), datetime(2026, 3, 2, 8, tzinfo=UTC)
 
-    def payment(n: int, category: str) -> dict[str, Any]:
+    def payment(n: int, category: str, updated: str = "2026-03-02T06:00:00.000Z") -> dict[str, Any]:
         return make_transaction(
             id=f"tx_TEST{n:04d}",
             created=f"2026-03-01T12:{n:02d}:00.000Z",
             category=category,
-            updated="2026-03-02T06:00:00.000Z",
+            updated=updated,
         )
 
+    # Posted from an older copy of each, fetched after all the copies below (now) but beaten
+    # by their later `updated`.
+    stale = [payment(n, "eating_out", "2026-03-02T05:00:00.000Z") for n in range(1, 8)]
+    await _normalize(session, connection, transactions=stale)
     # The same `updated`; fetched later beats a greater id.
     await _store_page(run, connection, [payment(1, "groceries")], copy=(late, 1))
     await _store_page(run, connection, [payment(1, "shopping")], copy=(early, 2))
@@ -1542,6 +1542,61 @@ async def test_replay_breaks_ties_by_fetch_time_then_id(session, run) -> None:
     assert categories == {"tx_TEST0001": "groceries"} | {
         f"tx_TEST{n:04d}": "household" for n in range(2, 8)
     }
+
+
+async def test_replay_posts_nothing_new(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection)
+    pending = make_transaction(settled="")
+    declined = make_transaction(
+        id="tx_TEST0002",
+        created="2026-03-01T13:00:00.000Z",
+        amount=-2500,
+        settled="",
+        decline_reason="INSUFFICIENT_FUNDS",
+    )
+    # Only ever in a page no sync normalized.
+    await _store_page(run, connection, [pending, declined])
+    await run(_before_structured_fields, connection)
+
+    report = await _normalize(session, connection)
+
+    # The replay only backfills what the ledger holds; a decline is recorded outside it.
+    assert report == NormalizeReport(skipped_declined=1)
+    assert await _transactions(session) == []
+    assert [r.external_id for r in await _declined(session)] == ["tx_TEST0002"]
+
+
+@pytest.mark.parametrize("updated", ["not a date", "2026-02-30T06:00:00.000Z"])
+async def test_replay_treats_a_malformed_updated_as_the_oldest(session, run, updated) -> None:
+    connection = await _connection(run)
+    await _normalize(
+        session, connection, transactions=[make_transaction(updated="2026-03-02T06:00:00.000Z")]
+    )
+    await _store_page(run, connection, [make_transaction(category="shopping", updated=updated)])
+    await run(_before_structured_fields, connection)
+
+    report = await _normalize(session, connection)
+
+    assert report == NormalizeReport(updated=1)
+    (tx,) = await _transactions(session)
+    assert (await _details(session, tx.id)).category == "groceries"
+
+
+@pytest.mark.parametrize("updated", ["infinity", "now"])
+async def test_replay_ignores_special_times_in_updated(session, run, updated) -> None:
+    connection = await _connection(run)
+    await _normalize(
+        session, connection, transactions=[make_transaction(updated="2026-03-02T06:00:00.000Z")]
+    )
+    # PostgreSQL reads these as times, later than the real one above.
+    await _store_page(run, connection, [make_transaction(category="shopping", updated=updated)])
+    await run(_before_structured_fields, connection)
+
+    await _normalize(session, connection)
+
+    (tx,) = await _transactions(session)
+    assert (await _details(session, tx.id)).category == "groceries"
 
 
 async def test_replay_runs_once(session, run) -> None:

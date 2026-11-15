@@ -1,6 +1,8 @@
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import select
+
 from lararium.core.commands import CommandContext
 from lararium.core.entities import (
     PlaceDetails,
@@ -8,7 +10,7 @@ from lararium.core.entities import (
     get_or_create_place,
     get_self_entity_id,
 )
-from lararium.core.models import Entity
+from lararium.core.models import AuditLogEntry, Entity
 
 
 async def test_organization_matched_case_insensitively(run) -> None:
@@ -78,11 +80,40 @@ async def test_place_details_updated_when_changed(session, run) -> None:
     entity = await session.get_one(Entity, place)
     await session.refresh(entity)
     assert entity.name == "Test Cafe 2"
+    # The mcc was not given the second time, so the stored one stays.
     assert (entity.address_city, entity.longitude, entity.mcc) == (
         "Otherton",
         Decimal("-0.25"),
-        None,
+        "5814",
     )
+
+
+async def _entity_changes(session, entity_id: UUID) -> int:
+    rows = (await session.execute(select(AuditLogEntry.changes))).scalars().all()
+    return sum(f"entity:{entity_id}" in changes for changes in rows)
+
+
+async def test_place_detail_not_given_keeps_the_stored_one(session, run) -> None:
+    place = await run(
+        get_or_create_place,
+        "Test Cafe",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Testville", mcc="5814"),
+    )
+    recorded = await _entity_changes(session, place)
+
+    again = await run(
+        get_or_create_place,
+        "Test Cafe",
+        external_id=("loc", "p_1"),
+        details=PlaceDetails(address_city="Testville", mcc=None),
+    )
+
+    assert again == place
+    entity = await session.get_one(Entity, place)
+    await session.refresh(entity)
+    assert entity.mcc == "5814"
+    assert await _entity_changes(session, place) == recorded == 1
 
 
 async def test_place_not_confused_with_organization(run) -> None:

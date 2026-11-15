@@ -105,13 +105,15 @@ async def get_or_create_place(
 ) -> UUID:
     """Return the place carrying the external id (scheme, value), creating it if none.
 
-    The name and details are brought in line with what the source now says, recording a change
-    when they differ. A place is never matched to an organization, or by name.
+    The name and the details the source gives are brought in line with what it now says,
+    recording a change when they differ; a detail given as None keeps the stored value. A place
+    is never matched to an organization, or by name.
 
     Concurrent callers are serialised on the external id; call it in a short transaction, as
     the lock is held until it commits.
     """
     scheme, value = external_id
+    given = {field: new for field, new in asdict(details).items() if new is not None}
     await ctx.session.execute(
         select(func.pg_advisory_xact_lock(func.hashtext(f"place:{scheme}:{value}")))
     )
@@ -134,9 +136,9 @@ async def get_or_create_place(
         )
         ctx.session.add(place)
         await ctx.session.flush()
-    elif place.name != name or _details_of(place) != details:
+    elif place.name != name or any(getattr(place, field) != new for field, new in given.items()):
         place.name = name
-        for field, new in asdict(details).items():
+        for field, new in given.items():
             setattr(place, field, new)
         await ctx.session.flush()
     else:
