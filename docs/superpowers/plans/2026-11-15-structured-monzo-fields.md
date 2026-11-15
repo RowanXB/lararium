@@ -4,7 +4,7 @@
 
 **Goal:** Every Monzo field the owner chose (tiers 1 and 2) is stored as a typed field, for future syncs and for the history already in `core.raw_records`.
 
-**Architecture:** One migration adds typed columns to `finance.transactions`, `finance.accounts` and `core.entities`, plus `finance.transaction_category_splits` and `finance.declined_transactions`. The Monzo normalizer fills them. Bumping `NORMALIZER_VERSION` makes the next sync replay the latest raw record of every Monzo transaction already in the ledger (and of declined ones) through the normalizer, which backfills history with the same code that handles new syncs.
+**Architecture:** One migration adds typed columns to `finance.transactions`, `finance.accounts` and `core.entities`, plus `finance.transaction_category_splits` and `finance.declined_transactions`. The Monzo normalizer fills them. Bumping `NORMALIZER_VERSION` makes the next sync replay the latest raw record of every Monzo transaction it fetched through the normalizer, which never posts one the ledger does not already hold: history is backfilled with the same code that handles new syncs.
 
 **Tech Stack:** Python 3.13, FastAPI, async SQLAlchemy, PostgreSQL 18, raw-SQL Alembic migrations, pytest.
 
@@ -35,7 +35,7 @@
      - `logo_url` (from `merchant.logo`).
    - The brand organization stays as today. A transaction links both: `counterparty_entity_id` (the brand) and `place_entity_id`.
    - Every transaction records its merchant's place first, whatever the ledger makes of it (posted, declined, or reversed to amount 0), so every Monzo merchant id the source shows gets its place. A place is identified by the merchant id alone: one without a readable name is named by its id, and only the brand organization, known by its name, is skipped.
-   - When transactions of one sync (the replay's included) say different things about a merchant, the newest statement wins (Monzo's `updated`, else `created`), each detail it lacks taken from older ones; the order the sync meets them in does not decide.
+   - Each sync writes each place once, before any transaction is applied, from everything that sync's transactions (the replay's included) say about the merchant, name included: folded by statement time (Monzo's `updated`, else `created`), each value a newer statement states replaces an older one, and one no newer statement states is kept. So neither the order the sync meets them in nor how many disagree decides, and an unchanged sync writes nothing. Accepted limit: the statement time is not stored, so across syncs a value only stated in an older transaction refetched later can replace a newer stored one; a sync's window always holds a merchant's newest transactions, so this needs Monzo to change an old transaction outside it.
    - The organization lookup filters on `kind = 'organization'`, so the shared external-id scheme does not collide.
 7. **Category splits** go in `finance.transaction_category_splits (transaction_id, position, category, quantity)`. They are written only when `categories` is a real split: more than one entry, or one entry other than `{category: amount}`. Otherwise the split is derivable.
 8. **Fees are separate postings** (spec §6; M2 uses the same convention).
@@ -212,7 +212,7 @@ Folded into Task 5's first commit; no tests of its own.
 - Consumes: Tasks 2–4.
 - Behaviour (Decisions 5–11):
   - **`_Normalizer.transaction`:**
-    - builds `TransactionDetails` from the transaction, and the place (through `_shared_row` with the key `("place", merchant_id)`, like `organization`) when `merchant.id` is present;
+    - builds `TransactionDetails` from the transaction, and links the place that `prepare_places` wrote for its `merchant.id` (Decision 6);
     - splits the fees into postings (Decision 8);
     - for a declined transaction, calls `upsert_declined` after `void_if_posted`.
   - **`account()` and `pot()`** call `set_source_details` on every sync, mapped or new.

@@ -26,10 +26,11 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 
 import logging
 import re
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from numbers import Real
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -58,7 +59,7 @@ from lararium.modules.finance.accounts import (
     set_source_details,
 )
 from lararium.modules.finance.declined import DeclinedInput, upsert_declined
-from lararium.modules.finance.errors import UnknownCurrencyError
+from lararium.modules.finance.errors import FinanceValidationError, UnknownCurrencyError
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency
 from lararium.modules.finance.ledger import (
     CategorySplit,
@@ -69,7 +70,7 @@ from lararium.modules.finance.ledger import (
     upsert_connector_transaction,
     void_transaction,
 )
-from lararium.modules.finance.money import to_plain_str, tolerance
+from lararium.modules.finance.money import require_amount, to_plain_str, tolerance
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.system_accounts import (
     SystemAccountKey,
@@ -156,16 +157,42 @@ def _fields(value: object) -> dict[str, Any]:
     return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
-def _fill(known: PlaceDetails, more: PlaceDetails) -> PlaceDetails:
-    """`known`, with each detail it lacks taken from `more`."""
-    return replace(
-        known,
-        **{
-            f.name: getattr(more, f.name)
-            for f in fields(PlaceDetails)
-            if getattr(known, f.name) is None
-        },
-    )
+@dataclass(frozen=True)
+class _Statement:
+    """What one transaction says about its merchant, and when it said it."""
+
+    at: datetime | None
+    name: str | None
+    details: PlaceDetails
+
+
+# Sorts a statement with no time before any other.
+_NO_TIME = datetime.min.replace(tzinfo=UTC)
+
+
+def _fold(statements: Sequence[_Statement]) -> tuple[str | None, PlaceDetails]:
+    """What a merchant's statements say together (structured-fields Decision 6): each value a
+    newer statement states replaces an older one, and one no newer statement states is kept.
+    By statement time alone (no time counts as the oldest; equal times keep the order given),
+    so the order a sync meets them in does not decide."""
+    name: str | None = None
+    values: dict[str, object] = {}
+    for statement in sorted(statements, key=lambda s: s.at or _NO_TIME):
+        if statement.name is not None:
+            name = statement.name
+        for detail in fields(PlaceDetails):
+            if (value := getattr(statement.details, detail.name)) is not None:
+                values[detail.name] = value
+    return name, replace(PlaceDetails(), **values)
+
+
+def _storable(quantity: Decimal) -> bool:
+    """Whether the ledger can store the amount (require_amount's rule, in one place)."""
+    try:
+        require_amount("amount", quantity)
+    except FinanceValidationError:
+        return False
+    return True
 
 
 def _minor_units(value: object) -> int | None:
@@ -500,9 +527,8 @@ class _Normalizer:
         self.report = NormalizeReport()
         self._currencies: dict[str, InstrumentRecord] = {}
         self._shared: dict[tuple[str, ...], UUID] = {}
-        # Per Monzo merchant id: its place, the details written to it in this sync, and the
-        # time of the newest statement they hold.
-        self._places: dict[str, tuple[UUID, PlaceDetails, datetime | None]] = {}
+        # Per Monzo merchant id: its place, written once per sync by prepare_places().
+        self._places: dict[str, UUID] = {}
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         self._deleted_pots: list[UUID] = []
@@ -658,9 +684,13 @@ class _Normalizer:
         read = _Reader(pot, "pot", self.unmapped)
         goal = read.minor_units("goal_amount")
         currency = await self.currency(pot["currency"])
+        goal_amount = None if goal is None else to_quantity(goal, currency.decimals)
+        if goal_amount is not None and not _storable(goal_amount):
+            read.unreadable_field("goal_amount")
+            goal_amount = None
         details = SourceDetails(
             product_type=read.text("type"),
-            goal_amount=None if goal is None else to_quantity(goal, currency.decimals),
+            goal_amount=goal_amount,
             locked=read.flag("locked"),
             round_up=read.flag("round_up"),
             round_up_multiplier=read.number("round_up_multiplier"),
@@ -705,7 +735,7 @@ class _Normalizer:
         read = _Reader(tx, "", self.unmapped)
         # What it says about its merchant holds whatever the ledger makes of it: declined,
         # reversed or posted, every Monzo merchant id gets its place.
-        counterparty, place = await self.merchant(read, _statement_time(tx))
+        counterparty, place = await self.merchant(read)
         if _is_stated(tx.get("decline_reason")):
             # Any stated reason is a decline, which is never posted, even one it cannot read.
             reason = read.text("decline_reason") or ""
@@ -748,15 +778,17 @@ class _Normalizer:
         )
         self.count(outcome)
 
-    async def replay(self, skipping: Collection[str]) -> None:
-        """Run the latest raw copy of every Monzo transaction this connection fetched through
-        transaction(), except those in `skipping` (structured-fields Decision 12): it decides
-        what each copy is, as for a sync, and only refuses to post one the ledger does not
-        hold. Through its upserts, an owner's void survives and an unchanged transaction is not
-        written."""
-        for tx, monzo_account_id in await _latest_transactions(self.session, self.connection_id):
-            if tx["id"] not in skipping:
-                await self.transaction(tx, monzo_account_id, backfill=True)
+    async def replay_copies(self, skipping: Collection[str]) -> list[tuple[dict[str, Any], str]]:
+        """The latest raw copy of every Monzo transaction this connection fetched, except those
+        in `skipping`, for a replay (structured-fields Decision 12): each is run through
+        transaction(backfill=True), which decides what it is as for a sync and only refuses to
+        post one the ledger does not hold. Through its upserts, an owner's void survives and
+        an unchanged transaction is not written."""
+        return [
+            (tx, monzo_account_id)
+            for tx, monzo_account_id in await _latest_transactions(self.session, self.connection_id)
+            if tx["id"] not in skipping
+        ]
 
     def _postings(
         self, tx: dict[str, Any], currency: InstrumentRecord, account_id: UUID, other: UUID
@@ -771,8 +803,13 @@ class _Normalizer:
             if amount != 0
         }
         before_fees = tx["amount"] - sum(fees.values())
-        if fees and before_fees == 0:
-            # All of it fees: the account's own posting would be zero, which none can be.
+        storable = all(
+            _storable(to_quantity(amount, currency.decimals))
+            for amount in (before_fees, *fees.values())
+        )
+        if fees and (before_fees == 0 or not storable):
+            # All of it fees, which would leave a zero posting on the account, or a fee the
+            # ledger cannot store: the transaction is posted whole, and the fees stay raw.
             self.unmapped.add("fees")
             fees, before_fees = {}, tx["amount"]
         return [
@@ -819,13 +856,23 @@ class _Normalizer:
         warning: its decimals, which the amount in minor units needs, are unknown."""
         code, minor_units = read.text("local_currency"), read.minor_units("local_amount")
         if code is None or minor_units is None:
+            # A pair: half of it stated without the other cannot be stored, which warns rather
+            # than vanishes (a half it could not read has warned already).
+            if code is not None and "local_amount" not in read.unreadable:
+                self.unmapped.add("local_currency")
+            if minor_units is not None and "local_currency" not in read.unreadable:
+                self.unmapped.add("local_amount")
             return None, None
         try:
             local = await self.currency(code)
         except UnknownCurrencyError:
             self.unmapped.add("local_currency")
             return None, None
-        return to_quantity(minor_units, local.decimals), local.id
+        quantity = to_quantity(minor_units, local.decimals)
+        if not _storable(quantity):
+            read.unreadable_field("local_amount")
+            return None, None
+        return quantity, local.id
 
     def _labels(self, value: object) -> tuple[str, ...]:
         if value is None:
@@ -861,14 +908,16 @@ class _Normalizer:
         category = read.text("category")
         if not amounts or (category is not None and amounts == {category: tx["amount"]}):
             return ()
-        return tuple(
+        splits = tuple(
             CategorySplit(category, to_quantity(amount, decimals))
             for category, amount in sorted(amounts.items())
         )
+        if not all(_storable(split.quantity) for split in splits):
+            self.unmapped.add("categories")
+            return ()
+        return splits
 
-    async def merchant(
-        self, read: _Reader, stated_at: datetime | None
-    ) -> tuple[UUID | None, UUID | None]:
+    async def merchant(self, read: _Reader) -> tuple[UUID | None, UUID | None]:
         """The merchant's brand, an organization merged by name, and its place, one per Monzo
         merchant id (structured-fields Decision 6): one name can cover several ids, each with
         its own address, logo and online flag."""
@@ -879,28 +928,36 @@ class _Normalizer:
         organization = None if name is None else await self.organization(name, external_id=tag)
         if merchant_id is None:
             return organization, None
-        external_id = ("monzo_merchant", merchant_id)
-        details = self._place_details(merchant, read.object("metadata"))
-        # Transactions of one sync, the replay's included, may say different things about a
-        # merchant: the newest statement wins, each detail it lacks taken from older ones, so
-        # neither the order a sync meets them in nor the replay decides. Written again only
-        # when that changes a detail.
-        known = self._places.get(merchant_id)
-        if known is not None:
-            place, seen, seen_at = known
-            newer = seen_at is None or (stated_at is not None and stated_at >= seen_at)
-            details = _fill(details, seen) if newer else _fill(seen, details)
-            latest_at = stated_at if newer else seen_at
-            if details == seen:
-                self._places[merchant_id] = (place, seen, latest_at)
-                return organization, place
-        else:
-            latest_at = stated_at
-        place = await self._in_short_transaction(
-            lambda ctx: get_or_create_place(ctx, name, external_id=external_id, details=details)
-        )
-        self._places[merchant_id] = (place, details, latest_at)
-        return organization, place
+        if merchant_id not in self._places:  # a transaction prepare_places() was not given
+            await self.prepare_places([read.fields])
+        return organization, self._places[merchant_id]
+
+    async def prepare_places(self, txs: Iterable[dict[str, Any]]) -> None:
+        """Write each merchant's place once, from everything these transactions say about it,
+        folded by statement time (_fold), before any of them is applied: so neither the order
+        they come in, the replay's included, nor how many of them disagree decides what is
+        stored, and an unchanged sync writes nothing."""
+        said: dict[str, list[_Statement]] = {}
+        for tx in txs:
+            read = _Reader(tx, "", self.unmapped)
+            merchant = read.object("merchant")
+            merchant_id = merchant.text("id")
+            if merchant_id is None:
+                continue
+            details = self._place_details(merchant, read.object("metadata"))
+            said.setdefault(merchant_id, []).append(
+                _Statement(_statement_time(tx), merchant.text("name"), details)
+            )
+        for merchant_id, statements in said.items():
+            name, details = _fold(statements)
+            self._places[merchant_id] = await self._in_short_transaction(
+                partial(
+                    get_or_create_place,
+                    name=name,
+                    external_id=("monzo_merchant", merchant_id),
+                    details=details,
+                )
+            )
 
     def _place_details(self, merchant: _Reader, metadata: _Reader) -> PlaceDetails:
         """The merchant, with what the transaction's metadata says about where it was paid."""
@@ -1142,8 +1199,17 @@ async def normalize(
     ]
     # Under a new version, first the history this sync's pages don't cover, once the accounts
     # and pots it posts to are mapped (and after adopt_boundary, which must precede any posting).
-    if connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION:
-        await n.replay(skipping={tx["id"] for _, content in pages for tx in content})
+    replayed = (
+        await n.replay_copies(skipping={tx["id"] for _, content in pages for tx in content})
+        if connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
+        else []
+    )
+    # Every merchant's place from all it is said to be in this sync, before anything links it.
+    await n.prepare_places(
+        [tx for tx, _ in replayed] + [tx for _, content in pages for tx in content]
+    )
+    for tx, monzo_account_id in replayed:
+        await n.transaction(tx, monzo_account_id, backfill=True)
     for monzo_account_id, content in pages:
         for tx in content:
             await n.transaction(tx, monzo_account_id)

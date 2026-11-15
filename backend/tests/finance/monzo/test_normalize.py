@@ -1422,27 +1422,58 @@ async def test_a_decline_with_an_unreadable_reason_is_recorded_not_posted(sessio
     assert await _warnings(session, connection) == [UNMAPPED.format("decline_reason")]
 
 
-async def test_the_newest_statement_about_a_merchant_wins(session, run) -> None:
+def _statement(n: int, day: int, **merchant: object) -> dict[str, Any]:
+    """A payment at merchant merch_TEST1, stated on the given day of March 2026."""
+    mcc = merchant.pop("mcc", None)
+    return make_transaction(
+        id=f"tx_TEST000{n}",
+        created=f"2026-03-0{day}T12:00:00.000Z",
+        updated=f"2026-03-0{day}T12:00:00.000Z",
+        merchant=make_merchant(**merchant),
+        metadata={} if mcc is None else {"mcc": mcc},
+    )
+
+
+async def _place_of_merchant(session) -> Entity:
+    place_id = await session.scalar(
+        text("select id from core.entities where external_ids ->> 'monzo_merchant' = 'merch_TEST1'")
+    )
+    return await session.get_one(Entity, place_id, populate_existing=True)
+
+
+async def _place_changes(session, place_id: uuid.UUID) -> int:
+    return await session.scalar(
+        text("select count(*) from core.audit_log where changes ? :key"),
+        {"key": f"entity:{place_id}"},
+    )
+
+
+@pytest.mark.parametrize(
+    "order",
+    [(0, 1, 2), (2, 1, 0), (1, 0, 2), (2, 0, 1)],
+    ids=["oldest-first", "newest-first", "mixed-1", "mixed-2"],
+)
+async def test_the_newest_statement_about_a_merchant_wins(
+    session, run, order: tuple[int, ...]
+) -> None:
     connection = await _connection(run)
+    statements = [
+        _statement(1, 2, name="Old Name", mcc="5411"),
+        _statement(2, 4, name="Old Name", mcc="5499"),
+        # The newest says nothing of the mcc: it keeps the newest one stated before it.
+        _statement(3, 6, name="New Name"),
+    ]
+    payments = [statements[i] for i in order]
 
-    def payment(n: int, day: int, mcc: str) -> dict[str, Any]:
-        return make_transaction(
-            id=f"tx_TEST000{n}",
-            created=f"2026-03-0{day}T12:00:00.000Z",
-            updated=f"2026-03-0{day}T12:00:00.000Z",
-            merchant=make_merchant(),
-            metadata={"mcc": mcc},
-        )
+    await _normalize(session, connection, transactions=payments)
 
-    # The older one first: the order a sync meets them in does not decide.
-    await _normalize(
-        session, connection, transactions=[payment(1, 2, "5411"), payment(2, 3, "5499")]
-    )
-    (first, _) = await _transactions(session)
-    place = await session.get_one(
-        Entity, (await _details(session, first.id)).place_entity_id, populate_existing=True
-    )
-    assert place.mcc == "5499"
+    place = await _place_of_merchant(session)
+    assert (place.name, place.mcc) == ("New Name", "5499")
+    # The same disagreeing statements again write nothing.
+    place_id = place.id
+    changes = await _place_changes(session, place_id)
+    await _normalize(session, connection, transactions=payments)
+    assert await _place_changes(session, place_id) == changes
 
 
 async def test_the_replay_does_not_override_newer_merchant_facts(session, run) -> None:
@@ -1468,6 +1499,54 @@ async def test_the_replay_does_not_override_newer_merchant_facts(session, run) -
     }
     (place_id,) = place_ids
     assert (await session.get_one(Entity, place_id, populate_existing=True)).mcc == "5499"
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [
+        ("local_amount", {"local_amount": -1234, "local_currency": None}),
+        ("local_currency", {"local_amount": None, "local_currency": "USD"}),
+        ("local_amount", {"local_amount": -(10**43), "local_currency": "GBP"}),
+        ("categories", {"categories": {"groceries": -(10**43), "household": 0}}),
+        ("fees", {"fees": {"test.fee": -(10**43)}}),
+    ],
+    ids=[
+        "amount-without-currency",
+        "currency-without-amount",
+        "local-too-large",
+        "split-too-large",
+        "fee-too-large",
+    ],
+)
+async def test_amounts_it_cannot_store_warn_and_still_post(
+    session, run, name: str, overrides: dict[str, Any]
+) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(amount=-1234) | overrides
+
+    report = await _normalize(session, connection, transactions=[payment])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    details = await _details(session, tx.id)
+    assert (details.original_quantity, details.original_instrument_id) in [
+        (None, None),
+        (Decimal("-12.34"), (await get_currency(session, "GBP")).id),
+    ]
+    assert await _splits(session, tx.id) == []
+    assert len(await _postings(session, tx.id)) == 2
+    assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+async def test_a_pot_goal_it_cannot_store_keeps_the_stored_one(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, pots=[make_pot(goal_amount=100000)])
+
+    await _normalize(session, connection, pots=[make_pot(goal_amount=10**43)])
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    assert pot.goal_amount == Decimal("1000.00")
+    assert await _warnings(session, connection) == [UNMAPPED.format("pot.goal_amount")]
 
 
 async def test_a_reversed_transaction_still_records_its_merchant(session, run) -> None:
