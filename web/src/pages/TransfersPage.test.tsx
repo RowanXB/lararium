@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import {
   addAccountIdentifier,
+  listAccounts,
   listTransferCandidates,
   listTransfers,
   pairTransfer,
@@ -104,6 +105,15 @@ vi.mock("../api", () => ({
         ledger_type: "asset",
         subtype: "bank",
         balance_mode: "hybrid",
+        status: "open",
+        system: false,
+      },
+      {
+        id: "0190a0b0-0000-7000-8000-000000000006",
+        name: "Lloyds",
+        ledger_type: "asset",
+        subtype: "bank",
+        balance_mode: "snapshots",
         status: "open",
         system: false,
       },
@@ -261,6 +271,15 @@ it("registers a suggestion against an account", async () => {
   // account of the same subtype can.
   expect(screen.queryByRole("option", { name: "In transit" })).toBeNull();
   expect(screen.getByRole("option", { name: "Cash in the post" })).toBeInTheDocument();
+  // A snapshots-only account can't have identifiers (the API refuses them); the section
+  // says so once, naming it, instead of offering it.
+  expect(screen.queryByRole("option", { name: "Lloyds" })).toBeNull();
+  expect(screen.getByRole("option", { name: "Monzo" })).toBeInTheDocument();
+  expect(
+    suggestions.getByText(
+      "Not listed: Lloyds. Snapshots-only accounts can't have identifiers; switch them to hybrid on Accounts.",
+    ),
+  ).toBeInTheDocument();
   await user.click(await screen.findByRole("option", { name: "Bank A" }));
   await user.click(suggestions.getByRole("button", { name: "Register" }));
 
@@ -270,6 +289,17 @@ it("registers a suggestion against an account", async () => {
       body: { kind: "uk_bank_account", value: "112233:12345678" },
     }),
   );
+});
+
+it("shows no snapshots hint when every account can have identifiers", async () => {
+  const accounts = (await listAccounts()).data as { balance_mode: string }[];
+  vi.mocked(listAccounts).mockResolvedValueOnce({
+    data: accounts.filter((a) => a.balance_mode !== "snapshots"),
+  } as never);
+  renderPage();
+  const suggestions = await section("Suggestions");
+  expect(await suggestions.findByText("11-22-33 · 12345678")).toBeInTheDocument();
+  expect(suggestions.queryByText(/Not listed/)).toBeNull();
 });
 
 it("pairs again a record the owner unpaired", async () => {

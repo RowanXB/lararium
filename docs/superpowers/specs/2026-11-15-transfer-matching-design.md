@@ -205,7 +205,7 @@ A periodic job (every 30 minutes, after healing) sends one notification per tran
 - **Transfers page** (`/transfers`), usable on a phone:
   - **Needs attention**: needing review and overdue `awaiting` transfers, each with its candidates (Pair on those of the same amount) and Reject;
   - **In transit**: `awaiting` transfers with days in transit;
-  - **Suggestions**: unregistered counterparty accounts, with register or dismiss;
+  - **Suggestions**: unregistered counterparty accounts, with register or dismiss; the register picker offers only accounts that can carry identifiers, and one line names the `snapshots`-mode accounts left out and says to switch them to `hybrid`;
   - **Recent**: the other transfers, one row each ("Monzo → Bank A · 100.00 GBP · inferred"), collapsed by default: Unpair on a matched one, Undo on a rejected one, Reject on the rest.
 - **Registry**: an identifiers section on each asset or liability account (on the Accounts page), add and remove; a `snapshots`-mode account offers the switch to `hybrid` instead.
 

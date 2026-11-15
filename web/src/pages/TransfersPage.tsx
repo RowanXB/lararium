@@ -382,12 +382,16 @@ export function TransfersPage() {
   const recent = all.filter((t) => t.status !== "awaiting" && !needsAttention(t));
   // Only an asset or liability account can be the owner's bank account; the ledger's own
   // accounts (In transit) can't have identifiers.
-  const ownAccounts = (accounts.data ?? []).filter(
+  const candidates = (accounts.data ?? []).filter(
     (a) =>
       (a.ledger_type === "asset" || a.ledger_type === "liability") &&
       !a.system &&
       a.status === "open",
   );
+  // A snapshots-only account ignores postings, so the API refuses its identifiers: it is
+  // left out of the picker, and the section names it once with the way to include it.
+  const ownAccounts = candidates.filter((a) => a.balance_mode !== "snapshots");
+  const snapshotsOnly = candidates.filter((a) => a.balance_mode === "snapshots");
 
   return (
     <div className="space-y-6">
@@ -413,6 +417,12 @@ export function TransfersPage() {
       </Section>
       <Section title="Suggestions">
         {suggestions.data?.length === 0 && <Empty>No suggestions</Empty>}
+        {!!suggestions.data?.length && snapshotsOnly.length > 0 && (
+          <p className="mb-3 text-sm text-muted-foreground">
+            {`Not listed: ${snapshotsOnly.map((a) => a.name).join(", ")}. ` +
+              "Snapshots-only accounts can't have identifiers; switch them to hybrid on Accounts."}
+          </p>
+        )}
         <ul className="divide-y">
           {suggestions.data?.map((suggestion) => (
             <SuggestionItem

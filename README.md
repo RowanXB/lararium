@@ -250,7 +250,8 @@ snapshot) plus anything posted after that.
 - **From Suggestions**: the Transfers page lists each bank account your transactions name that
   isn't registered, with the names it appeared under, how many payments went out and came in,
   and the latest date. Pick which of your accounts it is and choose **Register** (the same as
-  adding it by hand), or **Dismiss** one that isn't yours.
+  adding it by hand), or **Dismiss** one that isn't yours. Snapshots accounts aren't offered;
+  the section names them, and switching one to hybrid on the Accounts page adds it.
 - **Monzo registers its own accounts** on every sync, so a transfer between two Monzo
   connections (a joint account, say) needs nothing from you. It never takes an identifier you
   registered on another account, and it does take back its own account's if you dismissed it.
