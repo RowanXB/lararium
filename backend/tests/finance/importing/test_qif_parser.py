@@ -1,3 +1,4 @@
+import time
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -178,3 +179,11 @@ def test_too_many_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(parsed, "MAX_IMPORT_ROWS", 1)
     with pytest.raises(FileFormatError, match="more than 1 rows"):
         _parse(BANK)
+
+
+def test_many_repeated_tags_are_linear() -> None:
+    content = b"!Type:Bank\nD10/11/2026\nT-1.00\n" + b"Ax\n" * 50_000 + b"^\n"
+    started = time.perf_counter()
+    row = _rows(_parse(content))[0]
+    assert time.perf_counter() - started < 2
+    assert row.raw["A"] == "x" and row.raw["A#50000"] == "x"

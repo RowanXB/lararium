@@ -1,6 +1,7 @@
 """What a parser reads from a statement file, before staging: shared by every format."""
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -177,6 +178,18 @@ def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
         raise ValueError(f"not an amount: {text!r} ({error})") from None
     # 0 - value, not -value: keeps "(0.00)" from becoming -0.00.
     return Decimal(0) - value if negative else value
+
+
+def keyed(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """The pairs as a raw dict, in order; a repeated key gets "#2", "#3"… (keys never
+    contain "#"). Each pair costs O(1), so a file of repeated fields stays linear."""
+    values: dict[str, str] = {}
+    seen: dict[str, int] = {}
+    for key, value in pairs:
+        n = seen.get(key, 0) + 1
+        seen[key] = n
+        values[key if n == 1 else f"{key}#{n}"] = value
+    return values
 
 
 def clean_description(parts: list[str]) -> str:

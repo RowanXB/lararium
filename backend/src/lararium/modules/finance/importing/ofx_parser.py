@@ -5,6 +5,7 @@ No OFX library: a small tokenizer keeps every date as written (Decision 8).
 
 import html
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,6 +19,7 @@ from lararium.modules.finance.importing.parsed import (
     SkippedRow,
     StatementAccount,
     clean_description,
+    keyed,
     normalise_account_number,
     normalise_sort_code,
     parse_amount,
@@ -37,6 +39,8 @@ _DATETIME = re.compile(
 )
 _CURRENCY = re.compile(r"[A-Z]{3}")
 _STATEMENTS = frozenset({"STMTRS", "CCSTMTRS"})
+# Real statements nest about eight deep; the bound keeps the recursive walks safe.
+_MAX_DEPTH = 64
 
 
 @dataclass
@@ -57,23 +61,20 @@ class _Aggregate:
             found.extend(child.find(names))
         return found
 
-    def leaf_values(self, prefix: str = "") -> dict[str, str]:
-        """Every leaf, nested ones keyed "AGGREGATE/LEAF"; a repeated key gets "#2", "#3"…"""
-        values: dict[str, str] = {}
+    def leaf(self, name: str) -> str | None:
+        """A leaf directly inside this aggregate, or None when missing or empty."""
+        return next((value for leaf, value in self.leaves if leaf == name), None) or None
 
-        def add(key: str, value: str) -> None:
-            unique, n = key, 1
-            while unique in values:
-                n += 1
-                unique = f"{key}#{n}"
-            values[unique] = value
-
+    def leaf_pairs(self, prefix: str = "") -> Iterator[tuple[str, str]]:
+        """Every leaf, nested ones keyed "AGGREGATE/LEAF"."""
         for name, value in self.leaves:
-            add(prefix + name, value)
+            yield prefix + name, value
         for child in self.children:
-            for key, value in child.leaf_values(f"{prefix}{child.name}/").items():
-                add(key, value)
-        return values
+            yield from child.leaf_pairs(f"{prefix}{child.name}/")
+
+    def leaf_values(self) -> dict[str, str]:
+        """Every leaf, nested ones keyed "AGGREGATE/LEAF"; a repeated key gets "#2", "#3"…"""
+        return keyed(self.leaf_pairs())
 
 
 def _decode(content: bytes) -> str:
@@ -131,6 +132,8 @@ def _tree(text: str) -> _Aggregate:
             stack[-1].leaves.append((name, html.unescape(text_value)))
             last_leaf = name
         else:
+            if len(stack) > _MAX_DEPTH:
+                raise FileFormatError("the file is nested too deeply")
             node = _Aggregate(name)
             stack[-1].children.append(node)
             stack.append(node)
@@ -267,7 +270,7 @@ def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
         found = "no statement" if not statements else f"{len(statements)} statements"
         raise FileFormatError(f"the file has {found}: export one account per file")
     statement = statements[0]
-    curdef = _optional(statement.leaf_values(), "CURDEF")
+    curdef = statement.leaf("CURDEF")
     try:
         currency = None if curdef is None else _currency(curdef)
     except ValueError as error:

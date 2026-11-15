@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -455,3 +456,20 @@ def test_empty_sgml_leaf_does_not_swallow_its_siblings() -> None:
     assert row.quantity == Decimal("-1.00")
     assert (row.payee, row.memo) == ("Shop", None)
     assert row.raw == {"DTPOSTED": "20261110", "MEMO": "", "TRNAMT": "-1.00", "NAME": "Shop"}
+
+
+def test_many_repeated_leaves_are_linear() -> None:
+    repeats = "".join("<MEMO>x\n" for _ in range(50_000))
+    transaction = f"<STMTTRN>\n<DTPOSTED>20261110\n<TRNAMT>-1.00\n{repeats}</STMTTRN>"
+    content = _sgml(_sgml_statement(transaction))
+    started = time.perf_counter()
+    row = _rows(_parse(content))[0]
+    assert time.perf_counter() - started < 2
+    assert row.raw["MEMO"] == "x" and row.raw["MEMO#50000"] == "x"
+    assert len(row.raw) == 50_002
+
+
+def test_deep_nesting_is_file_error() -> None:
+    content = (SGML_HEADER + "<OFX>\n" + "<A>\n" * 10_000).encode()
+    with pytest.raises(FileFormatError, match="the file is nested too deeply"):
+        _parse(content)

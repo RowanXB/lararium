@@ -13,6 +13,7 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
     clean_description,
+    keyed,
     parse_amount,
 )
 from lararium.modules.finance.importing.profiles import AmountFormat, QifProfileConfig
@@ -54,18 +55,6 @@ def _records(content: bytes, config: QifProfileConfig) -> list[_Record]:
     if len(records) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
     return records
-
-
-def _raw(record: _Record) -> dict[str, str]:
-    """Every tag; a repeated one (address lines, splits) gets "#2", "#3"…"""
-    raw: dict[str, str] = {}
-    for tag, value in record:
-        key, n = tag, 1
-        while key in raw:
-            n += 1
-            key = f"{tag}#{n}"
-        raw[key] = value
-    return raw
 
 
 def _optional(raw: dict[str, str], tag: str) -> str | None:
@@ -120,7 +109,7 @@ def parse_qif(content: bytes, config: QifProfileConfig, local_tz: ZoneInfo) -> P
     """local_tz: the profile's timezone when set; the caller resolves it."""
     rows: list[ParsedRow | RowError | SkippedRow] = []
     for position, record in enumerate(_records(content, config)):
-        raw = _raw(record)
+        raw = keyed(record)  # repeated tags (address lines, splits) get #2, #3…
         try:
             rows.append(_row(position, raw, config, local_tz))
         except ValueError as error:
