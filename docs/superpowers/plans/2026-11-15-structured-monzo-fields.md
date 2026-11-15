@@ -55,7 +55,7 @@
     - When the stored value differs, `normalize` first runs the latest raw record of each Monzo transaction this connection already has in the ledger, or whose latest copy is declined, through `transaction()`, before this sync's own pages and skipping the ids those pages contain. Then it stores the version. The replay only backfills: a transaction seen only in a discarded fetch attempt is never posted by it.
     - "Latest" means the greatest Monzo `updated`, with ties broken by `fetched_at` and then the record id. `fetched_at` alone would be wrong, because a record whose content was seen before keeps its first fetch time. An `updated` that is not a valid ISO timestamp counts as missing (oldest), so it can neither fail the sync nor win.
     - The migration's downgrade removes `normalizer_version`, so a later upgrade replays again.
-    - The replay goes through the normal upserts, so an owner's void survives. It also fills M4's counterparty fields and PR #10's pot names whichever lands first, which makes M4's `counterparty_fields_v1` flag unnecessary.
+    - The replay goes through the normal upserts, so an owner's void survives. A replay only writes what the code it runs knows, so each change that needs history rewritten must bump `NORMALIZER_VERSION` again once it lands: M4 (PR #14) also uses `monzo-norm-2`, and PR #10 (pot names) none. Whichever of them merges after this PR bumps it to the next unused value (`monzo-norm-3`, …) and updates the version tests; until then M4 keeps its `counterparty_fields_v1` backfill.
 13. **Migration number.** `0013`, revising `0012` (main today). The PR is renumbered after M4 (0013/0014) and M2 (0013–0015) land, whichever merges first.
 14. **API and UI are unchanged** in this PR (a follow-up shows the fields).
 
