@@ -43,6 +43,7 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     TransactionStatus,
+    rename_connector_transactions,
     upsert_connector_transaction,
     void_transaction,
 )
@@ -305,6 +306,8 @@ class _Normalizer:
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         self._deleted_pots: list[UUID] = []
+        # Each pot's name, from this sync's pots: Monzo describes a pot move by the pot's id.
+        self.pot_names: dict[str, str] = {}
 
     async def currency(self, code: str) -> InstrumentRecord:
         if code not in self._currencies:
@@ -427,6 +430,8 @@ class _Normalizer:
             )
             account_id = created.id
             self.account_map[pot_id] = str(account_id)
+        if pot.get("name"):
+            self.pot_names[pot_id] = str(pot["name"])
         self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
         if pot.get("deleted"):
             self._deleted_pots.append(account_id)
@@ -476,6 +481,9 @@ class _Normalizer:
                 )
         created = _parse(tx["created"])
         settled = tx.get("settled") or ""
+        description = _description(tx)
+        if description == pot_id:  # a pot move, which Monzo describes by the pot's id
+            description = self.pot_names.get(description, description)
         _, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -483,7 +491,7 @@ class _Normalizer:
                 booking_date=local_date(created, self.tz),
                 value_date=local_date(_parse(settled), self.tz) if settled else None,
                 status="booked" if settled else "pending",
-                description=_description(tx),
+                description=description,
                 counterparty_entity_id=counterparty,
                 origin="connector",
                 connection_id=self.connection_id,
@@ -688,6 +696,11 @@ async def normalize(
             n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
+    # Moves posted before pot names were used still say the pot's id.
+    for pot_id, name in n.pot_names.items():
+        await rename_connector_transactions(
+            ctx.command, n.connection_id, description=pot_id, to=name
+        )
     for record_type, request, _, content in responses:
         if record_type == "transactions_page":
             for tx in content:

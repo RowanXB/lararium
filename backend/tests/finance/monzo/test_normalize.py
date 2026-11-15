@@ -332,6 +332,51 @@ async def test_pot_move_pairs_directly(session, run) -> None:
         )
     )
     assert unassigned_postings == 0
+    # Monzo describes a pot move by the pot's id; the ledger shows the pot's name.
+    assert tx.description == "Savings"
+
+
+async def _descriptions(session) -> dict[str, str]:
+    rows = await session.execute(text("select external_id, description from finance.transactions"))
+    return {external_id: description for external_id, description in rows.all()}
+
+
+async def test_existing_pot_moves_get_the_pot_name(session, run) -> None:
+    # Rows posted before pot names were used still say the pot's id; the next sync renames
+    # them, though they are outside its window, and leaves a description the owner wrote.
+    connection = await _connection(run)
+    moves = [
+        make_transaction(
+            id="tx_TEST0001",
+            amount=-5000,
+            description="pot_TEST1",
+            metadata={"pot_id": "pot_TEST1"},
+        ),
+        make_transaction(
+            id="tx_TEST0002",
+            amount=-1000,
+            description="pot_TEST1",
+            metadata={"pot_id": "pot_TEST1"},
+        ),
+    ]
+    await _normalize(session, connection, transactions=moves, pots=[make_pot()])
+    await session.execute(
+        text(
+            "update finance.transactions set description = case external_id"
+            " when 'tx_TEST0001' then 'pot_TEST1' else 'Rainy day fund' end"
+        )
+    )
+
+    await _normalize(session, connection, pots=[make_pot()])
+
+    assert await _descriptions(session) == {
+        "tx_TEST0001": "Savings",
+        "tx_TEST0002": "Rainy day fund",
+    }
+    events = await session.scalar(
+        text("select count(*) from core.events where type = 'finance.transaction.updated'")
+    )
+    assert events == 1
 
 
 async def _warnings(session, connection: ConnectionRecord) -> list[str]:

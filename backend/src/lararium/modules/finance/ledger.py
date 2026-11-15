@@ -421,6 +421,33 @@ async def upsert_connector_transaction(
     return record, "updated"
 
 
+async def rename_connector_transactions(
+    ctx: CommandContext, connection_id: UUID, *, description: str, to: str
+) -> int:
+    """Give this connection's transactions still described as `description` the description
+    `to`; return how many changed. One whose description was changed since (by the owner,
+    say) no longer matches and is left alone."""
+    t = models.Transaction
+    session = ctx.session
+    ids = list(
+        await session.scalars(
+            update(t)
+            .where(t.connection_id == connection_id, t.description == description)
+            .values(description=to)
+            .returning(t.id)
+        )
+    )
+    for transaction_id in ids:
+        ctx.emit(
+            "finance.transaction.updated", transaction_id, {"transaction_id": str(transaction_id)}
+        )
+        ctx.record_change(
+            f"transaction:{transaction_id}",
+            {"before": {"description": description}, "after": {"description": to}},
+        )
+    return len(ids)
+
+
 async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:
     """Void the transaction, recording who did. One already void is left as it is: the first
     void stands, so a connector acting on an older reading can't make the owner's void its
