@@ -81,6 +81,9 @@ _LOCK_KEY = "finance.transfers"
 _MAX_HEAL_PASSES = 5
 
 type _SystemIds = Mapping[SystemAccountKey, UUID]
+# The transfers a matching run dissolved, by each of their own records: one reopened for the
+# same record carries its notified_at over, so the owner isn't told twice (Decision 9).
+type _Dissolved = dict[UUID, TransferRecord]
 
 
 @dataclass(frozen=True)
@@ -123,9 +126,10 @@ async def _get(session: AsyncSession, transfer_id: UUID) -> TransferRecord:
     return record
 
 
-async def _dissolve(ctx: CommandContext, transaction_id: UUID) -> list[UUID]:
+async def _dissolve(ctx: CommandContext, transaction_id: UUID, dissolved: _Dissolved) -> list[UUID]:
     """Delete the transaction's transfer (unless rejected) with its placeholder and
-    settlement; returns the transfer's other own record, which needs matching again."""
+    settlement, noting it in `dissolved`; returns the transfer's other own record, which
+    needs matching again."""
     tr = models.Transfer
     found = await load_transfers(
         ctx.session,
@@ -139,6 +143,9 @@ async def _dissolve(ctx: CommandContext, transaction_id: UUID) -> list[UUID]:
             if derived is not None:
                 await delete_derived_transaction(ctx, derived)
         publish_transfer(ctx, "finance.transfer.dissolved", transfer.id, transfer, None)
+        for leg in (transfer.out_transaction_id, transfer.in_transaction_id):
+            if leg is not None:
+                dissolved[leg] = transfer
         others += [
             leg
             for leg in (transfer.out_transaction_id, transfer.in_transaction_id)
@@ -296,10 +303,15 @@ async def _open(
     system: _System,
     settings: TransferSettings,
     review_reason: ReviewReason | None,
+    previous: TransferRecord | None,
 ) -> None:
     """Open the record's own transfer: inferred with a placeholder when the counterpart is
     manual; else before_history with a settlement when the counterpart would predate that
-    account's history, or awaiting the counterpart's own record."""
+    account's history, or awaiting the counterpart's own record.
+
+    `previous`: the record's transfer this matching dissolved, if any. When the owner was
+    told about it and the new one is the same situation (the same accounts and amount, and
+    needing review or not alike), the new one counts as told too."""
     session = ctx.session
     placeholder_id: UUID | None = None
     settlement_id: UUID | None = None
@@ -313,6 +325,15 @@ async def _open(
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"
     from_id, to_id = _accounts(record, counterpart.id)
+    notified_at = None
+    if previous is not None and (
+        previous.from_account_id,
+        previous.to_account_id,
+        previous.instrument_id,
+        previous.amount,
+        previous.review_reason is None,
+    ) == (from_id, to_id, record.instrument_id, record.amount, review_reason is None):
+        notified_at = previous.notified_at
     tr = models.Transfer
     transfer_id = await session.scalar(
         insert(tr)
@@ -328,6 +349,7 @@ async def _open(
             placeholder_transaction_id=placeholder_id,
             settlement_transaction_id=settlement_id,
             opened_at=record.occurred_at,
+            notified_at=notified_at,
         )
         .returning(tr.id)
     )
@@ -372,7 +394,12 @@ async def _waiting_transfer(session: AsyncSession, record_id: UUID) -> TransferR
 
 
 async def _link_pair(
-    ctx: CommandContext, ids: _SystemIds, record: OwnRecord, partner_id: UUID, system: _System
+    ctx: CommandContext,
+    ids: _SystemIds,
+    record: OwnRecord,
+    partner_id: UUID,
+    system: _System,
+    dissolved: _Dissolved,
 ) -> tuple[list[UUID], set[UUID]]:
     """Link the record with its unique partner: into the partner's open transfer when it
     has one between the same accounts (so that transfer's placeholder or settlement goes),
@@ -386,7 +413,7 @@ async def _link_pair(
     if waiting is None or (waiting.from_account_id, waiting.to_account_id) != _accounts(
         record, partner.account_id
     ):
-        others = await _dissolve(ctx, partner.id)
+        others = await _dissolve(ctx, partner.id, dissolved)
         waiting = None
     if not await _set_contra(ctx, partner, system.in_transit):
         return others, set()
@@ -405,6 +432,7 @@ async def _match_one(
     settings: TransferSettings,
     system: _System,
     excluding: Collection[UUID],
+    dissolved: _Dissolved,
 ) -> tuple[list[UUID], set[UUID]]:
     """Match one record from scratch; returns other records left without their transfer,
     and the own record it was linked with, if any.
@@ -413,7 +441,7 @@ async def _match_one(
     which pairs uniquely with it (queries.pair_candidates both ways). That outcome, and the
     review reason, depend on the records alone, never on which arrived first."""
     session = ctx.session
-    others = await _dissolve(ctx, transaction_id)
+    others = await _dissolve(ctx, transaction_id, dissolved)
     ids = await system_account_ids(session)
     record = await load_own_record(session, ids, transaction_id)
     if record is None:
@@ -430,7 +458,7 @@ async def _match_one(
     if len(found) == 1 and await _pair_candidates(
         session, ids, settings, found[0], exact=True, excluding=excluding
     ) == [record.id]:
-        more, linked = await _link_pair(ctx, ids, record, found[0], system)
+        more, linked = await _link_pair(ctx, ids, record, found[0], system, dissolved)
         return others + more, linked
     counterpart_id = await _registry_counterpart(session, record)
     if counterpart_id is None:
@@ -448,7 +476,7 @@ async def _match_one(
     ):
         review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
-    await _open(ctx, record, counterpart, system, settings, review_reason)
+    await _open(ctx, record, counterpart, system, settings, review_reason, dissolved.get(record.id))
     return others, set()
 
 
@@ -457,6 +485,7 @@ async def _match(
     transaction_id: UUID,
     settings: TransferSettings,
     system: _System,
+    dissolved: _Dissolved,
     excluding: Collection[UUID] = (),
 ) -> set[UUID]:
     """match_transaction under the lock; returns every record this matched afresh or
@@ -473,7 +502,7 @@ async def _match(
         seen.add(current)
         if current != transaction_id and await is_active_leg(session, current):
             continue
-        others, partners = await _match_one(ctx, current, settings, system, excluding)
+        others, partners = await _match_one(ctx, current, settings, system, excluding, dissolved)
         queue += others
         linked |= partners
     return seen | linked
@@ -489,7 +518,7 @@ async def match_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
         raise TransactionNotFoundError(str(transaction_id))
     await lock_transfers(ctx)
     settings = await load_transfer_settings(ctx.session)
-    await _match(ctx, transaction_id, settings, await _system(ctx))
+    await _match(ctx, transaction_id, settings, await _system(ctx), {})
 
 
 async def heal_transfers(ctx: CommandContext) -> int:
@@ -498,6 +527,7 @@ async def heal_transfers(ctx: CommandContext) -> int:
     await lock_transfers(ctx)
     settings = await load_transfer_settings(ctx.session)
     matched = 0
+    dissolved: _Dissolved = {}
     for _ in range(_MAX_HEAL_PASSES):
         due = await records_to_heal(ctx.session, settings)
         if not due:
@@ -508,7 +538,7 @@ async def heal_transfers(ctx: CommandContext) -> int:
         for transaction_id in due:
             if transaction_id in done:
                 continue
-            done |= await _match(ctx, transaction_id, settings, system)
+            done |= await _match(ctx, transaction_id, settings, system, dissolved)
             matched += 1
     logger.error("transfers still disagree with the rule after %d heal passes", _MAX_HEAL_PASSES)
     return matched
@@ -553,7 +583,8 @@ async def unlink_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
     if await session.scalar(select(t.id).where(t.id == transaction_id)) is None:
         raise TransactionNotFoundError(str(transaction_id))
     await lock_transfers(ctx)
-    others = await _dissolve(ctx, transaction_id)
+    dissolved: _Dissolved = {}
+    others = await _dissolve(ctx, transaction_id, dissolved)
     await _release_rejected(ctx, transaction_id)
     system = await _system(ctx)
     record = await load_own_record(session, await system_account_ids(session), transaction_id)
@@ -561,7 +592,7 @@ async def unlink_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
         await _set_contra(ctx, record, system.unassigned)
     settings = await load_transfer_settings(session)
     for other in others:
-        await _match(ctx, other, settings, system, excluding={transaction_id})
+        await _match(ctx, other, settings, system, dissolved, excluding={transaction_id})
 
 
 async def preview_match(

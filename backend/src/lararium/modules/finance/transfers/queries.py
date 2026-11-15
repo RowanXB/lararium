@@ -21,10 +21,12 @@ from sqlalchemy import (
     select,
     union,
     union_all,
+    update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import TransferNotFoundError
@@ -577,3 +579,65 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
     )
     found = union(misplaced, orphaned, broken, missing).subquery()
     return list(await session.scalars(select(found.c.id).order_by(found.c.id)))
+
+
+async def due_notifications(session: AsyncSession, now: datetime) -> list[tuple[UUID, str]]:
+    """The transfers the owner hasn't been told about yet and should be, oldest first, each
+    with its message: those needing review, and awaiting ones overdue (in transit for longer
+    than the `overdue` setting). One message per transfer; review comes first, as it asks
+    the owner to act."""
+    settings = await load_transfer_settings(session)
+    tr, i = models.Transfer, models.Instrument
+    sender, receiver = (
+        aliased(models.Account, name="sender"),
+        aliased(models.Account, name="receiver"),
+    )
+    rows = await session.execute(
+        select(
+            tr.id,
+            tr.amount,
+            tr.opened_at,
+            tr.review_reason,
+            sender.name.label("from_name"),
+            receiver.name.label("to_name"),
+            i.symbol,
+            i.decimals,
+        )
+        .join(sender, sender.id == tr.from_account_id)
+        .join(receiver, receiver.id == tr.to_account_id)
+        .join(i, i.id == tr.instrument_id)
+        .where(
+            tr.notified_at.is_(None),
+            tr.status != "rejected",
+            or_(
+                tr.review_reason.is_not(None),
+                and_(tr.status == "awaiting", tr.opened_at < now - settings.overdue),
+            ),
+        )
+        .order_by(tr.opened_at, tr.id)
+    )
+    due: list[tuple[UUID, str]] = []
+    for row in rows:
+        amount = to_plain_str(row.amount.quantize(Decimal(1).scaleb(-row.decimals)))
+        what = f"A transfer of {amount} {row.symbol} from {row.from_name} to {row.to_name}"
+        if row.review_reason is not None:
+            due.append((row.id, f"{what} needs your review."))
+        else:
+            days = (now - row.opened_at).days
+            due.append((row.id, f"{what} has been in transit for {days} days."))
+    return due
+
+
+async def mark_notified(ctx: CommandContext, transfer_ids: Collection[UUID]) -> None:
+    """Record that the owner was told about these transfers (due_notifications)."""
+    if not transfer_ids:
+        return
+    tr = models.Transfer
+    marked = await ctx.session.execute(
+        update(tr)
+        .where(tr.id.in_(list(transfer_ids)), tr.notified_at.is_(None))
+        .values(notified_at=func.now())
+        .returning(tr.id, tr.notified_at)
+    )
+    for row in marked:
+        ctx.record_change(f"transfer:{row.id}", {"notified_at": row.notified_at.isoformat()})

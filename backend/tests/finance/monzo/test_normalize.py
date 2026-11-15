@@ -142,7 +142,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-1"
+    assert NORMALIZER_VERSION == "monzo-norm-2"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"

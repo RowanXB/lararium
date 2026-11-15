@@ -128,11 +128,17 @@ async def identifier_account(session: AsyncSession, identifier_id: UUID) -> UUID
 
 
 async def _get_or_create(ctx: CommandContext, kind: IdentifierKind, normalized: str) -> UUID:
+    i = models.AccountIdentifier
+    found = await ctx.session.scalar(select(i.id).where(i.kind == kind, i.value == normalized))
+    if found is not None:
+        # Rows are never deleted, so an existing one needs no lock. A sync that registers its
+        # own accounts in its long transaction must not hold one: another sync naming the
+        # same account, in a short transaction of its own, would wait on it to the end.
+        return found
     # Serialised on the identifier, so concurrent syncs naming the same account create one
     # row; the lock is held until the transaction commits.
     lock_key = f"finance.identifier.{kind}:{normalized}"
     await ctx.session.execute(select(func.pg_advisory_xact_lock(func.hashtext(lock_key))))
-    i = models.AccountIdentifier
     found = await ctx.session.scalar(select(i.id).where(i.kind == kind, i.value == normalized))
     if found is not None:
         return found

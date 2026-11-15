@@ -7,9 +7,13 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   (ruling R14), valued by its moves before its first snapshot and by the pot balance fetched
   on each sync afterwards; a deleted pot is closed;
 - each non-declined transaction is one ledger transaction keyed by its Monzo id, posted
-  against the pot's account for a pot move and against "Unassigned" otherwise; when it changes
-  upstream it is replaced in place, and a pending one that comes back declined or zero is
-  voided;
+  against the pot's account for a pot move, and otherwise against "In transit" when it is a
+  transfer between the owner's accounts and "Unassigned" when not (transfer_contra; the
+  heal after the sync does the matching); when it changes upstream it is replaced in place,
+  and a pending one that comes back declined or zero is voided;
+- what a transaction says about its counterparty is stored in typed fields, its bank
+  account in the identifier registry; each Monzo account's own bank details are registered
+  to it (M4 Decisions 10 and 11);
 - after each full backfill of an account, and when an account is first seen outside one,
   the difference from Monzo's balance is posted as its opening balance adjustment, replaced
   in place, so older history fetched later corrects it instead of adding to it (ruling R18);
@@ -28,6 +32,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core import models as core_models
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import SyncContext
@@ -38,11 +43,19 @@ from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import close_account, create_account, get_account
+from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.identifiers import (
+    ensure_identifier,
+    get_or_create_identifier,
+    normalize_identifier,
+)
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency
 from lararium.modules.finance.ledger import (
+    CounterpartyFields,
     PostingInput,
     TransactionInput,
     TransactionStatus,
+    set_counterparty_fields,
     upsert_connector_transaction,
     void_transaction,
 )
@@ -52,10 +65,11 @@ from lararium.modules.finance.system_accounts import (
     SystemAccountKey,
     get_or_create_system_account,
 )
+from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-1"
+NORMALIZER_VERSION = "monzo-norm-2"
 
 ACCOUNT_MAP_KEY = "account_map"
 # Per Monzo account: where the history its opening accounts for begins (ISO time). Recorded
@@ -64,6 +78,10 @@ OPENING_BOUNDARIES_KEY = "opening_boundaries"
 # The last mismatch the owner was told about, per Monzo account, so each value is sent once.
 NOTIFIED_KEY = "reconciliation_notified"
 OPENING_DESCRIPTION = "Opening balance adjustment"
+# Set once the transactions posted before counterparty fields existed have been given them.
+COUNTERPARTY_FIELDS_KEY = "counterparty_fields_v1"
+# The payment schemes that move money between bank accounts.
+_BANK_TRANSFER_SCHEMES = frozenset({"payport_faster_payments", "bacs", "monzo_to_monzo"})
 
 # By Monzo's account type; uk_rewards is the account Monzo pays rewards into.
 _ACCOUNT_NAMES = {
@@ -126,6 +144,20 @@ def _description(tx: dict[str, Any]) -> str:
     if isinstance(counterparty, dict) and (name := cast(dict[str, Any], counterparty).get("name")):
         return str(name)
     return str(tx.get("description") or "")
+
+
+def _bank_account(fields: dict[str, Any], whose: str) -> str | None:
+    """The UK bank account (sort code and account number) the fields name, in the registry's
+    form; None when they name none, or a malformed one (which is logged, never fatal)."""
+    sort_code, account_number = fields.get("sort_code"), fields.get("account_number")
+    if not sort_code or not account_number:
+        return None
+    try:
+        return normalize_identifier("uk_bank_account", f"{sort_code}:{account_number}")
+    except FinanceValidationError:
+        # The details are the owner's or a counterparty's, so they stay out of the log.
+        logger.warning("%s names a malformed bank account; stored without it", whose)
+        return None
 
 
 async def _connector_transaction(
@@ -340,6 +372,86 @@ class _Normalizer:
             lambda ctx: get_or_create_organization(ctx, name, external_id=external_id),
         )
 
+    async def identifier(self, value: str) -> UUID:
+        """The registry row of a bank account (in the registry's form), found or created in a
+        transaction of its own: its lock must not be held until this sync commits."""
+        return await self._shared_row(
+            ("identifier", "uk_bank_account", value),
+            lambda ctx: get_or_create_identifier(ctx, "uk_bank_account", value),
+        )
+
+    async def own_identifier(self, account: dict[str, Any]) -> None:
+        """Register the Monzo account's own bank details to its finance account, unless they
+        are registered already (the owner's registration elsewhere wins)."""
+        value = _bank_account(account, f"Monzo account {account['id']}")
+        if value is None:
+            return
+        # The row exists before ensure_identifier runs, so it takes no lock in this sync's
+        # transaction (identifiers._get_or_create).
+        await self.identifier(value)
+        await ensure_identifier(
+            self.command, self.require_mapped(account["id"]), "uk_bank_account", value
+        )
+
+    async def counterparty_fields(self, tx: dict[str, Any]) -> CounterpartyFields:
+        """What a transaction that is not a pot move says about the other side."""
+        raw = tx.get("counterparty")
+        counterparty = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        value = _bank_account(counterparty, f"transaction {tx['id']}")
+        name, notes = counterparty.get("name"), tx.get("notes")
+        return CounterpartyFields(
+            identifier_id=None if value is None else await self.identifier(value),
+            name=str(name) if name else None,
+            reference=str(notes) if notes else None,
+            bank_transfer=tx.get("scheme") in _BANK_TRANSFER_SCHEMES,
+        )
+
+    async def _fields_of(self, tx: dict[str, Any]) -> CounterpartyFields:
+        metadata = tx.get("metadata")
+        pot_id = (
+            cast(dict[str, Any], metadata).get("pot_id") if isinstance(metadata, dict) else None
+        )
+        return CounterpartyFields() if pot_id is not None else await self.counterparty_fields(tx)
+
+    async def fill_counterparty_fields(self) -> None:
+        """Give the transactions this connection posted before counterparty fields existed
+        the fields their latest raw record gives (Decision 10). Run once, before this sync's
+        transactions are posted, which come with their fields."""
+        r = core_models.RawRecord
+        pages = await self.session.scalars(
+            select(r.content)
+            .where(r.connection_id == self.connection_id, r.record_type == "transactions_page")
+            .order_by(r.fetched_at, r.id)
+        )
+        latest: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            for tx in cast(list[dict[str, Any]], page):
+                latest[tx["id"]] = tx  # a later record of the same transaction wins
+        t = models.Transaction
+        posted = await self.session.execute(
+            select(t.id, t.external_id)
+            .where(t.connection_id == self.connection_id, t.origin == "connector")
+            .order_by(t.occurred_at, t.id)
+        )
+        for row in list(posted):
+            tx = latest.get(row.external_id)
+            if tx is not None:
+                await set_counterparty_fields(self.command, row.id, await self._fields_of(tx))
+
+    async def contra(
+        self, external_id: str, own_account_id: UUID, fields: CounterpartyFields
+    ) -> UUID:
+        """Unassigned or In transit, by the owner's decisions, the transfer the transaction
+        is a leg of, and its counterparty's bank account (transfer_contra)."""
+        await self.unassigned()  # both must exist for transfer_contra
+        await self.system_account("in_transit")
+        return await transfer_contra(
+            self.session,
+            source=("connection", f"{self.connection_id}:{external_id}"),
+            own_account_id=own_account_id,
+            counterparty_identifier_id=fields.identifier_id,
+        )
+
     def mapped(self, monzo_id: str) -> UUID | None:
         value = self.account_map.get(monzo_id)
         return UUID(value) if isinstance(value, str) else None
@@ -456,14 +568,16 @@ class _Normalizer:
             return
         currency = await self.currency(tx["currency"])
         quantity = to_quantity(tx["amount"], currency.decimals)
+        own_account_id = self.require_mapped(monzo_account_id)
         metadata = tx.get("metadata")
         pot_id = (
             cast(dict[str, Any], metadata).get("pot_id") if isinstance(metadata, dict) else None
         )
-        # A pot that was deleted before the connection existed has no account; its moves stay
-        # unassigned, like any other transfer.
+        fields = await self._fields_of(tx)
+        # A pot that was deleted before the connection existed has no account; its moves are
+        # posted like any other payment.
         other = (self.mapped(pot_id) if isinstance(pot_id, str) else None) or (
-            await self.unassigned()
+            await self.contra(external_id, own_account_id, fields)
         )
         merchant = tx.get("merchant")
         counterparty: UUID | None = None
@@ -490,13 +604,11 @@ class _Normalizer:
                 external_id=external_id,
                 postings=[
                     PostingInput(
-                        self.require_mapped(monzo_account_id),
-                        currency.id,
-                        quantity,
-                        memo=str(tx.get("notes") or ""),
+                        own_account_id, currency.id, quantity, memo=str(tx.get("notes") or "")
                     ),
                     PostingInput(other, currency.id, -quantity),
                 ],
+                counterparty=fields,
             ),
         )
         self.count(outcome)
@@ -674,9 +786,12 @@ async def normalize(
             for account in content:
                 accounts[account["id"]] = account
                 await n.account(account)
+                await n.own_identifier(account)
     # Before anything is posted, so this run's transactions can't count as earlier history.
     for monzo_id in accounts:
         await n.adopt_boundary(monzo_id)
+    if connection.config.get(COUNTERPARTY_FIELDS_KEY) is not True:
+        await n.fill_counterparty_fields()
     balances: dict[str, tuple[dict[str, Any], datetime]] = {}
     for record_type, request, fetched_at, content in responses:
         if record_type == "pots":
@@ -726,7 +841,7 @@ async def normalize(
             await _notify(ctx, f"{connection.display_name}: {warning}")
 
     # Only this normaliser's keys: others (such as an OAuth state) may have changed meanwhile.
-    values: dict[str, JSONValue] = {ACCOUNT_MAP_KEY: n.account_map}
+    values: dict[str, JSONValue] = {ACCOUNT_MAP_KEY: n.account_map, COUNTERPARTY_FIELDS_KEY: True}
     if n.opening_boundaries:
         values[OPENING_BOUNDARIES_KEY] = n.opening_boundaries
     if notified:

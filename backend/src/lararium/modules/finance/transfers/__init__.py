@@ -10,6 +10,7 @@ from lararium.modules.finance.transfers.contra import (
 from lararium.modules.finance.transfers.decisions import pair, reject, unpair, unreject
 from lararium.modules.finance.transfers.engine import (
     heal_transfers,
+    lock_transfers,
     match_transaction,
     preview_match,
     unassign_identifier_and_rematch,
@@ -21,9 +22,11 @@ from lararium.modules.finance.transfers.queries import (
     TransferRecord,
     TransferStatus,
     candidates,
+    due_notifications,
     find_transfer_violations,
     get_transfer,
     list_transfers,
+    mark_notified,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -35,11 +38,14 @@ __all__ = [
     "TransferSettings",
     "TransferStatus",
     "candidates",
+    "due_notifications",
     "find_transfer_violations",
     "get_transfer",
     "heal_transfers",
     "list_transfers",
     "load_transfer_settings",
+    "lock_transfers",
+    "mark_notified",
     "match_transaction",
     "own_leg",
     "pair",
