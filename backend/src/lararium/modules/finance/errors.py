@@ -90,6 +90,29 @@ class ImportBatchNotFoundError(FinanceError):
     template = "no import batch has the id {}"
 
 
+class ImportBatchStateError(FinanceError):
+    """The batch's status doesn't allow the action (e.g. committing a committed batch), or
+    another batch relies on it.
+
+    Raised with the whole message, which says why.
+    """
+
+
+class ImportHasErrorsError(FinanceError):
+    """The batch has error rows, so it can't be committed."""
+
+    template = (
+        "the import batch {} has rows with errors; fix the file or the profile and upload it again"
+    )
+
+
+class ImportBatchStaleError(FinanceError):
+    """The ledger moved since the batch was staged (Decision 13 or 16): upload it again.
+
+    Raised with the whole message.
+    """
+
+
 class FileFormatError(FinanceError):
     """An imported file can't be read as a whole (wrong encoding, missing columns, no rows).
 

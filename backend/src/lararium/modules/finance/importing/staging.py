@@ -919,7 +919,12 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
         )
         row.dedupe_key = dedupe_key(account_id, parsed, row.currency, occurrences[same])
         occurrences[same] += 1
-    keyed = [row for row in rows if row.dedupe_key is not None]
+    await _mark_duplicates(session, account_id, [row for row in rows if row.dedupe_key])
+
+
+async def _mark_duplicates(session: AsyncSession, account_id: UUID, keyed: list[_Row]) -> None:
+    """A key that repeats among the rows is an error; a key a committed row has makes the row
+    that row's duplicate."""
     r = models.ImportRow
     committed: dict[str | None, UUID] = {
         key: row_id
@@ -1012,6 +1017,96 @@ async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: lis
             row.note = f"already imported from {filename}"
         else:
             row.fail(OUTSIDE_COVERED_DAY, real=True)
+
+
+async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
+    """Commit's re-run of the duplicate and covered-day checks (Decisions 5 and 16), for
+    rows other batches committed or rolled back since staging. Rows that became duplicates,
+    or whose committed original is gone, are updated. Returns how many rows would now be
+    errors (an uncovered row on a covered day); those are left as they are."""
+    r, b = models.ImportRow, models.ImportBatch
+    account_id = await session.scalar(select(b.account_id).where(b.id == batch_id))
+    assert account_id is not None
+    stored = list(
+        await session.scalars(
+            select(r)
+            .where(
+                r.batch_id == batch_id,
+                r.kind == "statement",
+                r.status.in_(("new", "duplicate")),
+            )
+            .order_by(r.position)
+            .execution_options(populate_existing=True)
+        )
+    )
+    targets = [row.duplicate_of for row in stored if row.duplicate_of is not None]
+    still_committed = set(
+        await session.scalars(select(r.id).where(r.id.in_(targets), r.status == "committed"))
+    )
+    rows: list[_Row] = []
+    for row in stored:
+        # Statement rows that are new or duplicate have these (the table's CHECK).
+        assert row.booking_date is not None and row.quantity is not None
+        keep = row.status == "duplicate" and row.duplicate_of in still_committed
+        rows.append(
+            _Row(
+                row.position,
+                "duplicate" if keep else "new",
+                row.raw,
+                parsed=ParsedRow(
+                    position=row.position,
+                    booking_date=row.booking_date,
+                    occurred_at=None,
+                    description=row.description,
+                    quantity=row.quantity,
+                    fee=row.fee,
+                    currency=None,
+                    balance=row.balance,
+                    external_id=row.external_id,
+                    bank_type=None,
+                    raw={},
+                ),
+                instrument_id=row.instrument_id,
+                dedupe_key=row.dedupe_key,
+                note=row.note if keep else None,
+                duplicate_of=row.duplicate_of if keep else None,
+            )
+        )
+    await _mark_duplicates(session, account_id, [row for row in rows if row.status == "new"])
+    await _match_covered_days(session, account_id, rows)
+    errors = 0
+    for row, original in zip(rows, stored, strict=True):
+        if row.status == "error":
+            errors += 1
+            continue
+        change = (row.status, row.duplicate_of, row.note)
+        if change != (original.status, original.duplicate_of, original.note):
+            await session.execute(
+                update(r)
+                .where(r.id == original.id)
+                .values(status=row.status, duplicate_of=row.duplicate_of, note=row.note)
+            )
+    return errors
+
+
+async def recheck_statement_account(session: AsyncSession, batch_id: UUID) -> None:
+    """Commit's re-run of the statement-account check (Decision 18), for batches committed
+    since staging: ImportNotAllowedError when the stored account disagrees with theirs."""
+    b, s = models.ImportBatch, models.ImportStatement
+    found = (
+        await session.execute(
+            select(b.account_id, s.sort_code, s.account_number, s.iban)
+            .join(s, s.batch_id == b.id)
+            .where(b.id == batch_id)
+        )
+    ).one_or_none()
+    if found is None:
+        return
+    stated = StatementAccount(
+        sort_code=found.sort_code, account_number=found.account_number, iban=found.iban
+    )
+    if stated != StatementAccount():
+        await _check_statement_account(session, found.account_id, stated)
 
 
 def _check_chain(rows: list[_Row], row_order: str) -> None:

@@ -1,19 +1,14 @@
 import re
-from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import TypeAdapter
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
-from lararium.core.commands import CommandContext
-from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, close_account
 from lararium.modules.finance.errors import (
@@ -27,148 +22,37 @@ from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
     ImportProfileRecord,
     PdfProfileConfig,
-    ProfileConfig,
-    create_profile,
     update_profile,
 )
 from lararium.modules.finance.importing.staging import (
-    ImportBatchRecord,
-    ImportRowRecord,
-    align_openings,
     batches_relying_on,
     get_batch,
-    ledger_balance_before,
-    list_batch_rows,
     list_batches,
-    stage_import,
 )
-from lararium.modules.finance.instruments import InstrumentRecord, get_currency
-from lararium.modules.finance.ledger import void_transaction
+from lararium.modules.finance.instruments import InstrumentRecord
 
-from .synthetic_pdfs import BocRow, BocStatement, HsbcRow, HsbcStatement, boc_pdf, hsbc_pdf
-
-type Run = Callable[..., Awaitable[Any]]
-type MakeAccount = Callable[..., Awaitable[AccountRecord]]
-type Commit = Callable[[UUID], Awaitable[None]]
-
-NO_BALANCES = "This file has no balances, so its opening balance can't be checked"
-HEADER = "Date,Description,Amount\n"
-BALANCE_HEADER = "Date,Description,Amount,Balance\n"
-BALANCE_COLUMNS = {
-    "date": "Date",
-    "description": ["Description"],
-    "amount": "Amount",
-    "balance": "Balance",
-}
-
-PROFILE_CONFIG: TypeAdapter[Any] = TypeAdapter(ProfileConfig)
-_names = iter(range(1_000_000))
-
-
-async def _profile(run: Run, **config: Any) -> ImportProfileRecord:
-    model = PROFILE_CONFIG.validate_python(config)
-    return await run(create_profile, name=f"Example Bank {next(_names)}", config=model)
-
-
-async def _csv_profile(run: Run, **overrides: Any) -> ImportProfileRecord:
-    config: dict[str, Any] = {
-        "format": "csv",
-        "columns": BALANCE_COLUMNS,
-        "date_format": "%d/%m/%Y",
-    }
-    return await _profile(run, **(config | overrides))
-
-
-@pytest.fixture
-async def account(make_account: MakeAccount) -> AccountRecord:
-    return await make_account(name="Example Current", balance_mode="transactions")
-
-
-@pytest.fixture
-def stage(
-    run: Run, store: LocalDocumentStore, account: AccountRecord, gbp: InstrumentRecord
-) -> Callable[..., Awaitable[ImportBatchRecord]]:
-    async def _stage(
-        profile: ImportProfileRecord,
-        content: str | bytes,
-        *,
-        account_id: UUID | None = None,
-        default: UUID | str | None = "gbp",
-        filename: str = "statement.csv",
-        media_type: str = "text/csv",
-    ) -> ImportBatchRecord:
-        return await run(
-            stage_import,
-            store,
-            account_id=account.id if account_id is None else account_id,
-            profile_id=profile.id,
-            content=content.encode() if isinstance(content, str) else content,
-            filename=filename,
-            media_type=media_type,
-            default_instrument_id=gbp.id if default == "gbp" else default,
-        )
-
-    return _stage
-
-
-type Stage = Callable[..., Awaitable[ImportBatchRecord]]
-
-
-async def _rows(session: AsyncSession, batch: ImportBatchRecord) -> list[ImportRowRecord]:
-    return await list_batch_rows(session, batch.id)
-
-
-def _statuses(rows: list[ImportRowRecord]) -> list[str]:
-    return [row.status for row in rows]
-
-
-def _adjustments(rows: list[ImportRowRecord]) -> list[ImportRowRecord]:
-    return [row for row in rows if row.kind == "opening_adjustment"]
-
-
-async def _dedupe_keys(session: AsyncSession, batch: ImportBatchRecord) -> list[str | None]:
-    r = models.ImportRow
-    result = await session.scalars(
-        select(r.dedupe_key).where(r.batch_id == batch.id).order_by(r.position)
-    )
-    return list(result)
-
-
-def _ofx(
-    transactions: list[tuple[str, str, str]],
-    *,
-    start: str,
-    end: str,
-    extra: str = "",
-    currency: str = "GBP",
-) -> str:
-    """transactions: (DTPOSTED, TRNAMT, FITID)."""
-    body = "\n".join(
-        f"<STMTTRN>\n<TRNTYPE>OTHER\n<DTPOSTED>{posted}\n<TRNAMT>{amount}\n<FITID>{fitid}\n"
-        f"<NAME>Example Payee {fitid}\n</STMTTRN>"
-        for posted, amount, fitid in transactions
-    )
-    return f"""OFXHEADER:100
-DATA:OFXSGML
-VERSION:102
-
-<OFX>
-<BANKMSGSRSV1>
-<STMTTRNRS>
-<STMTRS>
-<CURDEF>{currency}
-<BANKTRANLIST>
-<DTSTART>{start}
-<DTEND>{end}
-{body}
-</BANKTRANLIST>
-{extra}
-</STMTRS>
-</STMTTRNRS>
-</BANKMSGSRSV1>
-</OFX>
-"""
-
+from .staging_helpers import (
+    BALANCE_COLUMNS,
+    BALANCE_HEADER,
+    DECEMBER,
+    HEADER,
+    HSBC_ROWS,
+    NO_BALANCES,
+    NOVEMBER,
+    Commit,
+    MakeAccount,
+    Run,
+    Stage,
+    _adjustments,
+    _balance_after,
+    _csv_profile,
+    _dedupe_keys,
+    _ofx,
+    _profile,
+    _rows,
+    _statuses,
+)
+from .synthetic_pdfs import BocRow, BocStatement, HsbcStatement, boc_pdf, hsbc_pdf
 
 # Counts, statuses, keys --------------------------------------------------------------
 
@@ -427,8 +311,6 @@ async def test_newest_first_chain(session: AsyncSession, run: Run, stage: Stage)
 
 # Opening adjustment ------------------------------------------------------------------
 
-NOVEMBER = BALANCE_HEADER + "02/11/2026,Groceries,-18.00,1482.00\n03/11/2026,Bus,-2.00,1480.00\n"
-
 
 async def test_opening_adjustment_from_first_balance(
     session: AsyncSession, run: Run, stage: Stage, gbp: InstrumentRecord
@@ -472,14 +354,6 @@ async def test_gap_creates_adjustment(
 
     assert adjustment.quantity == Decimal("-75.00")  # 1405.00 opening, 1480.00 in the ledger
     assert adjustment.booking_date == date(2027, 1, 4)
-
-
-DECEMBER = BALANCE_HEADER + "01/12/2026,Rent,-30.00,1450.00\n"
-
-
-async def _balance_after(session: AsyncSession, account_id: UUID, day: date) -> Decimal:
-    gbp = await get_currency(session, "GBP")
-    return await ledger_balance_before(session, account_id, gbp.id, day + timedelta(days=1))
 
 
 async def test_older_statement_after_newer_realigns(
@@ -539,45 +413,6 @@ async def test_older_statement_after_newer_realigns(
     for day, balance in [("2027-05-08", "95.80"), ("2027-05-10", "1328.45")]:
         assert await _balance_after(session, other.id, date.fromisoformat(day)) == Decimal(balance)
     assert await _balance_after(session, other.id, date(2027, 6, 15)) == Decimal("1320.45")
-
-
-async def _roll_back(ctx: CommandContext, batch_id: UUID) -> None:
-    """A stand-in for Task 6's rollback_batch: voids the batch's rows, then re-aligns."""
-    r, b = models.ImportRow, models.ImportBatch
-    rows = await ctx.session.execute(
-        select(r.id, r.transaction_id).where(r.batch_id == batch_id, r.status == "committed")
-    )
-    for row_id, transaction_id in list(rows):
-        await void_transaction(ctx, transaction_id)
-        await ctx.session.execute(update(r).where(r.id == row_id).values(status="rolled_back"))
-    account_id = await ctx.session.scalar(
-        update(b)
-        .where(b.id == batch_id)
-        .values(status="rolled_back", rolled_back_at=func.now())
-        .returning(b.account_id)
-    )
-    assert account_id is not None
-    await align_openings(ctx, account_id)
-
-
-async def test_align_adds_an_adjustment_a_batch_now_needs(
-    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
-) -> None:
-    profile = await _csv_profile(run)
-    november = await stage(profile, NOVEMBER, filename="november.csv")
-    await commit(november.id)
-    december = await stage(profile, DECEMBER, filename="december.csv")
-    assert _adjustments(await _rows(session, december)) == []  # November's closing matches
-    await commit(december.id)
-
-    await run(_roll_back, november.id)
-    session.expunge_all()
-
-    (adjustment,) = _adjustments(await _rows(session, december))
-    assert (adjustment.status, adjustment.quantity) == ("committed", Decimal("1480.00"))
-    assert adjustment.booking_date == date(2026, 11, 30)
-    assert adjustment.position == -1
-    assert await _balance_after(session, account.id, date(2026, 12, 1)) == Decimal("1450.00")
 
 
 async def test_hybrid_account_has_no_adjustment(
@@ -794,13 +629,6 @@ async def test_bank_type_stored(
     assert [row.bank_type for row in statement_rows] == ["VIS", "CR", ")))"]
 
 
-HSBC_ROWS = [
-    HsbcRow(
-        "VIS", ("EXAMPLE CAFE", "EXAMPLETOWN"), paid_out="4.20", date="08 May 27", balance="95.80"
-    ),
-    HsbcRow("CR", ("EXAMPLE EMPLOYER",), paid_in="1,250.00", date="10 May 27"),
-    HsbcRow(")))", ("EXAMPLE SHOP",), paid_out="17.35", balance="1,328.45"),
-]
 BOC_LOCAL_OUT = BocRow(
     "03/05/27",
     "04/05/27",
