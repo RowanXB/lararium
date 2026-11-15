@@ -29,7 +29,10 @@ from lararium.modules.finance.importing.profiles import AmountFormat, OfxProfile
 PARSER_VERSION = "ofx-1"
 
 _START = re.compile(r"<OFX>", re.IGNORECASE)
-_UTF8_HEADER = re.compile(rb"ENCODING:\s*UTF-8|encoding\s*=\s*[\"']UTF-8[\"']", re.IGNORECASE)
+# OFX 1.x writes UTF-8 as ENCODING:UNICODE or ENCODING:UTF-8; 2.x has an XML declaration.
+_UTF8_HEADER = re.compile(
+    rb"ENCODING:\s*(?:UTF-8|UNICODE)|encoding\s*=\s*[\"']UTF-8[\"']", re.IGNORECASE
+)
 _TOKEN = re.compile(r"<(/?)([A-Za-z0-9.]+)>([^<]*)")
 # YYYYMMDD[HHMMSS[.XXX]][[±H[H][.MM]][:TZ]]
 _DATETIME = re.compile(
@@ -97,7 +100,7 @@ def _absorb(stack: list[_Aggregate]) -> None:
     what was read inside it belongs to its parent."""
     node = stack.pop()
     parent = stack[-1]
-    parent.children.remove(node)
+    parent.children.pop()  # node: nothing is added to the parent while a child is open
     parent.leaves.append((node.name, ""))
     parent.leaves.extend(node.leaves)
     parent.children.extend(node.children)

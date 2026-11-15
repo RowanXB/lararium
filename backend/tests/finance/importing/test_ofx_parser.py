@@ -535,3 +535,10 @@ def test_availbal_is_available_balance() -> None:
 def test_bad_availbal_is_file_error(balance: str) -> None:
     with pytest.raises(FileFormatError, match="AVAILBAL"):
         _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS, extra=balance)))
+
+
+def test_unicode_header_decodes_utf8() -> None:
+    transaction = _transaction(DTPOSTED="20261110", TRNAMT="-5.00", NAME="Café £")
+    content = _sgml(_sgml_statement("TRANSACTION")).decode().replace("TRANSACTION", transaction)
+    content = content.replace("ENCODING:USASCII", "ENCODING:UNICODE")
+    assert _rows(_parse(content.encode("utf-8")))[0].payee == "Café £"

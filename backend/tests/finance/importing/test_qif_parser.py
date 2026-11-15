@@ -169,7 +169,7 @@ def test_no_records_is_file_error(content: bytes) -> None:
 
 def test_wrong_encoding_is_file_error() -> None:
     content = BANK.replace(b"Example Cafe", "Café".encode("cp1252"))
-    with pytest.raises(FileFormatError, match="utf-8"):
+    with pytest.raises(FileFormatError, match=r"not valid utf-8$"):
         _parse(content)
     row = _rows(_parse(content, encoding="cp1252"))[0]
     assert row.payee == "Café"

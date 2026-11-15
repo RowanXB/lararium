@@ -30,7 +30,8 @@ def _records(content: bytes, config: QifProfileConfig) -> list[_Record]:
     try:
         text = content.decode(config.encoding)
     except UnicodeDecodeError:
-        raise FileFormatError(f"the file is not valid {config.encoding}") from None
+        encoding = config.encoding.removesuffix("-sig")
+        raise FileFormatError(f"the file is not valid {encoding}") from None
     lines = [line.strip() for line in text.replace("\r", "").split("\n")]
     lines = [line for line in lines if line]
     if not lines or not _HEADER.fullmatch(lines[0]):
