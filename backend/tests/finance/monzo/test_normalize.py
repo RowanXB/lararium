@@ -927,6 +927,38 @@ async def test_transaction_details_are_stored(session, run) -> None:
     assert await _warnings(session, connection) == []
 
 
+async def test_place_gets_details_a_later_transaction_states(session, run) -> None:
+    connection = await _connection(run)
+    payments = [
+        make_transaction(id="tx_TEST0001", merchant=make_merchant()),
+        make_transaction(
+            id="tx_TEST0002",
+            merchant=make_merchant(),
+            metadata={"mcc": "5411"},
+            created="2026-03-01T13:00:00.000Z",
+        ),
+    ]
+
+    await _normalize(session, connection, transactions=payments)
+    first, second = await _transactions(session)
+    place_id = (await _details(session, first.id)).place_entity_id
+    assert (await _details(session, second.id)).place_entity_id == place_id
+    place = await session.get_one(Entity, place_id, populate_existing=True)
+    assert place.mcc == "5411"
+
+    changes_before = await session.scalar(
+        text("select count(*) from core.audit_log where changes ? :key"),
+        {"key": f"entity:{place_id}"},
+    )
+    again = await _normalize(session, connection, transactions=payments)
+
+    assert again == NormalizeReport(unchanged=2)
+    assert changes_before == await session.scalar(
+        text("select count(*) from core.audit_log where changes ? :key"),
+        {"key": f"entity:{place_id}"},
+    )
+
+
 async def test_two_merchant_ids_one_name_two_places(session, run) -> None:
     connection = await _connection(run)
     town = make_merchant(id="merch_TEST1", name="Test Cafe")
@@ -998,6 +1030,18 @@ async def test_cash_deposit_fee_is_a_separate_posting(session, run) -> None:
         text("select sum(quantity) from finance.postings where account_id = :id"), {"id": main}
     )
     assert balance == Decimal("123.00")
+
+
+async def test_non_string_category_does_not_fail_the_sync(session, run) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(category={"id": "x"}, categories={"groceries": -1234})
+
+    await _normalize(session, connection, transactions=[payment])
+
+    (posted,) = await _transactions(session)
+    assert (await _details(session, posted.id)).category is None
+    # Not derivable from a category it cannot read, so the split is kept.
+    assert await _splits(session, posted.id) == [("groceries", Decimal("-12.34"))]
 
 
 async def test_split_categories_stored_only_when_split(session, run) -> None:
@@ -1610,6 +1654,19 @@ async def test_replay_runs_once(session, run) -> None:
     assert replayed == NormalizeReport(updated=1)
     # The version is stored: the next sync replays nothing.
     assert again == NormalizeReport()
+
+
+async def test_replay_runs_when_an_older_version_is_stored(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[_detailed()])
+    await run(_before_structured_fields, connection)
+    await run(update_config, connection.id, {NORMALIZER_VERSION_KEY: "monzo-norm-1"})
+
+    replayed = await _normalize(session, connection)
+
+    assert replayed == NormalizeReport(updated=1)
+    config = (await get_connection(session, connection.id)).config
+    assert config[NORMALIZER_VERSION_KEY] == NORMALIZER_VERSION
 
 
 async def test_replay_keeps_owner_void(session, run) -> None:

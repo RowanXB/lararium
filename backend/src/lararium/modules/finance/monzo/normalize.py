@@ -27,7 +27,7 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 import logging
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from numbers import Real
@@ -159,6 +159,18 @@ def _fields(value: object) -> dict[str, Any]:
 def _text(value: object) -> str | None:
     """A JSON string; None when absent or empty."""
     return value if isinstance(value, str) and value else None
+
+
+def _fill(known: PlaceDetails, more: PlaceDetails) -> PlaceDetails:
+    """`known`, with each detail it lacks taken from `more`."""
+    return replace(
+        known,
+        **{
+            f.name: getattr(more, f.name)
+            for f in fields(PlaceDetails)
+            if getattr(known, f.name) is None
+        },
+    )
 
 
 def _flag(value: object) -> bool | None:
@@ -417,6 +429,8 @@ class _Normalizer:
         self.report = NormalizeReport()
         self._currencies: dict[str, InstrumentRecord] = {}
         self._shared: dict[tuple[str, ...], UUID] = {}
+        # Per Monzo merchant id: its place and the details written to it in this sync.
+        self._places: dict[str, tuple[UUID, PlaceDetails]] = {}
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         self._deleted_pots: list[UUID] = []
@@ -439,12 +453,17 @@ class _Normalizer:
         serialised across concurrent syncs, and the lock that does it must not be held until
         this sync, which may take minutes, commits."""
         if key not in self._shared:
-            async with (
-                self.session_factory() as session,
-                command_context(session, self.command.actor, "finance.shared_row", {}) as ctx,
-            ):
-                self._shared[key] = await get_or_create(ctx)
+            self._shared[key] = await self._in_short_transaction(get_or_create)
         return self._shared[key]
+
+    async def _in_short_transaction(
+        self, work: Callable[[CommandContext], Awaitable[UUID]]
+    ) -> UUID:
+        async with (
+            self.session_factory() as session,
+            command_context(session, self.command.actor, "finance.shared_row", {}) as ctx,
+        ):
+            return await work(ctx)
 
     async def system_account(self, key: SystemAccountKey) -> UUID:
         return await self._shared_row(
@@ -745,7 +764,8 @@ class _Normalizer:
         (structured-fields Decision 7): more than one entry, or one other than
         {category: amount}, which is derivable."""
         amounts = self._amounts("categories", tx.get("categories"))
-        if not amounts or amounts == {tx.get("category"): tx["amount"]}:
+        category = _text(tx.get("category"))
+        if not amounts or (category is not None and amounts == {category: tx["amount"]}):
             return ()
         return tuple(
             CategorySplit(category, to_quantity(amount, decimals))
@@ -765,10 +785,19 @@ class _Normalizer:
         external_id = ("monzo_merchant", merchant_id)
         organization = await self.organization(name, external_id=external_id)
         details = self._place_details(merchant, _fields(tx.get("metadata")))
-        place = await self._shared_row(
-            ("place", merchant_id),
-            lambda ctx: get_or_create_place(ctx, name, external_id=external_id, details=details),
+        # Some details come from the transaction (its mcc, say) and one may lack what another
+        # states, so the place is written again whenever a later transaction of this sync adds
+        # a detail; one that adds nothing costs no write.
+        known = self._places.get(merchant_id)
+        if known is not None:
+            place, seen = known
+            details = _fill(seen, details)
+            if details == seen:
+                return organization, place
+        place = await self._in_short_transaction(
+            lambda ctx: get_or_create_place(ctx, name, external_id=external_id, details=details)
         )
+        self._places[merchant_id] = (place, details)
         return organization, place
 
     def _place_details(self, merchant: dict[str, Any], metadata: dict[str, Any]) -> PlaceDetails:
