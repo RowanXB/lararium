@@ -12,16 +12,20 @@ from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.db import create_engine
 
+from .containers import Endpoint, running
+
 BACKEND = Path(__file__).parents[1]
 INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
 
 
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[PostgresContainer]:
-    container = PostgresContainer("postgres:18").with_volume_mapping(
-        str(INFRA_POSTGRES), "/lararium", mode="ro"
-    )
-    with container:
+def postgres() -> Iterator[Endpoint]:
+    def build() -> PostgresContainer:
+        return PostgresContainer("postgres:18").with_copy_into_container(
+            INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql"
+        )
+
+    with running(build) as (container, endpoint):
         result = container.exec(
             [
                 "psql",
@@ -40,27 +44,25 @@ def postgres() -> Iterator[PostgresContainer]:
             ]
         )
         assert result.exit_code == 0, result.output.decode()
-        yield container
+        yield endpoint
 
 
-def _url(container: PostgresContainer, user: str, password: str) -> str:
-    host = container.get_container_host_ip()
-    port = container.get_exposed_port(5432)
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/lararium"
+def _url(endpoint: Endpoint, user: str, password: str) -> str:
+    return f"postgresql+psycopg://{user}:{password}@{endpoint.host}:{endpoint.port}/lararium"
 
 
 @pytest.fixture(scope="session")
-def owner_url(postgres: PostgresContainer) -> str:
+def owner_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_owner", "owner")
 
 
 @pytest.fixture(scope="session")
-def backend_url(postgres: PostgresContainer) -> str:
+def backend_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_backend", "backend")
 
 
 @pytest.fixture(scope="session")
-def webhook_in_url(postgres: PostgresContainer) -> str:
+def webhook_in_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_webhook_in", "webhook_in")
 
 
