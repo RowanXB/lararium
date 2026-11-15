@@ -75,7 +75,12 @@ def test_outflow_positive_negates() -> None:
     assert [row.quantity for row in rows] == [Decimal("3.50"), Decimal("-2000.00")]
 
 
-@pytest.mark.parametrize("header", [b"!Type: Bank", b"!type:bank", b"!TYPE:CCard", b"!Type:Cash"])
+# "Oth A" and "Oth L" (other asset, other liability) have the same records; HSBC UK
+# exports its current accounts as "Oth L".
+@pytest.mark.parametrize(
+    "header",
+    [b"!Type: Bank", b"!type:bank", b"!TYPE:CCard", b"!Type:Cash", b"!Type:Oth L", b"!Type:Oth A"],
+)
 def test_header_variants(header: bytes) -> None:
     content = BANK.replace(b"!Type:Bank", header)
     assert len(_rows(_parse(content))) == 2
@@ -153,7 +158,8 @@ def test_second_account_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "header", [b"!Type:Invst", b"!Account", b"!Type:Bankx", b"Type:Bank", b"D10/11/2026"]
+    "header",
+    [b"!Type:Invst", b"!Account", b"!Type:Bankx", b"Type:Bank", b"D10/11/2026", b"!Type:Oth X"],
 )
 def test_unknown_type_rejected(header: bytes) -> None:
     content = BANK.replace(b"!Type:Bank", header)

@@ -1,11 +1,23 @@
 """/api/v1/finance routes. Each route's name is its OpenAPI operationId."""
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +26,7 @@ from lararium.core.commands import command_context
 from lararium.core.entities import get_or_create_organization
 from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_setting, get_timezone, set_setting
-from lararium.deps import ActorDep, SessionDep, get_actor
+from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
     accounts,
     errors,
@@ -24,6 +36,7 @@ from lararium.modules.finance import (
     snapshots,
     valuation,
 )
+from lararium.modules.finance.importing import catalog, commit, parsed, profiles, staging
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.schemas import (
     AccountClose,
@@ -34,6 +47,12 @@ from lararium.modules.finance.schemas import (
     FinanceSettingsUpdate,
     FxRateCreate,
     HoldingOut,
+    ImportBatchDetailOut,
+    ImportBatchOut,
+    ImportCatalogEntryOut,
+    ImportProfileCreate,
+    ImportProfileOut,
+    ImportRowOut,
     InstrumentCreate,
     InstrumentOut,
     InstrumentUpdate,
@@ -59,7 +78,16 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.FinanceValidationError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_input"),
     errors.UnknownCurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "unknown_currency"),
     errors.NotACurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "not_a_currency"),
+    errors.ImportProfileNotFoundError: (status.HTTP_404_NOT_FOUND, "import_profile_not_found"),
+    errors.ImportBatchNotFoundError: (status.HTTP_404_NOT_FOUND, "import_batch_not_found"),
+    errors.DuplicateProfileNameError: (status.HTTP_409_CONFLICT, "duplicate_profile_name"),
+    errors.ImportNotAllowedError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "import_not_allowed"),
+    errors.FileFormatError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "file_format"),
+    errors.ImportBatchStateError: (status.HTTP_409_CONFLICT, "import_batch_state"),
+    errors.ImportHasErrorsError: (status.HTTP_409_CONFLICT, "import_has_errors"),
+    errors.ImportBatchStaleError: (status.HTTP_409_CONFLICT, "import_batch_stale"),
 }
+_UPLOAD_CHUNK = 64 * 1024
 
 
 def _error_handler(status_code: int, code: str) -> ExceptionHandler:
@@ -324,3 +352,136 @@ async def get_net_worth(
         start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
     points = await valuation.net_worth_series(session, start, end)
     return [NetWorthPointOut.model_validate(point) for point in points]
+
+
+# Imports
+
+
+@router.get("/import-profiles", name="list_import_profiles")
+async def list_import_profiles(session: SessionDep) -> list[ImportProfileOut]:
+    return [ImportProfileOut.model_validate(r) for r in await profiles.list_profiles(session)]
+
+
+@router.post("/import-profiles", name="create_import_profile", status_code=status.HTTP_201_CREATED)
+async def create_import_profile(
+    body: ImportProfileCreate, session: SessionDep, actor: ActorDep
+) -> ImportProfileOut:
+    async with command_context(session, actor, "create_import_profile", _args(body)) as ctx:
+        record = await profiles.create_profile(ctx, name=body.name, config=body.config)
+    return ImportProfileOut.model_validate(record)
+
+
+@router.put("/import-profiles/{profile_id}", name="update_import_profile")
+async def update_import_profile(
+    profile_id: UUID, body: ImportProfileCreate, session: SessionDep, actor: ActorDep
+) -> ImportProfileOut:
+    args = _args(body, profile_id=profile_id)
+    async with command_context(session, actor, "update_import_profile", args) as ctx:
+        record = await profiles.update_profile(ctx, profile_id, name=body.name, config=body.config)
+    return ImportProfileOut.model_validate(record)
+
+
+@router.get("/import-catalog", name="get_import_catalog")
+async def get_import_catalog() -> list[ImportCatalogEntryOut]:
+    """Each supported bank's export formats with a ready profile config (one recommended)."""
+    return [ImportCatalogEntryOut.model_validate(entry) for entry in catalog.CATALOG]
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """The upload's content, read in chunks: 413 as soon as it passes MAX_IMPORT_BYTES."""
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := await file.read(_UPLOAD_CHUNK):
+        size += len(chunk)
+        if size > parsed.MAX_IMPORT_BYTES:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                {
+                    "error": "file_too_large",
+                    "message": f"the file is larger than {parsed.MAX_IMPORT_BYTES} bytes",
+                },
+            )
+        chunks.append(chunk)
+    if size == 0:
+        raise errors.FileFormatError("the file is empty")
+    return b"".join(chunks)
+
+
+async def _batch_detail(
+    session: AsyncSession, record: staging.ImportBatchRecord
+) -> ImportBatchDetailOut:
+    rows = await staging.list_batch_rows(session, record.id)
+    batch = ImportBatchOut.model_validate(record)
+    return ImportBatchDetailOut(
+        **dict(batch), rows=[ImportRowOut.model_validate(row) for row in rows]
+    )
+
+
+@router.post("/imports", name="stage_import", status_code=status.HTTP_201_CREATED)
+async def stage_import(
+    account_id: Annotated[UUID, Form()],
+    profile_id: Annotated[UUID, Form()],
+    file: Annotated[UploadFile, File()],
+    session: SessionDep,
+    actor: ActorDep,
+    store: DocumentStoreDep,
+    instrument_id: Annotated[UUID | None, Form()] = None,
+) -> ImportBatchDetailOut:
+    """Upload a statement file and stage it for review; nothing is posted until commit."""
+    content = await _read_upload(file)
+    filename = file.filename or "upload"
+    # The audit records which file, never its content.
+    args: dict[str, JSONValue] = {
+        "account_id": str(account_id),
+        "profile_id": str(profile_id),
+        "instrument_id": None if instrument_id is None else str(instrument_id),
+        "filename": filename,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+    async with command_context(session, actor, "stage_import", args) as ctx:
+        record = await staging.stage_import(
+            ctx,
+            store,
+            account_id=account_id,
+            profile_id=profile_id,
+            content=content,
+            filename=filename,
+            media_type=file.content_type or "application/octet-stream",
+            default_instrument_id=instrument_id,
+        )
+    return await _batch_detail(session, record)
+
+
+@router.get("/imports", name="list_import_batches")
+async def list_import_batches(session: SessionDep) -> list[ImportBatchOut]:
+    return [ImportBatchOut.model_validate(r) for r in await staging.list_batches(session)]
+
+
+@router.get("/imports/{batch_id}", name="get_import_batch")
+async def get_import_batch(batch_id: UUID, session: SessionDep) -> ImportBatchDetailOut:
+    return await _batch_detail(session, await staging.get_batch(session, batch_id))
+
+
+@router.post("/imports/{batch_id}/commit", name="commit_import")
+async def commit_import(batch_id: UUID, session: SessionDep, actor: ActorDep) -> ImportBatchOut:
+    args = _args(batch_id=batch_id)
+    async with command_context(session, actor, "commit_import", args) as ctx:
+        record = await commit.commit_batch(ctx, batch_id)
+    return ImportBatchOut.model_validate(record)
+
+
+@router.post("/imports/{batch_id}/discard", name="discard_import")
+async def discard_import(batch_id: UUID, session: SessionDep, actor: ActorDep) -> ImportBatchOut:
+    args = _args(batch_id=batch_id)
+    async with command_context(session, actor, "discard_import", args) as ctx:
+        record = await commit.discard_batch(ctx, batch_id)
+    return ImportBatchOut.model_validate(record)
+
+
+@router.post("/imports/{batch_id}/rollback", name="rollback_import")
+async def rollback_import(batch_id: UUID, session: SessionDep, actor: ActorDep) -> ImportBatchOut:
+    args = _args(batch_id=batch_id)
+    async with command_context(session, actor, "rollback_import", args) as ctx:
+        record = await commit.rollback_batch(ctx, batch_id)
+    return ImportBatchOut.model_validate(record)

@@ -10,6 +10,7 @@ from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.importing.profiles import AmountFormat
 from lararium.modules.finance.money import require_amount
 
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_IMPORT_ROWS = 20_000
 MAX_DESCRIPTION_LENGTH = 1000
 

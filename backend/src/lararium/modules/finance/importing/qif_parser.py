@@ -20,7 +20,9 @@ from lararium.modules.finance.importing.profiles import QifProfileConfig
 
 PARSER_VERSION = "qif-1"
 
-_HEADER = re.compile(r"!type: ?(bank|ccard|cash)", re.IGNORECASE)
+# "Oth A" and "Oth L" (other asset or liability) records are read like a bank's; HSBC UK
+# exports current accounts as "Oth L", with the same signs as its OFX.
+_HEADER = re.compile(r"!type: ?(bank|ccard|cash|oth a|oth l)", re.IGNORECASE)
 
 type _Record = list[tuple[str, str]]
 
