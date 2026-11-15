@@ -232,14 +232,14 @@ def test_hsbc_rate_table() -> None:
             kind="Overdraft Interest Rates",
             band_from=None,
             band_to=Decimal("50"),
-            rate=Decimal("0.00"),
+            rate=None,
             ear=Decimal("0.00"),
         ),
         StatementRate(
             kind="Overdraft Interest Rates",
             band_from=Decimal("50"),
             band_to=None,
-            rate=Decimal("35.00"),
+            rate=None,
             ear=Decimal("35.00"),
         ),
     ]

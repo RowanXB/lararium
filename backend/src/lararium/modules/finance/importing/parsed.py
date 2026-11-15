@@ -81,13 +81,18 @@ class StatementAccount:
 
 @dataclass(frozen=True)
 class StatementRate:
-    """One row of a statement's rate table; rates in percent a year."""
+    """One row of a statement's rate table, in percent a year: the rate as printed (AER or
+    nominal) and the EAR, at least one of them."""
 
     kind: str  # as printed
     band_from: Decimal | None
     band_to: Decimal | None
-    rate: Decimal
+    rate: Decimal | None
     ear: Decimal | None
+
+    def __post_init__(self) -> None:
+        if self.rate is None and self.ear is None:
+            raise ValueError("a rate row needs a rate or an EAR")
 
 
 @dataclass(frozen=True)

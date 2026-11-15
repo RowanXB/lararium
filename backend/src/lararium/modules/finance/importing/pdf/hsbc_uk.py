@@ -152,7 +152,7 @@ def _percent(printed: str, page: int) -> Decimal:
     return amount(printed.removesuffix("%"), f"the rate table on page {page + 1}")
 
 
-def _rate(words: list[Word], kind: str, annual_equivalent: bool) -> StatementRate | None:
+def _rate(words: list[Word], kind: str, ear_column: bool) -> StatementRate | None:
     """One side of a rate row: "upto 50 0.00%" or "over 50 35.00%"."""
     page = words[0].page
     if text(words) == "Credit interest is not paid":
@@ -160,15 +160,15 @@ def _rate(words: list[Word], kind: str, annual_equivalent: bool) -> StatementRat
     if len(words) != 3 or words[0].text not in _BANDS:
         raise FileFormatError(f"the rate table on page {page + 1} has a row that doesn't parse")
     band = amount(words[1].text, f"the rate table on page {page + 1}")
-    rate = _percent(words[2].text, page)
+    printed = _percent(words[2].text, page)
     upto = words[0].text == "upto"
     return StatementRate(
         kind=kind,
         band_from=None if upto else band,
         band_to=band if upto else None,
-        rate=rate,
-        # The overdraft column prints the EAR: the annual rate as charged.
-        ear=rate if annual_equivalent else None,
+        # The credit column prints the AER; the overdraft column only the EAR.
+        rate=None if ear_column else printed,
+        ear=printed if ear_column else None,
     )
 
 
