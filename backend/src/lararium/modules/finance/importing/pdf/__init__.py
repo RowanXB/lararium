@@ -93,6 +93,10 @@ def check(result: LayoutResult) -> None:
     """Decision 15's self-checks; FileFormatError names the first that fails."""
     if result.unplaced:
         raise FileFormatError(f"words outside any column on page {result.unplaced[0].page + 1}")
+    # Every layout reads the currency from the statement; without it the rows would take
+    # the upload's default, and a currency account's amounts would be booked as GBP.
+    if result.currency is None:
+        raise FileFormatError("the statement doesn't print its currency")
     _rows_check(result)
     _summary_check(result)
     _balances_check(result)

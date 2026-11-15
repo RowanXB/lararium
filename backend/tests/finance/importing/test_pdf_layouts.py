@@ -698,3 +698,11 @@ def test_boc_field_printed_blank_is_absent() -> None:
     broke import_statements' CHECK)."""
     statement = _boc(BocStatement(pages=[[LOCAL_OUT]], iban=""))
     assert statement.account is not None and statement.account.iban is None
+
+
+def test_statement_without_a_printed_currency_is_refused() -> None:
+    """Third review: without one, rows took the upload's default currency, so a currency
+    account's amounts could be booked as GBP."""
+    content = boc_pdf(BocStatement(pages=[[LOCAL_OUT]], currencies=("gbp",)))
+    with pytest.raises(FileFormatError, match="doesn't print its currency"):
+        _parse(content, "boc_uk_statement")
