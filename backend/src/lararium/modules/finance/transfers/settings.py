@@ -26,6 +26,9 @@ DEFAULTS = TransferSettings(
     window_before=timedelta(days=1), window_after=timedelta(days=5), overdue=timedelta(days=7)
 )
 _WEEK = timedelta(days=7)
+# The most days any key may give: checked before a timedelta is built, so no value can
+# overflow one, or `now - overdue`, outside TransferSettingsError.
+_MAX_DAYS = 3650
 
 _FIELDS = {
     "window_before_days": "window_before",
@@ -37,8 +40,8 @@ _FIELDS = {
 async def load_transfer_settings(session: AsyncSession) -> TransferSettings:
     """The defaults, overridden by whatever the setting `finance.transfers` gives:
     `{"window_before_days", "window_after_days", "overdue_days"}`, each optional and a
-    positive whole number of days, with the two windows together shorter than 7 days. A
-    malformed setting raises TransferSettingsError."""
+    whole number of days from 1 to 3650, with the two windows together shorter than 7 days.
+    A malformed setting raises TransferSettingsError."""
     try:
         value = await get_setting(session, SETTING_KEY)
     except SettingNotFoundError:
@@ -58,9 +61,10 @@ async def load_transfer_settings(session: AsyncSession) -> TransferSettings:
             continue
         given = value[key]
         # bool is an int subclass; true is not a number of days.
-        if isinstance(given, bool) or not isinstance(given, int) or given <= 0:
+        if isinstance(given, bool) or not isinstance(given, int) or not 0 < given <= _MAX_DAYS:
             raise TransferSettingsError(
-                f"{SETTING_KEY}.{key} must be a positive integer, got {given!r}"
+                f"{SETTING_KEY}.{key} must be a whole number of days from 1 to {_MAX_DAYS},"
+                f" got {given!r}"
             )
         days[field] = timedelta(days=given)
     if days["window_before"] + days["window_after"] >= _WEEK:

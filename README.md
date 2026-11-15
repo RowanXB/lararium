@@ -313,8 +313,9 @@ and sends one message for each transfer that needs your review, or that has been
 more than 7 days; when more than 3 are due at once, it sends one message saying how many
 instead. Each transfer is reported once. The defaults (the receiving side may occur
 from 1 day before to 5 days after the sending side; overdue after 7 days) are in the
-`finance.transfers` setting; no page changes them yet. The two windows together must be shorter
-than 7 days, so a weekly transfer never pairs with the next week's.
+`finance.transfers` setting; no page changes them yet. Each is a whole number of days from 1 to
+3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
+with the next week's.
 
 ## Webhooks through Cloudflare Tunnel
 
