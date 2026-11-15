@@ -651,3 +651,41 @@ def test_failed_response_status_is_file_error(where: str) -> None:
     content = content.replace("<SEVERITY>ERROR\n<SEVERITY>INFO", "<SEVERITY>ERROR", 1)
     with pytest.raises(FileFormatError, match="status 2000 \\(ERROR\\)"):
         _parse(content.encode())
+
+
+def test_bare_ampersand_is_kept_as_written() -> None:
+    """Fourth review: a bare '&' before a legacy entity name was rewritten ('B&LTD' -> 'B<D')."""
+    transaction = _transaction(
+        DTPOSTED="20261110", TRNAMT="-1.00", FITID="E1", NAME="B&LTD SHOP", MEMO="A &amp; B"
+    )
+    (row,) = _rows(_parse(_sgml(_sgml_statement(transaction))))
+    assert (row.payee, row.memo) == ("B&LTD SHOP", "A & B")
+
+
+def test_xml_without_an_encoding_is_utf8() -> None:
+    """Fourth review: XML's default encoding is UTF-8; it was read as cp1252 (mojibake)."""
+    content = XML_V2.replace(b'encoding="UTF-8" ', b"").replace(
+        b"Example Cafe", "Café · £5".encode()
+    )
+    assert b"encoding=" not in content
+    rows = _rows(_parse(content))
+    assert rows[0].payee == "Café · £5"
+
+
+def test_repeated_statement_aggregate_is_file_error() -> None:
+    """Fourth review: a second LEDGERBAL was ignored, first-wins."""
+    extra = (
+        "<LEDGERBAL>\n<BALAMT>100.00\n<DTASOF>20261130\n</LEDGERBAL>\n"
+        "<LEDGERBAL>\n<BALAMT>999.00\n<DTASOF>20261130\n</LEDGERBAL>"
+    )
+    with pytest.raises(FileFormatError, match="has <LEDGERBAL> more than once"):
+        _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS, extra=extra)))
+
+
+def test_unclosed_cdata_is_file_error_and_linear() -> None:
+    """Fourth review: the CDATA pre-pass was quadratic on unclosed sections."""
+    content = (SGML_HEADER + "<OFX>\n" + "<![CDATA[" * 200_000).encode()
+    started = time.perf_counter()
+    with pytest.raises(FileFormatError, match="CDATA section is never closed"):
+        _parse(content)
+    assert time.perf_counter() - started < 2

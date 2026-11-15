@@ -34,9 +34,14 @@ _START = re.compile(r"<OFX>", re.IGNORECASE)
 _UTF8_HEADER = re.compile(
     rb"ENCODING:\s*(?:UTF-8|UNICODE)|encoding\s*=\s*[\"']UTF-8[\"']", re.IGNORECASE
 )
+# An XML declaration with no encoding: XML's default, UTF-8.
+_XML_NO_ENCODING = re.compile(rb"<\?xml(?![^>]*\bencoding\s*=)[^>]*\?>", re.IGNORECASE)
+# Only a well-formed reference is one: SGML OFX writes a bare "&" too ("B&Q"), which
+# html.unescape would read as a legacy entity ("&LT" -> "<").
+_ENTITY = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);")
 _TOKEN = re.compile(r"<(/?)([A-Za-z0-9.]+)>([^<]*)")
 # XML OFX may wrap a value in CDATA; the tokenizer reads text only up to the next "<".
-_CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+_CDATA_OPEN, _CDATA_CLOSE = "<![CDATA[", "]]>"
 # YYYYMMDD[HHMMSS[.XXX]][[±H[H][.MM]][:TZ]]
 _DATETIME = re.compile(
     r"(\d{4})(\d{2})(\d{2})"
@@ -65,6 +70,9 @@ _AGGREGATES = _STATEMENTS | {
     "ORIGCURRENCY",
     "LEDGERBAL",
     "AVAILBAL",
+    "PAYEE",
+    "BANKACCTTO",
+    "CCACCTTO",
 }
 # Real statements nest about eight deep; the bound keeps the recursive walks safe.
 _MAX_DEPTH = 64
@@ -77,7 +85,12 @@ class _Aggregate:
     children: list["_Aggregate"] = field(default_factory=list["_Aggregate"])
 
     def child(self, name: str) -> "_Aggregate | None":
-        return next((child for child in self.children if child.name == name), None)
+        """The aggregate directly inside this one; one it has twice refuses the file, as a
+        repeated leaf does (leaf)."""
+        found = [child for child in self.children if child.name == name]
+        if len(found) > 1:
+            raise FileFormatError(f"<{self.name}> has <{name}> more than once")
+        return found[0] if found else None
 
     def find(self, names: frozenset[str]) -> list["_Aggregate"]:
         """Every descendant with one of the names, in document order."""
@@ -112,7 +125,8 @@ def _decode(content: bytes) -> str:
     start = _START.search(content.decode("latin-1"))
     if start is None:
         raise FileFormatError("not an OFX file: there is no <OFX> tag")
-    utf8 = _UTF8_HEADER.search(content, 0, start.start()) is not None
+    head = content[: start.start()]
+    utf8 = _UTF8_HEADER.search(head) is not None or _XML_NO_ENCODING.search(head) is not None
     encoding = "utf-8-sig" if utf8 else "cp1252"
     try:
         text = content.decode(encoding)
@@ -120,8 +134,24 @@ def _decode(content: bytes) -> str:
         raise FileFormatError(f"the file is not valid {encoding.removesuffix('-sig')}") from None
     found = _START.search(text)
     assert found is not None
-    # A CDATA section's text, escaped as ordinary text (each value is unescaped once read).
-    return _CDATA.sub(lambda section: html.escape(section[1], quote=False), text[found.start() :])
+    return _without_cdata(text[found.start() :])
+
+
+def _without_cdata(text: str) -> str:
+    """Each CDATA section's text, escaped as ordinary text (values are unescaped once
+    read), in one pass; one never closed refuses the file."""
+    parts: list[str] = []
+    position = 0
+    while (opened := text.find(_CDATA_OPEN, position)) != -1:
+        closed = text.find(_CDATA_CLOSE, opened)
+        if closed == -1:
+            raise FileFormatError("not a valid OFX file: a CDATA section is never closed")
+        parts += [
+            text[position:opened],
+            html.escape(text[opened + len(_CDATA_OPEN) : closed], quote=False),
+        ]
+        position = closed + len(_CDATA_CLOSE)
+    return "".join([*parts, text[position:]])
 
 
 def _absorb(stack: list[_Aggregate]) -> None:
@@ -163,7 +193,8 @@ def _tree(text: str) -> _Aggregate:
             continue
         text_value = value.strip()
         if text_value:
-            stack[-1].leaves.append((name, html.unescape(text_value)))
+            unescaped = _ENTITY.sub(lambda entity: html.unescape(entity[0]), text_value)
+            stack[-1].leaves.append((name, unescaped))
             last_leaf = name
         else:
             if len(stack) > _MAX_DEPTH:
