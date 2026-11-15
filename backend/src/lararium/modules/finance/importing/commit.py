@@ -174,8 +174,12 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
             .values(status="committed", transaction_id=transaction.id)
         )
     b = models.ImportBatch
+    # The time now, under the account lock, not now() (the transaction's start): the walk
+    # orders ties by commit time, which must be the order the lock let the commits through.
     await session.execute(
-        update(b).where(b.id == batch_id).values(status="committed", committed_at=func.now())
+        update(b)
+        .where(b.id == batch_id)
+        .values(status="committed", committed_at=func.clock_timestamp())
     )
     # With this batch committed, the others' adjustments follow (Decision 13).
     await align_openings(ctx, account_id)
