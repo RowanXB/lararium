@@ -231,6 +231,7 @@ backend/Dockerfile                                                 # Task 9
   - `class LocalDocumentStore(DocumentStore)`: `__init__(self, root: Path)`. Stores at `root / sha[:2] / sha[2:4] / sha`, writing a temporary file in the same directory and `os.replace`-ing it into place; `put` of an existing hash is a no-op.
   - `@dataclass(frozen=True) class DocumentRecord`: `id: UUID, sha256: str, size_bytes: int, media_type: str, original_filename: str, source: str, created_at: datetime`.
   - `async def store_document(ctx: CommandContext, store: DocumentStore, content: bytes, *, filename: str, media_type: str, source: str) -> DocumentRecord`: writes the content first, then inserts with `ON CONFLICT (sha256) DO NOTHING` and returns the existing row on conflict (keeping the first filename). It emits `core.document.stored` only for a new row and calls `ctx.record_change("document", {...})`.
+  - `async def record_document(ctx, content, *, filename, media_type, source) -> DocumentRecord` (review ruling, 2026-11-15): the row alone. Its caller writes the bytes with `store.put` before the command commits, so a committed row never lacks its bytes; `store_document` is the two together.
   - `async def get_document(session: AsyncSession, document_id: UUID) -> DocumentRecord`: raises `DocumentNotFoundError`.
   - `async def read_document(session: AsyncSession, store: DocumentStore, document_id: UUID) -> bytes`: re-hashes and raises `DocumentIntegrityError` on mismatch or a missing file.
   - `Settings.document_dir: Path = Path("/var/lib/lararium/documents")` (env `LARARIUM_DOCUMENT_DIR`).
@@ -546,7 +547,7 @@ Migration `0015`:
 Rules for `stage_import`:
 1. **Account check.** The account must be open, `source_kind == "manual"`, and in balance mode `transactions` or `hybrid`; otherwise `ImportNotAllowedError` with a message saying why. After parsing, the statement's own account (Decision 18) must agree with every earlier committed (not rolled back) statement of this account, comparing sort code, account number and IBAN, each only when both state it; otherwise `ImportNotAllowedError` naming only the last four digits of each.
 2. **Default currency.** `default_instrument_id`, when given, must be a fiat instrument, else `NotACurrencyError`.
-3. **Store the document.** `store_document(ctx, store, content, filename=..., media_type=..., source="finance.import")`.
+3. **Record the document.** `record_document(ctx, content, filename=..., media_type=..., source="finance.import")`, after every check that can refuse the file except the opening check. The bytes are put last, after the opening check, so a refused upload leaves no bank statement on disk or in the backups (review ruling, 2026-11-15).
 4. **Parse** by `profile.config.format`, with `local_tz` = `ZoneInfo(profile timezone)` or `get_timezone(session)`. `FileFormatError` propagates, and `command_context` rolls back everything (the stored file may remain; it is content-addressed and harmless).
 5. **Classify each row:**
    - a `SkippedRow` becomes `skipped`, with its reason in `note`;
