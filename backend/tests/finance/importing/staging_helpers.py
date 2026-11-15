@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -135,3 +136,8 @@ HSBC_ROWS = [
     HsbcRow("CR", ("EXAMPLE EMPLOYER",), paid_in="1,250.00", date="10 May 27"),
     HsbcRow(")))", ("EXAMPLE SHOP",), paid_out="17.35", balance="1,328.45"),
 ]
+
+
+def _files(root: Path) -> list[Path]:
+    """The files under a LocalDocumentStore's root."""
+    return [path for path in root.rglob("*") if path.is_file()]

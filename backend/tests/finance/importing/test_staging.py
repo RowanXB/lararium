@@ -48,6 +48,7 @@ from .staging_helpers import (
     _balance_after,
     _csv_profile,
     _dedupe_keys,
+    _files,
     _ofx,
     _profile,
     _rows,
@@ -163,10 +164,6 @@ async def test_default_instrument_must_be_fiat(
 ) -> None:
     with pytest.raises(NotACurrencyError):
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", default=btc.id)
-
-
-def _files(root: Path) -> list[Path]:
-    return [path for path in root.rglob("*") if path.is_file()]
 
 
 async def test_file_format_error_persists_nothing(

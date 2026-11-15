@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext
-from lararium.core.documents import DocumentStore, store_document
+from lararium.core.documents import DocumentStore, record_document
 from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_timezone
@@ -1543,9 +1543,8 @@ async def stage_import(
     if missing is not None:
         raise ImportNotAllowedError(missing)
 
-    # Only now that nothing refuses the file: a refused one leaves no bank statement on disk.
-    document = await store_document(
-        ctx, store, content, filename=filename, media_type=media_type, source="finance.import"
+    document = await record_document(
+        ctx, content, filename=filename, media_type=media_type, source="finance.import"
     )
     b = models.ImportBatch
     batch_id = await session.scalar(
@@ -1595,6 +1594,9 @@ async def stage_import(
     )
     if account.balance_mode == "transactions" and all(row.status != "error" for row in rows):
         await _stage_openings(session, account_id, batch_id, rows, instruments, local_tz)
+    # The bytes last, once nothing can refuse the file: a refused one leaves no bank
+    # statement on disk (or in the backups).
+    store.put(document.sha256, content)
 
     record = await get_batch(session, batch_id)
     counts: dict[str, JSONValue] = {status: n for status, n in record.counts.items()}

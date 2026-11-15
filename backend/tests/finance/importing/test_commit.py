@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -40,6 +41,7 @@ from .staging_helpers import (
     _adjustments,
     _balance_after,
     _csv_profile,
+    _files,
     _ofx,
     _profile,
     _rows,
@@ -850,7 +852,12 @@ LOWER_LEDGERBAL = _ofx(
 
 
 async def test_overlapping_file_with_another_opening_refused(
-    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    account: AccountRecord,
+    tmp_path: Path,
 ) -> None:
     """An adjustment may stand only where no other statement vouches for the balance: on a
     day both files cover, a different opening is a contradiction, not a gap."""
@@ -863,6 +870,8 @@ async def test_overlapping_file_with_another_opening_refused(
     assert "export.ofx" in message and "nov.csv" in message
     assert "97.00" in message and "100.00" in message and "2026-11-20" in message
     assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("87.00")
+    # Refused while staging its openings: only nov.csv's bytes are stored.
+    assert len(_files(tmp_path)) == 1
 
 
 async def test_older_file_with_another_opening_refused(

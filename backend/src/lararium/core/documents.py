@@ -112,10 +112,30 @@ async def store_document(
     source: str,
 ) -> DocumentRecord:
     """Store a document; if the same content is already stored, return that one unchanged."""
+    record = await record_document(
+        ctx, content, filename=filename, media_type=media_type, source=source
+    )
+    store.put(record.sha256, content)
+    return record
+
+
+async def record_document(
+    ctx: CommandContext,
+    content: bytes,
+    *,
+    filename: str,
+    media_type: str,
+    source: str,
+) -> DocumentRecord:
+    """The document's row (the existing one for the same content), without its bytes.
+
+    The caller writes the bytes with `store.put(record.sha256, content)` before the command
+    commits: the row is invisible until then, so no committed row ever points at bytes that
+    were not written. Writing them last, once nothing in the command can refuse the content
+    any more, keeps a refused upload off the disk.
+    """
     d = models.Document
     digest = hashlib.sha256(content).hexdigest()
-    # The file first: a row must never point at bytes that were not written.
-    store.put(digest, content)
     inserted = await ctx.session.scalar(
         insert(d)
         .values(
