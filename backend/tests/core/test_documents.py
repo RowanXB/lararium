@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import exc, func, select, text
 
-from lararium.core import models
+from lararium.core import documents, models
 from lararium.core.documents import (
     LocalDocumentStore,
     get_document,
@@ -111,3 +111,17 @@ def test_stored_files_and_their_directories_are_owner_only(tmp_path: Path) -> No
     for directory in (root, path.parent.parent, path.parent):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_put_syncs_the_rename_and_new_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Third review: the rename wasn't made durable, so after a power cut a committed row
+    could point at a file that never reached the disk."""
+    synced: list[Path] = []
+    monkeypatch.setattr(documents, "_fsync_directory", synced.append)
+    store = LocalDocumentStore(tmp_path / "docs")
+    sha = "ab" * 32
+    store.put(sha, b"statement")
+    shard = tmp_path / "docs" / "ab" / "ab"
+    assert synced == [shard, shard.parent, tmp_path / "docs"]

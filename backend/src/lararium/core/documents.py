@@ -32,6 +32,14 @@ class DocumentStore(Protocol):
         ...
 
 
+def _fsync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class LocalDocumentStore(DocumentStore):
     """Files in a local directory, at `root / sha[:2] / sha[2:4] / sha`."""
 
@@ -61,6 +69,10 @@ class LocalDocumentStore(DocumentStore):
         except BaseException:
             Path(temporary).unlink(missing_ok=True)
             raise
+        # The rename and any new shard directories must reach the disk before the caller's
+        # row commits: a power cut would otherwise leave a committed row without its bytes.
+        for directory in (path.parent, path.parent.parent, self.root):
+            _fsync_directory(directory)
 
     def get(self, sha256: str) -> bytes:
         return self._path(sha256).read_bytes()
