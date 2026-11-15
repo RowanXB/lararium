@@ -265,7 +265,7 @@ Folded into Task 5's first commit; no tests of its own.
 - [ ] **Step 1: Add the note:** structured fields, the replay on a `NORMALIZER_VERSION` change, and what stays raw.
 - [ ] **Step 2: Commit** `docs: point the Monzo connector plan at the structured fields`.
 - [ ] **Step 3: Owner's check after deploy (not committed).** After the first sync on the NAS, read-only counts must match the raw inventory:
-  - every connector transaction except the opening balance adjustments, owner-voided ones and ones in a currency without an instrument has `original_instrument_id`;
+  - every connector transaction except the opening balance adjustments, voided ones (by the owner or by the connector) and ones in a currency without an instrument has `original_instrument_id`;
   - places: the number of distinct merchant ids;
   - declined rows: the number of declined ids;
   - exactly one `is_fee` posting.
