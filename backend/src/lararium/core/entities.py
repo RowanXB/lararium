@@ -1,9 +1,12 @@
+from dataclasses import asdict, dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
+from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity
 
 
@@ -64,3 +67,79 @@ async def get_or_create_organization(
             )
         )
     return existing
+
+
+@dataclass(frozen=True)
+class PlaceDetails:
+    """What a source says about a place (a merchant location); None means it says nothing."""
+
+    address_street: str | None = None
+    address_city: str | None = None
+    address_region: str | None = None
+    address_postcode: str | None = None
+    address_country: str | None = None
+    address_formatted: str | None = None
+    latitude: Decimal | None = None
+    longitude: Decimal | None = None
+    location_approximate: bool | None = None
+    online: bool | None = None
+    mcc: str | None = None
+    website: str | None = None
+    card_acceptor_website: str | None = None
+    logo_url: str | None = None
+
+
+def _place_change(place: Entity) -> dict[str, JSONValue]:
+    data: dict[str, JSONValue] = {"id": str(place.id), "name": place.name}
+    for field, value in asdict(_details_of(place)).items():
+        data[field] = str(value) if isinstance(value, Decimal) else value
+    return data
+
+
+def _details_of(place: Entity) -> PlaceDetails:
+    return PlaceDetails(**{field: getattr(place, field) for field in asdict(PlaceDetails())})
+
+
+async def get_or_create_place(
+    ctx: CommandContext, name: str, *, external_id: tuple[str, str], details: PlaceDetails
+) -> UUID:
+    """Return the place carrying the external id (scheme, value), creating it if none.
+
+    The name and details are brought in line with what the source now says, recording a change
+    when they differ. A place is never matched to an organization, or by name.
+
+    Concurrent callers are serialised on the external id; call it in a short transaction, as
+    the lock is held until it commits.
+    """
+    scheme, value = external_id
+    await ctx.session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtext(f"place:{scheme}:{value}")))
+    )
+    place = (
+        await ctx.session.execute(
+            select(Entity)
+            .where(Entity.kind == "place", Entity.external_ids[scheme].astext == value)
+            .order_by(Entity.id)
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if place is None:
+        place = Entity(
+            kind="place",
+            name=name,
+            external_ids={scheme: value},
+            owner_entity_id=await get_self_entity_id(ctx.session),
+            **asdict(details),
+        )
+        ctx.session.add(place)
+        await ctx.session.flush()
+    elif place.name != name or _details_of(place) != details:
+        place.name = name
+        for field, new in asdict(details).items():
+            setattr(place, field, new)
+        await ctx.session.flush()
+    else:
+        return place.id
+    ctx.record_change(f"entity:{place.id}", _place_change(place))
+    return place.id

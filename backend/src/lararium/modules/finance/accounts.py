@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, exists, insert, select, update
+from sqlalchemy import ColumnElement, exists, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -38,6 +39,25 @@ class AccountRecord:
     status: AccountStatus
     opened_on: date | None
     closed_on: date | None
+    product_type: str | None
+    owner_type: str | None
+    goal_amount: Decimal | None
+    locked: bool | None
+    round_up: bool | None
+    round_up_multiplier: Decimal | None
+
+
+@dataclass(frozen=True)
+class SourceDetails:
+    """What a source says about an account; None clears a field, except tax_wrapper (kept)."""
+
+    product_type: str | None = None
+    owner_type: str | None = None
+    goal_amount: Decimal | None = None
+    locked: bool | None = None
+    round_up: bool | None = None
+    round_up_multiplier: Decimal | None = None
+    tax_wrapper: TaxWrapper | None = None
 
 
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[AccountRecord]:
@@ -60,6 +80,12 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             a.status,
             a.opened_on,
             a.closed_on,
+            a.product_type,
+            a.owner_type,
+            a.goal_amount,
+            a.locked,
+            a.round_up,
+            a.round_up_multiplier,
         )
         .where(*conditions)
         .order_by(a.name, a.id)
@@ -80,6 +106,12 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             status=cast(AccountStatus, row.status),
             opened_on=row.opened_on,
             closed_on=row.closed_on,
+            product_type=row.product_type,
+            owner_type=row.owner_type,
+            goal_amount=row.goal_amount,
+            locked=row.locked,
+            round_up=row.round_up,
+            round_up_multiplier=row.round_up_multiplier,
         )
         for row in rows
     ]
@@ -105,6 +137,12 @@ def _change_data(record: AccountRecord) -> dict[str, JSONValue]:
         "status": record.status,
         "opened_on": _optional_str(record.opened_on),
         "closed_on": _optional_str(record.closed_on),
+        "product_type": record.product_type,
+        "owner_type": record.owner_type,
+        "goal_amount": _optional_str(record.goal_amount),
+        "locked": record.locked,
+        "round_up": record.round_up,
+        "round_up_multiplier": _optional_str(record.round_up_multiplier),
     }
 
 
@@ -178,6 +216,30 @@ async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> Ac
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.updated", record)
     return record
+
+
+async def set_source_details(ctx: CommandContext, account_id: UUID, details: SourceDetails) -> bool:
+    """Write what the source says about the account; False (and no event) if nothing differs."""
+    a = models.Account
+    values: dict[str, object] = {
+        "product_type": details.product_type,
+        "owner_type": details.owner_type,
+        "goal_amount": details.goal_amount,
+        "locked": details.locked,
+        "round_up": details.round_up,
+        "round_up_multiplier": details.round_up_multiplier,
+    }
+    if details.tax_wrapper is not None:
+        values["tax_wrapper"] = details.tax_wrapper
+    differs = or_(*(getattr(a, name).is_distinct_from(value) for name, value in values.items()))
+    written = await ctx.session.scalar(
+        update(a).where(a.id == account_id, differs).values(**values).returning(a.id)
+    )
+    if written is None:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    _publish(ctx, "finance.account.updated", await get_account(ctx.session, account_id))
+    return True
 
 
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:

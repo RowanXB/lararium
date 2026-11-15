@@ -1,16 +1,20 @@
 import uuid
 from datetime import date
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from lararium.core.entities import get_or_create_organization, get_self_entity_id
+from lararium.core.models import Event
 from lararium.modules.finance.accounts import (
+    SourceDetails,
     close_account,
     create_account,
     get_account,
     list_accounts,
     rename_account,
+    set_source_details,
 )
 from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
@@ -90,3 +94,54 @@ async def test_missing_account_not_found(session, run) -> None:
         await run(rename_account, uuid.uuid4(), "x")
     with pytest.raises(AccountNotFoundError):
         await run(close_account, uuid.uuid4(), date(2026, 6, 30))
+
+
+async def _updated_events(session) -> int:
+    return await session.scalar(
+        select(func.count()).select_from(Event).where(Event.type == "finance.account.updated")
+    )
+
+
+async def test_set_source_details_writes_once(session, run, make_account) -> None:
+    acc = await make_account(name="Pot")
+    details = SourceDetails(
+        product_type="flex",
+        owner_type="personal",
+        goal_amount=Decimal("500.00"),
+        locked=False,
+        round_up=True,
+        round_up_multiplier=Decimal("2"),
+        tax_wrapper="isa",
+    )
+    before = await _updated_events(session)
+    assert await run(set_source_details, acc.id, details) is True
+    assert await _updated_events(session) == before + 1
+    assert await run(set_source_details, acc.id, details) is False
+    assert await _updated_events(session) == before + 1
+    got = await get_account(session, acc.id)
+    assert (got.product_type, got.owner_type, got.goal_amount) == (
+        "flex",
+        "personal",
+        Decimal("500.00"),
+    )
+    assert (got.locked, got.round_up, got.round_up_multiplier, got.tax_wrapper) == (
+        False,
+        True,
+        Decimal("2"),
+        "isa",
+    )
+
+
+async def test_set_source_details_keeps_tax_wrapper_when_none(session, run, make_account) -> None:
+    acc = await make_account(name="ISA", tax_wrapper="isa")
+    assert await run(set_source_details, acc.id, SourceDetails(product_type="x")) is True
+    got = await get_account(session, acc.id)
+    assert (got.tax_wrapper, got.product_type) == ("isa", "x")
+    # Every other field is written as given, so None clears it.
+    assert await run(set_source_details, acc.id, SourceDetails()) is True
+    assert (await get_account(session, acc.id)).product_type is None
+
+
+async def test_set_source_details_unknown_account(run) -> None:
+    with pytest.raises(AccountNotFoundError):
+        await run(set_source_details, uuid.uuid4(), SourceDetails())
