@@ -379,6 +379,52 @@ async def test_existing_pot_moves_get_the_pot_name(session, run) -> None:
     assert events == 1
 
 
+async def test_moves_of_a_pot_deleted_before_connecting_get_its_name(session, run) -> None:
+    # A pot deleted before the connection existed has no account, so its moves stay
+    # unassigned; they still show the pot's name.
+    connection = await _connection(run)
+    move = make_transaction(amount=-5000, description="pot_TEST1", metadata={"pot_id": "pot_TEST1"})
+
+    await _normalize(session, connection, transactions=[move], pots=[make_pot(deleted=True)])
+
+    assert await _descriptions(session) == {"tx_TEST0001": "Savings"}
+
+
+async def test_an_unrenamed_move_in_the_window_changes_once(session, run) -> None:
+    # The first sync after the fix: a move still described by the pot's id is fetched again
+    # and also settles. It is updated once, and the audit records the id it had.
+    connection = await _connection(run)
+    pending = make_transaction(
+        amount=-5000, description="pot_TEST1", metadata={"pot_id": "pot_TEST1"}, settled=""
+    )
+    await _normalize(session, connection, transactions=[pending], pots=[make_pot()])
+    await session.execute(text("update finance.transactions set description = 'pot_TEST1'"))
+    tx_id = await session.scalar(text("select id from finance.transactions"))
+    events_before = await session.scalar(
+        text("select count(*) from core.events where type = 'finance.transaction.updated'")
+    )
+
+    settled = pending | {"settled": "2026-03-02T06:00:00.000Z"}
+    await _normalize(session, connection, transactions=[settled], pots=[make_pot()])
+
+    events = await session.scalar(
+        text("select count(*) from core.events where type = 'finance.transaction.updated'")
+    )
+    assert events - events_before == 1
+    change = await session.scalar(
+        text(
+            "select changes -> ('transaction:' || cast(:id as text)) from core.audit_log"
+            " where changes ? ('transaction:' || cast(:id as text))"
+            " order by occurred_at desc, id desc limit 1"
+        ),
+        {"id": tx_id},
+    )
+    assert (change["before"]["description"], change["after"]["description"]) == (
+        "pot_TEST1",
+        "Savings",
+    )
+
+
 async def _warnings(session, connection: ConnectionRecord) -> list[str]:
     return (await get_connection(session, connection.id)).warnings
 

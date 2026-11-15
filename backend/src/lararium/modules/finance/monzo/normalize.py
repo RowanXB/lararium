@@ -412,6 +412,10 @@ class _Normalizer:
 
     async def pot(self, pot: dict[str, Any], parent_monzo_id: str, fetched_at: datetime) -> None:
         pot_id: str = pot["id"]
+        # Whether or not it has an account: the moves of a pot deleted before the connection
+        # existed are described by its name too.
+        if pot.get("name"):
+            self.pot_names[pot_id] = str(pot["name"])
         account_id = self.mapped(pot_id)
         if account_id is None:
             if pot.get("deleted"):
@@ -430,8 +434,6 @@ class _Normalizer:
             )
             account_id = created.id
             self.account_map[pot_id] = str(account_id)
-        if pot.get("name"):
-            self.pot_names[pot_id] = str(pot["name"])
         self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
         if pot.get("deleted"):
             self._deleted_pots.append(account_id)
@@ -481,9 +483,7 @@ class _Normalizer:
                 )
         created = _parse(tx["created"])
         settled = tx.get("settled") or ""
-        description = _description(tx)
-        if description == pot_id:  # a pot move, which Monzo describes by the pot's id
-            description = self.pot_names.get(description, description)
+        description = self.description(tx)
         _, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -508,6 +508,12 @@ class _Normalizer:
             ),
         )
         self.count(outcome)
+
+    def description(self, tx: dict[str, Any]) -> str:
+        """Monzo describes a pot move by the pot's id: show the pot's name. The same rule
+        renames earlier rows (see normalize), so the two never disagree about a row."""
+        description = _description(tx)
+        return self.pot_names.get(description, description)
 
     def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
         if outcome == "created":
@@ -696,15 +702,17 @@ async def normalize(
             n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
-    # Moves posted before pot names were used still say the pot's id.
-    for pot_id, name in n.pot_names.items():
-        await rename_connector_transactions(
-            ctx.command, n.connection_id, description=pot_id, to=name
-        )
     for record_type, request, _, content in responses:
         if record_type == "transactions_page":
             for tx in content:
                 await n.transaction(tx, str(request["account_id"]))
+    # Rows posted before pot names were used still say the pot's id. After this sync's own
+    # transactions, so a row it fetched again is updated once, by the upsert, and only the
+    # older ones are left here.
+    for pot_id, name in n.pot_names.items():
+        await rename_connector_transactions(
+            ctx.command, n.connection_id, description=pot_id, to=name
+        )
     await n.finish()
 
     checked = set(reconciled) | set(openings)
