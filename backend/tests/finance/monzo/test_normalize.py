@@ -1,7 +1,7 @@
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import MAX_PREC, Decimal, localcontext
 from typing import Any
 
 import httpx
@@ -155,6 +155,8 @@ def test_to_quantity_is_exact() -> None:
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
+    # Beyond the 28 digits Decimal keeps by default: still exact.
+    assert to_quantity(10**30 + 1, 2) == Decimal("10000000000000000000000000000.01")
 
 
 async def test_creates_accounts_and_pot_children(session, run) -> None:
@@ -1436,7 +1438,10 @@ def _statement(n: int, day: int, **merchant: object) -> dict[str, Any]:
 
 async def _place_of_merchant(session) -> Entity:
     place_id = await session.scalar(
-        text("select id from core.entities where external_ids ->> 'monzo_merchant' = 'merch_TEST1'")
+        text(
+            "select id from core.entities"
+            " where kind = 'place' and external_ids ->> 'monzo_merchant' = 'merch_TEST1'"
+        )
     )
     return await session.get_one(Entity, place_id, populate_existing=True)
 
@@ -1474,6 +1479,32 @@ async def test_the_newest_statement_about_a_merchant_wins(
     changes = await _place_changes(session, place_id)
     await _normalize(session, connection, transactions=payments)
     assert await _place_changes(session, place_id) == changes
+
+
+@pytest.mark.parametrize(
+    "updated",
+    [
+        "9999-12-31T23:59:59.000-01:00",
+        "0001-01-01T00:00:00.000+01:00",
+        "2026-03-09",
+        "2026-03-09T12:00:00",
+    ],
+    ids=["past-the-last-year", "before-the-first-year", "date-only", "no-offset"],
+)
+async def test_a_time_it_cannot_read_neither_fails_nor_wins(session, run, updated: str) -> None:
+    connection = await _connection(run)
+    unreadable = _statement(1, 2, mcc="5411") | {"updated": updated}
+    newer = _statement(2, 4, mcc="5499")
+
+    # Read as no time, it falls back to its creation (the 2nd), older than the other (the 4th).
+    await _normalize(session, connection, transactions=[newer, unreadable])
+    assert (await _place_of_merchant(session)).mcc == "5499"
+
+    # The replay ranks its copies by the same rule, and fails on none of them.
+    await run(_before_structured_fields, connection)
+    await _store_page(run, connection, [unreadable])
+    await _normalize(session, connection)
+    assert (await _place_of_merchant(session)).mcc == "5499"
 
 
 async def test_the_replay_does_not_override_newer_merchant_facts(session, run) -> None:
@@ -1536,6 +1567,25 @@ async def test_amounts_it_cannot_store_warn_and_still_post(
     assert await _splits(session, tx.id) == []
     assert len(await _postings(session, tx.id)) == 2
     assert await _warnings(session, connection) == [UNMAPPED.format(name)]
+
+
+async def test_a_fee_longer_than_28_digits_still_balances(session, run) -> None:
+    connection = await _connection(run)
+    payment = make_transaction(amount=-1234, fees={"card.fee": -(10**30 + 7)})
+
+    report = await _normalize(session, connection, transactions=[payment])
+
+    assert report.created == 1
+    (tx,) = await _transactions(session)
+    postings = await _postings(session, tx.id)
+    assert [quantity for _, quantity, _ in postings] == [
+        Decimal("9999999999999999999999999987.73"),
+        Decimal("12.34"),
+        Decimal("-10000000000000000000000000000.07"),
+    ]
+    with localcontext(prec=MAX_PREC):
+        assert sum(quantity for _, quantity, _ in postings) == 0
+    assert await _warnings(session, connection) == []
 
 
 async def test_a_pot_goal_it_cannot_store_keeps_the_stored_one(session, run) -> None:

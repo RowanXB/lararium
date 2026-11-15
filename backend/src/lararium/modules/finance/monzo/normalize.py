@@ -29,7 +29,7 @@ import re
 from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import MAX_PREC, Decimal, localcontext
 from functools import partial
 from numbers import Real
 from typing import Any, Literal, cast
@@ -128,8 +128,11 @@ class NormalizeReport:
 
 
 def to_quantity(minor_units: int, decimals: int) -> Decimal:
-    """An amount in integer minor units as an exact decimal (-1234, 2 → -12.34)."""
-    return Decimal(minor_units).scaleb(-decimals)
+    """An amount in integer minor units as an exact decimal (-1234, 2 → -12.34), however many
+    digits it has: the default context would round it to 28, and then a fee split could fail
+    to balance, or an amount too long to store look storable."""
+    with localcontext(prec=MAX_PREC):
+        return Decimal(minor_units).scaleb(-decimals)
 
 
 async def _notify(ctx: SyncContext, text: str) -> None:
@@ -205,17 +208,29 @@ def _is_stated(value: object) -> bool:
     return value is not None and value != ""
 
 
+# A time as Monzo writes it (ISO 8601, with its offset, in a year it can mean). The one rule
+# for a readable time, in SQL (the replay's latest copy) and here: anything else, such as
+# PostgreSQL's "infinity", a date alone, or a time without an offset, is read as none.
+_ISO_TIME = (
+    r"(19|2[0-9])[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
+    r"(Z|[+-][0-9]{2}:?[0-9]{2})"
+)
+
+
+def _readable_time(value: object) -> datetime | None:
+    """A time in the _ISO_TIME form that is a real time, else None (never an error)."""
+    if not isinstance(value, str) or not re.fullmatch(_ISO_TIME, value):
+        return None
+    try:
+        return _parse(value)
+    except ValueError:  # a date that does not exist, such as the 30th of February
+        return None
+
+
 def _statement_time(tx: dict[str, Any]) -> datetime | None:
     """When the transaction last said what it says: Monzo's `updated`, else its creation;
     None when neither reads as a time."""
-    for key in ("updated", "created"):
-        value = tx.get(key)
-        if isinstance(value, str):
-            try:
-                return _parse(value)
-            except ValueError:
-                continue
-    return None
+    return _readable_time(tx.get("updated")) or _readable_time(tx.get("created"))
 
 
 class _Reader:
@@ -323,14 +338,6 @@ async def _connector_transaction(
     return row.id, cast(TransactionStatus, row.status), row.voided_by
 
 
-# A time as Monzo writes it (ISO 8601, with its offset). Anything else in `updated`, such as
-# PostgreSQL's "infinity" or "now", is read as none.
-_ISO_TIME = (
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
-    r"(Z|[+-][0-9]{2}:?[0-9]{2})$"
-)
-
-
 async def _latest_transactions(
     session: AsyncSession, connection_id: UUID
 ) -> list[tuple[dict[str, Any], str]]:
@@ -351,7 +358,9 @@ async def _latest_transactions(
     monzo_id = tx["id"].astext
     stated = tx["updated"].astext
     # Never a cast that can fail: one malformed copy must not fail the sync.
-    readable = and_(stated.regexp_match(_ISO_TIME), func.pg_input_is_valid(stated, "timestamptz"))
+    readable = and_(
+        stated.regexp_match(f"^{_ISO_TIME}$"), func.pg_input_is_valid(stated, "timestamptz")
+    )
     updated = case((readable, stated.cast(DateTime(timezone=True))))
     latest = (
         select(tx.label("tx"), r.request["account_id"].astext.label("account"), r.fetched_at, r.id)
