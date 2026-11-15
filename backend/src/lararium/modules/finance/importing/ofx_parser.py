@@ -245,6 +245,14 @@ def _account(statement: _Aggregate) -> StatementAccount | None:
         account_number = normalise_account_number(_optional(values, "ACCTID"))
     except ValueError:
         pass
+    if (
+        sort_code is not None
+        and account_number is not None
+        and len(account_number) == 14
+        and account_number.startswith(sort_code)
+    ):
+        # HSBC UK writes ACCTID as the sort code followed by the 8-digit account number.
+        account_number = account_number[len(sort_code) :]
     account = StatementAccount(
         sort_code=sort_code,
         account_number=account_number,

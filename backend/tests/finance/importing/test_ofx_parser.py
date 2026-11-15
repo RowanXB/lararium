@@ -542,3 +542,14 @@ def test_unicode_header_decodes_utf8() -> None:
     content = _sgml(_sgml_statement("TRANSACTION")).decode().replace("TRANSACTION", transaction)
     content = content.replace("ENCODING:USASCII", "ENCODING:UNICODE")
     assert _rows(_parse(content.encode("utf-8")))[0].payee == "Café £"
+
+
+def test_acctid_with_sort_code_prefix_gives_account_number() -> None:
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS))
+    prefixed = content.replace(b"<ACCTID>12345678", b"<ACCTID>40123412345678")
+    assert _parse(prefixed).account == StatementAccount(
+        sort_code="401234", account_number="12345678", account_type="CHECKING"
+    )
+    other = content.replace(b"<ACCTID>12345678", b"<ACCTID>99999912345678")
+    account = _parse(other).account
+    assert account is not None and account.account_number == "99999912345678"
