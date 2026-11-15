@@ -23,6 +23,7 @@ from lararium.modules.finance.importing.pdf.layout import (
     nearest,
     pages,
     parse_date,
+    split_amounts,
     text,
     word_of,
 )
@@ -155,18 +156,14 @@ class _Table:
             "Description": description,
             "Type": " ".join(pending.types),
         }
-        paid: dict[str, Decimal] = {}
-        balance: Decimal | None = None
-        moves = 0
+        where = f"row {position + 1} (page {pending.page + 1})"
+        split = split_amounts(pending.amounts, _BALANCE, where)
         for column, word in pending.amounts:
             raw[column] = word.text
-            value = amount(word.text, f"row {position + 1}'s {column}")
-            if column == _BALANCE:
-                balance = value
-            else:
-                paid[column] = value
-                moves += 1
-        paid_in, paid_out = paid.get(_IN), paid.get(_OUT)
+        balance = (
+            None if split.balance is None else amount(split.balance.text, f"{where}'s balance")
+        )
+        paid_in, paid_out = split.paid.get(_IN), split.paid.get(_OUT)
         self.rows.append(
             LayoutRow(
                 row=ParsedRow(
@@ -185,7 +182,7 @@ class _Table:
                 page=pending.page,
                 paid_in=paid_in,
                 paid_out=paid_out,
-                amounts=moves,
+                amounts=split.moves,
             )
         )
         if balance is not None:

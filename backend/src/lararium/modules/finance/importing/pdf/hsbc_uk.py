@@ -31,6 +31,7 @@ from lararium.modules.finance.importing.pdf.layout import (
     nearest,
     pages,
     parse_date,
+    split_amounts,
     text,
     word_of,
 )
@@ -244,14 +245,13 @@ class _Table:
         raw["Payment type"] = pending.type_code
         description = clean_description(pending.details)
         raw["Details"] = description
-        paid: dict[str, Decimal] = {}
+        split = split_amounts(pending.amounts, "Balance", f"row {position + 1}")
         for column, word in pending.amounts:
             raw[column] = word.text
-            paid[column] = amount(word.text, f"row {position + 1}'s {column.lower()}")
         balance = None
         if pending.balance is not None:
             balance, raw["Balance"] = pending.balance
-        paid_in, paid_out = paid.get("Paid in"), paid.get("Paid out")
+        paid_in, paid_out = split.paid.get("Paid in"), split.paid.get("Paid out")
         self.rows.append(
             LayoutRow(
                 row=ParsedRow(
@@ -270,7 +270,7 @@ class _Table:
                 page=pending.page,
                 paid_in=paid_in,
                 paid_out=paid_out,
-                amounts=len(pending.amounts),
+                amounts=split.moves,
             )
         )
 
@@ -360,13 +360,15 @@ def _line(line: list[Word], columns: _Columns, table: _Table) -> None:
         return
     if details_text:
         pending.details.append(details_text)
+    where = f"the row on page {line[0].page + 1}"
+    split = split_amounts([(column, word) for column, word, _ in amounts], "Balance", where)
     balance: tuple[Decimal, str] | None = None
     for column, word, overdrawn in amounts:
-        if column == "Balance":
+        if word is split.balance:
             value = amount(word.text, f"the balance on page {word.page + 1}")
             printed = f"{word.text} {_OVERDRAWN}" if overdrawn else word.text
             balance = (Decimal(0) - value if overdrawn else value, printed)
-        else:
+        elif column != "Balance":
             pending.amounts.append((column, word))
     if not pending.amounts:
         if balance is not None:

@@ -537,6 +537,22 @@ def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
         _parse(content, layout)
 
 
+@pytest.mark.parametrize("layout", ["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"])
+def test_layout_refuses_a_row_with_two_balances(layout: Layout) -> None:
+    # A second word in the balance column of one row must not replace the first unchecked.
+    if layout == "hsbc_uk_statement":
+        extra = [(0, 525.0, 502.75, "1.00"), (0, 541.0, 502.75, "2.00")]
+        content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], extra=extra))
+    elif layout == "lloyds_statement":
+        content = lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS, extra=[(0, 520.0, 352.0, "12.00")]))
+    else:
+        extra = [(1, 540.0, 193.5, "12.00")]
+        content = boc_pdf(BocStatement(pages=[[LOCAL_OUT]], extra=extra))
+
+    with pytest.raises(FileFormatError, match="prints two balances"):
+        _parse(content, layout)
+
+
 def test_layout_refuses_unplaced_words() -> None:
     # A stray amount right of the balance column, on a row's line.
     content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], extra=[(0, 572.0, 480.25, "12.00")]))

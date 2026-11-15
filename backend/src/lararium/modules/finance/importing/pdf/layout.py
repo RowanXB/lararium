@@ -104,6 +104,33 @@ def parse_date(printed: str, pattern: str, what: str) -> date:
         raise FileFormatError(f"{what} is not a date: {printed!r}") from None
 
 
+@dataclass(frozen=True)
+class SplitAmounts:
+    """A row's amounts: what it pays in or out by column, how many such amounts it prints,
+    and its balance word, if any."""
+
+    paid: dict[str, Decimal]
+    moves: int
+    balance: Word | None
+
+
+def split_amounts(amounts: list[tuple[str, Word]], balance_column: str, where: str) -> SplitAmounts:
+    """Splits a row's (column, word) amounts. A second balance would replace the first and
+    escape the balance check, so it refuses the file."""
+    paid: dict[str, Decimal] = {}
+    moves = 0
+    balance: Word | None = None
+    for column, word in amounts:
+        if column == balance_column:
+            if balance is not None:
+                raise FileFormatError(f"{where} prints two balances")
+            balance = word
+        else:
+            paid[column] = amount(word.text, f"{where}'s {column.lower()}")
+            moves += 1
+    return SplitAmounts(paid, moves, balance)
+
+
 def nearest(word: Word, right_edges: dict[str, Decimal], within: Decimal) -> str | None:
     """The column whose right edge is closest to the word's, if within the distance."""
     column, edge = min(right_edges.items(), key=lambda item: abs(item[1] - word.x1))
