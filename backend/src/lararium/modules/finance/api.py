@@ -388,7 +388,12 @@ async def get_import_catalog() -> list[ImportCatalogEntryOut]:
 
 
 async def _read_upload(file: UploadFile) -> bytes:
-    """The upload's content, read in chunks: 413 as soon as it passes MAX_IMPORT_BYTES."""
+    """The upload's content, read in chunks: 413 as soon as it passes MAX_IMPORT_BYTES.
+
+    This bounds what is parsed and stored, not what is received: Starlette has already
+    spooled the whole multipart body to a temporary file before the route runs (and before
+    the cross-site check's 403).
+    """
     chunks: list[bytes] = []
     size = 0
     while chunk := await file.read(_UPLOAD_CHUNK):

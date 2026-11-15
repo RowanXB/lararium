@@ -89,6 +89,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             ),
             date_format=_UK_DATE,
             row_order="newest_first",
+            amount_format=_GROUPED,
         ),
         recommended=True,
     ),

@@ -347,6 +347,7 @@ class ImportRowOut(_Out):
     kind: RowKind
     status: RowStatus
     booking_date: date | None
+    occurred_at: AwareDatetime | None
     value_date: date | None
     description: str
     payee: str | None
@@ -371,6 +372,7 @@ class ImportRowOut(_Out):
     note: str | None
     raw: dict[str, str]
     transaction_id: UUID | None
+    duplicate_of: UUID | None  # the committed row this one duplicates (Decision 16)
 
 
 class ImportBatchDetailOut(ImportBatchOut):

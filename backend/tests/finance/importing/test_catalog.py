@@ -79,3 +79,4 @@ def test_lloyds_csv() -> None:
     assert columns.type == "Transaction Type"
     assert (columns.account_sort_code, columns.account_number) == ("Sort Code", "Account Number")
     assert config.row_order == "newest_first"
+    assert config.amount_format.thousands_separator == ","

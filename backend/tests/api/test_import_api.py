@@ -94,6 +94,11 @@ async def _round_trip(
     statement_rows = [row for row in again.json()["rows"] if row["kind"] == "statement"]
     assert {row["status"] for row in statement_rows} <= {"duplicate", "skipped"}
     assert again.json()["counts"]["new"] == 0
+    # Each duplicate names the committed row it duplicates.
+    committed_ids = {row["id"] for row in batch["rows"]}
+    duplicates = [row for row in statement_rows if row["status"] == "duplicate"]
+    assert duplicates
+    assert all(row["duplicate_of"] in committed_ids for row in duplicates)
     assert again.json()["counts"]["duplicate"] == batch["counts"]["new"] - _adjustments(batch)
     return account_id, batch
 
@@ -115,6 +120,10 @@ async def test_example_csv_end_to_end(client) -> None:
     [adjustment] = [row for row in batch["rows"] if row["kind"] == "opening_adjustment"]
     assert (adjustment["quantity"], adjustment["booking_date"]) == ("1000.00", "2026-09-30")
     assert await _balance(client, account_id) == Decimal("1676.37")  # the last Balance
+    # Date-only rows occur at local midnight of their date (Decision 6).
+    assert all(
+        row["occurred_at"] is not None for row in batch["rows"] if row["kind"] == "statement"
+    )
 
 
 async def test_example_ofx_end_to_end(client) -> None:

@@ -684,6 +684,10 @@ export type ImportRowOut = {
      */
     description: string;
     /**
+     * Duplicate Of
+     */
+    duplicate_of: string | null;
+    /**
      * Error
      */
     error: string | null;
@@ -715,6 +719,10 @@ export type ImportRowOut = {
      * Note
      */
     note: string | null;
+    /**
+     * Occurred At
+     */
+    occurred_at: string | null;
     /**
      * Payee
      */

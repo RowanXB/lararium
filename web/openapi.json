@@ -1423,6 +1423,18 @@
             "title": "Description",
             "type": "string"
           },
+          "duplicate_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Of"
+          },
           "error": {
             "anyOf": [
               {
@@ -1503,6 +1515,18 @@
               }
             ],
             "title": "Note"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
           },
           "payee": {
             "anyOf": [
@@ -1625,6 +1649,7 @@
           "kind",
           "status",
           "booking_date",
+          "occurred_at",
           "value_date",
           "description",
           "payee",
@@ -1648,7 +1673,8 @@
           "error",
           "note",
           "raw",
-          "transaction_id"
+          "transaction_id",
+          "duplicate_of"
         ],
         "title": "ImportRowOut",
         "type": "object"
