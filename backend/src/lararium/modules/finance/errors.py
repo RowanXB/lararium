@@ -64,6 +64,18 @@ class TransactionNotFoundError(FinanceError):
     template = "no transaction has the id {}"
 
 
+class ImportProfileNotFoundError(FinanceError):
+    """No import profile has the given id."""
+
+    template = "no import profile has the id {}"
+
+
+class DuplicateProfileNameError(FinanceError):
+    """Another import profile already has the name (compared case-insensitively)."""
+
+    template = "another import profile is already named {}"
+
+
 class LedgerImbalanceError(FinanceError):
     """Postings do not sum to zero per instrument; residuals maps instrument id to the sum."""
 

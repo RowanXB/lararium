@@ -3,8 +3,10 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, Text, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from lararium.core.json_types import JSONValue
 from lararium.core.models import UUIDV7, Base
 
 FINANCE_SCHEMA = {"schema": "finance"}
@@ -145,3 +147,17 @@ class FxRate(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ImportProfile(Base):
+    __tablename__ = "import_profiles"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    name: Mapped[str] = mapped_column(Text)
+    format: Mapped[str] = mapped_column(Text)
+    config: Mapped[dict[str, JSONValue]] = mapped_column(JSONB)
+    version: Mapped[int] = mapped_column(server_default=text("1"))
+    owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
