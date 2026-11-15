@@ -192,14 +192,17 @@ async def run_check_transfers(
     """Heal, then tell the owner once about each transfer that is overdue or needs review.
 
     The messages are read and marked under the matching lock, so a heal running meanwhile
-    can't reopen a transfer between them (a reopened one keeps its notified_at)."""
+    can't reopen a transfer between them (a reopened one keeps its notified_at). They are
+    sent only once that has committed and the lock is free: a slow notifier must not hold
+    up every heal. A message lost to a failed send, or to a crash before it is sent, is not
+    sent again."""
     await _heal(session, {})
     async with command_context(session, TRANSFERS_ACTOR, "finance.notify_transfers", {}) as ctx:
         await lock_transfers(ctx)
         due = await due_notifications(session, now())
-        for _, text in due:
-            await _notify(notifier, text)
         await mark_notified(ctx, [transfer_id for transfer_id, _ in due])
+    for _, text in due:
+        await _notify(notifier, text)
 
 
 def _describe(exc: Exception) -> str:

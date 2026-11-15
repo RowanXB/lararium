@@ -3,6 +3,7 @@ tells the owner about overdue transfers and those needing review."""
 
 import base64
 import logging
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -17,6 +18,7 @@ from lararium.core.commands import command_context
 from lararium.core.connections import create_connection, get_connection, set_status
 from lararium.core.connectors import Connector, SyncContext
 from lararium.core.json_types import JSONValue
+from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import assign_identifier
@@ -352,19 +354,8 @@ async def test_overdue_and_review_notified_once(session, run) -> None:
     assert len(notifier.messages) == 2
 
 
-async def test_check_transfers_notifier_failure_does_not_fail(session, run) -> None:
-    class BrokenNotifier:
-        async def send(self, text: str) -> None:
-            raise RuntimeError("feishu is down")
-
-    await jobs.run_check_transfers(session, notifier=BrokenNotifier())
-
-
-async def test_check_transfers_still_notifies_when_heal_fails(session, run, monkeypatch) -> None:
-    async def broken_heal(ctx) -> int:
-        raise RuntimeError("heal broke")
-
-    monkeypatch.setattr(jobs, "heal_transfers", broken_heal)
+async def _overdue_to_broker(session, run) -> None:
+    """Monzo → Broker, sent 8 days ago and awaiting: overdue."""
     now = datetime.now(UTC)
     monzo_connection_, monzo = await _connected_account(run, "Monzo", "998877:87654321")
     broker_connection, broker = await _connected_account(run, "Broker", BROKER_IDENTIFIER)
@@ -394,6 +385,14 @@ async def test_check_transfers_still_notifies_when_heal_fails(session, run, monk
             text("select id from finance.transactions where external_id = 'out_broker'")
         )
         await match_transaction(ctx, transaction_id)
+
+
+async def test_check_transfers_still_notifies_when_heal_fails(session, run, monkeypatch) -> None:
+    async def broken_heal(ctx) -> int:
+        raise RuntimeError("heal broke")
+
+    monkeypatch.setattr(jobs, "heal_transfers", broken_heal)
+    await _overdue_to_broker(session, run)
     notifier = RecordingNotifier()
 
     await jobs.run_check_transfers(session, notifier=notifier)
@@ -401,3 +400,71 @@ async def test_check_transfers_still_notifies_when_heal_fails(session, run, monk
     assert notifier.messages == [
         "A transfer of 100.00 GBP from Monzo to Broker has been in transit for 8 days."
     ]
+
+
+async def test_check_transfers_notifier_failure_does_not_fail(session, run) -> None:
+    class BrokenNotifier:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def send(self, text: str) -> None:
+            self.attempts += 1
+            raise RuntimeError("feishu is down")
+
+    await _overdue_to_broker(session, run)
+    notifier = BrokenNotifier()
+
+    await jobs.run_check_transfers(session, notifier=notifier)
+    await jobs.run_check_transfers(session, notifier=notifier)
+
+    # Marked as told even though the send failed: a message lost to an outage is not
+    # retried, so a flaky channel can't repeat it either.
+    assert notifier.attempts == 1
+    [transfer] = await list_transfers(session)
+    assert transfer.notified_at is not None
+
+
+async def test_matching_lock_is_free_while_sending(
+    backend_url: str, owner_url: str, migrated: None, monkeypatch
+) -> None:
+    # Real commits through their own engine: a fixture session's outer transaction would
+    # hold the lock to the end of the test whatever the job does.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    lock_free: list[bool] = []
+
+    async def due(session, now) -> list[tuple[uuid.UUID, str]]:
+        return [(uuid.uuid4(), "A transfer needs your review.")]
+
+    class ProbingNotifier:
+        async def send(self, message: str) -> None:
+            # What a heal elsewhere would find while the message is on its way.
+            async with sessions() as other, other.begin():
+                lock_free.append(
+                    await other.scalar(
+                        text("select pg_try_advisory_xact_lock(hashtext('finance.transfers'))")
+                    )
+                )
+
+    monkeypatch.setattr(jobs, "due_notifications", due)
+    try:
+        async with sessions() as session:
+            started = await session.scalar(text("select clock_timestamp()"))
+            await session.rollback()
+            await jobs.run_check_transfers(session, notifier=ProbingNotifier())
+        assert lock_free == [True]
+    finally:
+        owner = create_engine(owner_url)
+        try:
+            # The audit log is append-only for the backend role.
+            async with owner.begin() as conn:
+                await conn.execute(
+                    text(
+                        "delete from core.audit_log where actor_type = 'system'"
+                        " and actor_id = 'transfers' and occurred_at >= :started"
+                    ),
+                    {"started": started},
+                )
+        finally:
+            await owner.dispose()
+            await engine.dispose()
