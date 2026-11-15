@@ -24,6 +24,14 @@ strictly from `backend/uv.lock` and `web/pnpm-lock.yaml` and fails if either is 
 make check
 ```
 
+The test containers can run on another Docker host you reach over ssh (your user there must be
+able to use Docker). The daemon's socket and the database port are forwarded over ssh, and the
+port is published on that host's loopback only:
+
+```bash
+DOCKER_HOST=ssh://<host> make check
+```
+
 To run the app, start a development database (roles are created by the same init script
 the deployment uses), migrate it, then start the API with auto-reload:
 
