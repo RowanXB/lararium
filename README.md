@@ -275,7 +275,8 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
 
   Until you decide, nothing moves: the balances and net worth stay as they were.
 - **In transit**: transfers to or from an account with its own connection, waiting for that
-  side to report, with the days so far.
+  side to report, with the days so far. Open **Candidates** on one (or on an inferred or
+  before-history one under Recent) to see what could be its other side.
 - **Suggestions**: unregistered bank accounts (above).
 - **Recent** (collapsed): the settled ones, each with its status:
   - *matched*: both accounts' own records;
@@ -290,8 +291,11 @@ What the buttons do (each decision is kept across re-syncs):
   its inferred transaction is removed, and later syncs keep it rejected.
 - **Undo** (on a rejected transfer): withdraws the rejection, and the records are matched again.
 - **Unpair** (on a matched transfer): these two records are not the same transfer, though each
-  may still be one. They are never paired again, and each is matched on its own.
-- **Pair** (on a candidate): these two records are one transfer. Your choice outranks any other
+  may still be one. They are never paired again automatically, and each is matched on its own.
+  If that was a mistake, each one's transfer lists the other as an *Unpaired* candidate; Pair it
+  to undo.
+- **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
+  differs has none): these two records are one transfer. Your choice outranks any other
   candidate.
 
 ### In transit in net worth
