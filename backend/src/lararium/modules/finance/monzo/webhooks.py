@@ -6,7 +6,7 @@ are logged, stored as raw records or put into a warning. A delivery only says wh
 changed: its body triggers a sync and never reaches the ledger.
 """
 
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Literal
 from uuid import UUID
 
@@ -23,6 +23,9 @@ from lararium.modules.finance.monzo.client import MonzoApiError, MonzoClient
 from lararium.modules.finance.monzo.normalize import ACCOUNT_MAP_KEY
 
 SOURCE = "monzo"
+# Connection config key: the ids of the webhooks we registered at Monzo (they carry no
+# secret), so ours are known by what we registered, not guessed from the current base URL.
+WEBHOOK_IDS_KEY = "webhook_ids"
 # Deliveries claimed per run; the rest wait for the next minute.
 BATCH_SIZE = 100
 
@@ -39,17 +42,17 @@ async def ensure_webhooks(
     base_url: str | None,
     secret: Secret | None,
     *,
-    ours: Collection[str] = (),
-) -> set[str]:
-    """Make our current URL the one webhook of ours on each account; return the ids of our
-    webhooks registered now.
+    ours: set[str],
+) -> None:
+    """Make our current URL the one webhook of ours on each account.
 
-    Ours are the ids we registered before (`ours`, from the cursor) and any under `base_url`.
-    Each of ours with any other URL (an old base URL or secret, a duplicate) is deleted, and
-    so is each of ours when webhooks are off (no `base_url`) or its account is closed.
-    Webhooks elsewhere are someone else's: left alone.
+    `ours` holds the ids of the webhooks we registered (WEBHOOK_IDS_KEY) and is updated in
+    place as each change is made at Monzo, so if this raises partway it still names every
+    webhook of ours that may exist, for the caller to record. Webhooks under `base_url` are
+    ours too. Each of ours with any other URL (an old base URL or secret, a duplicate) is
+    deleted, and so is each of ours when webhooks are off (no `base_url`) or its account is
+    closed. Webhooks elsewhere are someone else's: left alone.
     """
-    current: set[str] = set()
     seen: set[str] = set()
     if base_url is not None and secret is not None:
         url = webhook_url(base_url, secret)
@@ -61,20 +64,24 @@ async def ensure_webhooks(
                 seen.add(hook_id)
                 if hook_url == url and not registered:
                     registered = True
-                    current.add(hook_id)
+                    ours.add(hook_id)
                 elif hook_id in ours or (
                     isinstance(hook_url, str) and hook_url.startswith(under_base)
                 ):
                     await client.delete_webhook(hook_id)
+                    ours.discard(hook_id)
             if not registered:
-                current.add(str((await client.register_webhook(account_id, url))["id"]))
-    for hook_id in set(ours) - seen:
+                hook_id = str((await client.register_webhook(account_id, url))["id"])
+                ours.add(hook_id)
+                seen.add(hook_id)
+    # Ours on no account listed now: on a closed account, or webhooks are off.
+    for hook_id in ours - seen:
         try:
             await client.delete_webhook(hook_id)
         except MonzoApiError as exc:
             if exc.status != 404:  # already gone
                 raise
-    return current
+        ours.discard(hook_id)
 
 
 def _account_id(body: JSONValue) -> str | None:
