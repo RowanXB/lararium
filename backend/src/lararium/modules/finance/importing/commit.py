@@ -49,21 +49,27 @@ def _state_error(filename: str, status: str, action: str) -> ImportBatchStateErr
 
 
 async def _locked(session: AsyncSession, batch_id: UUID, allowed: BatchStatus, action: str) -> UUID:
-    """Locks the batch, then its account, so the batches of one account act one at a time;
-    returns the account id. ImportBatchStateError unless the batch's status is `allowed`."""
-    b = models.ImportBatch
+    """Locks the batch's account, then the batch, and returns the account id;
+    ImportBatchStateError unless the batch's status is `allowed`.
+
+    One order everywhere, account first: the account lock serialises every action on the
+    account's batches, and align_openings, which runs under it, may insert rows into the
+    account's other batches. The batch is locked FOR NO KEY UPDATE, which doesn't conflict
+    with the KEY SHARE such an insert's foreign key takes.
+    """
+    b, a = models.ImportBatch, models.Account
+    account_id = await session.scalar(select(b.account_id).where(b.id == batch_id))
+    if account_id is None:
+        raise ImportBatchNotFoundError(str(batch_id))
+    await session.execute(select(a.id).where(a.id == account_id).with_for_update())
     found = (
         await session.execute(
-            select(b.account_id, b.status, b.filename).where(b.id == batch_id).with_for_update()
+            select(b.status, b.filename).where(b.id == batch_id).with_for_update(key_share=True)
         )
-    ).one_or_none()
-    if found is None:
-        raise ImportBatchNotFoundError(str(batch_id))
-    a = models.Account
-    await session.execute(select(a.id).where(a.id == found.account_id).with_for_update())
+    ).one()
     if found.status != allowed:
         raise _state_error(found.filename, found.status, action)
-    return found.account_id
+    return account_id  # a batch's account never changes
 
 
 def _counts(record: ImportBatchRecord) -> dict[str, JSONValue]:

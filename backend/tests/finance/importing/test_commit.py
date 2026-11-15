@@ -1,9 +1,10 @@
 from datetime import date
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
@@ -477,6 +478,46 @@ async def test_rollback_skips_already_void_transactions(
         )
     )
     assert voids == 1
+
+
+# Locking ------------------------------------------------------------------------------
+
+
+async def test_actions_lock_the_account_before_the_batch(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    """One lock order everywhere (account, then batch), so align_openings' inserts into other
+    batches of the account can't deadlock with another action."""
+    locks: list[str] = []
+
+    def record(*args: Any) -> None:
+        statement = str(args[2])
+        if " FOR " in statement and "UPDATE" in statement:
+            table = "account" if "FROM finance.accounts" in statement else "other"
+            if "FROM finance.import_batches" in statement:
+                table = "batch"
+            locks.append(table)
+
+    discarded = await stage(csv_profile, TWO_ROWS)
+    committed = await stage(csv_profile, HEADER + "12/11/2026,Tea,-2.50\n")
+    connection = await session.connection()
+    event.listen(connection.sync_connection, "before_cursor_execute", record)
+    try:
+        for action in (
+            lambda: run(discard_batch, discarded.id),
+            lambda: commit(committed.id),
+            lambda: rollback(committed.id),
+        ):
+            locks.clear()
+            await action()
+            assert locks[:2] == ["account", "batch"]
+    finally:
+        event.remove(connection.sync_connection, "before_cursor_execute", record)
 
 
 # PDF and OFX overlaps -----------------------------------------------------------------
