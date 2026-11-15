@@ -713,11 +713,12 @@ async def preview_match(
     occurred_at: datetime,
     counterparty: CounterpartyFields,
     source: SourceRef | None = None,
-) -> TransferRecord | None:
-    """The open transfer a row not yet posted would complete if it were posted now
-    (Decision 6 steps 3 and 4, without writing): None when it would complete none, or
-    could complete more than one. It reads the pair relation matching does, with the row
-    added: the row's unique partner, when that is the transfer's present record.
+) -> UUID | None:
+    """The own record a row not yet posted would be linked with if it were posted now
+    (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
+    matching reads, with the row added; None when it has none (no candidate, or not
+    unique). Posting the row links it with that record, completing the record's open
+    transfer, or replacing whatever transfer the record is in.
 
     `source`: the reference the row will have once posted (a re-imported row keeps its
     own), so the owner's decisions about it apply; None for a row with none yet."""
@@ -739,8 +740,7 @@ async def preview_match(
         bank_transfer=counterparty.bank_transfer,
     )
     relation = await pair_relation(session, system, settings, adding=[row])
-    partner = relation.partner(row.id)
-    return None if partner is None else await _waiting_transfer(session, partner)
+    return relation.partner(row.id)
 
 
 async def unassign_identifier_and_rematch(

@@ -172,7 +172,7 @@ The Monzo normalizer calls it before each upsert, so a re-sync gives the same an
 **The interface M2 calls:**
 
 - after committing a batch: `match_transaction` for each committed row (or a batch form);
-- while staging: `preview_match(session, account_id, instrument_id, quantity, booking_date)`, returning the transfer the row would pair with, so the staging view can show "pairs with transfer from Monzo on …";
+- while staging: `preview_match(session, account_id, instrument_id, quantity, occurred_at, counterparty, source)`, returning the own record the row would pair with (its unique partner in the pair relation matching reads), or none, so the staging view can show "pairs with transfer from Monzo on …" from that record's account, date and description. Posting the row links it with that record, completing the record's open transfer or replacing whatever transfer it is in;
 - on batch rollback: the rows are deleted and `unlink_transaction` restores the affected transfers (placeholder posted again).
 - imported rows post their contra through `transfer_contra`, like connector transactions.
 
@@ -225,7 +225,7 @@ A periodic job (every 30 minutes, after healing) sends one notification per tran
 
 ## 7. Left for later milestones
 
-- **M2**: posts imported rows through `transfer_contra`, calls the matcher after commit and `unlink_transaction` on rollback, shows `preview_match` in staging, and gives each row a stable reference for decisions. M2 should reuse the system account "Unassigned" rather than its own "Unassigned (imports)".
+- **M2**: posts imported rows through `transfer_contra`, calls the matcher after commit and `unlink_transaction` on rollback, shows `preview_match` (the own record a row would pair with) in staging, and gives each row a stable reference for decisions. M2 should reuse the system account "Unassigned" rather than its own "Unassigned (imports)".
 - **M5**: IBKR deposits and withdrawals carry no Monzo details, so they match by amount and date (§5.7); FX and fee postings for the first transfers whose two sides differ; what happens to an account's earlier placeholders when it gets a connection.
 - **M7**: transaction-hash matching.
 - **M9**: comparing manual snapshots with inferred balances.

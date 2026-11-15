@@ -317,7 +317,7 @@ README.md, README.zh-CN.md, docs/superpowers/specs/*.md                         
   - **`pair(ctx, transfer_id, transaction_id) -> TransferRecord`.** The transaction must be among `candidates()` with reason `exact`; it stores `pair` and matches.
   - All of them raise `TransferNotFoundError` (404), or `FinanceValidationError` (422) when not allowed in the transfer's state, and end with `heal_transfers`.
   - **`unlink_transaction(ctx, transaction_id) -> None`.** For a caller about to delete a row: it dissolves the row's transfer, then matches the transfer's other records. Its placeholder comes back if needed. A rejected transfer only loses the row, and keeps its decisions.
-  - **`preview_match(session, *, account_id, instrument_id, quantity: Decimal, occurred_at: datetime, counterparty: CounterpartyFields) -> TransferRecord | None`.** It answers which open transfer a row not yet posted would link to (Decision 6 steps 3 and 4 without writing). It returns None when there is none, or more than one.
+  - **`preview_match(session, *, account_id, instrument_id, quantity: Decimal, occurred_at: datetime, counterparty: CounterpartyFields, source: SourceRef | None = None) -> UUID | None`.** It returns the own record a row not yet posted would pair with (Decision 6 steps 2-4 without writing): the row's unique partner in the pair relation matching reads. It returns None when there is none, or more than one.
   - **`unassign_identifier`** (Task 1) is wrapped in the engine as `unassign_identifier_and_rematch(ctx, identifier_id)`, which matches every record naming that identifier again.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -328,7 +328,7 @@ README.md, README.zh-CN.md, docs/superpowers/specs/*.md                         
   - **`test_import_row_replaces_placeholder`:** B gets a manual-origin transaction +100 with `bank_transfer` (a simulated M2 row), then heal.
     - The transfer is `matched` and the placeholder is gone.
     - B's balance is unchanged from before the row (one +100, not two).
-  - `test_preview_match_finds_the_transfer` and `test_preview_match_none_when_ambiguous`.
+  - `test_preview_match_finds_the_partner` and `test_preview_match_none_when_ambiguous`.
   - **`test_unlink_then_delete_restores_placeholder`:** the M2 rollback order.
   - **`test_delete_linked_without_unlink_fails`** (Review Focus): an `IntegrityError` from the foreign key.
   - `test_removing_identifier_reverts_to_unassigned`.

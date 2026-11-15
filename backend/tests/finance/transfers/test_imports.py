@@ -132,8 +132,23 @@ async def test_import_row_replaces_placeholder(session, ids, imported, heal) -> 
     assert await heal() == 0
 
 
-async def test_preview_match_finds_the_transfer(session, gbp, inferred) -> None:
-    *_, b, _, _, transfer = inferred
+async def _assert_previewed(session, previewed, row) -> None:
+    """Posting (and healing) did what preview_match said: the row is in a matched transfer
+    with exactly the previewed record, or in none when it previewed none."""
+    matched = [
+        t
+        for t in await list_transfers(session, statuses=["matched"])
+        if row.id in (t.out_transaction_id, t.in_transaction_id)
+    ]
+    if previewed is None:
+        assert matched == []
+    else:
+        [transfer] = matched
+        assert {transfer.out_transaction_id, transfer.in_transaction_id} == {previewed, row.id}
+
+
+async def test_preview_match_finds_the_partner(session, gbp, inferred) -> None:
+    _, b, _, sent, _ = inferred
     count = text("select count(*) from finance.transactions")
     before = await session.scalar(count)
 
@@ -147,7 +162,7 @@ async def test_preview_match_finds_the_transfer(session, gbp, inferred) -> None:
             counterparty=CounterpartyFields(bank_transfer=bank_transfer),
         )
 
-    assert await preview() == transfer
+    assert await preview() == sent.id
     assert await preview("90") is None  # another amount
     assert await preview("-100") is None  # the wrong direction
     assert await preview(bank_transfer=False) is None  # a card refund, say
@@ -321,7 +336,7 @@ async def test_weekly_transfers_each_match_their_own_week(
 async def test_preview_match_reads_the_relation_matching_does(
     session, run, gbp, inferred, registered, connector_tx, import_row, heal
 ) -> None:
-    _, b, b_identifier, sent, transfer = inferred
+    _, b, b_identifier, sent, _ = inferred
     # C's payment to B is already matched with B's row naming C (mutually identified), so
     # its strongest pair is that one, and a new row naming nobody pairs only with A's.
     c, c_identifier = await registered("C", C_IDENTIFIER)
@@ -364,12 +379,11 @@ async def test_preview_match_reads_the_relation_matching_does(
         counterparty=CounterpartyFields(bank_transfer=True),
     )
 
-    assert previewed == transfer
-    # Posting the row does link it into A's transfer, as previewed.
+    assert previewed == sent.id
+    # Posting the row does link it with A's record, as previewed.
     row = await import_row(b)
     await heal()
-    [linked] = [t for t in await list_transfers(session) if t.out_transaction_id == sent.id]
-    assert (linked.status, linked.in_transaction_id) == ("matched", row.id)
+    await _assert_previewed(session, previewed, row)
 
 
 async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) -> None:
@@ -387,7 +401,7 @@ async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) 
             source=source,
         )
 
-    assert await preview() == transfer
+    assert await preview() == sent.id
     d = models.TransferDecision
     sent_ref = await source_ref(session, sent.id)
     never = await session.scalar(
@@ -402,7 +416,7 @@ async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) 
         .returning(d.id)
     )
     assert await preview() is None  # the owner unpaired them
-    assert await preview(source=None) == transfer  # another row is not
+    assert await preview(source=None) == sent.id  # another row is not
     await session.execute(
         text("delete from finance.transfer_decisions where id = :d"), {"d": never}
     )
@@ -668,3 +682,60 @@ async def test_undo_of_a_rolled_back_rejection_withdraws_its_decisions(
     assert (reopened.status, reopened.in_transaction_id) == ("awaiting", again.id)
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def _preview(session, gbp, account, quantity: str, identifier=None):
+    return await preview_match(
+        session,
+        account_id=account.id,
+        instrument_id=gbp.id,
+        quantity=Decimal(quantity),
+        occurred_at=ROW_AT,
+        counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
+    )
+
+
+async def test_preview_partner_without_a_transfer(
+    session, run, gbp, registered, manual_bank, connector_tx, stable_row, heal
+) -> None:
+    # A's payment names nobody, so it has no transfer; a row on D naming A pairs with it.
+    a, a_identifier = await registered("A", A_IDENTIFIER)
+    d = await manual_bank("D", identifier=None)
+    sent = await connector_tx(a, "-100")
+    await heal()
+    assert await list_transfers(session) == []
+
+    previewed = await _preview(session, gbp, d, "100", a_identifier)
+
+    assert previewed == sent.id
+    row = await stable_row(d, "row1", identifier=a_identifier)
+    await heal()
+    await _assert_previewed(session, previewed, row)
+    await assert_consistent(session)
+
+
+async def test_preview_takeover(
+    session, run, gbp, registered, manual_bank, connector_tx, stable_row, heal
+) -> None:
+    # A's payment to C is matched with C's row naming nobody; a row on C naming A is the
+    # stronger pair, so posting it takes A's record over.
+    a, a_identifier = await registered("A", A_IDENTIFIER)
+    c = await manual_bank("C", identifier=C_IDENTIFIER)
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", C_IDENTIFIER)
+    sent = await connector_tx(a, "-100", identifier_id=c_identifier)
+    weaker = await stable_row(c, "x")
+    await heal()
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.in_transaction_id) == ("matched", weaker.id)
+
+    previewed = await _preview(session, gbp, c, "100", a_identifier)
+
+    assert previewed == sent.id
+    row = await stable_row(c, "row1", identifier=a_identifier)
+    await heal()
+    await _assert_previewed(session, previewed, row)
+    assert all(
+        weaker.id not in (t.out_transaction_id, t.in_transaction_id)
+        for t in await list_transfers(session)
+    )
+    await assert_consistent(session)
