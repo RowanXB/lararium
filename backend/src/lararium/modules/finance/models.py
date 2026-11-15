@@ -91,6 +91,14 @@ class Transaction(Base):
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     connection_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.connections.id"))
     external_id: Mapped[str | None] = mapped_column(Text)
+    # What the source says about the other side: its bank account (a registry row), name and
+    # payment reference, and whether it marks this as a payment between bank accounts.
+    counterparty_identifier_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.account_identifiers.id")
+    )
+    counterparty_name: Mapped[str | None] = mapped_column(Text)
+    payment_reference: Mapped[str | None] = mapped_column(Text)
+    bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

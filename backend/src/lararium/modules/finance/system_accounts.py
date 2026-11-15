@@ -6,19 +6,29 @@ from sqlalchemy import func, select
 from lararium.core.commands import CommandContext
 from lararium.core.errors import SettingNotFoundError
 from lararium.core.settings_store import get_setting, set_setting
-from lararium.modules.finance.accounts import create_account
+from lararium.modules.finance.accounts import (
+    AccountSubtype,
+    BalanceMode,
+    LedgerType,
+    create_account,
+)
 
-SystemAccountKey = Literal["unassigned", "opening_balances"]
+SystemAccountKey = Literal["unassigned", "opening_balances", "in_transit"]
 
-_NAMES: dict[SystemAccountKey, str] = {
-    "unassigned": "Unassigned",
-    "opening_balances": "Opening balances",
+# Name, ledger type, subtype and balance mode of each.
+_ACCOUNTS: dict[SystemAccountKey, tuple[str, LedgerType, AccountSubtype, BalanceMode]] = {
+    "unassigned": ("Unassigned", "equity", "other", "transactions"),
+    "opening_balances": ("Opening balances", "equity", "other", "transactions"),
+    # Money on its way between two own accounts: an asset, so it stays in net worth.
+    "in_transit": ("In transit", "asset", "in_transit", "transactions"),
 }
 
 
 async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKey) -> UUID:
-    """The equity account standing in for the unknown side of a connector's transactions.
-    Equity accounts are outside net worth. Its id is remembered in finance.system_account.<key>.
+    """An account the ledger itself keeps: Unassigned and Opening balances, equity accounts
+    (outside net worth) standing in for the unknown side of a connector's transactions, and
+    In transit, the asset holding a transfer between own accounts until both sides are in.
+    Its id is remembered in finance.system_account.<key>.
 
     Concurrent callers (syncs of different connections) are serialised on the key, so only
     one creates it; call it in a short transaction, as the lock is held until it commits.
@@ -33,12 +43,9 @@ async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKe
         if not isinstance(value, str):
             raise ValueError(f"{setting_key} must be an account id string, got {value!r}")
         return UUID(value)
+    name, ledger_type, subtype, balance_mode = _ACCOUNTS[key]
     account = await create_account(
-        ctx,
-        name=_NAMES[key],
-        ledger_type="equity",
-        subtype="other",
-        balance_mode="transactions",
+        ctx, name=name, ledger_type=ledger_type, subtype=subtype, balance_mode=balance_mode
     )
     await set_setting(ctx, setting_key, str(account.id))
     return account.id

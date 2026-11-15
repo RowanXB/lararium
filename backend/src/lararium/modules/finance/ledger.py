@@ -6,7 +6,19 @@ from decimal import MAX_PREC, Decimal, localcontext
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import Numeric, case, delete, func, insert, literal, or_, select, true, update
+from sqlalchemy import (
+    Numeric,
+    case,
+    delete,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    text,
+    true,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -42,6 +54,16 @@ class PostingInput:
 
 
 @dataclass(frozen=True)
+class CounterpartyFields:
+    """What a transaction's source says about the other side."""
+
+    identifier_id: UUID | None = None  # its bank account, a finance.account_identifiers row
+    name: str | None = None
+    reference: str | None = None  # the payment reference
+    bank_transfer: bool = False  # the source marks it a payment between bank accounts
+
+
+@dataclass(frozen=True)
 class TransactionInput:
     occurred_at: datetime  # must have a timezone
     description: str
@@ -54,6 +76,7 @@ class TransactionInput:
     counterparty_entity_id: UUID | None = None
     connection_id: UUID | None = None
     external_id: str | None = None
+    counterparty: CounterpartyFields = CounterpartyFields()
 
 
 @dataclass(frozen=True)
@@ -79,6 +102,7 @@ class TransactionRecord:
     description: str
     status: TransactionStatus
     origin: TransactionOrigin
+    counterparty: CounterpartyFields
     postings: tuple[PostingRecord, ...]  # sorted by position
 
 
@@ -154,9 +178,18 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
     t, p = models.Transaction, models.Posting
     row = (
         await session.execute(
-            select(t.id, t.occurred_at, t.booking_date, t.description, t.status, t.origin).where(
-                t.id == transaction_id
-            )
+            select(
+                t.id,
+                t.occurred_at,
+                t.booking_date,
+                t.description,
+                t.status,
+                t.origin,
+                t.counterparty_identifier_id,
+                t.counterparty_name,
+                t.payment_reference,
+                t.bank_transfer,
+            ).where(t.id == transaction_id)
         )
     ).one_or_none()
     if row is None:
@@ -185,6 +218,12 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
         description=row.description,
         status=cast(TransactionStatus, row.status),
         origin=cast(TransactionOrigin, row.origin),
+        counterparty=CounterpartyFields(
+            identifier_id=row.counterparty_identifier_id,
+            name=row.counterparty_name,
+            reference=row.payment_reference,
+            bank_transfer=row.bank_transfer,
+        ),
         postings=tuple(
             PostingRecord(
                 id=r.id,
@@ -220,6 +259,12 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
         "description": record.description,
         "status": record.status,
         "origin": record.origin,
+        "counterparty": {
+            "identifier_id": _optional_str(record.counterparty.identifier_id),
+            "name": record.counterparty.name,
+            "reference": record.counterparty.reference,
+            "bank_transfer": record.counterparty.bank_transfer,
+        },
         "postings": [
             {
                 "id": str(posting.id),
@@ -236,6 +281,15 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
             }
             for posting in record.postings
         ],
+    }
+
+
+def _counterparty_values(fields: CounterpartyFields) -> dict[str, object]:
+    return {
+        "counterparty_identifier_id": fields.identifier_id,
+        "counterparty_name": fields.name,
+        "payment_reference": fields.reference,
+        "bank_transfer": fields.bank_transfer,
     }
 
 
@@ -308,6 +362,7 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
                 connection_id=tx.connection_id,
                 external_id=tx.external_id,
                 owner_entity_id=await get_self_entity_id(session),
+                **_counterparty_values(tx.counterparty),
             )
             .returning(models.Transaction.id)
         )
@@ -359,6 +414,10 @@ async def upsert_connector_transaction(
                 t.counterparty_entity_id,
                 t.status,
                 t.voided_by,
+                t.counterparty_identifier_id,
+                t.counterparty_name,
+                t.payment_reference,
+                t.bank_transfer,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
     ).one_or_none()
@@ -382,6 +441,10 @@ async def upsert_connector_transaction(
         and existing.description == tx.description
         and existing.counterparty_entity_id == tx.counterparty_entity_id
         and existing.status == tx.status
+        and existing.counterparty_identifier_id == tx.counterparty.identifier_id
+        and existing.counterparty_name == tx.counterparty.name
+        and existing.payment_reference == tx.counterparty.reference
+        and existing.bank_transfer == tx.counterparty.bank_transfer
     )
     # Postings compare by position: the connector emits them in a stable order.
     if fields_unchanged and [_posting_key(p) for p in before.postings] == [
@@ -403,6 +466,7 @@ async def upsert_connector_transaction(
             counterparty_entity_id=tx.counterparty_entity_id,
             status=tx.status,
             voided_by=ctx.actor.type if tx.status == "void" else None,
+            **_counterparty_values(tx.counterparty),
         )
         .returning(t.id)
     )
@@ -413,12 +477,92 @@ async def upsert_connector_transaction(
     )
     await _insert_postings(session, existing.id, tx.postings)
     record = await _load_transaction(session, existing.id)
-    ctx.emit("finance.transaction.updated", record.id, {"transaction_id": str(record.id)})
-    ctx.record_change(
-        f"transaction:{record.id}",
-        {"before": _change_data(before), "after": _change_data(record)},
-    )
+    _publish_update(ctx, before, record)
     return record, "updated"
+
+
+def _publish_update(
+    ctx: CommandContext, before: TransactionRecord, after: TransactionRecord
+) -> None:
+    ctx.emit("finance.transaction.updated", after.id, {"transaction_id": str(after.id)})
+    ctx.record_change(
+        f"transaction:{after.id}", {"before": _change_data(before), "after": _change_data(after)}
+    )
+
+
+async def set_counterparty_fields(
+    ctx: CommandContext, transaction_id: UUID, fields: CounterpartyFields
+) -> bool:
+    """Set what the transaction's source says about the other side, writing only when it
+    differs from what is stored. Returns whether it wrote."""
+    before = await _load_transaction(ctx.session, transaction_id)
+    if before.counterparty == fields:
+        return False
+    await ctx.session.execute(
+        update(models.Transaction)
+        .where(models.Transaction.id == transaction_id)
+        .values(**_counterparty_values(fields))
+    )
+    _publish_update(ctx, before, await _load_transaction(ctx.session, transaction_id))
+    return True
+
+
+async def repoint_contra(
+    ctx: CommandContext, transaction_id: UUID, from_account_id: UUID, to_account_id: UUID
+) -> bool:
+    """Move the transaction's single posting on from_account_id to to_account_id, keeping
+    its quantity, so the transaction still balances. Returns False when it has no posting
+    there; several there are ambiguous and refused."""
+    if from_account_id == to_account_id:
+        raise FinanceValidationError("a contra is re-pointed to a different account")
+    session = ctx.session
+    before = await _load_transaction(session, transaction_id)
+    await get_account(session, to_account_id)  # raises AccountNotFoundError if missing
+    on_from = [p for p in before.postings if p.account_id == from_account_id]
+    if not on_from:
+        return False
+    if len(on_from) > 1:
+        raise FinanceValidationError(
+            f"transaction {transaction_id} has {len(on_from)} postings on account"
+            f" {from_account_id}; which one to re-point is ambiguous"
+        )
+    await session.execute(
+        update(models.Posting)
+        .where(models.Posting.id == on_from[0].id)
+        .values(account_id=to_account_id)
+    )
+    _publish_update(ctx, before, await _load_transaction(session, transaction_id))
+    return True
+
+
+_DERIVED_ORIGINS: tuple[TransactionOrigin, ...] = ("inference", "rule")
+
+_TRANSFER_LEG_OF = text(
+    "select id from finance.transfers where :transaction_id in"
+    " (out_transaction_id, in_transaction_id, placeholder_transaction_id,"
+    "  settlement_transaction_id)"
+)
+
+
+async def delete_derived_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
+    """Delete a transaction the ledger derived (a transfer's placeholder or settlement), so
+    replacing or dissolving one leaves no void rows behind. A recorded transaction (from a
+    connector, an import or the owner) is never deleted: it is voided instead."""
+    session = ctx.session
+    record = await _load_transaction(session, transaction_id)
+    if record.origin not in _DERIVED_ORIGINS:
+        raise FinanceValidationError(
+            f"only derived transactions can be deleted; {transaction_id} has origin"
+            f" {record.origin!r}"
+        )
+    transfer_id = await session.scalar(_TRANSFER_LEG_OF, {"transaction_id": transaction_id})
+    if transfer_id is not None:
+        raise FinanceValidationError(
+            f"transaction {transaction_id} is still part of transfer {transfer_id}"
+        )
+    await session.execute(delete(models.Transaction).where(models.Transaction.id == transaction_id))
+    ctx.emit("finance.transaction.deleted", record.id, {"transaction_id": str(record.id)})
+    ctx.record_change(f"transaction:{record.id}", {"before": _change_data(record), "after": None})
 
 
 async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:
