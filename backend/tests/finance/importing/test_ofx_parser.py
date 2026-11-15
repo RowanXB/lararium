@@ -473,3 +473,35 @@ def test_deep_nesting_is_file_error() -> None:
     content = (SGML_HEADER + "<OFX>\n" + "<A>\n" * 10_000).encode()
     with pytest.raises(FileFormatError, match="the file is nested too deeply"):
         _parse(content)
+
+
+def test_period_from_dtstart_dtend() -> None:
+    assert _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS))).period == (
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+    )
+    assert _parse(XML_V2).period == (date(2026, 11, 1), date(2026, 11, 30))
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(
+        b"<DTEND>20261130", b"<DTEND>20261130235959[-5:EST]"
+    )
+    assert _parse(content).period == (date(2026, 11, 1), date(2026, 11, 30))
+
+
+@pytest.mark.parametrize("leaf", [b"<DTSTART>20261101\n", b"<DTEND>20261130\n"])
+def test_period_needs_both_dates(leaf: bytes) -> None:
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(leaf, b"")
+    assert _parse(content).period is None
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b"<DTSTART>20261101", b"<DTSTART>2026-11-01"),
+        (b"<DTEND>20261130", b"<DTEND>20261131"),
+        (b"<DTSTART>20261101", b"<DTSTART>20261201"),  # after DTEND
+    ],
+)
+def test_bad_period_is_file_error(old: bytes, new: bytes) -> None:
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(old, new)
+    with pytest.raises(FileFormatError, match="BANKTRANLIST"):
+        _parse(content)

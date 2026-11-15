@@ -264,6 +264,23 @@ def _closing(statement: _Aggregate, config: OfxProfileConfig) -> tuple[Decimal |
     return balance, closing_date
 
 
+def _period(statement: _Aggregate) -> tuple[date, date] | None:
+    """BANKTRANLIST's DTSTART and DTEND by their written dates, when it states both."""
+    transactions = statement.child("BANKTRANLIST")
+    if transactions is None:
+        return None
+    start, end = transactions.leaf("DTSTART"), transactions.leaf("DTEND")
+    if start is None or end is None:
+        return None
+    try:
+        period = _datetime(start, "DTSTART")[0], _datetime(end, "DTEND")[0]
+    except ValueError as error:
+        raise FileFormatError(f"BANKTRANLIST: {error}") from None
+    if period[0] > period[1]:
+        raise FileFormatError(f"BANKTRANLIST: DTSTART {start!r} is after DTEND {end!r}")
+    return period
+
+
 def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
     statements = _tree(_decode(content)).find(_STATEMENTS)
     if len(statements) != 1:
@@ -292,6 +309,7 @@ def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
         rows=rows,
         closing_balance=closing_balance,
         closing_balance_date=closing_balance_date,
+        period=_period(statement),
         account=_account(statement),
         currency=currency,
     )
