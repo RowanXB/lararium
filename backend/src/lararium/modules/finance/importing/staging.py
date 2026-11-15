@@ -8,13 +8,13 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import MAX_PREC, Decimal, localcontext
 from typing import Any, Literal, cast, get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, func, insert, select
+from sqlalchemy import ColumnElement, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -49,7 +49,14 @@ from lararium.modules.finance.importing.profiles import (
     get_profile,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
+from lararium.modules.finance.ledger import (
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+    void_transaction,
+)
 from lararium.modules.finance.money import to_plain_str
+from lararium.modules.finance.system_accounts import get_or_create_system_account
 
 BatchStatus = Literal["staged", "committed", "discarded", "rolled_back"]
 RowStatus = Literal["new", "duplicate", "skipped", "error", "committed", "rolled_back"]
@@ -185,8 +192,13 @@ def dedupe_key(account_id: UUID, row: ParsedRow, currency: str, occurrence: int)
     return _hash("seq", account, *common, str(occurrence))
 
 
-def _opening_key(account_id: UUID, day: date, quantity: Decimal, currency: str) -> str:
-    return _hash("open", str(account_id), day.isoformat(), _plain(quantity), currency)
+def _opening_key(
+    account_id: UUID, batch_id: UUID, day: date, quantity: Decimal, currency: str
+) -> str:
+    # The batch too: two statements starting on one day may need the same adjustment.
+    return _hash(
+        "open", str(account_id), str(batch_id), day.isoformat(), _plain(quantity), currency
+    )
 
 
 def check_balance_chain(
@@ -229,7 +241,7 @@ def opening_adjustments(
 
     From the chronologically first row with a balance, else from the closing balance, which
     a file states for its one currency, so it is used only when every row is in one
-    instrument. Instruments with neither are absent.
+    instrument and it is dated on or after the last row. Instruments with neither are absent.
     """
     chains: dict[UUID, list[ParsedRow]] = defaultdict(list)
     for row in _chronological(rows, row_order):
@@ -245,7 +257,14 @@ def opening_adjustments(
                 if row.balance is not None:
                     opening = row.balance - net
                     break
-            if opening is None and closing is not None and len(chains) == 1:
+            # A closing balance dated before the last row doesn't include it.
+            last_day = max(row.booking_date for row in chain)
+            if (
+                opening is None
+                and closing is not None
+                and len(chains) == 1
+                and closing[1] >= last_day
+            ):
                 opening = closing[0] - sum((row.quantity - row.fee for row in chain), Decimal(0))
             if opening is not None:
                 openings[instrument] = (opening, first_day)
@@ -390,6 +409,349 @@ async def get_batch(session: AsyncSession, batch_id: UUID) -> ImportBatchRecord:
 async def list_batches(session: AsyncSession) -> list[ImportBatchRecord]:
     """Every batch, newest first."""
     return await _load_batches(session)
+
+
+# Opening adjustments (Decision 13) ------------------------------------------------------
+
+SUPERSEDED = "superseded"
+# A staged batch's adjustment rows and new rows count in the walk while it is previewed.
+_LIVE_ROWS = ("new", "duplicate", "committed")
+
+
+@dataclass(frozen=True)
+class OpeningClaim:
+    """A batch's statement opening balance in one instrument, which must hold at first_day."""
+
+    batch_id: UUID
+    instrument_id: UUID
+    opening: Decimal
+    first_day: date
+    committed_at: datetime | None  # None: the staged batch being previewed, after its ties
+
+
+type Movements = dict[UUID, list[tuple[date, Decimal]]]
+
+
+def plan_openings(
+    claims: Sequence[OpeningClaim], movements: Movements
+) -> dict[tuple[UUID, UUID], Decimal]:
+    """The walk: (batch, instrument) -> the adjustment that makes each opening hold.
+
+    Claims are taken by first date (ties by commit time). Each needs its opening minus the
+    account's movements (its postings other than opening adjustments) before its first date,
+    minus the adjustments assigned to the claims before it.
+    """
+
+    def order(claim: OpeningClaim) -> tuple[date, bool, datetime, UUID]:
+        staged = claim.committed_at is None
+        return (
+            claim.first_day,
+            staged,
+            claim.committed_at or datetime.min.replace(tzinfo=UTC),
+            claim.batch_id,
+        )
+
+    assigned: dict[UUID, Decimal] = defaultdict(Decimal)
+    needed: dict[tuple[UUID, UUID], Decimal] = {}
+    with localcontext(prec=MAX_PREC):
+        for claim in sorted(claims, key=order):
+            before = sum(
+                (
+                    amount
+                    for day, amount in movements.get(claim.instrument_id, [])
+                    if day < claim.first_day
+                ),
+                Decimal(0),
+            )
+            need = claim.opening - before - assigned[claim.instrument_id]
+            needed[(claim.batch_id, claim.instrument_id)] = need
+            assigned[claim.instrument_id] += need
+    return needed
+
+
+@dataclass(frozen=True)
+class _BatchInfo:
+    id: UUID
+    filename: str
+    committed_at: datetime | None
+    timezone: str | None
+
+
+def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
+    return lambda parsed: instruments[parsed.position]
+
+
+async def _claims(
+    session: AsyncSession, batches: list[_BatchInfo]
+) -> dict[UUID, list[OpeningClaim]]:
+    """Each batch's openings, from its stored statement rows (opening_adjustments)."""
+    b, r, s = models.ImportBatch, models.ImportRow, models.ImportStatement
+    ids = [batch.id for batch in batches]
+    configs = {
+        row.id: row.profile_config
+        for row in await session.execute(select(b.id, b.profile_config).where(b.id.in_(ids)))
+    }
+    closings = {
+        batch_id: (balance, day)
+        for batch_id, balance, day in await session.execute(
+            select(s.batch_id, s.closing_balance, s.closing_balance_date).where(s.batch_id.in_(ids))
+        )
+        if balance is not None and day is not None
+    }
+    stored: dict[UUID, list[models.ImportRow]] = defaultdict(list)
+    for row in await session.scalars(
+        select(r)
+        .where(r.batch_id.in_(ids), r.kind == "statement", r.status.in_(_LIVE_ROWS))
+        .order_by(r.batch_id, r.position)
+    ):
+        stored[row.batch_id].append(row)
+    claims: dict[UUID, list[OpeningClaim]] = {}
+    for batch in batches:
+        instruments: dict[int, UUID] = {}
+        rows: list[ParsedRow] = []
+        for row in stored[batch.id]:
+            # Live rows have these (the table's CHECK).
+            assert row.booking_date is not None and row.quantity is not None
+            assert row.instrument_id is not None
+            instruments[row.position] = row.instrument_id
+            rows.append(
+                ParsedRow(
+                    position=row.position,
+                    booking_date=row.booking_date,
+                    occurred_at=None,
+                    description=row.description,
+                    quantity=row.quantity,
+                    fee=row.fee,
+                    currency=None,
+                    balance=row.balance,
+                    external_id=None,
+                    bank_type=None,
+                    raw={},
+                )
+            )
+        row_order = configs[batch.id].get("row_order", "oldest_first")
+        openings = opening_adjustments(
+            rows,
+            _by_position(instruments),
+            closings.get(batch.id),
+            row_order if isinstance(row_order, str) else "oldest_first",
+        )
+        claims[batch.id] = [
+            OpeningClaim(batch.id, instrument_id, opening, first_day, batch.committed_at)
+            for instrument_id, (opening, first_day) in openings.items()
+        ]
+    return claims
+
+
+async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_BatchInfo]:
+    b = models.ImportBatch
+    found = await session.execute(
+        select(b.id, b.filename, b.committed_at, b.profile_config["timezone"].astext).where(
+            b.account_id == account_id, b.status == "committed"
+        )
+    )
+    return [_BatchInfo(*row) for row in found]
+
+
+async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
+    """The account's non-void postings by instrument and day, without opening adjustments."""
+    p, t, r = models.Posting, models.Transaction, models.ImportRow
+    adjustments = select(r.transaction_id).where(
+        r.kind == "opening_adjustment", r.transaction_id.is_not(None)
+    )
+    movements: Movements = defaultdict(list)
+    for instrument_id, day, amount in await session.execute(
+        select(p.instrument_id, t.booking_date, func.sum(p.quantity))
+        .join(t, t.id == p.transaction_id)
+        .where(p.account_id == account_id, t.status != "void", t.id.not_in(adjustments))
+        .group_by(p.instrument_id, t.booking_date)
+    ):
+        movements[instrument_id].append((day, amount))
+    return movements
+
+
+async def _live_adjustments(
+    session: AsyncSession, account_id: UUID
+) -> dict[tuple[UUID, UUID], models.ImportRow]:
+    """The committed adjustment rows of the account's committed batches."""
+    r, b = models.ImportRow, models.ImportBatch
+    rows = await session.scalars(
+        select(r)
+        .join(b, b.id == r.batch_id)
+        .where(
+            r.account_id == account_id,
+            r.kind == "opening_adjustment",
+            r.status == "committed",
+            b.status == "committed",
+        )
+        .execution_options(populate_existing=True)
+    )
+    live: dict[tuple[UUID, UUID], models.ImportRow] = {}
+    for row in rows:
+        assert row.instrument_id is not None
+        live[(row.batch_id, row.instrument_id)] = row
+    return live
+
+
+@dataclass(frozen=True)
+class OpeningChange:
+    """Another batch's adjustment that committing the previewed batch would change."""
+
+    batch_id: UUID
+    filename: str
+    instrument_id: UUID
+    current: Decimal
+    needed: Decimal
+
+
+@dataclass(frozen=True)
+class OpeningPreview:
+    """The walk with a staged batch included. needed: its adjustment per instrument it has
+    an opening in (zero when none is needed); changes: what it does to the other batches."""
+
+    needed: dict[UUID, Decimal]
+    changes: list[OpeningChange]
+
+
+async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPreview:
+    """Decision 13's walk as if the staged batch were committed now: its new rows count as
+    movements. Staging adds its adjustment rows from this; commit compares it with them."""
+    b, r = models.ImportBatch, models.ImportRow
+    staged = (await session.execute(select(b.account_id, b.filename).where(b.id == batch_id))).one()
+    account_id = staged.account_id
+    batches = [
+        *(batch for batch in await _committed_batches(session, account_id) if batch.id != batch_id),
+        _BatchInfo(batch_id, staged.filename, None, None),
+    ]
+    claims = await _claims(session, batches)
+    movements = await _movements(session, account_id)
+    with localcontext(prec=MAX_PREC):
+        for instrument_id, day, quantity, fee in await session.execute(
+            select(r.instrument_id, r.booking_date, r.quantity, r.fee).where(
+                r.batch_id == batch_id, r.kind == "statement", r.status == "new"
+            )
+        ):
+            assert instrument_id is not None and day is not None and quantity is not None
+            movements[instrument_id].append((day, quantity - fee))
+    plan = plan_openings([claim for found in claims.values() for claim in found], movements)
+    live = await _live_adjustments(session, account_id)
+    names = {batch.id: batch.filename for batch in batches}
+    changes: list[OpeningChange] = []
+    for owner, instrument_id in sorted(plan.keys() | live.keys(), key=str):
+        if owner == batch_id:
+            continue
+        need = plan.get((owner, instrument_id), Decimal(0))
+        row = live.get((owner, instrument_id))
+        current = row.quantity if row is not None and row.quantity is not None else Decimal(0)
+        if current != need:
+            changes.append(OpeningChange(owner, names[owner], instrument_id, current, need))
+    needed = {
+        instrument_id: need for (owner, instrument_id), need in plan.items() if owner == batch_id
+    }
+    return OpeningPreview(needed=needed, changes=changes)
+
+
+async def _post_adjustment(
+    ctx: CommandContext,
+    account_id: UUID,
+    instrument_id: UUID,
+    quantity: Decimal,
+    day: date,
+    local_tz: ZoneInfo,
+) -> UUID:
+    opening_account = await get_or_create_system_account(ctx, "opening_balances")
+    with localcontext(prec=MAX_PREC):
+        contra = -quantity
+    record = await post_transaction(
+        ctx,
+        TransactionInput(
+            occurred_at=_midnight(day, local_tz),
+            occurred_tz=local_tz.key,
+            booking_date=day,
+            description=OPENING_DESCRIPTION,
+            postings=[
+                PostingInput(account_id, instrument_id, quantity),
+                PostingInput(opening_account, instrument_id, contra),
+            ],
+        ),
+    )
+    return record.id
+
+
+async def align_openings(ctx: CommandContext, account_id: UUID) -> None:
+    """Decision 13: re-align the committed batches' opening adjustments after history
+    changed (a commit or a rollback), so every committed statement's opening holds.
+
+    A changed adjustment's transaction is voided and a new one posted; an adjustment that
+    is no longer needed turns its row rolled_back ("superseded"); a batch that now needs
+    one gets a new row.
+    """
+    session = ctx.session
+    account = await get_account(session, account_id)
+    if account.balance_mode != "transactions":
+        return
+    batches = await _committed_batches(session, account_id)
+    claims = await _claims(session, batches)
+    flat = [claim for found in claims.values() for claim in found]
+    plan = plan_openings(flat, await _movements(session, account_id))
+    live = await _live_adjustments(session, account_id)
+    first_days = {(c.batch_id, c.instrument_id): c.first_day for c in flat}
+    zones = {batch.id: batch.timezone for batch in batches}
+    default_tz = await get_timezone(session)
+    r = models.ImportRow
+    changed = False
+    for key in sorted(plan.keys() | live.keys(), key=str):
+        batch_id, instrument_id = key
+        need = plan.get(key, Decimal(0))
+        row = live.get(key)
+        current = row.quantity if row is not None else Decimal(0)
+        if current == need:
+            continue
+        changed = True
+        if row is not None and row.transaction_id is not None:
+            await void_transaction(ctx, row.transaction_id)
+        if need == 0:
+            assert row is not None
+            await session.execute(
+                update(r).where(r.id == row.id).values(status="rolled_back", note=SUPERSEDED)
+            )
+            continue
+        zone = zones.get(batch_id)
+        local_tz = ZoneInfo(zone) if zone else default_tz
+        day = first_days[key] - timedelta(days=1)
+        currency = _iso_code(await get_instrument(session, instrument_id))
+        transaction_id = await _post_adjustment(ctx, account_id, instrument_id, need, day, local_tz)
+        values: dict[str, Any] = {
+            "quantity": need,
+            "booking_date": day,
+            "occurred_at": _midnight(day, local_tz),
+            "occurred_tz": local_tz.key,
+            "transaction_id": transaction_id,
+            "dedupe_key": _opening_key(account_id, batch_id, day, need, currency),
+        }
+        if row is not None:
+            await session.execute(update(r).where(r.id == row.id).values(**values))
+            continue
+        lowest = await session.scalar(select(func.min(r.position)).where(r.batch_id == batch_id))
+        await session.execute(
+            insert(r).values(
+                batch_id=batch_id,
+                account_id=account_id,
+                position=min(lowest or 0, 0) - 1,
+                kind="opening_adjustment",
+                status="committed",
+                description=OPENING_DESCRIPTION,
+                instrument_id=instrument_id,
+                raw={},
+                **values,
+            )
+        )
+    if changed:
+        ctx.emit("finance.import.openings_aligned", account_id, {"account_id": str(account_id)})
+
+
+def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
+    return datetime.combine(day, time(), tzinfo=local_tz)
 
 
 # Checks ---------------------------------------------------------------------------------
@@ -664,77 +1026,11 @@ def _check_chain(rows: list[_Row], row_order: str) -> None:
         elif row.status == "error":
             chain.append(None)
     for position, message in check_balance_chain(
-        chain, lambda parsed: instruments[parsed.position], row_order
+        chain, _by_position(instruments), row_order
     ).items():
         row = by_position[position]
         if row.status != "error":
             row.fail(message)
-
-
-def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
-    return datetime.combine(day, time(), tzinfo=local_tz)
-
-
-async def _opening_rows(
-    session: AsyncSession,
-    account_id: UUID,
-    rows: list[_Row],
-    statement: ParsedStatement,
-    instruments: dict[UUID, InstrumentRecord],
-    row_order: str,
-) -> tuple[list[_Row], list[str]]:
-    """Decision 13: one adjustment row per instrument whose opening balance differs from the
-    ledger, or the warning when the file has no balances to tell."""
-    importable = [row for row in rows if row.status in ("new", "duplicate")]
-    by_position = {row.position: row for row in importable}
-
-    def instrument_of(parsed: ParsedRow) -> UUID:
-        instrument_id = by_position[parsed.position].instrument_id
-        assert instrument_id is not None
-        return instrument_id
-
-    parsed = [row.parsed for row in importable if row.parsed is not None]
-    closing = None
-    if statement.closing_balance is not None and statement.closing_balance_date is not None:
-        closing = (statement.closing_balance, statement.closing_balance_date)
-    openings = opening_adjustments(parsed, instrument_of, closing, row_order)
-    warnings = [NO_BALANCES_WARNING] if {instrument_of(p) for p in parsed} - openings.keys() else []
-    adjustments: list[_Row] = []
-    for instrument_id in sorted(openings, key=lambda i: instruments[i].symbol):
-        opening, first_day = openings[instrument_id]
-        before = await ledger_balance_before(session, account_id, instrument_id, first_day)
-        with localcontext(prec=MAX_PREC):
-            difference = opening - before
-        if difference == 0:
-            continue
-        day = first_day - timedelta(days=1)
-        currency = _iso_code(instruments[instrument_id])
-        adjustment = ParsedRow(
-            position=-(len(adjustments) + 1),
-            booking_date=day,
-            occurred_at=None,
-            description=OPENING_DESCRIPTION,
-            quantity=difference,
-            fee=Decimal(0),
-            currency=currency,
-            balance=None,
-            external_id=None,
-            bank_type=None,
-            raw={},
-        )
-        adjustments.append(
-            _Row(
-                adjustment.position,
-                "new",
-                {},
-                parsed=adjustment,
-                kind="opening_adjustment",
-                instrument_id=instrument_id,
-                currency=currency,
-                dedupe_key=_opening_key(account_id, day, difference, currency),
-            )
-        )
-    return adjustments, warnings
 
 
 def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo) -> dict[str, Any]:
@@ -833,6 +1129,73 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> tuple[date | None,
     return (min(days), max(days)) if days else (None, None)
 
 
+async def _stage_openings(
+    session: AsyncSession,
+    account_id: UUID,
+    batch_id: UUID,
+    rows: list[_Row],
+    instruments: dict[UUID, InstrumentRecord],
+    local_tz: ZoneInfo,
+) -> None:
+    """Decision 13: the staged batch's adjustment rows and warnings, from the walk with it
+    included. Its statement rows must be stored already."""
+    preview = await preview_openings(session, batch_id)
+    stated = {row.instrument_id for row in rows if row.status in ("new", "duplicate")}
+    warnings = [NO_BALANCES_WARNING] if stated - preview.needed.keys() else []
+    warnings += [
+        f"committing this changes the opening adjustment of {change.filename} from "
+        f"{to_plain_str(change.current)} to {to_plain_str(change.needed)}"
+        for change in preview.changes
+    ]
+    adjustments: list[_Row] = []
+    for instrument_id in sorted(preview.needed, key=lambda i: instruments[i].symbol):
+        need = preview.needed[instrument_id]
+        if need == 0:
+            continue
+        day = min(
+            row.parsed.booking_date
+            for row in rows
+            if row.parsed is not None
+            and row.instrument_id == instrument_id
+            and row.status in ("new", "duplicate")
+        ) - timedelta(days=1)
+        currency = _iso_code(instruments[instrument_id])
+        position = -(len(adjustments) + 1)
+        adjustment = ParsedRow(
+            position=position,
+            booking_date=day,
+            occurred_at=None,
+            description=OPENING_DESCRIPTION,
+            quantity=need,
+            fee=Decimal(0),
+            currency=currency,
+            balance=None,
+            external_id=None,
+            bank_type=None,
+            raw={},
+        )
+        adjustments.append(
+            _Row(
+                position,
+                "new",
+                {},
+                parsed=adjustment,
+                kind="opening_adjustment",
+                instrument_id=instrument_id,
+                currency=currency,
+                dedupe_key=_opening_key(account_id, batch_id, day, need, currency),
+            )
+        )
+    if adjustments:
+        await session.execute(
+            insert(models.ImportRow),
+            [_row_values(row, batch_id, account_id, local_tz) for row in adjustments],
+        )
+    if warnings:
+        b = models.ImportBatch
+        await session.execute(update(b).where(b.id == batch_id).values(warnings=warnings))
+
+
 async def stage_import(
     ctx: CommandContext,
     store: DocumentStore,
@@ -867,12 +1230,6 @@ async def stage_import(
     await _deduplicate(session, account_id, rows)
     await _match_covered_days(session, account_id, rows)
     _check_chain(rows, row_order)
-    warnings: list[str] = []
-    if account.balance_mode == "transactions" and all(row.status != "error" for row in rows):
-        adjustments, warnings = await _opening_rows(
-            session, account_id, rows, statement, instruments, row_order
-        )
-        rows = adjustments + rows
     covered_from, covered_to = _covered(statement, rows)
 
     b = models.ImportBatch
@@ -887,7 +1244,6 @@ async def stage_import(
             document_id=document.id,
             filename=filename,
             default_instrument_id=default_instrument_id,
-            warnings=warnings,
             covered_from=covered_from,
             covered_to=covered_to,
             owner_entity_id=await get_self_entity_id(session),
@@ -920,6 +1276,8 @@ async def stage_import(
         insert(models.ImportRow),
         [_row_values(row, batch_id, account_id, local_tz) for row in rows],
     )
+    if account.balance_mode == "transactions" and all(row.status != "error" for row in rows):
+        await _stage_openings(session, account_id, batch_id, rows, instruments, local_tz)
 
     record = await get_batch(session, batch_id)
     counts: dict[str, JSONValue] = {status: n for status, n in record.counts.items()}

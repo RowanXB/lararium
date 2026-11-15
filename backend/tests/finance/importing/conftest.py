@@ -17,6 +17,7 @@ from lararium.modules.finance.importing.profiles import (
     ImportProfileRecord,
     create_profile,
 )
+from lararium.modules.finance.importing.staging import align_openings
 from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 
@@ -39,7 +40,8 @@ async def csv_profile(run: Run) -> ImportProfileRecord:
 
 
 async def _commit(ctx: CommandContext, batch_id: UUID) -> None:
-    """A stand-in for Task 6's commit_batch: posts every new row and marks the batch committed."""
+    """A stand-in for Task 6's commit_batch: posts every new row, marks the batch committed and
+    re-aligns the account's opening adjustments."""
     session = ctx.session
     r, b = models.ImportRow, models.ImportBatch
     batch = (await session.execute(select(b.account_id).where(b.id == batch_id))).one()
@@ -76,6 +78,7 @@ async def _commit(ctx: CommandContext, batch_id: UUID) -> None:
     await session.execute(
         update(b).where(b.id == batch_id).values(status="committed", committed_at=func.now())
     )
+    await align_openings(ctx, batch.account_id)
 
 
 @pytest.fixture

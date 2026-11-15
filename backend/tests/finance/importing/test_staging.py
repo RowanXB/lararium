@@ -1,6 +1,6 @@
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import TypeAdapter
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
+from lararium.core.commands import CommandContext
 from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, close_account
@@ -33,13 +34,16 @@ from lararium.modules.finance.importing.profiles import (
 from lararium.modules.finance.importing.staging import (
     ImportBatchRecord,
     ImportRowRecord,
+    align_openings,
     batches_relying_on,
     get_batch,
+    ledger_balance_before,
     list_batch_rows,
     list_batches,
     stage_import,
 )
-from lararium.modules.finance.instruments import InstrumentRecord
+from lararium.modules.finance.instruments import InstrumentRecord, get_currency
+from lararium.modules.finance.ledger import void_transaction
 
 from .synthetic_pdfs import BocRow, BocStatement, HsbcRow, HsbcStatement, boc_pdf, hsbc_pdf
 
@@ -130,7 +134,14 @@ async def _dedupe_keys(session: AsyncSession, batch: ImportBatchRecord) -> list[
     return list(result)
 
 
-def _ofx(transactions: list[tuple[str, str, str]], *, start: str, end: str, extra: str = "") -> str:
+def _ofx(
+    transactions: list[tuple[str, str, str]],
+    *,
+    start: str,
+    end: str,
+    extra: str = "",
+    currency: str = "GBP",
+) -> str:
     """transactions: (DTPOSTED, TRNAMT, FITID)."""
     body = "\n".join(
         f"<STMTTRN>\n<TRNTYPE>OTHER\n<DTPOSTED>{posted}\n<TRNAMT>{amount}\n<FITID>{fitid}\n"
@@ -145,7 +156,7 @@ VERSION:102
 <BANKMSGSRSV1>
 <STMTTRNRS>
 <STMTRS>
-<CURDEF>GBP
+<CURDEF>{currency}
 <BANKTRANLIST>
 <DTSTART>{start}
 <DTEND>{end}
@@ -463,6 +474,112 @@ async def test_gap_creates_adjustment(
     assert adjustment.booking_date == date(2027, 1, 4)
 
 
+DECEMBER = BALANCE_HEADER + "01/12/2026,Rent,-30.00,1450.00\n"
+
+
+async def _balance_after(session: AsyncSession, account_id: UUID, day: date) -> Decimal:
+    gbp = await get_currency(session, "GBP")
+    return await ledger_balance_before(session, account_id, gbp.id, day + timedelta(days=1))
+
+
+async def test_older_statement_after_newer_realigns(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    account: AccountRecord,
+    make_account: MakeAccount,
+) -> None:
+    # December first (its adjustment: 1480.00 on 30 Nov), then November.
+    profile = await _csv_profile(run)
+    december = await stage(profile, DECEMBER, filename="december.csv")
+    await commit(december.id)
+    november = await stage(profile, NOVEMBER, filename="november.csv")
+
+    (adjustment,) = _adjustments(await _rows(session, november))
+    assert adjustment.quantity == Decimal("1500.00")
+    assert november.warnings == [
+        "committing this changes the opening adjustment of december.csv from 1480.00 to 0.00"
+    ]
+    await commit(november.id)
+    for day, balance in [("2026-11-02", "1482.00"), ("2026-11-03", "1480.00")]:
+        assert await _balance_after(session, account.id, date.fromisoformat(day)) == Decimal(
+            balance
+        )
+    assert await _balance_after(session, account.id, date(2026, 12, 1)) == Decimal("1450.00")
+    (superseded,) = _adjustments(await _rows(session, december))
+    assert (superseded.status, superseded.note) == ("rolled_back", "superseded")
+
+    # An OFX export for 10 May-15 Jun first, then the PDF statement for 6 May-5 Jun.
+    other = await make_account(name="Example HSBC", balance_mode="transactions")
+    ofx = await _profile(run, format="ofx")
+    export = _ofx(
+        [("20270510", "1250.00", "A"), ("20270510", "-17.35", "B"), ("20270612", "-8.00", "C")],
+        start="20270510",
+        end="20270615",
+        extra="<LEDGERBAL>\n<BALAMT>1320.45\n<DTASOF>20270615\n</LEDGERBAL>",
+    )
+    await commit((await stage(ofx, export, account_id=other.id, filename="export.ofx")).id)
+    pdf = await _profile(run, format="pdf", layout="hsbc_uk_statement")
+    statement = await stage(
+        pdf,
+        hsbc_pdf(HsbcStatement(pages=[HSBC_ROWS])),
+        account_id=other.id,
+        default=None,
+        filename="statement.pdf",
+    )
+
+    rows = await _rows(session, statement)
+    assert _statuses(rows) == ["new", "new", "duplicate", "duplicate"]
+    assert rows[0].quantity == Decimal("100.00")
+    assert statement.warnings == [
+        "committing this changes the opening adjustment of export.ofx from 95.80 to 0.00"
+    ]
+    await commit(statement.id)
+    for day, balance in [("2027-05-08", "95.80"), ("2027-05-10", "1328.45")]:
+        assert await _balance_after(session, other.id, date.fromisoformat(day)) == Decimal(balance)
+    assert await _balance_after(session, other.id, date(2027, 6, 15)) == Decimal("1320.45")
+
+
+async def _roll_back(ctx: CommandContext, batch_id: UUID) -> None:
+    """A stand-in for Task 6's rollback_batch: voids the batch's rows, then re-aligns."""
+    r, b = models.ImportRow, models.ImportBatch
+    rows = await ctx.session.execute(
+        select(r.id, r.transaction_id).where(r.batch_id == batch_id, r.status == "committed")
+    )
+    for row_id, transaction_id in list(rows):
+        await void_transaction(ctx, transaction_id)
+        await ctx.session.execute(update(r).where(r.id == row_id).values(status="rolled_back"))
+    account_id = await ctx.session.scalar(
+        update(b)
+        .where(b.id == batch_id)
+        .values(status="rolled_back", rolled_back_at=func.now())
+        .returning(b.account_id)
+    )
+    assert account_id is not None
+    await align_openings(ctx, account_id)
+
+
+async def test_align_adds_an_adjustment_a_batch_now_needs(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    profile = await _csv_profile(run)
+    november = await stage(profile, NOVEMBER, filename="november.csv")
+    await commit(november.id)
+    december = await stage(profile, DECEMBER, filename="december.csv")
+    assert _adjustments(await _rows(session, december)) == []  # November's closing matches
+    await commit(december.id)
+
+    await run(_roll_back, november.id)
+    session.expunge_all()
+
+    (adjustment,) = _adjustments(await _rows(session, december))
+    assert (adjustment.status, adjustment.quantity) == ("committed", Decimal("1480.00"))
+    assert adjustment.booking_date == date(2026, 11, 30)
+    assert adjustment.position == -1
+    assert await _balance_after(session, account.id, date(2026, 12, 1)) == Decimal("1450.00")
+
+
 async def test_hybrid_account_has_no_adjustment(
     session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
 ) -> None:
@@ -502,6 +619,31 @@ async def test_opening_from_ofx_ledgerbal(session: AsyncSession, run: Run, stage
     assert batch.statement.closing_balance == Decimal("2496.50")
     assert batch.statement.closing_balance_date == date(2026, 11, 30)
     assert batch.statement.period_from == date(2026, 11, 1)
+
+    # A LEDGERBAL dated before the last transaction can't be its closing balance.
+    early = content.replace("<DTASOF>20261130", "<DTASOF>20261110")
+    batch = await stage(profile, early, filename="early.ofx")
+    assert _adjustments(await _rows(session, batch)) == []
+    assert batch.warnings == [NO_BALANCES]
+
+
+async def test_ofx_rows_keep_the_files_currency(
+    session: AsyncSession, run: Run, stage: Stage, eur: InstrumentRecord
+) -> None:
+    profile = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261110", "-3.50", "EXB1"), ("20261111", "20.00", "EXB2")],
+        start="20261101",
+        end="20261130",
+        extra="<LEDGERBAL>\n<BALAMT>116.50\n<DTASOF>20261130\n</LEDGERBAL>",
+        currency="EUR",
+    )
+    # A picked default (GBP) doesn't override the file's CURDEF, nor does the LEDGERBAL route.
+    rows = await _rows(session, await stage(profile, content, filename="eur.ofx"))
+
+    assert {row.instrument_id for row in rows} == {eur.id}
+    (adjustment,) = _adjustments(rows)
+    assert adjustment.quantity == Decimal("100.00")
 
 
 async def test_multi_currency_chains_separately(
