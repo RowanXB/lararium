@@ -408,6 +408,7 @@ class BocStatement:
     summary: dict[str, str] = field(default_factory=dict[str, str])
     terms: bool = True
     extra: list[Extra] = field(default_factory=list[Extra])
+    iban: str = "GB99 EXAM 4012 3490 1234 56"
 
 
 def _boc(pdf: _Pdf, x: float, top: float, value: str, *, right: bool = False) -> None:
@@ -471,7 +472,7 @@ def boc_pdf(statement: BocStatement) -> bytes:
         pdf,
         8.8,
         541,
-        "International Bank Account Number(IBAN)/国际银行账号:GB99 EXAM 4012 3490 1234 56",
+        f"International Bank Account Number(IBAN)/国际银行账号:{statement.iban}",
     )
     _boc_label(pdf, 8.8, 570, "Account Balance Summary/账户余额概览")
     _rule(pdf, 585)

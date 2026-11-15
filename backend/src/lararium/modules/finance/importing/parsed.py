@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from decimal import Decimal, localcontext
 from functools import wraps
@@ -50,6 +50,14 @@ def normalise_account_number(text: str | None) -> str | None:
     return None if text is None else _digits(text, "an account number")
 
 
+def _blank_as_absent(details: object) -> None:
+    """Strips a frozen dataclass's text fields, and makes a blank one None: a field printed
+    blank is not stated, so each typed column is NULL or a value."""
+    for name in [f.name for f in fields(details)]:  # pyright: ignore[reportArgumentType]
+        value: str | None = getattr(details, name)
+        object.__setattr__(details, name, None if value is None else value.strip() or None)
+
+
 @dataclass(frozen=True)
 class Counterparty:
     """The other side of a payment, as the file states it (M4's counterparty details)."""
@@ -61,6 +69,7 @@ class Counterparty:
     bank: str | None = None
 
     def __post_init__(self) -> None:
+        _blank_as_absent(self)
         object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
         object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
 
@@ -80,6 +89,7 @@ class StatementAccount:
     branch: str | None = None  # name and address as one text
 
     def __post_init__(self) -> None:
+        _blank_as_absent(self)
         object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
         object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
         if self.iban is not None:

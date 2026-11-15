@@ -5,6 +5,8 @@ from typing import Any
 import pytest
 
 from lararium.modules.finance.importing.parsed import (
+    Counterparty,
+    StatementAccount,
     StatementRate,
     keyed,
     normalise_account_number,
@@ -53,3 +55,10 @@ def test_bad_identifiers_show_only_their_last_four(normalise: Any, text: str) ->
     message = str(raised.value)
     assert repr("…" + text[-4:]) in message
     assert text not in message and text[:4] not in message
+
+
+def test_blank_account_and_counterparty_fields_are_absent() -> None:
+    assert StatementAccount(iban=" ", name="", branch=" Example ") == StatementAccount(
+        branch="Example"
+    )
+    assert Counterparty(name=" ", reference="") == Counterparty()

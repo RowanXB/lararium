@@ -691,3 +691,10 @@ def test_not_a_pdf_refused() -> None:
 def test_wrong_layout_refused() -> None:
     with pytest.raises(FileFormatError):
         _parse(lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS)), "hsbc_uk_statement")
+
+
+def test_boc_field_printed_blank_is_absent() -> None:
+    """Review finding: a label printed with no value was stored as '' (a blank IBAN then
+    broke import_statements' CHECK)."""
+    statement = _boc(BocStatement(pages=[[LOCAL_OUT]], iban=""))
+    assert statement.account is not None and statement.account.iban is None

@@ -1178,8 +1178,9 @@ async def _missing_committed_row(
     complete: _Range,
 ) -> str | None:
     """Decision 16 the other way: on the days this file lists in full, every committed
-    statement row must have been matched by a row of this file. Otherwise the ledger would contradict
-    one of the two files; returns the message naming the first such row, or None."""
+    statement row must have been matched by a row of this file. Otherwise the ledger would
+    contradict one of the two files; returns the message naming the first such row, or
+    None."""
     start, end = complete
     if start is None or end is None:
         return None

@@ -171,6 +171,8 @@ def _fields(lines: list[list[Word]]) -> _Fields:
             if match is None:
                 continue
             value = match[1].strip()
+            if not value:  # the label printed without a value: a later page may have it
+                continue
             if key == "account_number":
                 found.account_numbers.add(value)
             found.values.setdefault(key, value)
