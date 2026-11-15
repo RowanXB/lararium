@@ -69,7 +69,25 @@ UPGRADE = [
     """,
 ]
 
+# The code before 0014 posts every contra against Unassigned and knows no derived rows, so
+# the ledger goes back to that before the tables go: the placeholders and settlements are
+# deleted (their postings cascade), and every recorded posting on In transit moves back to
+# Unassigned. The system accounts are found by their settings; In transit itself stays,
+# empty, as accounts are never deleted.
+_SYSTEM_ACCOUNT = "(SELECT (value #>> '{{}}')::uuid FROM core.settings WHERE key = '{}')"
+LEDGER_UNDO = [
+    # Its rows reference the derived transactions.
+    "DELETE FROM finance.transfers",
+    "DELETE FROM finance.transactions WHERE origin IN ('inference', 'rule')",
+    f"""
+    UPDATE finance.postings
+      SET account_id = {_SYSTEM_ACCOUNT.format("finance.system_account.unassigned")}
+      WHERE account_id = {_SYSTEM_ACCOUNT.format("finance.system_account.in_transit")}
+    """,
+]
+
 DOWNGRADE = [
+    *LEDGER_UNDO,
     "DROP TABLE finance.transfer_decisions",
     "DROP TABLE finance.transfers",
     "DROP INDEX finance.transactions_counterparty_identifier",

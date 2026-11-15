@@ -183,13 +183,19 @@ async def _heal(session: AsyncSession, args: Mapping[str, JSONValue]) -> None:
         logger.error("healing transfers failed: %s", type(exc).__name__)
 
 
+# More transfers due in one check than this are reported in one summary message.
+MAX_TRANSFER_MESSAGES = 3
+
+
 async def run_check_transfers(
     session: AsyncSession,
     *,
     notifier: Notifier,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
-    """Heal, then tell the owner once about each transfer that is overdue or needs review.
+    """Heal, then tell the owner once about each transfer that is overdue or needs review:
+    a message each, or one summary when there are more than MAX_TRANSFER_MESSAGES (the first
+    check after deploy may find a whole history due).
 
     The messages are read and marked under the matching lock, so a heal running meanwhile
     can't reopen a transfer between them (a reopened one keeps its notified_at). They are
@@ -201,7 +207,10 @@ async def run_check_transfers(
         await lock_transfers(ctx)
         due = await due_notifications(session, now())
         await mark_notified(ctx, [transfer_id for transfer_id, _ in due])
-    for _, text in due:
+    messages = [text for _, text in due]
+    if len(messages) > MAX_TRANSFER_MESSAGES:
+        messages = [f"{len(messages)} transfers need your attention: see Transfers"]
+    for text in messages:
         await _notify(notifier, text)
 
 

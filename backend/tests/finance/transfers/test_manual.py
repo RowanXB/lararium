@@ -1,5 +1,7 @@
+import importlib.util
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import insert, text
 
@@ -13,6 +15,7 @@ from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
     TransactionInput,
+    find_unbalanced_transactions,
     post_transaction,
     upsert_connector_transaction,
 )
@@ -522,3 +525,55 @@ async def test_any_stray_in_transit_posting_is_found_and_repaired(
     assert (ids.unassigned, Decimal("100.50")) in await postings_of(session, stray.id)
     await assert_consistent(session)
     assert await heal() == 0
+
+
+def _migration(name: str):
+    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_downgrading_0014_undoes_the_ledger_side(
+    session, run, ids, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    # A payment to a manual account (placeholder) and one before a connected account's
+    # history (settlement), both healed; then 0014's downgrade, up to its schema changes.
+    a = await connected_bank("A")
+    b = await manual_bank("B")
+    c = await connected_bank("C")
+    await run(assign_identifier, c.account.id, "uk_bank_account", "778899:33334444")
+    await connector_tx(c, "-5", external_id="card_1", occurred_at=WHEN, bank_transfer=False)
+    b_identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", "778899:33334444")
+    to_b = await connector_tx(a, "-100", external_id="to_b", identifier_id=b_identifier)
+    to_c = await connector_tx(
+        a,
+        "-30",
+        external_id="to_c",
+        occurred_at=WHEN - timedelta(days=30),
+        identifier_id=c_identifier,
+    )
+    await heal()
+    assert sorted(t.status for t in await list_transfers(session)) == ["before_history", "inferred"]
+    worth = await net_worth_on(session)
+
+    migration = _migration("0014_finance_transfers")
+    for statement in migration.LEDGER_UNDO:
+        await session.execute(text(statement))
+
+    assert await placeholders(session) == []
+    assert await placeholders(session, "rule") == []
+    for record in (to_b, to_c):
+        assert await contra_account(session, record.id, a.account.id) == ids.unassigned
+    on_in_transit = await session.scalar(
+        text("select count(*) from finance.postings where account_id = :a"), {"a": ids.in_transit}
+    )
+    assert on_in_transit == 0
+    # As the code before 0014 left it: B without the placeholder's 100, A's payments gone to
+    # Unassigned (the settled 30 was outside net worth already, on Opening balances).
+    assert (await balances_on(session))[b.id] == Decimal(1000)
+    assert await net_worth_on(session) == worth - 100
+    assert await find_unbalanced_transactions(session) == []

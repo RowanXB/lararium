@@ -468,3 +468,30 @@ async def test_matching_lock_is_free_while_sending(
         finally:
             await owner.dispose()
             await engine.dispose()
+
+
+async def test_many_due_notifications_go_as_one_summary(session, monkeypatch) -> None:
+    # The first check after deploy may find the whole history due at once.
+    due = [(uuid.uuid4(), f"A transfer {n} needs your review.") for n in range(4)]
+    marked: list[uuid.UUID] = []
+
+    async def due_notifications(session, now) -> list[tuple[uuid.UUID, str]]:
+        return due
+
+    async def mark_notified(ctx, transfer_ids) -> None:
+        marked.extend(transfer_ids)
+
+    monkeypatch.setattr(jobs, "due_notifications", due_notifications)
+    monkeypatch.setattr(jobs, "mark_notified", mark_notified)
+    notifier = RecordingNotifier()
+
+    await jobs.run_check_transfers(session, notifier=notifier)
+
+    assert notifier.messages == ["4 transfers need your attention: see Transfers"]
+    assert marked == [transfer_id for transfer_id, _ in due]
+
+    # Up to 3 still go one by one.
+    del due[3]
+    notifier = RecordingNotifier()
+    await jobs.run_check_transfers(session, notifier=notifier)
+    assert notifier.messages == [text for _, text in due]

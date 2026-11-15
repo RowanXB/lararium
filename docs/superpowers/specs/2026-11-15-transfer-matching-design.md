@@ -194,7 +194,7 @@ Registry rows with no account and not dismissed that transactions name, with the
 
 ### 5.11 Notifications
 
-A periodic job (every 30 minutes, after healing) sends one notification per transfer that has been `awaiting` longer than the overdue setting, and one when a transfer starts needing review, through the existing notifier. `notified_at` keeps them from repeating.
+A periodic job (every 30 minutes, after healing) sends one notification per transfer that has been `awaiting` longer than the overdue setting, and one when a transfer starts needing review, through the existing notifier. `notified_at` keeps them from repeating. When one run has more than 3 due (the first run after deploy may find a whole history), it sends one summary ("N transfers need your attention: see Transfers") instead, and marks them all notified.
 
 ### 5.12 API and UI
 
