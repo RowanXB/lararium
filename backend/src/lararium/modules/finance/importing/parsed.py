@@ -148,6 +148,8 @@ class ParsedStatement:
     currency: str | None = None
     statement_reference: str | None = None
     document_date: date | None = None
+    available_balance: Decimal | None = None
+    available_balance_date: date | None = None
     overdraft_limit: Decimal | None = None
     overdraft_limit_date: date | None = None
     rates: list[StatementRate] = field(default_factory=list[StatementRate])

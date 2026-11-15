@@ -250,20 +250,23 @@ def _account(statement: _Aggregate) -> StatementAccount | None:
     return None if account == StatementAccount() else account
 
 
-def _closing(statement: _Aggregate, config: OfxProfileConfig) -> tuple[Decimal | None, date | None]:
-    ledger = statement.child("LEDGERBAL")
-    if ledger is None:
+def _balance(
+    statement: _Aggregate, name: str, config: OfxProfileConfig
+) -> tuple[Decimal | None, date | None]:
+    """LEDGERBAL or AVAILBAL: the amount in ledger sign and the written date of DTASOF."""
+    aggregate = statement.child(name)
+    if aggregate is None:
         return None, None
-    values = ledger.leaf_values()
+    values = aggregate.leaf_values()
     amount, as_of = _optional(values, "BALAMT"), _optional(values, "DTASOF")
     if amount is None or as_of is None:
-        raise FileFormatError("LEDGERBAL needs both BALAMT and DTASOF")
+        raise FileFormatError(f"{name} needs both BALAMT and DTASOF")
     try:
         balance = _signed(parse_amount(amount, AmountFormat()), config)
-        closing_date, _ = _datetime(as_of, "DTASOF")
+        as_of_date, _ = _datetime(as_of, "DTASOF")
     except ValueError as error:
-        raise FileFormatError(f"LEDGERBAL: {error}") from None
-    return balance, closing_date
+        raise FileFormatError(f"{name}: {error}") from None
+    return balance, as_of_date
 
 
 def _period(statement: _Aggregate) -> tuple[date, date] | None:
@@ -306,12 +309,15 @@ def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
             rows.append(_row(position, raw, currency, config))
         except ValueError as error:
             rows.append(RowError(position=position, message=str(error), raw=raw))
-    closing_balance, closing_balance_date = _closing(statement, config)
+    closing_balance, closing_balance_date = _balance(statement, "LEDGERBAL", config)
+    available_balance, available_balance_date = _balance(statement, "AVAILBAL", config)
     return ParsedStatement(
         rows=rows,
         closing_balance=closing_balance,
         closing_balance_date=closing_balance_date,
         period=_period(statement),
+        available_balance=available_balance,
+        available_balance_date=available_balance_date,
         account=_account(statement),
         currency=currency,
     )

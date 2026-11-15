@@ -508,3 +508,30 @@ def test_bad_period_is_file_error(old: bytes, new: bytes) -> None:
     content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(old, new)
     with pytest.raises(FileFormatError, match="BANKTRANLIST"):
         _parse(content)
+
+
+def test_availbal_is_available_balance() -> None:
+    balances = (
+        "<LEDGERBAL>\n<BALAMT>1234.56\n<DTASOF>20261130\n</LEDGERBAL>\n"
+        "<AVAILBAL>\n<BALAMT>1500.00\n<DTASOF>20261129120000[-5:EST]\n</AVAILBAL>"
+    )
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS, extra=balances))
+    statement = _parse(content)
+    assert statement.available_balance == Decimal("1500.00")
+    assert statement.available_balance_date == date(2026, 11, 29)
+    assert statement.closing_balance == Decimal("1234.56")
+    assert _parse(content, sign="outflow_positive").available_balance == Decimal("-1500.00")
+    without = _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS)))
+    assert without.available_balance is None and without.available_balance_date is None
+
+
+@pytest.mark.parametrize(
+    "balance",
+    [
+        "<AVAILBAL>\n<BALAMT>x\n<DTASOF>20261130\n</AVAILBAL>",
+        "<AVAILBAL>\n<BALAMT>1.00\n</AVAILBAL>",
+    ],
+)
+def test_bad_availbal_is_file_error(balance: str) -> None:
+    with pytest.raises(FileFormatError, match="AVAILBAL"):
+        _parse(_sgml(_sgml_statement(SGML_TRANSACTIONS, extra=balance)))
