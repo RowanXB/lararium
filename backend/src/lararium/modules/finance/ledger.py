@@ -6,7 +6,7 @@ from decimal import MAX_PREC, Decimal, localcontext
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import Numeric, case, delete, func, insert, literal, select, update
+from sqlalchemy import Numeric, case, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -358,6 +358,7 @@ async def upsert_connector_transaction(
                 t.description,
                 t.counterparty_entity_id,
                 t.status,
+                t.voided_by,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
     ).one_or_none()
@@ -368,8 +369,9 @@ async def upsert_connector_transaction(
             f"transaction {existing.id} was not created by a connector; refusing to replace it"
         )
     before = await _load_transaction(session, existing.id)
-    if existing.status == "void" and tx.status != "void":
-        # The owner's void is a decision that survives re-syncs.
+    if existing.status == "void" and tx.status != "void" and existing.voided_by != "connector":
+        # The owner's void is a decision that survives re-syncs. A connector's own void (of a
+        # reversed transaction, say) gives way to what the upstream reports now.
         return before, "unchanged"
     booking_date = await _validate_transaction(session, tx)
     fields_unchanged = (
@@ -386,9 +388,12 @@ async def upsert_connector_transaction(
         _posting_key(p) for p in tx.postings
     ]:
         return before, "unchanged"
-    await session.execute(
+    # The decision above was made on an unlocked read: the UPDATE checks it again, so a void
+    # the owner commits meanwhile isn't overwritten (no row is updated, and nothing changes).
+    replaceable = or_(t.status != "void", t.voided_by == "connector")
+    updated = await session.scalar(
         update(t)
-        .where(t.id == existing.id)
+        .where(t.id == existing.id, replaceable if tx.status != "void" else true())
         .values(
             occurred_at=tx.occurred_at,
             occurred_tz=tx.occurred_tz,
@@ -397,8 +402,12 @@ async def upsert_connector_transaction(
             description=tx.description,
             counterparty_entity_id=tx.counterparty_entity_id,
             status=tx.status,
+            voided_by=ctx.actor.type if tx.status == "void" else None,
         )
+        .returning(t.id)
     )
+    if updated is None:
+        return await _load_transaction(session, existing.id), "unchanged"
     await session.execute(
         delete(models.Posting).where(models.Posting.transaction_id == existing.id)
     )
@@ -413,14 +422,21 @@ async def upsert_connector_transaction(
 
 
 async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:
+    """Void the transaction, recording who did. One already void is left as it is: the first
+    void stands, so a connector acting on an older reading can't make the owner's void its
+    own (and so let a later sync undo it)."""
+    t = models.Transaction
     voided = await ctx.session.scalar(
-        update(models.Transaction)
-        .where(models.Transaction.id == transaction_id)
-        .values(status="void")
-        .returning(models.Transaction.id)
+        update(t)
+        .where(t.id == transaction_id, t.status != "void")
+        .values(status="void", voided_by=ctx.actor.type)
+        .returning(t.id)
     )
     if voided is None:
-        raise TransactionNotFoundError(str(transaction_id))
+        exists = await ctx.session.scalar(select(t.id).where(t.id == transaction_id))
+        if exists is None:
+            raise TransactionNotFoundError(str(transaction_id))
+        return await _load_transaction(ctx.session, transaction_id)
     record = await _load_transaction(ctx.session, transaction_id)
     _publish(ctx, "finance.transaction.voided", record)
     return record

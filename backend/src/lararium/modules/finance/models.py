@@ -69,6 +69,8 @@ class Transaction(Base):
     description: Mapped[str] = mapped_column(Text, server_default=text("''"))
     counterparty_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
     status: Mapped[str] = mapped_column(Text)
+    # Who voided it (an actor type), when it is void; NULL for voids before this was kept.
+    voided_by: Mapped[str | None] = mapped_column(Text)
     origin: Mapped[str] = mapped_column(Text)
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     connection_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.connections.id"))

@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from lararium.core.connections import get_connection, set_warnings
+from lararium.core.commands import command_context
+from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import BACKFILL_FAILED, Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
@@ -19,7 +20,7 @@ from lararium.modules.finance.monzo.client import (
     NotYetApprovedError,
 )
 from lararium.modules.finance.monzo.normalize import FetchedRecord, normalize, oldest_pending
-from lararium.modules.finance.monzo.webhooks import ensure_webhooks
+from lararium.modules.finance.monzo.webhooks import WEBHOOK_IDS_KEY, ensure_webhooks
 
 VERSION = "monzo-sync-1"
 # Re-fetched on every incremental sync: pending transactions settle or change after creation.
@@ -109,6 +110,26 @@ async def _authorised(ctx: SyncContext) -> tuple[MonzoClient, list[dict[str, Any
         ) from exc
 
 
+async def _save_webhook_ids(ctx: SyncContext, ids: set[str]) -> None:
+    """Commit the ids of our webhooks at Monzo in a transaction of their own, as soon as
+    they change: a registration takes effect at Monzo at once, so its id must outlive this
+    sync failing later, or the webhook could never be found (and deleted) again.
+
+    Called before the sync updates the connection row, which would hold its lock until the
+    sync commits and so block this transaction.
+    """
+    args = {"connection_id": str(ctx.connection.id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "connection.save_webhook_ids", args) as cmd,
+    ):
+        if ids:
+            stored: list[JSONValue] = [*sorted(ids)]
+            await update_config(cmd, ctx.connection.id, {WEBHOOK_IDS_KEY: stored})
+        else:
+            await update_config(cmd, ctx.connection.id, remove=[WEBHOOK_IDS_KEY])
+
+
 class MonzoConnector:
     name = "monzo"
     version = VERSION
@@ -150,12 +171,21 @@ class MonzoConnector:
 
         warnings: list[str] = []
         await store("accounts", {}, accounts)
-        if ctx.webhook is not None:
+        stored_ids = connection.config.get(WEBHOOK_IDS_KEY)
+        known_ids: set[str] = (
+            {i for i in stored_ids if isinstance(i, str)} if isinstance(stored_ids, list) else set()
+        )
+        if ctx.webhook is not None or known_ids:
             # Not stored as raw records: the registered URLs carry the secret.
             open_accounts = [a["id"] for a in accounts if not a.get("closed")]
+            ours = set(known_ids)
             try:
                 await ensure_webhooks(
-                    client, open_accounts, ctx.webhook.base_url, ctx.webhook.secret
+                    client,
+                    open_accounts,
+                    ctx.webhook.base_url if ctx.webhook else None,
+                    ctx.webhook.secret if ctx.webhook else None,
+                    ours=ours,
                 )
             except Exception as exc:
                 # Best effort: without webhooks, syncs still run on the schedule. A
@@ -163,6 +193,9 @@ class MonzoConnector:
                 # its type, as its message may quote the URL.
                 reason = str(exc) if isinstance(exc, MonzoApiError) else type(exc).__name__
                 warnings.append(f"{WEBHOOK_WARNING} ({reason}); syncing on the schedule only")
+            finally:
+                if ours != known_ids:
+                    await _save_webhook_ids(ctx, ours)
         # Accounts missing from this response keep their state, in case they come back.
         cursor = connection.cursor
         previous = cursor.get("accounts") if isinstance(cursor, dict) else None

@@ -114,7 +114,9 @@ it("shows the authorising notice and polls until the status changes", async () =
     data: [{ ...CONNECTION, status: "authorising" }],
   } as never);
   renderPage();
-  expect(await screen.findByText(/Open the Monzo app and approve the request now/)).toBeVisible();
+  expect(await screen.findByText(/Approve the request in the Monzo app/)).toBeVisible();
+  // Not offered while it waits or backfills: that would throw the approval away.
+  expect(screen.queryByRole("button", { name: "Authorise" })).not.toBeInTheDocument();
   expect(listConnections).toHaveBeenCalledTimes(1);
 
   await act(async () => {
@@ -122,7 +124,7 @@ it("shows the authorising notice and polls until the status changes", async () =
   });
   expect(listConnections).toHaveBeenCalledTimes(2);
   await waitFor(() =>
-    expect(screen.queryByText(/Open the Monzo app and approve/)).not.toBeInTheDocument(),
+    expect(screen.queryByText(/Approve the request in the Monzo app/)).not.toBeInTheDocument(),
   );
 
   await act(async () => {

@@ -58,6 +58,9 @@ logger = logging.getLogger(__name__)
 NORMALIZER_VERSION = "monzo-norm-1"
 
 ACCOUNT_MAP_KEY = "account_map"
+# Per Monzo account: where the history its opening accounts for begins (ISO time). Recorded
+# when the opening is first computed, even when none is needed (ruling R18).
+OPENING_BOUNDARIES_KEY = "opening_boundaries"
 # The last mismatch the owner was told about, per Monzo account, so each value is sent once.
 NOTIFIED_KEY = "reconciliation_notified"
 OPENING_DESCRIPTION = "Opening balance adjustment"
@@ -127,16 +130,37 @@ def _description(tx: dict[str, Any]) -> str:
 
 async def _connector_transaction(
     session: AsyncSession, connection_id: UUID, external_id: str
-) -> tuple[UUID, TransactionStatus] | None:
+) -> tuple[UUID, TransactionStatus, str | None] | None:
+    """The transaction posted under this external id: its id, status and who voided it."""
     t = models.Transaction
     row = (
         await session.execute(
-            select(t.id, t.status).where(
+            select(t.id, t.status, t.voided_by).where(
                 t.connection_id == connection_id, t.external_id == external_id
             )
         )
     ).one_or_none()
-    return None if row is None else (row.id, cast(TransactionStatus, row.status))
+    if row is None:
+        return None
+    return row.id, cast(TransactionStatus, row.status), row.voided_by
+
+
+async def _earliest_connector_posting(
+    session: AsyncSession, account_id: UUID, connection_id: UUID, *, excluding: str
+) -> datetime | None:
+    """When the earliest transaction this connection posted to the account occurred, void
+    ones included (history once fetched, whatever became of it), leaving out the one with
+    the external id `excluding`."""
+    t, p = models.Transaction, models.Posting
+    return await session.scalar(
+        select(func.min(t.occurred_at))
+        .join(p, p.transaction_id == t.id)
+        .where(
+            p.account_id == account_id,
+            t.connection_id == connection_id,
+            t.external_id != excluding,
+        )
+    )
 
 
 async def _ledger_balance(
@@ -270,6 +294,10 @@ class _Normalizer:
         stored_map = config.get(ACCOUNT_MAP_KEY)
         self.account_map: dict[str, JSONValue] = (
             dict(stored_map) if isinstance(stored_map, dict) else {}
+        )
+        stored_boundaries = config.get(OPENING_BOUNDARIES_KEY)
+        self.opening_boundaries: dict[str, JSONValue] = (
+            dict(stored_boundaries) if isinstance(stored_boundaries, dict) else {}
         )
         self.report = NormalizeReport()
         self._currencies: dict[str, InstrumentRecord] = {}
@@ -408,7 +436,7 @@ class _Normalizer:
         existing = await _connector_transaction(self.session, self.connection_id, external_id)
         if existing is None:
             return False
-        transaction_id, status = existing
+        transaction_id, status, _ = existing
         if status == "void":
             self.report.unchanged += 1
         else:
@@ -481,47 +509,96 @@ class _Normalizer:
         else:
             self.report.unchanged += 1
 
-    async def opening(self, monzo_account: dict[str, Any], minor_units: int, code: str) -> None:
-        """Post the difference between Monzo's balance and the rest of the ledger, the day
-        before the earliest other transaction. An opening the owner voided stays void; one no
-        longer needed is voided.
+    def opening_boundary(self, monzo_id: str) -> datetime | None:
+        value = self.opening_boundaries.get(monzo_id)
+        return _parse(value) if isinstance(value, str) else None
 
-        An existing opening is corrected only by history older than what it was placed
-        before, which a later backfill fetched (ruling R18): everything else that changed
-        since, such as a transaction the owner voided or posted by hand, is a reconciliation
-        mismatch to report, never absorbed into it.
+    async def _earliest(self, monzo_id: str) -> datetime | None:
+        return await _earliest_connector_posting(
+            self.session,
+            self.require_mapped(monzo_id),
+            self.connection_id,
+            excluding=f"opening:{monzo_id}",
+        )
+
+    def _move_boundary(self, monzo_id: str, to: datetime) -> None:
+        """The boundary only ever moves earlier: the opening accounts for everything before
+        the earliest point it has covered."""
+        stored = self.opening_boundary(monzo_id)
+        boundary = to if stored is None else min(stored, to)
+        self.opening_boundaries[monzo_id] = boundary.astimezone(UTC).isoformat()
+
+    async def adopt_boundary(self, monzo_id: str) -> None:
+        """Give an account its boundary from what this connection posted before this run
+        (run before it posts anything): one reconciled before boundaries were recorded has its
+        opening accounting for all of that. An account with nothing posted yet gets none, and
+        its first opening is computed from Monzo's balance."""
+        if self.opening_boundary(monzo_id) is not None:
+            return
+        earliest = await self._earliest(monzo_id)
+        if earliest is not None:
+            self._move_boundary(monzo_id, earliest)
+
+    async def record_opening_boundary(self, monzo_id: str, balance_at: datetime) -> None:
+        """Record that the opening accounts for everything before this connection's earliest
+        posting on the account. With none, it accounts for everything in the balance read at
+        `balance_at`: any transaction a later fetch finds before then is in that balance, so
+        it must move the opening, however recent (the account's creation would be too early
+        when this run fetched only the last 89 days)."""
+        earliest = await self._earliest(monzo_id)
+        self._move_boundary(monzo_id, min(earliest, balance_at) if earliest else balance_at)
+
+    async def opening(
+        self, monzo_account: dict[str, Any], minor_units: int, code: str, balance_at: datetime
+    ) -> None:
+        """Post the difference between Monzo's balance (read at `balance_at`) and the rest of
+        the ledger, the day
+        before the earliest other transaction. An opening the owner voided stays void; one no
+        longer needed is voided by the connector, and posted again if it is needed again.
+
+        It is computed from Monzo's balance only the first time, which records where the
+        history it accounts for begins (the boundary), even when no opening is needed. After
+        that only this connection's postings before the boundary, which a later backfill
+        fetched, move it (ruling R18): anything else that changed since, such as a
+        transaction the owner voided or posted by hand, is a reconciliation mismatch to
+        report, never absorbed into it.
         """
         monzo_id: str = monzo_account["id"]
         external_id = f"opening:{monzo_id}"
         existing = await _connector_transaction(self.session, self.connection_id, external_id)
-        if existing is not None and existing[1] == "void":
+        if existing is not None and existing[1] == "void" and existing[2] != "connector":
             self.report.unchanged += 1
             return
+        posted = existing if existing is not None and existing[1] != "void" else None
         account_id = self.require_mapped(monzo_id)
         currency = await self.currency(code)
-        if existing is None:
+        # None only for an account with nothing posted before this run (see adopt_boundary).
+        boundary = self.opening_boundary(monzo_id)
+        if boundary is None:
             balance = to_quantity(minor_units, currency.decimals)
             others = await _ledger_balance(
                 self.session, account_id, currency.id, excluding=external_id
             )
             difference = balance - others
         else:
-            placed, occurred_at = await _posted(self.session, existing[0], account_id)
-            # It was placed a day before anything then on the account occurred, so what this
-            # connection posted before that is history a later backfill fetched. A posting
-            # made by hand is never older history, however it is dated.
+            placed = (
+                (await _posted(self.session, posted[0], account_id))[0]
+                if posted is not None
+                else Decimal(0)
+            )
             older = await _ledger_balance(
                 self.session,
                 account_id,
                 currency.id,
                 excluding=external_id,
-                before=occurred_at + timedelta(days=1),
+                before=boundary,
                 connection_id=self.connection_id,
             )
             difference = placed - older
+        await self.record_opening_boundary(monzo_id, balance_at)
         if difference == 0:
-            if existing is not None:
-                await void_transaction(self.command, existing[0])
+            if posted is not None:
+                await void_transaction(self.command, posted[0])
                 self.report.voided += 1
             return
         earliest = await _earliest_posting(self.session, account_id, excluding=external_id)
@@ -597,14 +674,17 @@ async def normalize(
             for account in content:
                 accounts[account["id"]] = account
                 await n.account(account)
-    balances: dict[str, dict[str, Any]] = {}
+    # Before anything is posted, so this run's transactions can't count as earlier history.
+    for monzo_id in accounts:
+        await n.adopt_boundary(monzo_id)
+    balances: dict[str, tuple[dict[str, Any], datetime]] = {}
     for record_type, request, fetched_at, content in responses:
         if record_type == "pots":
             for pot in content:
                 await n.pot(pot, str(request["current_account_id"]), fetched_at)
         elif record_type == "balance":
             monzo_id = str(request["account_id"])
-            balances[monzo_id] = content
+            balances[monzo_id] = (content, fetched_at)
             n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
@@ -616,11 +696,11 @@ async def normalize(
 
     checked = set(reconciled) | set(openings)
     mismatches: dict[str, tuple[str, str] | None] = {}
-    for monzo_id, balance in balances.items():
+    for monzo_id, (balance, balance_at) in balances.items():
         if monzo_id not in checked:
             continue
         if monzo_id in openings:
-            await n.opening(accounts[monzo_id], balance["balance"], balance["currency"])
+            await n.opening(accounts[monzo_id], balance["balance"], balance["currency"], balance_at)
         mismatches[monzo_id] = await n.reconcile(monzo_id, balance["balance"], balance["currency"])
 
     # Warnings and notifications: one warning per mismatched account; the owner hears about
@@ -647,6 +727,8 @@ async def normalize(
 
     # Only this normaliser's keys: others (such as an OAuth state) may have changed meanwhile.
     values: dict[str, JSONValue] = {ACCOUNT_MAP_KEY: n.account_map}
+    if n.opening_boundaries:
+        values[OPENING_BOUNDARIES_KEY] = n.opening_boundaries
     if notified:
         values[NOTIFIED_KEY] = notified
     remove = [] if notified or NOTIFIED_KEY not in connection.config else [NOTIFIED_KEY]

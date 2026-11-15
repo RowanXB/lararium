@@ -15,8 +15,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { errorMessage } from "../lib/errors";
 
 const POLL_MS = 5000;
-// The statuses the server accepts for an authorise request; anything else gets a 409.
-const AUTHORISABLE = ["created", "needs_reauth", "authorising", "disabled"];
+// The statuses offered Authorise. The server also accepts `authorising`, but this page can't
+// tell the wait for approval from the backfill after it, and authorising again during the
+// backfill throws a completed approval away; an expired wait ends as needs_reauth.
+const AUTHORISABLE = ["created", "needs_reauth", "disabled"];
 
 const CALLBACK_ERRORS: Record<string, string> = {
   state: "The authorisation link expired or was already used. Click Authorise again.",
@@ -75,9 +77,10 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
       <CardContent className="space-y-3">
         {connection.status === "authorising" && (
           <p role="status" className="rounded-md border border-primary p-3 font-medium">
-            Open the Monzo app and approve the request now: Lararium can fetch your full history
-            only within 4 minutes of authorising. Once you approve, it fetches it, and this page
-            shows the result.
+            Approve the request in the Monzo app within 4 minutes of authorising: only then can
+            Lararium fetch your full history. Once you approve, it fetches it, which can take a
+            few minutes, and this page shows the result. If no request appeared, disable the
+            connection and authorise it again.
           </p>
         )}
         <p className="text-sm text-muted-foreground">

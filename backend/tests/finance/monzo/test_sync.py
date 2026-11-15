@@ -423,12 +423,27 @@ async def test_an_account_first_seen_with_older_history_warns(session, run) -> N
     # so the opening absorbs the rest, and the owner is told.
     other = {"last_created": _iso(_noon(2)), "backfilled": True}
     connection = await _connection(run, cursor={"accounts": {"acc_TEST_OTHER": other}})
-    fake = FakeMonzo([], make_account(created=_iso(_noon(300))))
-
-    await _sync(session, run, connection, fake)
+    account = make_account(created=_iso(_noon(300)))
+    cursor = await _sync(session, run, connection, FakeMonzo([], account))
 
     clamped = f"Monzo account {ACCOUNT_ID}: sync window limited to the last 89 days"
     assert (await get_connection(session, connection.id)).warnings == [clamped]
+    assert (await _ledger(session, connection))["openings"] == [
+        ("booked", _noon(301).date(), "250.00")
+    ]
+
+    # Authorised again: the backfill fetches the older history the opening absorbed, and
+    # moves the opening by it, though it is later than the account's creation.
+    older = make_transaction(id="tx_TEST0001", amount=10000, created=_iso(_noon(200)))
+    await run(lambda ctx: _record_cursor(ctx, connection, cursor))
+    await _sync(session, run, connection, FakeMonzo([older], account), full_backfill=True)
+
+    ledger = await _ledger(session, connection)
+    assert ledger["openings"] == [("booked", _noon(201).date(), "150.00")]
+    assert ledger["balance"] == "250.00"
+    # No mismatch; only that Monzo's history starts well after the account's creation.
+    truncated = f"Monzo account {ACCOUNT_ID}: history may be truncated"
+    assert (await get_connection(session, connection.id)).warnings == [truncated]
 
 
 async def test_full_backfill_with_older_history_corrects_the_opening(session, run) -> None:

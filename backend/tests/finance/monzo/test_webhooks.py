@@ -14,16 +14,23 @@ from procrastinate.testing import InMemoryConnector
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from lararium.core.commands import CommandContext
-from lararium.core.connections import ConnectionRecord, get_connection
+from lararium.core.commands import CommandContext, command_context
+from lararium.core.connections import (
+    ConnectionRecord,
+    create_connection,
+    get_connection,
+    store_credential,
+    update_config,
+)
 from lararium.core.connectors import SyncContext, WebhookTarget
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import NullNotifier
 from lararium.core.secrets import Secret
+from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance.monzo import sync as monzo_sync
-from lararium.modules.finance.monzo.client import MonzoClient
+from lararium.modules.finance.monzo.client import MonzoApiError, MonzoClient
 from lararium.modules.finance.monzo.sync import MonzoConnector
-from lararium.modules.finance.monzo.webhooks import ensure_webhooks, process_inbox
+from lararium.modules.finance.monzo.webhooks import WEBHOOK_IDS_KEY, ensure_webhooks, process_inbox
 from lararium.worker.app import defer_sync, procrastinate_app
 
 from .fixtures import ACCOUNT_ID, make_account
@@ -95,7 +102,8 @@ async def test_ensure_webhooks_replaces_stale_and_registers_missing() -> None:
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
         client = MonzoClient(http, Secret("at-TEST"))
-        await ensure_webhooks(client, [ACCOUNT_ID, OTHER_ACCOUNT], BASE, Secret(SECRET))
+        ours: set[str] = set()
+        await ensure_webhooks(client, [ACCOUNT_ID, OTHER_ACCOUNT], BASE, Secret(SECRET), ours=ours)
 
     assert sorted((h["account_id"], h["url"]) for h in fake.hooks) == sorted(
         [
@@ -110,6 +118,7 @@ async def test_ensure_webhooks_replaces_stale_and_registers_missing() -> None:
     # Already registered: nothing posted for the other account.
     posted = [parse_qs(r.content.decode()) for r in fake.requests if r.method == "POST"]
     assert posted == [{"account_id": [ACCOUNT_ID], "url": [OUR_URL]}]
+    assert ours == {h["id"] for h in fake.hooks if h["url"] == OUR_URL}
 
 
 async def _sync(
@@ -172,6 +181,148 @@ async def test_sync_without_webhook_settings_leaves_webhooks_alone(session, run)
     await _sync(session, connection, fake, webhook=False)
 
     assert fake.webhook_requests() == []
+
+
+async def test_our_webhook_under_an_old_base_url_is_deleted(session, run) -> None:
+    # Registered before the tunnel hostname changed: its URL is no longer under BASE.
+    old = _hook("webhook_OLD", f"https://hooks.old.example/monzo/{SECRET}")
+    fake = WebhookMonzo([old])
+    connection = await _connection(run)
+    await run(update_config, connection.id, {WEBHOOK_IDS_KEY: ["webhook_OLD"]})
+
+    await _sync(session, connection, fake)
+
+    assert [h["url"] for h in fake.hooks] == [OUR_URL]
+    assert await _webhook_ids(session, connection) == [fake.hooks[0]["id"]]
+
+
+async def test_turning_webhooks_off_deletes_ours(session, run) -> None:
+    fake = WebhookMonzo()
+    connection = await _connection(run)
+    await _sync(session, connection, fake)
+    assert len(await _webhook_ids(session, connection) or []) == 1
+
+    await _sync(session, connection, fake, webhook=False)
+
+    assert fake.hooks == []
+    assert await _webhook_ids(session, connection) is None
+
+
+async def _webhook_ids(session: AsyncSession, connection: ConnectionRecord) -> Any:
+    """The ids as committed: read in a session of its own, as a later sync would."""
+    async with async_sessionmaker(bind=session.bind)() as other:
+        return (await get_connection(other, connection.id)).config.get(WEBHOOK_IDS_KEY)
+
+
+async def _delete_connection(engine: Any, owner_url: str, connection_id: uuid.UUID) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("delete from core.connections where id = :id"), {"id": connection_id}
+        )
+    owner = create_engine(owner_url)
+    try:
+        # The audit log is append-only for the backend role.
+        async with owner.begin() as conn:
+            await conn.execute(
+                text(
+                    "delete from core.audit_log where args->>'connection_id' = :id"
+                    " or changes ? ('connection:' || :id)"
+                ),
+                {"id": str(connection_id)},
+            )
+    finally:
+        await owner.dispose()
+
+
+class FailingTransactions(WebhookMonzo):
+    """WebhookMonzo whose /transactions answers 400, failing the sync after registration."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/transactions":
+            return httpx.Response(400, json={"code": "bad_request"})
+        return super().__call__(request)
+
+
+async def test_a_webhook_registered_by_a_failed_sync_is_still_known(
+    backend_url: str, owner_url: str, migrated: None
+) -> None:
+    # Real commits through their own engine: the sync's own transaction rolls back, as in
+    # run_sync, and only what was committed on its own survives.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    fake = FailingTransactions()
+    connection_id = None
+    try:
+        async with sessions() as setup, command_context(setup, CONNECTOR, "test.setup", {}) as ctx:
+            connection = await create_connection(
+                ctx, connector="monzo", display_name="Monzo", config={}
+            )
+            connection_id = connection.id
+            await store_credential(
+                ctx,
+                KEY,
+                connection_id,
+                "access_token",
+                "at-TEST",
+                datetime.now(UTC) + timedelta(hours=1),
+            )
+
+        with pytest.raises(MonzoApiError):
+            async with (
+                sessions() as session,
+                command_context(session, CONNECTOR, "connection.sync", {}) as ctx,
+                httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http,
+            ):
+                await MonzoConnector().sync(
+                    SyncContext(
+                        command=ctx,
+                        connection=await get_connection(session, connection_id),
+                        sync_id=uuid.uuid4(),
+                        master_key=KEY,
+                        http=http,
+                        notifier=NullNotifier(),
+                        session_factory=sessions,
+                        webhook=WebhookTarget(BASE, Secret(SECRET)),
+                    )
+                )
+
+        # Registered at Monzo, so recorded though the sync was rolled back: turning webhooks
+        # off later finds it by its id.
+        (hook,) = fake.hooks
+        async with sessions() as fresh:
+            config = (await get_connection(fresh, connection_id)).config
+        assert config.get(WEBHOOK_IDS_KEY) == [hook["id"]]
+    finally:
+        if connection_id is not None:
+            await _delete_connection(engine, owner_url, connection_id)
+        await engine.dispose()
+
+
+async def test_a_webhook_registered_before_registration_fails_is_still_known(
+    session, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_sleep(seconds: int) -> None:
+        return None
+
+    class DeleteFails(WebhookMonzo):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                self.requests.append(request)
+                return httpx.Response(500, json={"code": "internal_service"})
+            return super().__call__(request)
+
+    monkeypatch.setattr(monzo_sync, "MonzoClient", partial(MonzoClient, sleep=no_sleep))
+    fake = DeleteFails()
+    connection = await _connection(run)
+    # Ours on an account no longer listed: deleting it fails after the new one is registered.
+    await run(update_config, connection.id, {WEBHOOK_IDS_KEY: ["webhook_GONE"]})
+
+    await _sync(session, connection, fake)
+
+    (warning,) = (await get_connection(session, connection.id)).warnings
+    assert warning.startswith("Monzo webhooks could not be updated")
+    (hook,) = fake.hooks
+    assert await _webhook_ids(session, connection) == sorted([hook["id"], "webhook_GONE"])
 
 
 async def test_webhook_errors_warn_without_failing_the_sync(

@@ -25,7 +25,15 @@ def main() -> None:
     # Fails with a clear message when the environment is incomplete.
     get_settings()
     # run_worker imports the app's import_paths (lararium.worker.jobs), which registers the tasks.
-    procrastinate_app.run_worker(concurrency=CONCURRENCY)
+    # Finished jobs are deleted, failed ones kept to inspect: periodic jobs run every
+    # minute, and kept they would grow the database (and every dump) without bound.
+    # listen_notify=False: the worker finds new jobs and abort requests by polling the
+    # database, and doesn't LISTEN. Postgres checks no privilege on NOTIFY, so any role that
+    # can connect (the internet-facing receiver's included) could otherwise stop the worker
+    # with a malformed message or abort a running job. A sync starts a few seconds later.
+    procrastinate_app.run_worker(
+        concurrency=CONCURRENCY, delete_jobs="successful", listen_notify=False
+    )
 
 
 if __name__ == "__main__":

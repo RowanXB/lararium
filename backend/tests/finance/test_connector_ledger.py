@@ -1,7 +1,11 @@
 import asyncio
+import dataclasses
+import importlib.util
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import exc, text
@@ -10,6 +14,7 @@ from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
 from lararium.db import create_engine, make_sessionmaker
+from lararium.modules.finance import ledger
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import (
     PostingInput,
@@ -181,6 +186,87 @@ async def test_owner_void_is_sticky(session, run, make_account, gbp) -> None:
     assert updates == 0
 
 
+async def test_a_connector_void_gives_way_to_upstream_data(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    # The connector voided it (a pending payment that came back reversed)...
+    async with command_context(session, Actor("connector", "monzo"), "sync", {}) as ctx:
+        await void_transaction(ctx, created.id)
+    # ...and the upstream now reports it again: the upstream wins over the connector's void.
+    record, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "9.00", status="booked")
+    )
+
+    assert (outcome, record.status) == ("updated", "booked")
+    voided_by = await session.scalar(
+        text("select voided_by from finance.transactions where id = :i"), {"i": created.id}
+    )
+    assert voided_by is None
+
+
+async def test_voids_record_who_made_them(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+
+    await run(void_transaction, created.id)  # the owner, through `run`'s user actor
+
+    voided_by = await session.scalar(
+        text("select voided_by from finance.transactions where id = :i"), {"i": created.id}
+    )
+    assert voided_by == "user"
+
+
+async def test_the_first_void_stands(session, run, make_account, gbp) -> None:
+    # The owner voids; a connector acting on an older reading voids it again.
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    await run(void_transaction, created.id)
+    async with command_context(session, Actor("connector", "monzo"), "sync", {}) as ctx:
+        await void_transaction(ctx, created.id)
+
+    # Still the owner's, so a later sync can't undo it.
+    _, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "9.00", status="booked")
+    )
+    assert outcome == "unchanged"
+    voided_by = await session.scalar(
+        text("select voided_by from finance.transactions where id = :i"), {"i": created.id}
+    )
+    assert voided_by == "user"
+
+
+async def test_an_owner_void_made_during_the_upsert_is_kept(
+    session, run, make_account, gbp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    validate = ledger._validate_transaction
+
+    async def owner_voids_meanwhile(*args, **kwargs):
+        # Between the upsert's read and its UPDATE, as a concurrent request would.
+        async with command_context(session, Actor("user", "owner"), "void", {}) as ctx:
+            await void_transaction(ctx, created.id)
+        return await validate(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "_validate_transaction", owner_voids_meanwhile)
+    _, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "9.00", status="booked")
+    )
+
+    assert outcome == "unchanged"
+    row = (
+        await session.execute(
+            text("select status, voided_by from finance.transactions where id = :i"),
+            {"i": created.id},
+        )
+    ).one()
+    assert (row.status, row.voided_by) == ("void", "user")
+
+
 async def test_concurrent_callers_share_one_system_account(
     backend_url: str, owner_url: str, migrated: None
 ) -> None:
@@ -231,3 +317,36 @@ async def test_concurrent_callers_share_one_system_account(
             await conn.execute(text("delete from core.audit_log where command = 'test.shared_row'"))
         await engine.dispose()
         await owner.dispose()
+
+
+def _migration(name: str) -> Any:
+    path = Path(__file__).parents[2] / "migrations" / "versions" / name
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_voids_from_before_0012_get_who_made_them_from_the_audit_log(
+    session, run, make_account, gbp
+) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    reversed_, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    owners = await run(
+        upsert_connector_transaction,
+        dataclasses.replace(_tx(conn.id, a, b, gbp, "7.00"), external_id="tx_2"),
+    )
+    async with command_context(session, Actor("connector", "monzo"), "sync", {}) as ctx:
+        await void_transaction(ctx, reversed_.id)
+    await run(void_transaction, owners[0].id)
+    # As the voids were before 0012 recorded who made them.
+    await session.execute(text("update finance.transactions set voided_by = null"))
+
+    await session.execute(text(_migration("0012_finance_voided_by.py").BACKFILL_VOIDED_BY))
+
+    rows = dict(
+        (await session.execute(text("select id, voided_by from finance.transactions"))).all()
+    )
+    assert (rows[reversed_.id], rows[owners[0].id]) == ("connector", "user")
