@@ -33,7 +33,9 @@ type MakeAccount = Callable[..., Awaitable[AccountRecord]]
 type Commit = Callable[[UUID], Awaitable[ImportBatchRecord]]
 type Rollback = Commit
 
-NO_BALANCES = "This file has no balances, so its opening balance can't be checked"
+NO_BALANCES = (
+    "This file gives no balance to take its opening from, so its opening balance can't be checked"
+)
 HEADER = "Date,Description,Amount\n"
 BALANCE_HEADER = "Date,Description,Amount,Balance\n"
 BALANCE_COLUMNS = {

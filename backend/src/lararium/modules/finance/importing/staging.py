@@ -65,7 +65,11 @@ RowStatus = Literal["new", "duplicate", "skipped", "error", "committed", "rolled
 RowKind = Literal["statement", "opening_adjustment"]
 
 ROW_STATUSES: tuple[RowStatus, ...] = get_args(RowStatus)
-NO_BALANCES_WARNING = "This file has no balances, so its opening balance can't be checked"
+# No balance the opening can come from: none in the rows, and no closing the file lists
+# everything up to (an OFX LEDGERBAL as of the download day, after its period, isn't).
+NO_BALANCES_WARNING = (
+    "This file gives no balance to take its opening from, so its opening balance can't be checked"
+)
 OPENING_DESCRIPTION = "Opening balance adjustment"
 OUTSIDE_COVERED_DAY = (
     "this period was already imported from another file, and this row is not in it"
@@ -245,9 +249,8 @@ def opening_adjustments(
     instrument_of: Callable[[ParsedRow], UUID],
     closing: tuple[Decimal, date, UUID] | None,
     row_order: str,
-) -> dict[UUID, tuple[Decimal, date, int]]:
-    """Decision 13: the statement's opening balance, first date and first row's position
-    per instrument.
+) -> dict[UUID, tuple[Decimal, date]]:
+    """Decision 13: the statement's opening balance and first date per instrument.
 
     From the chronologically first row with a balance, else from the closing balance
     (amount, date, its instrument). That is the account's balance in the statement's
@@ -258,7 +261,7 @@ def opening_adjustments(
     chains: dict[UUID, list[ParsedRow]] = defaultdict(list)
     for row in _chronological(rows, row_order):
         chains[instrument_of(row)].append(row)
-    openings: dict[UUID, tuple[Decimal, date, int]] = {}
+    openings: dict[UUID, tuple[Decimal, date]] = {}
     with localcontext(prec=MAX_PREC):
         for instrument, chain in chains.items():
             first_day = min(row.booking_date for row in chain)
@@ -279,7 +282,7 @@ def opening_adjustments(
             ):
                 opening = closing[0] - sum((row.quantity - row.fee for row in chain), Decimal(0))
             if opening is not None:
-                openings[instrument] = (opening, first_day, chain[0].position)
+                openings[instrument] = (opening, first_day)
     return openings
 
 
@@ -498,9 +501,14 @@ class OpeningClaim:
     # days it lists in full, or, when they end before its first row (or there are none),
     # just its opening (the day before first_day). Per claim, never per batch.
     vouched_to: date | None = None
-    # The movement its first listed row stands for: the point its opening is the balance
-    # before, which another file listing that row speaks of too.
-    first_source: UUID | None = None
+    # The movements it lists on first_day. An earlier file listing any of them lists the
+    # start of that day's run too, so it speaks of the same opening: no row order needed
+    # (an OFX may list newest first, and its positions are file order).
+    first_day_sources: frozenset[UUID] = frozenset()
+    # The day its adjustment is dated (adjustment_day): before the run of days that every
+    # file of the account, with an opening or not, lists in full up to its opening, so the
+    # adjustment lands inside none of them. Set by _claims; None means opens_on's.
+    dated_on: date | None = None
 
     @property
     def opens_on(self) -> date:
@@ -518,6 +526,8 @@ class OpeningClaim:
         start of day (the gap is before that day starts); on it otherwise, after whatever
         another file lists of that day, so the adjustment never lands inside a day another
         file lists in full."""
+        if self.dated_on is not None:
+            return self.dated_on
         if self.first_day_in_full:
             return self.opens_on - timedelta(days=1)
         return self.opens_on
@@ -632,7 +642,7 @@ def opening_conflicts(
                     if claim.first_day_in_full:
                         vouched = start <= end + timedelta(days=1)
                     else:
-                        shared = claim.first_source is not None and claim.first_source in prior.own
+                        shared = bool(claim.first_day_sources & prior.own)
                         vouched = claim.first_day <= end or shared
                     if vouched:
                         conflicts.append(
@@ -687,6 +697,7 @@ async def _claims(
     }
     defaults = {batch.id: batch.default_instrument_id for batch in batches}
     closings: dict[UUID, tuple[Decimal, date, UUID]] = {}
+    period_ends: dict[UUID, date | None] = {}
     for batch_id, balance, day, code, period_to in await session.execute(
         select(
             s.batch_id, s.closing_balance, s.closing_balance_date, s.currency, s.period_to
@@ -698,14 +709,9 @@ async def _claims(
         # it was downloaded, after its period, and would take movements the file never
         # lists into the opening.
         instrument_id = (await get_currency(session, code)).id if code else defaults[batch_id]
-        after_period = period_to is not None and day is not None and day > period_to
-        if (
-            balance is not None
-            and day is not None
-            and instrument_id is not None
-            and not after_period
-        ):
+        if balance is not None and day is not None and instrument_id is not None:
             closings[batch_id] = (balance, day, instrument_id)
+            period_ends[batch_id] = period_to
     stored: dict[UUID, list[models.ImportRow]] = defaultdict(list)
     for row in await session.scalars(
         select(r)
@@ -713,6 +719,22 @@ async def _claims(
         .order_by(r.batch_id, r.position)
     ):
         stored[row.batch_id].append(row)
+    # A closing anchors an opening only if the file lists everything up to it: dated within
+    # its period, or by its last row when that runs past the period end.
+    for batch_id, (_, day, _) in list(closings.items()):
+        rows_end = max(
+            (row.booking_date for row in stored[batch_id] if row.booking_date), default=None
+        )
+        ends = [end for end in (period_ends[batch_id], rows_end) if end is not None]
+        if ends and day > max(ends):
+            del closings[batch_id]
+    # Each batch's days listed in full, by the instruments it has live rows in.
+    full_days: dict[UUID, list[tuple[date, date]]] = defaultdict(list)
+    for batch in batches:
+        if batch.complete_from is not None and batch.complete_to is not None:
+            for instrument_id in {row.instrument_id for row in stored[batch.id]}:
+                if instrument_id is not None:
+                    full_days[instrument_id].append((batch.complete_from, batch.complete_to))
     originals = aliased(models.ImportRow)
     original_of = {
         row_id: transaction_id
@@ -757,7 +779,6 @@ async def _claims(
             row_order if isinstance(row_order, str) else "oldest_first",
         )
         start, end = batch.complete_from, batch.complete_to
-        source_at = {row.position: _movement_source(row, original_of) for row in stored[batch.id]}
         claims[batch.id] = [
             OpeningClaim(
                 batch.id,
@@ -775,11 +796,49 @@ async def _claims(
                     if end is None
                     else max(first_day - timedelta(days=1), end)
                 ),
-                first_source=source_at.get(first_position),
+                first_day_sources=frozenset(
+                    source
+                    for row in stored[batch.id]
+                    if row.instrument_id == instrument_id
+                    and row.booking_date == first_day
+                    and (source := _movement_source(row, original_of)) is not None
+                ),
             )
-            for instrument_id, (opening, first_day, first_position) in openings.items()
+            for instrument_id, (opening, first_day) in openings.items()
+        ]
+    # Dated only once every claim is known: a run may carry an adjustment back no further
+    # than the opening of the claim before it in the walk, which must still hold there.
+    flat = sorted((claim for found in claims.values() for claim in found), key=_walk_order)
+    previous: dict[UUID, date] = {}
+    dated: dict[tuple[UUID, UUID], date] = {}
+    for claim in flat:
+        day = _dated_on(claim, full_days[claim.instrument_id])
+        floor = previous.get(claim.instrument_id)
+        dated[(claim.batch_id, claim.instrument_id)] = day if floor is None else max(day, floor)
+        previous[claim.instrument_id] = claim.opens_on
+    for batch_id, found in claims.items():
+        claims[batch_id] = [
+            replace(claim, dated_on=dated[(batch_id, claim.instrument_id)]) for claim in found
         ]
     return claims
+
+
+def _dated_on(claim: OpeningClaim, full_days: list[tuple[date, date]]) -> date:
+    """OpeningClaim.dated_on. An opening at a start of day (or partway through a day that
+    some file lists in full) is the balance as that day starts. Then every run of days some
+    file lists in full that reaches it carries it back, row by listed row, to the start of
+    the run: the adjustment is dated the day before. Otherwise it is dated on its day."""
+    covered = any(start <= claim.opens_on <= end for start, end in full_days)
+    if not claim.first_day_in_full and not covered:
+        return claim.opens_on
+    boundary = claim.opens_on
+    moved = True
+    while moved:
+        moved = False
+        for start, end in full_days:
+            if start < boundary <= end + timedelta(days=1):
+                boundary, moved = start, True
+    return boundary - timedelta(days=1)
 
 
 def _movement_source(row: models.ImportRow, original_of: dict[UUID, UUID]) -> UUID | None:

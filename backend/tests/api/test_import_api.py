@@ -9,6 +9,7 @@ import httpx
 
 from lararium.api.export_openapi import render_openapi
 from lararium.modules.finance.importing import parsed
+from lararium.modules.finance.importing.staging import NO_BALANCES_WARNING
 
 EXAMPLES = files("lararium.modules.finance.importing") / "examples"
 API = "/api/v1/finance"
@@ -141,9 +142,7 @@ async def test_example_ofx_end_to_end(client) -> None:
 async def test_example_qif_end_to_end(client) -> None:
     account_id, batch = await _round_trip(client, QIF_CONFIG, "example-bank.qif")
     assert batch["counts"]["new"] == 4
-    assert batch["warnings"] == [
-        "This file has no balances, so its opening balance can't be checked"
-    ]
+    assert batch["warnings"] == [NO_BALANCES_WARNING]
     assert await _balance(client, account_id) == Decimal("1232.30")  # the rows' sum
 
 

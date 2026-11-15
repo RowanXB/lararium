@@ -21,7 +21,7 @@ from lararium.modules.finance.errors import (
 )
 from lararium.modules.finance.importing.commit import discard_batch
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
-from lararium.modules.finance.importing.staging import get_batch
+from lararium.modules.finance.importing.staging import NO_BALANCES_WARNING, get_batch
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import find_unbalanced_transactions, void_transaction
 from lararium.modules.finance.valuation import balances_asof, net_worth_series
@@ -1119,4 +1119,41 @@ async def test_closing_after_the_period_is_not_an_opening_anchor(
     )
     staged = await stage(ofx, content, filename="october.ofx")
     assert _adjustments(await _rows(session, staged)) == []
-    assert staged.warnings == ["This file has no balances, so its opening balance can't be checked"]
+    assert staged.warnings == [NO_BALANCES_WARNING]
+
+
+async def test_adjustment_is_dated_before_days_a_file_without_an_opening_lists(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Sixth review: a QIF (no balances) lists Feb and Mar in full, so the CSV's opening on
+    10 Mar is the balance carried through them; its adjustment was dated inside them, and
+    February's history was off by the whole opening."""
+    qif = await _profile(run, format="qif", date_format="%d/%m/%Y")
+    records = [("01/02/2027", "1.00"), ("05/02/2027", "-20.00"), ("20/02/2027", "-30.00")]
+    records += [("10/03/2027", "-5.00"), ("31/03/2027", "-1.00")]
+    content = "!Type:Bank\n" + "".join(f"D{day}\nT{amount}\nPShop\n^\n" for day, amount in records)
+    await commit((await stage(qif, content, filename="q.qif")).id)
+
+    csv = BALANCE_HEADER + "10/03/2027,Shop,-5.00,945.00\n31/03/2027,Shop,-1.00,944.00\n"
+    staged = await stage(await _csv_profile(run), csv, filename="c.csv")
+    (adjustment,) = _adjustments(await _rows(session, staged))
+    assert (adjustment.quantity, adjustment.booking_date) == (Decimal("999.00"), date(2027, 2, 1))
+    await commit(staged.id)
+    assert await _balance_after(session, staged.account_id, date(2027, 2, 20)) == Decimal("950.00")
+    assert await _balance_after(session, staged.account_id, date(2027, 3, 31)) == Decimal("944.00")
+
+
+async def test_closing_within_rows_past_the_period_still_anchors(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    """Sixth review: the gate compared the closing with DTEND alone, so an OFX whose rows run
+    past DTEND, up to its LEDGERBAL, lost a valid opening."""
+    ofx = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20270110", "-10.00", "A"), ("20270202", "-5.00", "B")],
+        start="20270101",
+        end="20270131",
+        extra="<LEDGERBAL>\n<BALAMT>85.00\n<DTASOF>20270202\n</LEDGERBAL>",
+    )
+    (adjustment,) = _adjustments(await _rows(session, await stage(ofx, content)))
+    assert adjustment.quantity == Decimal("100.00")

@@ -31,7 +31,7 @@ def _claim(
     in_full: bool = False,
     vouched_to: int | None = None,
     own: frozenset[UUID] = frozenset(),
-    first_source: UUID | None = None,
+    first_day_sources: frozenset[UUID] = frozenset(),
 ) -> OpeningClaim:
     return OpeningClaim(
         batch,
@@ -43,7 +43,7 @@ def _claim(
         vouched_from=_day(first),
         first_day_in_full=in_full,
         vouched_to=_day(vouched_to if vouched_to is not None else first - 1),
-        first_source=first_source,
+        first_day_sources=first_day_sources,
     )
 
 
@@ -59,10 +59,20 @@ def test_shared_first_row_conflicts_in_either_order() -> None:
     movements = [Movement(_day(10), Decimal("-5"), row)]
     for a_first in (True, False):
         claim_a = _claim(
-            a, "100", 10, committed=1 if a_first else 2, own=frozenset({row}), first_source=row
+            a,
+            "100",
+            10,
+            committed=1 if a_first else 2,
+            own=frozenset({row}),
+            first_day_sources=frozenset({row}),
         )
         claim_b = _claim(
-            b, "150", 10, committed=2 if a_first else 1, own=frozenset({row}), first_source=row
+            b,
+            "150",
+            10,
+            committed=2 if a_first else 1,
+            own=frozenset({row}),
+            first_day_sources=frozenset({row}),
         )
         assert _conflicted([claim_a, claim_b], movements), a_first
 
@@ -110,7 +120,7 @@ def test_closing_anchors_only_its_own_currency() -> None:
     closing = (Decimal("500"), _day(30), GBP)
     assert opening_adjustments(rows, lambda _: EUR, closing, "oldest_first") == {}
     assert opening_adjustments(rows, lambda _: GBP, closing, "oldest_first") == {
-        GBP: (Decimal("530"), _day(5), 0)
+        GBP: (Decimal("530"), _day(5))
     }
 
 
@@ -133,3 +143,22 @@ def test_same_first_day_walk_order_follows_where_openings_sit() -> None:
         assert opening_conflicts([statement, export], plans[-1]) == []
         assert (statement.opens_on, statement.adjustment_day) == (_day(1), date(2026, 10, 31))
     assert plans[0] == plans[1] == {(pdf, EUR): Decimal("110"), (csv, EUR): Decimal("0")}
+
+
+def test_any_shared_first_day_row_vouches_whatever_the_file_order() -> None:
+    """Sixth review: the 'first row' was taken by file position, so a newest-first OFX named
+    its latest row and a disagreement with the earlier file went unseen."""
+    earlier, later, shared, newest = uuid4(), uuid4(), uuid4(), uuid4()
+    claims = [
+        _claim(earlier, "100", 1, committed=1, own=frozenset({shared}), vouched_to=19),
+        _claim(
+            later,
+            "107",
+            20,
+            committed=2,
+            own=frozenset({shared, newest}),
+            first_day_sources=frozenset({shared}),
+        ),
+    ]
+    movements = [Movement(_day(20), Decimal("-10"), shared)]
+    assert _conflicted(claims, movements) == {later}
