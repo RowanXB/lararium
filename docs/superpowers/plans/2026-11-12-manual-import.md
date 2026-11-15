@@ -364,7 +364,7 @@ Rules for `parse_csv`:
 
 **Interfaces (Decision 18, the owner's follow-up):**
 - `StatementAccount` gains `iban: str | None = None` (upper-cased, spaces removed), `bic: str | None = None`, `name: str | None = None`, `account_type: str | None = None`, `customer_number: str | None = None`, `clearing_account_number: str | None = None` and `branch: str | None = None`. `sort_code` and `account_number` get defaults of `None`.
-- `@dataclass(frozen=True) class StatementRate`: `kind: str, band_from: Decimal | None, band_to: Decimal | None, rate: Decimal, ear: Decimal | None`.
+- `@dataclass(frozen=True) class StatementRate`: `kind: str, band_from: Decimal | None, band_to: Decimal | None, rate: Decimal | None, ear: Decimal | None` (at least one of `rate` and `ear`).
 - `ParsedStatement` gains `currency: str | None = None`, `statement_reference: str | None = None`, `document_date: date | None = None`, `available_balance: Decimal | None = None`, `available_balance_date: date | None = None`, `overdraft_limit: Decimal | None = None`, `overdraft_limit_date: date | None = None` and `rates: list[StatementRate] = field(default_factory=list)`.
 - `Counterparty` gains `bank: str | None = None`. `ParsedRow` gains `payment_kind`, `bank_reference`, `purpose_code` and `remittance_info`, each `str | None = None`.
 - `CsvProfileConfig` gains `overdraft_footer_label: str | None = None`. When it is set, a footer line among the dropped `skip_footer_rows` whose first cell equals the label (after stripping) gives `overdraft_limit` and `overdraft_limit_date`. The date is the first cell that parses with `date_format`; the amount is the last cell, through `parse_amount`. Any other footer line is still dropped. A labelled line that doesn't parse raises `FileFormatError`.
@@ -518,7 +518,7 @@ Migration `0015`:
   - `available_balance numeric`, `available_balance_date date` (OFX `AVAILBAL`).
 
   It also carries NaN/Infinity CHECKs on the numeric columns.
-- `finance.import_statement_rates`: `id`, `batch_id` FK `import_statements ON DELETE CASCADE`, `position int` (`UNIQUE (batch_id, position)`), `kind text NOT NULL`, `band_from numeric`, `band_to numeric`, `rate numeric NOT NULL`, `ear numeric`.
+- `finance.import_statement_rates`: `id`, `batch_id` FK `import_statements ON DELETE CASCADE`, `position int` (`UNIQUE (batch_id, position)`), `kind text NOT NULL`, `band_from numeric`, `band_to numeric`, `rate numeric`, `ear numeric`, with `CHECK (rate IS NOT NULL OR ear IS NOT NULL)` (HSBC's overdraft tiers print only an EAR).
 - `finance.import_rows`. Columns: `id`; `batch_id` FK `ON DELETE CASCADE`; `account_id` FK (denormalised for the index); `position int`; `kind text NOT NULL DEFAULT 'statement' CHECK IN ('statement','opening_adjustment')`; `status text CHECK IN (...)`; `booking_date date`; `occurred_at timestamptz`; `occurred_tz text`; `description text NOT NULL DEFAULT ''`; `quantity numeric`; `fee numeric NOT NULL DEFAULT 0`; `instrument_id` FK; `balance numeric`; `external_id text`; `bank_type text`; `value_date date`; `payee text`; `memo text`; `check_number text`; `counterparty_name text`; `counterparty_sort_code text CHECK (~ '^[0-9]{6}$')`; `counterparty_account_number text CHECK (~ '^[0-9]+$')`; `counterparty_bank text`; `payment_reference text`; `payment_kind text`; `bank_reference text`; `purpose_code text`; `remittance_info text`; `dedupe_key text`; `error text`; `note text`; `raw jsonb NOT NULL`; `transaction_id` FK `finance.transactions` NULL.
   - Constraints:
     - `UNIQUE (batch_id, position)`;
