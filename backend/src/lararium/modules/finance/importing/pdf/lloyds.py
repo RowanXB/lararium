@@ -133,7 +133,7 @@ class _Pending:
     day_text: str
     page: int
     description: list[str] = field(default_factory=list[str])
-    types: list[str] = field(default_factory=list[str])
+    type_code: str | None = None
     amounts: list[tuple[str, Word]] = field(default_factory=list[tuple[str, Word]])
 
 
@@ -154,7 +154,7 @@ class _Table:
         raw = {
             "Date": pending.day_text,
             "Description": description,
-            "Type": " ".join(pending.types),
+            "Type": pending.type_code or "",
         }
         where = f"row {position + 1} (page {pending.page + 1})"
         split = split_amounts(pending.amounts, _BALANCE, where)
@@ -224,7 +224,10 @@ def _line(line: list[Word], columns: _Columns, table: _Table) -> None:
         return
     if description:
         pending.description.append(text(description))
-    pending.types.extend(word.text for word in types)
+    # A row has one type code; any other word in its column belongs to no field.
+    if types and pending.type_code is None:
+        pending.type_code = types.pop(0).text
+    table.unplaced.extend(types)
     pending.amounts.extend(amounts)
 
 

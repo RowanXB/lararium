@@ -302,6 +302,14 @@ def test_lloyds_hidden_layer_ignored() -> None:
         assert all("blank" not in value for value in row.raw.values())
 
 
+def test_lloyds_takes_one_type_code() -> None:
+    # A second word in the type column is not part of the type code.
+    content = lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS, extra=[(0, 272.0, 352.0, "XX")]))
+
+    with pytest.raises(FileFormatError, match="words outside any column on page 1"):
+        _parse(content, "lloyds_statement")
+
+
 # BOC UK --------------------------------------------------------------------------------
 
 
