@@ -376,7 +376,10 @@ def test_currency_overrides() -> None:
     assert isinstance(second, ParsedRow) and second.currency == "EUR"
     assert second.raw["CURRENCY/CURRATE"] == "1.15"
     assert second.raw["CURRENCY/CURSYM"] == "EUR"
-    assert isinstance(third, ParsedRow) and third.currency == "USD"
+    # ORIGCURRENCY records the original currency; TRNAMT is already in CURDEF.
+    assert isinstance(third, ParsedRow) and third.currency == "GBP"
+    assert third.raw["ORIGCURRENCY/CURSYM"] == "usd"
+    assert third.raw["ORIGCURRENCY/CURRATE"] == "0.79"
     assert isinstance(fourth, RowError) and "currency" in fourth.message
 
 

@@ -201,7 +201,9 @@ def _row(
     except ValueError as error:
         raise ValueError(f"TRNAMT: {error}") from None
     user_date = _optional(raw, "DTUSER")
-    own_currency = _optional(raw, "CURRENCY/CURSYM") or _optional(raw, "ORIGCURRENCY/CURSYM")
+    # CURRENCY: the amounts are in that currency. ORIGCURRENCY only records the currency
+    # TRNAMT was converted from, so the row stays in CURDEF (kept in raw).
+    own_currency = _optional(raw, "CURRENCY/CURSYM")
     payee = _optional(raw, "NAME")
     memo = _optional(raw, "MEMO")
     return ParsedRow(
