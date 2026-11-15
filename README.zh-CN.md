@@ -55,7 +55,8 @@ pnpm dev
 
 ## 服务器部署
 
-在装有 Docker Engine 28 或更新版本以及 Tailscale 的服务器上：
+在装有 Tailscale 和 Docker Engine 28 或更新版本的服务器上（局域网可信时，旧版本的引擎也可以；
+见下面的安全模型）：
 
 ```bash
 cp infra/env.example infra/.env
@@ -94,8 +95,10 @@ nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Log
 - 系统是只读的：从不下单、转账或提现。
 - 所有第三方凭据都是只读的：连接器需要 API key 或 token 时，只创建只读权限的那种。
 - 从不保存私钥和助记词：钱包只按公开地址跟踪。
-- 需要 Docker Engine 28 或更新版本。更旧的引擎可能让局域网里的其他机器访问到发布在
-  `127.0.0.1` 上的端口，从而暴露下面的 `web` 端口。
+- 建议使用 Docker Engine 28 或更新版本。在 Linux 上，更旧的引擎（群晖自带 24）会让局域网里加了
+  路由的其他机器直接访问到容器，包括 `web` 和 `api`，并自己发送身份请求头。只有在局域网可信时
+  才可以接受：没有你管不了的设备，访客 Wi-Fi 已隔离。否则请升级 Docker，或者用防火墙挡住局域网
+  到 Lararium 的 Docker 网桥的访问。Docker Desktop 不受影响。
 - webhook 接收器的数据库角色（`lararium_webhook_in`）是只写的：它只能往 webhook 收件箱里插入行，
   不能读取，也碰不了其他任何表。它拿不到主密钥。Cloudflare 负责终结 TLS，所以它能看到 webhook
   的明文内容；这些内容只被当作「立即同步」的信号，真正的数据始终由 worker 向 Monzo 拉取。

@@ -58,7 +58,8 @@ After changing the API, regenerate `web/openapi.json` and the typed client with
 
 ## Server deployment
 
-On a server with Docker Engine 28 or later and Tailscale:
+On a server with Tailscale and Docker Engine 28 or later (or an older engine on a trusted
+LAN; see the security model below):
 
 ```bash
 cp infra/env.example infra/.env
@@ -102,8 +103,11 @@ forge `Tailscale-User-Login`.
   create one that can only read.
 - Private keys and seed phrases are never stored: wallets are tracked by public address
   only.
-- Docker Engine 28 or later is required. Older engines could let other machines on the
-  LAN reach ports published on `127.0.0.1`, which would expose the `web` port below.
+- Docker Engine 28 or later is recommended. On Linux, older engines (Synology ships 24) let
+  another machine on the LAN that adds a route reach the containers directly, `web` and
+  `api` included, and send the identity header itself. That is acceptable only on a trusted
+  LAN: no devices you don't control, guest Wi-Fi isolated. Otherwise upgrade Docker, or
+  firewall Lararium's Docker bridges from the LAN. Docker Desktop is not affected.
 - The webhook receiver's database role (`lararium_webhook_in`) is write-only: it can insert rows
   into the webhook inbox, and cannot read them or touch any other table. It never gets the
   master key. Cloudflare terminates TLS, so it sees webhook payloads in plaintext; they are
