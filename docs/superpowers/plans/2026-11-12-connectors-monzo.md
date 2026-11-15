@@ -472,7 +472,7 @@ Behaviour:
   - "Sync now";
   - "Authorise" (status `created` or `needs_reauth`). It calls `authorizeConnection` and then sets `window.location.href` to the returned URL;
   - "Disable".
-- **While `authorising`:** a prominent notice "Open the Monzo app and approve the request now. Lararium has 4 minutes to fetch your full history." The page polls `listConnections` every 5 s until the status changes.
+- **While `authorising`:** a prominent notice to approve the request in the Monzo app within 4 minutes of authorising, saying that the full history is then fetched, which can take a few minutes, and that if no request appeared the owner disables the connection and authorises it again. Authorise is not offered: the page can't tell the wait for approval from the backfill after it, and authorising again during the backfill would throw a completed approval away (the server still accepts it; an expired wait ends as `needs_reauth`). The page polls `listConnections` every 5 s until the status changes.
 - **"Add Monzo" form:** display name, client ID, client secret (a password field). The help text shows the exact `redirect_uri` from the server, to paste into developers.monzo.com.
 - **`?error=state`** on the URL shows "The authorisation link expired or was already used. Click Authorise again."
 
