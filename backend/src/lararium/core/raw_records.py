@@ -114,20 +114,6 @@ async def list_raw_records(session: AsyncSession, sync_id: UUID) -> list[RawReco
     return [_record(row) for row in rows]
 
 
-async def list_connection_raw_records(
-    session: AsyncSession, connection_id: UUID, record_type: str
-) -> list[RawRecord]:
-    """Every record of this type the connection stored, by when each was first fetched (a
-    record fetched again keeps its first time), then by id."""
-    r = models.RawRecord
-    rows = await session.execute(
-        select(*_columns())
-        .where(r.connection_id == connection_id, r.record_type == record_type)
-        .order_by(r.fetched_at, r.id)
-    )
-    return [_record(row) for row in rows]
-
-
 async def get_raw_records(session: AsyncSession, ids: Sequence[UUID]) -> list[RawRecord]:
     """The records with these ids, in the order given; a record stored once and returned
     for several identical responses comes back once per id."""

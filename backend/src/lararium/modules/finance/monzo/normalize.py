@@ -34,7 +34,8 @@ from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import DateTime, column, func, select, true
+from sqlalchemy.dialects.postgresql import JSONB, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext, command_context
@@ -42,7 +43,8 @@ from lararium.core.connections import get_connection, set_warnings, update_confi
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import PlaceDetails, get_or_create_organization, get_or_create_place
 from lararium.core.json_types import JSONValue
-from lararium.core.raw_records import get_raw_records, list_connection_raw_records
+from lararium.core.models import RawRecord
+from lararium.core.raw_records import get_raw_records
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
@@ -140,16 +142,6 @@ def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
 
 
-# Before any time Monzo gives: a transaction without `updated` is its oldest version.
-_NEVER_UPDATED = datetime.min.replace(tzinfo=UTC)
-
-
-def _updated(tx: dict[str, Any]) -> datetime:
-    """When Monzo last changed the transaction."""
-    value = tx.get("updated")
-    return _parse(value) if isinstance(value, str) and value else _NEVER_UPDATED
-
-
 def _mismatch_prefix(monzo_account_id: str) -> str:
     return f"Monzo account {monzo_account_id}: reconciliation mismatch"
 
@@ -211,6 +203,40 @@ async def _connector_transaction(
     if row is None:
         return None
     return row.id, cast(TransactionStatus, row.status), row.voided_by
+
+
+async def _latest_transactions(
+    session: AsyncSession, connection_id: UUID
+) -> list[tuple[dict[str, Any], str]]:
+    """The latest raw copy of every Monzo transaction the connection fetched, with the Monzo
+    account its page was fetched for.
+
+    The latest has the greatest Monzo `updated` (none counts as the oldest), then fetch time,
+    then record id: the fetch time alone would mislead, as a page fetched again keeps its
+    first one. Picked by the database, so memory grows with the transactions, not with the
+    copies of them each sync stores again. Most recently fetched first: a merchant's place
+    takes its details from the first transaction a sync sees for it.
+    """
+    r = RawRecord
+    elements = func.jsonb_array_elements(r.content).table_valued(column("value", JSONB))
+    tx = elements.c.value
+    monzo_id = tx["id"].astext
+    updated = func.nullif(tx["updated"].astext, "").cast(DateTime(timezone=True))
+    latest = (
+        select(tx.label("tx"), r.request["account_id"].astext.label("account"), r.fetched_at, r.id)
+        .select_from(r)
+        .join(elements, true())
+        .where(r.connection_id == connection_id, r.record_type == "transactions_page")
+        .ext(distinct_on(monzo_id))
+        .order_by(monzo_id, updated.desc().nulls_last(), r.fetched_at.desc(), r.id.desc())
+        .subquery()
+    )
+    rows = await session.execute(
+        select(latest.c.tx, latest.c.account).order_by(
+            latest.c.fetched_at.desc(), latest.c.id.desc(), latest.c.tx["id"].astext
+        )
+    )
+    return [(row.tx, row.account) for row in rows]
 
 
 async def _earliest_connector_posting(
@@ -592,29 +618,13 @@ class _Normalizer:
         self.count(outcome)
 
     async def replay(self, skipping: Collection[str]) -> None:
-        """Run the latest raw record of every Monzo transaction this connection ever fetched
+        """Run the latest raw copy of every Monzo transaction this connection ever fetched
         through transaction(), except those in `skipping` (structured-fields Decision 12).
-
-        The latest has the greatest Monzo `updated`, then fetch time, then record id: the
-        fetch time alone would mislead, as a page fetched again keeps its first one. Going
-        through transaction() and its upserts, an owner's void survives and an unchanged
-        transaction is not written.
-        """
-        latest: dict[str, tuple[tuple[datetime, datetime, UUID], dict[str, Any], str]] = {}
-        pages = await list_connection_raw_records(
-            self.session, self.connection_id, "transactions_page"
-        )
-        for page in pages:
-            monzo_account_id = str(page.request["account_id"])
-            for tx in cast(list[dict[str, Any]], page.content):
-                external_id: str = tx["id"]
-                if external_id in skipping:
-                    continue
-                key = (_updated(tx), page.fetched_at, page.id)
-                if external_id not in latest or key > latest[external_id][0]:
-                    latest[external_id] = (key, tx, monzo_account_id)
-        for _, tx, monzo_account_id in latest.values():
-            await self.transaction(tx, monzo_account_id)
+        Through its upserts, an owner's void survives and an unchanged transaction is not
+        written."""
+        for tx, monzo_account_id in await _latest_transactions(self.session, self.connection_id):
+            if tx["id"] not in skipping:
+                await self.transaction(tx, monzo_account_id)
 
     def _postings(
         self, tx: dict[str, Any], currency: InstrumentRecord, account_id: UUID, other: UUID

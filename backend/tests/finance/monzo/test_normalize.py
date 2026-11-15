@@ -34,6 +34,7 @@ from lararium.modules.finance.ledger import (
 )
 from lararium.modules.finance.monzo.normalize import (
     NORMALIZER_VERSION,
+    NORMALIZER_VERSION_KEY,
     FetchedRecord,
     NormalizeReport,
     normalize,
@@ -1400,7 +1401,7 @@ async def _before_structured_fields(ctx: CommandContext, connection: ConnectionR
         "delete from finance.declined_transactions",
     ):
         await ctx.session.execute(text(statement))
-    await update_config(ctx, connection.id, remove=["normalizer_version"])
+    await update_config(ctx, connection.id, remove=[NORMALIZER_VERSION_KEY])
 
 
 async def _store_page(
@@ -1408,15 +1409,16 @@ async def _store_page(
     connection: ConnectionRecord,
     transactions: Sequence[dict[str, Any]],
     *,
-    fetched_at: datetime | None = None,
+    copy: tuple[datetime, int] | None = None,
 ) -> None:
     """Store a transactions page in a sync of its own without normalizing it, as a sync keeps
-    the pages of an attempt it discards. Fetched now, unless `fetched_at` says otherwise."""
+    the pages of an attempt it discards. Fetched now, unless `copy` gives the fetch time and
+    the record id (as an integer)."""
     content = list(transactions)
     request: dict[str, JSONValue] = {"account_id": ACCOUNT_ID}
 
     async def store(ctx: CommandContext) -> None:
-        if fetched_at is None:
+        if copy is None:
             await store_raw_record(
                 ctx,
                 connection_id=connection.id,
@@ -1427,9 +1429,11 @@ async def _store_page(
                 sync_id=uuid.uuid4(),
             )
             return
+        fetched_at, record_id = copy
         digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
         await ctx.session.execute(
             insert(RawRecord).values(
+                id=uuid.UUID(int=record_id),
                 connection_id=connection.id,
                 sync_id=uuid.uuid4(),
                 record_type="transactions_page",
@@ -1478,7 +1482,7 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
     ]
     assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
     config = (await get_connection(session, connection.id)).config
-    assert config["normalizer_version"] == "monzo-norm-2"
+    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-2"
 
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:
@@ -1508,14 +1512,25 @@ async def test_replay_uses_the_latest_by_updated(session, run) -> None:
 async def test_replay_breaks_ties_by_fetch_time_then_id(session, run) -> None:
     connection = await _connection(run)
     await _normalize(session, connection)
-    updated = "2026-03-02T06:00:00.000Z"
-    first = make_transaction(id="tx_TEST0001", updated=updated)
-    second = make_transaction(id="tx_TEST0002", created="2026-03-01T13:00:00.000Z", updated=updated)
     early, late = datetime(2026, 3, 2, 7, tzinfo=UTC), datetime(2026, 3, 2, 8, tzinfo=UTC)
-    # Stored in this order, so each page has a greater id than the one before.
-    await _store_page(run, connection, [first, second], fetched_at=late)
-    await _store_page(run, connection, [first | {"category": "shopping"}], fetched_at=early)
-    await _store_page(run, connection, [second | {"category": "household"}], fetched_at=late)
+
+    def payment(n: int, category: str) -> dict[str, Any]:
+        return make_transaction(
+            id=f"tx_TEST{n:04d}",
+            created=f"2026-03-01T12:{n:02d}:00.000Z",
+            category=category,
+            updated="2026-03-02T06:00:00.000Z",
+        )
+
+    # The same `updated`; fetched later beats a greater id.
+    await _store_page(run, connection, [payment(1, "groceries")], copy=(late, 1))
+    await _store_page(run, connection, [payment(1, "shopping")], copy=(early, 2))
+    # The same fetch time too: the greater id wins. Stored last for some and first for the
+    # others, so that no order but the id's picks them all.
+    for n in range(2, 8):
+        winner, loser = (payment(n, "household"), 10 * n + 1), (payment(n, "shopping"), 10 * n)
+        for page, record_id in (winner, loser) if n % 2 else (loser, winner):
+            await _store_page(run, connection, [page], copy=(late, record_id))
     await run(_before_structured_fields, connection)
 
     await _normalize(session, connection)
@@ -1524,9 +1539,9 @@ async def test_replay_breaks_ties_by_fetch_time_then_id(session, run) -> None:
         r.external_id: (await _details(session, r.id)).category
         for r in await _transactions(session)
     }
-    # The first: fetched later beats a greater id. The second: fetched at the same time, the
-    # greater id wins.
-    assert categories == {"tx_TEST0001": "groceries", "tx_TEST0002": "household"}
+    assert categories == {"tx_TEST0001": "groceries"} | {
+        f"tx_TEST{n:04d}": "household" for n in range(2, 8)
+    }
 
 
 async def test_replay_runs_once(session, run) -> None:
