@@ -325,7 +325,8 @@ for each bank use the recommended one, which carries the most information.
 
 A PDF statement is read by a layout written for that bank, which checks itself: the summary
 (opening and closing balance, money in and out, payment counts) must equal the rows, every
-printed balance must follow from the amounts, and every word in the table must belong to a row.
+printed balance must follow from the amounts, every row must have exactly one amount, a date
+inside the statement period and a type code, and every word in the table must belong to a row.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
