@@ -17,6 +17,7 @@ dependencies = [
     "procrastinate>=3.11.0",
     "starlette>=1.10.0",
     "psycopg-pool>=3.3.3",
+    "pdfplumber>=0.11.10",
 ]
 
 [dependency-groups]
@@ -27,6 +28,7 @@ dev = [
     "ruff",
     "pyright",
     "import-linter",
+    "reportlab>=5.1.0",
 ]
 
 [build-system]
