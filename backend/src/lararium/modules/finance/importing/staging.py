@@ -454,16 +454,33 @@ _LIVE_ROWS = ("new", "duplicate", "committed")
 
 @dataclass(frozen=True)
 class OpeningClaim:
-    """A batch's statement opening balance in one instrument, which must hold at first_day."""
+    """A batch's statement opening balance in one instrument: the balance just before the
+    file's first listed row, which is on first_day."""
 
     batch_id: UUID
     instrument_id: UUID
     opening: Decimal
     first_day: date
     committed_at: datetime | None  # None: the staged batch being previewed, after its ties
+    # The movements the file lists itself (its own rows, and the originals its duplicates
+    # stand for, whatever their dates): never before its opening.
+    own: frozenset[UUID] = frozenset()
+    # The first day its opening is vouched for from (final review C1): its first day listed
+    # in full when that is not after first_day, else first_day.
+    vouched_from: date | None = None
 
 
-type Movements = dict[UUID, list[tuple[date, Decimal]]]
+@dataclass(frozen=True)
+class Movement:
+    """One ledger movement of an account in an instrument: a transaction's postings there,
+    or a staged row being previewed (source is the transaction's or the row's id)."""
+
+    day: date
+    amount: Decimal
+    source: UUID
+
+
+type Movements = dict[UUID, list[Movement]]
 
 
 def _walk_order(claim: OpeningClaim) -> tuple[date, bool, datetime, UUID]:
@@ -483,8 +500,15 @@ def plan_openings(
     """The walk: (batch, instrument) -> the adjustment that makes each opening hold.
 
     Claims are taken by first date (ties by commit time). Each needs its opening minus the
-    account's movements (its postings other than opening adjustments) before its first date,
-    minus the adjustments assigned to the claims before it.
+    account's movements (its postings other than opening adjustments) before its first
+    listed row, minus the adjustments assigned to the claims before it.
+
+    Before its first listed row means by what the file lists, not by date alone: every
+    movement up to and including its first day except those it lists itself. Its own rows
+    and the originals its duplicates stand for come after its opening even when a duplicate's
+    original is dated earlier (an id matched across days); and another file's movement on its
+    first day that it doesn't list came before it (an export may start partway through a
+    day; on a day it lists in full there is none, as staging refuses that).
     """
 
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)
@@ -493,9 +517,9 @@ def plan_openings(
         for claim in sorted(claims, key=_walk_order):
             before = sum(
                 (
-                    amount
-                    for day, amount in movements.get(claim.instrument_id, [])
-                    if day < claim.first_day
+                    movement.amount
+                    for movement in movements.get(claim.instrument_id, [])
+                    if movement.day <= claim.first_day and movement.source not in claim.own
                 ),
                 Decimal(0),
             )
@@ -537,9 +561,10 @@ def opening_conflicts(
         for claim in sorted(claims, key=_walk_order):
             need = needed[(claim.batch_id, claim.instrument_id)]
             if need != 0:
+                start = claim.vouched_from or claim.first_day
                 for prior in earlier[claim.instrument_id]:
                     end = vouched_to.get(prior.batch_id)
-                    if end is not None and claim.first_day <= end + timedelta(days=1):
+                    if end is not None and start <= end + timedelta(days=1):
                         conflicts.append(
                             OpeningConflict(
                                 claim.batch_id,
@@ -572,6 +597,7 @@ class _BatchInfo:
     committed_at: datetime | None
     timezone: str | None
     vouched_to: date | None
+    complete_from: date | None
 
 
 def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
@@ -602,10 +628,22 @@ async def _claims(
         .order_by(r.batch_id, r.position)
     ):
         stored[row.batch_id].append(row)
+    originals = aliased(models.ImportRow)
+    original_of = {
+        row_id: transaction_id
+        for row_id, transaction_id in await session.execute(
+            select(r.id, originals.transaction_id)
+            .join(originals, originals.id == r.duplicate_of)
+            .where(r.batch_id.in_(ids), r.status == "duplicate")
+        )
+        if transaction_id is not None
+    }
     claims: dict[UUID, list[OpeningClaim]] = {}
     for batch in batches:
         instruments: dict[int, UUID] = {}
         rows: list[ParsedRow] = []
+        sources = (_movement_source(row, original_of) for row in stored[batch.id])
+        own = frozenset(source for source in sources if source is not None)
         for row in stored[batch.id]:
             # Live rows have these (the table's CHECK).
             assert row.booking_date is not None and row.quantity is not None
@@ -633,11 +671,31 @@ async def _claims(
             closings.get(batch.id),
             row_order if isinstance(row_order, str) else "oldest_first",
         )
+        start = batch.complete_from
         claims[batch.id] = [
-            OpeningClaim(batch.id, instrument_id, opening, first_day, batch.committed_at)
+            OpeningClaim(
+                batch.id,
+                instrument_id,
+                opening,
+                first_day,
+                batch.committed_at,
+                own=own,
+                vouched_from=start if start is not None and start <= first_day else first_day,
+            )
             for instrument_id, (opening, first_day) in openings.items()
         ]
     return claims
+
+
+def _movement_source(row: models.ImportRow, original_of: dict[UUID, UUID]) -> UUID | None:
+    """The movement a live statement row stands for: its transaction once committed, itself
+    while staged (preview_openings adds staged new rows as movements by their ids), or its
+    original's transaction for a duplicate."""
+    if row.status == "committed":
+        return row.transaction_id
+    if row.status == "new":
+        return row.id
+    return original_of.get(row.id)
 
 
 def _vouched_to(covered_from: date | None, complete_to: date | None) -> date | None:
@@ -658,29 +716,31 @@ async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_B
             b.committed_at,
             b.profile_config["timezone"].astext,
             b.covered_from,
+            b.complete_from,
             b.complete_to,
         ).where(b.account_id == account_id, b.status == "committed")
     )
     return [
-        _BatchInfo(id, name, at, zone, _vouched_to(start, end))
-        for id, name, at, zone, start, end in found
+        _BatchInfo(id, name, at, zone, _vouched_to(start, end), complete_from)
+        for id, name, at, zone, start, complete_from, end in found
     ]
 
 
 async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
-    """The account's non-void postings by instrument and day, without opening adjustments."""
+    """The account's non-void postings by instrument and transaction, without opening
+    adjustments."""
     p, t, r = models.Posting, models.Transaction, models.ImportRow
     adjustments = select(r.transaction_id).where(
         r.kind == "opening_adjustment", r.transaction_id.is_not(None)
     )
     movements: Movements = defaultdict(list)
-    for instrument_id, day, amount in await session.execute(
-        select(p.instrument_id, t.booking_date, func.sum(p.quantity))
+    for instrument_id, transaction_id, day, amount in await session.execute(
+        select(p.instrument_id, t.id, t.booking_date, func.sum(p.quantity))
         .join(t, t.id == p.transaction_id)
         .where(p.account_id == account_id, t.status != "void", t.id.not_in(adjustments))
-        .group_by(p.instrument_id, t.booking_date)
+        .group_by(p.instrument_id, t.id, t.booking_date)
     ):
-        movements[instrument_id].append((day, amount))
+        movements[instrument_id].append(Movement(day, amount, transaction_id))
     return movements
 
 
@@ -738,7 +798,9 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     b, r = models.ImportBatch, models.ImportRow
     staged = (
         await session.execute(
-            select(b.account_id, b.filename, b.covered_from, b.complete_to).where(b.id == batch_id)
+            select(b.account_id, b.filename, b.covered_from, b.complete_from, b.complete_to).where(
+                b.id == batch_id
+            )
         )
     ).one()
     account_id = staged.account_id
@@ -752,18 +814,19 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
             None,
             None,
             _vouched_to(staged.covered_from, staged.complete_to),
+            staged.complete_from,
         ),
     ]
     claims = await _claims(session, batches)
     movements = await _movements(session, account_id)
     with localcontext(prec=MAX_PREC):
-        for instrument_id, day, quantity, fee in await session.execute(
-            select(r.instrument_id, r.booking_date, r.quantity, r.fee).where(
+        for row_id, instrument_id, day, quantity, fee in await session.execute(
+            select(r.id, r.instrument_id, r.booking_date, r.quantity, r.fee).where(
                 r.batch_id == batch_id, r.kind == "statement", r.status == "new"
             )
         ):
             assert instrument_id is not None and day is not None and quantity is not None
-            movements[instrument_id].append((day, quantity - fee))
+            movements[instrument_id].append(Movement(day, quantity - fee, row_id))
     flat = [claim for found in claims.values() for claim in found]
     plan = plan_openings(flat, movements)
     live = await _live_adjustments(session, account_id)
@@ -1121,7 +1184,7 @@ class _Coverage:
 class _CommittedCoverage:
     filename: str
     coverage: _Coverage
-    instruments: frozenset[UUID]  # what it has rows in: it speaks for those alone
+    instruments: frozenset[UUID]  # what it has live rows in (_LIVE_ROWS): it speaks for those
 
 
 async def _committed_coverage(session: AsyncSession, account_id: UUID) -> list[_CommittedCoverage]:
@@ -1131,7 +1194,7 @@ async def _committed_coverage(session: AsyncSession, account_id: UUID) -> list[_
     for batch_id, instrument_id in await session.execute(
         select(r.batch_id, r.instrument_id)
         .distinct()
-        .where(r.account_id == account_id, r.status == "committed", r.kind == "statement")
+        .where(r.account_id == account_id, r.status.in_(_LIVE_ROWS), r.kind == "statement")
     ):
         assert instrument_id is not None  # committed rows have one (the table's CHECK)
         instruments[batch_id].add(instrument_id)
@@ -1239,11 +1302,12 @@ async def _missing_committed_row(
     start, end = complete
     if start is None or end is None:
         return None
-    # It lists in full only the instruments it has rows in (see _match_covered_days).
+    # It lists in full only the instruments it has live rows in, as _committed_coverage
+    # and _claims count them (_LIVE_ROWS).
     instruments = {
         row.instrument_id
         for row in rows
-        if row.kind == "statement" and row.status != "skipped" and row.instrument_id is not None
+        if row.kind == "statement" and row.status in _LIVE_ROWS and row.instrument_id is not None
     }
     matched = {row.duplicate_of for row in rows if row.duplicate_of is not None}
     r, b = models.ImportRow, models.ImportBatch

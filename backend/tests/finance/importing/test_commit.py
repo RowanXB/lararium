@@ -996,3 +996,107 @@ async def test_row_before_dtstart_still_checks_its_days(
     with pytest.raises(ImportNotAllowedError, match=r"nov\.csv has -10\.00 on 2026-11-22"):
         await stage(ofx, content, filename="export.ofx")
     assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("77.00")
+
+
+# Third review: the opening walk by what each file lists -------------------------------
+
+
+async def test_id_matched_across_days_is_not_before_the_opening(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """The walk counted movements by date, so a duplicate whose original is dated the day
+    before the file's first day was counted twice: a +50.00 adjustment, ledger 950.00 where
+    the statement says 900.00, with no error."""
+    ofx = await _profile(run, format="ofx")
+    november = _ofx(
+        [("20261110", "-20.00", "A"), ("20261130", "-50.00", "X")],
+        start="20261101",
+        end="20261130",
+        extra="<LEDGERBAL>\n<BALAMT>930.00\n<DTASOF>20261130\n</LEDGERBAL>",
+    )
+    await commit((await stage(ofx, november, filename="nov.ofx")).id)
+    december = _ofx(
+        [("20261201", "-50.00", "X"), ("20261215", "-30.00", "C")],
+        start="20261201",
+        end="20261231",
+        extra="<LEDGERBAL>\n<BALAMT>900.00\n<DTASOF>20261231\n</LEDGERBAL>",
+    )
+    staged = await stage(ofx, december, filename="dec.ofx")
+    assert _statuses(await _rows(session, staged)) == ["duplicate", "new"]
+    await commit(staged.id)
+    assert await _balance(session, account.id) == Decimal("900.00")
+
+
+async def test_partial_first_day_counts_the_earlier_rows_of_that_day(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """An export starting partway through a day: the walk left out another file's earlier
+    rows that day, posting a -5.00 adjustment on top of the -5.00 row (ledger 979.00)."""
+    profile = await _csv_profile(run)
+    first = BALANCE_HEADER + (
+        "19/11/2026,Pay,1000.00,1000.00\n20/11/2026,Shop,-5.00,995.00\n"
+        "20/11/2026,Cafe,-10.00,985.00\n"
+    )
+    await commit((await stage(profile, first, filename="a.csv")).id)
+    later = BALANCE_HEADER + "20/11/2026,Cafe,-10.00,985.00\n21/11/2026,Bus,-1.00,984.00\n"
+    staged = await stage(profile, later, filename="b.csv")
+    assert [row.kind for row in await _rows(session, staged)] == ["statement", "statement"]
+    await commit(staged.id)
+    assert await _balance(session, account.id) == Decimal("984.00")
+
+
+async def test_consecutive_statements_that_disagree_are_refused(
+    run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """C1 started a statement at its first row: June's statement, whose first row is on
+    8 Jun, wasn't compared with May's, which lists every day to 5 Jun, so their 11.55
+    disagreement became a 'gap' adjustment."""
+    account_id, pdf, _ = await _pdf_and_ofx(run, stage, make_account)
+    may = hsbc_pdf(HsbcStatement(pages=[PDF_ROWS]))
+    await commit((await stage(pdf, may, account_id=account_id, default=None)).id)
+    june = HsbcStatement(
+        pages=[
+            [
+                HsbcRow(
+                    "DD", ("EXAMPLE GYM",), paid_out="10.00", date="08 Jun 27", balance="1,290.00"
+                )
+            ]
+        ],
+        opening="1,300.00",
+        period="6 June to 5 July 2027",
+        brought_forward_date="05 Jun 27",
+        closing_day="05 Jul 27",
+    )
+    with pytest.raises(ImportNotAllowedError, match="disagree"):
+        await stage(pdf, hsbc_pdf(june), account_id=account_id, default=None)
+
+
+async def test_all_duplicate_statement_still_lists_its_days_in_full(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """A batch spoke for an instrument only if it committed a row in it, so a PDF whose rows
+    were all duplicates of an export stopped guarding the days it lists in full."""
+    account_id, pdf, ofx = await _pdf_and_ofx(run, stage, make_account)
+    export = _ofx(
+        [
+            ("20270508", "-4.20", "A"),
+            ("20270510", "1250.00", "B"),
+            ("20270510", "-17.35", "C"),
+            ("20270603", "-40.00", "D"),
+        ],
+        start="20270506",
+        end="20270605",
+        extra="<LEDGERBAL>\n<BALAMT>1288.45\n<DTASOF>20270605\n</LEDGERBAL>",
+    )
+    await commit((await stage(ofx, export, account_id=account_id, filename="e1.ofx")).id)
+    statement = await stage(
+        pdf, hsbc_pdf(HsbcStatement(pages=[PDF_ROWS])), account_id=account_id, default=None
+    )
+    assert set(_statuses(await _rows(session, statement))) == {"duplicate"}
+    await commit(statement.id)
+
+    extra = _ofx(
+        [("20270605", "-9.99", "E"), ("20270607", "-1.00", "F")], start="20270605", end="20270610"
+    )
+    rows = await _rows(session, await stage(ofx, extra, account_id=account_id))
+    assert _statuses(rows)[0] == "error"
