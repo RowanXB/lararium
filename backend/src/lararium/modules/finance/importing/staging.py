@@ -964,7 +964,10 @@ class _Row:
     real_error: bool = False
 
     def fail(self, message: str, *, real: bool = False) -> None:
+        # What a duplicate or skipped row carries goes with its status (import_rows' CHECK
+        # allows duplicate_of only on a duplicate).
         self.status, self.error, self.real_error = "error", message, real
+        self.duplicate_of = self.note = None
 
 
 def _iso_code(instrument: InstrumentRecord) -> str:

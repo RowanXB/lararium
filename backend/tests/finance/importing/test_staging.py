@@ -822,3 +822,20 @@ async def test_filtered_export_lists_no_day_in_full(
         )
     ).one()
     assert tuple(covered) == (date(2026, 11, 1), date(2026, 11, 5), None, None)
+
+
+async def test_duplicate_that_breaks_the_balance_chain_is_an_error(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row matched by covered day, then failed by the balance chain, kept
+    its duplicate_of, which import_rows' CHECK refuses."""
+    ofx = await _profile(run, format="ofx")
+    days = [("20261101", "1.00", "A"), ("20261109", "100.00", "B"), ("20261110", "-3.50", "C")]
+    days += [("20261130", "1.00", "D")]
+    await commit((await stage(ofx, _ofx(days, start="20261101", end="20261130"))).id)
+
+    csv = await _csv_profile(run)
+    content = BALANCE_HEADER + "09/11/2026,Pay,100.00,100.00\n10/11/2026,Cafe,-3.50,90.00\n"
+    rows = await _rows(session, await stage(csv, content))
+    assert _statuses(rows) == ["duplicate", "error"]
+    assert rows[1].duplicate_of is None and rows[1].note is None
