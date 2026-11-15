@@ -494,3 +494,44 @@ async def test_heal_waiting_on_the_matching_lock_times_out_as_503(
         await other.dispose()
     assert response.status_code == 503
     assert response.json()["detail"]["error"] == "query_timeout"
+
+
+async def test_hand_posted_in_transit_refused(client, session, run) -> None:
+    # Only matching posts on In transit: a transfer's legs and its placeholders.
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    b_id = await _manual(client)
+    gbp = await get_currency(session, "GBP")
+    count = text("select count(*) from finance.transactions")
+    before = await session.scalar(count)
+
+    response = await client.post(
+        f"{FINANCE}/transactions",
+        json={
+            "occurred_at": WHEN.isoformat(),
+            "description": "By hand",
+            "postings": [
+                {"account_id": b_id, "instrument_id": str(gbp.id), "quantity": "100"},
+                {"account_id": str(in_transit), "instrument_id": str(gbp.id), "quantity": "-100"},
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error": "invalid_input",
+        "message": "In transit holds only transfers between your accounts, which are"
+        " matched automatically; post against another account",
+    }
+    assert await session.scalar(count) == before
+
+
+async def test_identifier_on_a_system_account_refused(client, run) -> None:
+    in_transit = await run(get_or_create_system_account, "in_transit")
+
+    response = await _register(client, str(in_transit), B_IDENTIFIER)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error": "invalid_input",
+        "message": "a system account can't have identifiers",
+    }

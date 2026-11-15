@@ -380,9 +380,13 @@ export function TransfersPage() {
   const attention = all.filter(needsAttention);
   const inTransit = all.filter((t) => t.status === "awaiting" && !needsAttention(t));
   const recent = all.filter((t) => t.status !== "awaiting" && !needsAttention(t));
-  // Only an asset or liability account can be the owner's bank account.
+  // Only an asset or liability account can be the owner's bank account; In transit is
+  // the ledger's own, which can't have identifiers.
   const ownAccounts = (accounts.data ?? []).filter(
-    (a) => (a.ledger_type === "asset" || a.ledger_type === "liability") && a.status === "open",
+    (a) =>
+      (a.ledger_type === "asset" || a.ledger_type === "liability") &&
+      a.subtype !== "in_transit" &&
+      a.status === "open",
   );
 
   return (

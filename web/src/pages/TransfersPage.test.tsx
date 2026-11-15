@@ -105,6 +105,14 @@ vi.mock("../api", () => ({
         status: "open",
       },
       {
+        id: "0190a0b0-0000-7000-8000-000000000004",
+        name: "In transit",
+        ledger_type: "asset",
+        subtype: "in_transit",
+        balance_mode: "transactions",
+        status: "open",
+      },
+      {
         id: "0190a0b0-0000-7000-8000-000000000003",
         name: "Groceries",
         ledger_type: "expense",
@@ -216,6 +224,8 @@ it("registers a suggestion against an account", async () => {
   await user.click(await suggestions.findByRole("combobox", { name: "Account" }));
   // Only asset and liability accounts can own a bank account.
   expect(screen.queryByRole("option", { name: "Groceries" })).toBeNull();
+  // In transit is the ledger's own account, which can't have identifiers.
+  expect(screen.queryByRole("option", { name: "In transit" })).toBeNull();
   await user.click(await screen.findByRole("option", { name: "Bank A" }));
   await user.click(suggestions.getByRole("button", { name: "Register" }));
 

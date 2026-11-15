@@ -441,9 +441,9 @@ export function AccountsPage() {
                     defaultInstrumentId={defaultInstrumentId}
                   />
                 )}
-                {(account.ledger_type === "asset" || account.ledger_type === "liability") && (
-                  <Identifiers account={account} />
-                )}
+                {/* In transit is the ledger's own account, which can't have identifiers. */}
+                {(account.ledger_type === "asset" || account.ledger_type === "liability") &&
+                  account.subtype !== "in_transit" && <Identifiers account={account} />}
               </li>
             ))}
           </ul>

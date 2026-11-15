@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import {
   addAccountIdentifier,
   listAccountIdentifiers,
+  listAccounts,
   recordSnapshot,
   removeAccountIdentifier,
   setAccountBalanceMode,
@@ -185,4 +186,34 @@ it("offers the hybrid switch for a snapshots account", async () => {
       body: { balance_mode: "hybrid" },
     }),
   );
+});
+
+it("offers no identifiers on In transit", async () => {
+  const inTransit = {
+    id: "0190a0b0-0000-7000-8000-000000000003",
+    name: "In transit",
+    ledger_type: "asset",
+    subtype: "in_transit",
+    institution_entity_id: null,
+    owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+    tax_wrapper: "none",
+    parent_account_id: null,
+    balance_mode: "transactions",
+    source_kind: "manual",
+    source_connection_id: null,
+    status: "open",
+    opened_on: null,
+    closed_on: null,
+  };
+  const { data } = await listAccounts();
+  vi.mocked(listAccounts).mockResolvedValueOnce({ data: [...(data ?? []), inTransit] } as never);
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AccountsPage />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("group", { name: "Identifiers of Ledger account" });
+  // The ledger's own account is listed, but can't have identifiers.
+  expect(screen.getAllByText("In transit").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("group", { name: "Identifiers of In transit" })).toBeNull();
 });

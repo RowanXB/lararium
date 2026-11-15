@@ -44,6 +44,7 @@ from lararium.modules.finance.schemas import (
     TransactionCreate,
     TransactionOut,
 )
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers_api import healing_command
 
 router = APIRouter(prefix="/api/v1/finance", tags=["finance"], dependencies=[Depends(get_actor)])
@@ -271,6 +272,14 @@ async def post_transaction(
             for p in body.postings
         ],
     )
+    # Only matching posts on In transit (a transfer's legs and placeholders); a hand-posted
+    # posting there would sit in it with no transfer behind it.
+    in_transit = (await system_account_ids(session)).get("in_transit")
+    if any(p.account_id == in_transit for p in body.postings):
+        raise errors.FinanceValidationError(
+            "In transit holds only transfers between your accounts, which are matched"
+            " automatically; post against another account"
+        )
     async with command_context(session, actor, "post_transaction", _args(body)) as ctx:
         record = await ledger.post_transaction(ctx, tx)
     return TransactionOut.model_validate(record)
