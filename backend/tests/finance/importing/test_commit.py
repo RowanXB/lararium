@@ -694,3 +694,53 @@ async def test_commit_refuses_a_committed_row_missing_from_the_file(
     with pytest.raises(ImportBatchStaleError):
         await commit(statement.id)
     assert await _balance(session, account_id) == Decimal("1275.45")
+
+
+async def test_duplicate_of_a_rolled_back_row_is_posted(
+    session: AsyncSession,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    account: AccountRecord,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    """A row staged as a duplicate whose original was rolled back since must not be lost."""
+    first = await commit((await stage(csv_profile, TWO_ROWS)).id)
+    again = await stage(csv_profile, TWO_ROWS)
+    assert _statuses(await _rows(session, again)) == ["duplicate", "duplicate"]
+    await rollback(first.id)
+
+    rows = await _rows(session, await commit(again.id))
+    assert _statuses(rows) == ["committed", "committed"]
+    assert all(row.duplicate_of is None and row.note is None for row in rows)
+    assert await _balance(session, account.id) == Decimal("96.50")
+
+
+async def test_duplicate_rematched_when_another_file_now_covers_the_day(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    account: AccountRecord,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    first = await commit(
+        (await stage(csv_profile, HEADER + "20/11/2026,Cafe,-3.50\n", filename="x.csv")).id
+    )
+    ofx = await _profile(run, format="ofx")
+    export = await stage(ofx, _ofx([("20261120", "-3.50", "A")], start="20261120", end="20261120"))
+    await rollback(first.id)
+    # Another file for the day, committed after the rollback.
+    other = await commit(
+        (await stage(csv_profile, HEADER + "20/11/2026,Example Cafe,-3.50\n", filename="w.csv")).id
+    )
+
+    (row,) = await _rows(session, await commit(export.id))
+    (original,) = await _rows(session, other)
+    assert (row.status, row.duplicate_of, row.note) == (
+        "duplicate",
+        original.id,
+        "already imported from w.csv",
+    )
+    assert await _balance(session, account.id) == Decimal("-3.50")
