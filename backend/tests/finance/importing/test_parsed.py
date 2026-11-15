@@ -13,3 +13,9 @@ def test_keyed_is_linear() -> None:
     values = keyed([("A", "x")] * 200_000)
     assert time.perf_counter() - started < 1
     assert len(values) == 200_000 and values["A#200000"] == "x"
+
+
+def test_keyed_never_overwrites_a_key_that_looks_numbered() -> None:
+    pairs = [("A", "1"), ("A", "2"), ("A#2", "3"), ("A", "4")]
+    assert keyed(pairs) == {"A": "1", "A#2": "2", "A#2#2": "3", "A#3": "4"}
+    assert keyed([("A#2", "1"), ("A", "2"), ("A", "3")]) == {"A#2": "1", "A": "2", "A#3": "3"}

@@ -526,3 +526,33 @@ def test_misgrouped_amount_is_row_error_not_wrong_number() -> None:
     error, row = statement.rows
     assert isinstance(error, RowError) and "12,50" in error.message
     assert isinstance(row, ParsedRow) and row.quantity == Decimal("1234.56")
+
+
+def test_repeated_unmapped_header_keeps_every_column() -> None:
+    content = b"Date,Description,Amount,Note,Note\n10/11/2026,Coffee,-3.50,first,second\n"
+    row = _rows(_parse(content))[0]
+    assert row.raw == {
+        "Date": "10/11/2026",
+        "Description": "Coffee",
+        "Amount": "-3.50",
+        "Note": "first",
+        "Note#2": "second",
+    }
+
+
+def test_repeated_mapped_header_is_file_error() -> None:
+    content = b"Date,Description,Amount,Description\n10/11/2026,Coffee,-3.50,Shop\n"
+    with pytest.raises(FileFormatError, match="Description"):
+        _parse(content)
+
+
+def test_repeated_include_only_header_is_file_error() -> None:
+    content = b"Date,Description,Amount,State,State\n10/11/2026,Coffee,-3.50,DONE,PENDING\n"
+    with pytest.raises(FileFormatError, match="State"):
+        _parse(content, include_only={"State": ["DONE"]})
+
+
+def test_repeated_name_in_configured_header_is_file_error() -> None:
+    header = ["Date", "Amount", "Description", "Amount"]
+    with pytest.raises(FileFormatError, match="Amount"):
+        _parse(b"10/11/2026,-3.50,Coffee,-3.50\n", header=header)

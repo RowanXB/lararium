@@ -17,6 +17,7 @@ from lararium.modules.finance.importing.parsed import (
     SkippedRow,
     StatementAccount,
     clean_description,
+    keyed,
     parse_amount,
 )
 from lararium.modules.finance.importing.profiles import CsvProfileConfig
@@ -57,6 +58,10 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Li
     ]
     if missing:
         raise FileFormatError(f"columns not in the file's header: {', '.join(missing)}")
+    used = dict.fromkeys([*config.columns.names(), *config.include_only])
+    repeated = [name for name in used if header.count(name) > 1]
+    if repeated:
+        raise FileFormatError(f"columns named more than once in the header: {', '.join(repeated)}")
     if not lines:
         raise FileFormatError("no rows")
     if len(lines) > parsed.MAX_IMPORT_ROWS:
@@ -214,7 +219,8 @@ def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> P
     accounts: set[StatementAccount] = set()
     for position, line in enumerate(lines):
         # Short rows are padded: a trailing empty cell is often left out.
-        raw = dict(zip(header, line + [""] * (len(header) - len(line)), strict=False))
+        # A repeated header name keeps every column ("Note", "Note#2").
+        raw = keyed(zip(header, line + [""] * (len(header) - len(line)), strict=False))
         if len(line) > len(header):
             message = f"the row has {len(line)} cells, the header {len(header)}"
             rows.append(RowError(position=position, message=message, raw=raw))

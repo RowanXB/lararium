@@ -191,14 +191,19 @@ def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
 
 
 def keyed(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """The pairs as a raw dict, in order; a repeated key gets "#2", "#3"… (keys never
-    contain "#"). Each pair costs O(1), so a file of repeated fields stays linear."""
+    """The pairs as a raw dict, in order, losing none: a repeated key gets "#2", "#3"…, and
+    a numbered key that is already taken is numbered again. Each key resumes from its own
+    counter, so a file of repeated fields stays linear."""
     values: dict[str, str] = {}
     seen: dict[str, int] = {}
     for key, value in pairs:
-        n = seen.get(key, 0) + 1
+        n = seen.get(key, 1)
+        candidate = key
+        while candidate in values:
+            n += 1
+            candidate = f"{key}#{n}"
         seen[key] = n
-        values[key if n == 1 else f"{key}#{n}"] = value
+        values[candidate] = value
     return values
 
 
