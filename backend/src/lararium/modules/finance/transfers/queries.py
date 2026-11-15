@@ -14,6 +14,7 @@ from sqlalchemy import (
     Select,
     SQLColumnExpression,
     Uuid,
+    all_,
     and_,
     any_,
     case,
@@ -204,9 +205,14 @@ def _in_ids(
     return id_column == any_(sql_cast(ids, ARRAY(Uuid)))
 
 
-def history_start(account_id: SQLColumnExpression[UUID]) -> ScalarSelect[datetime]:
+def history_start(
+    account_id: SQLColumnExpression[UUID], opening_balances: UUID | None
+) -> ScalarSelect[datetime]:
     """When the account's history from its connection starts: its earliest non-void record
-    from that connection; NULL for a manual account or one that has synced nothing."""
+    from that connection, not counting one posted against Opening balances (the system
+    account `opening_balances`): a connector dates its opening balance adjustment before
+    the history it accounts for, which isn't history itself. NULL for a manual account or
+    one that has synced nothing else."""
     t = models.Transaction
     p = aliased(models.Posting, name="history_posting")
     a = aliased(models.Account, name="history_account")
@@ -222,18 +228,36 @@ def history_start(account_id: SQLColumnExpression[UUID]) -> ScalarSelect[datetim
             _in_ids(t.id, p, p.transaction_id, p.account_id == account_id),
             t.connection_id == connection,
             t.status != "void",
+            *_not_opening(t.id, opening_balances),
         )
         .correlate_except(t)
         .scalar_subquery()
     )
 
 
-def history_starts() -> CTE:
+def _not_opening(
+    transaction_id: SQLColumnExpression[UUID], opening_balances: UUID | None
+) -> list[ColumnElement[bool]]:
+    """That the transaction posts nothing on Opening balances (none if it doesn't exist)."""
+    if opening_balances is None:
+        return []
+    o = aliased(models.Posting, name="opening_posting")
+    # Their ids once, in an array (see _in_ids); none, and the array is NULL.
+    ids = (
+        select(func.array_agg(o.transaction_id))
+        .where(o.account_id == opening_balances)
+        .correlate_except(o)
+        .scalar_subquery()
+    )
+    return [func.coalesce(transaction_id != all_(sql_cast(ids, ARRAY(Uuid))), True)]
+
+
+def history_starts(opening_balances: UUID | None) -> CTE:
     """Every connected account's history_start, computed once per statement: columns
     account_id, starts_at."""
     a = aliased(models.Account, name="connected")
     return (
-        select(a.id.label("account_id"), history_start(a.id).label("starts_at"))
+        select(a.id.label("account_id"), history_start(a.id, opening_balances).label("starts_at"))
         .where(a.source_connection_id.is_not(None))
         .cte("history_starts")
         .prefix_with("MATERIALIZED")

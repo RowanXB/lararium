@@ -51,7 +51,7 @@ Choices the design leaves to the builder, made here so tasks don't have to:
       - **None, but one or more with a different amount** (same accounts, instrument and window): open R's own transfer with `amount_differs`.
       - **None at all:** open R's own transfer:
         - **X is manual:** `inferred` with a placeholder.
-        - **X is connected, and the counterpart's latest possible time is before X's history** (the earliest non-void record of X's connection posting on X): `before_history`, with a settlement In transit ↔ Opening balances.
+        - **X is connected, and the counterpart's latest possible time is before X's history** (the earliest non-void record of X's connection posting on X, other than one posted against Opening balances): `before_history`, with a settlement In transit ↔ Opening balances.
         - **Otherwise:** `awaiting`.
 
       R's contra is re-pointed to In transit.

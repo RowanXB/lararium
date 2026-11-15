@@ -395,6 +395,41 @@ async def test_before_history_settles_against_opening_balances(
     assert await heal() == 0
 
 
+async def test_opening_adjustment_does_not_start_the_history(
+    session, run, gbp, ids, a_and_c, connector_tx, heal
+) -> None:
+    """A connector dates its opening balance adjustment a day before the history it
+    accounts for. A transfer whose counterpart window ends between the two is already in the
+    opening balance, so it is before_history, not awaited."""
+    a, _, c, c_id = a_and_c
+    await history(connector_tx, c, days_before=0)  # C's first real record, at WHEN
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=WHEN - timedelta(days=1),
+            description="Opening balance",
+            origin="connector",
+            connection_id=c.connection_id,
+            external_id="opening:acc_c",
+            postings=[
+                PostingInput(c.account.id, gbp.id, Decimal(500)),
+                PostingInput(ids.opening_balances, gbp.id, Decimal(-500)),
+            ],
+        ),
+    )
+    # The counterpart could occur until 7 days after: 12 hours before WHEN, after the
+    # opening adjustment.
+    sent_at = WHEN - timedelta(days=7, hours=12)
+    await connector_tx(a, "-100", external_id="out_1", occurred_at=sent_at, identifier_id=c_id)
+    assert await heal() == 1
+
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "before_history"
+    assert await in_transit_balance(session, ids) == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
 async def test_older_history_without_the_counterpart_reopens_awaiting(
     session, ids, a_and_c, connector_tx, heal
 ) -> None:

@@ -321,7 +321,16 @@ async def _open(
         placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
         status = "inferred"
     elif await session.scalar(
-        select(before_history(record.columns(), history_start(bound_id(counterpart.id)), settings))
+        select(
+            before_history(
+                record.columns(),
+                history_start(
+                    bound_id(counterpart.id),
+                    (await system_account_ids(session)).get("opening_balances"),
+                ),
+                settings,
+            )
+        )
     ):
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"

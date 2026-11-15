@@ -94,7 +94,7 @@ async def records_to_heal(
         # (a) posting on In transit without being a transfer's leg, whatever its shape (a
         # leg that gained a fee posting included).
         queries.append(stray_in_transit(in_transit))
-        history = history_starts()
+        history = history_starts(system.get("opening_balances"))
         for side in ("out", "in"):
             leg, other_leg = (
                 (tr.out_transaction_id, tr.in_transaction_id)
