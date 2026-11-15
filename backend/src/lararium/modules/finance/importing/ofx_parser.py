@@ -34,8 +34,10 @@ _START = re.compile(r"<OFX>", re.IGNORECASE)
 _UTF8_HEADER = re.compile(
     rb"ENCODING:\s*(?:UTF-8|UNICODE)|encoding\s*=\s*[\"']UTF-8[\"']", re.IGNORECASE
 )
-# An XML declaration with no encoding: XML's default, UTF-8.
-_XML_NO_ENCODING = re.compile(rb"<\?xml(?![^>]*\bencoding\s*=)[^>]*\?>", re.IGNORECASE)
+# An encoding stated in the header: SGML's ENCODING:, or an XML declaration's encoding=.
+_STATED_ENCODING = re.compile(rb"ENCODING:|\bencoding\s*=", re.IGNORECASE)
+# OFX 2.x is XML (an <?xml ...?> or <?OFX ...?> processing instruction).
+_XML_INSTRUCTION = re.compile(rb"<\?(?:xml|OFX)\b", re.IGNORECASE)
 # Only a well-formed reference is one: SGML OFX writes a bare "&" too ("B&Q"), which
 # html.unescape would read as a legacy entity ("&LT" -> "<").
 _ENTITY = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);")
@@ -126,7 +128,13 @@ def _decode(content: bytes) -> str:
     if start is None:
         raise FileFormatError("not an OFX file: there is no <OFX> tag")
     head = content[: start.start()]
-    utf8 = _UTF8_HEADER.search(head) is not None or _XML_NO_ENCODING.search(head) is not None
+    # UTF-8 when the header says so, when a BOM opens the file, or when it is XML that
+    # states no encoding (XML's default); otherwise SGML OFX's usual cp1252.
+    utf8 = (
+        _UTF8_HEADER.search(head) is not None
+        or head.startswith(b"\xef\xbb\xbf")
+        or (_XML_INSTRUCTION.search(head) is not None and _STATED_ENCODING.search(head) is None)
+    )
     encoding = "utf-8-sig" if utf8 else "cp1252"
     try:
         text = content.decode(encoding)

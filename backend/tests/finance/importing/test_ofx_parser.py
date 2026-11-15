@@ -689,3 +689,13 @@ def test_unclosed_cdata_is_file_error_and_linear() -> None:
     with pytest.raises(FileFormatError, match="CDATA section is never closed"):
         _parse(content)
     assert time.perf_counter() - started < 2
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+def test_xml_with_only_the_ofx_instruction_is_utf8(bom: bytes) -> None:
+    """Fifth review: with no <?xml ...?> line (or after a BOM) it was read as cp1252."""
+    content = XML_V2.replace(XML_HEADER.split("\n")[0].encode() + b"\n", b"").replace(
+        b"Example Cafe", "Café René".encode()
+    )
+    assert not content.startswith(b"<?xml")
+    assert _rows(_parse(bom + content))[0].payee == "Café René"
