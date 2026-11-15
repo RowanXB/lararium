@@ -85,17 +85,19 @@ _INTERNATIONAL = re.compile(
     r"(?P<name>.*?)\s*REFED-NO:\s*(?P<reference>\S*?)\s*BUSIN-NO:\s*(?P<business>\S+)\s*(?P<rest>.*)"
 )
 # A sort code counts only where its meaning is printed: followed by the account number, or
-# directly by the bank's name ending in its legal form ("401234 EXAMPLE BANK PLC"). Any
-# other 6-digit run could be anything (an invoice number), so it is kept in raw only.
-_SORT_CODE_ACCOUNT = re.compile(
-    r"(?P<name>.+?) (?P<sort_code>\d{6}) (?P<account>\d{8}) (?P<rest>.+)"
+# directly by the bank's name, a run of upper-case words ending in its legal form ("401234
+# EXAMPLE BANK PLC"), optionally then the account number. Any other 6-digit run could be
+# anything (an invoice number), so it is kept in raw only.
+_BANK = r"(?:[A-Z0-9&.'()/-]+ )*?(?:PLC|LIMITED|LTD\.?)"
+_LOCAL = re.compile(
+    rf"(?P<name>.+?) (?P<sort_code>\d{{6}})(?: (?P<account>\d{{8}}))?"
+    rf"(?: (?P<bank>{_BANK})(?: (?P<account_after>\d{{8}}))?)?(?: (?P<reference>.+))?"
 )
-_SIX_DIGITS = re.compile(r"(?P<name>.+?) (?P<sort_code>\d{6}) (?P<rest>.+)")
+_SIX_DIGITS = re.compile(r"(?P<name>.+?) \d{6} (?P<rest>.+)")
 # Between the statement's own accounts: the name, a number whose meaning isn't printed (kept
 # in raw only), then the statement's own branch.
 _INTERNAL = re.compile(r"(?P<name>.+?) \d+ (?P<rest>.+)")
 _TRANSFERS = frozenset({"Transfer", "Inward Transfer", "Outward Transfer"})
-_LEGAL_SUFFIXES = frozenset({"PLC", "LIMITED", "LTD", "LTD."})
 
 # "Label/中文:value" fields: the whole line, or one value among several on a line.
 _LINE_FIELDS = {
@@ -242,16 +244,6 @@ def _tags(segment: str) -> tuple[str | None, str | None]:
     return tags.get("PURP") or None, tags.get("URI") or None
 
 
-def _bank_and_reference(rest: str) -> tuple[str | None, str | None]:
-    """A bank name ends with its legal form ("… PLC", "… LIMITED"); what follows is the
-    payment's reference."""
-    words = rest.split()
-    for n, word in enumerate(words):
-        if word.upper() in _LEGAL_SUFFIXES:
-            return " ".join(words[: n + 1]), " ".join(words[n + 1 :]) or None
-    return None, rest or None
-
-
 def _counterparty(
     *,
     name: str | None = None,
@@ -303,23 +295,17 @@ def _payment(details: str, branch: str | None) -> _Payment:
             )
             remittance = remittance or international["rest"] or None
     elif kind.startswith("Local Clearing"):
-        if (local := _SORT_CODE_ACCOUNT.fullmatch(rest)) is not None:
-            bank, reference = _bank_and_reference(local["rest"])
+        local = _LOCAL.fullmatch(rest)
+        if local is not None and (local["bank"] or local["account"]):
             counterparty = _counterparty(
                 name=local["name"],
                 sort_code=local["sort_code"],
-                account_number=local["account"],
-                bank=bank,
-                reference=reference,
+                account_number=local["account"] or local["account_after"],
+                bank=local["bank"],
+                reference=local["reference"],
             )
         elif (six := _SIX_DIGITS.fullmatch(rest)) is not None:
-            bank, reference = _bank_and_reference(six["rest"])
-            counterparty = _counterparty(
-                name=six["name"],
-                sort_code=six["sort_code"] if bank is not None else None,
-                bank=bank,
-                reference=reference,
-            )
+            counterparty = _counterparty(name=six["name"], reference=six["rest"])
     elif kind in _TRANSFERS and branch:
         internal = _INTERNAL.fullmatch(rest)
         if internal is not None and internal["rest"].startswith(branch):

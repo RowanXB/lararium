@@ -505,6 +505,30 @@ def test_boc_sort_code_before_a_bank_name() -> None:
     )
 
 
+def _local_counterparty(*lines: str) -> Counterparty | None:
+    row = BocRow("21/05/27", "21/05/27", ("///Local Clearing And Outward", *lines), paid_out="6.00")
+    return _rows(_boc(BocStatement(opening="10.00", pages=[[row]])))[0].counterparty
+
+
+def test_boc_bank_name_must_follow_the_sort_code() -> None:
+    # Lower-case words between the digits and the legal name: not a bank name, no sort code.
+    assert _local_counterparty("Remittance Alex 202701", "rent paid to EXAMPLE BANK PLC") == (
+        Counterparty(name="Alex", reference="rent paid to EXAMPLE BANK PLC")
+    )
+
+
+def test_boc_account_number_after_the_bank_name() -> None:
+    assert _local_counterparty("Remittance Alex 401234", "EXAMPLE BANK PLC", "12345678 rent") == (
+        Counterparty(
+            name="Alex",
+            sort_code="401234",
+            account_number="12345678",
+            bank="EXAMPLE BANK PLC",
+            reference="rent",
+        )
+    )
+
+
 def test_boc_lone_six_digits_are_not_a_sort_code() -> None:
     # Only a sort code printed with an account number fills the counterparty's account.
     lone = BocRow(
