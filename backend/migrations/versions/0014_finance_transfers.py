@@ -16,6 +16,15 @@ down_revision: str | None = "0013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# The counterparty fields are new whenever this runs, so a Monzo connection's note that it
+# filled them (normalize.COUNTERPARTY_FIELDS_KEY) is stale, whatever an earlier downgrade
+# left; the next sync fills them again from the raw records.
+FORGET_COUNTERPARTY_BACKFILL = """
+    UPDATE core.connections
+      SET config = config - 'counterparty_fields_v1'
+      WHERE config ? 'counterparty_fields_v1'
+"""
+
 UPGRADE = [
     """
     ALTER TABLE finance.transactions
@@ -67,13 +76,15 @@ UPGRADE = [
       UNIQUE NULLS NOT DISTINCT (kind, subject_kind, subject_ref, other_kind, other_ref)
     )
     """,
+    FORGET_COUNTERPARTY_BACKFILL,
 ]
 
 # The code before 0014 posts every contra against Unassigned and knows no derived rows, so
 # the ledger goes back to that before the tables go: the placeholders and settlements are
 # deleted (their postings cascade), and every recorded posting on In transit moves back to
 # Unassigned. The system accounts are found by their settings; In transit itself stays,
-# empty, as accounts are never deleted.
+# empty, as accounts are never deleted. The counterparty fields go with their columns, and
+# so does the note that they were filled.
 _SYSTEM_ACCOUNT = "(SELECT (value #>> '{{}}')::uuid FROM core.settings WHERE key = '{}')"
 LEDGER_UNDO = [
     # Its rows reference the derived transactions.
@@ -84,6 +95,7 @@ LEDGER_UNDO = [
       SET account_id = {_SYSTEM_ACCOUNT.format("finance.system_account.unassigned")}
       WHERE account_id = {_SYSTEM_ACCOUNT.format("finance.system_account.in_transit")}
     """,
+    FORGET_COUNTERPARTY_BACKFILL,
 ]
 
 DOWNGRADE = [

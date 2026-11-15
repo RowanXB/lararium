@@ -1,10 +1,12 @@
 """The Monzo normalizer and transfer matching: counterparty fields, own identifiers, and the
 contra each transaction is posted with (plan Decisions 9-11)."""
 
+import importlib.util
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -424,6 +426,59 @@ async def test_existing_history_gets_fields_once(session, run) -> None:
     await _clear_fields(session)
     await sync_monzo(session, connection)
     assert (await transaction_row(session, "tx_FPS0001")).counterparty_name is None
+
+
+def _migration(name: str) -> Any:
+    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_reupgrading_0014_fills_the_fields_again(session, run) -> None:
+    gbp = await get_currency(session, "GBP")
+    await manual_bank(run, gbp.id, identifier=B_IDENTIFIER)
+    connection = await monzo_connection(run)
+    await run(update_config, connection.id, {"other": "kept"})
+    await sync_monzo(session, connection, transactions={ACCOUNT_ID: [faster_payment(-10000)]})
+    assert (await get_connection(session, connection.id)).config["counterparty_fields_v1"] is True
+
+    # A downgrade and re-upgrade of 0014: the columns come back empty, and both ends of it
+    # forget the note that they were filled.
+    migration = _migration("0014_finance_transfers")
+    assert migration.FORGET_COUNTERPARTY_BACKFILL in migration.UPGRADE
+    assert migration.FORGET_COUNTERPARTY_BACKFILL in migration.LEDGER_UNDO
+    await _clear_fields(session)
+    await session.execute(text(migration.FORGET_COUNTERPARTY_BACKFILL))
+    await session.commit()
+    config = (await get_connection(session, connection.id)).config
+    assert "counterparty_fields_v1" not in config
+    assert config["other"] == "kept"
+
+    # The next sync, with nothing new fetched, fills them again from the raw records.
+    await sync_monzo(session, connection)
+
+    row = await transaction_row(session, "tx_FPS0001")
+    identifier = await identifier_row(session, B_IDENTIFIER)
+    assert (
+        row.counterparty_identifier_id,
+        row.counterparty_name,
+        row.payment_reference,
+        row.bank_transfer,
+    ) == (identifier.id, "Test Owner", "RENT MARCH", True)
+    assert (await get_connection(session, connection.id)).config["counterparty_fields_v1"] is True
+    await heal(session)
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "inferred"
+
+    # A config without the note is left as it is.
+    before = (await get_connection(session, connection.id)).config
+    await run(update_config, connection.id, {}, remove=["counterparty_fields_v1"])
+    await session.execute(text(migration.FORGET_COUNTERPARTY_BACKFILL))
+    after = (await get_connection(session, connection.id)).config
+    assert after == {k: v for k, v in before.items() if k != "counterparty_fields_v1"}
 
 
 async def test_two_monzo_connections_match(session, run) -> None:
