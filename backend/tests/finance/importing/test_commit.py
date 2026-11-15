@@ -879,3 +879,26 @@ async def test_superseded_adjustment_is_not_a_gap(
     (superseded,) = _adjustments(await _rows(session, export))
     assert superseded.status == "rolled_back"
     assert superseded.is_gap is None
+
+
+async def test_row_before_dtstart_still_checks_its_days(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """Final review test 2: an OFX whose DTSTART (25 Nov) comes after one of its rows
+    (20 Nov) covers that row's day too, so it can't skip the CSV's 22 Nov row unnoticed."""
+    csv = BALANCE_HEADER + (
+        "10/11/2026,Pay,100.00,100.00\n20/11/2026,Cafe,-5.00,95.00\n"
+        "22/11/2026,Taxi,-10.00,85.00\n28/11/2026,Shop,-8.00,77.00\n"
+    )
+    await commit((await stage(await _csv_profile(run), csv, filename="nov.csv")).id)
+    ofx = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261120", "-5.00", "A"), ("20261128", "-8.00", "B"), ("20261203", "-7.00", "C")],
+        start="20261125",
+        end="20261205",
+        extra="<LEDGERBAL>\n<BALAMT>70.00\n<DTASOF>20261205\n</LEDGERBAL>",
+    )
+
+    with pytest.raises(ImportNotAllowedError, match=r"nov\.csv has -10\.00 on 2026-11-22"):
+        await stage(ofx, content, filename="export.ofx")
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("77.00")
