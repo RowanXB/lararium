@@ -74,6 +74,15 @@ type Delimiter = Annotated[str, Field(min_length=1, max_length=1), AfterValidato
 type Encoding = Literal["utf-8-sig", "utf-8", "cp1252", "latin-1"]
 type Sign = Literal["inflow_positive", "outflow_positive"]
 
+
+def _check_label(label: str) -> str:
+    if not label.strip():
+        raise ValueError("the footer label can't be empty")
+    return label
+
+
+type FooterLabel = Annotated[str, AfterValidator(_check_label)]
+
 _CONFIG = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -161,6 +170,8 @@ class CsvProfileConfig(BaseModel):
     # Column names, in order, for a file without a header row; None: the first row is the header.
     header: list[str] | None = Field(default=None, min_length=1)
     skip_footer_rows: int = Field(default=0, ge=0, le=20)
+    # The first cell of the footer line that states the arranged overdraft limit (midata).
+    overdraft_footer_label: FooterLabel | None = None
     columns: CsvColumns
     date_format: DateFormat
     timezone: TimezoneName | None = None
@@ -170,6 +181,14 @@ class CsvProfileConfig(BaseModel):
     row_order: Literal["oldest_first", "newest_first"] = "oldest_first"
     sign: Sign = "inflow_positive"
     amount_format: AmountFormat = AmountFormat()
+
+    @model_validator(mode="after")
+    def _label_needs_footer(self) -> Self:
+        if self.overdraft_footer_label is not None and self.skip_footer_rows == 0:
+            raise ValueError(
+                "overdraft_footer_label is looked for in the footer: set skip_footer_rows"
+            )
+        return self
 
     @model_validator(mode="after")
     def _columns_in_header(self) -> Self:

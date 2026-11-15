@@ -180,3 +180,16 @@ def test_typed_field_columns_checked_against_header() -> None:
             PROFILE_CONFIG.validate_python(
                 _csv(columns=base | typed, header=[h for h in header if h != name])
             )
+
+
+def test_overdraft_label_validated() -> None:
+    label = "Arranged overdraft limit"
+    config = PROFILE_CONFIG.validate_python(_csv(overdraft_footer_label=label, skip_footer_rows=1))
+    assert config.overdraft_footer_label == label
+    assert PROFILE_CONFIG.validate_python(_csv()).overdraft_footer_label is None
+    for empty in ["", "  "]:
+        with pytest.raises(ValidationError):
+            PROFILE_CONFIG.validate_python(_csv(overdraft_footer_label=empty, skip_footer_rows=1))
+    # The label is looked for only among the footer rows, so it needs some.
+    with pytest.raises(ValidationError, match="skip_footer_rows"):
+        PROFILE_CONFIG.validate_python(_csv(overdraft_footer_label=label))

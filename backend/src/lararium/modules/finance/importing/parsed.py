@@ -1,7 +1,7 @@
 """What a parser reads from a statement file, before staging: shared by every format."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -50,6 +50,7 @@ class Counterparty:
     sort_code: str | None = None
     account_number: str | None = None
     reference: str | None = None
+    bank: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
@@ -60,12 +61,32 @@ class Counterparty:
 class StatementAccount:
     """The account a statement is for, as the file states it."""
 
-    sort_code: str | None
-    account_number: str | None
+    sort_code: str | None = None
+    account_number: str | None = None
+    iban: str | None = None  # upper-cased, without spaces
+    bic: str | None = None
+    name: str | None = None
+    account_type: str | None = None  # a product line, BOC's account type, or OFX ACCTTYPE
+    customer_number: str | None = None
+    clearing_account_number: str | None = None
+    branch: str | None = None  # name and address as one text
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
         object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
+        if self.iban is not None:
+            object.__setattr__(self, "iban", "".join(self.iban.split()).upper())
+
+
+@dataclass(frozen=True)
+class StatementRate:
+    """One row of a statement's rate table; rates in percent a year."""
+
+    kind: str  # as printed
+    band_from: Decimal | None
+    band_to: Decimal | None
+    rate: Decimal
+    ear: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -89,6 +110,10 @@ class ParsedRow:
     memo: str | None = None
     check_number: str | None = None
     counterparty: Counterparty | None = None
+    payment_kind: str | None = None
+    bank_reference: str | None = None
+    purpose_code: str | None = None
+    remittance_info: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +144,12 @@ class ParsedStatement:
     payments_in: int | None = None
     payments_out: int | None = None
     account: StatementAccount | None = None
+    currency: str | None = None
+    statement_reference: str | None = None
+    document_date: date | None = None
+    overdraft_limit: Decimal | None = None
+    overdraft_limit_date: date | None = None
+    rates: list[StatementRate] = field(default_factory=list[StatementRate])
 
 
 def parse_amount(text: str, fmt: AmountFormat) -> Decimal:

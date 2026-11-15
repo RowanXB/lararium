@@ -26,8 +26,11 @@ PARSER_VERSION = "csv-1"
 _CURRENCY = re.compile(r"[A-Z]{3}")
 
 
-def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], list[list[str]]]:
-    """The header and the data rows as cell lists, without all-empty lines and the footer."""
+type _Lines = list[list[str]]
+
+
+def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Lines, _Lines]:
+    """The header, the data rows and the footer rows as cell lists, without all-empty lines."""
     try:
         text = content.decode(config.encoding)
     except UnicodeDecodeError:
@@ -45,7 +48,9 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], lis
         if not lines:
             raise FileFormatError("no rows")
         header = lines.pop(0)
+    footer: _Lines = []
     if config.skip_footer_rows:
+        footer = lines[-config.skip_footer_rows :]
         lines = lines[: -config.skip_footer_rows]
     missing = [
         name for name in [*config.columns.names(), *config.include_only] if name not in header
@@ -56,7 +61,7 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], lis
         raise FileFormatError("no rows")
     if len(lines) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
-    return header, lines
+    return header, lines, footer
 
 
 def _optional(raw: dict[str, str], column: str | None) -> str | None:
@@ -137,7 +142,7 @@ def _account(raw: dict[str, str], config: CsvProfileConfig) -> StatementAccount 
         sort_code=_optional(raw, config.columns.account_sort_code),
         account_number=_optional(raw, config.columns.account_number),
     )
-    return None if account == StatementAccount(None, None) else account
+    return None if account == StatementAccount() else account
 
 
 def _row(
@@ -176,9 +181,35 @@ def _excluded(raw: dict[str, str], config: CsvProfileConfig) -> str | None:
     return None
 
 
+def _overdraft(
+    footer: _Lines, config: CsvProfileConfig, local_tz: ZoneInfo
+) -> tuple[Decimal | None, date | None]:
+    """The arranged overdraft limit and its date from the labelled footer line, if any."""
+    label = config.overdraft_footer_label
+    if label is None:
+        return None, None
+    for line in footer:
+        if line[0].strip() != label.strip():
+            continue
+        try:
+            limit = parse_amount(line[-1], config.amount_format)
+        except ValueError as error:
+            raise FileFormatError(f"the {label!r} line has no amount: {error}") from None
+        for cell in line[1:]:
+            try:
+                return limit, _datetime(cell, config, local_tz).date()
+            except ValueError:
+                continue
+        raise FileFormatError(
+            f"the {label!r} line has no date in the format {config.date_format!r}"
+        )
+    return None, None
+
+
 def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz: the profile's timezone when set; the caller resolves it."""
-    header, lines = _read_rows(content, config)
+    header, lines, footer = _read_rows(content, config)
+    overdraft_limit, overdraft_limit_date = _overdraft(footer, config, local_tz)
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()
     for position, line in enumerate(lines):
@@ -202,4 +233,9 @@ def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> P
             accounts.add(account)
     if len(accounts) > 1:
         raise FileFormatError("export one account per file")
-    return ParsedStatement(rows=rows, account=next(iter(accounts), None))
+    return ParsedStatement(
+        rows=rows,
+        account=next(iter(accounts), None),
+        overdraft_limit=overdraft_limit,
+        overdraft_limit_date=overdraft_limit_date,
+    )
