@@ -245,3 +245,56 @@ async def test_removing_identifier_reverts_to_unassigned(session, run, ids, infe
     assert (await balances_on(session))[b.id] == Decimal(1000)
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_weekly_transfers_each_match_their_own_week(
+    session, run, ids, gbp, connected_bank, manual_bank, connector_tx, heal
+) -> None:
+    # A weekly standing order from A to B: Monzo stamps each payment at 09:00, and B's
+    # statement rows carry only their date (00:00), so a receive is 9 hours before its send
+    # and exactly a week minus 9 hours after the previous one.
+    a = await connected_bank("A")
+    b = await manual_bank("B", snapshot_at=WHEN - timedelta(days=30))
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    midnight = WHEN.replace(hour=0)
+    weeks = range(4)
+    sends = [
+        await connector_tx(
+            a,
+            "-50",
+            external_id=f"so_{k}",
+            occurred_at=midnight + timedelta(days=7 * k, hours=9),
+            identifier_id=identifier,
+        )
+        for k in weeks
+    ]
+    rows = []
+    for k in weeks:
+        contra = await transfer_contra(
+            session, source=None, own_account_id=b.id, counterparty_identifier_id=None
+        )
+        rows.append(
+            await run(
+                post_transaction,
+                TransactionInput(
+                    occurred_at=midnight + timedelta(days=7 * k),
+                    description="Standing order from A",
+                    origin="manual",
+                    postings=[
+                        PostingInput(b.id, gbp.id, Decimal(50)),
+                        PostingInput(contra, gbp.id, Decimal(-50)),
+                    ],
+                    counterparty=CounterpartyFields(bank_transfer=True),
+                ),
+            )
+        )
+
+    await heal()
+
+    transfers = await list_transfers(session)
+    assert sorted(
+        (t.status, t.review_reason, t.out_transaction_id, t.in_transaction_id) for t in transfers
+    ) == sorted(("matched", None, s.id, r.id) for s, r in zip(sends, rows, strict=True))
+    assert await placeholders(session) == []
+    await assert_consistent(session)
+    assert await heal() == 0

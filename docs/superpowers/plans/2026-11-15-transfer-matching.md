@@ -34,7 +34,7 @@ Choices the design leaves to the builder, made here so tasks don't have to:
 4. **Direction and window.**
    - A negative own quantity is the sending side (`out`), a positive one the receiving side (`in`).
    - A pairing fits when `in.occurred_at` is within `[out.occurred_at − before, out.occurred_at + after]`.
-   - Defaults: `before = 2 days`, `after = 7 days`, `overdue = 7 days`, read from the setting `finance.transfers` (`{"window_before_days", "window_after_days", "overdue_days"}`, each optional, positive integers) when present.
+   - Defaults: `before = 1 day`, `after = 5 days`, `overdue = 7 days`, read from the setting `finance.transfers` (`{"window_before_days", "window_after_days", "overdue_days"}`, each optional, positive integers) when present. `before + after` must be shorter than 7 days (else the setting is refused), so a weekly recurrence's window never reaches the next occurrence.
 5. **Status and review.**
    - `status` is one of `awaiting | inferred | matched | before_history | rejected` and describes the ledger state.
    - `review_reason` is `several_candidates | amount_differs | NULL` and is orthogonal to it (the design's "needs review").
