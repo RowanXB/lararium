@@ -338,6 +338,15 @@ def test_footer_rows_skipped() -> None:
     assert (statement.overdraft_limit, statement.overdraft_limit_date) == (None, None)
 
 
+def test_padded_midata_footer_keeps_its_amount() -> None:
+    """Review finding: a spreadsheet re-save pads every line with commas, and the footer's
+    amount was then read from an empty last cell."""
+    padded = MIDATA.replace(b"+\xc2\xa3100.00\n", b"+\xc2\xa3100.00,,\n")
+    assert padded != MIDATA
+    label = {"overdraft_footer_label": "Arranged overdraft limit"}
+    assert _parse(padded, **MIDATA_CONFIG, **label).overdraft_limit == Decimal("100.00")
+
+
 def test_midata_overdraft_footer() -> None:
     label = {"overdraft_footer_label": "Arranged overdraft limit"}
     statement = _parse(MIDATA, **MIDATA_CONFIG, **label)

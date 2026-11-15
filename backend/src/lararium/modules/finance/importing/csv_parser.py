@@ -31,6 +31,13 @@ _CURRENCY = re.compile(r"[A-Z]{3}")
 type _Lines = list[list[str]]
 
 
+def _trimmed(line: list[str]) -> list[str]:
+    end = len(line)
+    while end and not line[end - 1].strip():
+        end -= 1
+    return line[:end]
+
+
 def _raw(header: list[str], line: list[str], used: Iterable[str]) -> dict[str, str]:
     """The row's cells by header name. Only cells the file has are kept, less the empty
     ones under an unnamed header cell (a spreadsheet pads both with commas), so the raw row
@@ -46,7 +53,9 @@ def _raw(header: list[str], line: list[str], used: Iterable[str]) -> dict[str, s
 
 
 def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Lines, _Lines]:
-    """The header, the data rows and the footer rows as cell lists, without all-empty lines."""
+    """The header, the data rows and the footer rows as cell lists, without all-empty lines.
+    Trailing empty cells are left out of the rows and the footer: a spreadsheet pads its
+    lines with commas, and a short row's mapped columns read as empty anyway."""
     try:
         text = content.decode(config.encoding)
     except UnicodeDecodeError:
@@ -64,6 +73,7 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Li
         if not lines:
             raise FileFormatError("no rows")
         header = lines.pop(0)
+    lines = [_trimmed(line) for line in lines]
     footer: _Lines = []
     if config.skip_footer_rows:
         footer = lines[-config.skip_footer_rows :]
@@ -247,11 +257,8 @@ def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> P
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()
     for position, line in enumerate(lines):
-        # A short row is read as it is: a trailing empty cell is often left out. Empty cells
-        # past the header are padding too. A repeated header name keeps every column
-        # ("Note", "Note#2").
-        if not any(cell.strip() for cell in line[len(header) :]):
-            line = line[: len(header)]
+        # A short row is read as it is (see _read_rows). A repeated header name keeps every
+        # column ("Note", "Note#2").
         raw = _raw(header, line, used)
         if len(line) > len(header):
             message = f"the row has {len(line)} cells, the header {len(header)}"
