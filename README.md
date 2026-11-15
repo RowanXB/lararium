@@ -58,7 +58,21 @@ After changing the API, regenerate `web/openapi.json` and the typed client with
 
 ## Server deployment
 
-On a server with Docker Engine 28 or later and Tailscale:
+Lararium is reached only through Tailscale, in one of two ways, chosen by `LARARIUM_INGRESS`
+in `infra/.env`:
+
+- `host` (the default): the host's `tailscale serve` forwards to `web` on `127.0.0.1:8080`.
+  Needs Tailscale on the host and Docker Engine 28 or later.
+- `tailscale`: a sidecar container joins your tailnet as its own node, `lararium`, and serves
+  `web`; nothing is published on the host. For a host with an older Docker (Synology's Docker
+  24, say) or without Tailscale. See [Ingress through a Tailscale sidecar](#ingress-through-a-tailscale-sidecar).
+
+Both run the same images and code and deliver your identity the same way; `make up` adds the
+chosen one's override file (`infra/compose.host.yaml` or `infra/compose.tailscale.yaml`). If you
+run `docker compose` yourself instead of `make`, pass that file after `infra/compose.yaml`: the
+base file alone publishes nothing.
+
+With `host`, on a server with Docker Engine 28 or later and Tailscale:
 
 ```bash
 cp infra/env.example infra/.env
@@ -78,13 +92,39 @@ serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; th
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
+### Ingress through a Tailscale sidecar
+
+1. In the Tailscale admin console, under DNS, turn on MagicDNS and HTTPS certificates: the
+   sidecar serves HTTPS with a certificate for its name.
+2. Under Settings > Keys, generate an auth key (reusable and ephemeral both off). Set
+   `TS_AUTHKEY` to it and `LARARIUM_INGRESS=tailscale` in `infra/.env`.
+3. Run `make up`. On a host without `make` (Synology), from the repository:
+
+   ```bash
+   sudo docker compose -f infra/compose.yaml -f infra/compose.tailscale.yaml \
+     --env-file infra/.env up -d --build
+   ```
+
+4. Open `https://lararium.<your-tailnet>.ts.net`; set `LARARIUM_PUBLIC_BASE_URL` to that URL.
+5. In the admin console, under Machines, disable key expiry for `lararium`, or it logs out
+   when its key expires (180 days by default) and Lararium is unreachable until it logs in
+   again.
+
+The sidecar uses the key only to log in the first time; its login is kept in the
+`lararium_tailscale-state` volume, so the key can be cleared afterwards. Deleting that volume
+makes it a new node that needs a new key.
+
+To switch between `host` and `tailscale`, run `make down`, change `LARARIUM_INGRESS`, and run
+`make up`. Going from `host` to the sidecar, also remove the host's serve with
+`tailscale serve reset`.
+
 **Upgrading a deployment from before connectors.** Compose now requires
 `LARARIUM_MASTER_KEY` and `LARARIUM_WEBHOOK_IN_PASSWORD`, so set both in `infra/.env` before the
 next `make up` (the key with `openssl rand -base64 32`, the password with `openssl rand -hex 32`).
 Then create the webhook receiver's role as **Existing databases** under
 [Webhooks through Cloudflare Tunnel](#webhooks-through-cloudflare-tunnel) describes.
 
-**If port 443 is already taken on the host**, serve on another HTTPS port instead:
+**With `host`, if port 443 is already taken on the host**, serve on another HTTPS port instead:
 
 ```bash
 tailscale serve --bg --https=8443 8080
@@ -102,8 +142,9 @@ forge `Tailscale-User-Login`.
   create one that can only read.
 - Private keys and seed phrases are never stored: wallets are tracked by public address
   only.
-- Docker Engine 28 or later is required. Older engines could let other machines on the
-  LAN reach ports published on `127.0.0.1`, which would expose the `web` port below.
+- With `LARARIUM_INGRESS=host`, Docker Engine 28 or later is required. Older engines could
+  let other machines on the LAN reach ports published on `127.0.0.1`, which would expose the
+  `web` port below. The sidecar publishes no port, so it doesn't depend on the engine.
 - The webhook receiver's database role (`lararium_webhook_in`) is write-only: it can insert rows
   into the webhook inbox, and cannot read them or touch any other table. It never gets the
   master key. Cloudflare terminates TLS, so it sees webhook payloads in plaintext; they are
@@ -115,13 +156,15 @@ forge `Tailscale-User-Login`.
 The API authenticates requests by the `Tailscale-User-Login` header and admits only
 `LARARIUM_OWNER_LOGIN`. That is only safe because of how the stack is exposed:
 
-- `tailscale serve` is the only ingress. It accepts connections from your tailnet, sets
-  `Tailscale-User-Login` to the caller's identity, and forwards to `127.0.0.1:8080`.
-- The `web` service binds to `127.0.0.1:8080` only, and the `api` service publishes no
-  ports at all: it is reachable only from Caddy on the compose network.
-- Nothing else must be able to reach port 8080: no other reverse proxy, no port forward,
-  no `tailscale funnel`, and no untrusted local users or containers on the host. Anyone
-  who can reach it can send the header themselves and act as you.
+- `tailscale serve` is the only ingress, on the host or in the sidecar. It accepts
+  connections from your tailnet, sets `Tailscale-User-Login` to the caller's identity, and
+  forwards to `web`.
+- With `host`, `web` binds to `127.0.0.1:8080` only. With the sidecar it publishes nothing,
+  and only the sidecar shares a network with it besides the stack's own services. The `api`
+  service publishes no ports at all: it is reachable only from Caddy on the compose network.
+- Nothing else must be able to reach `web`: no other reverse proxy, no port forward, no
+  `tailscale funnel`, and no untrusted local users or containers on the host. Anyone who
+  can reach it can send the header themselves and act as you.
 
 Because `tailscale serve` attaches your identity to every request your browser sends,
 including ones another site's page triggers, the API refuses any request whose

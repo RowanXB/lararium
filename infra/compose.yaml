@@ -114,8 +114,9 @@ services:
       dockerfile: web/Dockerfile
     restart: unless-stopped
     networks: [app]
-    # Loopback only: `tailscale serve` is the sole ingress and sets Tailscale-User-Login.
-    ports: ["127.0.0.1:8080:80"]
+    # No published port here: an ingress override adds the one way in, either the host's
+    # `tailscale serve` (compose.host.yaml) or a Tailscale sidecar (compose.tailscale.yaml).
+    # Either one sets Tailscale-User-Login, which the api trusts from whatever reaches it.
     depends_on: [api]
 volumes:
   pgdata: {}

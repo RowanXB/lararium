@@ -1,6 +1,12 @@
 .PHONY: check backend-sync backend-check openapi openapi-check web-install web-check up down backup
 
-COMPOSE = docker compose -f infra/compose.yaml --env-file infra/.env
+# How the stack is reached (LARARIUM_INGRESS in infra/.env): `host` (the default), through the
+# host's `tailscale serve`, or `tailscale`, through a sidecar. Each adds its own override file.
+INGRESS := $(or $(shell sed -n 's/^LARARIUM_INGRESS=//p' infra/.env 2>/dev/null),host)
+ifeq ($(filter $(INGRESS),host tailscale),)
+$(error LARARIUM_INGRESS must be host or tailscale, not "$(INGRESS)")
+endif
+COMPOSE = docker compose -f infra/compose.yaml -f infra/compose.$(INGRESS).yaml --env-file infra/.env
 
 check: backend-check openapi-check web-check
 
@@ -41,9 +47,10 @@ up:
 	$(COMPOSE) up -d --build
 
 # Every profile, so services started under one since turned off (the webhook receiver and
-# tunnel after COMPOSE_PROFILES is cleared) are stopped too.
+# tunnel after COMPOSE_PROFILES is cleared) are stopped too, and orphans, so the other
+# ingress's services are after LARARIUM_INGRESS changes.
 down:
-	$(COMPOSE) --profile '*' down
+	$(COMPOSE) --profile '*' down --remove-orphans
 
 backup:
 	infra/backup/backup.sh

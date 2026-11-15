@@ -55,7 +55,19 @@ pnpm dev
 
 ## 服务器部署
 
-在装有 Docker Engine 28 或更新版本以及 Tailscale 的服务器上：
+Lararium 只能通过 Tailscale 访问，入口有两种，由 `infra/.env` 里的 `LARARIUM_INGRESS` 选择：
+
+- `host`（默认）：主机上的 `tailscale serve` 转发到 `127.0.0.1:8080` 上的 `web`。需要主机装有
+  Tailscale，并且 Docker Engine 是 28 或更新版本。
+- `tailscale`：一个边车容器作为独立节点 `lararium` 加入你的 tailnet，由它提供 `web`；主机上不发布
+  任何端口。适用于 Docker 较旧（比如群晖的 Docker 24）或没装 Tailscale 的主机。见
+  [通过 Tailscale 边车访问](#通过-tailscale-边车访问)。
+
+两种方式用的是同一套镜像和代码，传递身份的方式也一样；`make up` 会加上所选方式的覆盖文件
+（`infra/compose.host.yaml` 或 `infra/compose.tailscale.yaml`）。如果不用 `make`、自己运行
+`docker compose`，要在 `infra/compose.yaml` 后面传入这个文件：单独的基础文件不发布任何端口。
+
+使用 `host` 时，在装有 Docker Engine 28 或更新版本以及 Tailscale 的服务器上：
 
 ```bash
 cp infra/env.example infra/.env
@@ -73,13 +85,35 @@ tailscale serve --bg 8080
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
+### 通过 Tailscale 边车访问
+
+1. 在 Tailscale 管理后台的 DNS 页面打开 MagicDNS 和 HTTPS 证书：边车用自己名字的证书提供 HTTPS。
+2. 在 Settings > Keys 里生成一个 auth key（reusable 和 ephemeral 都不勾）。在 `infra/.env` 里把
+   `TS_AUTHKEY` 设为它，并设置 `LARARIUM_INGRESS=tailscale`。
+3. 运行 `make up`。在没有 `make` 的主机上（群晖），在仓库目录下运行：
+
+   ```bash
+   sudo docker compose -f infra/compose.yaml -f infra/compose.tailscale.yaml \
+     --env-file infra/.env up -d --build
+   ```
+
+4. 打开 `https://lararium.<你的tailnet>.ts.net`，并把 `LARARIUM_PUBLIC_BASE_URL` 设为这个地址。
+5. 在管理后台的 Machines 页面给 `lararium` 关闭 key expiry，否则它的密钥过期时（默认 180 天）会
+   登出，Lararium 在它重新登录之前都无法访问。
+
+边车只在第一次登录时用这个 key；登录状态保存在 `lararium_tailscale-state` 卷里，所以之后可以把
+key 清空。删掉这个卷，它就会成为一个新节点，需要新的 key。
+
+要在 `host` 和 `tailscale` 之间切换：先运行 `make down`，改 `LARARIUM_INGRESS`，再运行
+`make up`。从 `host` 切到边车时，还要用 `tailscale serve reset` 撤掉主机上的 serve。
+
 **升级连接器出现之前的部署。** compose 现在要求设置 `LARARIUM_MASTER_KEY` 和
 `LARARIUM_WEBHOOK_IN_PASSWORD`，所以在下一次 `make up` 之前先把两者填进 `infra/.env`（主密钥用
 `openssl rand -base64 32` 生成，密码用 `openssl rand -hex 32` 生成）。然后按
 [通过 Cloudflare Tunnel 接收 Webhook](#通过-cloudflare-tunnel-接收-webhook) 一节里**已有的数据库**
 的说明创建 webhook 接收器的角色。
 
-**如果主机的 443 端口已被占用**，换一个 HTTPS 端口：
+**使用 `host` 时，如果主机的 443 端口已被占用**，换一个 HTTPS 端口：
 
 ```bash
 tailscale serve --bg --https=8443 8080
@@ -94,8 +128,9 @@ nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Log
 - 系统是只读的：从不下单、转账或提现。
 - 所有第三方凭据都是只读的：连接器需要 API key 或 token 时，只创建只读权限的那种。
 - 从不保存私钥和助记词：钱包只按公开地址跟踪。
-- 需要 Docker Engine 28 或更新版本。更旧的引擎可能让局域网里的其他机器访问到发布在
-  `127.0.0.1` 上的端口，从而暴露下面的 `web` 端口。
+- 使用 `LARARIUM_INGRESS=host` 时，需要 Docker Engine 28 或更新版本。更旧的引擎可能让局域网里的
+  其他机器访问到发布在 `127.0.0.1` 上的端口，从而暴露下面的 `web` 端口。边车不发布任何端口，
+  所以不依赖引擎版本。
 - webhook 接收器的数据库角色（`lararium_webhook_in`）是只写的：它只能往 webhook 收件箱里插入行，
   不能读取，也碰不了其他任何表。它拿不到主密钥。Cloudflare 负责终结 TLS，所以它能看到 webhook
   的明文内容；这些内容只被当作「立即同步」的信号，真正的数据始终由 worker 向 Monzo 拉取。
@@ -105,13 +140,13 @@ nginx）：不经过 `tailscale serve` 的流量可以伪造 `Tailscale-User-Log
 API 依据 `Tailscale-User-Login` 请求头认证请求，只放行 `LARARIUM_OWNER_LOGIN`。这之所以安全，
 完全取决于服务的暴露方式：
 
-- `tailscale serve` 是唯一入口。它接受来自你 tailnet 的连接，把 `Tailscale-User-Login`
-  设为调用者的身份，再转发到 `127.0.0.1:8080`。
-- `web` 服务只绑定 `127.0.0.1:8080`，`api` 服务不发布任何端口：只有 compose 网络里的
+- `tailscale serve` 是唯一入口，在主机上或在边车里。它接受来自你 tailnet 的连接，把
+  `Tailscale-User-Login` 设为调用者的身份，再转发到 `web`。
+- 使用 `host` 时，`web` 只绑定 `127.0.0.1:8080`。使用边车时它不发布任何端口，除了本套服务
+  自己的容器，只有边车和它在同一个网络里。`api` 服务不发布任何端口：只有 compose 网络里的
   Caddy 能访问它。
-- 除此之外，任何东西都不能访问 8080 端口：不能有别的反向代理、端口转发、
-  `tailscale funnel`，主机上也不能有不受信任的本地用户或容器。谁能访问到这个端口，
-  谁就能自己伪造这个请求头、冒充你。
+- 除此之外，任何东西都不能访问 `web`：不能有别的反向代理、端口转发、`tailscale funnel`，
+  主机上也不能有不受信任的本地用户或容器。谁能访问到它，谁就能自己伪造这个请求头、冒充你。
 
 `tailscale serve` 会给你浏览器发出的每个请求都附上你的身份，包括别的网站页面触发的请求，
 所以只要 `Sec-Fetch-Site` 或 `Origin` 显示请求来自别的网站，API 就拒绝它，读请求也一样。

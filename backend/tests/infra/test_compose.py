@@ -101,7 +101,7 @@ def test_make_down_stops_every_profile() -> None:
     # Services started under a profile since turned off (the webhook receiver and tunnel
     # after COMPOSE_PROFILES is cleared) are outside a plain `down`.
     makefile = (Path(__file__).parents[3] / "Makefile").read_text()
-    assert "down:\n\t$(COMPOSE) --profile '*' down\n" in makefile
+    assert "down:\n\t$(COMPOSE) --profile '*' down --remove-orphans\n" in makefile
 
 
 def test_api_does_not_log_requests() -> None:
@@ -152,9 +152,65 @@ def test_cloudflared_runs_a_pinned_tunnel() -> None:
     assert image.split(":", 1)[1] not in ("", "latest")
 
 
-def test_only_web_publishes_a_port() -> None:
-    published = {name for name, service in _services().items() if service.get("ports")}
-    assert published == {"web"}
+def _with_ingress(ingress: str) -> dict[str, Any]:
+    override = COMPOSE_FILE.with_name(f"compose.{ingress}.yaml")
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "-f",
+            str(override),
+            "--profile",
+            "*",
+            "config",
+            "--no-interpolate",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_the_base_file_publishes_nothing() -> None:
+    # The one way in comes from an ingress override, so a stack started without one has none.
+    assert [name for name, service in _services().items() if service.get("ports")] == []
+
+
+def test_host_ingress_publishes_web_on_loopback_only() -> None:
+    services = _with_ingress("host")["services"]
+    assert {name for name, service in services.items() if service.get("ports")} == {"web"}
+    (port,) = services["web"]["ports"]
+    assert (port["host_ip"], port["published"], port["target"]) == ("127.0.0.1", "8080", 80)
+
+
+def test_tailscale_ingress_publishes_nothing_and_serves_web() -> None:
+    config = _with_ingress("tailscale")
+    services = config["services"]
+    assert [name for name, service in services.items() if service.get("ports")] == []
+    sidecar = services["tailscale"]
+    image = sidecar["image"]
+    assert image.startswith("tailscale/tailscale:v") and "latest" not in image
+    assert sidecar["restart"] == "unless-stopped"
+    # Only the sidecar and web share its network; the api is reached through web alone.
+    on_ingress = {name for name, service in services.items() if "ingress" in service["networks"]}
+    assert on_ingress == {"tailscale", "web"}
+    # The key is needed on the first start only: required, it couldn't be cleared later.
+    assert sidecar["environment"]["TS_AUTHKEY"] == "${TS_AUTHKEY:-}"
+    serve = json.loads((COMPOSE_FILE.parent / "tailscale" / "serve.json").read_text())
+    (web,) = serve["Web"].values()
+    assert web["Handlers"]["/"]["Proxy"] == "http://web:80"
+
+
+def test_make_picks_the_ingress_override() -> None:
+    makefile = (Path(__file__).parents[3] / "Makefile").read_text()
+    assert "-f infra/compose.$(INGRESS).yaml" in makefile
+    for ingress in ("host", "tailscale"):
+        assert COMPOSE_FILE.with_name(f"compose.{ingress}.yaml").is_file()
 
 
 REQUIRED_SETTINGS = {

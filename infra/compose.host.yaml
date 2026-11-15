@@ -1,0 +1,7 @@
+# Ingress through the host's `tailscale serve` (LARARIUM_INGRESS=host, the default): web is
+# published on the host's loopback for it. Only on Docker Engine 28 or later: older engines
+# let other machines on the LAN reach a port published on 127.0.0.1, and with it forge the
+# identity header. Elsewhere use compose.tailscale.yaml.
+services:
+  web:
+    ports: ["127.0.0.1:8080:80"]
