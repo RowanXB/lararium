@@ -1290,9 +1290,8 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
 
 
 def _covered(statement: ParsedStatement, rows: list[_Row]) -> tuple[date | None, date | None]:
-    """Decision 16: the statement period, else the first to last day of the importable rows."""
-    if statement.period is not None:
-        return statement.period
+    """Decision 16: the days a file covers, the union of its stated period and its importable
+    rows' days. A period alone isn't enough: OFX rows may fall outside DTSTART..DTEND."""
     days = [
         row.parsed.booking_date
         for row in rows
@@ -1301,6 +1300,8 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> tuple[date | None,
         and row.status != "skipped"
         and row.instrument_id is not None
     ]
+    if statement.period is not None:
+        days += list(statement.period)
     return (min(days), max(days)) if days else (None, None)
 
 

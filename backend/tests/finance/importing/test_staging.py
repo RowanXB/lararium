@@ -767,3 +767,23 @@ async def test_statement_account_mismatch_refused(
     with pytest.raises(ImportNotAllowedError) as raised:
         await stage(profile, header + "12/11/2026,Cake,-4.00,22225678\n")
     assert sorted(re.findall(r"[0-9]+", str(raised.value))) == ["1234", "5678"]
+
+
+async def test_covered_range_includes_rows_outside_the_period(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    """A file covers its stated period and every day it has a row on (OFX's DTSTART/DTEND
+    don't bound its rows the way a PDF's period does)."""
+    profile = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261120", "-3.50", "A"), ("20261127", "-1.00", "B"), ("20261203", "-2.00", "C")],
+        start="20261125",
+        end="20261130",
+    )
+    batch = await stage(profile, content, filename="statement.ofx")
+
+    b = models.ImportBatch
+    covered = (
+        await session.execute(select(b.covered_from, b.covered_to).where(b.id == batch.id))
+    ).one()
+    assert tuple(covered) == (date(2026, 11, 20), date(2026, 12, 3))
