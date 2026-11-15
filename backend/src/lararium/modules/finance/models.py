@@ -62,9 +62,12 @@ class AccountIdentifier(Base):
     __table_args__ = FINANCE_SCHEMA
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
-    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
     kind: Mapped[str] = mapped_column(Text)
     value: Mapped[str] = mapped_column(Text)
+    # One of the owner's accounts; NULL for a counterparty's (or not yet known) bank account.
+    account_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.accounts.id"))
+    # When the owner said it is not theirs; only on an unassigned row.
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The actor type that registered it (the owner's "user", or a "connector").
     created_by: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -1,5 +1,6 @@
-"""The registry of the owner's account identifiers: what a counterparty's details on a
-transaction are matched against to tell a transfer between own accounts.
+"""The registry of bank accounts any source names: with an account, one of the owner's
+(what a counterparty's details are matched against to tell a transfer between own
+accounts); without, a counterparty's, or one the owner dismissed as not theirs.
 
 Revision ID: 0013
 Revises: 0012
@@ -19,13 +20,15 @@ UPGRADE = [
     """
     CREATE TABLE finance.account_identifiers (
       id uuid PRIMARY KEY DEFAULT uuidv7(),
-      account_id uuid NOT NULL REFERENCES finance.accounts (id),
       kind text NOT NULL CHECK (kind IN ('uk_bank_account')),
       value text NOT NULL,
+      account_id uuid REFERENCES finance.accounts (id),
+      dismissed_at timestamptz,
       created_by text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE (kind, value),
-      CHECK (kind <> 'uk_bank_account' OR value ~ '^[0-9]{6}:[0-9]{8}$')
+      CHECK (kind <> 'uk_bank_account' OR value ~ '^[0-9]{6}:[0-9]{8}$'),
+      CHECK (account_id IS NULL OR dismissed_at IS NULL)
     )
     """,
 ]
