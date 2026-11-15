@@ -171,26 +171,47 @@ async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
 
 
 async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> TransferRecord:
-    """The owner says the open transfer's missing side is this record, one of its
-    candidates of the same amount: pair them, which outranks any other candidate."""
+    """The owner says the open transfer's missing side is this record: one of its
+    candidates of the same amount, or one the owner unpaired from it (whose never_pair
+    decisions this withdraws). Pairing them outranks any other candidate; when it still
+    can't link them (another pair decision makes one of them ambiguous), nothing is
+    stored."""
     await lock_transfers(ctx)
     session = ctx.session
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         raise FinanceValidationError("only a transfer missing one side can be paired")
-    found = await candidates(session, transfer_id)
-    if not any(c.transaction_id == transaction_id and c.reason == "exact" for c in found):
+    found = {
+        c.reason
+        for c in await candidates(session, transfer_id)
+        if c.transaction_id == transaction_id
+    }
+    if not found & {"exact", "unpaired"}:
         raise FinanceValidationError(
             f"transaction {transaction_id} is not a candidate of the same amount for this transfer"
         )
     [present] = _records(transfer)
-    await _store(
-        ctx, "pair", await source_ref(session, present), await source_ref(session, transaction_id)
+    present_ref, chosen_ref = (
+        await source_ref(session, present),
+        await source_ref(session, transaction_id),
     )
+    await _forget(ctx, "never_pair", present_ref, chosen_ref)
+    await _store(ctx, "pair", present_ref, chosen_ref)
     await match_transaction(ctx, present)
     await heal_transfers(ctx)
     tr = models.Transfer
-    [paired] = await load_transfers(
-        session, or_(tr.out_transaction_id == present, tr.in_transaction_id == present)
+    paired = await load_transfers(
+        session,
+        tr.status == "matched",
+        or_(
+            and_(tr.out_transaction_id == present, tr.in_transaction_id == transaction_id),
+            and_(tr.out_transaction_id == transaction_id, tr.in_transaction_id == present),
+        ),
     )
-    return paired
+    if not paired:
+        # Raising rolls the decisions back with the rest of the command.
+        raise FinanceValidationError(
+            f"pairing with transaction {transaction_id} did not take effect: another pair"
+            " decision leaves it ambiguous"
+        )
+    return paired[0]

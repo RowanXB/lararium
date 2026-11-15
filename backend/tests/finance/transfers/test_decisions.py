@@ -144,8 +144,11 @@ async def test_unpair_splits_and_never_repairs(
             ("never_pair", "connection", in_ref, "connection", out_ref),
         ]
     )
-    for found in transfers:
-        assert await candidates(session, found.id) == []
+    # Each still offers the other, so the owner can pair them again.
+    for found, other in zip(transfers, (in_record, out_record), strict=True):
+        assert [(x.transaction_id, x.reason) for x in await candidates(session, found.id)] == [
+            (other.id, "unpaired")
+        ]
     await assert_consistent(session)
     assert await heal() == 0
 
@@ -158,6 +161,70 @@ async def test_unpair_refuses_a_placeholder_transfer(run, inferred) -> None:
     *_, transfer = inferred
     with pytest.raises(FinanceValidationError):
         await run(unpair, transfer.id)
+
+
+async def test_pair_undoes_an_unpair(session, run, ids, a_and_c, connector_tx, heal) -> None:
+    a, a_id, c, c_id = a_and_c
+    out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    in_record = await connector_tx(
+        c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=2), identifier_id=a_id
+    )
+    await heal()
+    [matched] = await list_transfers(session)
+    await run(unpair, matched.id)
+    [waiting] = [t for t in await list_transfers(session) if t.out_transaction_id is not None]
+
+    paired = await run(pair, waiting.id, in_record.id)
+
+    assert (paired.status, paired.out_transaction_id, paired.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
+    assert await list_transfers(session) == [paired]
+    assert await _decisions(session) == [
+        ("pair", "connection", f"{a.connection_id}:out_1", "connection", f"{c.connection_id}:in_1")
+    ]
+    assert await contra_account(session, in_record.id, c.account.id) == ids.in_transit
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_pair_that_does_not_take_effect_is_refused(
+    session, run, a_and_c, connector_tx, heal
+) -> None:
+    """The owner already paired the deposit with another payment: pairing it with this one
+    too leaves both ambiguous, so it is refused and nothing is stored."""
+    a, a_id, c, c_id = a_and_c
+    out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    in_record = await connector_tx(
+        c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=2), identifier_id=a_id
+    )
+    await connector_tx(
+        a, "-100", external_id="out_2", occurred_at=WHEN + timedelta(days=30), bank_transfer=False
+    )
+    out_ref, in_ref = f"{a.connection_id}:out_1", f"{c.connection_id}:in_1"
+    await session.execute(
+        text(
+            "insert into finance.transfer_decisions"
+            " (kind, subject_kind, subject_ref, other_kind, other_ref) values"
+            " ('pair', 'connection', :out_2, 'connection', :in_1),"
+            " ('never_pair', 'connection', :out_1, 'connection', :in_1)"
+        ),
+        {"out_2": f"{a.connection_id}:out_2", "out_1": out_ref, "in_1": in_ref},
+    )
+    await heal()
+    [waiting] = [t for t in await list_transfers(session) if t.status == "awaiting"]
+    assert waiting.out_transaction_id == out_record.id
+    before = await _decisions(session)
+    assert [(x.transaction_id, x.reason) for x in await candidates(session, waiting.id)] == [
+        (in_record.id, "unpaired")
+    ]
+
+    with pytest.raises(FinanceValidationError, match="did not take effect"):
+        await run(pair, waiting.id, in_record.id)
+
+    assert await _decisions(session) == before
 
 
 @pytest.fixture

@@ -4,6 +4,7 @@ import { type ReactNode, useState } from "react";
 import {
   type AccountOut,
   addAccountIdentifier,
+  type CandidateOut,
   dismissTransferSuggestion,
   listAccounts,
   listTransferCandidates,
@@ -84,20 +85,79 @@ function Empty({ children }: { children: ReactNode }) {
   return <p className="text-sm text-muted-foreground">{children}</p>;
 }
 
-function AttentionItem({ transfer }: { transfer: TransferOut }) {
-  const candidates = useQuery({
-    queryKey: ["transfers", transfer.id, "candidates"],
+function useCandidates(transferId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["transfers", transferId, "candidates"],
     queryFn: async () =>
-      (await listTransferCandidates({ path: { transfer_id: transfer.id }, throwOnError: true }))
+      (await listTransferCandidates({ path: { transfer_id: transferId }, throwOnError: true }))
         .data,
+    enabled,
   });
-  const pair = useWrite(async (transactionId: string) =>
+}
+
+function usePair(transferId: string) {
+  return useWrite(async (transactionId: string) =>
     pairTransfer({
-      path: { transfer_id: transfer.id },
+      path: { transfer_id: transferId },
       body: { transaction_id: transactionId },
       throwOnError: true,
     }),
   );
+}
+
+function CandidateList({
+  transfer,
+  candidates,
+  busy,
+  onPair,
+}: {
+  transfer: TransferOut;
+  candidates: CandidateOut[];
+  busy: boolean;
+  onPair: (transactionId: string) => void;
+}) {
+  if (candidates.length === 0) return <Empty>No candidates</Empty>;
+  return (
+    <ul className="space-y-2">
+      {candidates.map((candidate) => (
+        <li
+          key={candidate.transaction_id}
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-sm"
+        >
+          <span className="min-w-0 break-words">
+            {[
+              candidate.account_name,
+              new Date(candidate.occurred_at).toLocaleDateString("en-GB"),
+              `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${transfer.currency}`,
+              candidate.description,
+            ].join(" · ")}
+          </span>
+          {/* The API pairs a candidate of the same amount, or one the owner unpaired. */}
+          {candidate.reason === "amount_differs" ? (
+            <span className="text-muted-foreground">Different amount</span>
+          ) : (
+            <span className="flex items-center gap-2">
+              {candidate.reason === "unpaired" && (
+                <span className="text-muted-foreground">Unpaired</span>
+              )}
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => onPair(candidate.transaction_id)}
+              >
+                Pair
+              </Button>
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function AttentionItem({ transfer }: { transfer: TransferOut }) {
+  const candidates = useCandidates(transfer.id);
+  const pair = usePair(transfer.id);
   const reject = useWrite(async () =>
     rejectTransfer({ path: { transfer_id: transfer.id }, throwOnError: true }),
   );
@@ -122,38 +182,42 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
           Reject
         </Button>
       </div>
-      {candidates.data?.length === 0 && <Empty>No candidates</Empty>}
-      <ul className="space-y-2">
-        {candidates.data?.map((candidate) => (
-          <li
-            key={candidate.transaction_id}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-sm"
-          >
-            <span className="min-w-0 break-words">
-              {[
-                candidate.account_name,
-                new Date(candidate.occurred_at).toLocaleDateString("en-GB"),
-                `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${transfer.currency}`,
-                candidate.description,
-              ].join(" · ")}
-            </span>
-            {/* The API pairs only a candidate of the same amount. */}
-            {candidate.reason === "exact" ? (
-              <Button
-                size="sm"
-                disabled={busy}
-                onClick={() => pair.mutate(candidate.transaction_id)}
-              >
-                Pair
-              </Button>
-            ) : (
-              <span className="text-muted-foreground">Different amount</span>
-            )}
-          </li>
-        ))}
-      </ul>
+      {candidates.data && (
+        <CandidateList
+          transfer={transfer}
+          candidates={candidates.data}
+          busy={busy}
+          onPair={(transactionId) => pair.mutate(transactionId)}
+        />
+      )}
       {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
     </li>
+  );
+}
+
+// A transfer missing one side that needs no attention can still have candidates: the
+// records the owner unpaired from it, which pairing links again. Fetched when opened.
+function OpenCandidates({ transfer }: { transfer: TransferOut }) {
+  const [open, setOpen] = useState(false);
+  const candidates = useCandidates(transfer.id, open);
+  const pair = usePair(transfer.id);
+  const error = pair.error ?? candidates.error;
+
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer text-sm text-muted-foreground">Candidates</summary>
+      <div className="mt-2 space-y-2">
+        {candidates.data && (
+          <CandidateList
+            transfer={transfer}
+            candidates={candidates.data}
+            busy={pair.isPending}
+            onPair={(transactionId) => pair.mutate(transactionId)}
+          />
+        )}
+        {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
+      </div>
+    </details>
   );
 }
 
@@ -184,6 +248,9 @@ function RecentItem({ transfer }: { transfer: TransferOut }) {
       </div>
       {action.isError && (
         <p className="text-sm text-destructive">{errorMessage(action.error)}</p>
+      )}
+      {(transfer.status === "inferred" || transfer.status === "before_history") && (
+        <OpenCandidates transfer={transfer} />
       )}
     </li>
   );
@@ -294,8 +361,9 @@ export function TransfersPage() {
         {transfers.isSuccess && inTransit.length === 0 && <Empty>Nothing in transit</Empty>}
         <ul className="divide-y">
           {inTransit.map((transfer) => (
-            <li key={transfer.id} className="py-3 text-sm first:pt-0 last:pb-0">
-              {describeInTransit(transfer)}
+            <li key={transfer.id} className="space-y-1 py-3 text-sm first:pt-0 last:pb-0">
+              <p>{describeInTransit(transfer)}</p>
+              <OpenCandidates transfer={transfer} />
             </li>
           ))}
         </ul>

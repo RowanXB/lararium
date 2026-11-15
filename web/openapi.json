@@ -341,7 +341,8 @@
           "reason": {
             "enum": [
               "exact",
-              "amount_differs"
+              "amount_differs",
+              "unpaired"
             ],
             "title": "Reason",
             "type": "string"
@@ -2954,7 +2955,7 @@
     },
     "/api/v1/finance/transfers/{transfer_id}/candidates": {
       "get": {
-        "description": "The own records that could be the transfer's missing side: those of the same amount\nfirst, then those of another; empty for a transfer with both sides.",
+        "description": "The own records that could be the transfer's missing side: those of the same amount\nfirst, then those of another, then those the owner unpaired from it (which pair can\nlink again); empty for a transfer with both sides.",
         "operationId": "list_transfer_candidates",
         "parameters": [
           {
@@ -3002,7 +3003,7 @@
     },
     "/api/v1/finance/transfers/{transfer_id}/pair": {
       "post": {
-        "description": "The owner picks the transfer's missing side among its candidates of the same amount.",
+        "description": "The owner picks the transfer's missing side among its candidates of the same amount,\nor one they unpaired from it.",
         "operationId": "pair_transfer",
         "parameters": [
           {

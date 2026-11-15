@@ -317,11 +317,12 @@ class CandidateOut(BaseModel):
     quantity: DecimalStr  # signed, as posted on the account
     occurred_at: AwareDatetime
     description: str
-    reason: Literal["exact", "amount_differs"]
+    reason: Literal["exact", "amount_differs", "unpaired"]
 
 
 class TransferPair(BaseModel):
-    transaction_id: UUID  # one of the transfer's candidates of the same amount
+    # One of the transfer's candidates of the same amount, or one unpaired from it.
+    transaction_id: UUID
 
 
 class SuggestionOut(_Out):

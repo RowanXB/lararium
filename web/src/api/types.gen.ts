@@ -171,7 +171,7 @@ export type CandidateOut = {
     /**
      * Reason
      */
-    reason: 'exact' | 'amount_differs';
+    reason: 'exact' | 'amount_differs' | 'unpaired';
     /**
      * Transaction Id
      */

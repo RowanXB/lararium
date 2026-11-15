@@ -293,6 +293,45 @@ async def test_pair_candidate_flow(client, session, run) -> None:
     assert (rematched["status"], rematched["in_transaction_id"]) == ("matched", str(loose[1].id))
 
 
+async def test_unpair_is_undone_by_pair(client, session, run) -> None:
+    a, c = await _connected(run, "A"), await _connected(run, "C")
+    a_identifier = await run(get_or_create_identifier, "uk_bank_account", A_IDENTIFIER)
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", C_IDENTIFIER)
+    out_record = await _connector_tx(
+        session, run, a, "-100", external_id="out_1", identifier_id=c_identifier
+    )
+    in_record = await _connector_tx(
+        session,
+        run,
+        c,
+        "100",
+        external_id="in_1",
+        occurred_at=WHEN + timedelta(hours=1),
+        identifier_id=a_identifier,
+    )
+    assert (await _register(client, str(a[1].id), A_IDENTIFIER)).status_code == 201
+    assert (await _register(client, str(c[1].id), C_IDENTIFIER)).status_code == 201
+    [matched] = await _transfers(client)
+    assert matched["status"] == "matched"
+    assert (await client.post(f"{FINANCE}/transfers/{matched['id']}/unpair")).status_code == 204
+    [waiting] = [t for t in await _transfers(client) if t["out_transaction_id"]]
+
+    found = (await client.get(f"{FINANCE}/transfers/{waiting['id']}/candidates")).json()
+    assert [(x["transaction_id"], x["reason"]) for x in found] == [(str(in_record.id), "unpaired")]
+    paired = await client.post(
+        f"{FINANCE}/transfers/{waiting['id']}/pair", json={"transaction_id": str(in_record.id)}
+    )
+
+    assert paired.status_code == 200
+    body = paired.json()
+    assert (body["status"], body["out_transaction_id"], body["in_transaction_id"]) == (
+        "matched",
+        str(out_record.id),
+        str(in_record.id),
+    )
+    assert await _transfers(client) == [body]
+
+
 async def test_pair_refuses_a_non_candidate(client, session, run, inferred) -> None:
     [transfer] = await _transfers(client)
     response = await client.post(

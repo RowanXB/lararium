@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import {
   addAccountIdentifier,
+  listTransferCandidates,
   listTransfers,
   pairTransfer,
   rejectTransfer,
@@ -83,7 +84,7 @@ const SUGGESTION = {
 
 vi.mock("../api", () => ({
   listTransfers: vi.fn(),
-  listTransferCandidates: vi.fn(async () => ({ data: [CANDIDATE] })),
+  listTransferCandidates: vi.fn(),
   listTransferSuggestions: vi.fn(async () => ({ data: [SUGGESTION] })),
   listAccounts: vi.fn(async () => ({
     data: [
@@ -123,6 +124,7 @@ vi.mock("../api", () => ({
 
 beforeEach(() => {
   vi.mocked(listTransfers).mockResolvedValue({ data: TRANSFERS } as never);
+  vi.mocked(listTransferCandidates).mockResolvedValue({ data: [CANDIDATE] } as never);
 });
 
 afterEach(() => {
@@ -221,6 +223,27 @@ it("registers a suggestion against an account", async () => {
     expect.objectContaining({
       path: { account_id: BANK_A },
       body: { kind: "uk_bank_account", value: "112233:12345678" },
+    }),
+  );
+});
+
+it("pairs again a record the owner unpaired", async () => {
+  vi.mocked(listTransferCandidates).mockResolvedValue({
+    data: [{ ...CANDIDATE, reason: "unpaired" }],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  // An unpaired transfer is in transit again; its candidates are a click away.
+  const inTransit = await section("In transit");
+  const item = (await inTransit.findByText(/25.50 GBP · 3 days in transit/)).closest("li")!;
+  await user.click(within(item).getByText("Candidates"));
+  expect(await within(item).findByText("Unpaired")).toBeInTheDocument();
+  await user.click(within(item).getByRole("button", { name: "Pair" }));
+
+  expect(pairTransfer).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { transfer_id: "0190a0b0-0000-7000-8000-0000000000f2" },
+      body: { transaction_id: CANDIDATE.transaction_id },
     }),
   );
 });

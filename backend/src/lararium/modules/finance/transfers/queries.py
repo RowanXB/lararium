@@ -33,7 +33,10 @@ from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
     RecordColumns,
+    SourceRef,
     eligible_records,
+    is_rejected,
+    names_source,
 )
 from lararium.modules.finance.transfers.pairs import pair_relation
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
@@ -198,9 +201,9 @@ def before_history(
     return func.coalesce(latest < history_start(counterpart_id), False)
 
 
-# Why a record could be the transfer's missing side: a candidate of the same amount, or a
-# mutually identified one of another.
-CandidateReason = Literal["exact", "amount_differs"]
+# Why a record could be the transfer's missing side: a candidate of the same amount, a
+# mutually identified one of another, or one the owner unpaired from the transfer's record.
+CandidateReason = Literal["exact", "amount_differs", "unpaired"]
 
 
 @dataclass(frozen=True)
@@ -215,11 +218,58 @@ class CandidateRecord:
     reason: CandidateReason
 
 
+async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
+    """The own records the owner unpaired from this one (a never_pair decision either way
+    round) that a pair decision would link with it again: on another account, in the same
+    instrument, of opposite sign and the same amount, and neither rejected. The way back
+    from a mistaken unpair."""
+    system = await system_account_ids(session)
+    e = eligible_records(system)
+    record = (await session.execute(select(e).where(e.c.transaction_id == record_id))).one_or_none()
+    if record is None:
+        return []
+    source = (record.source_kind, record.source_ref)
+    d = models.TransferDecision
+    if await is_rejected(session, source):
+        return []
+    others: set[SourceRef] = set()
+    for row in await session.execute(
+        select(d.subject_kind, d.subject_ref, d.other_kind, d.other_ref).where(
+            d.kind == "never_pair",
+            or_(
+                and_(d.subject_kind == source[0], d.subject_ref == source[1]),
+                and_(d.other_kind == source[0], d.other_ref == source[1]),
+            ),
+        )
+    ):
+        subject, other = (row.subject_kind, row.subject_ref), (row.other_kind, row.other_ref)
+        others.add(other if subject == source else subject)
+    if not others:
+        return []
+    t = models.Transaction
+    found = await session.scalars(
+        select(e.c.transaction_id)
+        .where(
+            e.c.transaction_id.in_(select(t.id).where(or_(*(names_source(t, x) for x in others)))),
+            e.c.account_id != record.account_id,
+            e.c.instrument_id == record.instrument_id,
+            e.c.quantity == -record.quantity,
+            ~exists().where(
+                d.kind == "reject",
+                d.subject_kind == e.c.source_kind,
+                d.subject_ref == e.c.source_ref,
+            ),
+        )
+        .order_by(e.c.transaction_id)
+    )
+    return list(found)
+
+
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:
     """The own records that could complete a transfer missing one side, for the owner's
     review: its own record's candidates in the pair relation, those of the same amount
-    first, then those whose amount differs, each oldest first. Empty for a transfer with
-    both sides."""
+    first, then those whose amount differs, then those the owner unpaired from it (which
+    pair can link again), each oldest first. Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
@@ -231,6 +281,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
         ("exact", relation.candidates(present_id)),
         ("amount_differs", relation.candidates(present_id, exact=False)),
+        ("unpaired", await unpaired_from(session, present_id)),
     ]
     e = eligible_records(system)
     t = models.Transaction

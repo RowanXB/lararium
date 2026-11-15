@@ -200,7 +200,10 @@ async def test_never_pair_keeps_records_apart(
         None,
     )
     assert await contra_account(session, received.id, c.account.id) == ids.unassigned
-    assert await candidates(session, transfer.id) == []
+    # Offered only as the way back from the decision.
+    assert [(x.transaction_id, x.reason) for x in await candidates(session, transfer.id)] == [
+        (received.id, "unpaired")
+    ]
     await assert_consistent(session)
 
 

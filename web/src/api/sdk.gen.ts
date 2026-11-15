@@ -281,14 +281,16 @@ export const listTransfers = <ThrowOnError extends boolean = false>(options?: Op
  * List Transfer Candidates
  *
  * The own records that could be the transfer's missing side: those of the same amount
- * first, then those of another; empty for a transfer with both sides.
+ * first, then those of another, then those the owner unpaired from it (which pair can
+ * link again); empty for a transfer with both sides.
  */
 export const listTransferCandidates = <ThrowOnError extends boolean = false>(options: Options<ListTransferCandidatesData, ThrowOnError>): RequestResult<ListTransferCandidatesResponses, ListTransferCandidatesErrors, ThrowOnError> => (options.client ?? client).get<ListTransferCandidatesResponses, ListTransferCandidatesErrors, ThrowOnError>({ url: '/api/v1/finance/transfers/{transfer_id}/candidates', ...options });
 
 /**
  * Pair Transfer
  *
- * The owner picks the transfer's missing side among its candidates of the same amount.
+ * The owner picks the transfer's missing side among its candidates of the same amount,
+ * or one they unpaired from it.
  */
 export const pairTransfer = <ThrowOnError extends boolean = false>(options: Options<PairTransferData, ThrowOnError>): RequestResult<PairTransferResponses, PairTransferErrors, ThrowOnError> => (options.client ?? client).post<PairTransferResponses, PairTransferErrors, ThrowOnError>({
     url: '/api/v1/finance/transfers/{transfer_id}/pair',

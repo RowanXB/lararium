@@ -190,7 +190,8 @@ async def list_transfers(
 @router.get("/transfers/{transfer_id}/candidates", name="list_transfer_candidates")
 async def list_transfer_candidates(transfer_id: UUID, session: SessionDep) -> list[CandidateOut]:
     """The own records that could be the transfer's missing side: those of the same amount
-    first, then those of another; empty for a transfer with both sides."""
+    first, then those of another, then those the owner unpaired from it (which pair can
+    link again); empty for a transfer with both sides."""
     found = await transfers.candidates(session, transfer_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
     return [
@@ -246,7 +247,8 @@ async def unpair_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDe
 async def pair_transfer(
     transfer_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
 ) -> TransferOut:
-    """The owner picks the transfer's missing side among its candidates of the same amount."""
+    """The owner picks the transfer's missing side among its candidates of the same amount,
+    or one they unpaired from it."""
     args = _args(body.model_dump(mode="json"), transfer_id=transfer_id)
     async with healing_command(session, actor, "pair_transfer", args) as ctx:
         record = await transfers.pair(ctx, transfer_id, body.transaction_id)
