@@ -529,6 +529,35 @@ async def test_multi_currency_chains_separately(
     ]
 
 
+async def test_large_amounts_keep_precision(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    make_account: MakeAccount,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    # 34 and 37 significant digits: far past the default 28-digit context.
+    big = "1000000000000000000000000000000000.01"
+    content = (
+        BALANCE_HEADER
+        + f"01/11/2026,Big,{big},2000000000000000000000000000000000.02\n"
+        + "02/11/2026,Small,0.01,2000000000000000000000000000000000.03\n"
+    )
+    rows = await _rows(session, await stage(await _csv_profile(run), content))
+    assert _statuses(rows) == ["new", "new", "new"]  # the chain holds
+    assert rows[0].kind == "opening_adjustment"
+    assert rows[0].quantity == Decimal(big)
+
+    # Keys tell apart amounts that differ only in the last digit.
+    other = await make_account(name="Example Big", balance_mode="hybrid")
+    row = "10/11/2026,Transfer,1234567890123456789012345678901.11\n"
+    keys = [
+        await _dedupe_keys(session, await stage(csv_profile, HEADER + text, account_id=other.id))
+        for text in (row, row, row.replace(".11", ".12"))
+    ]
+    assert keys[0] == keys[1] != keys[2]
+
+
 # Covered days, typed fields, the statement's account ---------------------------------
 
 

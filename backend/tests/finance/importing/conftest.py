@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from decimal import MAX_PREC, localcontext
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -52,9 +53,11 @@ async def _commit(ctx: CommandContext, batch_id: UUID) -> None:
         contra = await get_or_create_system_account(ctx, key)
         assert row.quantity is not None and row.instrument_id is not None
         assert row.occurred_at is not None
+        with localcontext(prec=MAX_PREC):
+            contra_quantity = row.fee - row.quantity
         postings = [
             PostingInput(batch.account_id, row.instrument_id, row.quantity),
-            PostingInput(contra, row.instrument_id, -(row.quantity - row.fee)),
+            PostingInput(contra, row.instrument_id, contra_quantity),
         ]
         if row.fee:
             postings.insert(1, PostingInput(batch.account_id, row.instrument_id, -row.fee))

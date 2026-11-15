@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import MAX_PREC, Decimal, localcontext
 from typing import Any, Literal, cast, get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -160,7 +160,10 @@ def _chronological[T](rows: Sequence[T], row_order: str) -> list[T]:
 
 def _plain(value: Decimal) -> str:
     """Canonical text for an amount: "-3.5" for -3.50, and "0" for -0.00."""
-    return to_plain_str((value + 0).normalize())
+    # Amounts may have 40 digits on each side (money.require_amount); every computation on
+    # them here runs at unbounded precision, as ledger.py does, never rounding at 28 digits.
+    with localcontext(prec=MAX_PREC):
+        return to_plain_str((value + 0).normalize())
 
 
 def _text(value: str) -> str:
@@ -195,23 +198,24 @@ def check_balance_chain(
     previous one in its instrument. None stands for a parse error, which resets every chain."""
     expected: dict[UUID, Decimal] = {}
     errors: dict[int, str] = {}
-    for row in _chronological(rows, row_order):
-        if row is None:
-            expected.clear()
-            continue
-        instrument = instrument_of(row)
-        running = expected.get(instrument)
-        if running is not None:
-            running += row.quantity - row.fee
-        if row.balance is not None:
-            if running is not None and running != row.balance:
-                errors[row.position] = (
-                    "balance doesn't follow from the previous row: expected "
-                    f"{to_plain_str(running)}, the file says {to_plain_str(row.balance)}"
-                )
-            running = row.balance
-        if running is not None:
-            expected[instrument] = running
+    with localcontext(prec=MAX_PREC):
+        for row in _chronological(rows, row_order):
+            if row is None:
+                expected.clear()
+                continue
+            instrument = instrument_of(row)
+            running = expected.get(instrument)
+            if running is not None:
+                running += row.quantity - row.fee
+            if row.balance is not None:
+                if running is not None and running != row.balance:
+                    errors[row.position] = (
+                        "balance doesn't follow from the previous row: expected "
+                        f"{to_plain_str(running)}, the file says {to_plain_str(row.balance)}"
+                    )
+                running = row.balance
+            if running is not None:
+                expected[instrument] = running
     return errors
 
 
@@ -231,19 +235,20 @@ def opening_adjustments(
     for row in _chronological(rows, row_order):
         chains[instrument_of(row)].append(row)
     openings: dict[UUID, tuple[Decimal, date]] = {}
-    for instrument, chain in chains.items():
-        first_day = min(row.booking_date for row in chain)
-        net = Decimal(0)
-        opening: Decimal | None = None
-        for row in chain:
-            net += row.quantity - row.fee
-            if row.balance is not None:
-                opening = row.balance - net
-                break
-        if opening is None and closing is not None and len(chains) == 1:
-            opening = closing[0] - sum((row.quantity - row.fee for row in chain), Decimal(0))
-        if opening is not None:
-            openings[instrument] = (opening, first_day)
+    with localcontext(prec=MAX_PREC):
+        for instrument, chain in chains.items():
+            first_day = min(row.booking_date for row in chain)
+            net = Decimal(0)
+            opening: Decimal | None = None
+            for row in chain:
+                net += row.quantity - row.fee
+                if row.balance is not None:
+                    opening = row.balance - net
+                    break
+            if opening is None and closing is not None and len(chains) == 1:
+                opening = closing[0] - sum((row.quantity - row.fee for row in chain), Decimal(0))
+            if opening is not None:
+                openings[instrument] = (opening, first_day)
     return openings
 
 
@@ -697,9 +702,9 @@ async def _opening_rows(
     adjustments: list[_Row] = []
     for instrument_id in sorted(openings, key=lambda i: instruments[i].symbol):
         opening, first_day = openings[instrument_id]
-        difference = opening - await ledger_balance_before(
-            session, account_id, instrument_id, first_day
-        )
+        before = await ledger_balance_before(session, account_id, instrument_id, first_day)
+        with localcontext(prec=MAX_PREC):
+            difference = opening - before
         if difference == 0:
             continue
         day = first_day - timedelta(days=1)
