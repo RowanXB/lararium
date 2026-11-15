@@ -714,3 +714,27 @@ def test_statement_without_a_printed_currency_is_refused() -> None:
     content = boc_pdf(BocStatement(pages=[[LOCAL_OUT]], currencies=("gbp",)))
     with pytest.raises(FileFormatError, match="doesn't print its currency"):
         _parse(content, "boc_uk_statement")
+
+
+def test_mailing_block_passes_over_the_other_column() -> None:
+    """Fourth review: a line of the right-hand column between address lines ended the
+    block, silently dropping the rest of the address."""
+    from decimal import Decimal as D
+
+    from lararium.modules.finance.importing.pdf.layout import mailing_block
+    from lararium.modules.finance.importing.pdf.words import Word
+
+    def line(top: str, x0: str, text: str) -> list[Word]:
+        return [Word(text, D(x0), D(x0) + 50, D(top), 0)]
+
+    lines = [
+        line("155", "60.8", "Mr A Example"),
+        line("166", "60.8", "1 Example Street"),
+        line("170.5", "360", "Opening Balance"),
+        line("177", "60.8", "Exampletown"),
+        line("188", "60.8", "EX1 2MP"),
+    ]
+    assert mailing_block(lines, 0, D(300)) == (
+        "Mr A Example",
+        "1 Example Street, Exampletown, EX1 2MP",
+    )
