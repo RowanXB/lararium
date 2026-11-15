@@ -516,8 +516,8 @@ def _classify(statement: ParsedStatement) -> list[_Row]:
 
 
 async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]) -> None:
-    """Zero rows are skipped; the rest get a key and are duplicates of a committed row or an
-    earlier row of the file (Decision 5)."""
+    """Zero rows are skipped; the rest get a key (Decision 5). A key that repeats within the
+    file is an error; a key a committed row has is a duplicate."""
     occurrences: Counter[tuple[str, ...]] = Counter()
     for row in rows:
         parsed = row.parsed
@@ -547,11 +547,19 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
     )
     seen: set[str] = set()
     for row in keyed:
-        assert row.dedupe_key is not None
-        if row.dedupe_key in committed:
+        assert row.dedupe_key is not None and row.parsed is not None
+        if row.dedupe_key in seen:
+            # A repeat would count in the chain and the opening but never be committed
+            # (ruling 2026-11-15), so it blocks the commit instead.
+            external_id = row.parsed.external_id
+            row.fail(
+                f"the file lists transaction id {external_id} twice"
+                if external_id is not None
+                else "the file lists this row twice, with the same date, amount, description "
+                "and balance"
+            )
+        elif row.dedupe_key in committed:
             row.status, row.of_committed = "duplicate", True
-        elif row.dedupe_key in seen:
-            row.status = "duplicate"
         seen.add(row.dedupe_key)
 
 

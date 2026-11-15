@@ -230,7 +230,16 @@ async def test_external_id_duplicate_within_file(
     )
     batch = await stage(profile, content, filename="statement.ofx")
 
-    assert _statuses(await _rows(session, batch)) == ["new", "duplicate"]
+    rows = await _rows(session, batch)
+    assert _statuses(rows) == ["new", "error"]
+    assert rows[1].error == "the file lists transaction id EXB1 twice"
+    assert batch.counts["error"] == 1
+
+    # A repeated running-balance row is just as much an error.
+    repeated = BALANCE_HEADER + "02/11/2026,Shop,-10.00,90.00\n02/11/2026,Shop,-10.00,90.00\n"
+    rows = await _rows(session, await stage(await _csv_profile(run), repeated))
+    assert _statuses(rows) == ["new", "error"]
+    assert rows[1].error is not None and "twice" in rows[1].error
 
 
 # Which accounts and currencies -------------------------------------------------------
