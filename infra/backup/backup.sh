@@ -35,11 +35,15 @@ trap 'rm -f "$out.partial" "$out_docs.partial"' EXIT
 "${compose[@]}" exec -T db pg_dump -U postgres -d lararium --format=custom > "$out.partial"
 # .tmp-* files are uploads still being written; LocalDocumentStore renames them into place.
 # GNU tar exits 1 when a directory changed while it was read: an upload landed meanwhile.
-# Documents are written once and never change, so that tar still holds every document that
-# was there when it started. The 1 is made 0 inside the container, so a failed exec (the
-# api stopped, say, which compose also reports as 1) still stops the backup.
+# The dump above was taken first, and documents are written once and never change, so the
+# tar still holds every document the dump refers to; only ones uploaded since may be
+# missing, and the next backup has them. The 1 is made 0 inside the container (with a
+# warning), so a failed exec (the api stopped, say, which compose also reports as 1) still
+# stops the backup.
 "${compose[@]}" exec -T api sh -c \
-  'tar -C /var/lib/lararium/documents --exclude=".tmp-*" -cf - .; s=$?; [ "$s" -ne 1 ] || s=0; exit "$s"' \
+  'tar -C /var/lib/lararium/documents --exclude=".tmp-*" -cf - .; s=$?
+   if [ "$s" -eq 1 ]; then echo "warning: an upload landed during the documents tar" >&2; s=0; fi
+   exit "$s"' \
   > "$out_docs.partial"
 mv "$out.partial" "$out"
 mv "$out_docs.partial" "$out_docs"
