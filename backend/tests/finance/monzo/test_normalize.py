@@ -1,3 +1,5 @@
+import hashlib
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -6,11 +8,11 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from lararium.core.actors import Actor
-from lararium.core.commands import command_context
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     ConnectionRecord,
     create_connection,
@@ -20,7 +22,7 @@ from lararium.core.connections import (
 )
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
-from lararium.core.models import Entity
+from lararium.core.models import Entity, RawRecord
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.instruments import get_currency
@@ -150,7 +152,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-1"
+    assert NORMALIZER_VERSION == "monzo-norm-2"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
@@ -1365,3 +1367,230 @@ async def test_device_fingerprint_and_ip_never_stored(session, run) -> None:
         assert rows, table  # the search looks at something
         for value in secret.values():
             assert not [row for row in rows if value in row], (table, value)
+
+
+# Backfill by replay (plan Decision 12).
+
+
+def _detailed(**overrides: Any) -> dict[str, Any]:
+    """A card payment with the fields the structured-fields normalizer stores."""
+    payment = make_transaction(
+        amount=-850,
+        local_amount=-1000,
+        local_currency="USD",
+        categories={"groceries": -500, "household": -350},
+        labels=["test-label"],
+        scheme="mastercard",
+        include_in_spending=True,
+        merchant=make_merchant(),
+        metadata={"mcc": "5411"},
+    )
+    return payment | overrides
+
+
+async def _before_structured_fields(ctx: CommandContext, connection: ConnectionRecord) -> None:
+    """Make the ledger and the connection look as they did before the structured fields: no
+    typed fields on the transactions, no category splits or declined rows, and no normalizer
+    version in the config."""
+    for statement in (
+        "update finance.transactions set original_quantity = null,"
+        " original_instrument_id = null, category = null, labels = '{}',"
+        " include_in_spending = null, payment_scheme = null, place_entity_id = null",
+        "delete from finance.transaction_category_splits",
+        "delete from finance.declined_transactions",
+    ):
+        await ctx.session.execute(text(statement))
+    await update_config(ctx, connection.id, remove=["normalizer_version"])
+
+
+async def _store_page(
+    run,
+    connection: ConnectionRecord,
+    transactions: Sequence[dict[str, Any]],
+    *,
+    fetched_at: datetime | None = None,
+) -> None:
+    """Store a transactions page in a sync of its own without normalizing it, as a sync keeps
+    the pages of an attempt it discards. Fetched now, unless `fetched_at` says otherwise."""
+    content = list(transactions)
+    request: dict[str, JSONValue] = {"account_id": ACCOUNT_ID}
+
+    async def store(ctx: CommandContext) -> None:
+        if fetched_at is None:
+            await store_raw_record(
+                ctx,
+                connection_id=connection.id,
+                record_type="transactions_page",
+                request=request,
+                content=content,
+                connector_version="monzo-sync-1",
+                sync_id=uuid.uuid4(),
+            )
+            return
+        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+        await ctx.session.execute(
+            insert(RawRecord).values(
+                connection_id=connection.id,
+                sync_id=uuid.uuid4(),
+                record_type="transactions_page",
+                request=request,
+                fetched_at=fetched_at,
+                content=content,
+                content_hash=digest,
+                connector_version="monzo-sync-1",
+            )
+        )
+
+    await run(store)
+
+
+async def test_replay_fills_history_outside_this_sync(session, run) -> None:
+    connection = await _connection(run)
+    other = make_transaction(
+        id="tx_TEST0002", created="2026-03-01T13:00:00.000Z", amount=-500, local_amount=-500
+    )
+    await _normalize(session, connection, transactions=[_detailed(), other])
+    await run(_before_structured_fields, connection)
+
+    # This sync fetched only the other one, changed since.
+    report = await _normalize(session, connection, transactions=[other | {"notes": "lunch"}])
+
+    # One update each: the first by the replay, the other by this sync's page alone, as the
+    # replay skips what this sync fetched.
+    assert (report.created, report.updated, report.unchanged) == (0, 2, 0)
+    by_id = {r.external_id: r for r in await _transactions(session)}
+    replayed = by_id["tx_TEST0001"]
+    details = await _details(session, replayed.id)
+    usd = await get_currency(session, "USD")
+    assert (
+        details.original_quantity,
+        details.original_instrument_id,
+        details.category,
+        details.labels,
+        details.include_in_spending,
+        details.payment_scheme,
+    ) == (Decimal("-10.00"), usd.id, "groceries", ["test-label"], True, "mastercard")
+    place = await session.get_one(Entity, details.place_entity_id)
+    assert (place.kind, place.external_ids) == ("place", {"monzo_merchant": "merch_TEST1"})
+    assert await _splits(session, replayed.id) == [
+        ("groceries", Decimal("-5.00")),
+        ("household", Decimal("-3.50")),
+    ]
+    assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
+    config = (await get_connection(session, connection.id)).config
+    assert config["normalizer_version"] == "monzo-norm-2"
+
+
+async def test_replay_uses_the_latest_by_updated(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection)
+    newest = make_transaction(amount=-1234, updated="2026-03-02T06:00:00.000Z")
+    # Stored after the newest: a page seen before keeps its first fetch time, so the order of
+    # fetching does not tell which is newer.
+    older = make_transaction(
+        amount=-1500, settled="", category="shopping", updated="2026-03-01T12:00:05.000Z"
+    )
+    undated = make_transaction(amount=-999, settled="", category="eating_out")  # the oldest
+    for tx in (newest, older, undated):
+        await _store_page(run, connection, [tx])
+    await run(_before_structured_fields, connection)
+
+    report = await _normalize(session, connection)
+
+    assert report == NormalizeReport(created=1)
+    (tx,) = await _transactions(session)
+    main = (await _account_map(session, connection))[ACCOUNT_ID]
+    assert (tx.status, tx.value_date) == ("booked", date(2026, 3, 2))
+    assert (await _postings(session, tx.id))[0] == (main, Decimal("-12.34"), "")
+    assert (await _details(session, tx.id)).category == "groceries"
+
+
+async def test_replay_breaks_ties_by_fetch_time_then_id(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection)
+    updated = "2026-03-02T06:00:00.000Z"
+    first = make_transaction(id="tx_TEST0001", updated=updated)
+    second = make_transaction(id="tx_TEST0002", created="2026-03-01T13:00:00.000Z", updated=updated)
+    early, late = datetime(2026, 3, 2, 7, tzinfo=UTC), datetime(2026, 3, 2, 8, tzinfo=UTC)
+    # Stored in this order, so each page has a greater id than the one before.
+    await _store_page(run, connection, [first, second], fetched_at=late)
+    await _store_page(run, connection, [first | {"category": "shopping"}], fetched_at=early)
+    await _store_page(run, connection, [second | {"category": "household"}], fetched_at=late)
+    await run(_before_structured_fields, connection)
+
+    await _normalize(session, connection)
+
+    categories = {
+        r.external_id: (await _details(session, r.id)).category
+        for r in await _transactions(session)
+    }
+    # The first: fetched later beats a greater id. The second: fetched at the same time, the
+    # greater id wins.
+    assert categories == {"tx_TEST0001": "groceries", "tx_TEST0002": "household"}
+
+
+async def test_replay_runs_once(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[_detailed()])
+    await run(_before_structured_fields, connection)
+
+    replayed = await _normalize(session, connection)
+    again = await _normalize(session, connection)
+
+    assert replayed == NormalizeReport(updated=1)
+    # The version is stored: the next sync replays nothing.
+    assert again == NormalizeReport()
+
+
+async def test_replay_keeps_owner_void(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[_detailed()])
+    (posted,) = await _transactions(session)
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, posted.id)
+    await run(_before_structured_fields, connection)
+
+    report = await _normalize(session, connection)
+
+    assert report == NormalizeReport(unchanged=1)
+    status = await session.execute(
+        text("select status, voided_by from finance.transactions where id = :id"),
+        {"id": posted.id},
+    )
+    assert tuple(status.one()) == ("void", "user")
+
+
+async def test_replay_records_old_declines(session, run) -> None:
+    connection = await _connection(run)
+    never_posted = make_transaction(
+        amount=-2500, settled="", decline_reason="INSUFFICIENT_FUNDS", merchant=make_merchant()
+    )
+    pending = make_transaction(
+        id="tx_TEST0002",
+        created="2026-03-01T13:00:00.000Z",
+        amount=-4000,
+        settled="",
+        updated="2026-03-01T13:00:01.000Z",
+    )
+    declined_later = pending | {
+        "decline_reason": "CARD_INACTIVE",
+        "updated": "2026-03-01T13:05:00.000Z",
+    }
+    await _normalize(session, connection, transactions=[never_posted, pending])
+    await _normalize(session, connection, transactions=[declined_later])
+    # The normalizer before declined rows existed posted nothing for the first, and only
+    # voided the second.
+    await run(_before_structured_fields, connection)
+
+    report = await _normalize(session, connection)
+
+    assert report == NormalizeReport(unchanged=1, skipped_declined=1)
+    assert [r.status for r in await _transactions(session)] == ["void"]
+    rows = [
+        (r.external_id, r.quantity, r.decline_reason, r.description)
+        for r in await _declined(session)
+    ]
+    assert rows == [
+        ("tx_TEST0001", Decimal("-25.00"), "INSUFFICIENT_FUNDS", "Test Grocer"),
+        ("tx_TEST0002", Decimal("-40.00"), "CARD_INACTIVE", "TEST SHOP LONDON"),
+    ]

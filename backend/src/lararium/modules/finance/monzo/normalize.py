@@ -17,7 +17,10 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 - what Monzo says about a transaction, its merchant, an account or a pot is stored typed, a
   fee as a posting of its own, and a declined transaction outside the ledger (the
   structured-fields plan, Decisions 5-11); a field in a shape not mapped yet stays in the raw
-  records, with a warning on the connection, and never fails the sync.
+  records, with a warning on the connection, and never fails the sync;
+- the first sync under a new NORMALIZER_VERSION first replays the latest raw record of every
+  transaction the connection ever fetched (structured-fields Decision 12), so what a new
+  version stores is filled in for the history an older one posted too.
 """
 
 import logging
@@ -39,7 +42,7 @@ from lararium.core.connections import get_connection, set_warnings, update_confi
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import PlaceDetails, get_or_create_organization, get_or_create_place
 from lararium.core.json_types import JSONValue
-from lararium.core.raw_records import get_raw_records
+from lararium.core.raw_records import get_raw_records, list_raw_records
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
@@ -72,7 +75,10 @@ from lararium.modules.finance.system_accounts import (
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-1"
+NORMALIZER_VERSION = "monzo-norm-2"
+# The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
+# makes the next sync replay the history already fetched (see _Normalizer.replay).
+NORMALIZER_VERSION_KEY = "normalizer_version"
 
 ACCOUNT_MAP_KEY = "account_map"
 # Per Monzo account: where the history its opening accounts for begins (ISO time). Recorded
@@ -132,6 +138,16 @@ async def _notify(ctx: SyncContext, text: str) -> None:
 
 def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
+
+
+# Before any time Monzo gives: a transaction without `updated` is its oldest version.
+_NEVER_UPDATED = datetime.min.replace(tzinfo=UTC)
+
+
+def _updated(tx: dict[str, Any]) -> datetime:
+    """When Monzo last changed the transaction."""
+    value = tx.get("updated")
+    return _parse(value) if isinstance(value, str) and value else _NEVER_UPDATED
 
 
 def _mismatch_prefix(monzo_account_id: str) -> str:
@@ -575,6 +591,29 @@ class _Normalizer:
         )
         self.count(outcome)
 
+    async def replay(self, skipping: Collection[str]) -> None:
+        """Run the latest raw record of every Monzo transaction this connection ever fetched
+        through transaction(), except those in `skipping` (structured-fields Decision 12).
+
+        The latest has the greatest Monzo `updated`, then fetch time, then record id: the
+        fetch time alone would mislead, as a page fetched again keeps its first one. Going
+        through transaction() and its upserts, an owner's void survives and an unchanged
+        transaction is not written.
+        """
+        latest: dict[str, tuple[tuple[datetime, datetime, UUID], dict[str, Any], str]] = {}
+        pages = await list_raw_records(self.session, self.connection_id, "transactions_page")
+        for page in pages:
+            monzo_account_id = str(page.request["account_id"])
+            for tx in cast(list[dict[str, Any]], page.content):
+                external_id: str = tx["id"]
+                if external_id in skipping:
+                    continue
+                key = (_updated(tx), page.fetched_at, page.id)
+                if external_id not in latest or key > latest[external_id][0]:
+                    latest[external_id] = (key, tx, monzo_account_id)
+        for _, tx, monzo_account_id in latest.values():
+            await self.transaction(tx, monzo_account_id)
+
     def _postings(
         self, tx: dict[str, Any], currency: InstrumentRecord, account_id: UUID, other: UUID
     ) -> list[PostingInput]:
@@ -935,10 +974,18 @@ async def normalize(
             n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
-    for record_type, request, _, content in responses:
-        if record_type == "transactions_page":
-            for tx in content:
-                await n.transaction(tx, str(request["account_id"]))
+    pages = [
+        (str(request["account_id"]), content)
+        for record_type, request, _, content in responses
+        if record_type == "transactions_page"
+    ]
+    # Under a new version, first the history this sync's pages don't cover, once the accounts
+    # and pots it posts to are mapped (and after adopt_boundary, which must precede any posting).
+    if connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION:
+        await n.replay(skipping={tx["id"] for _, content in pages for tx in content})
+    for monzo_account_id, content in pages:
+        for tx in content:
+            await n.transaction(tx, monzo_account_id)
     await n.finish()
 
     checked = set(reconciled) | set(openings)
@@ -978,7 +1025,10 @@ async def normalize(
             await _notify(ctx, f"{connection.display_name}: {warning}")
 
     # Only this normaliser's keys: others (such as an OAuth state) may have changed meanwhile.
-    values: dict[str, JSONValue] = {ACCOUNT_MAP_KEY: n.account_map}
+    values: dict[str, JSONValue] = {
+        ACCOUNT_MAP_KEY: n.account_map,
+        NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
+    }
     if n.opening_boundaries:
         values[OPENING_BOUNDARIES_KEY] = n.opening_boundaries
     if notified:

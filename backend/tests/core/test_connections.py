@@ -212,7 +212,7 @@ async def test_raw_record_dedup_by_content(session, run) -> None:
     changed = await store({"id": "tx_1", "amount": -360}, sync_id)
     assert changed != first
 
-    records = await list_raw_records(session, sync_id)
+    records = await list_raw_records(session, connection.id, "transaction")
     assert [r.id for r in records] == [first, changed]
     assert (records[0].record_type, records[0].content, records[0].request) == (
         "transaction",
