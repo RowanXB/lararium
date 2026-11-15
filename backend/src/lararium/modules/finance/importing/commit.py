@@ -94,6 +94,8 @@ async def _check_openings(session: AsyncSession, batch_id: UUID) -> None:
         )
     }
     preview = await preview_openings(session, batch_id)
+    if preview.conflicts:  # another file committed since staging disagrees (final review C1)
+        raise ImportBatchStaleError(STALE)
     needed = {i: need for i, need in preview.needed.items() if need != 0}
     if staged != needed:
         raise ImportBatchStaleError(STALE)

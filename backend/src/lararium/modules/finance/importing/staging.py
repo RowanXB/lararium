@@ -332,7 +332,8 @@ async def list_batch_rows(session: AsyncSession, batch_id: UUID) -> list[ImportR
         earliest[claim.instrument_id] = min(known, claim.first_day)
 
     def is_gap(row: models.ImportRow) -> bool | None:
-        if row.kind != "opening_adjustment":
+        # A superseded (rolled back) adjustment is no longer a balance gap, or anything.
+        if row.kind != "opening_adjustment" or row.status == "rolled_back":
             return None
         # An adjustment is dated the day before its statement's first date.
         assert row.booking_date is not None and row.instrument_id is not None
@@ -465,6 +466,17 @@ class OpeningClaim:
 type Movements = dict[UUID, list[tuple[date, Decimal]]]
 
 
+def _walk_order(claim: OpeningClaim) -> tuple[date, bool, datetime, UUID]:
+    """By first date, then committed before the staged batch, then by commit time."""
+    staged = claim.committed_at is None
+    return (
+        claim.first_day,
+        staged,
+        claim.committed_at or datetime.min.replace(tzinfo=UTC),
+        claim.batch_id,
+    )
+
+
 def plan_openings(
     claims: Sequence[OpeningClaim], movements: Movements
 ) -> dict[tuple[UUID, UUID], Decimal]:
@@ -475,19 +487,10 @@ def plan_openings(
     minus the adjustments assigned to the claims before it.
     """
 
-    def order(claim: OpeningClaim) -> tuple[date, bool, datetime, UUID]:
-        staged = claim.committed_at is None
-        return (
-            claim.first_day,
-            staged,
-            claim.committed_at or datetime.min.replace(tzinfo=UTC),
-            claim.batch_id,
-        )
-
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)
     needed: dict[tuple[UUID, UUID], Decimal] = {}
     with localcontext(prec=MAX_PREC):
-        for claim in sorted(claims, key=order):
+        for claim in sorted(claims, key=_walk_order):
             before = sum(
                 (
                     amount
@@ -503,11 +506,72 @@ def plan_openings(
 
 
 @dataclass(frozen=True)
+class OpeningConflict:
+    """A claim that needs an adjustment where an earlier statement vouches for the balance:
+    the two files disagree about it. ledger is the balance the walk has there."""
+
+    batch_id: UUID
+    instrument_id: UUID
+    first_day: date
+    opening: Decimal
+    ledger: Decimal
+    vouched_by: UUID
+
+
+def opening_conflicts(
+    claims: Sequence[OpeningClaim],
+    needed: dict[tuple[UUID, UUID], Decimal],
+    covered_to: dict[UUID, date | None],
+) -> list[OpeningConflict]:
+    """Final review C1: an adjustment is legitimate only where no other statement vouches
+    for the balance (a gap, or the account's first statement).
+
+    An earlier claim in the walk (in the same instrument) vouches for the balance before
+    every day from its first date to the day after its file's last covered day: its opening
+    holds at its first date, and its rows carry it through what it covers. So a claim that
+    starts there, the same day included, must need nothing.
+    """
+    earlier: dict[UUID, list[OpeningClaim]] = defaultdict(list)
+    conflicts: list[OpeningConflict] = []
+    with localcontext(prec=MAX_PREC):
+        for claim in sorted(claims, key=_walk_order):
+            need = needed[(claim.batch_id, claim.instrument_id)]
+            if need != 0:
+                for prior in earlier[claim.instrument_id]:
+                    end = covered_to.get(prior.batch_id)
+                    if end is not None and claim.first_day <= end + timedelta(days=1):
+                        conflicts.append(
+                            OpeningConflict(
+                                claim.batch_id,
+                                claim.instrument_id,
+                                claim.first_day,
+                                claim.opening,
+                                claim.opening - need,
+                                prior.batch_id,
+                            )
+                        )
+                        break
+            earlier[claim.instrument_id].append(claim)
+    return conflicts
+
+
+def _conflict_message(conflict: OpeningConflict, names: dict[UUID, str]) -> str:
+    file, other = names[conflict.batch_id], names[conflict.vouched_by]
+    return (
+        f"{file} gives a balance of {to_plain_str(conflict.opening)} before "
+        f"{conflict.first_day.isoformat()}, but {other}, which covers that day, gives "
+        f"{to_plain_str(conflict.ledger)}: the two files disagree. Check which one is right, "
+        "and roll the other back or leave it out"
+    )
+
+
+@dataclass(frozen=True)
 class _BatchInfo:
     id: UUID
     filename: str
     committed_at: datetime | None
     timezone: str | None
+    covered_to: date | None
 
 
 def _by_position(instruments: dict[int, UUID]) -> Callable[[ParsedRow], UUID]:
@@ -579,9 +643,9 @@ async def _claims(
 async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_BatchInfo]:
     b = models.ImportBatch
     found = await session.execute(
-        select(b.id, b.filename, b.committed_at, b.profile_config["timezone"].astext).where(
-            b.account_id == account_id, b.status == "committed"
-        )
+        select(
+            b.id, b.filename, b.committed_at, b.profile_config["timezone"].astext, b.covered_to
+        ).where(b.account_id == account_id, b.status == "committed")
     )
     return [_BatchInfo(*row) for row in found]
 
@@ -644,6 +708,8 @@ class OpeningPreview:
 
     needed: dict[UUID, Decimal]
     changes: list[OpeningChange]
+    # Final review C1: where the batch and another statement disagree about a balance.
+    conflicts: list[str]
 
 
 async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPreview:
@@ -653,13 +719,17 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     Only transactions accounts take adjustments: for any other mode, nothing is needed.
     """
     b, r = models.ImportBatch, models.ImportRow
-    staged = (await session.execute(select(b.account_id, b.filename).where(b.id == batch_id))).one()
+    staged = (
+        await session.execute(
+            select(b.account_id, b.filename, b.covered_to).where(b.id == batch_id)
+        )
+    ).one()
     account_id = staged.account_id
     if (await get_account(session, account_id)).balance_mode != "transactions":
-        return OpeningPreview(needed={}, changes=[])
+        return OpeningPreview(needed={}, changes=[], conflicts=[])
     batches = [
         *(batch for batch in await _committed_batches(session, account_id) if batch.id != batch_id),
-        _BatchInfo(batch_id, staged.filename, None, None),
+        _BatchInfo(batch_id, staged.filename, None, None, staged.covered_to),
     ]
     claims = await _claims(session, batches)
     movements = await _movements(session, account_id)
@@ -671,9 +741,16 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
         ):
             assert instrument_id is not None and day is not None and quantity is not None
             movements[instrument_id].append((day, quantity - fee))
-    plan = plan_openings([claim for found in claims.values() for claim in found], movements)
+    flat = [claim for found in claims.values() for claim in found]
+    plan = plan_openings(flat, movements)
     live = await _live_adjustments(session, account_id)
     names = {batch.id: batch.filename for batch in batches}
+    conflicts = [
+        _conflict_message(conflict, names)
+        for conflict in opening_conflicts(
+            flat, plan, {batch.id: batch.covered_to for batch in batches}
+        )
+    ]
     changes: list[OpeningChange] = []
     for owner, instrument_id in sorted(plan.keys() | live.keys(), key=str):
         if owner == batch_id:
@@ -686,7 +763,7 @@ async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPrev
     needed = {
         instrument_id: need for (owner, instrument_id), need in plan.items() if owner == batch_id
     }
-    return OpeningPreview(needed=needed, changes=changes)
+    return OpeningPreview(needed=needed, changes=changes, conflicts=conflicts)
 
 
 async def _post_adjustment(
@@ -723,6 +800,11 @@ async def align_openings(ctx: CommandContext, account_id: UUID) -> None:
     A changed adjustment's transaction is voided and a new one posted; an adjustment that
     is no longer needed turns its row rolled_back ("superseded"); a batch that now needs
     one gets a new row.
+
+    It never meets an opening conflict (final review C1): staging and commit refuse them,
+    and a rollback only removes a statement. A remaining claim that an earlier statement
+    vouches for still gets that statement's balance, since the rows it covers stay posted:
+    rollback is refused while another batch relies on the rolled-back one's rows.
     """
     session = ctx.session
     account = await get_account(session, account_id)
@@ -1316,6 +1398,8 @@ async def _stage_openings(
     """Decision 13: the staged batch's adjustment rows and warnings, from the walk with it
     included. Its statement rows must be stored already."""
     preview = await preview_openings(session, batch_id)
+    if preview.conflicts:
+        raise ImportNotAllowedError(preview.conflicts[0])
     stated = {row.instrument_id for row in rows if row.status in ("new", "duplicate")}
     warnings = [NO_BALANCES_WARNING] if stated - preview.needed.keys() else []
     warnings += [

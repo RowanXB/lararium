@@ -783,3 +783,99 @@ async def test_duplicate_rematched_when_another_file_now_covers_the_day(
         "already imported from w.csv",
     )
     assert await _balance(session, account.id) == Decimal("-3.50")
+
+
+# Openings two files disagree on (final review C1) ------------------------------------
+
+# Balances 100.00, 95.00 and 87.00 over 10-28 Nov: its opening is 0.00.
+WITH_BALANCES = BALANCE_HEADER + (
+    "10/11/2026,Pay,100.00,100.00\n20/11/2026,Cafe,-5.00,95.00\n28/11/2026,Shop,-8.00,87.00\n"
+)
+# The same 20 and 28 Nov rows and one more, but a LEDGERBAL 3.00 lower than the CSV implies:
+# its opening on 20 Nov is 97.00 where the CSV's balances give 100.00.
+LOWER_LEDGERBAL = _ofx(
+    [("20261120", "-5.00", "A"), ("20261128", "-8.00", "B"), ("20261203", "-2.00", "C")],
+    start="20261120",
+    end="20261205",
+    extra="<LEDGERBAL>\n<BALAMT>82.00\n<DTASOF>20261205\n</LEDGERBAL>",
+)
+
+
+async def test_overlapping_file_with_another_opening_refused(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """An adjustment may stand only where no other statement vouches for the balance: on a
+    day both files cover, a different opening is a contradiction, not a gap."""
+    await commit((await stage(await _csv_profile(run), WITH_BALANCES, filename="nov.csv")).id)
+    ofx = await _profile(run, format="ofx")
+
+    with pytest.raises(ImportNotAllowedError) as raised:
+        await stage(ofx, LOWER_LEDGERBAL, filename="export.ofx")
+    message = str(raised.value)
+    assert "export.ofx" in message and "nov.csv" in message
+    assert "97.00" in message and "100.00" in message and "2026-11-20" in message
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("87.00")
+
+
+async def test_older_file_with_another_opening_refused(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    # The same contradiction the other way round: the OFX first, then the CSV.
+    ofx = await _profile(run, format="ofx")
+    await commit((await stage(ofx, LOWER_LEDGERBAL, filename="export.ofx")).id)
+
+    with pytest.raises(ImportNotAllowedError) as raised:
+        await stage(await _csv_profile(run), WITH_BALANCES, filename="nov.csv")
+    message = str(raised.value)
+    assert "export.ofx" in message and "nov.csv" in message
+    assert "97.00" in message and "100.00" in message
+    assert await _balance(session, account.id) == Decimal("82.00")
+
+
+async def test_same_first_day_with_another_opening_refused(
+    run: Run, stage: Stage, commit: Commit
+) -> None:
+    # Both start on 2 Nov; the CSV says 1500.00 before it, the OFX 1497.00 (task 5's N1).
+    await commit((await stage(await _csv_profile(run), NOVEMBER, filename="nov.csv")).id)
+    ofx = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261102", "-18.00", "A"), ("20261103", "-2.00", "B")],
+        start="20261102",
+        end="20261103",
+        extra="<LEDGERBAL>\n<BALAMT>1477.00\n<DTASOF>20261103\n</LEDGERBAL>",
+    )
+
+    with pytest.raises(ImportNotAllowedError, match=r"1497\.00"):
+        await stage(ofx, content, filename="export.ofx")
+
+
+async def test_commit_refuses_an_opening_another_file_now_contradicts(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    ofx = await _profile(run, format="ofx")
+    export = await stage(ofx, LOWER_LEDGERBAL, filename="export.ofx")  # nothing to contradict yet
+    await commit((await stage(await _csv_profile(run), WITH_BALANCES, filename="nov.csv")).id)
+
+    with pytest.raises(ImportBatchStaleError):
+        await commit(export.id)
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("87.00")
+
+
+async def test_superseded_adjustment_is_not_a_gap(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    account_id, pdf, ofx = await _pdf_and_ofx(run, stage, make_account)
+    export = await commit(
+        (await stage(ofx, EXPORT, account_id=account_id, filename="export.ofx")).id
+    )
+    await commit(
+        (
+            await stage(
+                pdf, hsbc_pdf(HsbcStatement(pages=[PDF_ROWS])), account_id=account_id, default=None
+            )
+        ).id
+    )
+
+    (superseded,) = _adjustments(await _rows(session, export))
+    assert superseded.status == "rolled_back"
+    assert superseded.is_gap is None
