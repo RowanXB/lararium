@@ -42,6 +42,27 @@ _DATETIME = re.compile(
 )
 _CURRENCY = re.compile(r"[A-Z]{3}")
 _STATEMENTS = frozenset({"STMTRS", "CCSTMTRS"})
+# The OFX aggregates on the way to what is read, and those read. The spec closes every
+# aggregate, so one left open is a broken file: read as an empty leaf, its contents would
+# move into its parent, and a transaction or a balance would silently vanish.
+_AGGREGATES = _STATEMENTS | {
+    "OFX",
+    "SIGNONMSGSRSV1",
+    "SONRS",
+    "STATUS",
+    "BANKMSGSRSV1",
+    "CREDITCARDMSGSRSV1",
+    "STMTTRNRS",
+    "CCSTMTTRNRS",
+    "BANKACCTFROM",
+    "CCACCTFROM",
+    "BANKTRANLIST",
+    "STMTTRN",
+    "CURRENCY",
+    "ORIGCURRENCY",
+    "LEDGERBAL",
+    "AVAILBAL",
+}
 # Real statements nest about eight deep; the bound keeps the recursive walks safe.
 _MAX_DEPTH = 64
 
@@ -99,6 +120,8 @@ def _absorb(stack: list[_Aggregate]) -> None:
     """Close the innermost open tag that had no closing tag: it was an empty SGML leaf, so
     what was read inside it belongs to its parent."""
     node = stack.pop()
+    if node.name in _AGGREGATES:
+        raise FileFormatError(f"not a valid OFX file: <{node.name}> is never closed")
     parent = stack[-1]
     parent.children.pop()  # node: nothing is added to the parent while a child is open
     parent.leaves.append((node.name, ""))
@@ -125,7 +148,7 @@ def _tree(text: str) -> _Aggregate:
             while stack[-1].name != name:
                 _absorb(stack)
             node = stack[-1]
-            if not node.leaves and not node.children:
+            if not node.leaves and not node.children and node.name not in _AGGREGATES:
                 _absorb(stack)  # XML's empty leaf, <MEMO></MEMO>
             else:
                 stack.pop()

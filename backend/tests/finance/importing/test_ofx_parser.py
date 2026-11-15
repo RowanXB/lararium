@@ -575,3 +575,18 @@ def test_correction_record_is_row_error(fields: dict[str, str]) -> None:
     row, error = _parse(_sgml(_sgml_statement(original + "\n" + correction))).rows
     assert isinstance(row, ParsedRow)
     assert isinstance(error, RowError) and "corrects transaction" in error.message
+
+
+@pytest.mark.parametrize("aggregate", ["STMTTRN", "LEDGERBAL"])
+def test_unclosed_aggregate_is_file_error(aggregate: str) -> None:
+    """Review finding: an aggregate left open was read as an empty leaf, so its contents
+    moved into its parent and a transaction or the balance silently vanished."""
+    first = _transaction(DTPOSTED="20261102", TRNAMT="-500.00", FITID="A")
+    second = _transaction(DTPOSTED="20261103", TRNAMT="-5.00", FITID="B")
+    extra = "<LEDGERBAL>\n<BALAMT>10.00\n<DTASOF>20261130\n</LEDGERBAL>"
+    if aggregate == "STMTTRN":
+        content = _sgml_statement(first.removesuffix("</STMTTRN>") + "\n" + second, extra=extra)
+    else:
+        content = _sgml_statement(first + "\n" + second, extra=extra.replace("</LEDGERBAL>", ""))
+    with pytest.raises(FileFormatError, match=f"<{aggregate}> is never closed"):
+        _parse(_sgml(content))
