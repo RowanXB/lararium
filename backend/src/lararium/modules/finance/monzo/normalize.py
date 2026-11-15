@@ -539,15 +539,20 @@ class _Normalizer:
         if earliest is not None:
             self._move_boundary(monzo_id, earliest)
 
-    async def record_opening_boundary(self, monzo_account: dict[str, Any]) -> None:
+    async def record_opening_boundary(self, monzo_id: str, balance_at: datetime) -> None:
         """Record that the opening accounts for everything before this connection's earliest
-        posting on the account (or before the account's creation, with none)."""
-        monzo_id: str = monzo_account["id"]
+        posting on the account. With none, it accounts for everything in the balance read at
+        `balance_at`: any transaction a later fetch finds before then is in that balance, so
+        it must move the opening, however recent (the account's creation would be too early
+        when this run fetched only the last 89 days)."""
         earliest = await self._earliest(monzo_id)
-        self._move_boundary(monzo_id, earliest or _parse(monzo_account["created"]))
+        self._move_boundary(monzo_id, min(earliest, balance_at) if earliest else balance_at)
 
-    async def opening(self, monzo_account: dict[str, Any], minor_units: int, code: str) -> None:
-        """Post the difference between Monzo's balance and the rest of the ledger, the day
+    async def opening(
+        self, monzo_account: dict[str, Any], minor_units: int, code: str, balance_at: datetime
+    ) -> None:
+        """Post the difference between Monzo's balance (read at `balance_at`) and the rest of
+        the ledger, the day
         before the earliest other transaction. An opening the owner voided stays void; one no
         longer needed is voided by the connector, and posted again if it is needed again.
 
@@ -590,7 +595,7 @@ class _Normalizer:
                 connection_id=self.connection_id,
             )
             difference = placed - older
-        await self.record_opening_boundary(monzo_account)
+        await self.record_opening_boundary(monzo_id, balance_at)
         if difference == 0:
             if posted is not None:
                 await void_transaction(self.command, posted[0])
@@ -672,14 +677,14 @@ async def normalize(
     # Before anything is posted, so this run's transactions can't count as earlier history.
     for monzo_id in accounts:
         await n.adopt_boundary(monzo_id)
-    balances: dict[str, dict[str, Any]] = {}
+    balances: dict[str, tuple[dict[str, Any], datetime]] = {}
     for record_type, request, fetched_at, content in responses:
         if record_type == "pots":
             for pot in content:
                 await n.pot(pot, str(request["current_account_id"]), fetched_at)
         elif record_type == "balance":
             monzo_id = str(request["account_id"])
-            balances[monzo_id] = content
+            balances[monzo_id] = (content, fetched_at)
             n.snapshot(
                 n.require_mapped(monzo_id), content["balance"], content["currency"], fetched_at
             )
@@ -691,11 +696,11 @@ async def normalize(
 
     checked = set(reconciled) | set(openings)
     mismatches: dict[str, tuple[str, str] | None] = {}
-    for monzo_id, balance in balances.items():
+    for monzo_id, (balance, balance_at) in balances.items():
         if monzo_id not in checked:
             continue
         if monzo_id in openings:
-            await n.opening(accounts[monzo_id], balance["balance"], balance["currency"])
+            await n.opening(accounts[monzo_id], balance["balance"], balance["currency"], balance_at)
         mismatches[monzo_id] = await n.reconcile(monzo_id, balance["balance"], balance["currency"])
 
     # Warnings and notifications: one warning per mismatched account; the owner hears about
