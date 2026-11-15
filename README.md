@@ -380,6 +380,25 @@ Example Bank files (`example-bank.csv`, `.ofx`, `.qif`) and the profiles for the
 (`example-bank-csv.json`, `example-bank-ofx.json`). Paste a profile's JSON into a new profile,
 pick GBP at upload, and import into a manual `transactions` account to try the flow.
 
+### Verifying against your real statements
+
+The tests use synthetic files. To check that your own statements still import correctly, for
+example after changing the import code, put each bank's files in a folder of its own, named
+starting `HSBC`, `Lloy` (Lloyds) or `BOC`, one account per folder, all under one directory, and
+run:
+
+```bash
+make real-check REAL_ROOT="$HOME/Downloads"
+```
+
+It imports every file into the same throwaway PostgreSQL container `make check` uses, twice:
+statements first, then exports first. Each time, every file must commit with no error row, and
+every statement's closing balance must hold on its own date. Rolling everything back, newest
+first, must be allowed and leave a zero balance. It prints only counts and pass or fail: error
+text has its digits and file names masked. The stored copies go to a temporary directory that
+is removed at the end, and the container is removed with it. Wherever Docker runs (a remote
+Docker host, say), the files' contents are sent there for the run. `make check` and CI skip it.
+
 ## Secrets: encrypting `infra/.env` with SOPS + age
 
 `infra/.env` holds every credential and is ignored by git. To keep an encrypted copy
