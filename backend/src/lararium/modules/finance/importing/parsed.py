@@ -1,10 +1,11 @@
 """What a parser reads from a statement file, before staging: shared by every format."""
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from functools import wraps
 
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.importing.profiles import AmountFormat
@@ -166,6 +167,26 @@ class ParsedStatement:
     rates: list[StatementRate] = field(default_factory=list[StatementRate])
 
 
+# Wide enough to add and subtract amounts of 40 digits on each side of the point exactly,
+# over any number of rows, yet finite: layouts also divide coordinates, which an unbounded
+# precision would expand without end.
+_EXACT_PREC = 200
+
+
+def exact_decimals[**P, R](parse: Callable[P, R]) -> Callable[P, R]:
+    """Runs a parser with exact Decimal arithmetic for amounts. They may have 40 digits on each
+    side of the point, past the default 28-digit context: a sign flip, inflow minus outflow or a
+    statement total would otherwise round silently, as ledger.py guards against too."""
+
+    @wraps(parse)
+    def exact(*args: P.args, **kwargs: P.kwargs) -> R:
+        with localcontext(prec=_EXACT_PREC):
+            return parse(*args, **kwargs)
+
+    return exact
+
+
+@exact_decimals
 def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
     """An amount as a bank writes it: "-£1,234.50", "(12.00)", "+85"; ValueError otherwise."""
     body = text.strip()

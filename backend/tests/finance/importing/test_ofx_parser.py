@@ -553,3 +553,12 @@ def test_acctid_with_sort_code_prefix_gives_account_number() -> None:
     other = content.replace(b"<ACCTID>12345678", b"<ACCTID>99999912345678")
     account = _parse(other).account
     assert account is not None and account.account_number == "99999912345678"
+
+
+def test_large_amount_negated_exactly() -> None:
+    big = "1234567890123456789012345678.91"
+    statement = _sgml_statement(
+        _transaction(TRNTYPE="DEBIT", DTPOSTED="20261110", TRNAMT=big, FITID="X1")
+    )
+    rows = _rows(_parse(_sgml(statement), sign="outflow_positive"))
+    assert [row.quantity for row in rows] == [Decimal(f"-{big}")]

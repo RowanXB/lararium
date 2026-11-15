@@ -106,6 +106,7 @@ def _row(
     )
 
 
+@parsed.exact_decimals
 def parse_qif(content: bytes, config: QifProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz: the profile's timezone when set; the caller resolves it."""
     rows: list[ParsedRow | RowError | SkippedRow] = []

@@ -16,6 +16,7 @@ from lararium.modules.finance.importing.parsed import (
     SkippedRow,
     StatementAccount,
     StatementRate,
+    parse_amount,
 )
 from lararium.modules.finance.importing.profiles import AmountFormat, CsvProfileConfig
 
@@ -556,3 +557,21 @@ def test_repeated_name_in_configured_header_is_file_error() -> None:
     header = ["Date", "Amount", "Description", "Amount"]
     with pytest.raises(FileFormatError, match="Amount"):
         _parse(b"10/11/2026,-3.50,Coffee,-3.50\n", header=header)
+
+
+BIG = "1234567890123456789012345678.91"  # 30 significant digits, past the default 28
+
+
+@pytest.mark.parametrize("text", [f"-{BIG}", f"({BIG})"])
+def test_parse_amount_negates_exactly(text: str) -> None:
+    assert parse_amount(text, AmountFormat()) == Decimal(f"-{BIG}")
+
+
+def test_large_amounts_keep_precision_through_signs() -> None:
+    content = f"Date,Description,Amount\n10/11/2026,Big,{BIG}\n".encode()
+    rows = _rows(_parse(content, sign="outflow_positive"))
+    assert [row.quantity for row in rows] == [Decimal(f"-{BIG}")]
+    two = f"Date,Description,In,Out\n10/11/2026,Big,0.01,{BIG}\n".encode()
+    columns = {"date": "Date", "description": ["Description"], "inflow": "In", "outflow": "Out"}
+    rows = _rows(_parse(two, columns=columns))
+    assert rows[0].quantity == Decimal("-1234567890123456789012345678.90")

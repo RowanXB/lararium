@@ -207,3 +207,10 @@ def test_amount_format_from_profile() -> None:
     amount_format = {"decimal_separator": ",", "thousands_separator": "."}
     rows = _rows(_parse(content, date_format="%d.%m.%Y", amount_format=amount_format))
     assert [row.quantity for row in rows] == [Decimal("-1234.50"), Decimal("12.50")]
+
+
+def test_large_amount_negated_exactly() -> None:
+    big = "1234567890123456789012345678.91"
+    content = f"!Type:Bank\nD10/11/2026\nT{big}\nPExample\n^\n".encode()
+    rows = _rows(_parse(content, sign="outflow_positive"))
+    assert [row.quantity for row in rows] == [Decimal(f"-{big}")]

@@ -297,6 +297,7 @@ def _period(statement: _Aggregate) -> tuple[date, date] | None:
     return period
 
 
+@parsed.exact_decimals
 def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
     statements = _tree(_decode(content)).find(_STATEMENTS)
     if len(statements) != 1:

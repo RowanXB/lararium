@@ -211,6 +211,7 @@ def _overdraft(
     return None, None
 
 
+@parsed.exact_decimals
 def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz: the profile's timezone when set; the caller resolves it."""
     header, lines, footer = _read_rows(content, config)

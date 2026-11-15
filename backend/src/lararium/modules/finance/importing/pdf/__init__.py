@@ -98,6 +98,7 @@ def check(result: LayoutResult) -> None:
     _balances_check(result)
 
 
+@parsed.exact_decimals
 def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz is unused: statements print dates only, so occurred_at stays None."""
     del local_tz
