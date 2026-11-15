@@ -4,7 +4,7 @@
 
 **Goal:** Every Monzo field the owner chose (tiers 1 and 2) is stored as a typed field, for future syncs and for the history already in `core.raw_records`.
 
-**Architecture:** One migration adds typed columns to `finance.transactions`, `finance.accounts` and `core.entities`, plus `finance.transaction_category_splits` and `finance.declined_transactions`. The Monzo normalizer fills them. Bumping `NORMALIZER_VERSION` makes the next sync replay every Monzo transaction's latest raw record through the normalizer, which backfills history with the same code that handles new syncs.
+**Architecture:** One migration adds typed columns to `finance.transactions`, `finance.accounts` and `core.entities`, plus `finance.transaction_category_splits` and `finance.declined_transactions`. The Monzo normalizer fills them. Bumping `NORMALIZER_VERSION` makes the next sync replay the latest raw record of every Monzo transaction already in the ledger (and of declined ones) through the normalizer, which backfills history with the same code that handles new syncs.
 
 **Tech Stack:** Python 3.13, FastAPI, async SQLAlchemy, PostgreSQL 18, raw-SQL Alembic migrations, pytest.
 
@@ -52,8 +52,9 @@
 11. **Declined transactions** go in `finance.declined_transactions`, outside the ledger. It holds the connection, the Monzo id (unique per connection), the account, `occurred_at`, the signed quantity and instrument, the description, `counterparty_entity_id`, `place_entity_id` and `decline_reason`. A re-sync upserts and writes nothing when unchanged. A pending transaction that comes back declined is voided in the ledger, as today, and gets its declined row.
 12. **Backfill by replay.**
     - `NORMALIZER_VERSION` becomes `monzo-norm-2`, kept in the connection config under `normalizer_version`.
-    - When the stored value differs, `normalize` first runs the latest raw record of every Monzo transaction this connection ever fetched through `transaction()`, before this sync's own pages and skipping the ids those pages contain. Then it stores the version.
-    - "Latest" means the greatest Monzo `updated`, with ties broken by `fetched_at` and then the record id. `fetched_at` alone would be wrong, because a record whose content was seen before keeps its first fetch time.
+    - When the stored value differs, `normalize` first runs the latest raw record of each Monzo transaction this connection already has in the ledger, or whose latest copy is declined, through `transaction()`, before this sync's own pages and skipping the ids those pages contain. Then it stores the version. The replay only backfills: a transaction seen only in a discarded fetch attempt is never posted by it.
+    - "Latest" means the greatest Monzo `updated`, with ties broken by `fetched_at` and then the record id. `fetched_at` alone would be wrong, because a record whose content was seen before keeps its first fetch time. An `updated` that is not a valid ISO timestamp counts as missing (oldest), so it can neither fail the sync nor win.
+    - The migration's downgrade removes `normalizer_version`, so a later upgrade replays again.
     - The replay goes through the normal upserts, so an owner's void survives. It also fills M4's counterparty fields and PR #10's pot names whichever lands first, which makes M4's `counterparty_fields_v1` flag unnecessary.
 13. **Migration number.** `0013`, revising `0012` (main today). The PR is renumbered after M4 (0013/0014) and M2 (0013–0015) land, whichever merges first.
 14. **API and UI are unchanged** in this PR (a follow-up shows the fields).
