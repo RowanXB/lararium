@@ -15,7 +15,6 @@ from sqlalchemy import (
     literal,
     or_,
     select,
-    text,
     true,
     update,
 )
@@ -512,7 +511,8 @@ async def repoint_contra(
 ) -> bool:
     """Move the transaction's single posting on from_account_id to to_account_id, keeping
     its quantity, so the transaction still balances. Returns False when it has no posting
-    there; several there are ambiguous and refused."""
+    there (or a concurrent upsert replaced the postings meanwhile); several there are
+    ambiguous and refused."""
     if from_account_id == to_account_id:
         raise FinanceValidationError("a contra is re-pointed to a different account")
     session = ctx.session
@@ -526,22 +526,21 @@ async def repoint_contra(
             f"transaction {transaction_id} has {len(on_from)} postings on account"
             f" {from_account_id}; which one to re-point is ambiguous"
         )
-    await session.execute(
+    # Conditional on the posting still being there: a concurrent upsert that replaced the
+    # postings since they were read leaves nothing to update.
+    moved = await session.scalar(
         update(models.Posting)
-        .where(models.Posting.id == on_from[0].id)
+        .where(models.Posting.id == on_from[0].id, models.Posting.account_id == from_account_id)
         .values(account_id=to_account_id)
+        .returning(models.Posting.id)
     )
+    if moved is None:
+        return False
     _publish_update(ctx, before, await _load_transaction(session, transaction_id))
     return True
 
 
 _DERIVED_ORIGINS: tuple[TransactionOrigin, ...] = ("inference", "rule")
-
-_TRANSFER_LEG_OF = text(
-    "select id from finance.transfers where :transaction_id in"
-    " (out_transaction_id, in_transaction_id, placeholder_transaction_id,"
-    "  settlement_transaction_id)"
-)
 
 
 async def delete_derived_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
@@ -555,7 +554,17 @@ async def delete_derived_transaction(ctx: CommandContext, transaction_id: UUID) 
             f"only derived transactions can be deleted; {transaction_id} has origin"
             f" {record.origin!r}"
         )
-    transfer_id = await session.scalar(_TRANSFER_LEG_OF, {"transaction_id": transaction_id})
+    tr = models.Transfer
+    transfer_id = await session.scalar(
+        select(tr.id).where(
+            or_(
+                tr.out_transaction_id == transaction_id,
+                tr.in_transaction_id == transaction_id,
+                tr.placeholder_transaction_id == transaction_id,
+                tr.settlement_transaction_id == transaction_id,
+            )
+        )
+    )
     if transfer_id is not None:
         raise FinanceValidationError(
             f"transaction {transaction_id} is still part of transfer {transfer_id}"

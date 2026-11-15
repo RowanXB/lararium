@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import exc, text
 
 from lararium.core.connections import create_connection
+from lararium.modules.finance import ledger
 from lararium.modules.finance.errors import FinanceValidationError, TransactionNotFoundError
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.ledger import (
@@ -200,6 +201,51 @@ async def test_repoint_contra_moves_one_posting_and_keeps_balance(
     assert await _event_count(session, "finance.transaction.updated") == 1
     with pytest.raises(FinanceValidationError):
         await run(repoint_contra, posted.id, in_transit, in_transit)
+
+
+async def test_repoint_contra_after_postings_replaced_does_nothing(
+    session, run, make_account, gbp, monkeypatch
+) -> None:
+    a = await make_account(name="A", balance_mode="transactions")
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    posted = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=WHEN,
+            description="To savings",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-100")),
+                PostingInput(unassigned, gbp.id, Decimal("100")),
+            ],
+        ),
+    )
+    get_account = ledger.get_account
+
+    async def upsert_replaces_postings_meanwhile(*args, **kwargs):
+        # Between repoint_contra's read and its UPDATE, as a concurrent upsert would.
+        await session.execute(
+            text("delete from finance.postings where transaction_id = :t"), {"t": posted.id}
+        )
+        for position, (account, quantity) in enumerate(((a.id, -100), (unassigned, 100))):
+            await session.execute(
+                text(
+                    "insert into finance.postings"
+                    " (transaction_id, position, account_id, instrument_id, quantity)"
+                    " values (:t, :p, :a, :i, :q)"
+                ),
+                {"t": posted.id, "p": position, "a": account, "i": gbp.id, "q": quantity},
+            )
+        return await get_account(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "get_account", upsert_replaces_postings_meanwhile)
+    assert await run(repoint_contra, posted.id, unassigned, in_transit) is False
+    assert await _event_count(session, "finance.transaction.updated") == 0
+    on_in_transit = await session.scalar(
+        text("select count(*) from finance.postings where transaction_id = :t and account_id = :a"),
+        {"t": posted.id, "a": in_transit},
+    )
+    assert on_in_transit == 0
 
 
 async def test_repoint_contra_refuses_several_postings(session, run, make_account, gbp) -> None:

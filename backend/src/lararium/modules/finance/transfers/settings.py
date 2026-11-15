@@ -1,0 +1,58 @@
+from dataclasses import dataclass
+from datetime import timedelta
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from lararium.core.errors import SettingNotFoundError
+from lararium.core.settings_store import get_setting
+
+SETTING_KEY = "finance.transfers"
+
+
+@dataclass(frozen=True)
+class TransferSettings:
+    # The receiving record must occur from window_before before the sending one's time to
+    # window_after after it.
+    window_before: timedelta
+    window_after: timedelta
+    overdue: timedelta  # an awaiting transfer is overdue after this long
+
+
+DEFAULTS = TransferSettings(
+    window_before=timedelta(days=2), window_after=timedelta(days=7), overdue=timedelta(days=7)
+)
+
+_FIELDS = {
+    "window_before_days": "window_before",
+    "window_after_days": "window_after",
+    "overdue_days": "overdue",
+}
+
+
+async def load_transfer_settings(session: AsyncSession) -> TransferSettings:
+    """The defaults, overridden by whatever the setting `finance.transfers` gives:
+    `{"window_before_days", "window_after_days", "overdue_days"}`, each optional and a
+    positive whole number of days."""
+    try:
+        value = await get_setting(session, SETTING_KEY)
+    except SettingNotFoundError:
+        return DEFAULTS
+    if not isinstance(value, dict):
+        raise ValueError(f"{SETTING_KEY} must be an object, got {value!r}")
+    unknown = set(value) - set(_FIELDS)
+    if unknown:
+        raise ValueError(f"{SETTING_KEY} has unknown keys: {', '.join(sorted(unknown))}")
+    days = {
+        "window_before": DEFAULTS.window_before,
+        "window_after": DEFAULTS.window_after,
+        "overdue": DEFAULTS.overdue,
+    }
+    for key, field in _FIELDS.items():
+        if key not in value:
+            continue
+        given = value[key]
+        # bool is an int subclass; true is not a number of days.
+        if isinstance(given, bool) or not isinstance(given, int) or given <= 0:
+            raise ValueError(f"{SETTING_KEY}.{key} must be a positive integer, got {given!r}")
+        days[field] = timedelta(days=given)
+    return TransferSettings(**days)

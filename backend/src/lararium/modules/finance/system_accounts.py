@@ -2,9 +2,11 @@ from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.errors import SettingNotFoundError
+from lararium.core.models import Setting
 from lararium.core.settings_store import get_setting, set_setting
 from lararium.modules.finance.accounts import (
     AccountSubtype,
@@ -49,3 +51,19 @@ async def get_or_create_system_account(ctx: CommandContext, key: SystemAccountKe
     )
     await set_setting(ctx, setting_key, str(account.id))
     return account.id
+
+
+async def system_account_ids(session: AsyncSession) -> dict[SystemAccountKey, UUID]:
+    """The system accounts created so far, by key; reading needs no command."""
+    by_setting: dict[str, SystemAccountKey] = {
+        f"finance.system_account.{key}": key for key in _ACCOUNTS
+    }
+    rows = await session.execute(
+        select(Setting.key, Setting.value).where(Setting.key.in_(list(by_setting)))
+    )
+    found: dict[SystemAccountKey, UUID] = {}
+    for row in rows:
+        if not isinstance(row.value, str):
+            raise ValueError(f"{row.key} must be an account id string, got {row.value!r}")
+        found[by_setting[row.key]] = UUID(row.value)
+    return found
