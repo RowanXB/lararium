@@ -1458,16 +1458,9 @@
             "title": "External Id"
           },
           "fee": {
-            "anyOf": [
-              {
-                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fee"
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Fee",
+            "type": "string"
           },
           "id": {
             "format": "uuid",

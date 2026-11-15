@@ -23,7 +23,7 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { errorMessage } from "../lib/errors";
-import { formatMoney } from "../lib/format";
+import { formatMoney, isZeroDecimal } from "../lib/format";
 import { BATCH_STATUS_LABELS, countsSummary, isoCode, ROW_STATUS_LABELS } from "../lib/imports";
 import { cn } from "../lib/utils";
 
@@ -51,7 +51,8 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     .join(", ");
   const details: [string, string | null][] = [
     // Charged on top of the amount: the balance moves by amount minus fee (Decision 11).
-    ["Fee", row.fee === null ? null : money(row.fee, code)],
+    // A zero fee is no fee: every row has one, as the file states none (Decision 11).
+    ["Fee", isZeroDecimal(row.fee) ? null : money(row.fee, code)],
     ["Value date", row.value_date],
     ["Payee", row.payee],
     ["Memo", row.memo],

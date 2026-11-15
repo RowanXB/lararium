@@ -698,7 +698,7 @@ export type ImportRowOut = {
     /**
      * Fee
      */
-    fee: string | null;
+    fee: string;
     /**
      * Id
      */

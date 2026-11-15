@@ -69,7 +69,7 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     remittance_info: null,
     bank_type: null,
     quantity: "-3.50",
-    fee: null,
+    fee: "0",
     balance: null,
     instrument_id: GBP_ID,
     external_id: null,
@@ -261,6 +261,13 @@ it("labels the adjustment as a gap when the server says it follows earlier histo
 it("shows a row's fee in its details", async () => {
   show(batch({ rows: [row(0, { quantity: "-100.00", fee: "1.50" })] }));
   expect(await screen.findByText(/Fee: £1\.50/)).toBeInTheDocument();
+});
+
+it("leaves a zero fee out of a row's details", async () => {
+  // Second review: every row has a fee, 0 when the file states none.
+  show(batch({ rows: [row(0, { quantity: "-100.00", fee: "0.00", payee: "Example Shop" })] }));
+  expect(await screen.findByText(/Payee: Example Shop/)).toBeInTheDocument();
+  expect(screen.queryByText(/Fee:/)).not.toBeInTheDocument();
 });
 
 it("formats rows in hidden currencies too", async () => {

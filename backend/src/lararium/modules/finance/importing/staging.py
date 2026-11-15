@@ -80,7 +80,7 @@ class ImportRowRecord:
     occurred_at: datetime | None
     description: str
     quantity: Decimal | None
-    fee: Decimal | None
+    fee: Decimal  # NOT NULL: 0 when the file states none
     instrument_id: UUID | None
     balance: Decimal | None
     external_id: str | None

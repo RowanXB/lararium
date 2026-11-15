@@ -363,7 +363,7 @@ class ImportRowOut(_Out):
     purpose_code: str | None
     remittance_info: str | None
     quantity: DecimalStr | None
-    fee: DecimalStr | None
+    fee: DecimalStr  # 0 when the file states none
     instrument_id: UUID | None
     balance: DecimalStr | None
     external_id: str | None
