@@ -187,12 +187,14 @@ async def test_ensure_identifier_assigns_a_counterparty_row(session, run, make_a
     assert await identifier_account(session, identifier_id) == account.id
 
 
-async def test_ensure_identifier_leaves_a_dismissed_row(session, run, make_account) -> None:
+async def test_ensure_identifier_claims_a_dismissed_row(session, run, make_account) -> None:
+    # A connector's own account is a fact, so it outweighs a dismissal.
     account = await make_account(balance_mode="transactions")
     identifier_id = await run(get_or_create_identifier, "uk_bank_account", VALUE)
     await run(dismiss_identifier, identifier_id)
-    assert await run(ensure_identifier, account.id, "uk_bank_account", VALUE) is False
-    assert await identifier_account(session, identifier_id) is None
+    assert await run(ensure_identifier, account.id, "uk_bank_account", VALUE) is True
+    [row] = await list_identifiers(session)
+    assert (row.id, row.account_id, row.dismissed_at) == (identifier_id, account.id, None)
 
 
 async def test_ensure_identifier_refuses_snapshots_account(run, make_account) -> None:

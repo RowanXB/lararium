@@ -205,21 +205,22 @@ async def ensure_identifier(
     """Assign the identifier unless it is assigned already; True when it assigned.
 
     For a connector registering its own accounts on every sync. An identifier on another
-    account stays there, and a dismissed one stays dismissed: the owner's say wins.
+    account stays there (the owner's registration wins); a dismissed one is assigned, as a
+    connector's own account is a fact.
     """
     normalized = normalize_identifier(kind, value)
     await _require_can_carry_identifiers(ctx.session, account_id)
     identifier_id = await _get_or_create(ctx, kind, normalized)
-    record = await _get(ctx.session, identifier_id)
-    if record.account_id == account_id:
+    holder = await identifier_account(ctx.session, identifier_id)
+    if holder == account_id:
         return False
-    if record.account_id is not None or record.dismissed_at is not None:
+    if holder is not None:
         # The value is the owner's bank details, so it stays out of the log.
         logger.warning(
-            "identifier %s of account %s is %s; left as it is",
+            "identifier %s of account %s is on account %s; left there",
             identifier_id,
             account_id,
-            "dismissed" if record.account_id is None else f"on account {record.account_id}",
+            holder,
         )
         return False
     return await _assign(ctx, identifier_id, account_id)
