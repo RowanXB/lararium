@@ -8,7 +8,7 @@ from sqlalchemy import insert
 
 from lararium.core import models
 from lararium.core.connections import ConnectionRecord, create_connection
-from lararium.core.raw_records import list_raw_records
+from lararium.core.raw_records import list_connection_raw_records
 
 T0 = datetime(2026, 3, 1, 12, tzinfo=UTC)
 
@@ -39,7 +39,7 @@ async def _insert(
     )
 
 
-async def test_list_raw_records_of_a_connection_and_type_by_fetch_time(session, run) -> None:
+async def test_list_connection_raw_records_of_a_type_by_fetch_time(session, run) -> None:
     mine, other = await _create(run, "Test bank"), await _create(run, "Other bank")
     later = await _insert(session, mine.id, "page", [{"id": "tx_1"}], T0 + timedelta(hours=1))
     first = await _insert(session, mine.id, "page", [{"id": "tx_2"}], T0)
@@ -48,7 +48,7 @@ async def test_list_raw_records_of_a_connection_and_type_by_fetch_time(session, 
     await _insert(session, mine.id, "balance", {"balance": 1}, T0)
     await _insert(session, other.id, "page", [{"id": "tx_4"}], T0)
 
-    records = await list_raw_records(session, mine.id, "page")
+    records = await list_connection_raw_records(session, mine.id, "page")
 
     assert [r.id for r in records] == [first, same_time, later]
     assert (
@@ -58,4 +58,4 @@ async def test_list_raw_records_of_a_connection_and_type_by_fetch_time(session, 
         records[0].content,
         records[0].fetched_at,
     ) == (mine.id, "page", {"account_id": "acc_TEST1"}, [{"id": "tx_2"}], T0)
-    assert await list_raw_records(session, mine.id, "pots") == []
+    assert await list_connection_raw_records(session, mine.id, "pots") == []

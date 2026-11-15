@@ -42,7 +42,7 @@ from lararium.core.connections import get_connection, set_warnings, update_confi
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import PlaceDetails, get_or_create_organization, get_or_create_place
 from lararium.core.json_types import JSONValue
-from lararium.core.raw_records import get_raw_records, list_raw_records
+from lararium.core.raw_records import get_raw_records, list_connection_raw_records
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
@@ -601,7 +601,9 @@ class _Normalizer:
         transaction is not written.
         """
         latest: dict[str, tuple[tuple[datetime, datetime, UUID], dict[str, Any], str]] = {}
-        pages = await list_raw_records(self.session, self.connection_id, "transactions_page")
+        pages = await list_connection_raw_records(
+            self.session, self.connection_id, "transactions_page"
+        )
         for page in pages:
             monzo_account_id = str(page.request["account_id"])
             for tx in cast(list[dict[str, Any]], page.content):

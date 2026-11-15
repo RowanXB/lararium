@@ -107,7 +107,14 @@ def _record(row: Any) -> RawRecord:
     )
 
 
-async def list_raw_records(
+async def list_raw_records(session: AsyncSession, sync_id: UUID) -> list[RawRecord]:
+    """The records first stored by this sync, in the order they were stored."""
+    r = models.RawRecord
+    rows = await session.execute(select(*_columns()).where(r.sync_id == sync_id).order_by(r.id))
+    return [_record(row) for row in rows]
+
+
+async def list_connection_raw_records(
     session: AsyncSession, connection_id: UUID, record_type: str
 ) -> list[RawRecord]:
     """Every record of this type the connection stored, by when each was first fetched (a
