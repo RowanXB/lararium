@@ -246,6 +246,7 @@ class RecordColumns:
     instrument_id: SQLColumnExpression[UUID]
     quantity: SQLColumnExpression[Decimal]
     occurred_at: SQLColumnExpression[datetime]
+    booking_date: SQLColumnExpression[date]
     source_kind: SQLColumnExpression[str]
     source_ref: SQLColumnExpression[str]
 
@@ -258,6 +259,7 @@ def record_columns(e: FromClause) -> RecordColumns:
         instrument_id=e.c.instrument_id,
         quantity=e.c.quantity,
         occurred_at=e.c.occurred_at,
+        booking_date=e.c.booking_date,
         source_kind=e.c.source_kind,
         source_ref=e.c.source_ref,
     )
@@ -293,6 +295,7 @@ class OwnRecord:
             instrument_id=bound_id(self.instrument_id),
             quantity=literal(self.quantity, Numeric),
             occurred_at=literal(self.occurred_at, DateTime(timezone=True)),
+            booking_date=literal(self.booking_date, Date),
             source_kind=literal(self.source[0], String),
             source_ref=literal(self.source[1], String),
         )

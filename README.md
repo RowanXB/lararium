@@ -312,8 +312,9 @@ page shows what is waiting.
 With [Feishu notifications](#feishu-notifications) set up, the worker checks every 30 minutes
 and sends one message for each transfer that needs your review, or that has been in transit for
 more than 7 days; when more than 3 are due at once, it sends one message saying how many
-instead. Each transfer is reported once. The defaults (the receiving side may occur
-from 1 day before to 5 days after the sending side; overdue after 7 days) are in the
+instead. Each transfer is reported once. The defaults (the receiving side may be booked from 1
+calendar day before to 5 after the sending side, counted in booking dates, so a statement row
+dated Friday pairs with a Monzo payment any time on Wednesday; overdue after 7 days) are in the
 `finance.transfers` setting; no page changes them yet. Each is a whole number of days from 1 to
 3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
 with the next week's.

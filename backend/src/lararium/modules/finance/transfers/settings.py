@@ -12,16 +12,18 @@ SETTING_KEY = "finance.transfers"
 
 @dataclass(frozen=True)
 class TransferSettings:
-    # The receiving record must occur from window_before before the sending one's time to
-    # window_after after it. Together they are shorter than a week, so a weekly transfer's
-    # window never reaches the next occurrence.
+    # The receiving record must be booked from window_before calendar days before the
+    # sending one's booking date to window_after after it, both included (whole days:
+    # pairs.counterpart_bounds, queries.counterpart_window). Together they are shorter than
+    # a week, so a weekly transfer's window never reaches the next occurrence.
     window_before: timedelta
     window_after: timedelta
     overdue: timedelta  # an awaiting transfer is overdue after this long
 
 
 # A Faster Payment arrives the same day; BACS takes 3 working days, up to 5 calendar days
-# over a weekend.
+# over a weekend: counted in booking dates, so a statement row (a date, stored at 00:00)
+# reaches a Monzo record at any time on that 5th day.
 DEFAULTS = TransferSettings(
     window_before=timedelta(days=1), window_after=timedelta(days=5), overdue=timedelta(days=7)
 )

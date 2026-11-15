@@ -5,7 +5,7 @@ mirror."""
 import logging
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -41,6 +41,7 @@ from lararium.modules.finance.ledger import (
     delete_derived_transaction,
     post_transaction,
     repoint_contra,
+    resolve_booking_date,
 )
 from lararium.modules.finance.system_accounts import (
     SystemAccountKey,
@@ -715,6 +716,7 @@ async def preview_match(
     occurred_at: datetime,
     counterparty: CounterpartyFields,
     source: SourceRef | None = None,
+    booking_date: date | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -723,7 +725,9 @@ async def preview_match(
     transfer, or replacing whatever transfer the record is in.
 
     `source`: the reference the row will have once posted (a re-imported row keeps its
-    own), so the owner's decisions about it apply; None for a row with none yet."""
+    own), so the owner's decisions about it apply; None for a row with none yet.
+    `booking_date`: the one the row will be posted with, if given; else it gets the one
+    posting would give it (ledger.resolve_booking_date), which the window is counted in."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
     holder = (
@@ -738,6 +742,7 @@ async def preview_match(
         instrument_id=instrument_id,
         quantity=quantity,
         occurred_at=occurred_at,
+        booking_date=await resolve_booking_date(session, occurred_at, booking_date),
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
     )

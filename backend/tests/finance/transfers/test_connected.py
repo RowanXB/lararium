@@ -281,12 +281,40 @@ async def test_outside_window_not_linked(session, ids, a_and_c, connector_tx, he
     await history(connector_tx, c)
     await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
     assert await heal() == 1
-    late = await connector_tx(c, "100", external_id="in_1", occurred_at=WHEN + timedelta(days=8))
+    # The window is counted in booking dates: the first minute of the 6th calendar day
+    # after the send is outside it.
+    late = await connector_tx(
+        c, "100", external_id="in_1", occurred_at=WHEN.replace(hour=0) + timedelta(days=6)
+    )
     assert await heal() == 0
 
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.in_transaction_id) == ("awaiting", None)
     assert await contra_account(session, late.id, c.account.id) == ids.unassigned
+    await assert_consistent(session)
+
+
+async def test_last_minute_of_the_fifth_calendar_day_is_inside_the_window(
+    session, a_and_c, connector_tx, heal
+) -> None:
+    a, _, c, c_id = a_and_c
+    await history(connector_tx, c)
+    out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
+    # 5 days and 11h59m after the send: past 5 x 24 hours, but on its 5th calendar day.
+    in_record = await connector_tx(
+        c,
+        "100",
+        external_id="in_1",
+        occurred_at=WHEN.replace(hour=23, minute=59) + timedelta(days=5),
+    )
+    await heal()
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
     await assert_consistent(session)
 
 
@@ -458,9 +486,9 @@ async def test_opening_adjustment_does_not_start_the_history(
             ],
         ),
     )
-    # The counterpart could occur until 7 days after: 12 hours before WHEN, after the
-    # opening adjustment.
-    sent_at = WHEN - timedelta(days=7, hours=12)
+    # The counterpart could be booked until 5 calendar days after: the day of the opening
+    # adjustment, the day before C's first record.
+    sent_at = WHEN - timedelta(days=6)
     await connector_tx(a, "-100", external_id="out_1", occurred_at=sent_at, identifier_id=c_id)
     assert await heal() == 1
 
@@ -468,6 +496,48 @@ async def test_opening_adjustment_does_not_start_the_history(
     assert transfer.status == "before_history"
     assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
+    assert await heal() == 0
+
+
+@pytest.mark.parametrize(
+    ("sent_at", "status"),
+    [
+        # The window's last day is C's first day, where its counterpart could still be
+        # booked (and would pair): awaited.
+        (WHEN.replace(hour=0) - timedelta(days=5), "awaiting"),
+        # It ends the day before: inside C's opening balance.
+        (WHEN.replace(hour=23, minute=59) - timedelta(days=6), "before_history"),
+    ],
+)
+async def test_before_history_agrees_with_the_window_on_the_boundary_day(
+    session, ids, a_and_c, connector_tx, heal, sent_at, status
+) -> None:
+    a, a_id, c, c_id = a_and_c
+    await history(connector_tx, c, days_before=0)  # C's history starts on WHEN's date
+    out_record = await connector_tx(
+        a, "-100", external_id="out_1", occurred_at=sent_at, identifier_id=c_id
+    )
+    assert await heal() == 1
+    [transfer] = await list_transfers(session)
+    assert transfer.status == status
+    await assert_consistent(session)
+    if status == "awaiting":
+        # A counterpart in the last minute of that day pairs.
+        in_record = await connector_tx(
+            c,
+            "100",
+            external_id="in_1",
+            occurred_at=WHEN.replace(hour=23, minute=59),
+            identifier_id=a_id,
+        )
+        await heal()
+        [transfer] = await list_transfers(session)
+        assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+            "matched",
+            out_record.id,
+            in_record.id,
+        )
+        await assert_consistent(session)
     assert await heal() == 0
 
 

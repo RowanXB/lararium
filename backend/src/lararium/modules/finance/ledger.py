@@ -387,9 +387,18 @@ async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> 
         # copy_abs is exact; abs() would round the residual to the context's 28 digits.
         if residual.copy_abs() > tolerance(instruments[instrument_id].decimals):
             raise LedgerImbalanceError(residuals)
-    if tx.booking_date is not None:
-        return tx.booking_date
-    return local_date(tx.occurred_at, await get_timezone(session))
+    return await resolve_booking_date(session, tx.occurred_at, tx.booking_date)
+
+
+async def resolve_booking_date(
+    session: AsyncSession, occurred_at: datetime, booking_date: date | None = None
+) -> date:
+    """The booking date a transaction posted with these gets: the one given, else
+    occurred_at's date in the owner's time zone. Posting and transfers.preview_match both
+    read it, so a preview pairs a row exactly as posting it does."""
+    if booking_date is not None:
+        return booking_date
+    return local_date(occurred_at, await get_timezone(session))
 
 
 async def _insert_postings(

@@ -148,8 +148,9 @@ async def records_to_heal(
                 )
             )
             # (d) a lone record whose counterpart's account history now starts after the
-            # counterpart's latest time, or no longer does (older history was fetched).
-            predates = before_history(record_columns(own), history.c.starts_at, settings)
+            # counterpart's latest booking date, or no longer does (older history was
+            # fetched).
+            predates = before_history(record_columns(own), history.c.starts_on, settings)
             queries.append(
                 select(own.c.transaction_id.label("id"), own.c.occurred_at)
                 .select_from(tr)

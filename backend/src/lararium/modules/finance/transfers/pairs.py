@@ -11,7 +11,7 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -43,6 +43,7 @@ class Pairable:
     instrument_id: UUID
     quantity: Decimal  # signed: negative on the sending side
     occurred_at: datetime
+    booking_date: date  # the window is counted in these
     holder: UUID | None  # the account its counterparty bank account is registered to
     bank_transfer: bool
 
@@ -56,15 +57,17 @@ class Pairable:
         return self.holder is not None and self.holder != self.account_id
 
 
-def counterpart_bounds(record: Pairable, settings: TransferSettings) -> tuple[datetime, datetime]:
-    """When the record's counterpart may occur (Decision 4; queries.counterpart_window in
-    SQL): the receiving side from `before` before to `after` after the sending side."""
+def counterpart_bounds(record: Pairable, settings: TransferSettings) -> tuple[date, date]:
+    """The booking dates the record's counterpart may have (Decision 4;
+    queries.counterpart_window in SQL): the receiving side's from `before` calendar days
+    before to `after` after the sending side's, both included. Counted in booking dates,
+    not instants: a statement row carries only its date (00:00), so an instant window
+    would lose up to a day of it, in one direction only."""
+    before = timedelta(days=settings.window_before.days)
+    after = timedelta(days=settings.window_after.days)
     if record.sends:
-        return (
-            record.occurred_at - settings.window_before,
-            record.occurred_at + settings.window_after,
-        )
-    return record.occurred_at - settings.window_after, record.occurred_at + settings.window_before
+        return record.booking_date - before, record.booking_date + after
+    return record.booking_date - after, record.booking_date + before
 
 
 def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
@@ -144,6 +147,7 @@ async def _load_records(
         e.c.instrument_id,
         e.c.quantity,
         e.c.occurred_at,
+        e.c.booking_date,
         e.c.holder,
         e.c.bank_transfer,
     ).where(or_(*can_pair))
@@ -157,6 +161,7 @@ async def _load_records(
             instrument_id=row.instrument_id,
             quantity=row.quantity,
             occurred_at=row.occurred_at,
+            booking_date=row.booking_date,
             holder=row.holder,
             bank_transfer=row.bank_transfer,
         )
@@ -178,15 +183,15 @@ class _Edges:
 
 
 class _Timeline:
-    """Records sorted by when they occurred, to find those inside a window."""
+    """Records sorted by booking date, to find those inside a window."""
 
     def __init__(self, records: Iterable[Pairable]) -> None:
-        self._records = sorted(records, key=lambda x: (x.occurred_at, x.id))
-        self._times = [x.occurred_at for x in self._records]
+        self._records = sorted(records, key=lambda x: (x.booking_date, x.occurred_at, x.id))
+        self._dates = [x.booking_date for x in self._records]
 
-    def between(self, earliest: datetime, latest: datetime) -> list[Pairable]:
-        """Those occurring from earliest to latest, both included."""
-        return self._records[bisect_left(self._times, earliest) : bisect_right(self._times, latest)]
+    def between(self, earliest: date, latest: date) -> list[Pairable]:
+        """Those booked from earliest to latest, both included."""
+        return self._records[bisect_left(self._dates, earliest) : bisect_right(self._dates, latest)]
 
 
 def _registry_edges(
@@ -284,7 +289,7 @@ async def pair_relation(
     review all use.
 
     The registry pairs two records when they are on different accounts, in the same
-    instrument, of opposite sign; the receiving one occurs in the sending one's window; at
+    instrument, of opposite sign; the receiving one is booked in the sending one's window; at
     least one is identified through the registry; each identified one names the other's
     account; each other one is a bank transfer; and neither is rejected nor decided never
     to pair with the other. The owner pairs two records with a pair decision.

@@ -168,18 +168,16 @@ async def list_transfers(
 
 def counterpart_window(
     r: RecordColumns, settings: TransferSettings
-) -> tuple[SQLColumnExpression[datetime], SQLColumnExpression[datetime]]:
-    """When the record's counterpart may occur (Decision 4): the receiving side from
-    `before` before to `after` after the sending side."""
+) -> tuple[SQLColumnExpression[date], SQLColumnExpression[date]]:
+    """The booking dates the record's counterpart may have (Decision 4;
+    pairs.counterpart_bounds in Python): the receiving side's from `before` calendar days
+    before to `after` after the sending side's, both included."""
+    # date minus an integer is a date; minus an interval it would be a timestamp, compared
+    # at the session time zone's midnight.
+    before, after = settings.window_before.days, settings.window_after.days
     sends = r.quantity < 0
-    earliest = case(
-        (sends, r.occurred_at - settings.window_before),
-        else_=r.occurred_at - settings.window_after,
-    )
-    latest = case(
-        (sends, r.occurred_at + settings.window_after),
-        else_=r.occurred_at + settings.window_before,
-    )
+    earliest = case((sends, r.booking_date - before), else_=r.booking_date - after)
+    latest = case((sends, r.booking_date + after), else_=r.booking_date + before)
     return earliest, latest
 
 
@@ -207,12 +205,13 @@ def _in_ids(
 
 def history_start(
     account_id: SQLColumnExpression[UUID], opening_balances: UUID | None
-) -> ScalarSelect[datetime]:
-    """When the account's history from its connection starts: its earliest non-void record
-    from that connection, not counting one posted against Opening balances (the system
-    account `opening_balances`): a connector dates its opening balance adjustment before
-    the history it accounts for, which isn't history itself. NULL for a manual account or
-    one that has synced nothing else."""
+) -> ScalarSelect[date]:
+    """The booking date the account's history from its connection starts on: its earliest
+    non-void record's from that connection, not counting one posted against Opening
+    balances (the system account `opening_balances`): a connector dates its opening balance
+    adjustment before the history it accounts for, which isn't history itself. NULL for a
+    manual account or one that has synced nothing else. A date, as the window is
+    (counterpart_window)."""
     t = models.Transaction
     p = aliased(models.Posting, name="history_posting")
     a = aliased(models.Account, name="history_account")
@@ -223,7 +222,7 @@ def history_start(
         .scalar_subquery()
     )
     return (
-        select(func.min(t.occurred_at))
+        select(func.min(t.booking_date))
         .where(
             _in_ids(t.id, p, p.transaction_id, p.account_id == account_id),
             t.connection_id == connection,
@@ -254,10 +253,10 @@ def _not_opening(
 
 def history_starts(opening_balances: UUID | None) -> CTE:
     """Every connected account's history_start, computed once per statement: columns
-    account_id, starts_at."""
+    account_id, starts_on."""
     a = aliased(models.Account, name="connected")
     return (
-        select(a.id.label("account_id"), history_start(a.id, opening_balances).label("starts_at"))
+        select(a.id.label("account_id"), history_start(a.id, opening_balances).label("starts_on"))
         .where(a.source_connection_id.is_not(None))
         .cte("history_starts")
         .prefix_with("MATERIALIZED")
@@ -265,13 +264,14 @@ def history_starts(opening_balances: UUID | None) -> CTE:
 
 
 def before_history(
-    r: RecordColumns, starts_at: SQLColumnExpression[datetime], settings: TransferSettings
+    r: RecordColumns, starts_on: SQLColumnExpression[date], settings: TransferSettings
 ) -> ColumnElement[bool]:
-    """Whether the record's counterpart would have to occur before the counterpart
-    account's history starts (`starts_at`, its history_start), so that it is already inside
-    that account's opening balance."""
+    """Whether the record's counterpart would have to be booked before the day the
+    counterpart account's history starts on (`starts_on`, its history_start), so that it is
+    already inside that account's opening balance. Both are dates: a counterpart booked on
+    that day itself is still inside the window, and would pair."""
     _, latest = counterpart_window(r, settings)
-    return func.coalesce(latest < starts_at, False)
+    return func.coalesce(latest < starts_on, False)
 
 
 # Why a record could be the transfer's missing side: a candidate of the same amount, a
