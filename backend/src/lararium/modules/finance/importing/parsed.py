@@ -165,8 +165,16 @@ def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
         body = body[1:]
     if body.startswith(_CURRENCY_SYMBOLS):
         body = body[1:]
-    if fmt.thousands_separator:
-        body = body.replace(fmt.thousands_separator, "")
+    separator = fmt.thousands_separator
+    if separator and separator in body:
+        # Only real grouping: "12,50" with "," for thousands is an error, never 1250.
+        whole, _, fraction = body.partition(fmt.decimal_separator)
+        grouped = rf"[0-9]{{1,3}}(?:{re.escape(separator)}[0-9]{{3}})+"
+        if separator in fraction or not re.fullmatch(grouped, whole):
+            raise ValueError(
+                f"not an amount: {text!r} (thousands must be grouped in threes by {separator!r})"
+            )
+        body = body.replace(separator, "")
     if fmt.decimal_separator != ".":
         body = body.replace(fmt.decimal_separator, ".")
     if not _PLAIN_AMOUNT.fullmatch(body):

@@ -97,6 +97,23 @@ def test_header_names_need_no_header_row() -> None:
 def test_qif_and_pdf_configs() -> None:
     qif = PROFILE_CONFIG.validate_python({"format": "qif", "date_format": "%d/%m/%Y"})
     assert qif.encoding == "utf-8-sig"
+    assert qif.amount_format == AmountFormat(thousands_separator=",")
+    euro = PROFILE_CONFIG.validate_python(
+        {
+            "format": "qif",
+            "date_format": "%d.%m.%Y",
+            "amount_format": {"decimal_separator": ",", "thousands_separator": "."},
+        }
+    )
+    assert euro.amount_format == AmountFormat(decimal_separator=",", thousands_separator=".")
+    with pytest.raises(ValidationError):
+        PROFILE_CONFIG.validate_python(
+            {
+                "format": "qif",
+                "date_format": "%d/%m/%Y",
+                "amount_format": {"decimal_separator": ",", "thousands_separator": ","},
+            }
+        )
     pdf = PROFILE_CONFIG.validate_python({"format": "pdf", "layout": "lloyds_statement"})
     assert pdf.layout == "lloyds_statement"
     with pytest.raises(ValidationError):

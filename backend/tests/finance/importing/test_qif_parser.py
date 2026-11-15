@@ -187,3 +187,17 @@ def test_many_repeated_tags_are_linear() -> None:
     row = _rows(_parse(content))[0]
     assert time.perf_counter() - started < 2
     assert row.raw["A"] == "x" and row.raw["A#50000"] == "x"
+
+
+def test_decimal_comma_amount_is_row_error_by_default() -> None:
+    content = b"!Type:Bank\nD10/11/2026\nT-12,50\n^\nD10/11/2026\nT-1,234.56\n^\n"
+    error, row = _parse(content).rows
+    assert isinstance(error, RowError) and "12,50" in error.message
+    assert isinstance(row, ParsedRow) and row.quantity == Decimal("-1234.56")
+
+
+def test_amount_format_from_profile() -> None:
+    content = b"!Type:Bank\nD10.11.2026\nT-1.234,50\n^\nD10.11.2026\nT12,50\n^\n"
+    amount_format = {"decimal_separator": ",", "thousands_separator": "."}
+    rows = _rows(_parse(content, date_format="%d.%m.%Y", amount_format=amount_format))
+    assert [row.quantity for row in rows] == [Decimal("-1234.50"), Decimal("12.50")]

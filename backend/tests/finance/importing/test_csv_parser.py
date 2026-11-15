@@ -486,3 +486,43 @@ def test_parse_amount_rules() -> None:
 def test_clean_description() -> None:
     assert parsed.clean_description(["  A ", "", "b\t c  "]) == "A b c"
     assert len(parsed.clean_description(["x" * 1500])) == 1000
+
+
+@pytest.mark.parametrize(
+    ("text", "fmt", "expected"),
+    [
+        ("1,234.56", AmountFormat(thousands_separator=","), Decimal("1234.56")),
+        ("-1,234,567", AmountFormat(thousands_separator=","), Decimal("-1234567")),
+        ("£12.50", AmountFormat(thousands_separator=","), Decimal("12.50")),
+        ("999", AmountFormat(thousands_separator=","), Decimal("999")),
+        (
+            "1.234,50",
+            AmountFormat(decimal_separator=",", thousands_separator="."),
+            Decimal("1234.50"),
+        ),
+        (
+            "1 234,50",
+            AmountFormat(decimal_separator=",", thousands_separator=" "),
+            Decimal("1234.50"),
+        ),
+        ("12,50", AmountFormat(decimal_separator=","), Decimal("12.50")),
+    ],
+)
+def test_parse_amount_thousands_grouping(text: str, fmt: AmountFormat, expected: Decimal) -> None:
+    assert parsed.parse_amount(text, fmt) == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["12,50", "-1,5", "1,23", "1234,567", ",123", "1,234,5", "1,234.5,6", "1,,234"]
+)
+def test_parse_amount_rejects_misgrouped_thousands(text: str) -> None:
+    with pytest.raises(ValueError, match="not an amount"):
+        parsed.parse_amount(text, AmountFormat(thousands_separator=","))
+
+
+def test_misgrouped_amount_is_row_error_not_wrong_number() -> None:
+    content = b'Date,Description,Amount\n10/11/2026,Card,"12,50"\n11/11/2026,Rent,"1,234.56"\n'
+    statement = _parse(content, amount_format={"thousands_separator": ","})
+    error, row = statement.rows
+    assert isinstance(error, RowError) and "12,50" in error.message
+    assert isinstance(row, ParsedRow) and row.quantity == Decimal("1234.56")

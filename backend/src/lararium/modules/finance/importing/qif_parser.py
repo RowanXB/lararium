@@ -16,13 +16,11 @@ from lararium.modules.finance.importing.parsed import (
     keyed,
     parse_amount,
 )
-from lararium.modules.finance.importing.profiles import AmountFormat, QifProfileConfig
+from lararium.modules.finance.importing.profiles import QifProfileConfig
 
 PARSER_VERSION = "qif-1"
 
 _HEADER = re.compile(r"!type: ?(bank|ccard|cash)", re.IGNORECASE)
-# QIF writes amounts like "-1,234.56"; a "," is only ever a thousands separator.
-_AMOUNT_FORMAT = AmountFormat(thousands_separator=",")
 
 type _Record = list[tuple[str, str]]
 
@@ -83,7 +81,7 @@ def _row(
         raise ValueError("the record has no amount (T)")
     booking_date = _date(written_date, config, local_tz)
     try:
-        value = parse_amount(amount, _AMOUNT_FORMAT)
+        value = parse_amount(amount, config.amount_format)
     except ValueError as error:
         raise ValueError(f"{tag}: {error}") from None
     payee, memo = _optional(raw, "P"), _optional(raw, "M")

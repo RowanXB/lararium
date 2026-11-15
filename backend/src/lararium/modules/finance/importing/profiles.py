@@ -222,6 +222,8 @@ class QifProfileConfig(BaseModel):
     format: Literal["qif"]
     date_format: DateFormat
     encoding: Encoding = "utf-8-sig"
+    # QIF amounts are written in the bank's locale.
+    amount_format: AmountFormat = AmountFormat(thousands_separator=",")
     sign: Sign = "inflow_positive"
     timezone: TimezoneName | None = None
 
