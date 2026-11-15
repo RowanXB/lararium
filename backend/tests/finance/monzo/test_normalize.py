@@ -31,10 +31,12 @@ from lararium.modules.finance.ledger import (
     void_transaction,
 )
 from lararium.modules.finance.monzo.normalize import (
+    _ISO_TIME,  # pyright: ignore[reportPrivateUsage]
     NORMALIZER_VERSION,
     NORMALIZER_VERSION_KEY,
     FetchedRecord,
     NormalizeReport,
+    _readable_time,  # pyright: ignore[reportPrivateUsage]
     normalize,
     to_quantity,
 )
@@ -1500,10 +1502,70 @@ async def test_a_time_it_cannot_read_neither_fails_nor_wins(session, run, update
     await _normalize(session, connection, transactions=[newer, unreadable])
     assert (await _place_of_merchant(session)).mcc == "5499"
 
-    # The replay ranks its copies by the same rule, and fails on none of them.
+    # The replay ranks its copies by the same rule, and fails on none of them: a readable
+    # copy of the same transaction beats the unreadable one, whichever was fetched last.
     await run(_before_structured_fields, connection)
-    await _store_page(run, connection, [unreadable])
+    readable = _statement(1, 3, mcc="5411") | {"category": "transport"}
+    await _store_page(run, connection, [readable])
+    await _store_page(run, connection, [unreadable | {"category": "groceries"}])
     await _normalize(session, connection)
+    first = next(r for r in await _transactions(session) if r.external_id == "tx_TEST0001")
+    assert (await _details(session, first.id)).category == "transport"
+    assert (await _place_of_merchant(session)).mcc == "5499"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-01-10T12:00:00.123Z",
+        "2026-01-10T12:00:00+01:00",
+        "2026-01-10T12:00:00-0130",
+        "2026-01-10T12:00:00-15:59",
+        "2026-01-10T24:00:00Z",
+        "2026-01-10T23:59:60Z",
+        "2026-01-10T12:00:00+16:00",
+        "2026-01-10T12:00:00+15:60",
+        "2026-01-10T12:00:00.9999995Z",
+        "2026-02-30T12:00:00Z",
+        "1899-12-31T23:59:59Z",
+        "infinity",
+    ],
+)
+async def test_the_replay_and_the_fold_read_a_time_alike(session, value: str) -> None:
+    """One rule for a readable time: the replay's SQL and the fold's Python read the same
+    strings, as the same instants."""
+    readable = await session.scalar(
+        text("select :v ~ :pattern and pg_input_is_valid(:v, 'timestamptz')"),
+        {"v": value, "pattern": f"^{_ISO_TIME}$"},
+    )
+    in_sql = (
+        await session.scalar(text("select cast(:v as timestamptz)"), {"v": value})
+        if readable
+        else None
+    )
+    assert in_sql == _readable_time(value)
+
+
+async def test_a_newer_replayed_statement_beats_an_older_page(session, run) -> None:
+    connection = await _connection(run)
+    newer = make_transaction(
+        created="2026-03-05T12:00:00.000Z",
+        updated="2026-03-05T12:00:00.000Z",
+        merchant=make_merchant(),
+        metadata={"mcc": "5499"},
+    )
+    await _normalize(session, connection, transactions=[newer])
+    await run(_before_structured_fields, connection)
+    older = make_transaction(
+        id="tx_TEST0002",
+        created="2026-03-01T12:00:00.000Z",
+        updated="2026-03-01T12:00:00.000Z",
+        merchant=make_merchant(),
+        metadata={"mcc": "5411"},
+    )
+
+    await _normalize(session, connection, transactions=[older])
+
     assert (await _place_of_merchant(session)).mcc == "5499"
 
 
@@ -1586,6 +1648,31 @@ async def test_a_fee_longer_than_28_digits_still_balances(session, run) -> None:
     with localcontext(prec=MAX_PREC):
         assert sum(quantity for _, quantity, _ in postings) == 0
     assert await _warnings(session, connection) == []
+
+
+@pytest.mark.parametrize("fees", [None, {"card.fee": -100}], ids=["no-fee", "fee"])
+async def test_an_amount_longer_than_28_digits_posts_exactly(
+    session, run, fees: dict[str, int] | None
+) -> None:
+    connection = await _connection(run)
+    amount = -(10**30 + 7)
+    payment = make_transaction(amount=amount, fees=fees)
+
+    report = await _normalize(
+        session,
+        connection,
+        transactions=[payment],
+        balance=amount,
+        reconciled=[ACCOUNT_ID],
+        openings=[ACCOUNT_ID],
+    )
+
+    assert report.created == 1 and report.mismatches == []
+    (tx,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST0001"]
+    postings = await _postings(session, tx.id)
+    assert postings[1][1] == Decimal("10000000000000000000000000000.07")
+    with localcontext(prec=MAX_PREC):
+        assert sum(quantity for _, quantity, _ in postings) == 0
 
 
 async def test_a_pot_goal_it_cannot_store_keeps_the_stored_one(session, run) -> None:

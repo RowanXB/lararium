@@ -208,12 +208,15 @@ def _is_stated(value: object) -> bool:
     return value is not None and value != ""
 
 
-# A time as Monzo writes it (ISO 8601, with its offset, in a year it can mean). The one rule
-# for a readable time, in SQL (the replay's latest copy) and here: anything else, such as
-# PostgreSQL's "infinity", a date alone, or a time without an offset, is read as none.
+# A time as Monzo writes it: ISO 8601 with its offset, in a year it can mean. The one rule
+# for a readable time, in SQL (the replay's latest copy) and here alike: only the forms both
+# PostgreSQL and Python read, as the same instant (hours to 23, minutes and seconds to 59, at
+# most microseconds, offsets within 15:59), whose date exists. Anything else, such as
+# "infinity", a date alone, a time without an offset, 24:00 or a leap second, reads as none.
 _ISO_TIME = (
-    r"(19|2[0-9])[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
-    r"(Z|[+-][0-9]{2}:?[0-9]{2})"
+    r"(19|2[0-9])[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?"
+    r"(Z|[+-](0[0-9]|1[0-5]):?[0-5][0-9])"
 )
 
 
@@ -1171,7 +1174,22 @@ async def normalize(
     sync: those whose full backfill it completed, and those it saw first. `reconciled`: the
     accounts that already have one, which are checked against Monzo's balance (as are
     `openings`, after their adjustment).
+
+    Its arithmetic on amounts is exact, however many digits they have, as the ledger's
+    balance check is: the default context rounds to 28 digits, so a negation or a difference
+    could otherwise leave postings that don't balance, or an opening that is off.
     """
+    with localcontext(prec=MAX_PREC):
+        return await _normalize(ctx, fetched, reconciled=reconciled, openings=openings)
+
+
+async def _normalize(
+    ctx: SyncContext,
+    fetched: Sequence[FetchedRecord],
+    *,
+    reconciled: Collection[str],
+    openings: Collection[str],
+) -> NormalizeReport:
     session = ctx.command.session
     connection = await get_connection(session, ctx.connection.id)
     n = _Normalizer(ctx, await get_timezone(session), connection.config)
