@@ -76,6 +76,20 @@ class DuplicateProfileNameError(FinanceError):
     template = "another import profile is already named {}"
 
 
+class ImportNotAllowedError(FinanceError):
+    """The account can't take this import (closed, synced from a connection, valued by
+    snapshots, or a file for another bank account).
+
+    Raised with the whole message, which says why.
+    """
+
+
+class ImportBatchNotFoundError(FinanceError):
+    """No import batch has the given id."""
+
+    template = "no import batch has the id {}"
+
+
 class FileFormatError(FinanceError):
     """An imported file can't be read as a whole (wrong encoding, missing columns, no rows).
 
