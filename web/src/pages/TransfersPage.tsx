@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsFetching,
+  useIsMutating,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 import {
@@ -62,12 +68,26 @@ function needsAttention(transfer: TransferOut): boolean {
 }
 
 
+const TRANSFER_WRITE = ["transfer-write"];
+
 function useWrite<T>(write: (arg: T) => Promise<unknown>) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: TRANSFER_WRITE,
     mutationFn: write,
     onSettled: () => refreshAfterTransferWrite(queryClient),
   });
+}
+
+// A write rematches transfers, which can reopen any of them under a new id, so while any
+// write or the refetch after it is in flight, every action on the page waits: none acts
+// on an id that may be gone.
+function useBusy(): boolean {
+  const writing = useIsMutating({ mutationKey: TRANSFER_WRITE });
+  const fetching =
+    useIsFetching({ queryKey: ["transfers"] }) +
+    useIsFetching({ queryKey: ["transfer-suggestions"] });
+  return writing + fetching > 0;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -162,7 +182,7 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
     rejectTransfer({ path: { transfer_id: transfer.id }, throwOnError: true }),
   );
   const error = pair.error ?? reject.error ?? candidates.error;
-  const busy = pair.isPending || reject.isPending;
+  const busy = useBusy();
 
   return (
     <li className="space-y-2 py-4 first:pt-0 last:pb-0">
@@ -178,7 +198,15 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
               .join(" · ")}
           </p>
         </div>
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => reject.mutate()}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            pair.reset();
+            reject.mutate();
+          }}
+        >
           Reject
         </Button>
       </div>
@@ -187,7 +215,10 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
           transfer={transfer}
           candidates={candidates.data}
           busy={busy}
-          onPair={(transactionId) => pair.mutate(transactionId)}
+          onPair={(transactionId) => {
+            reject.reset();
+            pair.mutate(transactionId);
+          }}
         />
       )}
       {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
@@ -202,6 +233,7 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
   const candidates = useCandidates(transfer.id, open);
   const pair = usePair(transfer.id);
   const error = pair.error ?? candidates.error;
+  const busy = useBusy();
 
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -211,7 +243,7 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
           <CandidateList
             transfer={transfer}
             candidates={candidates.data}
-            busy={pair.isPending}
+            busy={busy}
             onPair={(transactionId) => pair.mutate(transactionId)}
           />
         )}
@@ -230,6 +262,7 @@ function RecentItem({ transfer }: { transfer: TransferOut }) {
   });
   const label =
     transfer.status === "matched" ? "Unpair" : transfer.status === "rejected" ? "Undo" : "Reject";
+  const busy = useBusy();
 
   return (
     <li className="space-y-1 py-3 first:pt-0 last:pb-0">
@@ -237,12 +270,7 @@ function RecentItem({ transfer }: { transfer: TransferOut }) {
         <p className="min-w-0 text-sm break-words">
           {`${describe(transfer)} · ${STATUS_LABELS[transfer.status]}`}
         </p>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={action.isPending}
-          onClick={() => action.mutate()}
-        >
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => action.mutate()}>
           {label}
         </Button>
       </div>
@@ -281,7 +309,7 @@ function SuggestionItem({
     }),
   );
   const error = register.error ?? dismiss.error;
-  const busy = register.isPending || dismiss.isPending;
+  const busy = useBusy();
 
   return (
     <li className="space-y-2 py-4 first:pt-0 last:pb-0">
@@ -309,11 +337,22 @@ function SuggestionItem({
         />
         <Button
           disabled={busy || !accountId}
-          onClick={() => accountId && register.mutate(accountId)}
+          onClick={() => {
+            if (!accountId) return;
+            dismiss.reset();
+            register.mutate(accountId);
+          }}
         >
           Register
         </Button>
-        <Button variant="outline" disabled={busy} onClick={() => dismiss.mutate()}>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => {
+            register.reset();
+            dismiss.mutate();
+          }}
+        >
           Dismiss
         </Button>
       </div>

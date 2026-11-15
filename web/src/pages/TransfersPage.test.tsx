@@ -238,7 +238,9 @@ it("pairs again a record the owner unpaired", async () => {
   const item = (await inTransit.findByText(/25.50 GBP · 3 days in transit/)).closest("li")!;
   await user.click(within(item).getByText("Candidates"));
   expect(await within(item).findByText("Unpaired")).toBeInTheDocument();
-  await user.click(within(item).getByRole("button", { name: "Pair" }));
+  const pairButton = within(item).getByRole("button", { name: "Pair" });
+  await vi.waitFor(() => expect(pairButton).toBeEnabled());
+  await user.click(pairButton);
 
   expect(pairTransfer).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -246,4 +248,43 @@ it("pairs again a record the owner unpaired", async () => {
       body: { transaction_id: CANDIDATE.transaction_id },
     }),
   );
+});
+
+it("disables every transfer action while a write is in flight", async () => {
+  let finish: (value: unknown) => void = () => {};
+  vi.mocked(pairTransfer).mockImplementationOnce(
+    () => new Promise((resolve) => (finish = resolve)) as never,
+  );
+  const user = userEvent.setup();
+  renderPage();
+  const attention = await section("Needs attention");
+  await user.click(await attention.findByRole("button", { name: "Pair" }));
+
+  // Another item's transfer id may be gone once the write rematches, so it waits too.
+  const recent = await section("Recent");
+  await user.click(recent.getByText("Recent (2)"));
+  const matched = recent.getByText("Monzo → Bank A · 40.00 GBP · matched").closest("li")!;
+  expect(within(matched).getByRole("button", { name: "Unpair" })).toBeDisabled();
+  expect(attention.getByRole("button", { name: "Reject" })).toBeDisabled();
+
+  finish({ data: {} });
+  await vi.waitFor(() =>
+    expect(within(matched).getByRole("button", { name: "Unpair" })).toBeEnabled(),
+  );
+});
+
+it("clears an item's error when another of its actions runs", async () => {
+  vi.mocked(rejectTransfer).mockRejectedValueOnce({
+    detail: { error: "query_timeout", message: "The ledger is busy; try again" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const attention = await section("Needs attention");
+  await user.click(await attention.findByRole("button", { name: "Reject" }));
+  expect(await attention.findByText("The ledger is busy; try again")).toBeInTheDocument();
+
+  await vi.waitFor(() => expect(attention.getByRole("button", { name: "Pair" })).toBeEnabled());
+  await user.click(attention.getByRole("button", { name: "Pair" }));
+
+  expect(attention.queryByText("The ledger is busy; try again")).toBeNull();
 });
