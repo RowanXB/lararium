@@ -86,7 +86,10 @@ _INTERNATIONAL = re.compile(
 _SORT_CODE_ACCOUNT = re.compile(
     r"(?P<name>.+?) (?P<sort_code>\d{6})(?: (?P<account>\d{8}))? (?P<rest>.+)"
 )
-_ACCOUNT = re.compile(r"(?P<name>.+?) (?P<account>\d+) (?P<rest>.+)")
+# Between the statement's own accounts: the name, a number whose meaning isn't printed (kept
+# in raw only), then the statement's own branch.
+_INTERNAL = re.compile(r"(?P<name>.+?) \d+ (?P<rest>.+)")
+_TRANSFERS = frozenset({"Transfer", "Inward Transfer", "Outward Transfer"})
 _LEGAL_SUFFIXES = frozenset({"PLC", "LIMITED", "LTD", "LTD."})
 
 # "Label/中文:value" fields: the whole line, or one value among several on a line.
@@ -234,11 +237,9 @@ def _tags(segment: str) -> tuple[str | None, str | None]:
     return tags.get("PURP") or None, tags.get("URI") or None
 
 
-def _bank_and_reference(rest: str, branch: str | None) -> tuple[str | None, str | None]:
-    """A bank name ends with its legal form ("… PLC", "… LIMITED"), or is the statement's own
-    branch; what follows is the payment's reference."""
-    if branch and rest.startswith(branch):
-        return branch, rest[len(branch) :].strip() or None
+def _bank_and_reference(rest: str) -> tuple[str | None, str | None]:
+    """A bank name ends with its legal form ("… PLC", "… LIMITED"); what follows is the
+    payment's reference."""
     words = rest.split()
     for n, word in enumerate(words):
         if word.upper() in _LEGAL_SUFFIXES:
@@ -286,31 +287,34 @@ def _payment(details: str, branch: str | None) -> _Payment:
     if tagged != -1:
         purpose, remittance = _tags(rest[tagged:])
         rest = rest[:tagged].strip()
+    # Only the shapes seen on the bank's statements are typed; any other text stays in the
+    # description and raw, so no free-text number becomes an account number.
     counterparty: Counterparty | None = None
-    if (international := _INTERNATIONAL.fullmatch(rest)) is not None:
-        counterparty = _counterparty(
-            name=international["name"] or None, reference=international["reference"] or None
-        )
-        remittance = remittance or international["rest"] or None
-    elif (local := _SORT_CODE_ACCOUNT.fullmatch(rest)) is not None:
-        bank, reference = _bank_and_reference(local["rest"], branch)
-        counterparty = _counterparty(
-            name=local["name"],
-            sort_code=local["sort_code"],
-            account_number=local["account"],
-            bank=bank,
-            reference=reference,
-        )
-    elif (internal := _ACCOUNT.fullmatch(rest)) is not None:
-        bank, reference = _bank_and_reference(internal["rest"], branch)
-        counterparty = _counterparty(
-            name=internal["name"],
-            account_number=internal["account"],
-            bank=bank,
-            reference=reference,
-        )
-    elif rest:
-        counterparty = _counterparty(name=rest)
+    if kind.startswith("International"):
+        if (international := _INTERNATIONAL.fullmatch(rest)) is not None:
+            counterparty = _counterparty(
+                name=international["name"] or None,
+                reference=international["reference"] or None,
+            )
+            remittance = remittance or international["rest"] or None
+    elif kind.startswith("Local Clearing"):
+        if (local := _SORT_CODE_ACCOUNT.fullmatch(rest)) is not None:
+            bank, reference = _bank_and_reference(local["rest"])
+            counterparty = _counterparty(
+                name=local["name"],
+                sort_code=local["sort_code"],
+                account_number=local["account"],
+                bank=bank,
+                reference=reference,
+            )
+    elif kind in _TRANSFERS and branch:
+        internal = _INTERNAL.fullmatch(rest)
+        if internal is not None and internal["rest"].startswith(branch):
+            counterparty = _counterparty(
+                name=internal["name"],
+                bank=branch,
+                reference=internal["rest"][len(branch) :].strip() or None,
+            )
     return _Payment(
         kind=printed_kind,
         bank_reference=head[2] or None,

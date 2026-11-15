@@ -413,11 +413,32 @@ def test_boc_payment_fields() -> None:
 
     assert transfer.payment_kind == "Inward Transfer"
     assert transfer.bank_reference is None
+    # The number between the name and the bank has no printed meaning: raw only.
     assert transfer.counterparty == Counterparty(
-        name="A EXAMPLE",
-        account_number="51234",
-        bank="Example Bank (UK) Limited, Example Branch",
+        name="A EXAMPLE", bank="Example Bank (UK) Limited, Example Branch"
     )
+    assert "51234" in transfer.raw["Details"]
+
+
+def test_boc_digits_outside_known_shapes_are_not_typed() -> None:
+    charge = BocRow("20/05/27", "20/05/27", ("///Charging Monthly fee 12 2027",), paid_out="5.00")
+    local = BocRow(
+        "21/05/27",
+        "21/05/27",
+        ("/PTG2I02600000002//Local", "Clearing And Outward", "Remittance A Example 2027 rent"),
+        paid_out="6.00",
+    )
+    transfer = BocRow(
+        "22/05/27", "22/05/27", ("///Transfer A EXAMPLE 51234", "Other Bank PLC"), paid_out="7.00"
+    )
+    rows = _rows(_boc(BocStatement(opening="200.00", pages=[[charge, local, transfer]])))
+
+    assert [row.counterparty for row in rows] == [None, None, None]
+    assert [row.payment_kind for row in rows] == [
+        "Charging",
+        "Local Clearing And Outward Remittance",
+        "Transfer",
+    ]
 
 
 def test_boc_terms_pages_ignored() -> None:
