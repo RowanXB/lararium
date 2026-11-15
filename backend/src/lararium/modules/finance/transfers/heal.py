@@ -1,109 +1,74 @@
 """Which records heal (engine.heal_transfers) has to match again: those whose ledger state
 disagrees with the rule."""
 
-from collections.abc import Mapping
-from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, case, exists, func, literal, null, or_, select, union
+from sqlalchemy import and_, exists, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
-from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import eligible_records, record_columns
+from lararium.modules.finance.transfers.pairs import PairRelation
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
+    ReviewReason,
     before_history,
-    pair_candidates,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings
 
 
-def _pair_states(
-    system: Mapping[SystemAccountKey, UUID], settings: TransferSettings
-) -> list[Select[*tuple[Any, ...]]]:
-    """Records whose transfer disagrees with pair_candidates, which matching decides by:
+async def _pair_states(session: AsyncSession, relation: PairRelation) -> set[UUID]:
+    """Records whose transfer disagrees with the pair relation, which matching decides by:
     a unique pair (each the other's only candidate) not yet matched; a matched pair that
     is no longer unique; and an open transfer whose review reason is not the one its own
     record's candidates give (several_candidates if it has any of the same amount, else
     amount_differs if it has any of another, else none)."""
-    tr, t = models.Transfer, models.Transaction
-    pairs = pair_candidates(system, settings, exact=True).cte("pairs")
-    differing = pair_candidates(system, settings, exact=False).cte("differing")
-    degree = (
-        select(pairs.c.record_id, func.count().label("n")).group_by(pairs.c.record_id).cte("degree")
-    )
-    of_record, of_candidate = degree.alias("of_record"), degree.alias("of_candidate")
-    unique = (
-        select(pairs.c.record_id, pairs.c.candidate_id)
-        .join(of_record, and_(of_record.c.record_id == pairs.c.record_id, of_record.c.n == 1))
-        .join(
-            of_candidate,
-            and_(of_candidate.c.record_id == pairs.c.candidate_id, of_candidate.c.n == 1),
+    tr = models.Transfer
+    due: set[UUID] = set()
+    matched: set[tuple[UUID, UUID]] = set()
+    rows = await session.execute(
+        select(tr.status, tr.out_transaction_id, tr.in_transaction_id, tr.review_reason).where(
+            tr.status.in_(("matched", *OPEN_STATUSES))
         )
-        .cte("unique_pairs")
     )
-    matched = tr.status == "matched"
-    present = func.coalesce(tr.out_transaction_id, tr.in_transaction_id)
-    expected = case(
-        (
-            select(pairs.c.record_id).where(pairs.c.record_id == present).exists(),
-            literal("several_candidates"),
-        ),
-        (
-            select(differing.c.record_id).where(differing.c.record_id == present).exists(),
-            literal("amount_differs"),
-        ),
-        else_=null(),
-    )
-    return [
-        # (c) a unique pair not yet a matched transfer.
-        select(t.id.label("id"), t.occurred_at)
-        .join(unique, unique.c.record_id == t.id)
-        .where(
-            ~exists().where(
-                matched,
-                or_(
-                    and_(
-                        tr.out_transaction_id == unique.c.record_id,
-                        tr.in_transaction_id == unique.c.candidate_id,
-                    ),
-                    and_(
-                        tr.out_transaction_id == unique.c.candidate_id,
-                        tr.in_transaction_id == unique.c.record_id,
-                    ),
-                ),
-            )
-        ),
-        # (e) a matched transfer whose two records are no longer a unique pair.
-        select(t.id.label("id"), t.occurred_at)
-        .select_from(tr)
-        .join(t, t.id == tr.out_transaction_id)
-        .where(
-            matched,
-            ~select(unique.c.record_id)
-            .where(
-                unique.c.record_id == tr.out_transaction_id,
-                unique.c.candidate_id == tr.in_transaction_id,
-            )
-            .exists(),
-        ),
+    for row in rows:
+        if row.status == "matched":
+            matched.add((row.out_transaction_id, row.in_transaction_id))
+            # (e) a matched transfer whose two records are no longer a unique pair.
+            if relation.partner(row.out_transaction_id) != row.in_transaction_id:
+                due.add(row.out_transaction_id)
+            continue
+        present = row.out_transaction_id or row.in_transaction_id
+        if present is None or (row.out_transaction_id and row.in_transaction_id):
+            continue
+        expected: ReviewReason | None = None
+        if relation.candidates(present):
+            expected = "several_candidates"
+        elif relation.candidates(present, exact=False):
+            expected = "amount_differs"
         # (e) an open transfer whose review reason disagrees with its record's candidates.
-        select(t.id.label("id"), t.occurred_at)
-        .select_from(tr)
-        .join(t, t.id == present)
-        .where(
-            tr.status.in_(OPEN_STATUSES),
-            or_(tr.out_transaction_id.is_(None), tr.in_transaction_id.is_(None)),
-            tr.review_reason.is_distinct_from(expected),
-        ),
-    ]
+        if row.review_reason != expected:
+            due.add(present)
+    # (c) a unique pair not yet a matched transfer.
+    for record_id in relation.exact:
+        partner = relation.partner(record_id)
+        if (
+            partner is not None
+            and (record_id, partner) not in matched
+            and (partner, record_id) not in matched
+        ):
+            due.add(record_id)
+    return due
 
 
-async def records_to_heal(session: AsyncSession, settings: TransferSettings) -> list[UUID]:
-    """Records whose ledger state disagrees with the rule (Decision 8), in occurrence order:
-    matching each of them (engine.match_transaction) brings it in line."""
+async def records_to_heal(
+    session: AsyncSession, settings: TransferSettings, relation: PairRelation
+) -> list[UUID]:
+    """Records whose ledger state disagrees with the rule (Decision 8) and `relation` (the
+    pair relation as the ledger stands), in occurrence order: matching each of them
+    (engine.match_transaction) brings it in line."""
     system = await system_account_ids(session)
     in_transit, unassigned = system.get("in_transit"), system.get("unassigned")
     if unassigned is None:
@@ -136,8 +101,6 @@ async def records_to_heal(session: AsyncSession, settings: TransferSettings) -> 
             e.c.contra_account_id == unassigned, identified, ~rejected
         )
     ]
-    # (c) and (e): pairs, and review reasons, that disagree with pair_candidates.
-    queries += _pair_states(system, settings)
     if in_transit is not None:
         # (a) in In transit without a transfer.
         queries.append(
@@ -219,5 +182,9 @@ async def records_to_heal(session: AsyncSession, settings: TransferSettings) -> 
                 ),
             )
         )
+    # (c) and (e): pairs, and review reasons, that disagree with the pair relation.
+    paired = await _pair_states(session, relation)
+    if paired:
+        queries.append(select(t.id.label("id"), t.occurred_at).where(t.id.in_(paired)))
     due = union(*queries).subquery()
     return list(await session.scalars(select(due.c.id).order_by(due.c.occurred_at, due.c.id)))

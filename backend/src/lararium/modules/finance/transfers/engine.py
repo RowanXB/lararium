@@ -10,17 +10,10 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
-    Boolean,
-    DateTime,
-    Numeric,
-    String,
-    Uuid,
     and_,
     delete,
-    exists,
     func,
     insert,
-    literal,
     or_,
     select,
     update,
@@ -53,13 +46,20 @@ from lararium.modules.finance.system_accounts import (
 )
 from lararium.modules.finance.transfers.contra import (
     OwnRecord,
-    RecordColumns,
     bound_id,
     is_active_leg,
     is_rejected,
     load_own_record,
 )
 from lararium.modules.finance.transfers.heal import records_to_heal
+from lararium.modules.finance.transfers.pairs import (
+    Pairable,
+    PairRelation,
+    Tier,
+    counterpart_bounds,
+    pair_relation,
+    registry_tier,
+)
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
@@ -67,10 +67,7 @@ from lararium.modules.finance.transfers.queries import (
     TransferStatus,
     before_history,
     load_transfers,
-    pair_candidates,
-    tiered_pairs,
     transfer_change_data,
-    unposted_pairs,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -81,6 +78,8 @@ _LOCK_KEY = "finance.transfers"
 _MAX_HEAL_PASSES = 5
 
 type _SystemIds = Mapping[SystemAccountKey, UUID]
+# The id preview_match gives a row not yet posted, which no record has.
+_UNPOSTED = UUID(int=0)
 # The transfers a matching run dissolved, by each of their own records: one reopened for the
 # same record carries its notified_at over, so the owner isn't told twice (Decision 9).
 type _Dissolved = dict[UUID, TransferRecord]
@@ -359,26 +358,6 @@ async def _open(
     )
 
 
-async def _pair_candidates(
-    session: AsyncSession,
-    ids: _SystemIds,
-    settings: TransferSettings,
-    transaction_id: UUID,
-    *,
-    exact: bool,
-    excluding: Collection[UUID] = (),
-) -> list[UUID]:
-    """The own records the record could pair with (queries.pair_candidates)."""
-    pairs = pair_candidates(ids, settings, exact=exact, excluding=excluding).subquery()
-    return list(
-        await session.scalars(
-            select(pairs.c.candidate_id)
-            .where(pairs.c.record_id == transaction_id)
-            .order_by(pairs.c.candidate_id)
-        )
-    )
-
-
 async def _waiting_transfer(session: AsyncSession, record_id: UUID) -> TransferRecord | None:
     """The open transfer the record is the only own record of, if any."""
     tr = models.Transfer
@@ -431,14 +410,14 @@ async def _match_one(
     transaction_id: UUID,
     settings: TransferSettings,
     system: _System,
-    excluding: Collection[UUID],
+    relation: PairRelation,
     dissolved: _Dissolved,
 ) -> tuple[list[UUID], set[UUID]]:
     """Match one record from scratch; returns other records left without their transfer,
     and the own record it was linked with, if any.
 
     Order independence: a record is linked only with a partner it pairs with uniquely, and
-    which pairs uniquely with it (queries.pair_candidates both ways). That outcome, and the
+    which pairs uniquely with it (the pair relation both ways). That outcome, and the
     review reason, depend on the records alone, never on which arrived first."""
     session = ctx.session
     others = await _dissolve(ctx, transaction_id, dissolved)
@@ -452,13 +431,9 @@ async def _match_one(
         return others, set()
     # 2, 3 and 4. Paired by the owner, by the registry, or by amount and date: link a
     # unique pair.
-    found = await _pair_candidates(
-        session, ids, settings, record.id, exact=True, excluding=excluding
-    )
-    if len(found) == 1 and await _pair_candidates(
-        session, ids, settings, found[0], exact=True, excluding=excluding
-    ) == [record.id]:
-        more, linked = await _link_pair(ctx, ids, record, found[0], system, dissolved)
+    partner = relation.partner(record.id)
+    if partner is not None:
+        more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved)
         return others + more, linked
     counterpart_id = await _registry_counterpart(session, record)
     if counterpart_id is None:
@@ -469,11 +444,9 @@ async def _match_one(
     if not await _set_contra(ctx, record, system.in_transit):
         return others, set()
     review_reason: ReviewReason | None = None
-    if found:
+    if relation.candidates(record.id):
         review_reason = "several_candidates"
-    elif await _pair_candidates(
-        session, ids, settings, record.id, exact=False, excluding=excluding
-    ):
+    elif relation.candidates(record.id, exact=False):
         review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
     await _open(ctx, record, counterpart, system, settings, review_reason, dissolved.get(record.id))
@@ -485,12 +458,15 @@ async def _match(
     transaction_id: UUID,
     settings: TransferSettings,
     system: _System,
+    relation: PairRelation,
     dissolved: _Dissolved,
     excluding: Collection[UUID] = (),
 ) -> set[UUID]:
-    """match_transaction under the lock; returns every record this matched afresh or
-    linked, all of which then agree with the rule. Records in `excluding` are treated as
-    gone: never matched, and never anyone's candidate."""
+    """match_transaction under the lock, reading `relation` (the pair relation as the
+    ledger stands, which matching doesn't change); returns every record this matched afresh
+    or linked, all of which then agree with the rule. Records in `excluding` are treated as
+    gone: never matched, and never anyone's candidate (the relation must leave them out
+    too)."""
     session = ctx.session
     seen: set[UUID] = set()
     linked: set[UUID] = set()
@@ -502,7 +478,7 @@ async def _match(
         seen.add(current)
         if current != transaction_id and await is_active_leg(session, current):
             continue
-        others, partners = await _match_one(ctx, current, settings, system, excluding, dissolved)
+        others, partners = await _match_one(ctx, current, settings, system, relation, dissolved)
         queue += others
         linked |= partners
     return seen | linked
@@ -517,8 +493,17 @@ async def match_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
     if await ctx.session.scalar(select(t.id).where(t.id == transaction_id)) is None:
         raise TransactionNotFoundError(str(transaction_id))
     await lock_transfers(ctx)
+    await _match_all(ctx, [transaction_id])
+
+
+async def _match_all(ctx: CommandContext, transaction_ids: list[UUID]) -> None:
+    """_match each record in turn, under the lock, all reading one pair relation."""
     settings = await load_transfer_settings(ctx.session)
-    await _match(ctx, transaction_id, settings, await _system(ctx), {})
+    system = await _system(ctx)
+    relation = await pair_relation(ctx.session, await system_account_ids(ctx.session), settings)
+    dissolved: _Dissolved = {}
+    for transaction_id in transaction_ids:
+        await _match(ctx, transaction_id, settings, system, relation, dissolved)
 
 
 async def heal_transfers(ctx: CommandContext) -> int:
@@ -529,7 +514,9 @@ async def heal_transfers(ctx: CommandContext) -> int:
     matched = 0
     dissolved: _Dissolved = {}
     for _ in range(_MAX_HEAL_PASSES):
-        due = await records_to_heal(ctx.session, settings)
+        # Matching doesn't change the pair relation, so one serves the whole pass.
+        relation = await pair_relation(ctx.session, await system_account_ids(ctx.session), settings)
+        due = await records_to_heal(ctx.session, settings, relation)
         if not due:
             return matched
         system = await _system(ctx)
@@ -538,7 +525,7 @@ async def heal_transfers(ctx: CommandContext) -> int:
         for transaction_id in due:
             if transaction_id in done:
                 continue
-            done |= await _match(ctx, transaction_id, settings, system, dissolved)
+            done |= await _match(ctx, transaction_id, settings, system, relation, dissolved)
             matched += 1
     logger.error("transfers still disagree with the rule after %d heal passes", _MAX_HEAL_PASSES)
     return matched
@@ -591,8 +578,12 @@ async def unlink_transaction(ctx: CommandContext, transaction_id: UUID) -> None:
     if record is not None:
         await _set_contra(ctx, record, system.unassigned)
     settings = await load_transfer_settings(session)
+    gone = {transaction_id}
+    relation = await pair_relation(
+        session, await system_account_ids(session), settings, excluding=gone
+    )
     for other in others:
-        await _match(ctx, other, settings, system, dissolved, excluding={transaction_id})
+        await _match(ctx, other, settings, system, relation, dissolved, excluding=gone)
 
 
 async def preview_match(
@@ -608,31 +599,36 @@ async def preview_match(
     (Decision 6 steps 3 and 4, without writing): None when it would complete none, or
     could complete more than one. It reads the same pair relation matching does, with the
     row added: its one candidate in its strongest tier, which has no other candidate as
-    strong."""
+    strong. Such a row has no decisions, so none apply to it."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
+    relation = await pair_relation(session, system, settings)
     holder = (
         None
         if counterparty.identifier_id is None
         else await identifier_account(session, counterparty.identifier_id)
     )
-    row = RecordColumns(
-        transaction_id=literal(None, Uuid()),  # not posted yet
-        account_id=bound_id(account_id),
-        instrument_id=bound_id(instrument_id),
-        quantity=literal(quantity, Numeric),
-        occurred_at=literal(occurred_at, DateTime(timezone=True)),
-        source_kind=literal(None, String),
-        source_ref=literal(None, String),
+    row = Pairable(
+        id=_UNPOSTED,
+        source=("unposted", ""),
+        account_id=account_id,
+        instrument_id=instrument_id,
+        quantity=quantity,
+        occurred_at=occurred_at,
+        holder=holder,
+        bank_transfer=counterparty.bank_transfer,
     )
-    found = unposted_pairs(
-        system,
-        settings,
-        row,
-        holder=literal(holder, Uuid()),
-        bank_transfer=literal(counterparty.bank_transfer, Boolean),
-    ).subquery()
-    tiers = {r.candidate_id: r.tier for r in await session.execute(select(found))}
+    earliest, latest = counterpart_bounds(row, settings)
+    tiers: dict[UUID, Tier] = {}
+    for c in relation.records.values():
+        if (
+            c.id not in relation.rejected
+            and c.instrument_id == instrument_id
+            and c.quantity == -quantity
+            and earliest <= c.occurred_at <= latest
+            and (tier := registry_tier(row, c)) is not None
+        ):
+            tiers[c.id] = tier
     if not tiers:
         return None
     best = min(tiers.values())
@@ -640,10 +636,7 @@ async def preview_match(
     if len(partners) != 1:
         return None
     [partner] = partners
-    pairs = tiered_pairs(system, settings).subquery()
-    if await session.scalar(
-        select(exists().where(pairs.c.record_id == partner, pairs.c.tier <= best))
-    ):
+    if any(tier <= best for tier in relation.tiers.get(partner, {}).values()):
         return None  # the row would make the partner's pair ambiguous, or lose to another
     return await _waiting_transfer(session, partner)
 
@@ -661,7 +654,6 @@ async def unassign_identifier_and_rematch(
         .where(t.counterparty_identifier_id == identifier_id)
         .order_by(t.occurred_at, t.id)
     )
-    for transaction_id in list(naming):
-        await match_transaction(ctx, transaction_id)
+    await _match_all(ctx, list(naming))
     await heal_transfers(ctx)
     return record

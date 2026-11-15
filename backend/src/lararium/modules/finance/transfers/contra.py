@@ -1,7 +1,7 @@
 """Which transactions can be a transfer's leg, their stable reference, and which system
 account their contra belongs on."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -20,9 +20,11 @@ from sqlalchemy import (
     case,
     cast,
     exists,
+    false,
     func,
     literal,
     select,
+    true,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -44,17 +46,60 @@ class OwnLeg:
     contra_account_id: UUID  # Unassigned or In transit
 
 
+# A transaction's stable reference, which the owner's decisions are keyed by (design §5.9):
+# (kind, ref). Every kind is defined here once: when it applies to a transaction, its ref,
+# and which transaction a ref names. The last kind applies to every transaction the others
+# don't. An import source (M2) adds a kind before it.
+type SourceRef = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class _SourceKind:
+    name: str
+    applies: Callable[[type[models.Transaction]], ColumnElement[bool]]
+    ref: Callable[[type[models.Transaction]], ColumnElement[str]]
+    names: Callable[[type[models.Transaction], str], ColumnElement[bool]]
+
+
+def _connection_names(t: type[models.Transaction], ref: str) -> ColumnElement[bool]:
+    connection_id, external_id = ref.split(":", 1)
+    return and_(t.connection_id == UUID(connection_id), t.external_id == external_id)
+
+
+_SOURCE_KINDS = (
+    _SourceKind(
+        name="connection",
+        applies=lambda t: and_(t.connection_id.is_not(None), t.external_id.is_not(None)),
+        ref=lambda t: func.concat(cast(t.connection_id, String), ":", t.external_id),
+        names=_connection_names,
+    ),
+    _SourceKind(
+        name="transaction",
+        applies=lambda t: true(),
+        ref=lambda t: cast(t.id, String),
+        names=lambda t, ref: t.id == UUID(ref),
+    ),
+)
+
+
 def source_columns(
     t: type[models.Transaction],
 ) -> tuple[ColumnElement[str], ColumnElement[str]]:
-    """source_ref as SQL expressions (kind, ref) over a transactions table or alias."""
-    connector = and_(t.connection_id.is_not(None), t.external_id.is_not(None))
-    kind = case((connector, literal("connection")), else_=literal("transaction"))
-    ref = case(
-        (connector, func.concat(cast(t.connection_id, String), ":", t.external_id)),
-        else_=cast(t.id, String),
-    )
+    """The transaction's source reference as SQL expressions (kind, ref), over a
+    transactions table or alias."""
+    *specific, otherwise = _SOURCE_KINDS
+    kind = case(*((k.applies(t), literal(k.name)) for k in specific), else_=literal(otherwise.name))
+    ref = case(*((k.applies(t), k.ref(t)) for k in specific), else_=otherwise.ref(t))
     return kind, ref
+
+
+def names_source(t: type[models.Transaction], source: SourceRef) -> ColumnElement[bool]:
+    """Whether the transaction is the one the reference names (looked up by index), false
+    for a kind no transaction has."""
+    for k in _SOURCE_KINDS:
+        if k.name == source[0]:
+            return and_(k.names(t, source[1]), source_columns(t)[0] == k.name)
+    return false()
 
 
 def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
@@ -67,9 +112,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     """
     t = models.Transaction
     own, contra = aliased(models.Posting, name="own"), aliased(models.Posting, name="contra")
+    third = aliased(models.Posting, name="third")
     contras = [system[key] for key in ("unassigned", "in_transit") if key in system]
-    p = models.Posting
-    posting_count = select(func.count()).where(p.transaction_id == t.id).scalar_subquery()
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
@@ -92,7 +136,11 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             t.origin.not_in(DERIVED_ORIGINS),
             contra.account_id.in_(contras),
             own.account_id.not_in(list(system.values())),
-            posting_count == 2,
+            # Exactly two postings: no third besides these. An anti-join, not a count per
+            # row, so the planner sees how many rows qualify.
+            ~exists().where(
+                third.transaction_id == t.id, third.id != own.id, third.id != contra.id
+            ),
         )
         .subquery(name)
     )
@@ -204,19 +252,15 @@ async def own_leg(session: AsyncSession, transaction_id: UUID) -> OwnLeg | None:
     return OwnLeg(row.account_id, row.instrument_id, row.quantity, row.contra_account_id)
 
 
-async def source_ref(session: AsyncSession, transaction_id: UUID) -> tuple[str, str]:
-    """The transaction's stable reference, which the owner's decisions are keyed by:
-    ("connection", "<connection_id>:<external_id>") for a connector's row, else
-    ("transaction", "<id>")."""
+async def source_ref(session: AsyncSession, transaction_id: UUID) -> SourceRef:
+    """The transaction's stable reference (source_columns): ("connection",
+    "<connection_id>:<external_id>") for a connector's row, else ("transaction", "<id>")."""
     t = models.Transaction
-    row = (
-        await session.execute(select(t.connection_id, t.external_id).where(t.id == transaction_id))
-    ).one_or_none()
+    kind, ref = source_columns(t)
+    row = (await session.execute(select(kind, ref).where(t.id == transaction_id))).one_or_none()
     if row is None:
         raise TransactionNotFoundError(str(transaction_id))
-    if row.connection_id is not None and row.external_id is not None:
-        return "connection", f"{row.connection_id}:{row.external_id}"
-    return "transaction", str(transaction_id)
+    return row[0], row[1]
 
 
 async def is_rejected(session: AsyncSession, source: tuple[str, str]) -> bool:
@@ -233,17 +277,9 @@ async def is_rejected(session: AsyncSession, source: tuple[str, str]) -> bool:
     )
 
 
-async def _transaction_of(session: AsyncSession, source: tuple[str, str]) -> UUID | None:
-    kind, ref = source
+async def _transaction_of(session: AsyncSession, source: SourceRef) -> UUID | None:
     t = models.Transaction
-    if kind == "connection":
-        connection_id, external_id = ref.split(":", 1)
-        return await session.scalar(
-            select(t.id).where(t.connection_id == UUID(connection_id), t.external_id == external_id)
-        )
-    if kind == "transaction":
-        return UUID(ref)
-    return None
+    return await session.scalar(select(t.id).where(names_source(t, source)))
 
 
 async def is_active_leg(session: AsyncSession, transaction_id: UUID) -> bool:
