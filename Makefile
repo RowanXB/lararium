@@ -2,7 +2,8 @@
 
 # How the stack is reached (LARARIUM_INGRESS in infra/.env): `host` (the default), through the
 # host's `tailscale serve`, or `tailscale`, through a sidecar. Each adds its own override file.
-INGRESS := $(or $(shell sed -n 's/^LARARIUM_INGRESS=//p' infra/.env 2>/dev/null),host)
+# Read as compose reads it: an inline comment, quotes and surrounding spaces are not the value.
+INGRESS := $(or $(shell sed -n 's/^LARARIUM_INGRESS=//p' infra/.env 2>/dev/null | tail -n 1 | sed 's/[[:space:]]\#.*//' | tr -d "\"' \t"),host)
 ifeq ($(filter $(INGRESS),host tailscale),)
 $(error LARARIUM_INGRESS must be host or tailscale, not "$(INGRESS)")
 endif
