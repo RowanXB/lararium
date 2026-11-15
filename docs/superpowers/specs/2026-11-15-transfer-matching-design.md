@@ -103,19 +103,25 @@ The same holds for the sender side: if B's record is seen first and A's side is 
 
 ### 5.3 The registry (`finance.account_identifiers`)
 
-- One row: `account_id`, `kind`, normalised `value`, `created_at`.
-- M4 has one kind, `uk_bank_account`: value `"<6-digit sort code>:<8-digit account number>"`, digits only. Input with dashes and spaces is normalised; anything else is a 422.
-- Unique on `(kind, value)`: one identifier points to one account.
-- An identifier that resolves to the transaction's own account (the account's own sort code, registered for imports) is not a transfer.
-- Further kinds (IBAN, wallet address, xpub, Monzo account id) are added by the milestones that need them; the table and lookup take a kind, so they need no change.
-- **Connectors register their own accounts.** Monzo's `/accounts` response carries each account's sort code and account number, so the Monzo normalizer registers them for its accounts (actor `connector`, audited) on every sync, adding missing ones and never deleting one the owner added. A connected account is then identified on the other side's records without the owner typing anything. (Builder-check call.)
+- One row per bank account any source has named: `kind`, normalised `value`, `account_id` (nullable), `dismissed_at` (nullable), `created_by`, `created_at`. Unique on `(kind, value)`.
+  - With `account_id`: one of the owner's accounts.
+  - Without: a counterparty account not (yet) known to be the owner's. These are the suggestions (§5.10).
+  - `dismissed_at`: the owner said it is not theirs.
+- M4 has one kind, `uk_bank_account`: value `"<6-digit sort code>:<8-digit account number>"`, digits only. Input with dashes and spaces is normalised; anything else is a 422. Further kinds (IBAN, wallet address, xpub) are added by the milestones that need them.
+- Registering an identifier assigns the row to an account (creating it if no source has named it yet); removing one unassigns it (the row stays, as transactions reference it).
+- A row that resolves to the transaction's own account is not a transfer.
+- **Connectors register their own accounts.** Monzo's `/accounts` response carries each account's sort code and account number, so the Monzo normalizer assigns them to its accounts (actor `connector`, audited) on every sync, never taking a row the owner assigned elsewhere. (Builder-check call.)
 
-### 5.4 Counterparty details on transactions
+### 5.4 Counterparty fields on transactions
 
-- `finance.transactions` gains `counterparty_details jsonb` (nullable): `{"name", "sort_code", "account_number", "reference", "transfer_like"}`, each optional, normalised by the source. `transfer_like` is true when the source itself marks the record as a payment between bank accounts (a bank's transfer type code in an import, a broker's deposit or withdrawal record); it gates the amount-and-date fallback in §5.7. It is part of the transaction, so `upsert_connector_transaction` compares it like the other fields.
-- The Monzo normalizer fills it from `counterparty.name`, `counterparty.sort_code`, `counterparty.account_number` and the transaction's `notes` (the payment reference) for every non-pot transaction that has them.
-- M2 fills whatever its formats give (often only a name or a reference in the description; often nothing).
-- **Existing history must get its details too.** The Monzo transactions already in the ledger were fetched once and are past the incremental overlap, so a re-sync would not fill them. The plan fills them from the stored raw records (they are immutable and kept for this), so registering an identifier re-evaluates the whole history.
+The owner's data-model rule (2026-11-15): every field a source provides is stored as a typed field, unless it can be computed from other data or has a better structured home. The counterparty's bank account has one: the registry. So `finance.transactions` gains, with no JSON:
+
+- `counterparty_identifier_id` → the registry row of the counterparty's bank account;
+- `counterparty_name` (as the source gave it);
+- `payment_reference`;
+- `bank_transfer` (boolean): the source itself marks the record as a payment between bank accounts (a Faster Payment or BACS for Monzo; a bank's transfer type code in an import; a broker's deposit or withdrawal record). It gates the amount-and-date fallback in §5.7.
+
+They are part of the transaction, so `upsert_connector_transaction` compares them like the other fields. Monzo fills them from `counterparty` and `notes` (the payment reference); M2 fills what its formats give, through the same registry function. **Existing history** gets them too: the Monzo transactions already in the ledger are past the incremental overlap, so the plan fills them once from the stored raw records, and registering an identifier re-evaluates the whole history.
 
 ### 5.5 Transfers (`finance.transfers`)
 
@@ -130,11 +136,11 @@ One row per transfer between two own accounts:
 
 ### 5.6 Deciding a transaction's contra
 
-One function, `transfer_contra(session, source, details)`, used by every caller:
+One function, `transfer_contra(session, source, own account, counterparty registry row)`, used by every caller:
 
 1. a stored owner decision for this transaction's stable reference (§5.9) wins: rejected → Unassigned;
 2. otherwise, if the transaction is already a leg of an active transfer → In transit;
-3. otherwise, if `details` resolve through the registry to an own account other than the transaction's own account → In transit;
+3. otherwise, if the transaction's counterparty registry row belongs to an own account other than the transaction's own account → In transit;
 4. otherwise → Unassigned.
 
 The Monzo normalizer calls it before each upsert, so a re-sync gives the same answer and writes nothing. Matching itself (§5.7) runs after the sync has committed, in a short transaction of its own, so its lock is never held for the length of a sync. In between, a newly identified record already sits in In transit, so net worth is right even before its transfer row exists. When something outside a sync changes the answer (an identifier is added or removed, the owner decides, the matcher links a transaction found by amount and date), the engine re-points the contra leg in place through a ledger function that only swaps a posting's account between Unassigned and In transit. The next re-sync then computes the same contra and writes nothing.
@@ -144,7 +150,7 @@ The Monzo normalizer calls it before each upsert, so a re-sync gives the same an
 `match_transaction(ctx, transaction_id)` runs for a new or changed transaction:
 
 - **Registry-identified** (step 3 above): find an open transfer between the same two accounts, in the same instrument, of the same amount, in the opposite role, within the date window; link to it if exactly one exists. Otherwise open a new transfer: `inferred` with a placeholder if the other account is manual, `awaiting` if it is connected.
-- **Not identified, but on an account some open transfer is waiting on** (a receiver record with no counterparty bank details, such as a broker's deposit or an imported row): considered only when its details say `transfer_like`, so a card refund of the same amount is never linked. Link it if it is the only candidate (same account, instrument and amount, inside the window, contra still Unassigned). If it links to an `inferred` transfer, it replaces the placeholder (§5.8).
+- **Not identified, but on an account some open transfer is waiting on** (a receiver record naming no counterparty bank account, such as a broker's deposit or an imported row): considered only when its `bank_transfer` is true, so a card refund of the same amount is never linked. Link it if it is the only candidate (same account, instrument and amount, inside the window, contra still Unassigned). If it links to an `inferred` transfer, it replaces the placeholder (§5.8).
 - **Ambiguity or difference**: several candidates, or one whose amount or instrument differs → the transfer gets a `review_reason`. During review the ledger stays as it was: a registry-identified own record is a leg and stays in In transit (it is certainly a transfer; only its counterpart is open), a placeholder stays posted, and candidates found by amount and date are not legs and stay Unassigned until the owner pairs them. So the invariant in §5.5 holds and net worth does not move during review.
 - **Before the other side's history**: when the other account is connected and the transfer's first record is older than that account's earliest record from its connection (less the window), its counterpart will never arrive: it is already inside that account's opening balance adjustment. The matcher marks it `before_history` and posts the amount from In transit to the system account "Opening balances", so In transit nets to zero and nothing is alerted. If older history is fetched later and the counterpart appears, the matcher reverses that posting and matches normally. (Builder-check call.)
 - **Order independence**: the matcher links only a single candidate; two or more always go to review, so no choice depends on which source synced first. It is also query-driven: after any change it looks for every record whose state disagrees with the rule (identified but not linked, linked but no longer fitting, a placeholder out of step with its record) and matches those, so a crash between a sync's commit and its matching is repaired by the next run.
@@ -171,7 +177,6 @@ Stored in `finance.transfer_decisions`, keyed by the stable reference of the tra
 - `reject` (this is not a transfer): applies to the whole transfer, and is stored for every own record in it, so neither leg re-opens a transfer through the registry on the next sync. Each own record's contra goes back to Unassigned, the transfer is `rejected` and its placeholder voided;
 - `unpair` (these two records are not the same transfer, but each still is one): stored as "never pair X with Y"; the transfer is split and each record goes back through matching on its own;
 - `pair` (link this record with that one): resolves a case that needs review with several candidates; allowed only when both records have the same instrument and amount (§5.2);
-- `dismiss_identifier` (a suggested counterparty account is not the owner's).
 
 (Builder-check call: the parent spec's "reject a match" covers both a rejected transfer and a wrong pairing, so both exist.)
 
@@ -179,7 +184,7 @@ Stored in `finance.transfer_decisions`, keyed by the stable reference of the tra
 
 ### 5.10 Suggestions
 
-Counterparty bank accounts that appear on transactions but are not registered, grouped by sort code and account number, with the names they appeared under, the count in each direction and the latest date. The owner either registers one against an account (an existing one, or a new manual account created on the spot) or dismisses it. Registering re-evaluates every past transaction with those details. Ranking by name similarity is not done: the owner's names vary and the self entity carries no real name, so the list is sorted by count and recency instead.
+Registry rows with no account and not dismissed that transactions name, with the names they appeared under, the count in each direction and the latest date. The owner either registers one against an account (an existing one, or a new manual account created on the spot) or dismisses it (`dismissed_at`). Registering re-evaluates every past transaction naming it. Ranking by name similarity is not done: the owner's names vary and the self entity carries no real name, so the list is sorted by count and recency instead.
 
 ### 5.11 Notifications
 
@@ -222,7 +227,7 @@ A periodic job (daily) sends one notification per transfer that has been `awaiti
 ## 8. Left to the builder
 
 - Table and column names, indexes, and the exact constraint set (as long as the invariant in §5.5 is enforced by the service and, where possible, by the database).
-- How existing Monzo transactions get their `counterparty_details` from raw records (a data migration or a one-off job), as long as the owner's existing history is covered on deploy.
+- How existing Monzo transactions get their counterparty fields from raw records (a data migration or a one-off job), as long as the owner's existing history is covered on deploy.
 - The batch form of the matcher, the integrity-check query, the notification wording, and the UI layout.
 - Endpoint paths and payload shapes, following the existing finance API's conventions.
 
