@@ -113,7 +113,8 @@ function ordered(rows: ImportRowOut[]): ImportRowOut[] {
 
 export function ImportBatchPage({ batchId }: { batchId: string }) {
   const queryClient = useQueryClient();
-  const [confirmingRollback, setConfirmingRollback] = useState(false);
+  // Discard and roll back can't be undone, so each asks for a second click.
+  const [confirming, setConfirming] = useState<"discard" | "rollback" | null>(null);
   const batch = useQuery({
     queryKey: ["import-batch", batchId],
     queryFn: async () =>
@@ -138,7 +139,7 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
       return (await rollbackImport(options)).data;
     },
     onSettled: async () => {
-      setConfirmingRollback(false);
+      setConfirming(null);
       await queryClient.invalidateQueries({ queryKey: ["imports"] });
       await queryClient.invalidateQueries({ queryKey: ["import-batch", batchId] });
       await queryClient.invalidateQueries({ queryKey: ["holdings"] });
@@ -195,13 +196,29 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
               >
                 Commit
               </Button>
-              <Button
-                variant="outline"
-                disabled={mutation.isPending}
-                onClick={() => mutation.mutate("discard")}
-              >
-                Discard
-              </Button>
+              {confirming === "discard" ? (
+                <>
+                  <p className="text-sm">Discarding can't be undone</p>
+                  <Button
+                    variant="destructive"
+                    disabled={mutation.isPending}
+                    onClick={() => mutation.mutate("discard")}
+                  >
+                    Confirm discard
+                  </Button>
+                  <Button variant="outline" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="outline"
+                  disabled={mutation.isPending}
+                  onClick={() => setConfirming("discard")}
+                >
+                  Discard
+                </Button>
+              )}
               {errors > 0 && (
                 <p className="text-sm text-destructive">
                   Fix the errors in the file or profile and upload again
@@ -211,7 +228,7 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
           )}
           {detail.status === "committed" && (
             <div className="flex flex-wrap items-center gap-3">
-              {confirmingRollback ? (
+              {confirming === "rollback" ? (
                 <>
                   <p className="text-sm">
                     This voids {transactions} {transactions === 1 ? "transaction" : "transactions"}
@@ -223,12 +240,12 @@ export function ImportBatchPage({ batchId }: { batchId: string }) {
                   >
                     Confirm roll back
                   </Button>
-                  <Button variant="outline" onClick={() => setConfirmingRollback(false)}>
+                  <Button variant="outline" onClick={() => setConfirming(null)}>
                     Cancel
                   </Button>
                 </>
               ) : (
-                <Button variant="outline" onClick={() => setConfirmingRollback(true)}>
+                <Button variant="outline" onClick={() => setConfirming("rollback")}>
                   Roll back
                 </Button>
               )}

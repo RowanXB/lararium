@@ -292,6 +292,11 @@ it("discards a staged batch", async () => {
   const user = userEvent.setup();
   show(batch());
   await user.click(await screen.findByRole("button", { name: "Discard" }));
+  // Review finding: discard can't be undone and ran on one click, next to Commit.
+  expect(discardImport).not.toHaveBeenCalled();
+  expect(screen.getByText("Discarding can't be undone")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Confirm discard" }));
   expect(discardImport).toHaveBeenCalledWith(
     expect.objectContaining({ path: { batch_id: BATCH_ID } }),
   );
