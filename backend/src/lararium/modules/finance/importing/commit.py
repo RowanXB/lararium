@@ -123,8 +123,8 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
     # A batch committed since staging may now cover this one's days (Decision 16).
     if await recheck_duplicates(session, batch_id):
         raise ImportBatchStaleError(STALE)
-    if account.balance_mode == "transactions":
-        await _check_openings(session, batch_id)
+    # Whatever the mode: a staged adjustment on an account that no longer takes them is stale.
+    await _check_openings(session, batch_id)
 
     contra_id = await get_or_create_system_account(ctx, "unassigned")
     opening_id: UUID | None = None

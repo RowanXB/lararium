@@ -7,6 +7,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
+from lararium.core.commands import CommandContext
 from lararium.core.settings_store import get_setting
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord
@@ -76,6 +77,11 @@ async def _postings(session: AsyncSession, transaction_id: UUID | None) -> list[
         select(p).where(p.transaction_id == transaction_id).order_by(p.position)
     )
     return list(rows)
+
+
+async def _switch_mode(ctx: CommandContext, account_id: UUID, mode: str) -> None:
+    a = models.Account
+    await ctx.session.execute(update(a).where(a.id == account_id).values(balance_mode=mode))
 
 
 # Commit -------------------------------------------------------------------------------
@@ -217,15 +223,28 @@ async def test_commit_refused_after_account_switched_to_snapshots(
     csv_profile: ImportProfileRecord,
 ) -> None:
     batch = await stage(csv_profile, TWO_ROWS)
-    a = models.Account
-
-    async def switch(ctx: object) -> None:
-        await session.execute(update(a).where(a.id == account.id).values(balance_mode="snapshots"))
-
-    await run(switch)
+    await run(_switch_mode, account.id, "snapshots")
 
     with pytest.raises(ImportNotAllowedError):
         await commit(batch.id)
+
+
+async def test_commit_refused_after_account_switched_to_hybrid(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    account: AccountRecord,
+) -> None:
+    # Staged on a transactions account, so it carries an opening adjustment; a hybrid account
+    # takes none (Decision 13), so the staged batch is stale.
+    batch = await stage(await _csv_profile(run), NOVEMBER)
+    assert _adjustments(await _rows(session, batch))
+    await run(_switch_mode, account.id, "hybrid")
+
+    with pytest.raises(ImportBatchStaleError):
+        await commit(batch.id)
+    assert await _balance(session, account.id) == Decimal(0)
 
 
 async def test_commit_rechecks_the_statement_account(

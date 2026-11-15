@@ -615,10 +615,15 @@ class OpeningPreview:
 
 async def preview_openings(session: AsyncSession, batch_id: UUID) -> OpeningPreview:
     """Decision 13's walk as if the staged batch were committed now: its new rows count as
-    movements. Staging adds its adjustment rows from this; commit compares it with them."""
+    movements. Staging adds its adjustment rows from this; commit compares it with them.
+
+    Only transactions accounts take adjustments: for any other mode, nothing is needed.
+    """
     b, r = models.ImportBatch, models.ImportRow
     staged = (await session.execute(select(b.account_id, b.filename).where(b.id == batch_id))).one()
     account_id = staged.account_id
+    if (await get_account(session, account_id)).balance_mode != "transactions":
+        return OpeningPreview(needed={}, changes=[])
     batches = [
         *(batch for batch in await _committed_batches(session, account_id) if batch.id != batch_id),
         _BatchInfo(batch_id, staged.filename, None, None),
