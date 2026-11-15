@@ -63,6 +63,8 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     ["Bank reference", row.bank_reference],
     ["Purpose code", row.purpose_code],
     ["Remittance", row.remittance_info],
+    ["Converted from", row.original_currency],
+    ["Exchange rate", row.exchange_rate],
     ["Type", row.bank_type],
   ];
   return details.flatMap(([label, value]) => (value ? [`${label}: ${value}`] : []));

@@ -223,6 +223,29 @@ def _excluded(raw: dict[str, str], config: CsvProfileConfig) -> str | None:
     return None
 
 
+def _check_footer(
+    header: list[str],
+    footer: _Lines,
+    used: list[str],
+    config: CsvProfileConfig,
+    local_tz: ZoneInfo,
+) -> None:
+    """skip_footer_rows drops the last lines unread, so one that reads as a transaction
+    means the file has no footer (an account without an overdraft line, say): refuse it
+    rather than lose that transaction."""
+    for line in footer:
+        if len(line) > len(header):
+            continue
+        try:
+            _row(0, _raw(header, line, used), config, local_tz)
+        except ValueError:
+            continue
+        raise FileFormatError(
+            f"a line the profile skips as a footer ({config.skip_footer_rows} at the end) "
+            "reads as a transaction: this file has no such footer"
+        )
+
+
 def _overdraft(
     footer: _Lines, config: CsvProfileConfig, local_tz: ZoneInfo
 ) -> tuple[Decimal | None, date | None]:
@@ -253,6 +276,7 @@ def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> P
     """local_tz: the profile's timezone when set; the caller resolves it."""
     header, lines, footer = _read_rows(content, config)
     used = [*config.columns.names(), *config.include_only]
+    _check_footer(header, footer, used, config, local_tz)
     overdraft_limit, overdraft_limit_date = _overdraft(footer, config, local_tz)
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()

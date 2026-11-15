@@ -59,7 +59,7 @@ def _records(content: bytes, config: QifProfileConfig) -> list[_Record]:
 
 
 def _optional(raw: dict[str, str], tag: str) -> str | None:
-    return raw.get(tag) or None
+    return parsed.single(raw, tag)
 
 
 def _date(text: str, config: QifProfileConfig, local_tz: ZoneInfo) -> date:

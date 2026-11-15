@@ -692,6 +692,10 @@ export type ImportRowOut = {
      */
     error: string | null;
     /**
+     * Exchange Rate
+     */
+    exchange_rate: string | null;
+    /**
      * External Id
      */
     external_id: string | null;
@@ -727,6 +731,10 @@ export type ImportRowOut = {
      * Occurred At
      */
     occurred_at: string | null;
+    /**
+     * Original Currency
+     */
+    original_currency: string | null;
     /**
      * Payee
      */

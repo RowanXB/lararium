@@ -868,3 +868,12 @@ async def test_each_currency_speaks_for_its_own_days(
     rows = await _rows(session, await stage(csv_profile, gbp_month, filename="gbp.csv"))
     assert _statuses(rows) == ["new", "new", "new"]
     assert [row.note for row in rows] == [None, None, None]
+
+
+async def test_nul_character_refuses_the_file_naming_its_row(
+    stage: Stage, csv_profile: ImportProfileRecord
+) -> None:
+    """Third review: a NUL reached the insert, which failed with a message naming nothing."""
+    content = HEADER + "10/11/2026,Coffee,-3.50\n11/11/2026,Example\x00Shop,-1.00\n"
+    with pytest.raises(FileFormatError, match="row 2 has a NUL character"):
+        await stage(csv_profile, content)

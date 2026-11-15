@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import MAX_PREC, Decimal, localcontext
 from typing import Any, Literal, cast, get_args
@@ -26,6 +26,7 @@ from lararium.core.settings_store import get_timezone
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import (
+    FileFormatError,
     ImportBatchNotFoundError,
     ImportNotAllowedError,
     NotACurrencyError,
@@ -99,6 +100,8 @@ class ImportRowRecord:
     bank_reference: str | None
     purpose_code: str | None
     remittance_info: str | None
+    original_currency: str | None
+    exchange_rate: Decimal | None
     error: str | None
     note: str | None
     raw: dict[str, str]
@@ -1049,13 +1052,46 @@ def _parse(
 ) -> tuple[ParsedStatement, str]:
     match config:
         case CsvProfileConfig():
-            return csv_parser.parse_csv(content, config, local_tz), csv_parser.PARSER_VERSION
+            statement, version = (
+                csv_parser.parse_csv(content, config, local_tz),
+                csv_parser.PARSER_VERSION,
+            )
         case OfxProfileConfig():
-            return ofx_parser.parse_ofx(content, config), ofx_parser.PARSER_VERSION
+            statement, version = ofx_parser.parse_ofx(content, config), ofx_parser.PARSER_VERSION
         case QifProfileConfig():
-            return qif_parser.parse_qif(content, config, local_tz), qif_parser.PARSER_VERSION
+            statement, version = (
+                qif_parser.parse_qif(content, config, local_tz),
+                qif_parser.PARSER_VERSION,
+            )
         case PdfProfileConfig():
-            return pdf.parse_pdf(content, config, local_tz), pdf.PARSER_VERSION
+            statement, version = pdf.parse_pdf(content, config, local_tz), pdf.PARSER_VERSION
+    _refuse_nul(statement)
+    return statement, version
+
+
+def _has_nul(value: object) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        items = cast(dict[object, object], value).items()
+        return any(_has_nul(key) or _has_nul(item) for key, item in items)
+    if isinstance(value, list | tuple):
+        return any(_has_nul(item) for item in cast(Sequence[object], value))
+    if is_dataclass(value) and not isinstance(value, type):
+        return any(_has_nul(getattr(value, f.name)) for f in fields(value))
+    return False
+
+
+def _refuse_nul(statement: ParsedStatement) -> None:
+    """PostgreSQL text can't hold NUL, whichever parser read it: refuse the file here,
+    naming the row, rather than fail at insert with a message that names nothing."""
+    for row in statement.rows:
+        if _has_nul(row):
+            raise FileFormatError(
+                f"row {row.position + 1} has a NUL character, which no field can hold"
+            )
+    if _has_nul(replace(statement, rows=[])):
+        raise FileFormatError("the statement has a NUL character, which no field can hold")
 
 
 @dataclass
@@ -1523,6 +1559,8 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "bank_reference": parsed.bank_reference,
         "purpose_code": parsed.purpose_code,
         "remittance_info": parsed.remittance_info,
+        "original_currency": parsed.original_currency,
+        "exchange_rate": parsed.exchange_rate,
     }
 
 

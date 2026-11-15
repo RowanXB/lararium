@@ -66,6 +66,8 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     payment_kind: null,
     bank_reference: null,
     purpose_code: null,
+    original_currency: null,
+    exchange_rate: null,
     remittance_info: null,
     bank_type: null,
     quantity: "-3.50",

@@ -9,6 +9,7 @@ from lararium.modules.finance.errors import FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.ofx_parser import PARSER_VERSION, parse_ofx
 from lararium.modules.finance.importing.parsed import (
+    Counterparty,
     ParsedRow,
     ParsedStatement,
     RowError,
@@ -462,14 +463,33 @@ def test_empty_sgml_leaf_does_not_swallow_its_siblings() -> None:
 
 
 def test_many_repeated_leaves_are_linear() -> None:
-    repeats = "".join("<MEMO>x\n" for _ in range(50_000))
+    # A leaf the parser doesn't read may repeat; it is kept, numbered, in raw.
+    repeats = "".join("<EXTDNAME>x\n" for _ in range(50_000))
     transaction = f"<STMTTRN>\n<DTPOSTED>20261110\n<TRNAMT>-1.00\n{repeats}</STMTTRN>"
     content = _sgml(_sgml_statement(transaction))
     started = time.perf_counter()
     row = _rows(_parse(content))[0]
     assert time.perf_counter() - started < 2
-    assert row.raw["MEMO"] == "x" and row.raw["MEMO#50000"] == "x"
+    assert row.raw["EXTDNAME"] == "x" and row.raw["EXTDNAME#50000"] == "x"
     assert len(row.raw) == 50_002
+
+
+@pytest.mark.parametrize("leaf", ["TRNAMT", "FITID", "DTPOSTED", "NAME"])
+def test_repeated_read_leaf_is_row_error(leaf: str) -> None:
+    """Third review: a STMTTRN with two transactions' leaves kept only the first, and the
+    second's amount silently vanished."""
+    values = {"DTPOSTED": "20261110", "TRNAMT": "-5.00", "FITID": "A1", "NAME": "Shop"}
+    repeated = f"<{leaf}>{values[leaf]}\n"
+    transaction = _transaction(**values).replace("</STMTTRN>", repeated + "</STMTTRN>")
+    (error,) = _parse(_sgml(_sgml_statement(transaction))).rows
+    assert isinstance(error, RowError) and f"gives {leaf} more than once" in error.message
+
+
+def test_repeated_statement_leaf_is_file_error() -> None:
+    extra = "<LEDGERBAL>\n<BALAMT>10.00\n<BALAMT>12.00\n<DTASOF>20261130\n</LEDGERBAL>"
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS, extra=extra))
+    with pytest.raises(FileFormatError, match="LEDGERBAL: the record gives BALAMT more than once"):
+        _parse(content)
 
 
 def test_deep_nesting_is_file_error() -> None:
@@ -590,3 +610,28 @@ def test_unclosed_aggregate_is_file_error(aggregate: str) -> None:
         content = _sgml_statement(first + "\n" + second, extra=extra.replace("</LEDGERBAL>", ""))
     with pytest.raises(FileFormatError, match=f"<{aggregate}> is never closed"):
         _parse(_sgml(content))
+
+
+def test_payee_aggregate_account_paid_to_and_rate_are_typed() -> None:
+    """Third review: PAYEE, BANKACCTTO and CURRATE were only in raw (Decision 18)."""
+    transaction = (
+        "<STMTTRN>\n<TRNTYPE>DEBIT\n<DTPOSTED>20261110\n<TRNAMT>-12.00\n<FITID>P1\n"
+        "<PAYEE>\n<NAME>Example Landlord\n<ADDR1>1 Example Road\n</PAYEE>\n"
+        "<BANKACCTTO>\n<BANKID>201234\n<ACCTID>87654321\n<ACCTTYPE>CHECKING\n</BANKACCTTO>\n"
+        "<ORIGCURRENCY>\n<CURRATE>1.1650\n<CURSYM>EUR\n</ORIGCURRENCY>\n</STMTTRN>"
+    )
+    (row,) = _rows(_parse(_sgml(_sgml_statement(transaction))))
+    assert (row.payee, row.description) == ("Example Landlord", "Example Landlord")
+    assert row.counterparty == Counterparty(sort_code="201234", account_number="87654321")
+    assert (row.original_currency, row.exchange_rate) == ("EUR", Decimal("1.1650"))
+    assert row.currency == "GBP"
+
+
+def test_cdata_value_is_read() -> None:
+    """Third review: the tokenizer dropped CDATA, so a memo came back empty, even in raw."""
+    transaction = _transaction(DTPOSTED="20261110", TRNAMT="-1.00", FITID="Q1")
+    transaction = transaction.replace(
+        "</STMTTRN>", "<MEMO><![CDATA[Rent & <bills>]]></MEMO>\n</STMTTRN>"
+    )
+    (row,) = _rows(_parse(_sgml(_sgml_statement(transaction))))
+    assert row.memo == "Rent & <bills>" and row.raw["MEMO"] == "Rent & <bills>"

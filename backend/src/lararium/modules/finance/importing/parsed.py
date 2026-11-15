@@ -137,6 +137,10 @@ class ParsedRow:
     bank_reference: str | None = None
     purpose_code: str | None = None
     remittance_info: str | None = None
+    # OFX: the currency a row was converted from (ORIGCURRENCY), and CURRATE, the rate
+    # between the row's currency and the statement's.
+    original_currency: str | None = None
+    exchange_rate: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,15 @@ def parse_amount(text: str, fmt: AmountFormat) -> Decimal:
         raise ValueError(f"not an amount: {text!r} ({error})") from None
     # 0 - value, not -value: keeps "(0.00)" from becoming -0.00.
     return Decimal(0) - value if negative else value
+
+
+def single(raw: dict[str, str], key: str) -> str | None:
+    """A record's one value for key, or None when missing or empty. A key the record gives
+    twice ("KEY#2" in raw, see keyed) is a ValueError: reading the first would silently drop
+    the second, perhaps a second transaction run into the same record."""
+    if f"{key}#2" in raw:
+        raise ValueError(f"the record gives {key} more than once")
+    return raw.get(key) or None
 
 
 def keyed(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:

@@ -214,3 +214,11 @@ def test_large_amount_negated_exactly() -> None:
     content = f"!Type:Bank\nD10/11/2026\nT{big}\nPExample\n^\n".encode()
     rows = _rows(_parse(content, sign="outflow_positive"))
     assert [row.quantity for row in rows] == [Decimal(f"-{big}")]
+
+
+def test_two_transactions_run_together_are_a_row_error() -> None:
+    """Third review: a record missing its '^' kept only the first transaction; the second's
+    amount survived only in raw."""
+    content = b"!Type:Bank\nD01/11/2026\nT-5.00\nPA\nD02/11/2026\nT-7.00\nPB\n^\n"
+    (error,) = _parse(content).rows
+    assert isinstance(error, RowError) and "more than once" in error.message

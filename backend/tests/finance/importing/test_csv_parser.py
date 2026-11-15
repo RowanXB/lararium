@@ -338,6 +338,15 @@ def test_footer_rows_skipped() -> None:
     assert (statement.overdraft_limit, statement.overdraft_limit_date) == (None, None)
 
 
+def test_missing_footer_refuses_rather_than_drops_a_row() -> None:
+    """Third review: with no footer line, skip_footer_rows silently dropped the last
+    transaction."""
+    no_footer = MIDATA.split(b"\n\n")[0] + b"\n"
+    label = {"overdraft_footer_label": "Arranged overdraft limit"}
+    with pytest.raises(FileFormatError, match="reads as a transaction"):
+        _parse(no_footer, **MIDATA_CONFIG, **label)
+
+
 def test_padded_midata_footer_keeps_its_amount() -> None:
     """Review finding: a spreadsheet re-save pads every line with commas, and the footer's
     amount was then read from an empty last cell."""

@@ -275,6 +275,8 @@ class ImportRow(Base):
     bank_reference: Mapped[str | None] = mapped_column(Text)
     purpose_code: Mapped[str | None] = mapped_column(Text)
     remittance_info: Mapped[str | None] = mapped_column(Text)
+    original_currency: Mapped[str | None] = mapped_column(Text)
+    exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric)
     dedupe_key: Mapped[str | None] = mapped_column(Text)
     duplicate_of: Mapped[UUID | None] = mapped_column(ForeignKey("finance.import_rows.id"))
     error: Mapped[str | None] = mapped_column(Text)

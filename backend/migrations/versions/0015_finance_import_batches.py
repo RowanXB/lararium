@@ -138,6 +138,8 @@ UPGRADE = [
       bank_reference text,
       purpose_code text,
       remittance_info text,
+      original_currency text CHECK (original_currency ~ '^[A-Z]{{3}}$'),
+      exchange_rate numeric CHECK (exchange_rate > 0),
       dedupe_key text,
       -- The committed row this one duplicates (Decision 16), by key or by covered day.
       duplicate_of uuid REFERENCES finance.import_rows (id),

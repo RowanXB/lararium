@@ -1446,6 +1446,18 @@
             ],
             "title": "Error"
           },
+          "exchange_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange Rate"
+          },
           "external_id": {
             "anyOf": [
               {
@@ -1531,6 +1543,17 @@
               }
             ],
             "title": "Occurred At"
+          },
+          "original_currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Currency"
           },
           "payee": {
             "anyOf": [
@@ -1668,6 +1691,8 @@
           "bank_reference",
           "purpose_code",
           "remittance_info",
+          "original_currency",
+          "exchange_rate",
           "quantity",
           "fee",
           "instrument_id",

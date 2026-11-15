@@ -362,6 +362,8 @@ class ImportRowOut(_Out):
     bank_reference: str | None
     purpose_code: str | None
     remittance_info: str | None
+    original_currency: str | None
+    exchange_rate: DecimalStr | None
     quantity: DecimalStr | None
     fee: DecimalStr  # 0 when the file states none
     instrument_id: UUID | None

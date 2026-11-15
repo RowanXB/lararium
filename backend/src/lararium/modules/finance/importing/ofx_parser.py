@@ -13,6 +13,7 @@ from decimal import Decimal
 from lararium.modules.finance.errors import FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.parsed import (
+    Counterparty,
     ParsedRow,
     ParsedStatement,
     RowError,
@@ -34,6 +35,8 @@ _UTF8_HEADER = re.compile(
     rb"ENCODING:\s*(?:UTF-8|UNICODE)|encoding\s*=\s*[\"']UTF-8[\"']", re.IGNORECASE
 )
 _TOKEN = re.compile(r"<(/?)([A-Za-z0-9.]+)>([^<]*)")
+# XML OFX may wrap a value in CDATA; the tokenizer reads text only up to the next "<".
+_CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # YYYYMMDD[HHMMSS[.XXX]][[±H[H][.MM]][:TZ]]
 _DATETIME = re.compile(
     r"(\d{4})(\d{2})(\d{2})"
@@ -86,8 +89,12 @@ class _Aggregate:
         return found
 
     def leaf(self, name: str) -> str | None:
-        """A leaf directly inside this aggregate, or None when missing or empty."""
-        return next((value for leaf, value in self.leaves if leaf == name), None) or None
+        """A leaf directly inside this aggregate, or None when missing or empty; one it has
+        twice refuses the file (see parsed.single)."""
+        values = [value for leaf, value in self.leaves if leaf == name]
+        if len(values) > 1:
+            raise FileFormatError(f"<{self.name}> gives {name} more than once")
+        return (values[0] if values else None) or None
 
     def leaf_pairs(self, prefix: str = "") -> Iterator[tuple[str, str]]:
         """Every leaf, nested ones keyed "AGGREGATE/LEAF"."""
@@ -113,7 +120,8 @@ def _decode(content: bytes) -> str:
         raise FileFormatError(f"the file is not valid {encoding.removesuffix('-sig')}") from None
     found = _START.search(text)
     assert found is not None
-    return text[found.start() :]
+    # A CDATA section's text, escaped as ordinary text (each value is unescaped once read).
+    return _CDATA.sub(lambda section: html.escape(section[1], quote=False), text[found.start() :])
 
 
 def _absorb(stack: list[_Aggregate]) -> None:
@@ -170,7 +178,16 @@ def _tree(text: str) -> _Aggregate:
 
 
 def _optional(raw: dict[str, str], key: str) -> str | None:
-    return raw.get(key) or None
+    """A transaction's one value for key (a repeated one is the row's error)."""
+    return parsed.single(raw, key)
+
+
+def _stated(values: dict[str, str], key: str, where: str) -> str | None:
+    """A statement-level aggregate's one value for key (a repeated one refuses the file)."""
+    try:
+        return parsed.single(values, key)
+    except ValueError as error:
+        raise FileFormatError(f"{where}: {error}") from None
 
 
 def _datetime(text: str, what: str) -> tuple[date, datetime | None]:
@@ -238,7 +255,14 @@ def _row(
     # CURRENCY: the amounts are in that currency. ORIGCURRENCY only records the currency
     # TRNAMT was converted from, so the row stays in CURDEF (kept in raw).
     own_currency = _optional(raw, "CURRENCY/CURSYM")
-    payee = _optional(raw, "NAME")
+    original = _optional(raw, "ORIGCURRENCY/CURSYM")
+    if own_currency is not None and original is not None:
+        raise ValueError("the transaction has both CURRENCY and ORIGCURRENCY")
+    rate_key = "CURRENCY/CURRATE" if own_currency is not None else "ORIGCURRENCY/CURRATE"
+    rate_text = _optional(raw, rate_key)
+    rate = None if rate_text is None else _rate(rate_text, rate_key)
+    # NAME, or the PAYEE aggregate the spec allows instead (its address stays in raw).
+    payee = _optional(raw, "NAME") or _optional(raw, "PAYEE/NAME")
     memo = _optional(raw, "MEMO")
     return ParsedRow(
         position=position,
@@ -256,7 +280,39 @@ def _row(
         payee=payee,
         memo=memo,
         check_number=_optional(raw, "CHECKNUM"),
+        counterparty=_counterparty(raw),
+        original_currency=None if original is None else _currency(original),
+        exchange_rate=rate,
     )
+
+
+def _rate(text: str, key: str) -> Decimal:
+    try:
+        rate = parse_amount(text, AmountFormat())
+    except ValueError as error:
+        raise ValueError(f"{key}: {error}") from None
+    if rate <= 0:
+        raise ValueError(f"{key}: {text!r} is not a rate")
+    return rate
+
+
+def _counterparty(raw: dict[str, str]) -> Counterparty | None:
+    """The account paid to (BANKACCTTO, or CCACCTTO for a card), normalised as M4's
+    registry expects. A value that isn't a UK sort code or account number has no typed
+    home and stays in raw, as for BANKACCTFROM."""
+    prefix = "BANKACCTTO" if any(key.startswith("BANKACCTTO/") for key in raw) else "CCACCTTO"
+    sort_code: str | None = None
+    account_number: str | None = None
+    try:
+        sort_code = normalise_sort_code(_optional(raw, f"{prefix}/BANKID"))
+    except ValueError:
+        pass
+    try:
+        account_number = normalise_account_number(_optional(raw, f"{prefix}/ACCTID"))
+    except ValueError:
+        pass
+    counterparty = Counterparty(sort_code=sort_code, account_number=account_number)
+    return None if counterparty == Counterparty() else counterparty
 
 
 def _account(statement: _Aggregate) -> StatementAccount | None:
@@ -264,16 +320,18 @@ def _account(statement: _Aggregate) -> StatementAccount | None:
     if source is None:
         return None
     values = source.leaf_values()
+    bank_id = _stated(values, "BANKID", source.name)
+    account_id = _stated(values, "ACCTID", source.name)
     sort_code: str | None = None
     account_number: str | None = None
     try:
         # A UK BANKID is the sort code; other countries' bank IDs aren't six digits.
-        sort_code = normalise_sort_code(_optional(values, "BANKID"))
+        sort_code = normalise_sort_code(bank_id)
     except ValueError:
         pass
     try:
         # Masked card numbers ("XXXX1234") have no typed home.
-        account_number = normalise_account_number(_optional(values, "ACCTID"))
+        account_number = normalise_account_number(account_id)
     except ValueError:
         pass
     if (
@@ -287,7 +345,7 @@ def _account(statement: _Aggregate) -> StatementAccount | None:
     account = StatementAccount(
         sort_code=sort_code,
         account_number=account_number,
-        account_type=_optional(values, "ACCTTYPE"),
+        account_type=_stated(values, "ACCTTYPE", source.name),
     )
     return None if account == StatementAccount() else account
 
@@ -300,7 +358,7 @@ def _balance(
     if aggregate is None:
         return None, None
     values = aggregate.leaf_values()
-    amount, as_of = _optional(values, "BALAMT"), _optional(values, "DTASOF")
+    amount, as_of = _stated(values, "BALAMT", name), _stated(values, "DTASOF", name)
     if amount is None or as_of is None:
         raise FileFormatError(f"{name} needs both BALAMT and DTASOF")
     try:
