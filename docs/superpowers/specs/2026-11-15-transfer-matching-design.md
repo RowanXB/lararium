@@ -1,7 +1,7 @@
 # M4 design: transfer matching
 
 - Date: 2026-11-15
-- Status: approach approved by the owner on 2026-11-15; awaiting the owner's review of this document
+- Status: implemented on feat/claude-transfer-matching (2026-11-15)
 - Builds on: `main` at `bdcb64a` (M0, M1, M3 merged; migrations up to `0012`)
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§6.3, §6.6, §8, §10.2, §13 M4, §14)
 - Related: the M2 manual import plan (`docs/superpowers/plans/2026-11-12-manual-import.md`, being revised on its own branch). M2 imports must go through the matching described here.
@@ -97,7 +97,7 @@ The same holds for the sender side: if B's record is seen first and A's side is 
 ### 5.2 Accounts
 
 - **In transit**: a new system account (key `in_transit`), `ledger_type = 'asset'`, `subtype = 'in_transit'`, `balance_mode = 'transactions'`, one account for all instruments. Being an asset, it counts in net worth. `get_or_create_system_account` gains the key and creates it with these attributes (the existing keys stay equity).
-- **Manual receiving accounts** should be `hybrid` with an opening snapshot, so a placeholder moves the balance from the snapshot on, and placeholders dated before the latest snapshot are already contained in it (no double count). A `transactions`-mode manual account is correct only if its whole history is imported. M4 does not change valuation; the registry UI shows a hint when an account with identifiers is `transactions`-mode and has no postings other than placeholders.
+- **Manual receiving accounts** should be `hybrid` with an opening snapshot, so a placeholder moves the balance from the snapshot on, and placeholders dated before the latest snapshot are already contained in it (no double count). A `transactions`-mode manual account is correct only if its whole history is imported. M4 does not change valuation and leaves the mode to the owner; the README says to create manual accounts as `hybrid`.
 - **A `snapshots`-mode account cannot carry identifiers.** Valuation ignores its postings, so a placeholder there would change nothing and net worth would dip until the next snapshot. Adding an identifier to one is refused (422) with a message saying to switch it to `hybrid`, which values it exactly as before (the latest snapshot) plus whatever is posted after it. The registry UI offers the switch. (Builder-check call.)
 - **No difference postings in M4.** All of the owner's own accounts deal in GBP and none takes a fee on arrival (owner, 2026-11-15), so a transfer's two sides are always the same instrument and amount. A pair that differs is a case that needs review the owner can only reject or unpair; difference postings (FX, fees) come with the first connector that produces them (M5).
 
@@ -110,7 +110,7 @@ The same holds for the sender side: if B's record is seen first and A's side is 
 - M4 has one kind, `uk_bank_account`: value `"<6-digit sort code>:<8-digit account number>"`, digits only. Input with dashes and spaces is normalised; anything else is a 422. Further kinds (IBAN, wallet address, xpub) are added by the milestones that need them.
 - Registering an identifier assigns the row to an account (creating it if no source has named it yet); removing one unassigns it (the row stays, as transactions reference it).
 - A row that resolves to the transaction's own account is not a transfer.
-- **Connectors register their own accounts.** Monzo's `/accounts` response carries each account's sort code and account number, so the Monzo normalizer assigns them to its accounts (actor `connector`, audited) on every sync, never taking a row the owner assigned elsewhere. (Builder-check call.)
+- **Connectors register their own accounts.** Monzo's `/accounts` response carries each account's sort code and account number, so the Monzo normalizer assigns them to its accounts (actor `connector`, audited) on every sync, never taking a row the owner assigned elsewhere. A row the owner dismissed is assigned all the same: a connector's own account is a fact, so the dismissal was a mistake. (Builder-check call.)
 
 ### 5.4 Counterparty fields on transactions
 
@@ -147,20 +147,21 @@ The Monzo normalizer calls it before each upsert, so a re-sync gives the same an
 
 ### 5.7 Matching
 
-`match_transaction(ctx, transaction_id)` runs for a new or changed transaction:
+`match_transaction(ctx, transaction_id)` runs for a new or changed transaction. Linking is decided on the set of records, never on the order they arrived in:
 
-- **Registry-identified** (step 3 above): find an open transfer between the same two accounts, in the same instrument, of the same amount, in the opposite role, within the date window; link to it if exactly one exists. Otherwise open a new transfer: `inferred` with a placeholder if the other account is manual, `awaiting` if it is connected.
-- **Not identified, but on an account some open transfer is waiting on** (a receiver record naming no counterparty bank account, such as a broker's deposit or an imported row): considered only when its `bank_transfer` is true, so a card refund of the same amount is never linked. Link it if it is the only candidate (same account, instrument and amount, inside the window, contra still Unassigned). If it links to an `inferred` transfer, it replaces the placeholder (§5.8).
-- **Ambiguity or difference**: several candidates, or one whose amount or instrument differs → the transfer gets a `review_reason`. During review the ledger stays as it was: a registry-identified own record is a leg and stays in In transit (it is certainly a transfer; only its counterpart is open), a placeholder stays posted, and candidates found by amount and date are not legs and stay Unassigned until the owner pairs them. So the invariant in §5.5 holds and net worth does not move during review.
+- **Candidates.** Two own records are candidates for one transfer when they are on different accounts, in the same instrument, of opposite sign, the receiving one inside the sending one's window, neither rejected nor decided never to pair with the other, and at least one of them is identified through the registry. Each identified one must name the other's account; each one that names no registered account must have `bank_transfer` true, so a card refund of the same amount is never linked.
+- **Tiers.** Candidates are ranked by their evidence: an owner `pair` decision, then mutually identified (each names the other's account), then one-sided (one names the other's account, the other is only a bank transfer). A record's candidates are those in the strongest tier it has any in, and only those for which that tier is also the candidate's strongest, so weaker evidence (an unrelated same-amount bank payment) never makes a stronger pair ambiguous.
+- **Link only on a mutual singleton.** Two records link only when each is the other's only candidate. A registry-identified record left unlinked has a transfer of its own: `inferred` with a placeholder if the other account is manual, `awaiting` if it is connected (needing review if it has several candidates, below). A record naming no counterparty bank account (a broker's deposit, an imported row) links to the transfer waiting on its account under the same rule; linked to an `inferred` transfer, it replaces the placeholder (§5.8).
+- **Ambiguity or difference**: a record with several candidates gets `review_reason = several_candidates`. A mutually identified counterpart of another amount gets `amount_differs`; an unidentified bank payment of another amount is no evidence, so it is not flagged. During review the ledger stays as it was: a registry-identified own record is a leg and stays in In transit (it is certainly a transfer; only its counterpart is open), a placeholder stays posted, and candidates found by amount and date are not legs and stay Unassigned until the owner pairs them. So the invariant in §5.5 holds and net worth does not move during review.
 - **Before the other side's history**: when the other account is connected and the transfer's first record is older than that account's earliest record from its connection (less the window), its counterpart will never arrive: it is already inside that account's opening balance adjustment. The matcher marks it `before_history` and posts the amount from In transit to the system account "Opening balances", so In transit nets to zero and nothing is alerted. If older history is fetched later and the counterpart appears, the matcher reverses that posting and matches normally. (Builder-check call.)
-- **Order independence**: the matcher links only a single candidate; two or more always go to review, so no choice depends on which source synced first. It is also query-driven: after any change it looks for every record whose state disagrees with the rule (identified but not linked, linked but no longer fitting, a placeholder out of step with its record) and matches those, so a crash between a sync's commit and its matching is repaired by the next run.
+- **Order independence**: candidates and tiers are functions of the set of records and decisions, so no link depends on which source synced first. The matcher is also query-driven: after any change it looks for every record whose state disagrees with the rule (identified but not linked, linked but no longer fitting, a review reason a fresh evaluation would not give, a placeholder out of step with its record) and matches those, so a crash between a sync's commit and its matching is repaired by the next run.
 - **Concurrency**: matching is serialised by a transaction-scoped advisory lock taken before reading candidates, so two syncs of different connections cannot both link the same transfer. Tests use real concurrent sessions.
 - **Defaults** (settings, changeable): the receiving side's record must occur from 2 days before to 7 days after the sending side's; an `awaiting` transfer is overdue after 7 days.
 
 ### 5.8 Placeholders
 
 - An inferred placeholder is a transaction with `origin = 'inference'`, `status = 'inferred'`, no connection, posting In transit and the manual account, dated as the own record it mirrors.
-- It follows that record: if the record's amount, date or status changes (a pending payment settles for another amount), the placeholder is updated; if the record is voided, the placeholder is voided and the transfer is closed.
+- It follows that record: if the record's amount, date or status changes (a pending payment settles for another amount), the placeholder is updated; if the record is voided, the transfer is dissolved and the placeholder deleted. (Matching dissolves and reopens a transfer whenever its records change, so a transfer's id is not stable; decisions are therefore keyed by records, §5.9.)
 - **Replaced by the real record.** When the manual account's own record arrives (an M2 import), the matcher links it as the transfer's other own record, re-points its contra to In transit, and deletes the placeholder (it is derived data, so no void rows pile up as imports come and go). The transfer becomes `matched`. If that import is rolled back, the transfer goes back to `inferred` and the placeholder is posted again. This differs in mechanism from the parent spec §8.2, which says the placeholder's status becomes `confirmed` and no new transaction is created; the outcome is the same (no duplicate, the transfer is confirmed), and this way the manual account's ledger holds the statement's own dates and description, and an import goes through the same path as a connector record.
 
 **The interface M2 calls:**
@@ -174,9 +175,9 @@ The Monzo normalizer calls it before each upsert, so a re-sync gives the same an
 
 Stored in `finance.transfer_decisions`, keyed by the stable reference of the transaction they concern: a generic `(source_kind, source_ref)` pair, which is `('connection', '<connection_id>:<external_id>')` for connector rows and whatever stable key M2 gives an import row (M4 lands first, per the owner, so it ships only this generic key and a simulated import source in tests). A placeholder has none and is never decided on directly.
 
-- `reject` (this is not a transfer): applies to the whole transfer, and is stored for every own record in it, so neither leg re-opens a transfer through the registry on the next sync. Each own record's contra goes back to Unassigned, the transfer is `rejected` and its placeholder voided;
+- `reject` (this is not a transfer): applies to the whole transfer, and is stored for every own record in it, so neither leg re-opens a transfer through the registry on the next sync. Each own record's contra goes back to Unassigned, the transfer is `rejected` and its placeholder (or `before_history` settlement) deleted. Withdrawing it (`unreject`, "Undo" in the UI) deletes the decisions and the rejected transfer and matches the records again;
 - `unpair` (these two records are not the same transfer, but each still is one): stored as "never pair X with Y"; the transfer is split and each record goes back through matching on its own;
-- `pair` (link this record with that one): resolves a case that needs review with several candidates; allowed only when both records have the same instrument and amount (§5.2);
+- `pair` (link this record with that one): resolves a case that needs review with several candidates; allowed only when both records have the same instrument and amount (§5.2). It is the strongest tier of evidence (§5.7), so it outranks any other candidate;
 
 (Builder-check call: the parent spec's "reject a match" covers both a rejected transfer and a wrong pairing, so both exist.)
 
@@ -184,24 +185,24 @@ Stored in `finance.transfer_decisions`, keyed by the stable reference of the tra
 
 ### 5.10 Suggestions
 
-Registry rows with no account and not dismissed that transactions name, with the names they appeared under, the count in each direction and the latest date. The owner either registers one against an account (an existing one, or a new manual account created on the spot) or dismisses it (`dismissed_at`). Registering re-evaluates every past transaction naming it. Ranking by name similarity is not done: the owner's names vary and the self entity carries no real name, so the list is sorted by count and recency instead.
+Registry rows with no account and not dismissed that transactions name, with the names they appeared under, the count in each direction and the latest date. The owner either registers one against an existing account (creating a manual account first if needed) or dismisses it (`dismissed_at`). Registering re-evaluates every past transaction naming it. Ranking by name similarity is not done: the owner's names vary and the self entity carries no real name, so the list is sorted by count and recency instead.
 
 ### 5.11 Notifications
 
-A periodic job (daily) sends one notification per transfer that has been `awaiting` longer than the overdue setting, and one when a transfer starts needing review, through the existing notifier. `notified_at` keeps them from repeating.
+A periodic job (every 30 minutes, after healing) sends one notification per transfer that has been `awaiting` longer than the overdue setting, and one when a transfer starts needing review, through the existing notifier. `notified_at` keeps them from repeating.
 
 ### 5.12 API and UI
 
 - **API** (under `/api/v1`, owner-only like the rest):
-  - identifiers: list, add, delete per account;
-  - transfers: list (filter by status), get, reject, pair (pick a candidate), list candidates for a transfer that needs review;
-  - suggestions: list, register, dismiss.
+  - identifiers: list, add, delete per account; switching an account's balance mode (to `hybrid`, so it can carry identifiers);
+  - transfers: list, reject, unreject, unpair, pair (pick a candidate), list candidates for a transfer that needs review;
+  - suggestions: list, dismiss (registering one is adding the identifier to an account).
 - **Transfers page** (`/transfers`), usable on a phone:
-  - **Needs attention**: needing review and overdue `awaiting` transfers, each with its candidates and confirm or reject;
+  - **Needs attention**: needing review and overdue `awaiting` transfers, each with its candidates (Pair on those of the same amount) and Reject;
   - **In transit**: `awaiting` transfers with days in transit;
   - **Suggestions**: unregistered counterparty accounts, with register or dismiss;
-  - **Recent**: matched and inferred transfers, one row each ("Monzo → Bank A, £100, inferred"), collapsed by default, each with reject.
-- **Registry**: an identifiers section on each account (on the Accounts page), add and delete.
+  - **Recent**: the other transfers, one row each ("Monzo → Bank A · 100.00 GBP · inferred"), collapsed by default: Unpair on a matched one, Undo on a rejected one, Reject on the rest.
+- **Registry**: an identifiers section on each asset or liability account (on the Accounts page), add and remove; a `snapshots`-mode account offers the switch to `hybrid` instead.
 
 ## 6. Edge cases (parent spec §8.7) and how this covers them
 
