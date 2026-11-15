@@ -274,6 +274,7 @@ class ImportRow(Base):
     purpose_code: Mapped[str | None] = mapped_column(Text)
     remittance_info: Mapped[str | None] = mapped_column(Text)
     dedupe_key: Mapped[str | None] = mapped_column(Text)
+    duplicate_of: Mapped[UUID | None] = mapped_column(ForeignKey("finance.import_rows.id"))
     error: Mapped[str | None] = mapped_column(Text)
     note: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, str]] = mapped_column(JSONB)

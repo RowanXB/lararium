@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext
 from lararium.core.documents import DocumentStore, store_document
@@ -94,6 +95,7 @@ class ImportRowRecord:
     note: str | None
     raw: dict[str, str]
     transaction_id: UUID | None
+    duplicate_of: UUID | None  # the committed row this one duplicates (Decision 16)
 
 
 @dataclass(frozen=True)
@@ -357,6 +359,22 @@ async def _load_batches(
     ]
 
 
+async def batches_relying_on(session: AsyncSession, batch_id: UUID) -> list[tuple[UUID, str]]:
+    """The other committed batches (id, filename) with rows that duplicate this batch's rows
+    (Decision 16): rolling this batch back would leave the days they skipped uncovered."""
+    r, b = models.ImportRow, models.ImportBatch
+    target = aliased(models.ImportRow)
+    found = await session.execute(
+        select(b.id, b.filename)
+        .distinct()
+        .join(r, r.batch_id == b.id)
+        .join(target, target.id == r.duplicate_of)
+        .where(target.batch_id == batch_id, b.id != batch_id, b.status == "committed")
+        .order_by(b.filename, b.id)
+    )
+    return [(row.id, row.filename) for row in found]
+
+
 async def get_batch(session: AsyncSession, batch_id: UUID) -> ImportBatchRecord:
     found = await _load_batches(session, models.ImportBatch.id == batch_id)
     if not found:
@@ -453,8 +471,8 @@ class _Row:
     dedupe_key: str | None = None
     error: str | None = None
     note: str | None = None
-    # A duplicate of a committed row (not of an earlier row of this file).
-    of_committed: bool = False
+    # The committed row this one duplicates.
+    duplicate_of: UUID | None = None
     # An error that still has a valid amount (counts in the balance chain).
     real_error: bool = False
 
@@ -536,15 +554,16 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
         occurrences[same] += 1
     keyed = [row for row in rows if row.dedupe_key is not None]
     r = models.ImportRow
-    committed = set(
-        await session.scalars(
-            select(r.dedupe_key).where(
+    committed: dict[str | None, UUID] = {
+        key: row_id
+        for key, row_id in await session.execute(
+            select(r.dedupe_key, r.id).where(
                 r.account_id == account_id,
                 r.status == "committed",
                 r.dedupe_key.in_([row.dedupe_key for row in keyed]),
             )
         )
-    )
+    }
     seen: set[str] = set()
     for row in keyed:
         assert row.dedupe_key is not None and row.parsed is not None
@@ -559,7 +578,7 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
                 "and balance"
             )
         elif row.dedupe_key in committed:
-            row.status, row.of_committed = "duplicate", True
+            row.status, row.duplicate_of = "duplicate", committed[row.dedupe_key]
         seen.add(row.dedupe_key)
 
 
@@ -590,9 +609,10 @@ async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: lis
     }
     if not days:
         return
-    available: dict[_DayKey, list[str]] = defaultdict(list)
-    for day, instrument_id, quantity, filename in await session.execute(
-        select(r.booking_date, r.instrument_id, r.quantity, b.filename)
+    # Each day's committed rows, as (row id, its file's name) by (day, instrument, quantity).
+    available: dict[_DayKey, list[tuple[UUID, str]]] = defaultdict(list)
+    for row_id, day, instrument_id, quantity, filename in await session.execute(
+        select(r.id, r.booking_date, r.instrument_id, r.quantity, b.filename)
         .join(b, b.id == r.batch_id)
         .where(
             r.account_id == account_id,
@@ -604,24 +624,25 @@ async def _match_covered_days(session: AsyncSession, account_id: UUID, rows: lis
     ):
         # Committed rows have all three (the table's CHECK).
         assert day is not None and instrument_id is not None and quantity is not None
-        available[(day, instrument_id, quantity)].append(filename)
+        available[(day, instrument_id, quantity)].append((row_id, filename))
 
     def key(row: _Row) -> _DayKey:
         assert row.parsed is not None and row.instrument_id is not None
         return row.parsed.booking_date, row.instrument_id, row.parsed.quantity
 
-    # A row whose key matched a committed row has already claimed it.
-    for row in rows:
-        if row.of_committed and row.parsed is not None and row.parsed.booking_date in days:
-            claimed = available.get(key(row))
-            if claimed:
-                claimed.pop(0)
+    # A row whose key matched a committed row has already claimed that row, wherever it is
+    # (an external id's match may be on another day).
+    claimed = {row.duplicate_of for row in rows if row.duplicate_of is not None}
+    for pool in available.values():
+        pool[:] = [entry for entry in pool if entry[0] not in claimed]
     for row in rows:
         if row.parsed is None or row.status != "new" or row.parsed.booking_date not in days:
             continue
         matches = available.get(key(row))
         if matches:
-            row.status, row.note = "duplicate", f"already imported from {matches.pop(0)}"
+            row_id, filename = matches.pop(0)
+            row.status, row.duplicate_of = "duplicate", row_id
+            row.note = f"already imported from {filename}"
         else:
             row.fail(OUTSIDE_COVERED_DAY, real=True)
 
@@ -720,6 +741,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "status": row.status,
         "instrument_id": row.instrument_id,
         "dedupe_key": row.dedupe_key,
+        "duplicate_of": row.duplicate_of,
         "error": row.error,
         "note": row.note,
         "raw": row.raw,

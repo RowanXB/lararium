@@ -46,7 +46,9 @@ UPGRADE = [
       CHECK ((covered_from IS NULL) = (covered_to IS NULL)),
       CHECK (covered_from <= covered_to),
       CHECK ((committed_at IS NOT NULL) = (status IN ('committed', 'rolled_back'))),
-      CHECK ((rolled_back_at IS NOT NULL) = (status = 'rolled_back'))
+      CHECK ((rolled_back_at IS NOT NULL) = (status = 'rolled_back')),
+      -- The target of import_rows' (batch_id, account_id) key.
+      UNIQUE (id, account_id)
     )
     """,
     "CREATE INDEX import_batches_account ON finance.import_batches (account_id, status)",
@@ -100,7 +102,8 @@ UPGRADE = [
     f"""
     CREATE TABLE finance.import_rows (
       id uuid PRIMARY KEY DEFAULT uuidv7(),
-      batch_id uuid NOT NULL REFERENCES finance.import_batches (id) ON DELETE CASCADE,
+      batch_id uuid NOT NULL,
+      -- Denormalised for import_rows_committed_once; the key below keeps it the batch's.
       account_id uuid NOT NULL REFERENCES finance.accounts (id),
       position integer NOT NULL,
       kind text NOT NULL DEFAULT 'statement' CHECK (kind IN ('statement', 'opening_adjustment')),
@@ -130,12 +133,17 @@ UPGRADE = [
       purpose_code text,
       remittance_info text,
       dedupe_key text,
+      -- The committed row this one duplicates (Decision 16), by key or by covered day.
+      duplicate_of uuid REFERENCES finance.import_rows (id),
       error text,
       note text,
       raw jsonb NOT NULL CHECK (jsonb_typeof(raw) = 'object'),
       transaction_id uuid REFERENCES finance.transactions (id),
+      FOREIGN KEY (batch_id, account_id)
+        REFERENCES finance.import_batches (id, account_id) ON DELETE CASCADE,
       UNIQUE (batch_id, position),
       CHECK ((status = 'error') = (error IS NOT NULL)),
+      CHECK (duplicate_of IS NULL OR status = 'duplicate'),
       CHECK (
         status NOT IN ('new', 'duplicate', 'committed', 'rolled_back')
         OR (
@@ -154,6 +162,11 @@ UPGRADE = [
     """
     CREATE UNIQUE INDEX import_rows_committed_once
       ON finance.import_rows (account_id, dedupe_key) WHERE status = 'committed'
+    """,
+    # Rollback looks up the rows that duplicate a batch's rows (Decision 16).
+    """
+    CREATE INDEX import_rows_duplicate_of
+      ON finance.import_rows (duplicate_of) WHERE duplicate_of IS NOT NULL
     """,
     # Covered days (Decision 16) look up an account's committed rows by day.
     """

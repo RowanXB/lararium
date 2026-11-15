@@ -33,6 +33,7 @@ from lararium.modules.finance.importing.profiles import (
 from lararium.modules.finance.importing.staging import (
     ImportBatchRecord,
     ImportRowRecord,
+    batches_relying_on,
     get_batch,
     list_batch_rows,
     list_batches,
@@ -562,6 +563,38 @@ async def test_covered_days_match_across_formats(
     assert _statuses(rows) == ["duplicate", "duplicate", "error", "duplicate", "new"]
     assert rows[0].note == "already imported from november.csv"
     assert rows[2].error is not None and "already imported from another file" in rows[2].error
+
+
+async def test_duplicate_of_records_the_committed_row(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    csv_profile: ImportProfileRecord,
+) -> None:
+    november = HEADER + "01/11/2026,Rent,-500.00\n20/11/2026,Cafe,-3.50\n"
+    first = await stage(csv_profile, november, filename="november.csv")
+    await commit(first.id)
+    committed = {row.booking_date: row.id for row in await _rows(session, first)}
+
+    # By key: the same file again.
+    again = await _rows(session, await stage(csv_profile, november))
+    assert [row.duplicate_of for row in again] == list(committed.values())
+
+    # By covered day: an OFX export of the same days, then committed, relies on the CSV.
+    ofx = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261120", "-3.50", "A"), ("20261203", "-9.99", "B")], start="20261120", end="20261205"
+    )
+    export = await stage(ofx, content, filename="export.ofx")
+    rows = await _rows(session, export)
+    assert _statuses(rows) == ["duplicate", "new"]
+    assert rows[0].duplicate_of == committed[date(2026, 11, 20)]
+    assert rows[1].duplicate_of is None
+    assert await batches_relying_on(session, first.id) == []  # staged, not committed
+    await commit(export.id)
+    assert await batches_relying_on(session, first.id) == [(export.id, "export.ofx")]
+    assert await batches_relying_on(session, export.id) == []
 
 
 async def test_bank_type_stored(
