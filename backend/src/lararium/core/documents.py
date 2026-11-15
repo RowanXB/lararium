@@ -45,7 +45,11 @@ class LocalDocumentStore(DocumentStore):
         path = self._path(sha256)
         if path.exists():
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Owner-only, whatever the umask lets through: the files are bank statements, and the
+        # directory names are their hashes. mkstemp already makes the files themselves 0600.
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.parent.mkdir(mode=0o700, exist_ok=True)
+        path.parent.mkdir(mode=0o700, exist_ok=True)
         # Written beside the target and renamed into place, so a reader never sees half a file.
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
         try:

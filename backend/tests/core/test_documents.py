@@ -1,4 +1,6 @@
+import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -90,3 +92,22 @@ async def test_backend_role_cannot_update_or_delete_documents(session, run, stor
         with pytest.raises(exc.ProgrammingError, match="permission denied"):
             async with session.begin_nested():
                 await session.execute(text(statement))
+
+
+def test_stored_files_and_their_directories_are_owner_only(tmp_path: Path) -> None:
+    """Documents are bank statements: the shard directories are 0700, the files 0600,
+    whatever the process umask."""
+    root = tmp_path / "documents"
+    store = LocalDocumentStore(root)
+    sha = "ab" + "0" * 62
+    previous = os.umask(0o022)
+    try:
+        store.put(sha, CONTENT)
+    finally:
+        os.umask(previous)
+
+    path = _path(root, sha)
+    assert path.read_bytes() == CONTENT
+    for directory in (root, path.parent.parent, path.parent):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
