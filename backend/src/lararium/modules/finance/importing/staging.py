@@ -1095,18 +1095,21 @@ async def _match_covered_days(
     """Decision 16: on a day this file or a committed batch covers, new rows are matched
     with that day's committed rows by (date, instrument, quantity) as a multiset. A new row
     left unmatched on a day a committed batch lists in full contradicts that file, so it is
-    an error; anywhere else it is new (one listing a day partly may lack it). The other
-    direction is _missing_committed_row's."""
+    an error; on a day a committed batch lists only in part it is new, with a note naming
+    that file for review (the file may lack it, or list it under another date or amount).
+    The other direction is _missing_committed_row's."""
     b, r = models.ImportBatch, models.ImportRow
     covers: list[_Range] = [own.covered]
     complete: list[_Range] = []
-    for covered_from, covered_to, complete_from, complete_to in await session.execute(
-        select(b.covered_from, b.covered_to, b.complete_from, b.complete_to).where(
-            b.account_id == account_id, b.status == "committed"
-        )
+    partly: list[tuple[_Range, str]] = []
+    for covered_from, covered_to, complete_from, complete_to, name in await session.execute(
+        select(b.covered_from, b.covered_to, b.complete_from, b.complete_to, b.filename)
+        .where(b.account_id == account_id, b.status == "committed")
+        .order_by(b.committed_at, b.id)
     ):
         covers.append((covered_from, covered_to))
         complete.append((complete_from, complete_to))
+        partly.append(((covered_from, covered_to), name))
 
     def within(day: date, ranges: list[_Range]) -> bool:
         return any(
@@ -1158,6 +1161,11 @@ async def _match_covered_days(
             row.note = f"already imported from {filename}"
         elif within(row.parsed.booking_date, complete):
             row.fail(OUTSIDE_COVERED_DAY, real=True)
+        else:
+            day = row.parsed.booking_date
+            names = [name for covered, name in partly if within(day, [covered])]
+            if names:
+                row.note = f"not in {names[0]}, which lists {day.isoformat()} only in part"
 
 
 async def _missing_committed_row(

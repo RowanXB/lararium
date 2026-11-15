@@ -499,7 +499,10 @@ async def test_export_taken_mid_day_then_rest_of_day_counted_once(
         csv_profile,
         HEADER + "05/11/2026,Bus,-2.00\n05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n",
     )
-    assert _statuses(await _rows(session, later)) == ["duplicate", "new", "new"]
+    rows = await _rows(session, later)
+    assert _statuses(rows) == ["duplicate", "new", "new"]
+    assert rows[1].note is not None and "lists 2026-11-05 only in part" in rows[1].note
+    assert rows[2].note is None
     await commit(later.id)
     assert await _balance(session, account.id) == Decimal("86.00")
 
