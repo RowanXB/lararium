@@ -67,6 +67,7 @@ from lararium.modules.finance.transfers import (
 from lararium.modules.finance.transfers.queries import OPEN_STATUSES
 from lararium.modules.finance.valuation import balances_asof, net_worth_series
 
+from .conftest import record_import_rows
 from .strategies import (
     FIRST_DAY,
     IDENTIFIERS,
@@ -82,6 +83,7 @@ from .strategies import (
     Record,
     Scenario,
     Transfer,
+    booking_date,
     by_day,
     describe,
     local,
@@ -268,6 +270,14 @@ class Ledger:
             ),
         )
         self.posted[record.key] = posted.id
+        # Its statement lists in full the days after the opening snapshot's (that day's
+        # rows before it are inside the snapshot) through the last day imported.
+        manual = self.scenario.by_name[record.movement.account]
+        assert manual.snapshot_at is not None and manual.imported_through is not None
+        complete = (booking_date(manual.snapshot_at) + timedelta(days=1), manual.imported_through)
+        await record_import_rows(
+            self.session, self.run, account, [posted.id], complete, keys=[record.key]
+        )
 
     async def arrive(self, item: Item) -> None:
         what, key = item
@@ -538,6 +548,8 @@ async def test_owner_decisions_survive_a_resync(
                 connection_id, external_id = ref.split(":", 1)
                 assert UUID(connection_id) in ledger.connections.values()
                 return external_id
+            if kind == "import":  # keyed by the row's dedupe key, here the record's key
+                return ref
             return ledger.key_of(UUID(ref))
 
         linked = {
@@ -593,24 +605,15 @@ def _scenario(
     )
 
 
-# Known caveat (design §5.8), accepted until M2 is wired in: when a manual account's own row
-# of a transfer is not in the ledger, an unrelated same-amount bank row inside the window is
-# taken as it, silently. Wiring M2 closes it with each import batch's date range; these
-# tests are strict, so that fix turns them into failures to un-mark.
-PENDING_M2_IMPORT_COVERAGE = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="known caveat until M2: an unrelated row stands in for a counterpart not in the ledger",
-)
-
-
-@PENDING_M2_IMPORT_COVERAGE
-async def test_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_snapshot(
+# Design §5.8's caveat "an unrelated row can stand in", closed by M2's import coverage:
+# a counterpart found by amount and date only, on days imports list in full.
+async def test_no_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_snapshot(
     connection: AsyncConnection,
 ) -> None:
     """Shrunk from P4: Bank 1 booked the receipt on Sunday, inside its opening snapshot of
-    Wednesday 09:00; a friend's 50 on Friday is linked to Monzo's payment instead, so the 50
-    sits in In transit from Monday to Thursday."""
+    Wednesday 09:00. A friend's 50 on Friday was once linked to Monzo's payment instead,
+    putting the 50 in In transit from Monday to Thursday: Monzo's window starts before the
+    days Bank 1's imports list in full, so it no longer is."""
     await _p4(
         connection,
         _scenario(
@@ -622,13 +625,13 @@ async def test_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_
     )
 
 
-@PENDING_M2_IMPORT_COVERAGE
-async def test_unrelated_receipt_stands_in_for_a_counterpart_after_the_last_import(
+async def test_no_unrelated_receipt_stands_in_for_a_counterpart_after_the_last_import(
     connection: AsyncConnection,
 ) -> None:
     """The same with Bank 1's own row (a BACS on Saturday) after the last day imported
-    (Thursday): the friend's 50 on Wednesday replaces the placeholder, so Bank 1 is
-    understated by 50 until the next statement is imported."""
+    (Thursday): the friend's 50 on Wednesday once replaced the placeholder, understating
+    Bank 1 by 50 until the next statement was imported. Monzo's window runs past that
+    day, so the placeholder stays."""
     await _p4(
         connection,
         _scenario(

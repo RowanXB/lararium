@@ -81,9 +81,13 @@ async def connected(run: Run) -> tuple[UUID, AccountRecord]:
 
 
 async def _pay(
-    session: AsyncSession, run: Run, gbp: InstrumentRecord, connected: tuple[UUID, AccountRecord]
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    connected: tuple[UUID, AccountRecord],
+    on: date = date(2026, 12, 10),
 ) -> None:
-    """A pays 100 on 10 Dec to the bank account M's statement names, then matching runs."""
+    """A pays 100 (on 10 Dec) to the bank account M's statement names, then matching runs."""
     connection_id, a = connected
     identifier = await run(
         get_or_create_identifier, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}"
@@ -98,7 +102,7 @@ async def _pay(
     await run(
         upsert_connector_transaction,
         TransactionInput(
-            occurred_at=datetime(2026, 12, 10, 12, tzinfo=UTC),
+            occurred_at=datetime(on.year, on.month, on.day, 12, tzinfo=UTC),
             description="To M",
             origin="connector",
             connection_id=connection_id,
@@ -206,3 +210,22 @@ async def test_the_owners_reject_follows_the_row_imported_again(
     assert again is not None and again != transfer.in_transaction_id
     assert await source_ref(session, again) == reference
     assert [t.status for t in await list_transfers(session)] == ["rejected"]
+
+
+async def test_a_row_on_a_day_not_listed_in_full_is_not_taken(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """Design §5.8: A's payment on 30 Dec may arrive on M up to 4 Jan, but an export's last
+    day (31 Dec) may be cut short and the days after aren't imported, so the 100 on 31 Dec
+    may be an unrelated receipt standing in for M's real row: not taken."""
+    await commit((await stage(profile, _lines(NOVEMBER))).id)
+    await _pay(session, run, gbp, connected, on=date(2026, 12, 30))
+    december = "01/12/2026,VIS,Shop,-2.00,497.00\n31/12/2026,CR,From A,100.00,597.00\n"
+    await commit((await stage(profile, _lines(december))).id)
+    assert await _status(session) == "inferred"

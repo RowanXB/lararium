@@ -26,6 +26,7 @@ from lararium.modules.finance.transfers import (
     transfer_contra,
 )
 from lararium.modules.finance.transfers.pairs import (
+    Known,
     Pairable,
     _Decisions,
     _registry_edges,
@@ -35,6 +36,7 @@ from lararium.modules.finance.transfers.settings import DEFAULTS
 
 from .conftest import (
     B_IDENTIFIER,
+    IMPORTED,
     assert_consistent,
     balances_on,
     net_worth_on,
@@ -53,6 +55,8 @@ def _at(day: date, hour: int = 0, minute: int = 0) -> datetime:
 
 UUID_GBP = uuid4()
 _NO_DECISIONS = _Decisions(frozenset(), frozenset(), ())
+# Every account's own rows known, as a connected account's are.
+_ALL_KNOWN = Known(frozenset(), {})
 
 
 def _record(at: datetime, quantity: str, *, identified: bool) -> Pairable:
@@ -73,7 +77,7 @@ def _record(at: datetime, quantity: str, *, identified: bool) -> Pairable:
 def _pairs(sender: Pairable, receiver: Pairable) -> bool:
     # The receiver names the sender's account; the sender names nobody (a statement row).
     receiver = replace(receiver, holder=sender.account_id)
-    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS)
+    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     return receiver.id in same.tiers.get(sender.id, {})
 
 
@@ -104,7 +108,7 @@ def test_bounds_are_dates_both_ways_round() -> None:
 
 
 @pytest.fixture
-def statement_row(session, run, gbp):
+def statement_row(session, run, gbp, record_import):
     """A row as an M2 statement import posts it: dated by its day alone (00:00), naming
     nobody, a bank transfer."""
 
@@ -117,7 +121,7 @@ def statement_row(session, run, gbp):
             other_postings=0,
         )
         amount = Decimal(quantity)
-        return await run(
+        row = await run(
             post_transaction,
             TransactionInput(
                 occurred_at=_at(day),
@@ -130,6 +134,8 @@ def statement_row(session, run, gbp):
                 counterparty=CounterpartyFields(bank_transfer=True),
             ),
         )
+        await record_import(account.id, [row.id])
+        return row
 
     return _post
 
@@ -196,6 +202,7 @@ async def test_preview_of_a_date_only_row_agrees_with_posting_it(
         occurred_at=_at(FRIDAY),
         booking_date=FRIDAY if give_booking_date else None,
         counterparty=CounterpartyFields(bank_transfer=True),
+        complete=IMPORTED,
     )
 
     assert previewed == received.id

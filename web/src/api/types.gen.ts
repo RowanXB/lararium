@@ -218,6 +218,8 @@ export type CandidateOut = {
     transaction_id: string;
 };
 
+export type CardTypes = Array<string>;
+
 /**
  * ConnectionOut
  */
@@ -361,6 +363,7 @@ export type CsvColumns = {
  */
 export type CsvProfileConfig = {
     amount_format?: AmountFormat;
+    card_types?: CardTypes;
     columns: CsvColumns;
     date_format: DateFormat;
     delimiter?: Delimiter;
@@ -1161,6 +1164,7 @@ export type NetWorthPointOut = {
  * OfxProfileConfig
  */
 export type OfxProfileConfig = {
+    card_types?: CardTypes;
     /**
      * Format
      */
@@ -1173,6 +1177,7 @@ export type OfxProfileConfig = {
  * PdfProfileConfig
  */
 export type PdfProfileConfig = {
+    card_types?: CardTypes;
     /**
      * Format
      */
@@ -1313,6 +1318,7 @@ export type ProfileConfig = ({
  */
 export type QifProfileConfig = {
     amount_format?: AmountFormat;
+    card_types?: CardTypes;
     date_format: DateFormat;
     encoding?: Encoding;
     /**

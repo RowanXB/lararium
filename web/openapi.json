@@ -436,6 +436,15 @@
         "title": "CandidateOut",
         "type": "object"
       },
+      "CardTypes": {
+        "items": {
+          "maxLength": 60,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 50,
+        "type": "array"
+      },
       "ConnectionOut": {
         "properties": {
           "connector": {
@@ -772,6 +781,9 @@
               "decimal_separator": ".",
               "thousands_separator": ""
             }
+          },
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
           },
           "columns": {
             "$ref": "#/components/schemas/CsvColumns"
@@ -2524,6 +2536,9 @@
       "OfxProfileConfig": {
         "additionalProperties": false,
         "properties": {
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
           "format": {
             "const": "ofx",
             "title": "Format",
@@ -2553,6 +2568,9 @@
       "PdfProfileConfig": {
         "additionalProperties": false,
         "properties": {
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
           "format": {
             "const": "pdf",
             "title": "Format",
@@ -2833,6 +2851,9 @@
               "decimal_separator": ".",
               "thousands_separator": ","
             }
+          },
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
           },
           "date_format": {
             "$ref": "#/components/schemas/DateFormat"

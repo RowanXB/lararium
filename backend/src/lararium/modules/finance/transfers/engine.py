@@ -727,6 +727,7 @@ async def preview_match(
     counterparty: CounterpartyFields,
     source: SourceRef | None = None,
     booking_date: date | None = None,
+    complete: tuple[date, date] | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -737,7 +738,9 @@ async def preview_match(
     `source`: the reference the row will have once posted (a re-imported row keeps its
     own), so the owner's decisions about it apply; None for a row with none yet.
     `booking_date`: the one the row will be posted with, if given; else it gets the one
-    posting would give it (ledger.resolve_booking_date), which the window is counted in."""
+    posting would give it (ledger.resolve_booking_date), which the window is counted in.
+    `complete`: the days the row's import lists in full, which committing it would add
+    (a counterpart found by amount and date is taken only on such days, design §5.8)."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
     holder = (
@@ -756,7 +759,8 @@ async def preview_match(
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
     )
-    relation = await pair_relation(session, system, settings, adding=[row])
+    listing = [] if complete is None else [(account_id, instrument_id, *complete)]
+    relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
     return relation.partner(row.id)
 
 

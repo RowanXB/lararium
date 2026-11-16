@@ -438,6 +438,20 @@ number, IBAN, BIC, customer number, branch), the arranged overdraft limit and it
 table. The account a file names must agree with the earlier imports into the same ledger
 account, or the upload is refused (the message shows only the last four digits).
 
+**Imports and transfers.** Committing a statement registers the sort code and account number it
+names to the account (as on Registering identifiers), and passes its rows through transfer
+matching: a row that is the other side of a transfer from a connected account replaces the
+transfer's placeholder instead of counting twice, and the Transfers page treats it like any
+other record. A row naming the other account is matched through the registry. A row naming no
+account, and not of a card type, is taken by amount and date only when the statement and
+earlier imports list every day of the transfer's window in full (an export without a stated
+period may cut its first and last day short): otherwise the real row may simply not have been
+imported yet, and an unrelated payment of the same amount must not stand in for it. The transfer
+then keeps its placeholder, and the row counts too, so the account is off by the amount until a
+statement lists those days. This mostly hits a transfer in the last days of a statement: import
+the next one and the two pair. Rolling back a batch unlinks its rows
+first, so the placeholders come back.
+
 ### Formats
 
 Under Import profiles, **Add from catalog** creates a ready profile for each bank format below;
@@ -465,7 +479,10 @@ since, in either order: rows on days an earlier import already covers are matche
 A profile is JSON, checked by the server when you save it. `format` is `csv`, `ofx`, `qif` or
 `pdf`; every format takes an optional `timezone` (an IANA name such as `Europe/London`; the
 default is Lararium's time zone), which turns dates into times without moving the date written
-in the file.
+in the file, and `card_types`: the bank's type codes for card payments, cash withdrawals and
+cheques (the catalog sets them, e.g. HSBC's `VIS` and `)))`, Lloyds' `DEB`; OFX defaults to
+`POS`, `ATM` and `CHECK`). A row of such a type is never taken as the other side of a transfer
+by amount and date (below).
 
 - **`csv`**: `columns` (below), `date_format` (a `strptime` format such as `%d/%m/%Y`; one with
   a time such as `%d %b, %Y %H:%M` keeps the time of day), `encoding` (`utf-8-sig`, the default,

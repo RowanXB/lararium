@@ -160,7 +160,7 @@ async def test_an_earlier_snapshot_reopens_what_it_no_longer_contains(
 
 
 async def test_a_later_real_record_replaces_the_settlement(
-    session, run, ids, gbp, opened, heal
+    session, run, ids, gbp, opened, record_import, heal
 ) -> None:
     _, b, records, *_ = opened
     sent = records["long_before"]
@@ -180,6 +180,9 @@ async def test_a_later_real_record_replaces_the_settlement(
             counterparty=CounterpartyFields(bank_transfer=True),
         ),
     )
+    # A statement from back then, imported later: it lists the days around the row in full.
+    day = sent.booking_date
+    await record_import(b.id, [row.id], (day - timedelta(days=10), day + timedelta(days=10)))
     await heal()
 
     transfer = _by_record(await list_transfers(session))[sent.id]
