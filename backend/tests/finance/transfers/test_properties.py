@@ -593,18 +593,18 @@ def _scenario(
     )
 
 
-# A design gap left to the owner (Scenario._stand_in): when a manual account's own row of a
-# transfer is not in the ledger, an unrelated same-amount bank receipt inside the window is
-# taken as it, silently. Strict, so the fix the owner chooses turns these into failures to
-# update.
-PENDING_OWNER_DECISION = pytest.mark.xfail(
+# Known caveat (design §5.8), accepted until M2 is wired in: when a manual account's own row
+# of a transfer is not in the ledger, an unrelated same-amount bank row inside the window is
+# taken as it, silently. Wiring M2 closes it with each import batch's date range; these
+# tests are strict, so that fix turns them into failures to un-mark.
+PENDING_M2_IMPORT_COVERAGE = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="design gap: an unrelated row stands in for a counterpart not in the ledger",
+    reason="known caveat until M2: an unrelated row stands in for a counterpart not in the ledger",
 )
 
 
-@PENDING_OWNER_DECISION
+@PENDING_M2_IMPORT_COVERAGE
 async def test_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_snapshot(
     connection: AsyncConnection,
 ) -> None:
@@ -622,7 +622,7 @@ async def test_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_
     )
 
 
-@PENDING_OWNER_DECISION
+@PENDING_M2_IMPORT_COVERAGE
 async def test_unrelated_receipt_stands_in_for_a_counterpart_after_the_last_import(
     connection: AsyncConnection,
 ) -> None:

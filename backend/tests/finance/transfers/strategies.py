@@ -237,11 +237,12 @@ class Scenario:
                 ):
                     found.append(f"snapshot_in_settlement_gap: transfer {t.index}")
                 if self._stand_in(t, manual_side, other_side) is not None:
-                    found.append(f"OWNER_DECISION_unrelated_row_stands_in: transfer {t.index}")
+                    found.append(f"CAVEAT_unrelated_row_stands_in: transfer {t.index}")
         return found
 
     def _stand_in(self, t: Transfer, manual_side: Movement, other_side: Movement) -> Record | None:
-        """NOT a documented caveat: a design gap left to the owner (props-report.md). The
+        """Known caveat "an unrelated row can stand in for a counterpart that is not in the
+        ledger" (design §5.8), accepted by the owner on 2026-11-16 until M2 is wired in. The
         manual side's own row is not in the ledger (it is inside the account's opening
         snapshot, or after the last statement imported), but another imported row of the
         same amount and direction, a bank transfer, is booked inside the window of the
