@@ -8,9 +8,11 @@ a local port. Files go into the container by copy, not a bind mount, since a rem
 can't see this machine's paths. Otherwise the local Docker is used as before, with the port
 on loopback; a daemon reached at any other address is refused.
 
-On the remote host nothing reaps containers if the test process dies without unwinding
-(SIGKILL, OOM, a dropped link). List and remove what is left with
-`docker --context <host> ps -a --filter label=org.testcontainers=true`.
+On the remote host nothing reaps containers if the test process ends without unwinding
+(SIGKILL, SIGTERM, a closed terminal, OOM, a dropped link), and the two ssh forwards, in their
+own session, may outlive it. List what is left with
+`docker -H ssh://<host> ps -a --filter label=org.testcontainers=true` and, when no other run is
+in progress, stop the forwards with `pkill -f 'ssh -N -o ControlMaster=no -o ControlPath=none'`.
 """
 
 import atexit
@@ -45,9 +47,10 @@ def _ssh_destination() -> list[str] | None:
     """The ssh arguments naming the Docker host, when the daemon testcontainers uses is ssh://."""
     if "DOCKER_CONTEXT" in os.environ and "DOCKER_HOST" not in os.environ:
         raise RuntimeError(
-            "DOCKER_CONTEXT is ignored here: testcontainers reads the docker context only from "
-            "config.json and writes that back into DOCKER_HOST. Use DOCKER_HOST=ssh://<host> "
-            "or `docker context use <context>` instead."
+            "DOCKER_CONTEXT is only partly honoured here: testcontainers resolves the docker "
+            "context from config.json, while docker-py may follow DOCKER_CONTEXT through its own "
+            "ssh transport, so the two could talk to different daemons. Use "
+            "DOCKER_HOST=ssh://<host> or `docker context use <context>` instead."
         )
     docker_host = get_docker_host() or ""
     if not docker_host.startswith("ssh://"):

@@ -31,11 +31,16 @@ make check
 DOCKER_HOST=ssh://<host> make check
 ```
 
-如果一次运行在清理之前就被杀掉（SIGKILL、内存耗尽、连接断开），它的容器会留在那台主机上。
-用下面的命令列出它们，再用 `docker rm -f` 删除：
+如果一次运行没来得及清理就结束了（SIGKILL、SIGTERM、关掉终端、内存耗尽、连接断开），它的容器
+会留在那台主机上，本机上它的两个 ssh 转发也可能还在运行。用下面的命令列出容器，再用
+`docker rm -f` 删除；确认没有别的测试在跑时，用 `pkill` 停掉转发：
 
 ```bash
-docker --context <host> ps -a --filter label=org.testcontainers=true
+docker -H ssh://<host> ps -a --filter label=org.testcontainers=true
+```
+
+```bash
+pkill -f 'ssh -N -o ControlMaster=no -o ControlPath=none'
 ```
 
 要运行应用，先启动一个开发数据库（角色由部署时用的同一个初始化脚本创建），执行迁移，

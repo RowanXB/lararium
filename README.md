@@ -34,11 +34,16 @@ loopback only:
 DOCKER_HOST=ssh://<host> make check
 ```
 
-If a run is killed before it can clean up (SIGKILL, out of memory, a dropped connection), its
-containers stay on that host. List them, then remove them with `docker rm -f`:
+If a run ends without cleaning up (SIGKILL, SIGTERM, a closed terminal, out of memory, a dropped
+connection), its containers stay on that host and its two ssh forwards may keep running here.
+List the containers, then remove them with `docker rm -f`. When no other test run is in progress, stop the forwards with `pkill`:
 
 ```bash
-docker --context <host> ps -a --filter label=org.testcontainers=true
+docker -H ssh://<host> ps -a --filter label=org.testcontainers=true
+```
+
+```bash
+pkill -f 'ssh -N -o ControlMaster=no -o ControlPath=none'
 ```
 
 To run the app, start a development database (roles are created by the same init script
