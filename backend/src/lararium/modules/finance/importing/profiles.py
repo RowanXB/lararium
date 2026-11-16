@@ -11,7 +11,15 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from psycopg.errors import UniqueViolation
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    model_validator,
+)
 from sqlalchemy import ColumnElement, Insert, Update, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,6 +92,21 @@ def _check_label(label: str) -> str:
 type FooterLabel = Annotated[str, AfterValidator(_check_label)]
 
 _CONFIG = ConfigDict(extra="forbid", frozen=True)
+
+
+# A bank's type codes for payments that are not between bank accounts: card, cash and
+# cheque payments (M4 transfer matching, design §5.4). Every other row, a row without a type
+# included, is a bank transfer: matching then only pairs it with a transfer whose other side
+# names this account, on days the account's imports list in full.
+type CardTypes = Annotated[
+    list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=60)]],
+    Field(max_length=50),
+]
+
+
+def is_bank_transfer(card_types: list[str], bank_type: str | None) -> bool:
+    """Whether a row with this type code is a payment between bank accounts."""
+    return bank_type is None or bank_type.strip() not in card_types
 
 
 class AmountFormat(BaseModel):
@@ -181,6 +204,7 @@ class CsvProfileConfig(BaseModel):
     row_order: Literal["oldest_first", "newest_first"] = "oldest_first"
     sign: Sign = "inflow_positive"
     amount_format: AmountFormat = AmountFormat()
+    card_types: CardTypes = Field(default_factory=list[str])
 
     @model_validator(mode="after")
     def _label_needs_footer(self) -> Self:
@@ -214,6 +238,8 @@ class OfxProfileConfig(BaseModel):
     format: Literal["ofx"]
     sign: Sign = "inflow_positive"
     timezone: TimezoneName | None = None
+    # OFX's own TRNTYPE codes for them.
+    card_types: CardTypes = Field(default_factory=lambda: ["POS", "ATM", "CHECK"])
 
 
 class QifProfileConfig(BaseModel):
@@ -226,6 +252,7 @@ class QifProfileConfig(BaseModel):
     amount_format: AmountFormat = AmountFormat(thousands_separator=",")
     sign: Sign = "inflow_positive"
     timezone: TimezoneName | None = None
+    card_types: CardTypes = Field(default_factory=list[str])
 
 
 class PdfProfileConfig(BaseModel):
@@ -234,6 +261,7 @@ class PdfProfileConfig(BaseModel):
     format: Literal["pdf"]
     layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]
     timezone: TimezoneName | None = None
+    card_types: CardTypes = Field(default_factory=list[str])
 
 
 type ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig

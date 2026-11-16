@@ -31,12 +31,15 @@ class CatalogEntry:
 
 _UK_DATE = "%d/%m/%Y"
 _GROUPED = AmountFormat(thousands_separator=",")
+# Card (Visa, contactless), cash machine and cheque codes, which are no bank transfers.
+_HSBC_CARD_TYPES = [")))", "VIS", "ATM", "CHQ"]
+_LLOYDS_CARD_TYPES = ["DEB", "CPT", "CHQ"]
 
 CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         "HSBC UK",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="hsbc_uk_statement"),
+        PdfProfileConfig(format="pdf", layout="hsbc_uk_statement", card_types=_HSBC_CARD_TYPES),
         recommended=True,
     ),
     CatalogEntry(
@@ -56,6 +59,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             skip_footer_rows=1,
             overdraft_footer_label="Arranged overdraft limit",
             amount_format=_GROUPED,
+            card_types=_HSBC_CARD_TYPES,
         ),
     ),
     CatalogEntry("HSBC UK", "OFX", OfxProfileConfig(format="ofx")),
@@ -90,11 +94,14 @@ CATALOG: tuple[CatalogEntry, ...] = (
             date_format=_UK_DATE,
             row_order="newest_first",
             amount_format=_GROUPED,
+            card_types=_LLOYDS_CARD_TYPES,
         ),
         recommended=True,
     ),
     CatalogEntry(
-        "Lloyds", "PDF statement", PdfProfileConfig(format="pdf", layout="lloyds_statement")
+        "Lloyds",
+        "PDF statement",
+        PdfProfileConfig(format="pdf", layout="lloyds_statement", card_types=_LLOYDS_CARD_TYPES),
     ),
     CatalogEntry("Lloyds", "QIF", QifProfileConfig(format="qif", date_format=_UK_DATE)),
     CatalogEntry(

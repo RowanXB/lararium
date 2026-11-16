@@ -168,6 +168,16 @@ UPGRADE = [
       CHECK ((status IN ('committed', 'rolled_back')) = (transaction_id IS NOT NULL))
     )
     """,
+    # M4's matching reads a transaction's import row (its source reference, transfers.contra)
+    # and finds the live one by key.
+    """
+    CREATE INDEX import_rows_transaction
+      ON finance.import_rows (transaction_id) WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX import_rows_committed_key
+      ON finance.import_rows (dedupe_key) WHERE status = 'committed'
+    """,
     # The database backstop for Decision 5: a key is committed at most once per account.
     """
     CREATE UNIQUE INDEX import_rows_committed_once
