@@ -43,9 +43,6 @@ UPGRADE = [
       complete_from date,
       complete_to date,
       owner_entity_id uuid NOT NULL REFERENCES core.entities (id),
-      -- The statement's own bank account, when this batch's commit registered it to the
-      -- account (M4): a rollback takes it off again unless another import still names it.
-      registered_identifier_id uuid REFERENCES finance.account_identifiers (id),
       created_at timestamptz NOT NULL DEFAULT now(),
       committed_at timestamptz,
       rolled_back_at timestamptz,

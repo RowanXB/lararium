@@ -452,7 +452,8 @@ too, so the account is off by the amount until the next statement extends the sp
 a transfer in the last days of the latest statement, and the two pair once the next one is
 imported. Leave no statement out between imports, as nothing here notices a missing one.
 Rolling back a batch unlinks its rows first, so the placeholders come back, and takes off the
-account registration it made, unless another import into the account still names it.
+account's registration of that bank account, unless another import into the account still
+names it (the next import naming it registers it again).
 
 ### Formats
 

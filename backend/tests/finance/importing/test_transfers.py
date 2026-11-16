@@ -14,11 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
-from lararium.modules.finance.identifiers import (
-    assign_identifier,
-    get_or_create_identifier,
-    list_identifiers,
-)
+from lararium.modules.finance.identifiers import get_or_create_identifier, list_identifiers
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import (
@@ -295,9 +291,8 @@ async def test_rolling_back_takes_the_registration_it_made_off_again(
     assert account.id != other.id
 
 
-async def test_rolling_back_keeps_a_registration_another_import_or_the_owner_made(
+async def test_rolling_back_keeps_a_registration_another_import_shows(
     session: AsyncSession,
-    run: Run,
     stage: Stage,
     commit: Commit,
     rollback: Rollback,
@@ -312,10 +307,3 @@ async def test_rolling_back_keeps_a_registration_another_import_or_the_owner_mad
     await rollback(second.id)
     [identifier] = await list_identifiers(session)
     assert identifier.account_id is None
-
-    # Registered by the owner first, it stays through an import's commit and rollback.
-    await run(assign_identifier, account.id, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}")
-    third = await commit((await stage(profile, _lines(NOVEMBER))).id)
-    await rollback(third.id)
-    [identifier] = await list_identifiers(session)
-    assert identifier.account_id == account.id

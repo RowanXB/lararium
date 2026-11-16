@@ -10,7 +10,7 @@ what the commit or the rollback changed.
 from decimal import MAX_PREC, Decimal, localcontext
 from uuid import UUID
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -150,26 +150,16 @@ async def _own_account(session: AsyncSession, batch_id: UUID) -> str | None:
 async def _register_own_account(ctx: CommandContext, batch_id: UUID, account_id: UUID) -> None:
     """The bank account the statement says it is for, registered to the account it was
     imported into, as a connector registers its own accounts (M4, design §5.3): transfers
-    naming it are then recognised. One registered already stays where it is. The batch
-    keeps the registration it made, so that rolling it back can undo it."""
+    naming it are then recognised. One registered already stays where it is."""
     value = await _own_account(ctx.session, batch_id)
-    if value is None or not await ensure_identifier(ctx, account_id, "uk_bank_account", value):
-        return
-    b = models.ImportBatch
-    await ctx.session.execute(
-        update(b)
-        .where(b.id == batch_id)
-        .values(
-            registered_identifier_id=await get_or_create_identifier(ctx, "uk_bank_account", value)
-        )
-    )
+    if value is not None:
+        await ensure_identifier(ctx, account_id, "uk_bank_account", value)
 
 
 async def _unregister_own_account(ctx: CommandContext, batch_id: UUID, account_id: UUID) -> None:
-    """Undo the registration an import made once no committed import of the account names
-    that bank account any more: the import was the only evidence for it (a statement
-    imported into the wrong account, say), so it mustn't outlive it. The owner's own
-    registration, which no import made, stays."""
+    """The registration follows the statements that show it: once no committed import of
+    the account names that bank account (a statement imported into the wrong account,
+    rolled back), it comes off, and the next import naming it registers it again."""
     value = await _own_account(ctx.session, batch_id)
     if value is None:
         return
@@ -181,24 +171,11 @@ async def _unregister_own_account(ctx: CommandContext, batch_id: UUID, account_i
     )
     if identifier_id is None:
         return
-    made_by_an_import = await ctx.session.scalar(
-        select(
-            exists().where(b.account_id == account_id, b.registered_identifier_id == identifier_id)
-        )
-    )
     others = await ctx.session.scalars(
         select(b.id).where(b.account_id == account_id, b.status == "committed", b.id != batch_id)
     )
-    still_named = [other for other in others if await _own_account(ctx.session, other) == value]
-    if made_by_an_import and not still_named:
+    if all([await _own_account(ctx.session, other) != value for other in others]):
         await unassign_identifier_and_rematch(ctx, identifier_id)
-        # Undone, the registration is no import's any more: one the owner makes later is
-        # theirs, and stays when an import is rolled back.
-        await ctx.session.execute(
-            update(b)
-            .where(b.account_id == account_id, b.registered_identifier_id == identifier_id)
-            .values(registered_identifier_id=None)
-        )
 
 
 async def _counterparty(
