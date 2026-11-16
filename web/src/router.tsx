@@ -8,10 +8,12 @@ import { ImportsPage } from "./pages/ImportsPage";
 import { InstrumentsPage } from "./pages/InstrumentsPage";
 import { NetWorthPage } from "./pages/NetWorthPage";
 import { PricesPage } from "./pages/PricesPage";
+import { TransfersPage } from "./pages/TransfersPage";
 
 const NAV = [
   { to: "/", label: "Net worth" },
   { to: "/accounts", label: "Accounts" },
+  { to: "/transfers", label: "Transfers" },
   { to: "/instruments", label: "Instruments" },
   { to: "/prices", label: "Prices" },
   { to: "/imports", label: "Imports" },
@@ -23,7 +25,7 @@ function Layout() {
   return (
     <div className="min-h-screen">
       <header className="border-b">
-        <nav className="mx-auto flex max-w-5xl items-center gap-6 px-4 py-3">
+        <nav className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
           <span className="font-semibold">Lararium</span>
           {NAV.map((item) => (
             <Link
@@ -59,6 +61,7 @@ const importBatchRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: NetWorthPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/transfers", component: TransfersPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/instruments", component: InstrumentsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/prices", component: PricesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/imports", component: ImportsPage }),

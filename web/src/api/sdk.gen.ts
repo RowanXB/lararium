@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
+import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -87,6 +87,20 @@ export const renameAccount = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
+ * Set Account Balance Mode
+ *
+ * Switch a snapshots account to hybrid, so it can carry identifiers.
+ */
+export const setAccountBalanceMode = <ThrowOnError extends boolean = false>(options: Options<SetAccountBalanceModeData, ThrowOnError>): RequestResult<SetAccountBalanceModeResponses, SetAccountBalanceModeErrors, ThrowOnError> => (options.client ?? client).post<SetAccountBalanceModeResponses, SetAccountBalanceModeErrors, ThrowOnError>({
+    url: '/api/v1/finance/accounts/{account_id}/balance-mode',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Close Account
  */
 export const closeAccount = <ThrowOnError extends boolean = false>(options: Options<CloseAccountData, ThrowOnError>): RequestResult<CloseAccountResponses, CloseAccountErrors, ThrowOnError> => (options.client ?? client).post<CloseAccountResponses, CloseAccountErrors, ThrowOnError>({
@@ -97,6 +111,34 @@ export const closeAccount = <ThrowOnError extends boolean = false>(options: Opti
         ...options.headers
     }
 });
+
+/**
+ * List Account Identifiers
+ */
+export const listAccountIdentifiers = <ThrowOnError extends boolean = false>(options: Options<ListAccountIdentifiersData, ThrowOnError>): RequestResult<ListAccountIdentifiersResponses, ListAccountIdentifiersErrors, ThrowOnError> => (options.client ?? client).get<ListAccountIdentifiersResponses, ListAccountIdentifiersErrors, ThrowOnError>({ url: '/api/v1/finance/accounts/{account_id}/identifiers', ...options });
+
+/**
+ * Add Account Identifier
+ *
+ * Register one of the account's identifiers (a suggestion, too): every record naming
+ * it is matched again.
+ */
+export const addAccountIdentifier = <ThrowOnError extends boolean = false>(options: Options<AddAccountIdentifierData, ThrowOnError>): RequestResult<AddAccountIdentifierResponses, AddAccountIdentifierErrors, ThrowOnError> => (options.client ?? client).post<AddAccountIdentifierResponses, AddAccountIdentifierErrors, ThrowOnError>({
+    url: '/api/v1/finance/accounts/{account_id}/identifiers',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Remove Account Identifier
+ *
+ * Take the identifier off the account; the registry row stays, as transactions name
+ * it, and the records naming it are matched again.
+ */
+export const removeAccountIdentifier = <ThrowOnError extends boolean = false>(options: Options<RemoveAccountIdentifierData, ThrowOnError>): RequestResult<RemoveAccountIdentifierResponses, RemoveAccountIdentifierErrors, ThrowOnError> => (options.client ?? client).delete<RemoveAccountIdentifierResponses, RemoveAccountIdentifierErrors, ThrowOnError>({ url: '/api/v1/finance/accounts/{account_id}/identifiers/{identifier_id}', ...options });
 
 /**
  * Record Snapshot
@@ -284,8 +326,78 @@ export const postTransaction = <ThrowOnError extends boolean = false>(options: O
 
 /**
  * Void Transaction
+ *
+ * Void the transaction; a transfer it was a side of follows (heal).
  */
 export const voidTransaction = <ThrowOnError extends boolean = false>(options: Options<VoidTransactionData, ThrowOnError>): RequestResult<VoidTransactionResponses, VoidTransactionErrors, ThrowOnError> => (options.client ?? client).post<VoidTransactionResponses, VoidTransactionErrors, ThrowOnError>({ url: '/api/v1/finance/transactions/{transaction_id}/void', ...options });
+
+/**
+ * List Transfer Suggestions
+ *
+ * Bank accounts that own records name and that are neither registered nor dismissed,
+ * most named first. Registering one is add_account_identifier.
+ */
+export const listTransferSuggestions = <ThrowOnError extends boolean = false>(options?: Options<ListTransferSuggestionsData, ThrowOnError>): RequestResult<ListTransferSuggestionsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<ListTransferSuggestionsResponses, unknown, ThrowOnError>({ url: '/api/v1/finance/transfer-suggestions', ...options });
+
+/**
+ * Dismiss Transfer Suggestion
+ *
+ * The owner says the bank account is not one of theirs.
+ */
+export const dismissTransferSuggestion = <ThrowOnError extends boolean = false>(options: Options<DismissTransferSuggestionData, ThrowOnError>): RequestResult<DismissTransferSuggestionResponses, DismissTransferSuggestionErrors, ThrowOnError> => (options.client ?? client).post<DismissTransferSuggestionResponses, DismissTransferSuggestionErrors, ThrowOnError>({ url: '/api/v1/finance/transfer-suggestions/{identifier_id}/dismiss', ...options });
+
+/**
+ * List Transfers
+ *
+ * Transfers, newest first; only those of the given statuses when any are given.
+ */
+export const listTransfers = <ThrowOnError extends boolean = false>(options?: Options<ListTransfersData, ThrowOnError>): RequestResult<ListTransfersResponses, ListTransfersErrors, ThrowOnError> => (options?.client ?? client).get<ListTransfersResponses, ListTransfersErrors, ThrowOnError>({ url: '/api/v1/finance/transfers', ...options });
+
+/**
+ * List Transfer Candidates
+ *
+ * The own records that could be the transfer's missing side: those of the same amount
+ * first, then those of another, then those the owner unpaired from it (which pair can
+ * link again); empty for a transfer with both sides.
+ */
+export const listTransferCandidates = <ThrowOnError extends boolean = false>(options: Options<ListTransferCandidatesData, ThrowOnError>): RequestResult<ListTransferCandidatesResponses, ListTransferCandidatesErrors, ThrowOnError> => (options.client ?? client).get<ListTransferCandidatesResponses, ListTransferCandidatesErrors, ThrowOnError>({ url: '/api/v1/finance/transfers/{transfer_id}/candidates', ...options });
+
+/**
+ * Pair Transfer
+ *
+ * The owner picks the transfer's missing side among its candidates of the same amount,
+ * or one they unpaired from it.
+ */
+export const pairTransfer = <ThrowOnError extends boolean = false>(options: Options<PairTransferData, ThrowOnError>): RequestResult<PairTransferResponses, PairTransferErrors, ThrowOnError> => (options.client ?? client).post<PairTransferResponses, PairTransferErrors, ThrowOnError>({
+    url: '/api/v1/finance/transfers/{transfer_id}/pair',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Reject Transfer
+ *
+ * The owner says it is not a transfer: its records go back to Unassigned.
+ */
+export const rejectTransfer = <ThrowOnError extends boolean = false>(options: Options<RejectTransferData, ThrowOnError>): RequestResult<RejectTransferResponses, RejectTransferErrors, ThrowOnError> => (options.client ?? client).post<RejectTransferResponses, RejectTransferErrors, ThrowOnError>({ url: '/api/v1/finance/transfers/{transfer_id}/reject', ...options });
+
+/**
+ * Unpair Transfer
+ *
+ * The owner says the matched transfer's two records are not one transfer; each is
+ * matched again, never with the other.
+ */
+export const unpairTransfer = <ThrowOnError extends boolean = false>(options: Options<UnpairTransferData, ThrowOnError>): RequestResult<UnpairTransferResponses, UnpairTransferErrors, ThrowOnError> => (options.client ?? client).post<UnpairTransferResponses, UnpairTransferErrors, ThrowOnError>({ url: '/api/v1/finance/transfers/{transfer_id}/unpair', ...options });
+
+/**
+ * Unreject Transfer
+ *
+ * Withdraw a rejection; its records are matched again (under a new transfer id).
+ */
+export const unrejectTransfer = <ThrowOnError extends boolean = false>(options: Options<UnrejectTransferData, ThrowOnError>): RequestResult<UnrejectTransferResponses, UnrejectTransferErrors, ThrowOnError> => (options.client ?? client).post<UnrejectTransferResponses, UnrejectTransferErrors, ThrowOnError>({ url: '/api/v1/finance/transfers/{transfer_id}/unreject', ...options });
 
 /**
  * Health

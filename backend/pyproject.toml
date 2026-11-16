@@ -30,6 +30,7 @@ dev = [
     "pyright",
     "import-linter",
     "reportlab>=5.1.0",
+    "hypothesis>=6.170.15",
 ]
 
 [build-system]

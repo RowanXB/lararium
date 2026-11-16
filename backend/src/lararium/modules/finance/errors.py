@@ -52,6 +52,18 @@ class AccountNotFoundError(FinanceError):
     template = "no account has the id {}"
 
 
+class DuplicateAccountIdentifierError(FinanceError):
+    """An account identifier (kind, value) already belongs to an account, given by name."""
+
+    template = "this identifier already belongs to the account {}"
+
+
+class AccountIdentifierNotFoundError(FinanceError):
+    """No account identifier has the given id."""
+
+    template = "no account identifier has the id {}"
+
+
 class AccountAlreadyClosedError(FinanceError):
     """The account is already closed."""
 
@@ -125,6 +137,17 @@ class FileFormatError(FinanceError):
 
     Raised with the whole message, which says what is wrong with the file.
     """
+
+
+class TransferNotFoundError(FinanceError):
+    """No transfer has the given id."""
+
+    template = "no transfer has the id {}"
+
+
+class TransferSettingsError(FinanceError, ValueError):
+    """The setting finance.transfers is malformed, so transfers can't be matched until the
+    owner fixes it. Raised with the whole message, which says what is wrong."""
 
 
 class LedgerImbalanceError(FinanceError):

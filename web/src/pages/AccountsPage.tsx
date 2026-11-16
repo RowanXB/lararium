@@ -4,12 +4,16 @@ import { type FormEvent, useId, useState } from "react";
 import {
   type AccountCreate,
   type AccountOut,
+  addAccountIdentifier,
   createAccount,
   getFinanceSettings,
   type InstrumentOut,
+  listAccountIdentifiers,
   listAccounts,
   listInstruments,
   recordSnapshot,
+  removeAccountIdentifier,
+  setAccountBalanceMode,
   type SnapshotCreate,
 } from "../api";
 import { LabelledSelect } from "../components/LabelledSelect";
@@ -19,7 +23,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { errorMessage } from "../lib/errors";
-import { isDecimalString, negateDecimalString } from "../lib/format";
+import { formatSortCode, isDecimalString, negateDecimalString } from "../lib/format";
+import { refreshAfterTransferWrite } from "../lib/refresh";
 
 const LEDGER_TYPES: { value: AccountCreate["ledger_type"]; label: string }[] = [
   { value: "asset", label: "Asset" },
@@ -243,6 +248,138 @@ function SnapshotForm({
   );
 }
 
+function IdentifierList({ account }: { account: AccountOut }) {
+  const queryClient = useQueryClient();
+  const [sortCode, setSortCode] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const identifiers = useQuery({
+    queryKey: ["account-identifiers", account.id],
+    queryFn: async () =>
+      (await listAccountIdentifiers({ path: { account_id: account.id }, throwOnError: true }))
+        .data,
+  });
+  const add = useMutation({
+    mutationFn: async (value: string) =>
+      addAccountIdentifier({
+        path: { account_id: account.id },
+        body: { kind: "uk_bank_account", value },
+        throwOnError: true,
+      }),
+    onSuccess: () => {
+      setSortCode("");
+      setAccountNumber("");
+    },
+    onSettled: () => refreshAfterTransferWrite(queryClient),
+  });
+  const remove = useMutation({
+    mutationFn: async (identifierId: string) =>
+      removeAccountIdentifier({
+        path: { account_id: account.id, identifier_id: identifierId },
+        throwOnError: true,
+      }),
+    onSettled: () => refreshAfterTransferWrite(queryClient),
+  });
+  const error = add.error ?? remove.error ?? identifiers.error;
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    // The API accepts either part with spaces or dashes and checks the digits.
+    add.mutate(`${sortCode.trim()}:${accountNumber.trim()}`);
+  }
+
+  return (
+    <div className="space-y-3">
+      {identifiers.data?.length === 0 && (
+        <p className="text-sm text-muted-foreground">No identifiers yet</p>
+      )}
+      <ul className="space-y-2">
+        {identifiers.data?.map((identifier) => (
+          <li key={identifier.id} className="flex flex-wrap items-center gap-3 text-sm">
+            <span>{`${formatSortCode(identifier.sort_code)} · ${identifier.account_number}`}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate(identifier.id)}
+            >
+              Remove
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <form
+        aria-label={`New identifier for ${account.name}`}
+        onSubmit={submit}
+        className="flex flex-wrap items-end gap-3"
+      >
+        <TextField label="Sort code" value={sortCode} onChange={setSortCode} required />
+        <TextField
+          label="Account number"
+          value={accountNumber}
+          onChange={setAccountNumber}
+          required
+        />
+        <Button type="submit" disabled={add.isPending}>
+          Add identifier
+        </Button>
+      </form>
+      {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
+    </div>
+  );
+}
+
+function HybridSwitch({ account }: { account: AccountOut }) {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: async () =>
+      setAccountBalanceMode({
+        path: { account_id: account.id },
+        body: { balance_mode: "hybrid" },
+        throwOnError: true,
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <p className="text-sm text-muted-foreground">Switch to hybrid to register identifiers</p>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={mutation.isPending}
+        onClick={() => mutation.mutate()}
+      >
+        Switch to hybrid
+      </Button>
+      {mutation.isError && (
+        <p className="text-sm text-destructive">{errorMessage(mutation.error)}</p>
+      )}
+    </div>
+  );
+}
+
+function Identifiers({ account }: { account: AccountOut }) {
+  // Fetched only once opened, so the page doesn't make a request per account.
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      aria-label={`Identifiers of ${account.name}`}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer text-sm font-medium">Identifiers</summary>
+      {open && (
+        <div className="mt-3">
+          {/* A snapshots-only account ignores postings, so the API refuses its identifiers. */}
+          {account.balance_mode === "snapshots" ? (
+            <HybridSwitch account={account} />
+          ) : (
+            <IdentifierList account={account} />
+          )}
+        </div>
+      )}
+    </details>
+  );
+}
+
 export function AccountsPage() {
   const accounts = useQuery({
     queryKey: ["accounts"],
@@ -304,6 +441,9 @@ export function AccountsPage() {
                     defaultInstrumentId={defaultInstrumentId}
                   />
                 )}
+                {/* The ledger's own accounts (In transit) can't have identifiers. */}
+                {(account.ledger_type === "asset" || account.ledger_type === "liability") &&
+                  !account.system && <Identifiers account={account} />}
               </li>
             ))}
           </ul>

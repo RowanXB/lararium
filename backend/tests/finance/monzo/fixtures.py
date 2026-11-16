@@ -14,6 +14,9 @@ def make_account(**overrides: Any) -> dict[str, Any]:
         "type": "uk_retail",
         "currency": "GBP",
         "country_code": "GB",
+        # Synthetic bank details.
+        "sort_code": "998877",
+        "account_number": "87654321",
         "owners": [{"user_id": "user_TEST1", "preferred_name": "Test Owner"}],
         "product_type": "standard",
         "owner_type": "personal",

@@ -65,6 +65,22 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AccountIdentifier(Base):
+    __tablename__ = "account_identifiers"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    kind: Mapped[str] = mapped_column(Text)
+    value: Mapped[str] = mapped_column(Text)
+    # One of the owner's accounts; NULL for a counterparty's (or not yet known) bank account.
+    account_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.accounts.id"))
+    # When the owner said it is not theirs; only on an unassigned row.
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The actor type that registered it (the owner's "user", or a "connector").
+    created_by: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = FINANCE_SCHEMA
@@ -83,6 +99,14 @@ class Transaction(Base):
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     connection_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.connections.id"))
     external_id: Mapped[str | None] = mapped_column(Text)
+    # What the source says about the other side: its bank account (a registry row), name and
+    # payment reference, and whether it marks this as a payment between bank accounts.
+    counterparty_identifier_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.account_identifiers.id")
+    )
+    counterparty_name: Mapped[str | None] = mapped_column(Text)
+    payment_reference: Mapped[str | None] = mapped_column(Text)
+    bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(
@@ -337,3 +361,49 @@ class ImportRow(Base):
     note: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, str]] = mapped_column(JSONB)
     transaction_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.transactions.id"))
+
+
+class Transfer(Base):
+    __tablename__ = "transfers"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    from_account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    to_account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # positive, as sent
+    status: Mapped[str] = mapped_column(Text)
+    # Why the rule could not decide ("needs review"); NULL when it could.
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    # The legs; no cascade, so a linked transaction can't be deleted until it is unlinked.
+    out_transaction_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.transactions.id"))
+    in_transaction_id: Mapped[UUID | None] = mapped_column(ForeignKey("finance.transactions.id"))
+    placeholder_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id")
+    )
+    settlement_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id")
+    )
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TransferDecision(Base):
+    __tablename__ = "transfer_decisions"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    kind: Mapped[str] = mapped_column(Text)  # reject | never_pair | pair
+    # The source reference of the transaction it concerns (see transfers.contra.source_ref).
+    subject_kind: Mapped[str] = mapped_column(Text)
+    subject_ref: Mapped[str] = mapped_column(Text)
+    # The other transaction, for never_pair and pair; NULL for reject.
+    other_kind: Mapped[str | None] = mapped_column(Text)
+    other_ref: Mapped[str | None] = mapped_column(Text)
+    # The rejected transfer a reject was made on; NULL for the other kinds.
+    transfer_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transfers.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

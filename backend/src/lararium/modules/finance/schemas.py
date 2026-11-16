@@ -3,7 +3,7 @@
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -26,12 +26,14 @@ from lararium.modules.finance.accounts import (
     SourceKind,
     TaxWrapper,
 )
+from lararium.modules.finance.identifiers import IdentifierKind
 from lararium.modules.finance.importing.profiles import ProfileConfig
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.snapshots import SnapshotKind
+from lararium.modules.finance.transfers import ReviewReason, TransferStatus
 from lararium.modules.finance.valuation import HoldingStatus
 
 # ASCII digits only (\d matches any script's digits), at most 40 on each side of the point:
@@ -139,6 +141,8 @@ class AccountOut(_Out):
     status: AccountStatus
     opened_on: date | None
     closed_on: date | None
+    # One the ledger keeps for itself (Unassigned, Opening balances, In transit).
+    system: bool
 
 
 class SnapshotCreate(BaseModel):
@@ -384,3 +388,76 @@ class ImportRowOut(_Out):
 
 class ImportBatchDetailOut(ImportBatchOut):
     rows: list[ImportRowOut]
+
+
+# Transfers between own accounts, and the registry of the owner's account identifiers
+
+
+class IdentifierCreate(BaseModel):
+    kind: IdentifierKind
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+
+
+class IdentifierOut(BaseModel):
+    id: UUID
+    kind: IdentifierKind
+    value: str  # as stored: "<sort code>:<account number>"
+    sort_code: str
+    account_number: str
+    account_id: UUID | None
+    dismissed_at: AwareDatetime | None
+    created_by: str
+    created_at: AwareDatetime
+
+
+class BalanceModeUpdate(BaseModel):
+    balance_mode: BalanceMode
+
+
+class TransferOut(BaseModel):
+    """A transfer as matching left it. Its id changes when matching reopens it, so a client
+    finds it again by its own records' ids."""
+
+    id: UUID
+    from_account_id: UUID
+    from_account_name: str
+    to_account_id: UUID
+    to_account_name: str
+    instrument_id: UUID
+    amount: DecimalStr  # positive, as sent
+    currency: str  # the instrument's symbol
+    status: TransferStatus
+    review_reason: ReviewReason | None
+    opened_at: AwareDatetime
+    matched_at: AwareDatetime | None
+    # Whole days since it was opened, in the owner's timezone; only for awaiting ones.
+    days_in_transit: int | None
+    overdue: bool
+    out_transaction_id: UUID | None
+    in_transaction_id: UUID | None
+    placeholder_transaction_id: UUID | None
+
+
+class CandidateOut(BaseModel):
+    transaction_id: UUID
+    account_id: UUID
+    account_name: str
+    quantity: DecimalStr  # signed, as posted on the account
+    occurred_at: AwareDatetime
+    description: str
+    reason: Literal["exact", "amount_differs", "unpaired"]
+
+
+class TransferPair(BaseModel):
+    # One of the transfer's candidates of the same amount, or one unpaired from it.
+    transaction_id: UUID
+
+
+class SuggestionOut(_Out):
+    identifier_id: UUID
+    sort_code: str
+    account_number: str
+    names: list[str]
+    outgoing: int
+    incoming: int
+    latest: date

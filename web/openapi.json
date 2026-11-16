@@ -238,6 +238,10 @@
             "title": "Subtype",
             "type": "string"
           },
+          "system": {
+            "title": "System",
+            "type": "boolean"
+          },
           "tax_wrapper": {
             "enum": [
               "none",
@@ -264,7 +268,8 @@
           "source_connection_id",
           "status",
           "opened_on",
-          "closed_on"
+          "closed_on",
+          "system"
         ],
         "title": "AccountOut",
         "type": "object"
@@ -323,6 +328,24 @@
         "title": "AuthorizeOut",
         "type": "object"
       },
+      "BalanceModeUpdate": {
+        "properties": {
+          "balance_mode": {
+            "enum": [
+              "transactions",
+              "snapshots",
+              "hybrid"
+            ],
+            "title": "Balance Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "balance_mode"
+        ],
+        "title": "BalanceModeUpdate",
+        "type": "object"
+      },
       "Body_stage_import": {
         "properties": {
           "account_id": {
@@ -359,6 +382,58 @@
           "file"
         ],
         "title": "Body_stage_import",
+        "type": "object"
+      },
+      "CandidateOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "exact",
+              "amount_differs",
+              "unpaired"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "account_name",
+          "quantity",
+          "occurred_at",
+          "description",
+          "reason"
+        ],
+        "title": "CandidateOut",
         "type": "object"
       },
       "ConnectionOut": {
@@ -997,6 +1072,97 @@
           "status"
         ],
         "title": "HoldingOut",
+        "type": "object"
+      },
+      "IdentifierCreate": {
+        "properties": {
+          "kind": {
+            "const": "uk_bank_account",
+            "title": "Kind",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value"
+        ],
+        "title": "IdentifierCreate",
+        "type": "object"
+      },
+      "IdentifierOut": {
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "account_number": {
+            "title": "Account Number",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "dismissed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dismissed At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "uk_bank_account",
+            "title": "Kind",
+            "type": "string"
+          },
+          "sort_code": {
+            "title": "Sort Code",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "value",
+          "sort_code",
+          "account_number",
+          "account_id",
+          "dismissed_at",
+          "created_by",
+          "created_at"
+        ],
+        "title": "IdentifierOut",
         "type": "object"
       },
       "ImportBatchDetailOut": {
@@ -2814,6 +2980,54 @@
         "title": "SnapshotOut",
         "type": "object"
       },
+      "SuggestionOut": {
+        "properties": {
+          "account_number": {
+            "title": "Account Number",
+            "type": "string"
+          },
+          "identifier_id": {
+            "format": "uuid",
+            "title": "Identifier Id",
+            "type": "string"
+          },
+          "incoming": {
+            "title": "Incoming",
+            "type": "integer"
+          },
+          "latest": {
+            "format": "date",
+            "title": "Latest",
+            "type": "string"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Names",
+            "type": "array"
+          },
+          "outgoing": {
+            "title": "Outgoing",
+            "type": "integer"
+          },
+          "sort_code": {
+            "title": "Sort Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier_id",
+          "sort_code",
+          "account_number",
+          "names",
+          "outgoing",
+          "incoming",
+          "latest"
+        ],
+        "title": "SuggestionOut",
+        "type": "object"
+      },
       "SyncQueuedOut": {
         "properties": {
           "queued": {
@@ -2930,6 +3144,177 @@
           "postings"
         ],
         "title": "TransactionOut",
+        "type": "object"
+      },
+      "TransferOut": {
+        "description": "A transfer as matching left it. Its id changes when matching reopens it, so a client\nfinds it again by its own records' ids.",
+        "properties": {
+          "amount": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "days_in_transit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days In Transit"
+          },
+          "from_account_id": {
+            "format": "uuid",
+            "title": "From Account Id",
+            "type": "string"
+          },
+          "from_account_name": {
+            "title": "From Account Name",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "in_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Transaction Id"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "matched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched At"
+          },
+          "opened_at": {
+            "format": "date-time",
+            "title": "Opened At",
+            "type": "string"
+          },
+          "out_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Out Transaction Id"
+          },
+          "overdue": {
+            "title": "Overdue",
+            "type": "boolean"
+          },
+          "placeholder_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder Transaction Id"
+          },
+          "review_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "several_candidates",
+                  "amount_differs"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Reason"
+          },
+          "status": {
+            "enum": [
+              "awaiting",
+              "inferred",
+              "matched",
+              "before_history",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "to_account_id": {
+            "format": "uuid",
+            "title": "To Account Id",
+            "type": "string"
+          },
+          "to_account_name": {
+            "title": "To Account Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "from_account_id",
+          "from_account_name",
+          "to_account_id",
+          "to_account_name",
+          "instrument_id",
+          "amount",
+          "currency",
+          "status",
+          "review_reason",
+          "opened_at",
+          "matched_at",
+          "days_in_transit",
+          "overdue",
+          "out_transaction_id",
+          "in_transaction_id",
+          "placeholder_transaction_id"
+        ],
+        "title": "TransferOut",
+        "type": "object"
+      },
+      "TransferPair": {
+        "properties": {
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id"
+        ],
+        "title": "TransferPair",
         "type": "object"
       },
       "ValidationError": {
@@ -3351,6 +3736,60 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/{account_id}/balance-mode": {
+      "post": {
+        "description": "Switch a snapshots account to hybrid, so it can carry identifiers.",
+        "operationId": "set_account_balance_mode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BalanceModeUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Account Balance Mode",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}/close": {
       "post": {
         "operationId": "close_account",
@@ -3399,6 +3838,152 @@
           }
         },
         "summary": "Close Account",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/accounts/{account_id}/identifiers": {
+      "get": {
+        "operationId": "list_account_identifiers",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IdentifierOut"
+                  },
+                  "title": "Response List Account Identifiers",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Account Identifiers",
+        "tags": [
+          "finance"
+        ]
+      },
+      "post": {
+        "description": "Register one of the account's identifiers (a suggestion, too): every record naming\nit is matched again.",
+        "operationId": "add_account_identifier",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Account Identifier",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/accounts/{account_id}/identifiers/{identifier_id}": {
+      "delete": {
+        "description": "Take the identifier off the account; the registry row stays, as transactions name\nit, and the records naming it are matched again.",
+        "operationId": "remove_account_identifier",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "identifier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Identifier Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Account Identifier",
         "tags": [
           "finance"
         ]
@@ -4274,6 +4859,7 @@
     },
     "/api/v1/finance/transactions/{transaction_id}/void": {
       "post": {
+        "description": "Void the transaction; a transfer it was a side of follows (heal).",
         "operationId": "void_transaction",
         "parameters": [
           {
@@ -4310,6 +4896,353 @@
           }
         },
         "summary": "Void Transaction",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfer-suggestions": {
+      "get": {
+        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first. Registering one is add_account_identifier.",
+        "operationId": "list_transfer_suggestions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SuggestionOut"
+                  },
+                  "title": "Response List Transfer Suggestions",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Transfer Suggestions",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfer-suggestions/{identifier_id}/dismiss": {
+      "post": {
+        "description": "The owner says the bank account is not one of theirs.",
+        "operationId": "dismiss_transfer_suggestion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "identifier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Identifier Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Transfer Suggestion",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers": {
+      "get": {
+        "description": "Transfers, newest first; only those of the given statuses when any are given.",
+        "operationId": "list_transfers",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "awaiting",
+                      "inferred",
+                      "matched",
+                      "before_history",
+                      "rejected"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TransferOut"
+                  },
+                  "title": "Response List Transfers",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Transfers",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers/{transfer_id}/candidates": {
+      "get": {
+        "description": "The own records that could be the transfer's missing side: those of the same amount\nfirst, then those of another, then those the owner unpaired from it (which pair can\nlink again); empty for a transfer with both sides.",
+        "operationId": "list_transfer_candidates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CandidateOut"
+                  },
+                  "title": "Response List Transfer Candidates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Transfer Candidates",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers/{transfer_id}/pair": {
+      "post": {
+        "description": "The owner picks the transfer's missing side among its candidates of the same amount,\nor one they unpaired from it.",
+        "operationId": "pair_transfer",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferPair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Transfer",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers/{transfer_id}/reject": {
+      "post": {
+        "description": "The owner says it is not a transfer: its records go back to Unassigned.",
+        "operationId": "reject_transfer",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject Transfer",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers/{transfer_id}/unpair": {
+      "post": {
+        "description": "The owner says the matched transfer's two records are not one transfer; each is\nmatched again, never with the other.",
+        "operationId": "unpair_transfer",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unpair Transfer",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfers/{transfer_id}/unreject": {
+      "post": {
+        "description": "Withdraw a rejection; its records are matched again (under a new transfer id).",
+        "operationId": "unreject_transfer",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unreject Transfer",
         "tags": [
           "finance"
         ]

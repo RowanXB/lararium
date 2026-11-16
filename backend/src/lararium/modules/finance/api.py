@@ -63,6 +63,8 @@ from lararium.modules.finance.schemas import (
     TransactionCreate,
     TransactionOut,
 )
+from lararium.modules.finance.system_accounts import system_account_ids
+from lararium.modules.finance.transfers_api import healing_command
 
 router = APIRouter(prefix="/api/v1/finance", tags=["finance"], dependencies=[Depends(get_actor)])
 
@@ -73,10 +75,24 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.AccountNotFoundError: (status.HTTP_404_NOT_FOUND, "account_not_found"),
     errors.InstrumentNotFoundError: (status.HTTP_404_NOT_FOUND, "instrument_not_found"),
     errors.TransactionNotFoundError: (status.HTTP_404_NOT_FOUND, "transaction_not_found"),
+    errors.TransferNotFoundError: (status.HTTP_404_NOT_FOUND, "transfer_not_found"),
+    errors.AccountIdentifierNotFoundError: (
+        status.HTTP_404_NOT_FOUND,
+        "account_identifier_not_found",
+    ),
     errors.DuplicateIdentifierError: (status.HTTP_409_CONFLICT, "duplicate_identifier"),
+    errors.DuplicateAccountIdentifierError: (
+        status.HTTP_409_CONFLICT,
+        "duplicate_account_identifier",
+    ),
     errors.AccountAlreadyClosedError: (status.HTTP_409_CONFLICT, "account_already_closed"),
     errors.FinanceValidationError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_input"),
     errors.UnknownCurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "unknown_currency"),
+    # Not the request's fault: matching can't run until the owner fixes the setting.
+    errors.TransferSettingsError: (
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "invalid_transfer_settings",
+    ),
     errors.NotACurrencyError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "not_a_currency"),
     errors.ImportProfileNotFoundError: (status.HTTP_404_NOT_FOUND, "import_profile_not_found"),
     errors.ImportBatchNotFoundError: (status.HTTP_404_NOT_FOUND, "import_batch_not_found"),
@@ -248,7 +264,8 @@ async def record_snapshot(
     account_id: UUID, body: SnapshotCreate, session: SessionDep, actor: ActorDep
 ) -> SnapshotOut:
     args = _args(body, account_id=account_id)
-    async with command_context(session, actor, "record_snapshot", args) as ctx:
+    # A manual hybrid account's first snapshot settles the transfers it contains (heal).
+    async with healing_command(session, actor, "record_snapshot", args) as ctx:
         record = await snapshots.record_snapshot(
             ctx,
             account_id=account_id,
@@ -285,6 +302,14 @@ async def post_transaction(
             for p in body.postings
         ],
     )
+    # Only matching posts on In transit (a transfer's legs and placeholders); a hand-posted
+    # posting there would sit in it with no transfer behind it.
+    in_transit = (await system_account_ids(session)).get("in_transit")
+    if any(p.account_id == in_transit for p in body.postings):
+        raise errors.FinanceValidationError(
+            "In transit holds only transfers between your accounts, which are matched"
+            " automatically; post against another account"
+        )
     async with command_context(session, actor, "post_transaction", _args(body)) as ctx:
         record = await ledger.post_transaction(ctx, tx)
     return TransactionOut.model_validate(record)
@@ -294,8 +319,9 @@ async def post_transaction(
 async def void_transaction(
     transaction_id: UUID, session: SessionDep, actor: ActorDep
 ) -> TransactionOut:
+    """Void the transaction; a transfer it was a side of follows (heal)."""
     args = _args(transaction_id=transaction_id)
-    async with command_context(session, actor, "void_transaction", args) as ctx:
+    async with healing_command(session, actor, "void_transaction", args) as ctx:
         await staging.require_not_imported(ctx.session, transaction_id)
         record = await ledger.void_transaction(ctx, transaction_id)
     return TransactionOut.model_validate(record)

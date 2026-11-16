@@ -109,6 +109,10 @@ export type AccountOut = {
      */
     subtype: 'bank' | 'savings_pot' | 'broker' | 'exchange' | 'wallet' | 'in_transit' | 'manual_asset' | 'other';
     /**
+     * System
+     */
+    system: boolean;
+    /**
      * Tax Wrapper
      */
     tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
@@ -149,6 +153,16 @@ export type AuthorizeOut = {
 };
 
 /**
+ * BalanceModeUpdate
+ */
+export type BalanceModeUpdate = {
+    /**
+     * Balance Mode
+     */
+    balance_mode: 'transactions' | 'snapshots' | 'hybrid';
+};
+
+/**
  * Body_stage_import
  */
 export type BodyStageImport = {
@@ -168,6 +182,40 @@ export type BodyStageImport = {
      * Profile Id
      */
     profile_id: string;
+};
+
+/**
+ * CandidateOut
+ */
+export type CandidateOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Account Name
+     */
+    account_name: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Occurred At
+     */
+    occurred_at: string;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Reason
+     */
+    reason: 'exact' | 'amount_differs' | 'unpaired';
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
 };
 
 /**
@@ -462,6 +510,62 @@ export type HoldingOut = {
      * Value
      */
     value: string | null;
+};
+
+/**
+ * IdentifierCreate
+ */
+export type IdentifierCreate = {
+    /**
+     * Kind
+     */
+    kind: 'uk_bank_account';
+    /**
+     * Value
+     */
+    value: string;
+};
+
+/**
+ * IdentifierOut
+ */
+export type IdentifierOut = {
+    /**
+     * Account Id
+     */
+    account_id: string | null;
+    /**
+     * Account Number
+     */
+    account_number: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Created By
+     */
+    created_by: string;
+    /**
+     * Dismissed At
+     */
+    dismissed_at: string | null;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Kind
+     */
+    kind: 'uk_bank_account';
+    /**
+     * Sort Code
+     */
+    sort_code: string;
+    /**
+     * Value
+     */
+    value: string;
 };
 
 /**
@@ -1294,6 +1398,40 @@ export type SnapshotOut = {
 };
 
 /**
+ * SuggestionOut
+ */
+export type SuggestionOut = {
+    /**
+     * Account Number
+     */
+    account_number: string;
+    /**
+     * Identifier Id
+     */
+    identifier_id: string;
+    /**
+     * Incoming
+     */
+    incoming: number;
+    /**
+     * Latest
+     */
+    latest: string;
+    /**
+     * Names
+     */
+    names: Array<string>;
+    /**
+     * Outgoing
+     */
+    outgoing: number;
+    /**
+     * Sort Code
+     */
+    sort_code: string;
+};
+
+/**
  * SyncQueuedOut
  */
 export type SyncQueuedOut = {
@@ -1359,6 +1497,93 @@ export type TransactionOut = {
      * Status
      */
     status: 'pending' | 'booked' | 'inferred' | 'confirmed' | 'void';
+};
+
+/**
+ * TransferOut
+ *
+ * A transfer as matching left it. Its id changes when matching reopens it, so a client
+ * finds it again by its own records' ids.
+ */
+export type TransferOut = {
+    /**
+     * Amount
+     */
+    amount: string;
+    /**
+     * Currency
+     */
+    currency: string;
+    /**
+     * Days In Transit
+     */
+    days_in_transit: number | null;
+    /**
+     * From Account Id
+     */
+    from_account_id: string;
+    /**
+     * From Account Name
+     */
+    from_account_name: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * In Transaction Id
+     */
+    in_transaction_id: string | null;
+    /**
+     * Instrument Id
+     */
+    instrument_id: string;
+    /**
+     * Matched At
+     */
+    matched_at: string | null;
+    /**
+     * Opened At
+     */
+    opened_at: string;
+    /**
+     * Out Transaction Id
+     */
+    out_transaction_id: string | null;
+    /**
+     * Overdue
+     */
+    overdue: boolean;
+    /**
+     * Placeholder Transaction Id
+     */
+    placeholder_transaction_id: string | null;
+    /**
+     * Review Reason
+     */
+    review_reason: 'several_candidates' | 'amount_differs' | null;
+    /**
+     * Status
+     */
+    status: 'awaiting' | 'inferred' | 'matched' | 'before_history' | 'rejected';
+    /**
+     * To Account Id
+     */
+    to_account_id: string;
+    /**
+     * To Account Name
+     */
+    to_account_name: string;
+};
+
+/**
+ * TransferPair
+ */
+export type TransferPair = {
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
 };
 
 /**
@@ -1638,6 +1863,36 @@ export type RenameAccountResponses = {
 
 export type RenameAccountResponse = RenameAccountResponses[keyof RenameAccountResponses];
 
+export type SetAccountBalanceModeData = {
+    body: BalanceModeUpdate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/balance-mode';
+};
+
+export type SetAccountBalanceModeErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetAccountBalanceModeError = SetAccountBalanceModeErrors[keyof SetAccountBalanceModeErrors];
+
+export type SetAccountBalanceModeResponses = {
+    /**
+     * Successful Response
+     */
+    200: AccountOut;
+};
+
+export type SetAccountBalanceModeResponse = SetAccountBalanceModeResponses[keyof SetAccountBalanceModeResponses];
+
 export type CloseAccountData = {
     body: AccountClose;
     path: {
@@ -1667,6 +1922,102 @@ export type CloseAccountResponses = {
 };
 
 export type CloseAccountResponse = CloseAccountResponses[keyof CloseAccountResponses];
+
+export type ListAccountIdentifiersData = {
+    body?: never;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/identifiers';
+};
+
+export type ListAccountIdentifiersErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListAccountIdentifiersError = ListAccountIdentifiersErrors[keyof ListAccountIdentifiersErrors];
+
+export type ListAccountIdentifiersResponses = {
+    /**
+     * Response List Account Identifiers
+     *
+     * Successful Response
+     */
+    200: Array<IdentifierOut>;
+};
+
+export type ListAccountIdentifiersResponse = ListAccountIdentifiersResponses[keyof ListAccountIdentifiersResponses];
+
+export type AddAccountIdentifierData = {
+    body: IdentifierCreate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/identifiers';
+};
+
+export type AddAccountIdentifierErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AddAccountIdentifierError = AddAccountIdentifierErrors[keyof AddAccountIdentifierErrors];
+
+export type AddAccountIdentifierResponses = {
+    /**
+     * Successful Response
+     */
+    201: IdentifierOut;
+};
+
+export type AddAccountIdentifierResponse = AddAccountIdentifierResponses[keyof AddAccountIdentifierResponses];
+
+export type RemoveAccountIdentifierData = {
+    body?: never;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+        /**
+         * Identifier Id
+         */
+        identifier_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/identifiers/{identifier_id}';
+};
+
+export type RemoveAccountIdentifierErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveAccountIdentifierError = RemoveAccountIdentifierErrors[keyof RemoveAccountIdentifierErrors];
+
+export type RemoveAccountIdentifierResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveAccountIdentifierResponse = RemoveAccountIdentifierResponses[keyof RemoveAccountIdentifierResponses];
 
 export type RecordSnapshotData = {
     body: SnapshotCreate;
@@ -2252,6 +2603,238 @@ export type VoidTransactionResponses = {
 };
 
 export type VoidTransactionResponse = VoidTransactionResponses[keyof VoidTransactionResponses];
+
+export type ListTransferSuggestionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/transfer-suggestions';
+};
+
+export type ListTransferSuggestionsResponses = {
+    /**
+     * Response List Transfer Suggestions
+     *
+     * Successful Response
+     */
+    200: Array<SuggestionOut>;
+};
+
+export type ListTransferSuggestionsResponse = ListTransferSuggestionsResponses[keyof ListTransferSuggestionsResponses];
+
+export type DismissTransferSuggestionData = {
+    body?: never;
+    path: {
+        /**
+         * Identifier Id
+         */
+        identifier_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfer-suggestions/{identifier_id}/dismiss';
+};
+
+export type DismissTransferSuggestionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DismissTransferSuggestionError = DismissTransferSuggestionErrors[keyof DismissTransferSuggestionErrors];
+
+export type DismissTransferSuggestionResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DismissTransferSuggestionResponse = DismissTransferSuggestionResponses[keyof DismissTransferSuggestionResponses];
+
+export type ListTransfersData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Status
+         */
+        status?: Array<'awaiting' | 'inferred' | 'matched' | 'before_history' | 'rejected'> | null;
+    };
+    url: '/api/v1/finance/transfers';
+};
+
+export type ListTransfersErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListTransfersError = ListTransfersErrors[keyof ListTransfersErrors];
+
+export type ListTransfersResponses = {
+    /**
+     * Response List Transfers
+     *
+     * Successful Response
+     */
+    200: Array<TransferOut>;
+};
+
+export type ListTransfersResponse = ListTransfersResponses[keyof ListTransfersResponses];
+
+export type ListTransferCandidatesData = {
+    body?: never;
+    path: {
+        /**
+         * Transfer Id
+         */
+        transfer_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfers/{transfer_id}/candidates';
+};
+
+export type ListTransferCandidatesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListTransferCandidatesError = ListTransferCandidatesErrors[keyof ListTransferCandidatesErrors];
+
+export type ListTransferCandidatesResponses = {
+    /**
+     * Response List Transfer Candidates
+     *
+     * Successful Response
+     */
+    200: Array<CandidateOut>;
+};
+
+export type ListTransferCandidatesResponse = ListTransferCandidatesResponses[keyof ListTransferCandidatesResponses];
+
+export type PairTransferData = {
+    body: TransferPair;
+    path: {
+        /**
+         * Transfer Id
+         */
+        transfer_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfers/{transfer_id}/pair';
+};
+
+export type PairTransferErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PairTransferError = PairTransferErrors[keyof PairTransferErrors];
+
+export type PairTransferResponses = {
+    /**
+     * Successful Response
+     */
+    200: TransferOut;
+};
+
+export type PairTransferResponse = PairTransferResponses[keyof PairTransferResponses];
+
+export type RejectTransferData = {
+    body?: never;
+    path: {
+        /**
+         * Transfer Id
+         */
+        transfer_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfers/{transfer_id}/reject';
+};
+
+export type RejectTransferErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RejectTransferError = RejectTransferErrors[keyof RejectTransferErrors];
+
+export type RejectTransferResponses = {
+    /**
+     * Successful Response
+     */
+    200: TransferOut;
+};
+
+export type RejectTransferResponse = RejectTransferResponses[keyof RejectTransferResponses];
+
+export type UnpairTransferData = {
+    body?: never;
+    path: {
+        /**
+         * Transfer Id
+         */
+        transfer_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfers/{transfer_id}/unpair';
+};
+
+export type UnpairTransferErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UnpairTransferError = UnpairTransferErrors[keyof UnpairTransferErrors];
+
+export type UnpairTransferResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type UnpairTransferResponse = UnpairTransferResponses[keyof UnpairTransferResponses];
+
+export type UnrejectTransferData = {
+    body?: never;
+    path: {
+        /**
+         * Transfer Id
+         */
+        transfer_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transfers/{transfer_id}/unreject';
+};
+
+export type UnrejectTransferErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UnrejectTransferError = UnrejectTransferErrors[keyof UnrejectTransferErrors];
+
+export type UnrejectTransferResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type UnrejectTransferResponse = UnrejectTransferResponses[keyof UnrejectTransferResponses];
 
 export type HealthData = {
     body?: never;

@@ -1,10 +1,15 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
 from lararium.api.export_openapi import render_openapi
 from lararium.modules.finance import errors
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.api import _ERRORS  # pyright: ignore[reportPrivateUsage]
+from lararium.modules.finance.instruments import get_currency
+from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
 
 
 async def _gbp_id(client) -> str:
@@ -304,3 +309,31 @@ async def test_net_worth_range_out_of_bounds_is_rejected(client, params) -> None
     response = await client.get("/api/v1/finance/net-worth", params=params)
     assert response.status_code == 422
     assert response.json()["detail"]["error"] == "invalid_input"
+
+
+async def test_voiding_a_derived_transaction_is_refused(client, session, run) -> None:
+    gbp = await get_currency(session, "GBP")
+    a, b = [
+        await run(
+            create_account, name=name, ledger_type="asset", subtype="bank", balance_mode="hybrid"
+        )
+        for name in ("A", "B")
+    ]
+    placeholder = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 10, 12, tzinfo=UTC),
+            description="Transfer from A",
+            status="inferred",
+            origin="inference",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-100")),
+                PostingInput(b.id, gbp.id, Decimal("100")),
+            ],
+        ),
+    )
+    response = await client.post(f"/api/v1/finance/transactions/{placeholder.id}/void")
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "invalid_input"
+    assert "derived" in detail["message"]

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatMoney,
   formatQuantity,
+  formatSortCode,
   isDecimalString,
   isZeroDecimal,
   negateDecimalString,
@@ -70,5 +71,15 @@ describe("isZeroDecimal", () => {
   });
   it.each(["0.01", "-1", "10", "", "."])("is not zero: %s", (value) => {
     expect(isZeroDecimal(value)).toBe(false);
+  });
+});
+
+describe("formatSortCode", () => {
+  it("groups six digits in pairs", () => {
+    expect(formatSortCode("112233")).toBe("11-22-33");
+  });
+
+  it("leaves anything else as it is", () => {
+    expect(formatSortCode("1122")).toBe("1122");
   });
 });
