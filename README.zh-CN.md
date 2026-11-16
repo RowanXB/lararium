@@ -22,11 +22,20 @@ OpenAPI/客户端漂移检查、前端类型检查与测试）。它严格按 `b
 make check
 ```
 
-测试容器也可以跑在一台通过 ssh 访问的 Docker 主机上（你在那台主机上的用户需要能使用 Docker）。
-Docker 守护进程的 socket 和数据库端口都经 ssh 转发，端口只发布在那台主机的回环地址上：
+测试容器也可以跑在一台通过 ssh 访问的 Docker 主机上（你在那台主机上的用户需要能使用 Docker，
+守护进程的 socket 需要在 /var/run/docker.sock，且 sshd 允许 TCP 和 Unix socket（stream-local）
+转发，这是 OpenSSH 的默认设置）。Docker 守护进程的 socket 和数据库端口都经 ssh 转发，端口只发布
+在那台主机的回环地址上：
 
 ```bash
 DOCKER_HOST=ssh://<host> make check
+```
+
+如果一次运行在清理之前就被杀掉（SIGKILL、内存耗尽、连接断开），它的容器会留在那台主机上。
+用下面的命令列出它们，再用 `docker rm -f` 删除：
+
+```bash
+docker --context <host> ps -a --filter label=org.testcontainers=true
 ```
 
 要运行应用，先启动一个开发数据库（角色由部署时用的同一个初始化脚本创建），执行迁移，

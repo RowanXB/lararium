@@ -25,11 +25,20 @@ make check
 ```
 
 The test containers can run on another Docker host you reach over ssh (your user there must be
-able to use Docker). The daemon's socket and the database port are forwarded over ssh, and the
-port is published on that host's loopback only:
+able to use Docker, the daemon's socket must be at /var/run/docker.sock, and sshd there must
+allow TCP and Unix-socket (stream-local) forwarding, which is the OpenSSH default). The daemon's
+socket and the database port are forwarded over ssh, and the port is published on that host's
+loopback only:
 
 ```bash
 DOCKER_HOST=ssh://<host> make check
+```
+
+If a run is killed before it can clean up (SIGKILL, out of memory, a dropped connection), its
+containers stay on that host. List them, then remove them with `docker rm -f`:
+
+```bash
+docker --context <host> ps -a --filter label=org.testcontainers=true
 ```
 
 To run the app, start a development database (roles are created by the same init script
