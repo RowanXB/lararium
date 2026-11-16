@@ -7,22 +7,33 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.docker_client import get_docker_host
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.db import create_engine
 
+from .containers import SSH, Endpoint, running
+
 BACKEND = Path(__file__).parents[1]
 INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
 
 
+def pytest_report_header() -> str:
+    # The only sign of which daemon the containers run on: on a Mac whose docker context is
+    # Docker Desktop, a plain `make check` runs there, as CI's does on the runner's Docker.
+    mode = "ssh forward" if SSH else "local"
+    return f"docker: {get_docker_host() or 'default local socket'} ({mode})"
+
+
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[PostgresContainer]:
-    # Copied in rather than bind-mounted, so the suite also runs against a remote Docker host.
-    container = PostgresContainer("postgres:18").with_copy_into_container(
-        INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql"
-    )
-    with container:
+def postgres() -> Iterator[Endpoint]:
+    def build() -> PostgresContainer:
+        return PostgresContainer("postgres:18").with_copy_into_container(
+            INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql"
+        )
+
+    with running(build) as (container, endpoint):
         result = container.exec(
             [
                 "psql",
@@ -41,27 +52,25 @@ def postgres() -> Iterator[PostgresContainer]:
             ]
         )
         assert result.exit_code == 0, result.output.decode()
-        yield container
+        yield endpoint
 
 
-def _url(container: PostgresContainer, user: str, password: str) -> str:
-    host = container.get_container_host_ip()
-    port = container.get_exposed_port(5432)
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/lararium"
+def _url(endpoint: Endpoint, user: str, password: str) -> str:
+    return f"postgresql+psycopg://{user}:{password}@{endpoint.host}:{endpoint.port}/lararium"
 
 
 @pytest.fixture(scope="session")
-def owner_url(postgres: PostgresContainer) -> str:
+def owner_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_owner", "owner")
 
 
 @pytest.fixture(scope="session")
-def backend_url(postgres: PostgresContainer) -> str:
+def backend_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_backend", "backend")
 
 
 @pytest.fixture(scope="session")
-def webhook_in_url(postgres: PostgresContainer) -> str:
+def webhook_in_url(postgres: Endpoint) -> str:
     return _url(postgres, "lararium_webhook_in", "webhook_in")
 
 

@@ -8,6 +8,8 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
+from ..containers import Endpoint, running
+
 INFRA_POSTGRES = Path(__file__).parents[3] / "infra" / "postgres"
 INIT_SCRIPT = INFRA_POSTGRES / "init" / "00-roles.sh"
 
@@ -39,18 +41,19 @@ def test_passwords_are_not_on_the_psql_command_line() -> None:
 
 
 @pytest.fixture(scope="module")
-def initialised() -> Iterator[PostgresContainer]:
-    container = (
-        PostgresContainer("postgres:18")
-        .with_env("LARARIUM_OWNER_PASSWORD", OWNER_PW)
-        .with_env("LARARIUM_BACKEND_PASSWORD", BACKEND_PW)
-        .with_env("LARARIUM_WEBHOOK_IN_PASSWORD", WEBHOOK_IN_PW)
-        # Copied in rather than bind-mounted, so this also runs against a remote Docker host.
-        .with_copy_into_container(INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql")
-        .with_copy_into_container(INIT_SCRIPT, "/docker-entrypoint-initdb.d/00-roles.sh", 0o755)
-    )
-    with container:
-        yield container
+def initialised() -> Iterator[Endpoint]:
+    def build() -> PostgresContainer:
+        return (
+            PostgresContainer("postgres:18")
+            .with_env("LARARIUM_OWNER_PASSWORD", OWNER_PW)
+            .with_env("LARARIUM_BACKEND_PASSWORD", BACKEND_PW)
+            .with_env("LARARIUM_WEBHOOK_IN_PASSWORD", WEBHOOK_IN_PW)
+            .with_copy_into_container(INFRA_POSTGRES / "roles.sql", "/lararium/roles.sql")
+            .with_copy_into_container(INIT_SCRIPT, "/docker-entrypoint-initdb.d/00-roles.sh", 0o755)
+        )
+
+    with running(build) as (_, endpoint):
+        yield endpoint
 
 
 @pytest.mark.parametrize(
@@ -61,10 +64,10 @@ def initialised() -> Iterator[PostgresContainer]:
         ("lararium_webhook_in", WEBHOOK_IN_PW),
     ],
 )
-def test_roles_log_in_to_lararium(initialised: PostgresContainer, user: str, password: str) -> None:
+def test_roles_log_in_to_lararium(initialised: Endpoint, user: str, password: str) -> None:
     with psycopg.connect(
-        host=initialised.get_container_host_ip(),
-        port=int(initialised.get_exposed_port(5432)),
+        host=initialised.host,
+        port=initialised.port,
         user=user,
         password=password,
         dbname="lararium",
