@@ -7,15 +7,23 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.docker_client import get_docker_host
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.db import create_engine
 
-from .containers import Endpoint, running
+from .containers import SSH, Endpoint, running
 
 BACKEND = Path(__file__).parents[1]
 INFRA_POSTGRES = BACKEND.parent / "infra" / "postgres"
+
+
+def pytest_report_header() -> str:
+    # The only sign of which daemon the containers run on: on a Mac whose docker context is
+    # Docker Desktop, a plain `make check` runs there, as CI's does on the runner's Docker.
+    mode = "ssh forward" if SSH else "local"
+    return f"docker: {get_docker_host() or 'default local socket'} ({mode})"
 
 
 @pytest.fixture(scope="session")
