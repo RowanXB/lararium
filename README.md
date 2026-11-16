@@ -443,14 +443,16 @@ names to the account (as on Registering identifiers), and passes its rows throug
 matching: a row that is the other side of a transfer from a connected account replaces the
 transfer's placeholder instead of counting twice, and the Transfers page treats it like any
 other record. A row naming the other account is matched through the registry. A row naming no
-account, and not of a card type, is taken by amount and date only when the statement and
-earlier imports list every day of the transfer's window in full (an export without a stated
-period may cut its first and last day short): otherwise the real row may simply not have been
-imported yet, and an unrelated payment of the same amount must not stand in for it. The transfer
-then keeps its placeholder, and the row counts too, so the account is off by the amount until a
-statement lists those days. This mostly hits a transfer in the last days of a statement: import
-the next one and the two pair. Rolling back a batch unlinks its rows
-first, so the placeholders come back.
+account, and not of a card type, is taken by amount and date only when the transfer's window
+lies within the days the account's imports span, from the first day one of them lists in full
+to the last (an export without a stated period may cut its first and last day short). Outside
+them the real row may simply not have been imported yet, and an unrelated payment of the same
+amount must not stand in for it. The transfer then keeps its placeholder, and the row counts
+too, so the account is off by the amount until the next statement extends the span: this hits
+a transfer in the last days of the latest statement, and the two pair once the next one is
+imported. Leave no statement out between imports, as nothing here notices a missing one.
+Rolling back a batch unlinks its rows first, so the placeholders come back, and takes off the
+account registration it made, unless another import into the account still names it.
 
 ### Formats
 

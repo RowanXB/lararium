@@ -98,16 +98,20 @@ class Known:
     def lists_in_full(self, record: Pairable, earliest: date, latest: date) -> bool:
         """Whether the ledger would hold the record's account's own row on every day from
         earliest to latest, if there were one: always for a connected account; for a
-        manual one, when imports list every such day in full (a day before an opening
-        snapshot isn't, its rows are inside the snapshot)."""
+        manual one, when the days lie within its imports' span, from the first day one
+        lists in full to the last. Not before it (inside the opening snapshot, or before
+        the first statement) nor after it (not imported yet). Between imports, a day
+        counts: an export's edge days, listed in full by no file, and a quiet period no
+        statement can be imported for, have no rows missing; a whole statement left out is
+        the owner's to import, not told apart here."""
         if record.account_id not in self.manual:
             return True
-        day = earliest
-        for start, end in sorted(self.full_days.get((record.account_id, record.instrument_id), [])):
-            if start > day:
-                break
-            day = max(day, end + timedelta(days=1))
-        return day > latest
+        ranges = self.full_days.get((record.account_id, record.instrument_id))
+        if not ranges:
+            return False
+        return min(start for start, _ in ranges) <= earliest and latest <= max(
+            end for _, end in ranges
+        )
 
 
 # Days an import not yet committed would list in full: (account, instrument, from, to).
@@ -253,7 +257,7 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
     nobody) is taken only if its account's own row would be in the ledger on every day of
     the identified record's window: otherwise the real row may be missing (inside an
-    opening snapshot, or on a day no import lists in full) and an unrelated one stand in."""
+    opening snapshot, or outside the days its imports span) and an unrelated one stand in."""
     identified, other = (s, c) if s.identified else (c, s)
     return known.lists_in_full(other, *counterpart_bounds(identified, settings))
 

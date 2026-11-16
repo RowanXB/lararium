@@ -258,6 +258,7 @@ class ImportBatch(Base):
     covered_to: Mapped[date | None]
     complete_from: Mapped[date | None]
     complete_to: Mapped[date | None]
+    registered_identifier_id: Mapped[UUID | None]
     owner_entity_id: Mapped[UUID] = mapped_column(ForeignKey("core.entities.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

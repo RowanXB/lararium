@@ -49,9 +49,12 @@ async def healing_command(
     session: AsyncSession, actor: Actor, command: str, args: dict[str, JSONValue]
 ) -> AsyncGenerator[CommandContext]:
     """command_context, with lock waits bounded by LOCK_TIMEOUT and heal_transfers run at
-    the end of the command, in its transaction."""
+    the end of the command, in its transaction. The matching lock is taken first, before
+    the command locks any row: one order everywhere (an import's commit and rollback take
+    it, then their account), so the two can't each wait on the other."""
     async with command_context(session, actor, command, args) as ctx:
         await session.execute(select(func.set_config("lock_timeout", LOCK_TIMEOUT, True)))
+        await transfers.lock_transfers(ctx)
         yield ctx
         await transfers.heal_transfers(ctx)
 

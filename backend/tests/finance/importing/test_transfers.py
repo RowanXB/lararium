@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
-from lararium.modules.finance.identifiers import get_or_create_identifier, list_identifiers
+from lararium.modules.finance.identifiers import (
+    assign_identifier,
+    get_or_create_identifier,
+    list_identifiers,
+)
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import (
@@ -212,7 +216,7 @@ async def test_the_owners_reject_follows_the_row_imported_again(
     assert [t.status for t in await list_transfers(session)] == ["rejected"]
 
 
-async def test_a_row_on_a_day_not_listed_in_full_is_not_taken(
+async def test_a_row_past_the_days_imported_waits_for_the_next_statement(
     session: AsyncSession,
     run: Run,
     gbp: InstrumentRecord,
@@ -223,9 +227,95 @@ async def test_a_row_on_a_day_not_listed_in_full_is_not_taken(
 ) -> None:
     """Design §5.8: A's payment on 30 Dec may arrive on M up to 4 Jan, but an export's last
     day (31 Dec) may be cut short and the days after aren't imported, so the 100 on 31 Dec
-    may be an unrelated receipt standing in for M's real row: not taken."""
+    may be an unrelated receipt standing in for M's real row: not taken until January's
+    statement is imported, which shows the days after."""
     await commit((await stage(profile, _lines(NOVEMBER))).id)
     await _pay(session, run, gbp, connected, on=date(2026, 12, 30))
     december = "01/12/2026,VIS,Shop,-2.00,497.00\n31/12/2026,CR,From A,100.00,597.00\n"
     await commit((await stage(profile, _lines(december))).id)
     assert await _status(session) == "inferred"
+
+    january = "01/01/2027,VIS,Shop,-1.00,596.00\n10/01/2027,VIS,Shop,-1.00,595.00\n"
+    await commit((await stage(profile, _lines(january))).id)
+    assert await _status(session) == "matched"
+
+
+async def test_a_transfer_at_the_boundary_of_back_to_back_exports_pairs(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """An export lists in full only the days strictly inside it (it may be cut short on its
+    first and last), so 30 Nov and 1 Dec are listed in full by neither of two exports
+    taken without overlap. They still lie between imports, with no rows missing: A's 100
+    on 30 Nov pairs with November's row once December's export is imported."""
+    november = "01/11/2026,CR,Pay,500.00,500.00\n30/11/2026,CR,From A,100.00,600.00\n"
+    await commit((await stage(profile, _lines(november))).id)
+    await _pay(session, run, gbp, connected, on=date(2026, 11, 30))
+    assert await _status(session) == "inferred"  # the days after 30 Nov aren't imported
+
+    december = "01/12/2026,VIS,Shop,-2.00,598.00\n31/12/2026,VIS,Shop,-1.00,597.00\n"
+    await commit((await stage(profile, _lines(december))).id)
+    assert await _status(session) == "matched"
+    assert await _balance_after(session, account.id, END) == Decimal("597")
+    assert await find_transfer_violations(session) == []
+
+
+async def test_rolling_back_takes_the_registration_it_made_off_again(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+) -> None:
+    """A statement imported into the wrong account, then rolled back: the registration it
+    made goes with it, so importing it into the right one registers it there."""
+    other = await run(
+        create_account,
+        name="Right",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+    )
+    wrong = await commit((await stage(profile, _lines(NOVEMBER))).id)
+    await rollback(wrong.id)
+    [identifier] = await list_identifiers(session)
+    assert identifier.account_id is None
+
+    await commit((await stage(profile, _lines(NOVEMBER), account_id=other.id)).id)
+    [identifier] = await list_identifiers(session)
+    assert identifier.account_id == other.id
+    assert account.id != other.id
+
+
+async def test_rolling_back_keeps_a_registration_another_import_or_the_owner_made(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+) -> None:
+    first = await commit((await stage(profile, _lines(NOVEMBER))).id)
+    second = await commit((await stage(profile, _lines(DECEMBER.format(type="CR")))).id)
+    await rollback(first.id)  # December's statement still names the account
+    [identifier] = await list_identifiers(session)
+    assert identifier.account_id == account.id
+    await rollback(second.id)
+    [identifier] = await list_identifiers(session)
+    assert identifier.account_id is None
+
+    # Registered by the owner first, it stays through an import's commit and rollback.
+    await run(assign_identifier, account.id, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}")
+    third = await commit((await stage(profile, _lines(NOVEMBER))).id)
+    await rollback(third.id)
+    [identifier] = await list_identifiers(session)
+    assert identifier.account_id == account.id

@@ -236,3 +236,23 @@ async def test_arrival_after_the_window_on_a_manual_account_double_counts_silent
     assert (await balances_on(session, FRIDAY + timedelta(days=7)))[b.id] == 0  # 1000, -500 twice
     assert await due_notifications(session, _at(FRIDAY + timedelta(days=60))) == []
     await assert_consistent(session)
+
+
+def test_imports_vouch_for_their_span() -> None:
+    """Design §5.8: a manual account's row is known from the first day its imports list in
+    full to the last, across the edge days of back-to-back exports no file lists in full,
+    and not outside that span."""
+    record = _record(_at(FRIDAY), "500", identified=False)
+    other = replace(record, instrument_id=uuid4())
+    november = (date(2026, 11, 2), date(2026, 11, 29))
+    december = (date(2026, 12, 2), date(2026, 12, 30))
+    known = Known(
+        frozenset({record.account_id}), {(record.account_id, UUID_GBP): [december, november]}
+    )
+
+    assert known.lists_in_full(record, date(2026, 11, 28), date(2026, 12, 3))
+    assert known.lists_in_full(record, *november)
+    assert not known.lists_in_full(record, date(2026, 11, 1), date(2026, 11, 5))
+    assert not known.lists_in_full(record, date(2026, 12, 28), date(2026, 12, 31))
+    assert not known.lists_in_full(other, *november)  # nothing imported in it
+    assert Known(frozenset(), {}).lists_in_full(record, *november)  # a connected account

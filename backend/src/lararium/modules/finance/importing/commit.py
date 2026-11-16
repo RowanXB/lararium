@@ -10,7 +10,7 @@ what the commit or the rollback changed.
 from decimal import MAX_PREC, Decimal, localcontext
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -24,7 +24,11 @@ from lararium.modules.finance.errors import (
     ImportBatchStateError,
     ImportHasErrorsError,
 )
-from lararium.modules.finance.identifiers import ensure_identifier, get_or_create_identifier
+from lararium.modules.finance.identifiers import (
+    ensure_identifier,
+    get_or_create_identifier,
+    normalize_identifier,
+)
 from lararium.modules.finance.importing.profiles import is_bank_transfer
 from lararium.modules.finance.importing.staging import (
     BatchStatus,
@@ -49,6 +53,7 @@ from lararium.modules.finance.transfers import (
     heal_transfers,
     lock_transfers,
     transfer_contra,
+    unassign_identifier_and_rematch,
     unlink_transaction,
 )
 
@@ -128,24 +133,72 @@ async def _card_types(session: AsyncSession, batch_id: UUID) -> list[str]:
     return [str(code) for code in found] if isinstance(found, list) else []
 
 
+async def _own_account(session: AsyncSession, batch_id: UUID) -> str | None:
+    """The UK bank account the batch's statement says it is for, as the registry keeps it."""
+    s = models.ImportStatement
+    found = (
+        await session.execute(select(s.sort_code, s.account_number).where(s.batch_id == batch_id))
+    ).one_or_none()
+    if found is None or found.sort_code is None or found.account_number is None:
+        return None
+    try:
+        return normalize_identifier("uk_bank_account", f"{found.sort_code}:{found.account_number}")
+    except FinanceValidationError:
+        return None  # not a UK account number (a longer BOC one, say): nothing to register
+
+
 async def _register_own_account(ctx: CommandContext, batch_id: UUID, account_id: UUID) -> None:
     """The bank account the statement says it is for, registered to the account it was
     imported into, as a connector registers its own accounts (M4, design §5.3): transfers
-    naming it are then recognised. One registered to another account stays there."""
-    s = models.ImportStatement
-    found = (
-        await ctx.session.execute(
-            select(s.sort_code, s.account_number).where(s.batch_id == batch_id)
-        )
-    ).one_or_none()
-    if found is None or found.sort_code is None or found.account_number is None:
+    naming it are then recognised. One registered already stays where it is. The batch
+    keeps the registration it made, so that rolling it back can undo it."""
+    value = await _own_account(ctx.session, batch_id)
+    if value is None or not await ensure_identifier(ctx, account_id, "uk_bank_account", value):
         return
-    try:
-        await ensure_identifier(
-            ctx, account_id, "uk_bank_account", f"{found.sort_code}:{found.account_number}"
+    b = models.ImportBatch
+    await ctx.session.execute(
+        update(b)
+        .where(b.id == batch_id)
+        .values(
+            registered_identifier_id=await get_or_create_identifier(ctx, "uk_bank_account", value)
         )
-    except FinanceValidationError:
-        pass  # not a UK account number (a longer BOC one, say): nothing to register
+    )
+
+
+async def _unregister_own_account(ctx: CommandContext, batch_id: UUID, account_id: UUID) -> None:
+    """Undo the registration an import made once no committed import of the account names
+    that bank account any more: the import was the only evidence for it (a statement
+    imported into the wrong account, say), so it mustn't outlive it. The owner's own
+    registration, which no import made, stays."""
+    value = await _own_account(ctx.session, batch_id)
+    if value is None:
+        return
+    b, i = models.ImportBatch, models.AccountIdentifier
+    identifier_id = await ctx.session.scalar(
+        select(i.id).where(
+            i.kind == "uk_bank_account", i.value == value, i.account_id == account_id
+        )
+    )
+    if identifier_id is None:
+        return
+    made_by_an_import = await ctx.session.scalar(
+        select(
+            exists().where(b.account_id == account_id, b.registered_identifier_id == identifier_id)
+        )
+    )
+    others = await ctx.session.scalars(
+        select(b.id).where(b.account_id == account_id, b.status == "committed", b.id != batch_id)
+    )
+    still_named = [other for other in others if await _own_account(ctx.session, other) == value]
+    if made_by_an_import and not still_named:
+        await unassign_identifier_and_rematch(ctx, identifier_id)
+        # Undone, the registration is no import's any more: one the owner makes later is
+        # theirs, and stays when an import is rolled back.
+        await ctx.session.execute(
+            update(b)
+            .where(b.account_id == account_id, b.registered_identifier_id == identifier_id)
+            .values(registered_identifier_id=None)
+        )
 
 
 async def _counterparty(
@@ -310,6 +363,7 @@ async def rollback_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchReco
     )
     # Without this batch, the remaining batches' adjustments follow (Decision 13).
     await align_openings(ctx, account_id)
+    await _unregister_own_account(ctx, batch_id, account_id)
     await heal_transfers(ctx)
     record = await get_batch(session, batch_id)
     _publish(ctx, "finance.import.rolled_back", record)
