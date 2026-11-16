@@ -230,6 +230,112 @@ outside the approval window (after a long outage, say) can't be fetched: the con
 shows a "sync window limited" warning. To backfill it, disable the connection, then authorise
 it again and approve within 4 minutes (a healthy connection can't be authorised directly).
 
+## Transfers between your accounts
+
+When money moves between two of your own accounts, Lararium changes both balances, and net
+worth neither dips nor counts the money twice, even while it is on its way. It recognises a
+transfer by the other side's sort code and account number (names vary too much to be used), so
+it needs to know which bank accounts are yours. The examples use a Monzo connection and a
+manual account called "Bank A".
+
+### Manual accounts: hybrid, with an opening snapshot
+
+Bank A has no connection, so it can't report its side of a transfer. Lararium posts an
+*inferred* transaction on it instead, as soon as it sees Monzo's side. For that to move Bank A's
+balance:
+
+1. On the Accounts page, create the account with **Balance mode: Hybrid** (ledger type Asset,
+   subtype Bank).
+2. Save an opening snapshot: its balance in GBP as of a date, from a Bank A statement.
+
+A hybrid account's balance is its latest snapshot plus whatever is posted after it. Transfers
+dated before the snapshot are already in it, so they aren't counted twice. A transfer dated at or
+before the account's first snapshot in that currency gets no inferred transaction at all: it is
+settled against Opening balances, so the account's history before the snapshot doesn't change
+either. Recording an earlier snapshot later moves the transfers after it back onto the account. Don't use
+Transactions mode for a manual account: its balance would be only the transfers Lararium has
+seen. A Snapshots account ignores postings, so it can't carry identifiers; its Identifiers
+section offers **Switch to hybrid** instead, which values it exactly as before (its latest
+snapshot) plus anything posted after that.
+
+### Registering identifiers
+
+- **By hand**: on the Accounts page, open an account's **Identifiers** and add its sort code and
+  account number (dashes and spaces are fine). Lararium then goes through the whole history:
+  every past transaction naming that account becomes a transfer, and Bank A gets its inferred
+  transactions. **Remove** undoes it.
+- **From Suggestions**: the Transfers page lists each bank account your transactions name that
+  isn't registered, with the names it appeared under, how many payments went out and came in,
+  and the latest date. Pick which of your accounts it is and choose **Register** (the same as
+  adding it by hand), or **Dismiss** one that isn't yours. Snapshots accounts aren't offered;
+  the section names them, and switching one to hybrid on the Accounts page adds it.
+- **Monzo registers its own accounts** on every sync, so a transfer between two Monzo
+  connections (a joint account, say) needs nothing from you. It never takes an identifier you
+  registered on another account, and it does take back its own account's if you dismissed it.
+
+A record that names no bank account (a broker's deposit, say) can still be the other side of a
+transfer, by amount and date, but only if its source marks it as a bank transfer: a card refund
+of the same amount never pairs. Transfers are in GBP; Lararium posts no exchange or fee
+differences.
+
+### The Transfers page
+
+Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
+
+- **Needs attention**: transfers Lararium won't settle by itself. It pairs two records only when
+  each is the other's only candidate, so the result never depends on which source synced first.
+  - *Several candidates*: more than one record could be the other side (two transfers of the
+    same amount a few days apart, say). The candidates are listed; **Pair** the right one.
+  - *Amount differs*: the two records name each other's accounts but their amounts differ.
+    They can't be paired; Reject the transfer if it isn't one.
+  - *Overdue*: the other account has its own connection and hasn't reported its side within 7
+    days.
+
+  Until you decide, nothing moves: the balances and net worth stay as they were.
+- **In transit**: transfers to or from an account with its own connection, waiting for that
+  side to report, with the days so far. Open **Candidates** on one (or on an inferred or
+  before-history one under Recent) to see what could be its other side.
+- **Suggestions**: unregistered bank accounts (above).
+- **Recent** (collapsed): the settled ones, each with its status:
+  - *matched*: both accounts' own records;
+  - *inferred*: one record, plus the inferred transaction on a manual account;
+  - *before history*: the other account's connection starts after the transfer, so its opening
+    balance already contains it;
+  - *rejected*.
+
+What the buttons do (each decision is kept across re-syncs):
+
+- **Reject**: this isn't a transfer between your accounts. Its records go back to Unassigned,
+  its inferred transaction is removed, and later syncs keep it rejected.
+- **Undo** (on a rejected transfer): withdraws the rejection, and the records are matched again.
+- **Unpair** (on a matched transfer): these two records are not the same transfer, though each
+  may still be one. They are never paired again automatically, and each is matched on its own.
+  If that was a mistake, each one's transfer lists the other as an *Unpaired* candidate; Pair it
+  to undo.
+- **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
+  differs has none): these two records are one transfer. Your choice outranks any other
+  candidate.
+
+### In transit in net worth
+
+**In transit** is a system account of the asset type, so it counts in net worth. A transfer's
+sending side posts to it and the receiving side (its own record, or the inferred one) takes the
+money out again. While money is on its way it sits in In transit, so net worth doesn't dip;
+with nothing on its way, In transit is 0. If it isn't, the In transit section of the Transfers
+page shows what is waiting.
+
+### The overdue alert
+
+With [Feishu notifications](#feishu-notifications) set up, the worker checks every 30 minutes
+and sends one message for each transfer that needs your review, or that has been in transit for
+more than 7 days; when more than 3 are due at once, it sends one message saying how many
+instead. Each transfer is reported once. The defaults (the receiving side may be booked from 1
+calendar day before to 5 after the sending side, counted in booking dates, so a statement row
+dated Friday pairs with a Monzo payment any time on Wednesday; overdue after 7 days) are in the
+`finance.transfers` setting; no page changes them yet. Each is a whole number of days from 1 to
+3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
+with the next week's.
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo

@@ -27,6 +27,7 @@ dev = [
     "ruff",
     "pyright",
     "import-linter",
+    "hypothesis>=6.170.15",
 ]
 
 [build-system]

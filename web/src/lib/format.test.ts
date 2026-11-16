@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, formatQuantity, isDecimalString, negateDecimalString } from "./format";
+import {
+  formatMoney,
+  formatQuantity,
+  formatSortCode,
+  isDecimalString,
+  negateDecimalString,
+} from "./format";
 
 describe("formatMoney", () => {
   it("formats GBP from a string", () => {
@@ -55,5 +61,15 @@ describe("isDecimalString", () => {
   it("rejects a sign when only unsigned amounts are allowed", () => {
     expect(isDecimalString("-500", { unsigned: true })).toBe(false);
     expect(isDecimalString("500", { unsigned: true })).toBe(true);
+  });
+});
+
+describe("formatSortCode", () => {
+  it("groups six digits in pairs", () => {
+    expect(formatSortCode("112233")).toBe("11-22-33");
+  });
+
+  it("leaves anything else as it is", () => {
+    expect(formatSortCode("1122")).toBe("1122");
   });
 });
