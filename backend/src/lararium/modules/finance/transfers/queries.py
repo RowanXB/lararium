@@ -276,18 +276,21 @@ def before_history(
 
 
 def manual_predates(
-    r: RecordColumns, counterpart_id: SQLColumnExpression[UUID]
+    r: RecordColumns, counterpart_id: SQLColumnExpression[UUID], settings: TransferSettings
 ) -> ColumnElement[bool]:
-    """Whether the record is before the manual account `counterpart_id`'s history starts,
-    in its instrument, so that the account's opening already contains its counterpart and
-    a placeholder there would count it twice:
-    - a hybrid account's history starts at its first snapshot: valuation
+    """Whether the manual account `counterpart_id` already holds the record's counterpart,
+    in its instrument, through what its own history records, so that a placeholder there
+    would count it twice (then the transfer is before_history, settled against Opening
+    balances):
+    - a hybrid account: the record is at or before its first snapshot. Valuation
       (v1_balances_asof) counts its postings only after the snapshot's as_of, and before
       the first one sums them from zero. Compared with valuation's own cut-off
       (occurred_at <= as_of), on the record's own time, which a placeholder carries.
-    - a transactions-mode one's starts on the first day its committed statement imports
-      cover (M2): the opening adjustment before that day holds the balance the statement
-      opens with. Compared on booking dates, as statements are.
+    - a transactions-mode one with statement imports (M2): every day the counterpart may
+      be booked on (the record's window) is no later than the last day its committed
+      imports list in full. Each of those days is a statement's, listing the real rows, or
+      lies before one, inside its opening or gap adjustment. A placeholder is right only
+      for a side that may come after them, not imported yet.
     False for any other account: a connected one (before_history), or a transactions-mode
     manual one with no imports, whose history is all its own records."""
     s = aliased(models.BalanceSnapshot, name="opening_snapshot")
@@ -304,11 +307,11 @@ def manual_predates(
         .correlate_except(s, a)
         .scalar_subquery()
     )
-    b = aliased(models.ImportBatch, name="opening_import")
-    row = aliased(models.ImportRow, name="opening_import_row")
+    b = aliased(models.ImportBatch, name="listing_import")
+    row = aliased(models.ImportRow, name="listing_import_row")
     ia = aliased(models.Account, name="imported_account")
-    first_imported = (
-        select(func.min(b.covered_from))
+    last_listed = (
+        select(func.max(b.complete_to))
         .join(row, row.batch_id == b.id)
         .join(ia, ia.id == b.account_id)
         .where(
@@ -322,9 +325,10 @@ def manual_predates(
         .correlate_except(b, row, ia)
         .scalar_subquery()
     )
+    _, latest = counterpart_window(r, settings)
     return or_(
         func.coalesce(r.occurred_at <= first, False),
-        func.coalesce(r.booking_date < first_imported, False),
+        func.coalesce(latest <= last_listed, False),
     )
 
 

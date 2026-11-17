@@ -886,8 +886,8 @@ async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
     say. A placeholder is matching's estimate of a side not yet in, which matching posts
     and takes off at any time (another account's import, a sync); an adjustment sized
     around one would go stale, and one on a day a statement lists in full would read as
-    a gap. None lies before the account's first statement: a transfer there is inside its
-    opening, before_history (M4's manual_predates)."""
+    a gap. None lies on days the account's imports list or open with: a transfer there is
+    before_history (M4's manual_predates)."""
     p, t, r, x = models.Posting, models.Transaction, models.ImportRow, models.Transfer
     adjustments = select(r.transaction_id).where(
         r.kind == "opening_adjustment", r.transaction_id.is_not(None)

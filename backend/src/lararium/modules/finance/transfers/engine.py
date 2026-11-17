@@ -315,9 +315,9 @@ async def _open(
     previous: TransferRecord | None,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
-    counterpart predates that account's history (a manual hybrid account's first snapshot,
-    or a manual transactions account's first statement import, manual_predates; a connected
-    account's first record, before_history); else inferred
+    counterpart is already held by that account's history (a manual hybrid account's first
+    snapshot, or the days a manual transactions account's imports list or open with,
+    manual_predates; a connected account's first record, before_history); else inferred
     with a placeholder when the counterpart is manual, or awaiting the counterpart's own
     record when it is connected.
 
@@ -330,7 +330,7 @@ async def _open(
     status: TransferStatus = "awaiting"
     if counterpart.source_kind == "manual":
         if await session.scalar(
-            select(manual_predates(record.columns(), bound_id(counterpart.id)))
+            select(manual_predates(record.columns(), bound_id(counterpart.id), settings))
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"

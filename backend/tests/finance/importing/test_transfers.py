@@ -96,8 +96,10 @@ async def _pay(
     gbp: InstrumentRecord,
     connected: tuple[UUID, AccountRecord],
     on: date = date(2026, 12, 10),
+    quantity: str = "-100",
 ) -> None:
-    """A pays 100 (on 10 Dec) to the bank account M's statement names, then matching runs."""
+    """A pays 100 (on 10 Dec) to the bank account M's statement names, or receives it from
+    there (a positive quantity), then matching runs."""
     connection_id, a = connected
     identifier = await run(
         get_or_create_identifier, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}"
@@ -118,8 +120,8 @@ async def _pay(
             connection_id=connection_id,
             external_id="tx_1",
             postings=[
-                PostingInput(a.id, gbp.id, Decimal("-100")),
-                PostingInput(contra, gbp.id, Decimal("100")),
+                PostingInput(a.id, gbp.id, Decimal(quantity)),
+                PostingInput(contra, gbp.id, -Decimal(quantity)),
             ],
             counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
         ),
@@ -182,12 +184,16 @@ async def test_a_card_row_is_no_transfers_other_side(
     stage: Stage,
     commit: Commit,
     profile: ImportProfileRecord,
+    account: AccountRecord,
     connected: tuple[UUID, AccountRecord],
 ) -> None:
     await commit((await stage(profile, _lines(NOVEMBER))).id)
     await _pay(session, run, gbp, connected)
     await commit((await stage(profile, _lines(DECEMBER.format(type="VIS")))).id)
-    assert await _status(session) == "inferred"  # a card refund of 100 is not the transfer
+    # A card refund of 100 is not the transfer. December lists the days M's side may be
+    # booked on in full, so M's balance is the statement's and the transfer is settled.
+    assert await _status(session) == "before_history"
+    assert await _balance_after(session, account.id, END) == Decimal("596")
 
 
 async def test_the_owners_reject_follows_the_row_imported_again(
@@ -350,19 +356,20 @@ async def test_a_transfer_before_the_first_statement_is_inside_its_opening(
     assert await find_transfer_violations(session) == []
 
 
-async def test_a_placeholder_puts_no_adjustment_on_the_next_statement(
+async def test_a_late_receipt_leaves_the_statement_balance_alone(
     session: AsyncSession,
     run: Run,
     gbp: InstrumentRecord,
     stage: Stage,
     commit: Commit,
     profile: ImportProfileRecord,
+    account: AccountRecord,
     connected: tuple[UUID, AccountRecord],
 ) -> None:
-    """A's 100 on 10 Dec arrives on M on 20 Dec, after its window: no pair, and the
-    placeholder stays on 10 Dec, a day December's export lists in full. January's export
-    agrees with December's, so it takes no opening adjustment: one sized around the
-    placeholder would be wrong once matching takes it off."""
+    """A's 100 on 10 Dec arrives on M on 20 Dec, after its window: no pair. December lists
+    every day M's side may be booked on in full, so M's balance is the statement's: the
+    transfer is settled, with no placeholder on M. January's export agrees with
+    December's, so it takes no opening adjustment."""
     await commit((await stage(profile, _lines(NOVEMBER))).id)
     await _pay(session, run, gbp, connected)
     december = (
@@ -370,9 +377,60 @@ async def test_a_placeholder_puts_no_adjustment_on_the_next_statement(
         "31/12/2026,VIS,Shop,-1.00,596.00\n"
     )
     await commit((await stage(profile, _lines(december))).id)
-    assert await _status(session) == "inferred"
+    assert await _status(session) == "before_history"
+    assert await _balance_after(session, account.id, END) == Decimal("596")
 
     january = "01/01/2027,VIS,Shop,-1.00,595.00\n10/01/2027,VIS,Shop,-1.00,594.00\n"
     committed = await commit((await stage(profile, _lines(january))).id)
     assert _adjustments(await list_batch_rows(session, committed.id)) == []
     assert await find_transfer_violations(session) == []
+
+
+async def test_a_skipped_statement_month_is_held_by_the_gap_adjustment(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """October and December imported, November skipped: A's 100 to M on 15 Nov is inside
+    the gap December's opening adjustment holds, so it is settled, not counted again as a
+    placeholder; importing November pairs it with M's own row."""
+    october = "01/10/2026,CR,Pay,200.00,200.00\n31/10/2026,VIS,Shop,-1.00,199.00\n"
+    await commit((await stage(profile, _lines(october))).id)
+    await _pay(session, run, gbp, connected, on=date(2026, 11, 15))
+    assert await _status(session) == "inferred"
+    december = "01/12/2026,VIS,Shop,-1.00,298.00\n31/12/2026,VIS,Shop,-1.00,297.00\n"
+    await commit((await stage(profile, _lines(december))).id)
+    assert await _status(session) == "before_history"
+    assert await _balance_after(session, account.id, END) == Decimal("297")
+
+    november = "01/11/2026,VIS,Shop,-1.00,198.00\n15/11/2026,CR,From A,100.00,298.00\n"
+    november += "30/11/2026,CR,Pay,1.00,299.00\n"
+    await commit((await stage(profile, _lines(november))).id)
+    assert await _status(session) == "matched"
+    assert await find_transfer_violations(session) == []
+
+
+async def test_a_transfer_across_the_first_statements_start_is_held_by_its_opening(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """A receives M's 100 on 3 Nov, which M may have booked as early as 29 Oct, before its
+    first statement (November): M's side is in the statement or in its opening, so the
+    transfer is settled and M's balance is the statement's."""
+    for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
+        await run(get_or_create_system_account, key)
+    await _pay(session, run, gbp, connected, on=date(2026, 11, 3), quantity="100")
+    await commit((await stage(profile, _lines(NOVEMBER))).id)
+    assert await _status(session) == "before_history"
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("499")
