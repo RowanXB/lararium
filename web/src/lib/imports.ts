@@ -37,6 +37,7 @@ export function countsSummary(counts: Record<string, number>): string {
 // account's or a card's (the system accounts imports post their other legs to are equity).
 export function isImportable(account: AccountOut): boolean {
   return (
+    !account.system &&
     account.status === "open" &&
     account.source_kind === "manual" &&
     (account.ledger_type === "asset" || account.ledger_type === "liability") &&

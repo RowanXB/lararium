@@ -16,6 +16,7 @@ from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
 from lararium.modules.finance.identifiers import get_or_create_identifier, list_identifiers
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
+from lararium.modules.finance.importing.staging import list_batch_rows
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -33,7 +34,15 @@ from lararium.modules.finance.transfers import (
     transfer_contra,
 )
 
-from .staging_helpers import Commit, Rollback, Run, Stage, _balance_after, _csv_profile
+from .staging_helpers import (
+    Commit,
+    Rollback,
+    Run,
+    Stage,
+    _adjustments,
+    _balance_after,
+    _csv_profile,
+)
 
 SORT_CODE, ACCOUNT_NUMBER = "401234", "12345678"
 HEADER = "Date,Type,Description,Amount,Balance,Sort Code,Account Number\n"
@@ -310,7 +319,7 @@ async def test_rolling_back_keeps_a_registration_another_import_shows(
     assert identifier.account_id is None
 
 
-async def test_a_transfer_before_the_first_statement_stays_inside_its_opening(
+async def test_a_transfer_before_the_first_statement_is_inside_its_opening(
     session: AsyncSession,
     run: Run,
     gbp: InstrumentRecord,
@@ -320,14 +329,50 @@ async def test_a_transfer_before_the_first_statement_stays_inside_its_opening(
     account: AccountRecord,
     connected: tuple[UUID, AccountRecord],
 ) -> None:
-    """A's 100 to M's bank account in October, before M's first statement: committing that
-    statement registers M, so matching gives the transfer a placeholder on M dated before
-    the statement. The opening adjustment is sized after matching, so it takes the 100 in
-    and M's balance is the statement's."""
+    """M's history starts on the first day its imports cover: A's 100 in October, before
+    M's first statement (November), is inside the opening November's statement gives, so
+    it is settled against Opening balances (before_history), not given a placeholder on
+    M. Importing October, with M's own row of it, moves the start back, and they pair."""
     for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
         await run(get_or_create_system_account, key)
     await _pay(session, run, gbp, connected, on=date(2026, 10, 15))
     await commit((await stage(profile, _lines(NOVEMBER))).id)
-    assert await _status(session) == "inferred"
+    assert await _status(session) == "before_history"
     assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("499")
+
+    october = (
+        "01/10/2026,VIS,Shop,-1.00,99.00\n15/10/2026,CR,From A,100.00,199.00\n"
+        "31/10/2026,VIS,Shop,-199.00,0.00\n"
+    )
+    await commit((await stage(profile, _lines(october))).id)
+    assert await _status(session) == "matched"
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("499")
+    assert await find_transfer_violations(session) == []
+
+
+async def test_a_placeholder_puts_no_adjustment_on_the_next_statement(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """A's 100 on 10 Dec arrives on M on 20 Dec, after its window: no pair, and the
+    placeholder stays on 10 Dec, a day December's export lists in full. January's export
+    agrees with December's, so it takes no opening adjustment: one sized around the
+    placeholder would be wrong once matching takes it off."""
+    await commit((await stage(profile, _lines(NOVEMBER))).id)
+    await _pay(session, run, gbp, connected)
+    december = (
+        "01/12/2026,VIS,Shop,-2.00,497.00\n20/12/2026,CR,From A,100.00,597.00\n"
+        "31/12/2026,VIS,Shop,-1.00,596.00\n"
+    )
+    await commit((await stage(profile, _lines(december))).id)
+    assert await _status(session) == "inferred"
+
+    january = "01/01/2027,VIS,Shop,-1.00,595.00\n10/01/2027,VIS,Shop,-1.00,594.00\n"
+    committed = await commit((await stage(profile, _lines(january))).id)
+    assert _adjustments(await list_batch_rows(session, committed.id)) == []
     assert await find_transfer_violations(session) == []

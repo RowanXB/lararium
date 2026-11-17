@@ -24,6 +24,7 @@ from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from lararium.modules.finance.importing.staging import NO_BALANCES_WARNING, get_batch
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import find_unbalanced_transactions, void_transaction
+from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.valuation import balances_asof, net_worth_series
 
 from .staging_helpers import (
@@ -1157,3 +1158,12 @@ async def test_closing_within_rows_past_the_period_still_anchors(
     )
     (adjustment,) = _adjustments(await _rows(session, await stage(ofx, content)))
     assert adjustment.quantity == Decimal("100.00")
+
+
+async def test_the_ledgers_own_accounts_take_no_imports(
+    run: Run, stage: Stage, csv_profile: ImportProfileRecord
+) -> None:
+    """In transit is an asset the ledger keeps for transfers in flight (M4), not a bank's."""
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    with pytest.raises(ImportNotAllowedError, match="belongs to the ledger"):
+        await stage(csv_profile, TWO_ROWS, account_id=in_transit)

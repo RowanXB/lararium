@@ -882,16 +882,29 @@ async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_B
 
 async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
     """The account's non-void postings by instrument and transaction, without opening
-    adjustments."""
-    p, t, r = models.Posting, models.Transaction, models.ImportRow
+    adjustments nor M4's placeholders: the walk reads what statements and real records
+    say. A placeholder is matching's estimate of a side not yet in, which matching posts
+    and takes off at any time (another account's import, a sync); an adjustment sized
+    around one would go stale, and one on a day a statement lists in full would read as
+    a gap. None lies before the account's first statement: a transfer there is inside its
+    opening, before_history (M4's manual_predates)."""
+    p, t, r, x = models.Posting, models.Transaction, models.ImportRow, models.Transfer
     adjustments = select(r.transaction_id).where(
         r.kind == "opening_adjustment", r.transaction_id.is_not(None)
+    )
+    placeholders = select(x.placeholder_transaction_id).where(
+        x.placeholder_transaction_id.is_not(None)
     )
     movements: Movements = defaultdict(list)
     for instrument_id, transaction_id, day, amount in await session.execute(
         select(p.instrument_id, t.id, t.booking_date, func.sum(p.quantity))
         .join(t, t.id == p.transaction_id)
-        .where(p.account_id == account_id, t.status != "void", t.id.not_in(adjustments))
+        .where(
+            p.account_id == account_id,
+            t.status != "void",
+            t.id.not_in(adjustments),
+            t.id.not_in(placeholders),
+        )
         .group_by(p.instrument_id, t.id, t.booking_date)
     ):
         movements[instrument_id].append(Movement(day, amount, transaction_id))
@@ -1108,8 +1121,12 @@ def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
 def require_importable(account: AccountRecord) -> None:
     """Decision 3: only open, manual accounts whose balance comes from transactions, and
     only assets and liabilities: a statement is a bank account's or a card's, never an
-    income, expense or equity account's (the system accounts an import posts its other
-    legs to are equity)."""
+    income, expense or equity account's, nor one of the ledger's own accounts (In transit
+    is an asset, but holds M4's transfers in flight)."""
+    if account.system:
+        raise ImportNotAllowedError(
+            f"{account.name} belongs to the ledger, so it can't take imports"
+        )
     if account.ledger_type not in ("asset", "liability"):
         raise ImportNotAllowedError(
             f"this is an {account.ledger_type} account; statements import into a bank, card "

@@ -291,8 +291,9 @@ async def _post_settlement(
     ctx: CommandContext, record: OwnRecord, counterpart: AccountRecord, system: _System
 ) -> UUID:
     """Settle a counterpart that predates its account's history against Opening balances,
-    which that account's opening balance (a connector's adjustment, or a manual account's
-    first snapshot) already contains it through."""
+    which that account's opening balance (a connector's adjustment, a manual account's
+    first snapshot, or its first statement import's opening adjustment) already contains
+    it through."""
     return await _post_mirror(
         ctx,
         record,
@@ -315,7 +316,8 @@ async def _open(
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart predates that account's history (a manual hybrid account's first snapshot,
-    manual_predates; a connected account's first record, before_history); else inferred
+    or a manual transactions account's first statement import, manual_predates; a connected
+    account's first record, before_history); else inferred
     with a placeholder when the counterpart is manual, or awaiting the counterpart's own
     record when it is connected.
 

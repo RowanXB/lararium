@@ -298,9 +298,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
     # Pair the new rows with the transfers they are a side of, replacing placeholders, and
     # whatever else the commit changed (M4, design §5.8: the registration, the span).
     await heal_transfers(ctx)
-    # Then the adjustments follow (Decision 13), sized against the ledger as matching left
-    # it: one sized before would be off by every placeholder matching then posts or takes
-    # off.
+    # With this batch committed, the others' adjustments follow (Decision 13).
     await align_openings(ctx, account_id)
     record = await get_batch(session, batch_id)
     _publish(ctx, "finance.import.committed", record)
@@ -343,7 +341,7 @@ async def rollback_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchReco
     # Without this batch, the remaining batches' adjustments follow (Decision 13).
     await _unregister_own_account(ctx, batch_id, account_id)
     await heal_transfers(ctx)
-    # As at commit: after matching, against the ledger it left.
+    # Without this batch, the remaining batches' adjustments follow (Decision 13).
     await align_openings(ctx, account_id)
     record = await get_batch(session, batch_id)
     _publish(ctx, "finance.import.rolled_back", record)
