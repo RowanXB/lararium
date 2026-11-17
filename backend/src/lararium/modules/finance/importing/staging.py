@@ -14,7 +14,7 @@ from typing import Any, Literal, cast, get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, func, insert, select, union, update
+from sqlalchemy import ColumnElement, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -882,28 +882,16 @@ async def _committed_batches(session: AsyncSession, account_id: UUID) -> list[_B
 
 async def _movements(session: AsyncSession, account_id: UUID) -> Movements:
     """The account's non-void postings by instrument and transaction, without opening
-    adjustments, nor M4's placeholders and settlements: those stand in for a transfer's
-    side until its real record is in, so they are no movement a statement lists, and
-    matching takes them off again (at this commit's own heal, say). An adjustment sized
-    to absorb one would be wrong by its amount once it goes."""
-    p, t, r, x = models.Posting, models.Transaction, models.ImportRow, models.Transfer
+    adjustments."""
+    p, t, r = models.Posting, models.Transaction, models.ImportRow
     adjustments = select(r.transaction_id).where(
         r.kind == "opening_adjustment", r.transaction_id.is_not(None)
-    )
-    derived = union(
-        select(x.placeholder_transaction_id).where(x.placeholder_transaction_id.is_not(None)),
-        select(x.settlement_transaction_id).where(x.settlement_transaction_id.is_not(None)),
     )
     movements: Movements = defaultdict(list)
     for instrument_id, transaction_id, day, amount in await session.execute(
         select(p.instrument_id, t.id, t.booking_date, func.sum(p.quantity))
         .join(t, t.id == p.transaction_id)
-        .where(
-            p.account_id == account_id,
-            t.status != "void",
-            t.id.not_in(adjustments),
-            t.id.not_in(derived),
-        )
+        .where(p.account_id == account_id, t.status != "void", t.id.not_in(adjustments))
         .group_by(p.instrument_id, t.id, t.booking_date)
     ):
         movements[instrument_id].append(Movement(day, amount, transaction_id))

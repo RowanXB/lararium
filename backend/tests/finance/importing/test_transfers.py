@@ -23,6 +23,7 @@ from lararium.modules.finance.ledger import (
     TransactionInput,
     upsert_connector_transaction,
 )
+from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
     heal_transfers,
@@ -307,3 +308,26 @@ async def test_rolling_back_keeps_a_registration_another_import_shows(
     await rollback(second.id)
     [identifier] = await list_identifiers(session)
     assert identifier.account_id is None
+
+
+async def test_a_transfer_before_the_first_statement_stays_inside_its_opening(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """A's 100 to M's bank account in October, before M's first statement: committing that
+    statement registers M, so matching gives the transfer a placeholder on M dated before
+    the statement. The opening adjustment is sized after matching, so it takes the 100 in
+    and M's balance is the statement's."""
+    for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
+        await run(get_or_create_system_account, key)
+    await _pay(session, run, gbp, connected, on=date(2026, 10, 15))
+    await commit((await stage(profile, _lines(NOVEMBER))).id)
+    assert await _status(session) == "inferred"
+    assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("499")
+    assert await find_transfer_violations(session) == []
