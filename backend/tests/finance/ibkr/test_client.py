@@ -136,13 +136,23 @@ async def test_config_errors_are_credential_rejected(code: int) -> None:
     assert str(caught.value) == f"IBKR Flex error {code}: Token has expired."
 
 
-@pytest.mark.parametrize("code", [1001, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1018, 1019, 1021])
-async def test_retryable_codes_poll_until_the_budget(code: int) -> None:
+@pytest.mark.parametrize("code", [1003, 1004, 1005, 1006, 1007, 1008, 1009, 1019])
+async def test_not_ready_codes_poll_until_the_budget(code: int) -> None:
     env = Endless(failure(code))
     with pytest.raises(FlexRetryableError) as caught:
         await fetch(env)
     assert str(caught.value) == f"IBKR Flex error {code}"
     assert env.sleeps == BUDGET_SLEEPS
+
+
+@pytest.mark.parametrize("code", [1001, 1018, 1021])
+async def test_other_retryable_codes_on_get_statement_raise_after_one_poll(code: int) -> None:
+    env = Endless(failure(code))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert caught.value.code == code
+    assert len(env.requests) == 2
+    assert env.sleeps == [5]
 
 
 @pytest.mark.parametrize("code", [1001, 1018, 1021])

@@ -30,9 +30,12 @@ POLL_BUDGET = 120
 
 # Token, query, or permission problems the owner has to fix.
 CONFIG_CODES = frozenset(range(1011, 1017))
-# Failures a later sync may not meet again. Once a statement is requested, each is polled
-# again within POLL_BUDGET (the statement may still be generating); a SendRequest fails at once.
+# Failures a later sync may not meet again.
 RETRYABLE_CODES = frozenset({1001, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1018, 1019, 1021})
+# The statement isn't ready or the server is busy with it: GetStatement is polled again within
+# POLL_BUDGET. The other retryable codes (1018 "too many requests" among them) raise at once, so
+# a rate limit isn't answered with more requests; the next tick retries.
+POLL_AGAIN_CODES = frozenset({1003, 1004, 1005, 1006, 1007, 1008, 1009, 1019})
 
 _URL = re.compile(r"https?://\S+", re.IGNORECASE)
 _MAX_MESSAGE = 200
@@ -162,6 +165,6 @@ class FlexClient:
             if root.tag.lower() != "flexstatementresponse":
                 return body
             error = self._error(root)
-            if not isinstance(error, FlexRetryableError):
+            if error.code not in POLL_AGAIN_CODES:
                 raise error
             pending = error.code
