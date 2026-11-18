@@ -83,16 +83,13 @@ class Account:
             and booking_date(at) <= self.imported_through
         )
 
-    def lists_in_full(self, earliest: date, latest: date) -> bool:
-        """Whether the account's imports list every day from earliest to latest in full:
-        the days after its opening snapshot's (that day's rows before it are inside the
-        snapshot) through the last day imported (the harness records them so)."""
+    def holds_from(self, earliest: date) -> bool:
+        """Whether a counterpart found by amount and date may be taken in a window starting
+        on earliest (pairs.Known): the account has imports, and the window doesn't start
+        before the first day they list in full, the day after the opening snapshot's (that
+        day's rows before it are inside the snapshot; the harness records them so)."""
         assert self.snapshot_at is not None
-        return (
-            self.imported_through is not None
-            and earliest > booking_date(self.snapshot_at)
-            and latest <= self.imported_through
-        )
+        return self.imported_through is not None and earliest > booking_date(self.snapshot_at)
 
 
 @dataclass(frozen=True)
@@ -240,19 +237,26 @@ class Scenario:
                 assert account.snapshot_at is not None
                 own = self.record_of(t.index, account.name)
                 other = self.record_of(t.index, other_side.account)
+                earliest, latest = _window(other_side)
+                one_sided = other is not None and other.names is not None
                 if own is not None and (
-                    own.names is not None
-                    or other is None
-                    or other.names is None
-                    or account.lists_in_full(*_window(other_side))
+                    own.names is not None or not one_sided or account.holds_from(earliest)
                 ):
                     continue  # its own row is in the ledger and taken, not a placeholder
                 if own is not None:
-                    # Caveat "a transfer whose window runs past the days imported keeps its
-                    # placeholder" (design §5.8): its own row, found by amount and date
-                    # only, isn't taken until imports list the window in full.
-                    found.append(f"window_not_listed_in_full: transfer {t.index}")
+                    # Caveat "a window starting before the days imported" (design §5.8):
+                    # its own row, found by amount and date only, isn't taken.
+                    found.append(f"window_starts_before_imports: transfer {t.index}")
                     continue
+                if (
+                    one_sided
+                    and account.holds_from(earliest)
+                    and self._stand_in(t, manual_side, earliest, latest)
+                ):
+                    # Caveat "an unrelated row can stand in until the next statement" (design
+                    # §5.8): its own row is after the last day imported, and another of the
+                    # same amount is taken for it until the next statement brings it.
+                    found.append(f"stand_in_until_next_statement: transfer {t.index}")
                 # Caveat "a snapshot dated between the two banks' bookings of a multi-day
                 # transfer": the snapshot and the placeholder (dated as the other side's
                 # record) disagree about which side of it the money is on.
@@ -261,6 +265,20 @@ class Scenario:
                 ):
                     found.append(f"snapshot_in_settlement_gap: transfer {t.index}")
         return found
+
+    def _stand_in(self, t: Transfer, manual_side: Movement, earliest: date, latest: date) -> bool:
+        """Whether another imported bank transfer of the transfer's amount, naming nobody, is
+        booked on its manual side's account inside the window."""
+        return any(
+            r.kind == "import"
+            and r.transfer != t.index
+            and r.movement.account == manual_side.account
+            and r.movement.quantity == manual_side.quantity
+            and r.bank_transfer
+            and r.names is None
+            and earliest <= r.movement.day <= latest
+            for r in self.records
+        )
 
 
 def _window(side: Movement) -> tuple[date, date]:

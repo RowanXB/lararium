@@ -444,14 +444,13 @@ names to the account (as on Registering identifiers), and passes its rows throug
 matching: a row that is the other side of a transfer from a connected account replaces the
 transfer's placeholder instead of counting twice, and the Transfers page treats it like any
 other record. A row naming the other account is matched through the registry. A row naming no
-account, and not of a card type, is taken by amount and date only when the transfer's window
-lies within the days the account's imports span, from the first day one of them lists in full
-to the last (an export without a stated period may cut its first and last day short). Outside
-them the real row may simply not have been imported yet, and an unrelated payment of the same
-amount must not stand in for it. Where the window runs past the last day imported (a transfer in
-the last days of the latest statement), the transfer keeps its placeholder, and the row, if it
-is already there, counts too, so the account is off by the amount until the next statement is
-imported and the two pair. On a Transactions account, a transfer whose window lies wholly on
+account, and not of a card type, is taken by amount and date unless the transfer's window starts
+before the first day the account's imports list in full (an export without a stated period may
+cut its first and last day short): before it, the real row may be inside the account's opening,
+never to be imported, and an unrelated payment of the same amount must not stand in for it.
+After the last day imported a row is taken: should it not be the real one, the next statement
+brings the real row, and the transfer goes to Needs attention with both as candidates. On a
+Transactions account, a transfer whose window lies wholly on
 days its statements list or open with is settled instead (*before history*), so the account
 stays at its statements' balances. That includes a receipt booked too late to pair: it stays on
 Unassigned, and the transfer shows under Recent rather than as needing attention. Leave no

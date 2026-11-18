@@ -742,7 +742,8 @@ async def preview_match(
     `booking_date`: the one the row will be posted with, if given; else it gets the one
     posting would give it (ledger.resolve_booking_date), which the window is counted in.
     `complete`: the days the row's import lists in full, which committing it would add
-    (a counterpart found by amount and date is taken only on such days, design §5.8)."""
+    (a counterpart found by amount and date is taken only from the first day imports list
+    in full, design §5.8)."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
     holder = (
@@ -761,7 +762,7 @@ async def preview_match(
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
     )
-    listing = [] if complete is None else [(account_id, instrument_id, *complete)]
+    listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
     return relation.partner(row.id)
 

@@ -232,28 +232,27 @@ async def test_the_owners_reject_follows_the_row_imported_again(
     assert [t.status for t in await list_transfers(session)] == ["rejected"]
 
 
-async def test_a_row_past_the_days_imported_waits_for_the_next_statement(
+async def test_a_row_at_the_end_of_the_days_imported_pairs(
     session: AsyncSession,
     run: Run,
     gbp: InstrumentRecord,
     stage: Stage,
     commit: Commit,
     profile: ImportProfileRecord,
+    account: AccountRecord,
     connected: tuple[UUID, AccountRecord],
 ) -> None:
-    """Design §5.8: A's payment on 30 Dec may arrive on M up to 4 Jan, but an export's last
-    day (31 Dec) may be cut short and the days after aren't imported, so the 100 on 31 Dec
-    may be an unrelated receipt standing in for M's real row: not taken until January's
-    statement is imported, which shows the days after."""
+    """Design §5.8: A's payment on 30 Dec may arrive on M up to 4 Jan, after the days
+    December's export lists. Its 100 on 31 Dec is taken at once, rather than counting a
+    placeholder on top of it until January: were it an unrelated receipt, January's
+    statement would bring M's real row, and the two would go to review."""
     await commit((await stage(profile, _lines(NOVEMBER))).id)
     await _pay(session, run, gbp, connected, on=date(2026, 12, 30))
     december = "01/12/2026,VIS,Shop,-2.00,497.00\n31/12/2026,CR,From A,100.00,597.00\n"
     await commit((await stage(profile, _lines(december))).id)
-    assert await _status(session) == "inferred"
-
-    january = "01/01/2027,VIS,Shop,-1.00,596.00\n10/01/2027,VIS,Shop,-1.00,595.00\n"
-    await commit((await stage(profile, _lines(january))).id)
     assert await _status(session) == "matched"
+    assert await _balance_after(session, account.id, END) == Decimal("597")
+    assert await find_transfer_violations(session) == []
 
 
 async def test_a_transfer_at_the_boundary_of_back_to_back_exports_pairs(
@@ -268,12 +267,12 @@ async def test_a_transfer_at_the_boundary_of_back_to_back_exports_pairs(
 ) -> None:
     """An export lists in full only the days strictly inside it (it may be cut short on its
     first and last), so 30 Nov and 1 Dec are listed in full by neither of two exports
-    taken without overlap. They still lie between imports, with no rows missing: A's 100
-    on 30 Nov pairs with November's row once December's export is imported."""
+    taken without overlap. A's 100 on 30 Nov pairs with November's row at once, and stays
+    paired when December's export is imported."""
     november = "01/11/2026,CR,Pay,500.00,500.00\n30/11/2026,CR,From A,100.00,600.00\n"
     await commit((await stage(profile, _lines(november))).id)
     await _pay(session, run, gbp, connected, on=date(2026, 11, 30))
-    assert await _status(session) == "inferred"  # the days after 30 Nov aren't imported
+    assert await _status(session) == "matched"
 
     december = "01/12/2026,VIS,Shop,-2.00,598.00\n31/12/2026,VIS,Shop,-1.00,597.00\n"
     await commit((await stage(profile, _lines(december))).id)
@@ -518,3 +517,33 @@ async def test_backfilling_a_transfer_in_a_statement_gap(
             assert await _status(session) == "before_history"
             assert await _balance_after(session, account.id, END) == november_close - 3
             assert await find_transfer_violations(session) == []
+
+
+async def test_a_wrong_pick_at_the_end_is_flagged_by_the_next_statement(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """The accepted cost (design §5.8): A's 100 on 29 Nov arrives on M on 1 Dec, after the
+    days November's export lists, and a friend's 100 on 28 Nov is taken for it meanwhile.
+    December's export brings M's real row: two candidates, so the transfer goes to review,
+    and M's balance is the statements' throughout."""
+    november = (
+        "01/11/2026,CR,Pay,500.00,500.00\n28/11/2026,CR,From a friend,100.00,600.00\n"
+        "30/11/2026,VIS,Shop,-1.00,599.00\n"
+    )
+    await commit((await stage(profile, _lines(november))).id)
+    await _pay(session, run, gbp, connected, on=date(2026, 11, 29))
+    assert await _status(session) == "matched"  # with the friend's 100, for now
+
+    december = "01/12/2026,CR,From A,100.00,699.00\n31/12/2026,VIS,Shop,-1.00,698.00\n"
+    await commit((await stage(profile, _lines(december))).id)
+    [transfer] = await list_transfers(session)
+    assert (transfer.review_reason, transfer.in_transaction_id) == ("several_candidates", None)
+    assert await _balance_after(session, account.id, END) == Decimal("698")
+    assert await find_transfer_violations(session) == []
