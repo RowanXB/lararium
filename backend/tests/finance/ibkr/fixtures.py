@@ -19,6 +19,11 @@ CONTAINERS: Mapping[str, str] = {
     "Transfer": "Transfers",
     "EquitySummaryByReportDateInBase": "EquitySummaryInBase",
     "StatementOfFundsLine": "StmtFunds",
+    "Order": "Trades",
+    "Lot": "Trades",
+    "WashSale": "Trades",
+    "SymbolSummary": "Trades",
+    "AssetSummary": "Trades",
 }
 
 
@@ -33,6 +38,7 @@ class AccountSpec:
 class RowSpec:
     """One row. `attributes` override the defaults; a value of None drops the attribute.
 
+    `container` overrides the container element (a Lot sits under Trades or OpenPositions).
     `day` puts the row in that day's statement only when the statement is built by day;
     without it the row is repeated in every daily statement, as IBKR repeats conversion rates.
     """
@@ -43,11 +49,13 @@ class RowSpec:
         account_id: str,
         *,
         day: date | None = None,
+        container: str | None = None,
         **attributes: str | None,
     ) -> None:
         self.section = section
         self.account_id = account_id
         self.day = day
+        self.container = container
         self.attributes = attributes
 
 
@@ -168,7 +176,7 @@ def build_statement(
                     continue
                 if spec.day is not None and by_day and spec.day != start:
                     continue
-                name = CONTAINERS.get(spec.section, f"{spec.section}s")
+                name = spec.container or CONTAINERS.get(spec.section, f"{spec.section}s")
                 if name not in containers:
                     containers[name] = ElementTree.SubElement(statement, name)
                 values: dict[str, str | None] = dict(

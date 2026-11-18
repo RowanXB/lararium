@@ -18,7 +18,19 @@ def build(*rows: RowSpec, accounts: list[AccountSpec] | None = None, by_day: boo
 
 def test_parses_every_section() -> None:
     sections = [s for s in SECTIONS if s != "AccountInformation"]
-    rows = [RowSpec(s, a) for s in sections for a in (A1, A2)]
+    rows = [
+        spec
+        for s in sections
+        for a in (A1, A2)
+        for spec in (
+            # routed record types have no element of their own
+            RowSpec("Order", a, levelOfDetail="ORDER")
+            if s == "TradeDetail"
+            else RowSpec("Lot", a, container="OpenPositions", levelOfDetail="LOT")
+            if s == "PositionLot"
+            else RowSpec(s, a),
+        )
+    ]
     statement = parse_statement(build(*rows))
     assert statement.flagged == frozenset()
     for section in sections:
@@ -138,21 +150,162 @@ def test_not_xml_refused() -> None:
         parse_statement(b"<oops")
 
 
+PERSONAL_VALUES = {
+    "AccountInformation": {
+        "name": "Zed Quux",
+        "primaryEmail": "zed@example.invalid",
+        "dateOfBirth": "19700101",
+        "street": "1 Nowhere Rd",
+        "street2": "Flat 9",
+        "city": "Faketown",
+        "postalCode": "ZZ9 9ZZ",
+        "accountRepName": "Rep Person",
+        "accountRepPhone": "+000000000",
+        "beneficiaryDesignations": "Heir Name",
+    },
+    "Transfer": {"accountName": "Zed Quux ISA"},
+}
+
+
+def _personal(section: str) -> dict[str, str]:
+    return PERSONAL_VALUES[section]
+
+
+def _assert_no_personal(text: str) -> None:
+    values = [v for group in PERSONAL_VALUES.values() for v in group.values()]
+    assert values and all(v not in text for v in values)
+
+
+def test_personal_fields_cover_the_fixture() -> None:
+    names = {n for group in PERSONAL_VALUES.values() for n in group}
+    assert names and names <= PERSONAL_FIELDS
+    assert "accountName" in PERSONAL_FIELDS
+
+
 def test_flags_never_contain_values() -> None:
-    personal = {
-        name: f"secret-{name}" for name in PERSONAL_FIELDS if name in SECTIONS["Transfer"].known
-    }
     body = build(
-        RowSpec("Transfer", A1, mystery="secret-mystery", **personal),
-        RowSpec("Transfer", A1, transactionID=None, **personal),
+        RowSpec(
+            "AccountInformation", A1, mysteryInfo="Zed Quux", **_personal("AccountInformation")
+        ),
+        RowSpec("Transfer", A1, mystery="Zed Quux ISA", **_personal("Transfer")),
         accounts=ACCOUNTS[:1],
+    )
+    statement = parse_statement(body)
+    assert statement.flagged == {"AccountInformation.mysteryInfo", "Transfer.mystery"}
+    for flag in statement.flagged:
+        _assert_no_personal(flag)
+
+
+@pytest.mark.parametrize(
+    ("section", "missing"),
+    [("AccountInformation", "dateOpened"), ("Transfer", "transactionID")],
+)
+def test_error_messages_never_contain_values(section: str, missing: str) -> None:
+    body = build(
+        RowSpec(section, A1, **{missing: None}, **_personal(section)), accounts=ACCOUNTS[:1]
     )
     with pytest.raises(FlexDataError) as error:
         parse_statement(body)
-    assert "secret-" not in str(error.value)
-    flagged_body = build(
-        RowSpec("Transfer", A1, mystery="secret-mystery", **personal), accounts=ACCOUNTS[:1]
+    assert f"{section}.{missing}" in str(error.value)
+    _assert_no_personal(str(error.value))
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_required_attribute_is_missing(value: str) -> None:
+    body = build(RowSpec("Transfer", A1, transactionID=value), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match=r"Transfer\.transactionID"):
+        parse_statement(body)
+
+
+def test_row_account_must_match_its_statement() -> None:
+    body = build(RowSpec("CashTransaction", A1, accountId=A2), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError) as error:
+        parse_statement(body)
+    assert "CashTransaction.accountId" in str(error.value)
+    assert A1 not in str(error.value) and A2 not in str(error.value)
+
+
+def test_account_information_account_must_match_its_statement() -> None:
+    body = build(RowSpec("AccountInformation", A1, accountId=A2), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match=r"AccountInformation\.accountId"):
+        parse_statement(body)
+
+
+def test_level_required_in_level_gated_sections() -> None:
+    body = build(RowSpec("CashTransaction", A1, levelOfDetail=None), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match=r"CashTransaction\.levelOfDetail"):
+        parse_statement(body)
+    body = build(RowSpec("CashReportCurrency", A1, levelOfDetail=" "), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match=r"CashReportCurrency\.levelOfDetail"):
+        parse_statement(body)
+
+
+@pytest.mark.parametrize("section", ["CashTransaction", "CashReportCurrency"])
+def test_unknown_level_flagged_and_skipped(section: str) -> None:
+    body = build(RowSpec(section, A1, levelOfDetail="BRAND_NEW"), accounts=ACCOUNTS[:1])
+    statement = parse_statement(body)
+    assert statement.flagged == {f"{section}.levelOfDetail"}
+    assert all(r.section != section for r in statement.rows)
+
+
+def _only(statement, section: str):
+    return [r for r in statement.rows if r.section == section]
+
+
+def test_execution_trade_is_a_trade() -> None:
+    statement = parse_statement(build(RowSpec("Trade", A1), accounts=ACCOUNTS[:1]))
+    assert len(_only(statement, "Trade")) == 1 and not _only(statement, "TradeDetail")
+
+
+def test_trade_without_execution_level_is_a_detail() -> None:
+    body = build(
+        RowSpec("Trade", A1, levelOfDetail="CLOSED_LOT", transactionID=None, tradeID=None),
+        accounts=ACCOUNTS[:1],
     )
-    statement = parse_statement(flagged_body)
-    assert statement.flagged == {"Transfer.mystery"}
-    assert not any("secret-" in flag for flag in statement.flagged)
+    statement = parse_statement(body)
+    assert len(_only(statement, "TradeDetail")) == 1 and not _only(statement, "Trade")
+    assert statement.flagged == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("tag", "level"),
+    [
+        ("Order", "ORDER"),
+        ("Lot", "CLOSED_LOT"),
+        ("WashSale", "WASH_SALE"),
+        ("SymbolSummary", "SYMBOL_SUMMARY"),
+        ("AssetSummary", "ASSET_SUMMARY"),
+    ],
+)
+def test_trade_detail_tags(tag: str, level: str) -> None:
+    body = build(RowSpec(tag, A1, levelOfDetail=level, symbol="TST"), accounts=ACCOUNTS[:1])
+    statement = parse_statement(body)
+    (row,) = _only(statement, "TradeDetail")
+    assert row.attributes["levelOfDetail"] == level
+    assert statement.flagged == frozenset()
+
+
+def test_trade_detail_requires_account_and_level_only() -> None:
+    body = build(RowSpec("Order", A1, levelOfDetail=None), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match=r"TradeDetail\.levelOfDetail"):
+        parse_statement(body)
+
+
+def test_lot_under_open_positions_is_a_position_lot() -> None:
+    body = build(
+        RowSpec("Lot", A1, container="OpenPositions", levelOfDetail="LOT", symbol="TST"),
+        accounts=ACCOUNTS[:1],
+    )
+    statement = parse_statement(body)
+    assert len(_only(statement, "PositionLot")) == 1 and not _only(statement, "TradeDetail")
+    assert statement.flagged == frozenset()
+    assert SECTIONS["PositionLot"].record_type == "ibkr.position_lot"
+    assert SECTIONS["TradeDetail"].record_type == "ibkr.trade_detail"
+
+
+def test_skipped_row_may_carry_another_account() -> None:
+    body = build(
+        RowSpec("CashTransaction", A1, levelOfDetail="SUMMARY", accountId=A2, transactionID=None),
+        accounts=ACCOUNTS[:1],
+    )
+    assert parse_statement(body).flagged == frozenset()

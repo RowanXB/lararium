@@ -12,8 +12,11 @@ from xml.parsers import expat
 
 from lararium.modules.finance.ibkr.fields import (
     DERIVABLE_SECTIONS,
+    EXECUTION_LEVEL,
+    ROUTED_SECTIONS,
     SECTIONS,
     SINGLE_ROW_SECTIONS,
+    TRADE_DETAIL_TAGS,
 )
 
 _SECTION_FIELD_LEVEL = "levelOfDetail"
@@ -88,8 +91,21 @@ def _row(
     flagged: set[str],
 ) -> Row | None:
     spec = SECTIONS[section]
-    if spec.level is not None and element.get(_SECTION_FIELD_LEVEL) != spec.level:
-        return None
+    if spec.levels:
+        level = element.get(_SECTION_FIELD_LEVEL)
+        if level is None or not level.strip():
+            raise FlexDataError(
+                f"{section}.{_SECTION_FIELD_LEVEL} is missing: select it in the Flex query"
+            )
+        if level not in spec.levels:
+            flagged.add(f"{section}.{_SECTION_FIELD_LEVEL}")
+            return None
+        if level != spec.level:
+            return None
+    # Only rows that are read are checked: a skipped SUMMARY row may carry another account.
+    own_account = element.get("accountId")
+    if own_account is not None and own_account.strip() and own_account != account:
+        raise FlexDataError(f"{section}.accountId does not match its FlexStatement")
     attributes: dict[str, str] = {}
     for name, value in element.attrib.items():
         if name in spec.known:
@@ -98,9 +114,25 @@ def _row(
             attributes[name] = value
             flagged.add(f"{section}.{name}")
     for name in sorted(spec.required):
-        if element.get(name) is None:
+        if not (element.get(name) or "").strip():
             raise FlexDataError(f"{section}.{name} is missing: select it in the Flex query")
     return Row(section, account, period[0], period[1], attributes)
+
+
+def _section_of(container: str, element: ElementTree.Element) -> str | None:
+    """The record type of a row element, which for Trade and Lot depends on its container."""
+    tag = element.tag
+    if container == "Trades":
+        if tag == "Trade":
+            if element.get(_SECTION_FIELD_LEVEL) == EXECUTION_LEVEL:
+                return "Trade"
+            return "TradeDetail"
+        return "TradeDetail" if tag in TRADE_DETAIL_TAGS else None
+    if container == "OpenPositions" and tag == "Lot":
+        return "PositionLot"
+    if tag in SECTIONS and tag not in ROUTED_SECTIONS:
+        return tag
+    return None
 
 
 def _statement_rows(statement: ElementTree.Element, flagged: set[str]) -> list[Row]:
@@ -122,8 +154,9 @@ def _statement_rows(statement: ElementTree.Element, flagged: set[str]) -> list[R
                     found.append(row)
             continue
         for child in container:
-            if child.tag in SECTIONS:
-                row = _row(child.tag, child, account, period, flagged)
+            section = _section_of(container.tag, child)
+            if section is not None:
+                row = _row(section, child, account, period, flagged)
                 if row is not None:
                     found.append(row)
             else:

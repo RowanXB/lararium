@@ -18,6 +18,9 @@ class SectionSpec:
     known: frozenset[str]
     # The one levelOfDetail that is read, or None for every level.
     level: str | None
+    # Every levelOfDetail value known for a level-gated section; any other value is flagged.
+    # Empty means the section is not gated by level (the parser routes by level instead).
+    levels: frozenset[str] = frozenset()
 
 
 def _f(names: str) -> frozenset[str]:
@@ -37,7 +40,7 @@ PERSONAL_FIELDS = _f(
     """name street street2 city state country postalCode streetResidentialAddress
     street2ResidentialAddress cityResidentialAddress stateResidentialAddress
     countryResidentialAddress postalCodeResidentialAddress primaryEmail dateOfBirth
-    beneficiaryDesignations accountRepName accountRepPhone masterName"""
+    beneficiaryDesignations accountRepName accountRepPhone masterName accountName"""
 )
 
 # Sections (container elements) whose content is derivable from what is stored; skipped silently.
@@ -148,11 +151,15 @@ _CORPORATE_ACTION = (
     )
 )
 
-_EVERY = _f("accountId currency")
 
-
-def _spec(record_type: str, required: str, known: frozenset[str], level: str | None) -> SectionSpec:
-    return SectionSpec(record_type, _f(required), known, level)
+def _spec(
+    record_type: str,
+    required: str,
+    known: frozenset[str],
+    level: str | None,
+    levels: str = "",
+) -> SectionSpec:
+    return SectionSpec(record_type, _f(required), known, level, _f(levels))
 
 
 SECTIONS: Mapping[str, SectionSpec] = {
@@ -170,22 +177,28 @@ SECTIONS: Mapping[str, SectionSpec] = {
     ),
     "CashReportCurrency": _spec(
         "ibkr.cash_report",
-        "accountId currency fromDate toDate endingCash",
+        "accountId currency fromDate toDate endingCash levelOfDetail",
         _CASH_REPORT,
         "Currency",
+        "Currency BaseCurrency",
     ),
     "Trade": _spec(
         "ibkr.trade",
         "accountId currency transactionID reportDate dateTime quantity tradePrice proceeds"
         " ibCommission ibCommissionCurrency",
         _TRADE,
-        None,
+        "EXECUTION",
     ),
+    # Trades at every level but EXECUTION (orders, lots, wash sales, summaries).
+    "TradeDetail": _spec("ibkr.trade_detail", "accountId levelOfDetail", _TRADE, None),
+    # A Lot under OpenPositions.
+    "PositionLot": _spec("ibkr.position_lot", "accountId levelOfDetail", _OPEN_POSITION, None),
     "CashTransaction": _spec(
         "ibkr.cash_transaction",
-        "accountId currency transactionID reportDate dateTime amount type",
+        "accountId currency transactionID reportDate dateTime amount type levelOfDetail",
         _CASH_TRANSACTION,
         "DETAIL",
+        "DETAIL SUMMARY",
     ),
     "ConversionRate": _spec(
         "ibkr.conversion_rate", "reportDate fromCurrency toCurrency rate", _CONVERSION_RATE, None
@@ -209,3 +222,9 @@ SECTIONS: Mapping[str, SectionSpec] = {
 
 # Sections whose single row is the section element itself, its fields being its attributes.
 SINGLE_ROW_SECTIONS = frozenset({"AccountInformation"})
+
+# Record types that no element is named after: the parser routes rows to them by container.
+ROUTED_SECTIONS = frozenset({"TradeDetail", "PositionLot"})
+# Tags under Trades that are always details; a Trade there is a detail unless it is an execution.
+TRADE_DETAIL_TAGS = frozenset({"Order", "Lot", "WashSale", "SymbolSummary", "AssetSummary"})
+EXECUTION_LEVEL = "EXECUTION"
