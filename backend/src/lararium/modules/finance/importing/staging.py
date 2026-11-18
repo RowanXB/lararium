@@ -6,6 +6,7 @@ Nothing is posted here: commit.py turns a staged batch's new rows into transacti
 import asyncio
 import hashlib
 import json
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -1184,6 +1185,19 @@ async def _check_statement_account(
 # Staging --------------------------------------------------------------------------------
 
 
+# A statement is decoded in full in memory, under the api container's memory cap (compose),
+# which everything the process serves shares: parses in parallel threads would add up. So
+# a second upload waits for the first, as it did when parsing ran on the event loop.
+_PARSING = threading.Lock()
+
+
+def _parse_alone(
+    content: bytes, config: ProfileConfigModel, local_tz: ZoneInfo
+) -> tuple[ParsedStatement, str]:
+    with _PARSING:
+        return _parse(content, config, local_tz)
+
+
 def _parse(
     content: bytes, config: ProfileConfigModel, local_tz: ZoneInfo
 ) -> tuple[ParsedStatement, str]:
@@ -1869,8 +1883,10 @@ async def stage_import(
     zone = profile.config.timezone
     local_tz = ZoneInfo(zone) if zone is not None else await get_timezone(session)
     # Parsing is pure CPU work (a long PDF takes seconds): off the event loop, so the other
-    # requests this process serves meanwhile aren't held up.
-    statement, parser_version = await asyncio.to_thread(_parse, content, profile.config, local_tz)
+    # requests this process serves meanwhile aren't held up; one at a time (_parse_alone).
+    statement, parser_version = await asyncio.to_thread(
+        _parse_alone, content, profile.config, local_tz
+    )
     await _check_statement_account(session, account_id, statement.account)
     row_order = (
         profile.config.row_order if isinstance(profile.config, CsvProfileConfig) else "oldest_first"

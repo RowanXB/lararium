@@ -1,5 +1,6 @@
 import re
 import threading
+import time
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -112,6 +113,32 @@ async def test_parsing_runs_off_the_event_loop(
     monkeypatch.setattr(staging, "_parse", recording)
     await stage(csv_profile, HEADER + NOVEMBER)
     assert parsed_in and parsed_in[0] != loop_thread
+
+
+def test_statements_are_parsed_one_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each parse holds a whole statement in memory, under a cap the api's requests share:
+    uploads arriving together parse in turn."""
+    guard = threading.Lock()
+    active = most = 0
+
+    def slow(*_: Any) -> None:
+        nonlocal active, most
+        with guard:
+            active += 1
+            most = max(most, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+
+    monkeypatch.setattr(staging, "_parse", slow)
+    uploads = [
+        threading.Thread(target=staging._parse_alone, args=(b"", None, None)) for _ in range(4)
+    ]
+    for upload in uploads:
+        upload.start()
+    for upload in uploads:
+        upload.join()
+    assert most == 1
 
 
 async def test_get_missing_batch(session: AsyncSession) -> None:
