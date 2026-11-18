@@ -253,8 +253,8 @@ dated before the snapshot are already in it, so they aren't counted twice. A tra
 before the account's first snapshot in that currency gets no inferred transaction at all: it is
 settled against Opening balances, so the account's history before the snapshot doesn't change
 either. Recording an earlier snapshot later moves the transfers after it back onto the account. Don't use
-Transactions mode for a manual account: its balance would be only the transfers Lararium has
-seen. A Snapshots account ignores postings, so it can't carry identifiers; its Identifiers
+Transactions mode for a manual account unless you import its statements (Importing statements,
+below): without them its balance would be only the transfers Lararium has seen. A Snapshots account ignores postings, so it can't carry identifiers; its Identifiers
 section offers **Switch to hybrid** instead, which values it exactly as before (its latest
 snapshot) plus anything posted after that.
 
@@ -299,8 +299,9 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
 - **Recent** (collapsed): the settled ones, each with its status:
   - *matched*: both accounts' own records;
   - *inferred*: one record, plus the inferred transaction on a manual account;
-  - *before history*: the other account's connection starts after the transfer, so its opening
-    balance already contains it;
+  - *before history*: the other account's own history already holds the transfer, so nothing is
+    posted on it: its connection starts after the transfer, the transfer is at or before its
+    opening snapshot, or it falls on days the account's imported statements list or open with;
   - *rejected*.
 
 What the buttons do (each decision is kept across re-syncs):
@@ -447,10 +448,14 @@ account, and not of a card type, is taken by amount and date only when the trans
 lies within the days the account's imports span, from the first day one of them lists in full
 to the last (an export without a stated period may cut its first and last day short). Outside
 them the real row may simply not have been imported yet, and an unrelated payment of the same
-amount must not stand in for it. The transfer then keeps its placeholder, and the row counts
-too, so the account is off by the amount until the next statement extends the span: this hits
-a transfer in the last days of the latest statement, and the two pair once the next one is
-imported. Leave no statement out between imports, as nothing here notices a missing one.
+amount must not stand in for it. Where the window runs past the last day imported (a transfer in
+the last days of the latest statement), the transfer keeps its placeholder, and the row, if it
+is already there, counts too, so the account is off by the amount until the next statement is
+imported and the two pair. On a Transactions account, a transfer whose window lies wholly on
+days its statements list or open with is settled instead (*before history*), so the account
+stays at its statements' balances. That includes a receipt booked too late to pair: it stays on
+Unassigned, and the transfer shows under Recent rather than as needing attention. Leave no
+statement out between imports: a transfer in a missing month is paired only once you import it.
 Rolling back a batch unlinks its rows first, so the placeholders come back, and takes off the
 account's registration of that bank account, unless another import into the account still
 names it (the next import naming it registers it again).
