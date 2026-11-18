@@ -1,7 +1,9 @@
 import re
+import threading
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,7 @@ from lararium.modules.finance.errors import (
     ImportNotAllowedError,
     NotACurrencyError,
 )
+from lararium.modules.finance.importing import staging
 from lararium.modules.finance.importing.parsed import ParsedRow
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
@@ -91,6 +94,24 @@ async def test_stage_counts_and_rows(
         select(core_models.Event).where(core_models.Event.type == "finance.import.staged")
     )
     assert event is not None and event.data["batch_id"] == str(batch.id)
+
+
+async def test_parsing_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, stage: Stage, csv_profile: ImportProfileRecord
+) -> None:
+    """A long PDF takes seconds to parse: the other requests the process serves meanwhile
+    mustn't wait on it."""
+    loop_thread = threading.get_ident()
+    parsed_in: list[int] = []
+    parse = staging._parse
+
+    def recording(*args: Any) -> Any:
+        parsed_in.append(threading.get_ident())
+        return parse(*args)
+
+    monkeypatch.setattr(staging, "_parse", recording)
+    await stage(csv_profile, HEADER + NOVEMBER)
+    assert parsed_in and parsed_in[0] != loop_thread
 
 
 async def test_get_missing_batch(session: AsyncSession) -> None:

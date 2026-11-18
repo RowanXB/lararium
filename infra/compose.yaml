@@ -46,6 +46,11 @@ services:
     build: ../backend
     networks: [app]
     restart: unless-stopped
+    # Statement PDFs are decoded in full in memory: a hostile one (a few MiB of compressed
+    # zeros) could otherwise take the host's memory, the database's included. Parsing the
+    # owner's real statements peaks under 200 MiB; past the cap only the api is killed, and
+    # restarts.
+    mem_limit: 1g
     volumes:
       - documents:/var/lib/lararium/documents
     command: ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

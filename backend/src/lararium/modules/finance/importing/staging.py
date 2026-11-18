@@ -3,6 +3,7 @@
 Nothing is posted here: commit.py turns a staged batch's new rows into transactions.
 """
 
+import asyncio
 import hashlib
 import json
 from collections import Counter, defaultdict
@@ -1867,7 +1868,9 @@ async def stage_import(
     profile = await get_profile(session, profile_id)
     zone = profile.config.timezone
     local_tz = ZoneInfo(zone) if zone is not None else await get_timezone(session)
-    statement, parser_version = _parse(content, profile.config, local_tz)
+    # Parsing is pure CPU work (a long PDF takes seconds): off the event loop, so the other
+    # requests this process serves meanwhile aren't held up.
+    statement, parser_version = await asyncio.to_thread(_parse, content, profile.config, local_tz)
     await _check_statement_account(session, account_id, statement.account)
     row_order = (
         profile.config.row_order if isinstance(profile.config, CsvProfileConfig) else "oldest_first"
