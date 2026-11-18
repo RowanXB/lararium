@@ -286,6 +286,9 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
   each is the other's only candidate, so the result never depends on which source synced first.
   - *Several candidates*: more than one record could be the other side (two transfers of the
     same amount a few days apart, say). The candidates are listed; **Pair** the right one.
+    Identical ones pair by themselves: a transfer split into equal parts (two payments of the
+    same amount between the same two accounts on one day, and their two receipts) can't be
+    paired wrongly, so it needs no review.
   - *Amount differs*: the two records name each other's accounts but their amounts differ.
     They can't be paired; Reject the transfer if it isn't one.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
