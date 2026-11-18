@@ -1,6 +1,7 @@
 """Helpers shared by the staging and commit tests (synthetic Example Bank data)."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -9,7 +10,7 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord
@@ -47,6 +48,21 @@ BALANCE_COLUMNS = {
 
 PROFILE_CONFIG: TypeAdapter[Any] = TypeAdapter(ProfileConfig)
 _names = iter(range(1_000_000))
+
+
+@asynccontextmanager
+async def isolated_example(session: AsyncSession) -> AsyncIterator[None]:
+    """Commands commit their own savepoints. Wrap each example in one more so even a
+    failing Hypothesis example leaves a clean database for the next shrink attempt."""
+    assert isinstance(session.bind, AsyncConnection)
+    await session.commit()
+    example = await session.bind.begin_nested()
+    try:
+        yield
+    finally:
+        await session.rollback()
+        await example.rollback()
+        session.expunge_all()
 
 
 async def _profile(run: Run, **config: Any) -> ImportProfileRecord:

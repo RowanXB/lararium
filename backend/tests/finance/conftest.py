@@ -1,7 +1,9 @@
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, settings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance.accounts import AccountRecord, create_account
@@ -10,6 +12,23 @@ from lararium.modules.finance.instruments import (
     create_instrument,
     get_currency,
 )
+
+settings.register_profile(
+    "ci",
+    derandomize=True,
+    max_examples=15,
+    deadline=None,  # every example runs on Postgres
+    database=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+settings.register_profile(
+    "deep",
+    max_examples=int(os.environ.get("HYPOTHESIS_MAX_EXAMPLES", "500")),
+    deadline=None,
+    database=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci"))
 
 
 @pytest.fixture

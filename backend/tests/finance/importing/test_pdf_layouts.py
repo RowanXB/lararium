@@ -1,10 +1,13 @@
 import re
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from lararium.modules.finance.errors import FileFormatError
 from lararium.modules.finance.importing.parsed import (
@@ -611,6 +614,49 @@ def test_statement_account_and_summary_fields() -> None:
 
 
 # Self-checks ---------------------------------------------------------------------------
+
+
+@given(
+    cents=st.lists(
+        st.one_of(st.integers(-10000, -1), st.integers(1, 10000)), min_size=1, max_size=8
+    ),
+    data=st.data(),
+)
+def test_hsbc_reconciles_every_printed_balance(cents: list[int], data: st.DataObject) -> None:
+    # Positive opening and closing use the ordinary summary layout. Intermediate
+    # balances can be overdrawn, which the bank prints with a trailing D.
+    def printed(amount: Decimal) -> str:
+        return f"{abs(amount):,.2f}" + (" D" if amount < 0 else "")
+
+    opening = Decimal(max(0, -sum(cents)) + 1).scaleb(-2)
+    balance = opening
+    balances = []
+    rows = []
+    for i, value in enumerate(cents):
+        amount = Decimal(value).scaleb(-2)
+        balance += amount
+        balances.append(balance)
+        rows.append(
+            HsbcRow(
+                "CR" if value > 0 else "VIS",
+                ("EXAMPLE SHOP",),
+                paid_in=str(amount) if value > 0 else None,
+                paid_out=str(-amount) if value < 0 else None,
+                date=f"{8 + i:02} May 27",
+                balance=printed(balance),
+            )
+        )
+    statement = HsbcStatement(pages=[rows], opening=str(opening))
+    parsed = _hsbc(statement)
+    assert parsed.opening_balance == opening and parsed.closing_balance == balance
+    assert [row.balance for row in _rows(parsed)] == balances
+    assert [row.quantity for row in _rows(parsed)] == [Decimal(n).scaleb(-2) for n in cents]
+
+    index = data.draw(st.integers(0, len(rows) - 1), label="misprinted balance")
+    altered = rows.copy()
+    altered[index] = replace(rows[index], balance=printed(balances[index] + Decimal("0.01")))
+    with pytest.raises(FileFormatError, match="the balance printed on page"):
+        _hsbc(replace(statement, pages=[altered]))
 
 
 def test_layout_refuses_when_summary_differs() -> None:

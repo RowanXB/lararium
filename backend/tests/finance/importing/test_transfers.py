@@ -3,11 +3,13 @@ other side of a known transfer replaces the transfer's placeholder instead of co
 twice, a rollback brings the placeholder back, and the statement's own bank account is
 registered to the account it was imported into."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +24,7 @@ from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
     TransactionInput,
+    find_unbalanced_transactions,
     upsert_connector_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
@@ -42,6 +45,7 @@ from .staging_helpers import (
     _adjustments,
     _balance_after,
     _csv_profile,
+    isolated_example,
 )
 
 SORT_CODE, ACCOUNT_NUMBER = "401234", "12345678"
@@ -434,3 +438,83 @@ async def test_a_transfer_across_the_first_statements_start_is_held_by_its_openi
     await commit((await stage(profile, _lines(NOVEMBER))).id)
     assert await _status(session) == "before_history"
     assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("499")
+
+
+@given(
+    cents=st.integers(1, 100_000),
+    booking_day=st.integers(9, 21),
+    delay=st.integers(0, 3),
+    incoming=st.booleans(),
+    arrival=st.permutations(("october", "december", "connector")),
+)
+async def test_backfilling_a_transfer_in_a_statement_gap(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+    cents: int,
+    booking_day: int,
+    delay: int,
+    incoming: bool,
+    arrival: list[str],
+) -> None:
+    amount = Decimal(cents).scaleb(-2)
+    booked = date(2026, 11, booking_day)
+    lag = timedelta(days=delay)
+    connector_day = booked - lag if incoming else booked + lag
+    if not incoming:
+        amount = -amount
+    transfer_type = "CR" if incoming else "BP"
+    # November contains both the transfer and an unrelated card movement of equal value.
+    # Its absence leaves both movements inside the adjustment to December's opening.
+    november_close = Decimal(100) + 2 * amount
+    statements = {
+        "october": "01/10/2026,CR,Pay,101,101\n31/10/2026,VIS,Shop,-1,100\n",
+        "november": (
+            f"01/11/2026,VIS,Shop,-1,99\n"
+            f"{booked:%d/%m/%Y},VIS,Card,{amount},{99 + amount}\n"
+            f"{booked:%d/%m/%Y},{transfer_type},Bank transfer,{amount},{99 + 2 * amount}\n"
+            f"30/11/2026,CR,Pay,1,{november_close}\n"
+        ),
+        "december": (
+            f"01/12/2026,VIS,Shop,-2,{november_close - 2}\n"
+            f"31/12/2026,VIS,Shop,-1,{november_close - 3}\n"
+        ),
+    }
+    async with isolated_example(session):
+        for key in ("unassigned", "in_transit"):
+            await run(get_or_create_system_account, key)
+        for item in arrival:
+            if item == "connector":
+                await _pay(session, run, gbp, connected, on=connector_day, quantity=str(-amount))
+            else:
+                await commit((await stage(profile, _lines(statements[item]))).id)
+            assert await find_transfer_violations(session) == []
+
+        assert await _status(session) == "before_history"
+        assert await _balance_after(session, account.id, END) == november_close - 3
+        for _ in range(2):
+            batch = await commit((await stage(profile, _lines(statements["november"]))).id)
+            [transfer] = await list_transfers(session)
+            assert transfer.status == "matched"
+            [bank_row] = [
+                row
+                for row in await list_batch_rows(session, batch.id)
+                if row.description == "Bank transfer"
+            ]
+            matched_leg = transfer.in_transaction_id if incoming else transfer.out_transaction_id
+            assert bank_row.transaction_id is not None and matched_leg == bank_row.transaction_id
+            assert await _balance_after(session, account.id, booked) == 99 + 2 * amount
+            assert await _balance_after(session, account.id, END) == november_close - 3
+            assert await find_transfer_violations(session) == []
+            assert await find_unbalanced_transactions(session) == []
+
+            await rollback(batch.id)
+            assert await _status(session) == "before_history"
+            assert await _balance_after(session, account.id, END) == november_close - 3
+            assert await find_transfer_violations(session) == []

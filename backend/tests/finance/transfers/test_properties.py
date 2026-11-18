@@ -20,7 +20,6 @@ Each run of a scenario is one transaction on a connection of its own, rolled bac
 end, so examples never see each other. Profiles: "ci" (the default, derandomized, a modest
 number of examples) and "deep" (HYPOTHESIS_PROFILE=deep, many more, for local runs)."""
 
-import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from hypothesis import HealthCheck, event, given, note, settings
+from hypothesis import event, given, note
 from hypothesis import strategies as st
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -89,23 +88,6 @@ from .strategies import (
     local,
     scenarios,
 )
-
-settings.register_profile(
-    "ci",
-    derandomize=True,
-    max_examples=15,
-    deadline=None,  # every example runs on Postgres
-    database=None,
-    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
-)
-settings.register_profile(
-    "deep",
-    max_examples=int(os.environ.get("HYPOTHESIS_MAX_EXAMPLES", "500")),
-    deadline=None,
-    database=None,
-    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
-)
-settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci"))
 
 USER = Actor("user", "test")
 WORKER = Actor("system", "transfers")
