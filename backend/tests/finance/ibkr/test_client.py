@@ -101,27 +101,30 @@ async def test_poll_until_ready() -> None:
     assert [b - a for a, b in itertools.pairwise(times)] == [5, 6, 6]
 
 
+class Endless(Env):
+    """SendRequest succeeds, then every poll answers with the same body."""
+
+    def __init__(self, poll: bytes) -> None:
+        super().__init__()
+        self._poll = poll
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((self.now, request))
+        body = send_ok() if len(self.requests) == 1 else self._poll
+        return httpx.Response(200, content=body)
+
+
+# A first poll after 5 s, then one every 6 s while the next still starts within 120 s.
+BUDGET_SLEEPS = [5, *[6] * 19]
+
+
 async def test_not_ready_is_ordinary_failure() -> None:
-    env = Env(send_ok(), failure(1003), repeat_last=False)
+    env = Endless(failure(1003))
     with pytest.raises(FlexRetryableError) as caught:
         await fetch(env)
     assert not isinstance(caught.value, CredentialRejectedError)
     assert caught.value.code == 1003
-
-
-async def test_poll_budget_exhausted_is_retryable() -> None:
-    class Endless(Env):
-        def handler(self, request: httpx.Request) -> httpx.Response:
-            self.requests.append((self.now, request))
-            first = len(self.requests) == 1
-            return httpx.Response(200, content=send_ok() if first else failure(1019))
-
-    env = Endless()
-    with pytest.raises(FlexRetryableError) as caught:
-        await fetch(env)
-    assert caught.value.code == 1019
-    assert env.now - 1000 <= 120
-    assert sum(env.sleeps) > 100
+    assert env.sleeps == BUDGET_SLEEPS
 
 
 @pytest.mark.parametrize("code", range(1011, 1017))
@@ -133,12 +136,40 @@ async def test_config_errors_are_credential_rejected(code: int) -> None:
     assert str(caught.value) == f"IBKR Flex error {code}: Token has expired."
 
 
-@pytest.mark.parametrize("code", [1001, 1004, 1005, 1006, 1007, 1008, 1009, 1018, 1021])
-async def test_retryable_codes(code: int) -> None:
-    env = Env(failure(code))
+@pytest.mark.parametrize("code", [1001, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1018, 1019, 1021])
+async def test_retryable_codes_poll_until_the_budget(code: int) -> None:
+    env = Endless(failure(code))
     with pytest.raises(FlexRetryableError) as caught:
         await fetch(env)
     assert str(caught.value) == f"IBKR Flex error {code}"
+    assert env.sleeps == BUDGET_SLEEPS
+
+
+@pytest.mark.parametrize("code", [1001, 1018, 1021])
+async def test_retryable_code_on_send_request_raises_at_once(code: int) -> None:
+    env = Env(failure(code))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert caught.value.code == code
+    assert len(env.requests) == 1
+    assert env.sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"), [(429, True), (500, True), (503, True), (400, False), (403, False)]
+)
+async def test_http_error_status(status: int, retryable: bool) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=b"<html>x</html>")
+
+    env = Env()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client = FlexClient(http, Secret(TOKEN), sleep=env.sleep, clock=env.clock)
+    async with http:
+        with pytest.raises(FlexError) as caught:
+            await client.fetch("1", date(2026, 1, 1), date(2026, 1, 2))
+    assert isinstance(caught.value, FlexRetryableError) is retryable
+    assert caught.value.code == 0
 
 
 async def test_unknown_code_is_plain_flex_error() -> None:
