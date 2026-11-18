@@ -26,6 +26,7 @@ from lararium.modules.finance.transfers import (
     transfer_contra,
 )
 from lararium.modules.finance.transfers.pairs import (
+    Known,
     Pairable,
     _Decisions,
     _registry_edges,
@@ -35,6 +36,7 @@ from lararium.modules.finance.transfers.settings import DEFAULTS
 
 from .conftest import (
     B_IDENTIFIER,
+    IMPORTED,
     assert_consistent,
     balances_on,
     net_worth_on,
@@ -53,6 +55,8 @@ def _at(day: date, hour: int = 0, minute: int = 0) -> datetime:
 
 UUID_GBP = uuid4()
 _NO_DECISIONS = _Decisions(frozenset(), frozenset(), ())
+# Every account's own rows known, as a connected account's are.
+_ALL_KNOWN = Known(frozenset(), {})
 
 
 def _record(at: datetime, quantity: str, *, identified: bool) -> Pairable:
@@ -73,7 +77,7 @@ def _record(at: datetime, quantity: str, *, identified: bool) -> Pairable:
 def _pairs(sender: Pairable, receiver: Pairable) -> bool:
     # The receiver names the sender's account; the sender names nobody (a statement row).
     receiver = replace(receiver, holder=sender.account_id)
-    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS)
+    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     return receiver.id in same.tiers.get(sender.id, {})
 
 
@@ -104,7 +108,7 @@ def test_bounds_are_dates_both_ways_round() -> None:
 
 
 @pytest.fixture
-def statement_row(session, run, gbp):
+def statement_row(session, run, gbp, record_import):
     """A row as an M2 statement import posts it: dated by its day alone (00:00), naming
     nobody, a bank transfer."""
 
@@ -117,7 +121,7 @@ def statement_row(session, run, gbp):
             other_postings=0,
         )
         amount = Decimal(quantity)
-        return await run(
+        row = await run(
             post_transaction,
             TransactionInput(
                 occurred_at=_at(day),
@@ -130,6 +134,8 @@ def statement_row(session, run, gbp):
                 counterparty=CounterpartyFields(bank_transfer=True),
             ),
         )
+        await record_import(account.id, [row.id])
+        return row
 
     return _post
 
@@ -196,6 +202,7 @@ async def test_preview_of_a_date_only_row_agrees_with_posting_it(
         occurred_at=_at(FRIDAY),
         booking_date=FRIDAY if give_booking_date else None,
         counterparty=CounterpartyFields(bank_transfer=True),
+        complete=IMPORTED,
     )
 
     assert previewed == received.id
@@ -229,3 +236,23 @@ async def test_arrival_after_the_window_on_a_manual_account_double_counts_silent
     assert (await balances_on(session, FRIDAY + timedelta(days=7)))[b.id] == 0  # 1000, -500 twice
     assert await due_notifications(session, _at(FRIDAY + timedelta(days=60))) == []
     await assert_consistent(session)
+
+
+def test_imports_vouch_for_their_span() -> None:
+    """Design §5.8: a manual account's row is known from the first day its imports list in
+    full to the last, across the edge days of back-to-back exports no file lists in full,
+    and not outside that span."""
+    record = _record(_at(FRIDAY), "500", identified=False)
+    other = replace(record, instrument_id=uuid4())
+    november = (date(2026, 11, 2), date(2026, 11, 29))
+    december = (date(2026, 12, 2), date(2026, 12, 30))
+    known = Known(
+        frozenset({record.account_id}), {(record.account_id, UUID_GBP): [december, november]}
+    )
+
+    assert known.lists_in_full(record, date(2026, 11, 28), date(2026, 12, 3))
+    assert known.lists_in_full(record, *november)
+    assert not known.lists_in_full(record, date(2026, 11, 1), date(2026, 11, 5))
+    assert not known.lists_in_full(record, date(2026, 12, 28), date(2026, 12, 31))
+    assert not known.lists_in_full(other, *november)  # nothing imported in it
+    assert Known(frozenset(), {}).lists_in_full(record, *november)  # a connected account

@@ -86,6 +86,65 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
 
 
 @dataclass(frozen=True)
+class Known:
+    """What the ledger knows of manual accounts' own rows (design §5.8, "An unrelated row
+    can stand in"): per account and instrument, the days committed imports list in full
+    (M2's complete_from..complete_to). A connected account's history is known from its
+    connection, so it isn't in `manual`."""
+
+    manual: frozenset[UUID]
+    full_days: Mapping[tuple[UUID, UUID], list[tuple[date, date]]]
+
+    def lists_in_full(self, record: Pairable, earliest: date, latest: date) -> bool:
+        """Whether the ledger would hold the record's account's own row on every day from
+        earliest to latest, if there were one: always for a connected account; for a
+        manual one, when the days lie within its imports' span, from the first day one
+        lists in full to the last. Not before it (inside the opening snapshot, or before
+        the first statement) nor after it (not imported yet). Between imports, a day
+        counts: an export's edge days, listed in full by no file, and a quiet period no
+        statement can be imported for, have no rows missing; a whole statement left out is
+        the owner's to import, not told apart here."""
+        if record.account_id not in self.manual:
+            return True
+        ranges = self.full_days.get((record.account_id, record.instrument_id))
+        if not ranges:
+            return False
+        return min(start for start, _ in ranges) <= earliest and latest <= max(
+            end for _, end in ranges
+        )
+
+
+# Days an import not yet committed would list in full: (account, instrument, from, to).
+type Listing = tuple[UUID, UUID, date, date]
+
+
+async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Known:
+    a, b, r = models.Account, models.ImportBatch, models.ImportRow
+    manual = frozenset(
+        # Own records are never on a system account, so these needn't be left out.
+        await session.scalars(select(a.id).where(a.source_connection_id.is_(None)))
+    )
+    full_days: dict[tuple[UUID, UUID], list[tuple[date, date]]] = defaultdict(list)
+    # A batch speaks only for the instruments it has live rows in (M2's Decision 16).
+    for account_id, instrument_id, start, end in await session.execute(
+        select(b.account_id, r.instrument_id, b.complete_from, b.complete_to)
+        .distinct()
+        .join(r, r.batch_id == b.id)
+        .where(
+            b.status == "committed",
+            b.complete_from.is_not(None),
+            r.kind == "statement",
+            r.status.in_(("committed", "duplicate")),
+        )
+    ):
+        assert instrument_id is not None and start is not None and end is not None
+        full_days[(account_id, instrument_id)].append((start, end))
+    for account_id, instrument_id, start, end in listing:
+        full_days[(account_id, instrument_id)].append((start, end))
+    return Known(manual, full_days)
+
+
+@dataclass(frozen=True)
 class _Decisions:
     rejected: frozenset[SourceRef]
     never: frozenset[tuple[SourceRef, SourceRef]]  # as stored, either way round
@@ -194,12 +253,22 @@ class _Timeline:
         return self._records[bisect_left(self._dates, earliest) : bisect_right(self._dates, latest)]
 
 
+def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
+    """Design §5.8: an identified record's counterpart found by amount and date (one naming
+    nobody) is taken only if its account's own row would be in the ledger on every day of
+    the identified record's window: otherwise the real row may be missing (inside an
+    opening snapshot, or outside the days its imports span) and an unrelated one stand in."""
+    identified, other = (s, c) if s.identified else (c, s)
+    return known.lists_in_full(other, *counterpart_bounds(identified, settings))
+
+
 def _registry_edges(
-    records: list[Pairable], settings: TransferSettings, decisions: _Decisions
+    records: list[Pairable], settings: TransferSettings, decisions: _Decisions, known: Known
 ) -> tuple[_Edges, _Edges]:
     """(same amount, another amount) pairs the registry gives. Of the same amount, both
-    tiers; of another amount, only mutually identified ones (Ruling 8: a payment naming
-    nobody is no evidence of a differing transfer)."""
+    tiers, a one-sided one only where the ledger would hold the real counterpart
+    (_one_sided_known); of another amount, only mutually identified ones (Ruling 8: a
+    payment naming nobody is no evidence of a differing transfer)."""
     same, differing = _Edges(), _Edges()
     # Same amount: a sender meets the receivers in its instrument of its amount.
     receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
@@ -220,8 +289,11 @@ def _registry_edges(
         timeline = by_amount.get((s.instrument_id, -s.quantity))
         for c in timeline.between(*window) if timeline else ():
             tier = registry_tier(s, c)
-            if tier is not None and not decisions.apart(s, c):
-                same.add(s.id, c.id, tier)
+            if tier is None or decisions.apart(s, c):
+                continue
+            if tier == ONE_SIDED and not _one_sided_known(s, c, settings, known):
+                continue
+            same.add(s.id, c.id, tier)
         if not s.identified or s.holder is None:
             continue
         timeline = by_accounts.get((s.instrument_id, s.account_id, s.holder))
@@ -284,6 +356,7 @@ async def pair_relation(
     *,
     excluding: Collection[UUID] = (),
     adding: Collection[Pairable] = (),
+    listing: Collection[Listing] = (),
 ) -> PairRelation:
     """The pair relation as the ledger stands: the single definition matching, heal and
     review all use.
@@ -296,10 +369,12 @@ async def pair_relation(
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
-    their references included."""
+    their references included; `listing`, the days their import would list in full."""
     decisions = await _load_decisions(session)
     records = await _load_records(session, system, decisions, excluding) + list(adding)
-    same, differing = _registry_edges(records, settings, decisions)
+    same, differing = _registry_edges(
+        records, settings, decisions, await _load_known(session, listing)
+    )
     _decided_edges(records, decisions, same)
     best = {r: min(found.values()) for r, found in same.tiers.items()}
     exact = {

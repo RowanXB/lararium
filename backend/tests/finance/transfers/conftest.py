@@ -2,18 +2,23 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
+from lararium.core.documents import record_document
+from lararium.core.entities import get_self_entity_id
+from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
 from lararium.modules.finance.identifiers import assign_identifier
+from lararium.modules.finance.importing.profiles import QifProfileConfig, create_profile
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -267,3 +272,88 @@ async def history(connector_tx: ConnectorTx, bank: Connected, days_before: int =
 
 async def in_transit_balance(session: AsyncSession, ids: SystemIds) -> Decimal:
     return (await balances_on(session)).get(ids.in_transit, Decimal(0))
+
+
+type RecordImport = Callable[..., Awaitable[None]]
+# What an import lists in full by default: well around WHEN, from the manual accounts'
+# default snapshot day on.
+IMPORTED = (WHEN.date() - timedelta(days=1), WHEN.date() + timedelta(days=60))
+
+
+async def record_import_rows(
+    session: AsyncSession,
+    run: Run,
+    account_id: UUID,
+    transaction_ids: list[UUID],
+    complete: tuple[date, date] = IMPORTED,
+    *,
+    keys: list[str] | None = None,
+) -> None:
+    """Record posted transactions as the rows of a committed statement import (M2) of their
+    account, listing `complete` in full. Matching takes a counterpart found by amount and
+    date only on days imports list in full (design §5.8), so a row posted as an import
+    is recorded as one. `keys`: the rows' dedupe keys, which a row imported again keeps
+    (its reference, source kind "import"); by default one per transaction."""
+    config = QifProfileConfig(format="qif", date_format="%d/%m/%Y")
+    profile = await run(create_profile, name=f"Statements {uuid4()}", config=config)
+    document = await run(
+        record_document,
+        uuid4().bytes,
+        filename="statement.qif",
+        media_type="application/qif",
+        source="finance.import",
+    )
+    b, r, t, p = models.ImportBatch, models.ImportRow, models.Transaction, models.Posting
+    batch_id = await session.scalar(
+        insert(b)
+        .values(
+            account_id=account_id,
+            profile_id=profile.id,
+            profile_version=1,
+            profile_config=config.model_dump(mode="json"),
+            parser_version="test",
+            document_id=document.id,
+            filename="statement.qif",
+            status="committed",
+            committed_at=func.clock_timestamp(),
+            covered_from=complete[0],
+            covered_to=complete[1],
+            complete_from=complete[0],
+            complete_to=complete[1],
+            owner_entity_id=await get_self_entity_id(session),
+        )
+        .returning(b.id)
+    )
+    if keys is None:
+        keys = [f"test:{t}" for t in transaction_ids]
+    for position, (transaction_id, key) in enumerate(zip(transaction_ids, keys, strict=True)):
+        posted = (
+            await session.execute(
+                select(t.booking_date, t.occurred_at, t.description, p.instrument_id, p.quantity)
+                .join(p, p.transaction_id == t.id)
+                .where(t.id == transaction_id, p.account_id == account_id)
+            )
+        ).one()
+        await session.execute(
+            insert(r).values(
+                batch_id=batch_id,
+                account_id=account_id,
+                position=position,
+                kind="statement",
+                status="committed",
+                booking_date=posted.booking_date,
+                occurred_at=posted.occurred_at,
+                description=posted.description,
+                quantity=posted.quantity,
+                instrument_id=posted.instrument_id,
+                dedupe_key=key,
+                raw={},
+                transaction_id=transaction_id,
+            )
+        )
+
+
+@pytest.fixture
+def record_import(session: AsyncSession, run: Run) -> RecordImport:
+    """record_import_rows in this test's session."""
+    return partial(record_import_rows, session, run)

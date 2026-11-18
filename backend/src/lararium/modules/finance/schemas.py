@@ -27,6 +27,8 @@ from lararium.modules.finance.accounts import (
     TaxWrapper,
 )
 from lararium.modules.finance.identifiers import IdentifierKind
+from lararium.modules.finance.importing.profiles import ProfileConfig
+from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
 from lararium.modules.finance.money import to_plain_str
@@ -262,6 +264,130 @@ class NetWorthPointOut(_Out):
     day: date
     value: DecimalStr
     missing_count: int
+
+
+# Imports
+
+
+class ImportProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    config: ProfileConfig
+
+
+class ImportProfileOut(_Out):
+    id: UUID
+    name: str
+    config: ProfileConfig
+    version: int
+    updated_at: AwareDatetime
+
+
+class ImportCatalogEntryOut(_Out):
+    institution: str
+    format: str
+    label: str
+    config: ProfileConfig
+    recommended: bool
+
+
+class ImportStatementRateOut(_Out):
+    kind: str
+    band_from: DecimalStr | None
+    band_to: DecimalStr | None
+    rate: DecimalStr | None
+    ear: DecimalStr | None
+
+
+class ImportStatementOut(_Out):
+    """What the file says at statement level; fields it doesn't print are null."""
+
+    period_from: date | None
+    period_to: date | None
+    currency: str | None
+    opening_balance: DecimalStr | None
+    closing_balance: DecimalStr | None
+    closing_balance_date: date | None
+    money_in: DecimalStr | None
+    money_out: DecimalStr | None
+    payments_in: int | None
+    payments_out: int | None
+    statement_reference: str | None
+    document_date: date | None
+    account_type: str | None
+    account_name: str | None
+    sort_code: str | None
+    account_number: str | None
+    iban: str | None
+    bic: str | None
+    customer_number: str | None
+    clearing_account_number: str | None
+    branch: str | None
+    addressee: str | None
+    address: str | None
+    overdraft_limit: DecimalStr | None
+    overdraft_limit_date: date | None
+    available_balance: DecimalStr | None
+    available_balance_date: date | None
+    rates: list[ImportStatementRateOut]
+
+
+class ImportBatchOut(_Out):
+    id: UUID
+    account_id: UUID
+    profile_id: UUID
+    profile_version: int
+    document_id: UUID
+    filename: str
+    status: BatchStatus
+    created_at: AwareDatetime
+    committed_at: AwareDatetime | None
+    rolled_back_at: AwareDatetime | None
+    counts: dict[str, int]  # every row status, zeros included
+    warnings: list[str]
+    statement: ImportStatementOut | None
+
+
+class ImportRowOut(_Out):
+    id: UUID
+    position: int
+    kind: RowKind
+    status: RowStatus
+    booking_date: date | None
+    occurred_at: AwareDatetime | None
+    value_date: date | None
+    description: str
+    payee: str | None
+    memo: str | None
+    check_number: str | None
+    counterparty_name: str | None
+    counterparty_sort_code: str | None
+    counterparty_account_number: str | None
+    counterparty_bank: str | None
+    payment_reference: str | None
+    payment_kind: str | None
+    bank_reference: str | None
+    purpose_code: str | None
+    remittance_info: str | None
+    original_currency: str | None
+    exchange_rate: DecimalStr | None
+    quantity: DecimalStr | None
+    fee: DecimalStr  # 0 when the file states none
+    instrument_id: UUID | None
+    balance: DecimalStr | None
+    external_id: str | None
+    bank_type: str | None
+    error: str | None
+    note: str | None
+    raw: dict[str, str]
+    transaction_id: UUID | None
+    duplicate_of: UUID | None  # the committed row this one duplicates (Decision 16)
+    # Adjustment rows: True when the adjustment follows earlier imported history (a likely
+    # missing period), False when it is the account's opening; None on statement rows.
+    is_gap: bool | None
+
+
+class ImportBatchDetailOut(ImportBatchOut):
+    rows: list[ImportRowOut]
 
 
 # Transfers between own accounts, and the registry of the owner's account identifiers

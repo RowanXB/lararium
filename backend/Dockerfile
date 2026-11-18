@@ -19,6 +19,9 @@ COPY alembic.ini ./
 RUN uv sync --locked --no-dev
 
 RUN useradd --system --uid 10001 --no-create-home lararium
+# Uploaded documents (the `documents` volume): a new named volume copies this ownership and
+# mode on first mount, so the api can write there and nobody else can read it.
+RUN mkdir -p /var/lib/lararium/documents && chown lararium /var/lib/lararium/documents && chmod 700 /var/lib/lararium/documents
 USER lararium
 
 CMD ["uvicorn", "lararium.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

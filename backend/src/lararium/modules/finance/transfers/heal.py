@@ -171,7 +171,7 @@ async def records_to_heal(
             # instrument) now contains it, or no longer does (an earlier one was recorded):
             # the same manual_predates engine._open decides by.
             manual = aliased(models.Account, name="manual_counterpart")
-            contained = manual_predates(record_columns(own), counterpart)
+            contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(
                 select(own.c.transaction_id.label("id"), own.c.occurred_at)
                 .select_from(tr)

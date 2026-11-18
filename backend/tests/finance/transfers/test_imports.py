@@ -1,14 +1,14 @@
 """The interface statement imports (M2) use, with a simulated import row: a manual-origin
-transaction on the manual account, naming no counterparty, marked a bank transfer."""
+transaction on the manual account, naming no counterparty, marked a bank transfer, recorded
+as a row of a committed import (record_import)."""
 
 from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import insert, text
+from sqlalchemy import insert, text, update
 from sqlalchemy.exc import IntegrityError
 
-from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.ledger import (
@@ -33,6 +33,7 @@ from .conftest import (
     A_IDENTIFIER,
     B_IDENTIFIER,
     C_IDENTIFIER,
+    IMPORTED,
     WHEN,
     assert_consistent,
     balances_on,
@@ -58,7 +59,7 @@ async def inferred(session, run, connected_bank, manual_bank, connector_tx, heal
 
 
 @pytest.fixture
-def import_row(session, run, gbp):
+def import_row(session, run, gbp, record_import):
     """Post a row as an M2 import would: its contra from transfer_contra."""
 
     async def _post(account, quantity: str = "100"):
@@ -83,7 +84,8 @@ def import_row(session, run, gbp):
                 counterparty=CounterpartyFields(bank_transfer=True),
             ),
         )
-        assert await source_ref(session, row.id) == ("transaction", str(row.id))
+        await record_import(account.id, [row.id])
+        assert await source_ref(session, row.id) == ("import", f"test:{row.id}")
         return row
 
     return _post
@@ -152,7 +154,7 @@ async def test_preview_match_finds_the_partner(session, gbp, inferred) -> None:
     count = text("select count(*) from finance.transactions")
     before = await session.scalar(count)
 
-    async def preview(quantity: str = "100", bank_transfer: bool = True):
+    async def preview(quantity: str = "100", bank_transfer: bool = True, complete=IMPORTED):
         return await preview_match(
             session,
             account_id=b.id,
@@ -160,12 +162,16 @@ async def test_preview_match_finds_the_partner(session, gbp, inferred) -> None:
             quantity=Decimal(quantity),
             occurred_at=ROW_AT,
             counterparty=CounterpartyFields(bank_transfer=bank_transfer),
+            complete=complete,
         )
 
     assert await preview() == sent.id
     assert await preview("90") is None  # another amount
     assert await preview("-100") is None  # the wrong direction
     assert await preview(bank_transfer=False) is None  # a card refund, say
+    # Its import doesn't list A's window in full: B's real row may be missing (design §5.8).
+    assert await preview(complete=None) is None
+    assert await preview(complete=(WHEN.date(), IMPORTED[1])) is None
     assert await session.scalar(count) == before
 
 
@@ -194,20 +200,23 @@ async def test_preview_match_none_when_ambiguous(
             quantity=Decimal(100),
             occurred_at=ROW_AT,
             counterparty=CounterpartyFields(bank_transfer=True),
+            complete=IMPORTED,
         )
         is None
     )
 
 
-async def test_unlink_then_delete_restores_placeholder(session, run, ids, imported, heal) -> None:
+async def test_unlink_then_void_restores_placeholder(session, run, ids, imported, heal) -> None:
     a, b, _, record, row = imported
 
-    # The M2 rollback order: unlink each row, then delete it.
+    # The M2 rollback order: unlink each row, then void it.
     await run(unlink_transaction, row.id)
-    # The row is no longer a leg: back on Unassigned, until it is deleted.
+    # The row is no longer a leg: back on Unassigned, until it is voided.
     assert await contra_account(session, row.id, b.id) == ids.unassigned
     await assert_consistent(session)
-    await session.execute(text("delete from finance.transactions where id = :t"), {"t": row.id})
+    r = models.ImportRow
+    await session.execute(update(r).where(r.transaction_id == row.id).values(status="rolled_back"))
+    await run(void_transaction, row.id)
 
     await _assert_placeholder_back(session, ids, a, b, record)
     assert await heal() == 0
@@ -220,8 +229,7 @@ async def test_unlink_from_a_rejected_transfer_keeps_the_rejection(
     [transfer] = await list_transfers(session)
     await run(reject, transfer.id)
 
-    await run(unlink_transaction, row.id)
-    await session.execute(text("delete from finance.transactions where id = :t"), {"t": row.id})
+    await _unlink_and_void(session, run, row)
 
     [still] = await list_transfers(session)
     assert (still.id, still.status, still.out_transaction_id, still.in_transaction_id) == (
@@ -235,7 +243,7 @@ async def test_unlink_from_a_rejected_transfer_keeps_the_rejection(
     # The row's decision stays with the rejection it is part of.
     assert await _rejections(session) == {
         await source_ref(session, record.id): transfer.id,
-        ("transaction", str(row.id)): transfer.id,
+        ("import", f"test:{row.id}"): transfer.id,
     }
     await assert_consistent(session)
     assert await heal() == 0
@@ -277,7 +285,7 @@ async def test_removing_identifier_reverts_to_unassigned(session, run, ids, infe
 
 
 async def test_weekly_transfers_each_match_their_own_week(
-    session, run, ids, gbp, connected_bank, manual_bank, connector_tx, heal
+    session, run, ids, gbp, connected_bank, manual_bank, connector_tx, record_import, heal
 ) -> None:
     # A weekly standing order from A to B: Monzo stamps each payment at 09:00, and B's
     # statement rows carry only their date (00:00), so a receive is 9 hours before its send
@@ -321,6 +329,7 @@ async def test_weekly_transfers_each_match_their_own_week(
                 ),
             )
         )
+    await record_import(b.id, [r.id for r in rows])
 
     await heal()
 
@@ -334,7 +343,7 @@ async def test_weekly_transfers_each_match_their_own_week(
 
 
 async def test_preview_match_reads_the_relation_matching_does(
-    session, run, gbp, inferred, registered, connector_tx, import_row, heal
+    session, run, gbp, inferred, registered, connector_tx, import_row, record_import, heal
 ) -> None:
     _, b, b_identifier, sent, _ = inferred
     # C's payment to B is already matched with B's row naming C (mutually identified), so
@@ -354,7 +363,7 @@ async def test_preview_match_reads_the_relation_matching_does(
         counterparty_identifier_id=c_identifier,
         other_postings=0,
     )
-    await run(
+    from_c = await run(
         post_transaction,
         TransactionInput(
             occurred_at=WHEN + timedelta(hours=2),
@@ -367,6 +376,7 @@ async def test_preview_match_reads_the_relation_matching_does(
             counterparty=CounterpartyFields(identifier_id=c_identifier, bank_transfer=True),
         ),
     )
+    await record_import(b.id, [from_c.id])
     await heal()
     assert sorted(t.status for t in await list_transfers(session)) == ["inferred", "matched"]
 
@@ -377,6 +387,7 @@ async def test_preview_match_reads_the_relation_matching_does(
         quantity=Decimal(100),
         occurred_at=ROW_AT,
         counterparty=CounterpartyFields(bank_transfer=True),
+        complete=IMPORTED,
     )
 
     assert previewed == sent.id
@@ -398,6 +409,7 @@ async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) 
             quantity=Decimal(100),
             occurred_at=ROW_AT,
             counterparty=CounterpartyFields(bank_transfer=True),
+            complete=IMPORTED,
             source=source,
         )
 
@@ -429,33 +441,25 @@ async def test_preview_match_applies_the_rows_decisions(session, gbp, inferred) 
 
 
 @pytest.fixture
-async def statement(run):
-    """The connection an M2 statement import stands in for: its rows keep their reference,
-    (connection, "<id>:<row>"), when the statement is imported again."""
-    return await run(create_connection, connector="import", display_name="Statement", config={})
-
-
-@pytest.fixture
-def stable_row(session, run, gbp, statement):
-    """Post a statement row as an M2 import would, under a stable reference."""
+def stable_row(session, run, gbp, record_import):
+    """Post a statement row as an M2 import would, under a stable reference: its dedupe key,
+    which it keeps when the statement is imported again."""
 
     async def _post(account, row: str, quantity: str = "100", *, at=ROW_AT, identifier=None):
         contra = await transfer_contra(
             session,
-            source=("connection", f"{statement.id}:{row}"),
+            source=("import", row),
             own_account_id=account.id,
             counterparty_identifier_id=identifier,
             other_postings=0,
         )
         amount = Decimal(quantity)
-        return await run(
+        posted = await run(
             post_transaction,
             TransactionInput(
                 occurred_at=at,
                 description="Faster payment",
                 origin="manual",
-                connection_id=statement.id,
-                external_id=row,
                 postings=[
                     PostingInput(account.id, gbp.id, amount),
                     PostingInput(contra, gbp.id, -amount),
@@ -463,6 +467,8 @@ def stable_row(session, run, gbp, statement):
                 counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
             ),
         )
+        await record_import(account.id, [posted.id], keys=[row])
+        return posted
 
     return _post
 
@@ -486,6 +492,9 @@ async def _assert_rejections_hold(session) -> None:
             " join finance.transactions t on d.subject_kind = 'connection'"
             "   and d.subject_ref = t.connection_id::text || ':' || t.external_id"
             "   or d.subject_kind = 'transaction' and d.subject_ref = t.id::text"
+            "   or d.subject_kind = 'import' and d.subject_ref in (select r.dedupe_key"
+            "     from finance.import_rows r"
+            "     where r.transaction_id = t.id and r.status = 'committed')"
             " join finance.transfers tr on tr.id = d.transfer_id"
             " where d.kind = 'reject' and tr.status = 'rejected'"
             "   and t.id is distinct from tr.out_transaction_id"
@@ -496,10 +505,16 @@ async def _assert_rejections_hold(session) -> None:
 
 
 async def _roll_back(session, run, heal, row) -> None:
-    """M2's rollback: unlink the row, delete it, heal."""
-    await run(unlink_transaction, row.id)
-    await session.execute(text("delete from finance.transactions where id = :t"), {"t": row.id})
+    """M2's rollback: unlink the row, void it, its import row rolled back; heal."""
+    await _unlink_and_void(session, run, row)
     await heal()
+
+
+async def _unlink_and_void(session, run, row) -> None:
+    await run(unlink_transaction, row.id)
+    r = models.ImportRow
+    await session.execute(update(r).where(r.transaction_id == row.id).values(status="rolled_back"))
+    await run(void_transaction, row.id)
 
 
 async def test_reimporting_a_rejected_row_keeps_the_rejection(
@@ -692,6 +707,7 @@ async def _preview(session, gbp, account, quantity: str, identifier=None):
         quantity=Decimal(quantity),
         occurred_at=ROW_AT,
         counterparty=CounterpartyFields(identifier_id=identifier, bank_transfer=True),
+        complete=IMPORTED,
     )
 
 

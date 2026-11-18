@@ -83,6 +83,17 @@ class Account:
             and booking_date(at) <= self.imported_through
         )
 
+    def lists_in_full(self, earliest: date, latest: date) -> bool:
+        """Whether the account's imports list every day from earliest to latest in full:
+        the days after its opening snapshot's (that day's rows before it are inside the
+        snapshot) through the last day imported (the harness records them so)."""
+        assert self.snapshot_at is not None
+        return (
+            self.imported_through is not None
+            and earliest > booking_date(self.snapshot_at)
+            and latest <= self.imported_through
+        )
+
 
 @dataclass(frozen=True)
 class Movement:
@@ -227,8 +238,21 @@ class Scenario:
                 if account.connected:
                     continue
                 assert account.snapshot_at is not None
-                if self.record_of(t.index, account.name) is not None:
-                    continue  # its own row is in the ledger, not a placeholder
+                own = self.record_of(t.index, account.name)
+                other = self.record_of(t.index, other_side.account)
+                if own is not None and (
+                    own.names is not None
+                    or other is None
+                    or other.names is None
+                    or account.lists_in_full(*_window(other_side))
+                ):
+                    continue  # its own row is in the ledger and taken, not a placeholder
+                if own is not None:
+                    # Caveat "a transfer whose window runs past the days imported keeps its
+                    # placeholder" (design §5.8): its own row, found by amount and date
+                    # only, isn't taken until imports list the window in full.
+                    found.append(f"window_not_listed_in_full: transfer {t.index}")
+                    continue
                 # Caveat "a snapshot dated between the two banks' bookings of a multi-day
                 # transfer": the snapshot and the placeholder (dated as the other side's
                 # record) disagree about which side of it the money is on.
@@ -236,31 +260,7 @@ class Scenario:
                     other_side.at <= account.snapshot_at
                 ):
                     found.append(f"snapshot_in_settlement_gap: transfer {t.index}")
-                if self._stand_in(t, manual_side, other_side) is not None:
-                    found.append(f"CAVEAT_unrelated_row_stands_in: transfer {t.index}")
         return found
-
-    def _stand_in(self, t: Transfer, manual_side: Movement, other_side: Movement) -> Record | None:
-        """Known caveat "an unrelated row can stand in for a counterpart that is not in the
-        ledger" (design §5.8), accepted by the owner on 2026-11-16 until M2 is wired in. The
-        manual side's own row is not in the ledger (it is inside the account's opening
-        snapshot, or after the last statement imported), but another imported row of the
-        same amount and direction, a bank transfer, is booked inside the window of the
-        connected side's record: the amount-and-date fallback (§5.7) takes it as the
-        counterpart, silently, and net worth is off by the amount until that row's date or
-        until the real row is imported."""
-        earliest, latest = _window(other_side)
-        for r in self.records:
-            if (
-                r.kind == "import"
-                and r.transfer != t.index
-                and r.movement.account == manual_side.account
-                and r.movement.quantity == manual_side.quantity
-                and r.bank_transfer
-                and earliest <= r.movement.day <= latest
-            ):
-                return r
-        return None
 
 
 def _window(side: Movement) -> tuple[date, date]:

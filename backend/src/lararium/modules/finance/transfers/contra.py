@@ -78,6 +78,28 @@ def _connection_names(t: type[models.Transaction], ref: str) -> ColumnElement[bo
     return and_(t.connection_id == UUID(connection_id), t.external_id == external_id)
 
 
+def _imported(t: type[models.Transaction]) -> ColumnElement[bool]:
+    r = models.ImportRow
+    return exists().where(r.transaction_id == t.id, r.kind == "statement")
+
+
+def _import_key(t: type[models.Transaction]) -> ColumnElement[str]:
+    r = models.ImportRow
+    return (
+        select(r.dedupe_key)
+        .where(r.transaction_id == t.id, r.kind == "statement")
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _import_names(t: type[models.Transaction], ref: str) -> ColumnElement[bool]:
+    # The live one: a rolled-back row keeps its voided transaction, and the same row
+    # imported again (the same key) posts a new one.
+    r = models.ImportRow
+    return t.id.in_(select(r.transaction_id).where(r.dedupe_key == ref, r.status == "committed"))
+
+
 _SOURCE_KINDS = (
     _SourceKind(
         name="connection",
@@ -85,6 +107,9 @@ _SOURCE_KINDS = (
         ref=lambda t: func.concat(cast(t.connection_id, String), ":", t.external_id),
         names=_connection_names,
     ),
+    # A statement import's row (M2): its dedupe key, which the same row keeps when imported
+    # again after a rollback, so the owner's decisions follow it.
+    _SourceKind(name="import", applies=_imported, ref=_import_key, names=_import_names),
     _SourceKind(
         name="transaction",
         applies=lambda t: true(),
@@ -342,7 +367,8 @@ async def own_leg(session: AsyncSession, transaction_id: UUID) -> OwnLeg | None:
 
 async def source_ref(session: AsyncSession, transaction_id: UUID) -> SourceRef:
     """The transaction's stable reference (source_columns): ("connection",
-    "<connection_id>:<external_id>") for a connector's row, else ("transaction", "<id>")."""
+    "<connection_id>:<external_id>") for a connector's row, ("import", "<dedupe key>") for
+    a statement import's row, else ("transaction", "<id>")."""
     t = models.Transaction
     kind, ref = source_columns(t)
     row = (await session.execute(select(kind, ref).where(t.id == transaction_id))).one_or_none()

@@ -4,6 +4,7 @@ import {
   formatQuantity,
   formatSortCode,
   isDecimalString,
+  isZeroDecimal,
   negateDecimalString,
 } from "./format";
 
@@ -61,6 +62,15 @@ describe("isDecimalString", () => {
   it("rejects a sign when only unsigned amounts are allowed", () => {
     expect(isDecimalString("-500", { unsigned: true })).toBe(false);
     expect(isDecimalString("500", { unsigned: true })).toBe(true);
+  });
+});
+
+describe("isZeroDecimal", () => {
+  it.each(["0", "0.00", "-0", "000.0", "0."])("is zero: %s", (value) => {
+    expect(isZeroDecimal(value)).toBe(true);
+  });
+  it.each(["0.01", "-1", "10", "", "."])("is not zero: %s", (value) => {
+    expect(isZeroDecimal(value)).toBe(false);
   });
 });
 

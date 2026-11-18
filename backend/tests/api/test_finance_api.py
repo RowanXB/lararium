@@ -249,10 +249,20 @@ async def test_fiat_without_iso4217_code_is_rejected(client) -> None:
     assert response.json()["detail"]["error"] == "invalid_input"
 
 
+def test_every_finance_error_has_a_status() -> None:
+    # An unmapped one would be a 500. LedgerImbalanceError has its own handler.
+    defined = {
+        value
+        for value in vars(errors).values()
+        if isinstance(value, type) and issubclass(value, errors.FinanceError)
+    }
+    assert defined - {errors.FinanceError, errors.LedgerImbalanceError} == set(_ERRORS)
+
+
 @pytest.mark.parametrize(
     "error_class",
-    # Those two take a sentence.
-    [c for c in _ERRORS if c not in (errors.FinanceValidationError, errors.TransferSettingsError)],
+    # Errors raised with a whole sentence (template "{}") are left out.
+    [c for c in _ERRORS if c.template != "{}"],
 )
 def test_every_error_message_explains_itself(error_class) -> None:
     # The web UI shows the message as is, so a bare id or code would explain nothing.

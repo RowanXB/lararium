@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.config import Settings
 from lararium.core.actors import Actor
+from lararium.core.documents import DocumentStore
 
 OWNER_HEADER = "Tailscale-User-Login"
 
@@ -80,6 +81,11 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
     return cast(async_sessionmaker[AsyncSession], request.app.state.sessionmaker)
 
 
+def get_document_store(request: Request) -> DocumentStore:
+    return cast(DocumentStore, request.app.state.document_store)
+
+
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 SessionFactoryDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
 ActorDep = Annotated[Actor, Depends(get_actor)]
+DocumentStoreDep = Annotated[DocumentStore, Depends(get_document_store)]

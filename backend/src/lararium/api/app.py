@@ -11,6 +11,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalErr
 from lararium import __version__
 from lararium.api import core_routes
 from lararium.config import Settings, get_settings
+from lararium.core.documents import LocalDocumentStore
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.registry import MODULES
 from lararium.worker.app import procrastinate_app
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Read by lararium.deps.
     app.state.settings = settings
     app.state.sessionmaker = make_sessionmaker(engine)
+    app.state.document_store = LocalDocumentStore(settings.document_dir)
     for error_class in (IntegrityError, DataError, OperationalError):
         app.add_exception_handler(error_class, _database_error)
     app.include_router(core_routes.public_router)

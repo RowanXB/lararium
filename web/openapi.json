@@ -287,6 +287,34 @@
         "title": "AccountRename",
         "type": "object"
       },
+      "AmountFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "decimal_separator": {
+            "default": ".",
+            "enum": [
+              ".",
+              ","
+            ],
+            "title": "Decimal Separator",
+            "type": "string"
+          },
+          "thousands_separator": {
+            "default": "",
+            "enum": [
+              "",
+              ",",
+              ".",
+              " ",
+              "'"
+            ],
+            "title": "Thousands Separator",
+            "type": "string"
+          }
+        },
+        "title": "AmountFormat",
+        "type": "object"
+      },
       "AuthorizeOut": {
         "properties": {
           "url": {
@@ -316,6 +344,44 @@
           "balance_mode"
         ],
         "title": "BalanceModeUpdate",
+        "type": "object"
+      },
+      "Body_stage_import": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "instrument_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instrument Id"
+          },
+          "profile_id": {
+            "format": "uuid",
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "profile_id",
+          "file"
+        ],
+        "title": "Body_stage_import",
         "type": "object"
       },
       "CandidateOut": {
@@ -369,6 +435,15 @@
         ],
         "title": "CandidateOut",
         "type": "object"
+      },
+      "CardTypes": {
+        "items": {
+          "maxLength": 60,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 50,
+        "type": "array"
       },
       "ConnectionOut": {
         "properties": {
@@ -475,6 +550,359 @@
         "title": "ConnectionOut",
         "type": "object"
       },
+      "CsvColumns": {
+        "additionalProperties": false,
+        "description": "Column names in the file; several description columns are joined with one space.",
+        "properties": {
+          "account_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
+          },
+          "account_sort_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Sort Code"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "balance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Balance"
+          },
+          "check_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Number"
+          },
+          "counterparty_account_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Account Number"
+          },
+          "counterparty_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Name"
+          },
+          "counterparty_sort_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Sort Code"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "description": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Description",
+            "type": "array"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "fee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fee"
+          },
+          "inflow": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inflow"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memo"
+          },
+          "outflow": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outflow"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payee"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "value_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Date"
+          }
+        },
+        "required": [
+          "date",
+          "description"
+        ],
+        "title": "CsvColumns",
+        "type": "object"
+      },
+      "CsvProfileConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "amount_format": {
+            "$ref": "#/components/schemas/AmountFormat",
+            "default": {
+              "decimal_separator": ".",
+              "thousands_separator": ""
+            }
+          },
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
+          "columns": {
+            "$ref": "#/components/schemas/CsvColumns"
+          },
+          "date_format": {
+            "$ref": "#/components/schemas/DateFormat"
+          },
+          "delimiter": {
+            "$ref": "#/components/schemas/Delimiter",
+            "default": ","
+          },
+          "encoding": {
+            "$ref": "#/components/schemas/Encoding",
+            "default": "utf-8-sig"
+          },
+          "format": {
+            "const": "csv",
+            "title": "Format",
+            "type": "string"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header"
+          },
+          "include_only": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "title": "Include Only",
+            "type": "object"
+          },
+          "overdraft_footer_label": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FooterLabel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "row_order": {
+            "default": "oldest_first",
+            "enum": [
+              "oldest_first",
+              "newest_first"
+            ],
+            "title": "Row Order",
+            "type": "string"
+          },
+          "sign": {
+            "$ref": "#/components/schemas/Sign",
+            "default": "inflow_positive"
+          },
+          "skip_footer_rows": {
+            "default": 0,
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Skip Footer Rows",
+            "type": "integer"
+          },
+          "skip_rows": {
+            "default": 0,
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Skip Rows",
+            "type": "integer"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimezoneName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "format",
+          "columns",
+          "date_format"
+        ],
+        "title": "CsvProfileConfig",
+        "type": "object"
+      },
+      "DateFormat": {
+        "type": "string"
+      },
+      "Delimiter": {
+        "maxLength": 1,
+        "minLength": 1,
+        "type": "string"
+      },
+      "Encoding": {
+        "enum": [
+          "utf-8-sig",
+          "utf-8",
+          "cp1252",
+          "latin-1"
+        ],
+        "type": "string"
+      },
       "FinanceSettingsOut": {
         "properties": {
           "reporting_currency": {
@@ -500,6 +928,9 @@
         ],
         "title": "FinanceSettingsUpdate",
         "type": "object"
+      },
+      "FooterLabel": {
+        "type": "string"
       },
       "FxRateCreate": {
         "properties": {
@@ -746,6 +1177,1134 @@
         "title": "IdentifierOut",
         "type": "object"
       },
+      "ImportBatchDetailOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Committed At"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "profile_id": {
+            "format": "uuid",
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "profile_version": {
+            "title": "Profile Version",
+            "type": "integer"
+          },
+          "rolled_back_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rolled Back At"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRowOut"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "statement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImportStatementOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "staged",
+              "committed",
+              "discarded",
+              "rolled_back"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "profile_id",
+          "profile_version",
+          "document_id",
+          "filename",
+          "status",
+          "created_at",
+          "committed_at",
+          "rolled_back_at",
+          "counts",
+          "warnings",
+          "statement",
+          "rows"
+        ],
+        "title": "ImportBatchDetailOut",
+        "type": "object"
+      },
+      "ImportBatchOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Committed At"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "profile_id": {
+            "format": "uuid",
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "profile_version": {
+            "title": "Profile Version",
+            "type": "integer"
+          },
+          "rolled_back_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rolled Back At"
+          },
+          "statement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImportStatementOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "staged",
+              "committed",
+              "discarded",
+              "rolled_back"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "profile_id",
+          "profile_version",
+          "document_id",
+          "filename",
+          "status",
+          "created_at",
+          "committed_at",
+          "rolled_back_at",
+          "counts",
+          "warnings",
+          "statement"
+        ],
+        "title": "ImportBatchOut",
+        "type": "object"
+      },
+      "ImportCatalogEntryOut": {
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ProfileConfig"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "institution": {
+            "title": "Institution",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "recommended": {
+            "title": "Recommended",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "institution",
+          "format",
+          "label",
+          "config",
+          "recommended"
+        ],
+        "title": "ImportCatalogEntryOut",
+        "type": "object"
+      },
+      "ImportProfileCreate": {
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ProfileConfig"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "config"
+        ],
+        "title": "ImportProfileCreate",
+        "type": "object"
+      },
+      "ImportProfileOut": {
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ProfileConfig"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "config",
+          "version",
+          "updated_at"
+        ],
+        "title": "ImportProfileOut",
+        "type": "object"
+      },
+      "ImportRowOut": {
+        "properties": {
+          "balance": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Balance"
+          },
+          "bank_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Reference"
+          },
+          "bank_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Type"
+          },
+          "booking_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Booking Date"
+          },
+          "check_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Number"
+          },
+          "counterparty_account_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Account Number"
+          },
+          "counterparty_bank": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Bank"
+          },
+          "counterparty_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Name"
+          },
+          "counterparty_sort_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Sort Code"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "duplicate_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Of"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "exchange_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exchange Rate"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "fee": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Fee",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "instrument_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instrument Id"
+          },
+          "is_gap": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Gap"
+          },
+          "kind": {
+            "enum": [
+              "statement",
+              "opening_adjustment"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memo"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "original_currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Currency"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payee"
+          },
+          "payment_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Kind"
+          },
+          "payment_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Reference"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "purpose_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose Code"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "raw": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Raw",
+            "type": "object"
+          },
+          "remittance_info": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remittance Info"
+          },
+          "status": {
+            "enum": [
+              "new",
+              "duplicate",
+              "skipped",
+              "error",
+              "committed",
+              "rolled_back"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
+          },
+          "value_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Date"
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "kind",
+          "status",
+          "booking_date",
+          "occurred_at",
+          "value_date",
+          "description",
+          "payee",
+          "memo",
+          "check_number",
+          "counterparty_name",
+          "counterparty_sort_code",
+          "counterparty_account_number",
+          "counterparty_bank",
+          "payment_reference",
+          "payment_kind",
+          "bank_reference",
+          "purpose_code",
+          "remittance_info",
+          "original_currency",
+          "exchange_rate",
+          "quantity",
+          "fee",
+          "instrument_id",
+          "balance",
+          "external_id",
+          "bank_type",
+          "error",
+          "note",
+          "raw",
+          "transaction_id",
+          "duplicate_of",
+          "is_gap"
+        ],
+        "title": "ImportRowOut",
+        "type": "object"
+      },
+      "ImportStatementOut": {
+        "description": "What the file says at statement level; fields it doesn't print are null.",
+        "properties": {
+          "account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Name"
+          },
+          "account_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
+          },
+          "account_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Type"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "addressee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addressee"
+          },
+          "available_balance": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available Balance"
+          },
+          "available_balance_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available Balance Date"
+          },
+          "bic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bic"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "clearing_account_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clearing Account Number"
+          },
+          "closing_balance": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closing Balance"
+          },
+          "closing_balance_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closing Balance Date"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "customer_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Number"
+          },
+          "document_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Date"
+          },
+          "iban": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iban"
+          },
+          "money_in": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Money In"
+          },
+          "money_out": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Money Out"
+          },
+          "opening_balance": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opening Balance"
+          },
+          "overdraft_limit": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overdraft Limit"
+          },
+          "overdraft_limit_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overdraft Limit Date"
+          },
+          "payments_in": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payments In"
+          },
+          "payments_out": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payments Out"
+          },
+          "period_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period From"
+          },
+          "period_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period To"
+          },
+          "rates": {
+            "items": {
+              "$ref": "#/components/schemas/ImportStatementRateOut"
+            },
+            "title": "Rates",
+            "type": "array"
+          },
+          "sort_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
+          },
+          "statement_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Reference"
+          }
+        },
+        "required": [
+          "period_from",
+          "period_to",
+          "currency",
+          "opening_balance",
+          "closing_balance",
+          "closing_balance_date",
+          "money_in",
+          "money_out",
+          "payments_in",
+          "payments_out",
+          "statement_reference",
+          "document_date",
+          "account_type",
+          "account_name",
+          "sort_code",
+          "account_number",
+          "iban",
+          "bic",
+          "customer_number",
+          "clearing_account_number",
+          "branch",
+          "addressee",
+          "address",
+          "overdraft_limit",
+          "overdraft_limit_date",
+          "available_balance",
+          "available_balance_date",
+          "rates"
+        ],
+        "title": "ImportStatementOut",
+        "type": "object"
+      },
+      "ImportStatementRateOut": {
+        "properties": {
+          "band_from": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Band From"
+          },
+          "band_to": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Band To"
+          },
+          "ear": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ear"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          }
+        },
+        "required": [
+          "kind",
+          "band_from",
+          "band_to",
+          "rate",
+          "ear"
+        ],
+        "title": "ImportStatementRateOut",
+        "type": "object"
+      },
       "InstrumentCreate": {
         "properties": {
           "decimals": {
@@ -974,6 +2533,76 @@
         "title": "NetWorthPointOut",
         "type": "object"
       },
+      "OfxProfileConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
+          "format": {
+            "const": "ofx",
+            "title": "Format",
+            "type": "string"
+          },
+          "sign": {
+            "$ref": "#/components/schemas/Sign",
+            "default": "inflow_positive"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimezoneName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "format"
+        ],
+        "title": "OfxProfileConfig",
+        "type": "object"
+      },
+      "PdfProfileConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
+          "format": {
+            "const": "pdf",
+            "title": "Format",
+            "type": "string"
+          },
+          "layout": {
+            "enum": [
+              "hsbc_uk_statement",
+              "lloyds_statement",
+              "boc_uk_statement"
+            ],
+            "title": "Layout",
+            "type": "string"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimezoneName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "format",
+          "layout"
+        ],
+        "title": "PdfProfileConfig",
+        "type": "object"
+      },
       "PostingCreate": {
         "properties": {
           "account_id": {
@@ -1188,6 +2817,78 @@
         "title": "PriceCreate",
         "type": "object"
       },
+      "ProfileConfig": {
+        "discriminator": {
+          "mapping": {
+            "csv": "#/components/schemas/CsvProfileConfig",
+            "ofx": "#/components/schemas/OfxProfileConfig",
+            "pdf": "#/components/schemas/PdfProfileConfig",
+            "qif": "#/components/schemas/QifProfileConfig"
+          },
+          "propertyName": "format"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CsvProfileConfig"
+          },
+          {
+            "$ref": "#/components/schemas/OfxProfileConfig"
+          },
+          {
+            "$ref": "#/components/schemas/QifProfileConfig"
+          },
+          {
+            "$ref": "#/components/schemas/PdfProfileConfig"
+          }
+        ]
+      },
+      "QifProfileConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "amount_format": {
+            "$ref": "#/components/schemas/AmountFormat",
+            "default": {
+              "decimal_separator": ".",
+              "thousands_separator": ","
+            }
+          },
+          "card_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
+          "date_format": {
+            "$ref": "#/components/schemas/DateFormat"
+          },
+          "encoding": {
+            "$ref": "#/components/schemas/Encoding",
+            "default": "utf-8-sig"
+          },
+          "format": {
+            "const": "qif",
+            "title": "Format",
+            "type": "string"
+          },
+          "sign": {
+            "$ref": "#/components/schemas/Sign",
+            "default": "inflow_positive"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimezoneName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "format",
+          "date_format"
+        ],
+        "title": "QifProfileConfig",
+        "type": "object"
+      },
       "SettingsOut": {
         "properties": {
           "timezone": {
@@ -1213,6 +2914,13 @@
         ],
         "title": "SettingsUpdate",
         "type": "object"
+      },
+      "Sign": {
+        "enum": [
+          "inflow_positive",
+          "outflow_positive"
+        ],
+        "type": "string"
       },
       "SnapshotCreate": {
         "properties": {
@@ -1353,6 +3061,9 @@
         ],
         "title": "SyncQueuedOut",
         "type": "object"
+      },
+      "TimezoneName": {
+        "type": "string"
       },
       "TransactionCreate": {
         "properties": {
@@ -2436,6 +4147,386 @@
           }
         },
         "summary": "Get Holdings",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/import-catalog": {
+      "get": {
+        "description": "Each supported bank's export formats with a ready profile config (one recommended).",
+        "operationId": "get_import_catalog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImportCatalogEntryOut"
+                  },
+                  "title": "Response Get Import Catalog",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Import Catalog",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/import-profiles": {
+      "get": {
+        "operationId": "list_import_profiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImportProfileOut"
+                  },
+                  "title": "Response List Import Profiles",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Import Profiles",
+        "tags": [
+          "finance"
+        ]
+      },
+      "post": {
+        "operationId": "create_import_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportProfileCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportProfileOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Import Profile",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/import-profiles/{profile_id}": {
+      "put": {
+        "operationId": "update_import_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportProfileCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportProfileOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Import Profile",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/imports": {
+      "get": {
+        "operationId": "list_import_batches",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImportBatchOut"
+                  },
+                  "title": "Response List Import Batches",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Import Batches",
+        "tags": [
+          "finance"
+        ]
+      },
+      "post": {
+        "description": "Upload a statement file and stage it for review; nothing is posted until commit.",
+        "operationId": "stage_import",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_stage_import"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBatchDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stage Import",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/imports/{batch_id}": {
+      "get": {
+        "operationId": "get_import_batch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBatchDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Import Batch",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/imports/{batch_id}/commit": {
+      "post": {
+        "operationId": "commit_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Commit Import",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/imports/{batch_id}/discard": {
+      "post": {
+        "operationId": "discard_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discard Import",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/imports/{batch_id}/rollback": {
+      "post": {
+        "operationId": "rollback_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rollback Import",
         "tags": [
           "finance"
         ]

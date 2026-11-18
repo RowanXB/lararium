@@ -2,6 +2,9 @@ import { createRootRoute, createRoute, createRouter, Link, Outlet } from "@tanst
 
 import { AccountsPage } from "./pages/AccountsPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
+import { ImportBatchPage } from "./pages/ImportBatchPage";
+import { ImportProfilesPage } from "./pages/ImportProfilesPage";
+import { ImportsPage } from "./pages/ImportsPage";
 import { InstrumentsPage } from "./pages/InstrumentsPage";
 import { NetWorthPage } from "./pages/NetWorthPage";
 import { PricesPage } from "./pages/PricesPage";
@@ -13,6 +16,8 @@ const NAV = [
   { to: "/transfers", label: "Transfers" },
   { to: "/instruments", label: "Instruments" },
   { to: "/prices", label: "Prices" },
+  { to: "/imports", label: "Imports" },
+  { to: "/import-profiles", label: "Profiles" },
   { to: "/connections", label: "Connections" },
 ] as const;
 
@@ -44,12 +49,28 @@ function Layout() {
 
 const rootRoute = createRootRoute({ component: Layout });
 
+const importBatchRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/imports/$batchId",
+  component: function ImportBatchRoute() {
+    const { batchId } = importBatchRoute.useParams();
+    return <ImportBatchPage batchId={batchId} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: NetWorthPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/transfers", component: TransfersPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/instruments", component: InstrumentsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/prices", component: PricesPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/imports", component: ImportsPage }),
+  importBatchRoute,
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/import-profiles",
+    component: ImportProfilesPage,
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: "/connections", component: ConnectionsPage }),
 ]);
 

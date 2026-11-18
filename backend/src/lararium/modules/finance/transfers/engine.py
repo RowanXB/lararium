@@ -291,8 +291,9 @@ async def _post_settlement(
     ctx: CommandContext, record: OwnRecord, counterpart: AccountRecord, system: _System
 ) -> UUID:
     """Settle a counterpart that predates its account's history against Opening balances,
-    which that account's opening balance (a connector's adjustment, or a manual account's
-    first snapshot) already contains it through."""
+    which that account's opening balance (a connector's adjustment, a manual account's
+    first snapshot, or its first statement import's opening adjustment) already contains
+    it through."""
     return await _post_mirror(
         ctx,
         record,
@@ -314,7 +315,8 @@ async def _open(
     previous: TransferRecord | None,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
-    counterpart predates that account's history (a manual hybrid account's first snapshot,
+    counterpart is already held by that account's history (a manual hybrid account's first
+    snapshot, or the days a manual transactions account's imports list or open with,
     manual_predates; a connected account's first record, before_history); else inferred
     with a placeholder when the counterpart is manual, or awaiting the counterpart's own
     record when it is connected.
@@ -328,7 +330,7 @@ async def _open(
     status: TransferStatus = "awaiting"
     if counterpart.source_kind == "manual":
         if await session.scalar(
-            select(manual_predates(record.columns(), bound_id(counterpart.id)))
+            select(manual_predates(record.columns(), bound_id(counterpart.id), settings))
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
@@ -727,6 +729,7 @@ async def preview_match(
     counterparty: CounterpartyFields,
     source: SourceRef | None = None,
     booking_date: date | None = None,
+    complete: tuple[date, date] | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -737,7 +740,9 @@ async def preview_match(
     `source`: the reference the row will have once posted (a re-imported row keeps its
     own), so the owner's decisions about it apply; None for a row with none yet.
     `booking_date`: the one the row will be posted with, if given; else it gets the one
-    posting would give it (ledger.resolve_booking_date), which the window is counted in."""
+    posting would give it (ledger.resolve_booking_date), which the window is counted in.
+    `complete`: the days the row's import lists in full, which committing it would add
+    (a counterpart found by amount and date is taken only on such days, design §5.8)."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
     holder = (
@@ -756,7 +761,8 @@ async def preview_match(
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
     )
-    relation = await pair_relation(session, system, settings, adding=[row])
+    listing = [] if complete is None else [(account_id, instrument_id, *complete)]
+    relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
     return relation.partner(row.id)
 
 
