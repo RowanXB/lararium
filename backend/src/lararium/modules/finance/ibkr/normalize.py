@@ -1,22 +1,33 @@
 """IBKR raw records into the ledger.
 
-Deterministic from its inputs and versioned (NORMALIZER_VERSION). So far it maps accounts
-(design 5.5): one finance account per IBKR account, found or created from its Account
-Information row, closed on its dateClosed, given the tax wrapper its customerType says, and
-registered under its IBKR account id. Later parts post the rest of the statement.
+Deterministic from its inputs and versioned (NORMALIZER_VERSION, stored in the connection's
+config): when the stored version differs, the run replays every raw record the connection
+holds (the latest copy of each row), so what a new version stores is filled in for the
+history an older one saw too.
+
+In order (design 5.5-5.10): accounts (one finance account per IBKR account, closed on its
+dateClosed, its tax wrapper from customerType, registered under its IBKR account id);
+instruments; FX rates; prices; Cash Reports, NAV and the other levels of Trades; trades, cash
+transactions, corporate actions and transfers (records.py); opening adjustments, for the
+account's earliest window only; reported snapshots (reports.py).
 
 Account Information holds personal data (name, address, e-mail, date of birth): it is stored
-in ibkr_accounts and never logged or put in a warning.
+in ibkr_accounts and never logged or put in a warning. Errors and flags name sections, fields,
+categories and IBKR's transaction ids, never a row's values.
 """
 
 import logging
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from datetime import date
+from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
+from sqlalchemy import select
+
+from lararium.core import models as core_models
 from lararium.core.commands import CommandContext, command_context
-from lararium.core.connections import update_config
+from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import get_or_create_organization
 from lararium.core.json_types import JSONValue
@@ -30,8 +41,10 @@ from lararium.modules.finance.accounts import (
     set_source_details,
 )
 from lararium.modules.finance.errors import AccountNotFoundError
-from lararium.modules.finance.ibkr import tables
+from lararium.modules.finance.ibkr import records, reports, tables
 from lararium.modules.finance.ibkr.fields import SECTIONS
+from lararium.modules.finance.ibkr.parser import FlexDataError
+from lararium.modules.finance.ibkr.state import Item, NormalizeReport, Run
 from lararium.modules.finance.identifiers import (
     ensure_identifier,
     get_or_create_identifier,
@@ -42,19 +55,43 @@ from lararium.modules.finance.instruments import get_currency
 logger = logging.getLogger(__name__)
 
 NORMALIZER_VERSION = "ibkr-norm-1"
+# The version that last normalized the connection, in its config (Decision 8).
+NORMALIZER_VERSION_KEY = "normalizer_version"
 ACCOUNT_MAP_KEY = "account_map"
 INSTITUTION = "Interactive Brokers"
 _SECTION = "AccountInformation"
-_ACCOUNT_RECORD_TYPE = SECTIONS[_SECTION].record_type
+_SECTION_OF = {spec.record_type: section for section, spec in SECTIONS.items()}
 
 
-@dataclass
-class NormalizeReport:
-    """What a normalize run changed."""
+def _type(section: str) -> str:
+    return SECTIONS[section].record_type
 
-    accounts_created: int = 0
-    accounts_updated: int = 0
-    accounts_unchanged: int = 0
+
+_ACCOUNT = _type(_SECTION)
+_OPEN_POSITION = _type("OpenPosition")
+_POSITION_LOT = _type("PositionLot")
+_PRIOR_POSITION = _type("PriorPeriodPosition")
+_CASH_REPORT = _type("CashReportCurrency")
+_TRADE = _type("Trade")
+_TRADE_DETAIL = _type("TradeDetail")
+_CASH_TRANSACTION = _type("CashTransaction")
+_CONVERSION_RATE = _type("ConversionRate")
+_CORPORATE_ACTION = _type("CorporateAction")
+_TRANSFER = _type("Transfer")
+_NAV = _type("EquitySummaryByReportDateInBase")
+# The record types whose rows may name a security, in the order their instruments are made.
+_WITH_INSTRUMENTS = (
+    _OPEN_POSITION,
+    _POSITION_LOT,
+    _PRIOR_POSITION,
+    _TRADE,
+    _TRADE_DETAIL,
+    _CORPORATE_ACTION,
+    _TRANSFER,
+    _CASH_TRANSACTION,
+)
+# Where a row's security is optional: no conid means none, and no flag.
+_OPTIONAL_INSTRUMENT = frozenset({_TRADE_DETAIL, _CASH_TRANSACTION})
 
 
 def tax_wrapper(customer_type: str) -> TaxWrapper | None:
@@ -79,28 +116,106 @@ async def _in_short_transaction[T](
         return await work(cmd)
 
 
-def _latest_per_account(records: Sequence[RawRecord]) -> dict[str, dict[str, str]]:
+def _latest_per_account(items: Sequence[Item]) -> dict[str, dict[str, str]]:
     """The newest Account Information attributes of each IBKR account: statements repeat the
     section for every day, and the latest one says how the account is now."""
     newest: dict[str, tuple[str, str, dict[str, str]]] = {}
-    for record in records:
-        if record.record_type != _ACCOUNT_RECORD_TYPE or not isinstance(record.content, dict):
+    for item in items:
+        if item.record_type != _ACCOUNT:
             continue
-        account = str(record.content["account"])
-        period = record.content["period"]
-        attributes = record.content["attributes"]
-        assert isinstance(period, dict) and isinstance(attributes, dict)
-        order = (str(period["to"]), str(record.id))
-        if account not in newest or order > newest[account][:2]:
-            newest[account] = (*order, {k: str(v) for k, v in attributes.items()})
+        order = (item.period_to.isoformat(), str(item.record_id))
+        if item.account not in newest or order > newest[item.account][:2]:
+            newest[item.account] = (*order, item.attributes)
     return {account: attributes for account, (_, _, attributes) in newest.items()}
 
 
+def _item(record: RawRecord) -> Item | None:
+    section = _SECTION_OF.get(record.record_type)
+    content = record.content
+    if section is None or not isinstance(content, dict):
+        return None
+    period, attributes = content["period"], content["attributes"]
+    assert isinstance(period, dict) and isinstance(attributes, dict)
+    return Item(
+        record_id=record.id,
+        record_type=record.record_type,
+        section=section,
+        account=str(content["account"]),
+        period_from=date.fromisoformat(str(period["from"])),
+        period_to=date.fromisoformat(str(period["to"])),
+        attributes={k: str(v) for k, v in attributes.items()},
+        fetched_at=record.fetched_at,
+    )
+
+
+def _key(item: Item) -> tuple[str, ...]:
+    """What makes a row the same row in another statement: its ledger key for the
+    transactional sections, else the account, security and date it reports on."""
+    kind, text = item.record_type, item.text
+    if kind in records.PREFIXES:
+        return kind, records.external_id(item)
+    if kind == _ACCOUNT:
+        # Every copy is kept: _latest_per_account picks the one with the latest period.
+        return kind, item.account, str(item.record_id)
+    if kind in (_OPEN_POSITION, _POSITION_LOT):
+        lot = tables.lot_key(item.attributes) if reports.is_lot(item) else ""
+        return kind, item.account, text("conid"), text("reportDate"), text("levelOfDetail"), lot
+    if kind == _PRIOR_POSITION:
+        return kind, item.account, text("conid"), text("date")
+    if kind == _CASH_REPORT:
+        return kind, item.account, text("currency"), text("fromDate"), text("toDate")
+    if kind == _CONVERSION_RATE:
+        return kind, text("reportDate"), text("fromCurrency"), text("toCurrency")
+    if kind == _NAV:
+        return kind, item.account, text("reportDate")
+    if kind == _TRADE_DETAIL:
+        return kind, item.account, text("levelOfDetail"), tables.trade_detail_key(item.attributes)
+    return kind, str(item.record_id)
+
+
+async def _connection_records(ctx: SyncContext) -> list[RawRecord]:
+    """Every raw record of the connection, oldest fetch first."""
+    r = core_models.RawRecord
+    ids = await ctx.command.session.scalars(
+        select(r.id).where(r.connection_id == ctx.connection.id).order_by(r.fetched_at, r.id)
+    )
+    return await get_raw_records(ctx.command.session, list(ids))
+
+
+async def _items(ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool) -> list[Item]:
+    """This run's rows, one per key; with `replay`, also the latest copy of every other row
+    the connection holds.
+
+    The same transaction id with different attributes in one run fails it, naming the
+    section and key (Decision 9): a row repeated unchanged (by overlapping windows, under
+    another period) is one row.
+    """
+    given = [
+        item
+        for item in map(_item, await get_raw_records(ctx.command.session, raw_record_ids))
+        if item is not None
+    ]
+    chosen: dict[tuple[str, ...], Item] = {}
+    for item in sorted(given, key=lambda i: (i.fetched_at, i.record_id)):
+        key = _key(item)
+        held = chosen.get(key)
+        if held is not None and key[0] in records.PREFIXES and held.attributes != item.attributes:
+            raise FlexDataError(f"{item.section} has two different rows for {key[1]}")
+        chosen[key] = item
+    if replay:
+        given_keys = set(chosen)
+        for record in await _connection_records(ctx):
+            item = _item(record)
+            if item is not None and (key := _key(item)) not in given_keys:
+                chosen[key] = item  # oldest first, so the latest copy stays
+    return list(chosen.values())
+
+
 class _Accounts:
-    def __init__(self, ctx: SyncContext) -> None:
+    def __init__(self, ctx: SyncContext, config: dict[str, JSONValue]) -> None:
         self.ctx = ctx
         self.command = ctx.command
-        stored = ctx.connection.config.get(ACCOUNT_MAP_KEY)
+        stored = config.get(ACCOUNT_MAP_KEY)
         self.account_map: dict[str, JSONValue] = dict(stored) if isinstance(stored, dict) else {}
         self.institution_id: UUID | None = None
         self.report = NormalizeReport()
@@ -182,14 +297,84 @@ class _Accounts:
         return await tables.upsert_accounts(self.command, {"account_id": account_id}, values)
 
 
+def _history_fetched(cursor: JSONValue) -> bool:
+    """Whether a window was fetched before: then this run's windows are not the earliest."""
+    return isinstance(cursor, dict) and isinstance(cursor.get("history_from"), str)
+
+
 async def normalize(
     ctx: SyncContext, raw_record_ids: Sequence[UUID], flagged: frozenset[str] = frozenset()
 ) -> NormalizeReport:
-    del flagged
-    records = await get_raw_records(ctx.command.session, raw_record_ids)
-    accounts = _Accounts(ctx)
-    for ibkr_id, attributes in sorted(_latest_per_account(records).items()):
+    """Apply raw records to the ledger. `flagged` (the parser's flags) is reported with this
+    run's own (unsupported categories, rows it could not post).
+
+    Its arithmetic on amounts is exact, as the ledger's balance check is: the default context
+    rounds to 28 digits, which could leave postings that do not balance."""
+    with localcontext(prec=MAX_PREC):
+        return await _normalize(ctx, raw_record_ids, flagged)
+
+
+async def _normalize(
+    ctx: SyncContext, raw_record_ids: Sequence[UUID], flagged: frozenset[str]
+) -> NormalizeReport:
+    connection = await get_connection(ctx.command.session, ctx.connection.id)
+    replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
+    items = await _items(ctx, list(dict.fromkeys(raw_record_ids)), replay)
+    accounts = _Accounts(ctx, connection.config)
+    latest = _latest_per_account(items)
+    for ibkr_id, attributes in sorted(latest.items()):
         await accounts.account(ibkr_id, attributes)
-    if accounts.account_map != ctx.connection.config.get(ACCOUNT_MAP_KEY):
-        await update_config(ctx.command, ctx.connection.id, {ACCOUNT_MAP_KEY: accounts.account_map})
-    return accounts.report
+    mapped = {k: UUID(v) for k, v in accounts.account_map.items() if isinstance(v, str)}
+    run = Run(ctx, mapped, accounts.report)
+    run.report.flagged |= flagged
+
+    by_type: defaultdict[str, list[Item]] = defaultdict(list)
+    for item in sorted(
+        items, key=lambda i: (i.text("reportDate"), i.period_from, i.fetched_at, i.record_id)
+    ):
+        by_type[item.record_type].append(item)
+    for kind in _WITH_INSTRUMENTS:
+        for item in by_type[kind]:
+            category = item.text("assetCategory")
+            optional = kind in _OPTIONAL_INSTRUMENT and not (category and item.text("conid"))
+            if category != "CASH" and not optional:
+                await run.instrument(item, flag=False)
+    await reports.fx_rates(run, by_type[_CONVERSION_RATE])
+    positions = by_type[_OPEN_POSITION] + by_type[_POSITION_LOT]
+    await reports.prices(run, by_type[_PRIOR_POSITION], positions)
+    await reports.cash_reports(run, by_type[_CASH_REPORT])
+    await reports.nav(run, by_type[_NAV])
+    await reports.trade_details(run, by_type[_TRADE_DETAIL])
+
+    internal = records.internal_movements(by_type[_TRANSFER])
+    for item in sorted(by_type[_TRADE], key=records.order):
+        await records.trade(run, item)
+    for item in sorted(by_type[_CASH_TRANSACTION], key=records.order):
+        await records.cash_transaction(run, item, internal)
+    for item in sorted(by_type[_CORPORATE_ACTION], key=records.order):
+        await records.corporate_action(run, item)
+    for item in sorted(by_type[_TRANSFER], key=records.order):
+        await records.transfer(run, item)
+    if not _history_fetched(connection.cursor):
+        opened = {
+            ibkr_id: tables.parse_date(attributes["dateOpened"], f"{_SECTION}.dateOpened")
+            for ibkr_id, attributes in latest.items()
+        }
+        await records.openings(
+            run,
+            items,
+            opened,
+            cash_report=_CASH_REPORT,
+            open_position=_OPEN_POSITION,
+            is_summary=lambda item: not reports.is_lot(item),
+        )
+    await reports.snapshots(run, positions, by_type[_CASH_REPORT])
+
+    # Only this normaliser's keys: others (the token's reminder) may have changed meanwhile.
+    values: dict[str, JSONValue] = {
+        ACCOUNT_MAP_KEY: accounts.account_map,
+        NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
+    }
+    if any(connection.config.get(key) != value for key, value in values.items()):
+        await update_config(ctx.command, connection.id, values)
+    return run.report

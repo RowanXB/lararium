@@ -134,14 +134,24 @@ async def typed_values(
     return values
 
 
+def _content_key(attributes: Mapping[str, str]) -> str:
+    canonical = json.dumps(dict(attributes), sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def trade_detail_key(attributes: Mapping[str, str]) -> str:
     """The key of a trade row other than an execution: its transactionID, else its tradeID,
     else a hash of its attributes."""
     for name in ("transactionID", "tradeID"):
         if attributes.get(name):
             return attributes[name]
-    canonical = json.dumps(dict(attributes), sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    return _content_key(attributes)
+
+
+def lot_key(attributes: Mapping[str, str]) -> str:
+    """The key of an open position's lot: its originatingTransactionID, else a hash of its
+    attributes."""
+    return attributes.get("originatingTransactionID", "").strip() or _content_key(attributes)
 
 
 def _quote(name: str) -> str:
