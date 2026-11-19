@@ -22,7 +22,7 @@ def test_every_config_validates() -> None:
 def test_one_recommended_format_per_institution() -> None:
     recommended = Counter(entry.institution for entry in CATALOG if entry.recommended)
     institutions = {entry.institution for entry in CATALOG}
-    assert institutions == {"HSBC UK", "Lloyds", "BOC UK"}
+    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "Revolut Current", "Revolut Savings"}
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
 
@@ -35,9 +35,17 @@ def test_decision_14_formats() -> None:
         "HSBC UK": ["csv", "csv", "ofx", "pdf", "qif"],
         "Lloyds": ["csv", "pdf", "qif"],
         "BOC UK": ["pdf"],
+        "Revolut Current": ["csv", "pdf"],
+        "Revolut Savings": ["csv", "pdf"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
-    assert recommended == {("HSBC UK", "pdf"), ("Lloyds", "csv"), ("BOC UK", "pdf")}
+    assert recommended == {
+        ("HSBC UK", "pdf"),
+        ("Lloyds", "csv"),
+        ("BOC UK", "pdf"),
+        ("Revolut Current", "pdf"),
+        ("Revolut Savings", "pdf"),
+    }
 
 
 def test_labels_are_unique() -> None:
@@ -80,3 +88,24 @@ def test_lloyds_csv() -> None:
     assert (columns.account_sort_code, columns.account_number) == ("Sort Code", "Account Number")
     assert config.row_order == "newest_first"
     assert config.amount_format.thousands_separator == ","
+
+
+def test_revolut_current_csv() -> None:
+    config = _csv("Revolut Current", "CSV")
+    columns = config.columns
+    assert (columns.date, columns.started_at) == ("Completed Date", "Started Date")
+    assert (columns.amount, columns.fee, columns.currency) == ("Amount", "Fee", "Currency")
+    assert columns.account_type == "Product"
+    assert config.include_only == {"State": ["COMPLETED"]}
+    assert config.card_types == ["Card Payment", "Card Refund"]
+
+
+def test_revolut_savings_csv() -> None:
+    config = _csv("Revolut Savings", "CSV")
+    columns = config.columns
+    assert (columns.inflow, columns.outflow, columns.type) == (
+        "Money in",
+        "Money out",
+        "Description",
+    )
+    assert config.date_format == "%b %d, %Y"

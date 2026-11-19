@@ -74,6 +74,9 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Li
             raise FileFormatError("no rows")
         header = lines.pop(0)
     lines = [_trimmed(line) for line in lines]
+    # A line repeating the header is no row (Revolut's savings export ends with one).
+    names = [name.strip() for name in _trimmed(header)]
+    lines = [line for line in lines if [cell.strip() for cell in line] != names]
     footer: _Lines = []
     if config.skip_footer_rows:
         footer = lines[-config.skip_footer_rows :]
@@ -168,6 +171,13 @@ def _value_date(raw: dict[str, str], config: CsvProfileConfig, local_tz: ZoneInf
     return None if text is None else _datetime(text, config, local_tz).date()
 
 
+def _started_at(
+    raw: dict[str, str], config: CsvProfileConfig, local_tz: ZoneInfo
+) -> datetime | None:
+    text = _optional(raw, config.columns.started_at)
+    return None if text is None else _datetime(text, config, local_tz)
+
+
 def _counterparty(raw: dict[str, str], config: CsvProfileConfig) -> Counterparty | None:
     columns = config.columns
     counterparty = Counterparty(
@@ -183,6 +193,7 @@ def _account(raw: dict[str, str], config: CsvProfileConfig) -> StatementAccount 
     account = StatementAccount(
         sort_code=_optional(raw, config.columns.account_sort_code),
         account_number=_optional(raw, config.columns.account_number),
+        account_type=_optional(raw, config.columns.account_type),
     )
     return None if account == StatementAccount() else account
 
@@ -210,6 +221,7 @@ def _row(
         memo=_optional(raw, columns.memo),
         check_number=_optional(raw, columns.check_number),
         counterparty=_counterparty(raw, config),
+        started_at=_started_at(raw, config, local_tz),
     )
     return row, _account(raw, config)
 

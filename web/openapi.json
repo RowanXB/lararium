@@ -576,6 +576,17 @@
             ],
             "title": "Account Sort Code"
           },
+          "account_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Type"
+          },
           "amount": {
             "anyOf": [
               {
@@ -741,6 +752,17 @@
               }
             ],
             "title": "Reference"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
           },
           "type": {
             "anyOf": [
@@ -1542,6 +1564,17 @@
             ],
             "title": "Booking Date"
           },
+          "card_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Card Number"
+          },
           "check_number": {
             "anyOf": [
               {
@@ -1652,6 +1685,30 @@
             "title": "Fee",
             "type": "string"
           },
+          "fx_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Rate"
+          },
+          "fx_reference_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Reference Rate"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1721,6 +1778,18 @@
               }
             ],
             "title": "Occurred At"
+          },
+          "original_amount": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Amount"
           },
           "original_currency": {
             "anyOf": [
@@ -1811,6 +1880,18 @@
             ],
             "title": "Remittance Info"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "status": {
             "enum": [
               "new",
@@ -1871,6 +1952,11 @@
           "remittance_info",
           "original_currency",
           "exchange_rate",
+          "started_at",
+          "card_number",
+          "original_amount",
+          "fx_rate",
+          "fx_reference_rate",
           "quantity",
           "fee",
           "instrument_id",
@@ -2580,7 +2666,9 @@
             "enum": [
               "hsbc_uk_statement",
               "lloyds_statement",
-              "boc_uk_statement"
+              "boc_uk_statement",
+              "revolut_current_statement",
+              "revolut_savings_statement"
             ],
             "title": "Layout",
             "type": "string"

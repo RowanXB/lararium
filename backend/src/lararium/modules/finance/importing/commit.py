@@ -198,7 +198,7 @@ async def _counterparty(
         identifier_id=identifier_id,
         name=row.counterparty_name,
         reference=row.payment_reference,
-        bank_transfer=is_bank_transfer(card_types, row.bank_type),
+        bank_transfer=is_bank_transfer(card_types, row.bank_type, row.card_number),
     )
 
 

@@ -7,6 +7,7 @@ from decimal import Decimal
 from lararium.modules.finance.errors import FileFormatError
 from lararium.modules.finance.importing.parsed import (
     ParsedRow,
+    SkippedRow,
     StatementAccount,
     StatementRate,
     parse_amount,
@@ -56,6 +57,12 @@ class LayoutResult:
     statement_reference: str | None = None
     document_date: date | None = None
     rates: list[StatementRate] = field(default_factory=list[StatementRate])
+    # Rows the statement lists apart from its transactions and leaves out of its summary
+    # (Revolut's pending payments), numbered after the rows.
+    skipped: list[SkippedRow] = field(default_factory=list[SkippedRow])
+    # Whether the statement prints a type code on every row; a layout without them (Revolut's
+    # current account) marks card payments by their card number instead.
+    type_codes: bool = True
 
 
 def text(words: list[Word]) -> str:

@@ -104,8 +104,11 @@ type CardTypes = Annotated[
 ]
 
 
-def is_bank_transfer(card_types: list[str], bank_type: str | None) -> bool:
-    """Whether a row with this type code is a payment between bank accounts."""
+def is_bank_transfer(card_types: list[str], bank_type: str | None, card_number: str | None) -> bool:
+    """Whether a row with this type code, paid with this card if any, is a payment between
+    bank accounts."""
+    if card_number is not None:
+        return False
     return bank_type is None or bank_type.strip() not in card_types
 
 
@@ -145,9 +148,14 @@ class CsvColumns(BaseModel):
     counterparty_sort_code: str | None = None
     counterparty_account_number: str | None = None
     reference: str | None = None  # the payment's reference, part of the counterparty
-    # The statement's own account; every row must name the same one.
+    # When the payment was started (Revolut's Started Date), in date_format, which must
+    # then carry a time; date is when it completed.
+    started_at: str | None = None
+    # The statement's own account; every row must name the same one. account_type is its
+    # product line (Revolut's Product).
     account_sort_code: str | None = None
     account_number: str | None = None
+    account_type: str | None = None
 
     @model_validator(mode="after")
     def _amount_xor_inflow_outflow(self) -> Self:
@@ -177,8 +185,10 @@ class CsvColumns(BaseModel):
             self.counterparty_sort_code,
             self.counterparty_account_number,
             self.reference,
+            self.started_at,
             self.account_sort_code,
             self.account_number,
+            self.account_type,
         ]
         return [self.date, *self.description, *(name for name in optional if name is not None)]
 
@@ -225,6 +235,12 @@ class CsvProfileConfig(BaseModel):
             raise ValueError(f"columns not in the header: {', '.join(missing)}")
         return self
 
+    @model_validator(mode="after")
+    def _started_needs_time(self) -> Self:
+        if self.columns.started_at is not None and not self.has_time:
+            raise ValueError("started_at is a time: give date_format a time of day")
+        return self
+
     @property
     def has_time(self) -> bool:
         """Whether the dates carry a time of day."""
@@ -259,7 +275,13 @@ class PdfProfileConfig(BaseModel):
     model_config = _CONFIG
 
     format: Literal["pdf"]
-    layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]
+    layout: Literal[
+        "hsbc_uk_statement",
+        "lloyds_statement",
+        "boc_uk_statement",
+        "revolut_current_statement",
+        "revolut_savings_statement",
+    ]
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])
 

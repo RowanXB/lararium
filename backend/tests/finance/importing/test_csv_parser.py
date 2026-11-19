@@ -505,6 +505,43 @@ def test_statement_account_from_columns() -> None:
         _parse(header + rows + other, **config)
 
 
+_STARTED = {
+    "columns": {
+        "date": "Completed Date",
+        "started_at": "Started Date",
+        "description": ["Description"],
+        "amount": "Amount",
+        "account_type": "Product",
+    },
+    "date_format": "%Y-%m-%d %H:%M:%S",
+}
+_STARTED_HEADER = b"Product,Started Date,Completed Date,Description,Amount\n"
+
+
+def test_started_at_is_aware_in_the_profile_zone() -> None:
+    content = _STARTED_HEADER + (
+        b"Current,2026-07-01 23:30:00,2026-07-02 09:15:00,Shop,-1.00\n"
+        b"Current,,2026-07-03 10:00:00,Pay,5.00\n"
+    )
+    first, second = _rows(_parse(content, **_STARTED))
+    assert first.started_at == datetime(2026, 7, 1, 23, 30, tzinfo=LONDON)
+    assert first.occurred_at == datetime(2026, 7, 2, 9, 15, tzinfo=LONDON)
+    assert first.booking_date == date(2026, 7, 2)
+    assert second.started_at is None
+
+
+def test_account_type_column_is_the_statement_product() -> None:
+    rows = (
+        b"Current,2026-07-01 08:00:00,2026-07-01 08:00:00,Shop,-1.00\n"
+        b"Current,2026-07-02 08:00:00,2026-07-02 08:00:00,Pay,5.00\n"
+    )
+    statement = _parse(_STARTED_HEADER + rows, **_STARTED)
+    assert statement.account == StatementAccount(account_type="Current")
+    other = b"Savings,2026-07-03 08:00:00,2026-07-03 08:00:00,Move,1.00\n"
+    with pytest.raises(FileFormatError, match="one account per file"):
+        _parse(_STARTED_HEADER + rows + other, **_STARTED)
+
+
 def test_statement_account_normalises_iban() -> None:
     account = StatementAccount(iban="gb29 nwbk 6016 1331 9268 19", bic="EXAMBGB2")
     assert account.iban == "GB29NWBK60161331926819"
@@ -633,3 +670,48 @@ def test_large_amounts_keep_precision_through_signs() -> None:
     columns = {"date": "Date", "description": ["Description"], "inflow": "In", "outflow": "Out"}
     rows = _rows(_parse(two, columns=columns))
     assert rows[0].quantity == Decimal("-1234567890123456789012345678.90")
+
+
+def test_a_line_repeating_the_header_is_no_row() -> None:
+    # Revolut's savings export ends with its header again, after a blank line.
+    content = SIMPLE + b"\nDate,Description,Amount\n"
+    assert len(_rows(_parse(content))) == 2
+
+
+def test_revolut_exports_through_the_catalog() -> None:
+    from lararium.modules.finance.importing.catalog import CATALOG
+
+    configs = {(e.institution, e.label): e.config for e in CATALOG}
+    current = configs[("Revolut Current", "CSV")]
+    savings = configs[("Revolut Savings", "CSV")]
+    assert isinstance(current, CsvProfileConfig) and isinstance(savings, CsvProfileConfig)
+    current_file = (
+        b"Type,Product,Started Date,Completed Date,Description,Amount,Fee,Currency,State,Balance\n"
+        b"Card Payment,Current,2027-10-02 09:15:00,2027-10-03 10:00:00,Example Cafe,-4.20,0.00,"
+        b"GBP,COMPLETED,95.80\n"
+        b"Card Payment,Current,2027-10-04 12:00:00,,Example Shop,-9.99,0.00,GBP,PENDING,\n"
+    )
+    statement = parse_csv(current_file, current, LONDON)
+    row, skipped = statement.rows
+    assert isinstance(row, ParsedRow) and isinstance(skipped, SkippedRow)
+    assert row.occurred_at == datetime(2027, 10, 3, 10, 0, tzinfo=LONDON)
+    assert row.started_at == datetime(2027, 10, 2, 9, 15, tzinfo=LONDON)
+    assert (row.bank_type, row.quantity, row.balance, row.currency) == (
+        "Card Payment",
+        Decimal("-4.20"),
+        Decimal("95.80"),
+        "GBP",
+    )
+    assert skipped.reason == "State is PENDING"
+    assert statement.account == StatementAccount(account_type="Current")
+    savings_file = (
+        "Date,Description,Money out,Money in,Balance\n"
+        '"Oct 1, 2027",Deposit,,"£1,000.00","£1,500.00"\n'
+        '"Oct 2, 2027",Withdrawal,£200.00,,"£1,300.00"\n'
+        "\nDate,Description,Money out,Money in,Balance\n"
+    ).encode()
+    rows = _rows(parse_csv(savings_file, savings, LONDON))
+    assert [(r.booking_date, r.bank_type, r.quantity) for r in rows] == [
+        (date(2027, 10, 1), "Deposit", Decimal("1000.00")),
+        (date(2027, 10, 2), "Withdrawal", Decimal("-200.00")),
+    ]

@@ -379,7 +379,8 @@ SQL
 
 **文件里的每个字段都会保存。** 每一行保存日期和起息日、收款方和备注、支票号、银行的交易类型代码、
 对方的名称、sort code、账号和付款参考，以及账单上印出时的更多字段（付款类型、银行参考号、用途代码、
-汇款附言、对方银行），各占一列，另外还保存整行原始数据。每份账单保存账单期间、期初和期末余额、
+汇款附言、对方银行；Revolut 还有付款的发起时间、所用的卡，以及外币付款的原币金额、银行汇率和 ECB
+汇率），各占一列，另外还保存整行原始数据。每份账单保存账单期间、期初和期末余额、
 收入和支出合计、笔数、账单编号和日期、印出的账户信息（类型、名称、sort code、账号、IBAN、BIC、
 客户号、分行）、约定透支额度以及利率表。文件写明的账户必须与之前导入到同一个账本账户的账户一致，
 否则上传会被拒绝（提示信息只显示账号的最后四位）。
@@ -410,9 +411,22 @@ SQL
 | Lloyds | CSV | 是 |
 | Lloyds | PDF 账单、QIF | |
 | BOC UK | PDF 账单 | 是（唯一格式） |
+| Revolut Current | PDF 账单 | 是 |
+| Revolut Current | CSV | |
+| Revolut Savings | PDF 账单 | 是 |
+| Revolut Savings | CSV | |
+
+Revolut 的两个账户导出格式不同，所以各有自己的条目。活期账户的 CSV 比 PDF 多的只有交易类型、发起和
+完成时间以及手续费；PDF 多出账户信息（sort code、账号、IBAN、BIC）、余额汇总，以及每笔付款的参考、
+对方、所用的卡和外币付款的原币金额与汇率。储蓄账户的 PDF 包含 CSV 的全部行，另有账户信息、产品名和
+每类交易的合计。
 
 PDF 账单由为该银行编写的版式读取，它会自我校验：汇总（期初和期末余额、收入和支出、笔数）必须等于
-各行，每个印出的余额都必须能由金额推出，每一行都必须恰好有一个金额、一个落在账单期间内的日期和一个交易类型代码，表格里的每个词都必须属于某一行。对不上的账单会被整体拒绝，
+各行，每个印出的余额都必须能由金额推出，每一行都必须恰好有一个金额、一个落在账单期间内的日期和一个交易类型代码，表格里的每个词都必须属于某一行。Revolut 活期账户的账单不印交易类型代码：刷卡付款靠所用的卡来识别；
+汇总不计入的待处理（pending）和已撤销（reverted）付款作为跳过的行保留。一份 Revolut 账单只能有一个
+币种有金额，两个币种都有的会被拒绝。在账单期间最后一天当天或之前生成的账单（Revolut 账单的期间截止到
+你下载的那天时就是这样），和导出文件一样只部分列出那一天，它的期末余额是生成那一刻的余额，保存时不带日期；要完整
+列出，Revolut 账单请截止到已经过完的一天。对不上的账单会被整体拒绝，
 并写明哪项校验失败，而不是带着错误的数字导入。同一个账户可以用不同格式导入重叠的日期，例如过去用
 PDF 账单、最近几周用 OFX 导出，先后顺序不限：落在之前导入已覆盖日期上的行，会与那次导入的行核对。
 
@@ -431,14 +445,18 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   页脚行的第一格）、`include_only`（`{"列名": ["值", ...]}`：其他值的行会被跳过，例如待入账的
   卡付款）、`row_order`（`oldest_first` 或 `newest_first`）、`sign`（见下）和 `amount_format`
   （`decimal_separator`，`.` 或 `,`；`thousands_separator`，默认无，或 `,` `.` 空格 `'`）。
+  重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、
   `fee`（在金额之外另收的费用）、`type`、`value_date`、`payee`、`memo`、`check_number`、
   `counterparty_name`、`counterparty_sort_code`、`counterparty_account_number`、`reference`
-  （付款参考），以及账单自身账户的 `account_sort_code` 和 `account_number`。
+  （付款参考）、`started_at`（付款的发起时间，按 `date_format` 解析，这时它必须带时间；`date` 是
+  完成时间），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
+  例如 Revolut 的 `Product`；每一行都必须相同）。
 - **`ofx`**：`sign`。
 - **`qif`**：`date_format`、`encoding`、`amount_format`（默认以 `,` 作千位分隔符）和 `sign`。
-- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement` 或 `boc_uk_statement`。
+- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement`、`boc_uk_statement`、
+  `revolut_current_statement` 或 `revolut_savings_statement`。
 
 **正负号。** Profile 用 **inflow**（流入：账户余额增加）和 **outflow**（流出）来表述。只有一个
 `amount` 列时，`sign` 说明它的方向：`inflow_positive`（默认）或 `outflow_positive`；有 `inflow`
@@ -447,8 +465,10 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 
 **重复识别。** 当同一账户里一条已提交的行有相同的键时，这一行就是重复的：有外部 ID（OFX 的
 `FITID`，或映射的 `external_id` 列）时用它；否则用日期、金额、币种、描述和滚动余额；再否则用不含
-余额的这些字段，加上同一文件里排在它前面的完全相同行的数量。这样同一天两笔真实的相同消费都会导入，
-文件再次导入时两笔都算重复。不同格式的文件键不相同，所以在之前导入已覆盖的日期上，改为按日期和金额
+余额的这些字段。后两种还会加上同一文件里排在它前面的完全相同行的数量，这样同一天两笔真实的相同消费都会
+导入，文件再次导入时两笔都算重复。滚动余额也可能重复：同一天余额回到同一个数（同一笔转账转入两次，中间
+有一笔付款）。如果两份重叠的导出在那一天截断的位置不同，某一行可能被当成另一份导出里相同的那一行；
+这时第二份导出的余额和账本对不上，会被拒绝，不会悄悄丢失。不同格式的文件键不相同，所以在之前导入已覆盖的日期上，改为按日期和金额
 与那次导入的行配对：配上的是重复行，其余的是错误行。如果文件缺少之前导入在这些日期上的某一行，
 上传会被拒绝；若新文件是对的，先回滚之前那次导入。
 
@@ -460,8 +480,9 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 ### 用真实账单验证
 
 测试用的是合成文件。要确认你自己的账单仍能正确导入（例如改了导入代码之后），把每家银行的文件
-各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）或 `BOC` 开头，每个文件夹一个账户，都放在
-同一个目录下，然后运行：
+各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC` 或 `Revolut` 开头，每个文件夹一个
+账户，都放在同一个目录下（Revolut 可以叫 `Revolut current` 和 `Revolut savings`：文件本身会说明
+文件夹里是哪个账户），然后运行：
 
 ```bash
 make real-check REAL_ROOT="$HOME/Downloads"

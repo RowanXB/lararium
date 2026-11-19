@@ -16,7 +16,7 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
 )
-from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lloyds
+from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lloyds, revolut
 from lararium.modules.finance.importing.pdf.layout import LayoutResult
 from lararium.modules.finance.importing.pdf.words import Word, visible_lines
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
@@ -29,6 +29,8 @@ _LAYOUTS: dict[str, _Layout] = {
     "hsbc_uk_statement": (hsbc_uk.X_TOLERANCE, hsbc_uk.parse),
     "lloyds_statement": (lloyds.X_TOLERANCE, lloyds.parse),
     "boc_uk_statement": (boc_uk.X_TOLERANCE, boc_uk.parse),
+    "revolut_current_statement": (revolut.X_TOLERANCE, revolut.parse_current),
+    "revolut_savings_statement": (revolut.X_TOLERANCE, revolut.parse_savings),
 }
 
 
@@ -39,7 +41,7 @@ def _rows_check(result: LayoutResult) -> None:
         where = f"row {n} (page {layout_row.page + 1})"
         if layout_row.amounts != 1:
             raise FileFormatError(f"{where} has {layout_row.amounts} amounts, not one")
-        if not row.bank_type:
+        if result.type_codes and not row.bank_type:
             raise FileFormatError(f"{where} has no type code")
         if not start <= row.booking_date <= end:
             raise FileFormatError(
@@ -114,10 +116,15 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
     check(result)
     rows: list[ParsedRow | RowError | SkippedRow] = [r.row for r in result.rows]
+    rows += result.skipped
+    # A statement made on or before its period's last day (Revolut's) closes with the
+    # balance when it was made, which is no day's closing: later payments that day move it.
+    made = result.document_date
+    closed = result.period[1] if made is None or made > result.period[1] else None
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
-        closing_balance_date=result.period[1],
+        closing_balance_date=closed,
         period=result.period,
         period_complete=True,
         opening_balance=result.opening_balance,

@@ -69,6 +69,11 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     original_currency: null,
     exchange_rate: null,
     remittance_info: null,
+    started_at: null,
+    card_number: null,
+    original_amount: null,
+    fx_rate: null,
+    fx_reference_rate: null,
     bank_type: null,
     quantity: "-3.50",
     fee: "0",
@@ -265,6 +270,29 @@ it("labels the adjustment as a gap when the server says it follows earlier histo
 it("shows a row's fee in its details", async () => {
   show(batch({ rows: [row(0, { quantity: "-100.00", fee: "1.50" })] }));
   expect(await screen.findByText(/Fee: £1\.50/)).toBeInTheDocument();
+});
+
+it("shows a card payment's card and foreign amount in its details", async () => {
+  show(
+    batch({
+      rows: [
+        row(0, {
+          quantity: "-75.00",
+          started_at: "2026-10-01T22:30:00Z",
+          card_number: "123456******1234",
+          original_currency: "USD",
+          original_amount: "-100.00",
+          fx_rate: "1.33",
+          fx_reference_rate: "1.34",
+        }),
+      ],
+    }),
+  );
+  expect(await screen.findByText(/Card: 123456\*{6}1234/)).toBeInTheDocument();
+  expect(screen.getByText(/Started: 2026-10-01T22:30:00Z/)).toBeInTheDocument();
+  expect(screen.getByText(/Converted from: -US\$100\.00/)).toBeInTheDocument();
+  expect(screen.getByText(/Bank rate: 1\.33/)).toBeInTheDocument();
+  expect(screen.getByText(/Reference rate: 1\.34/)).toBeInTheDocument();
 });
 
 it("leaves a zero fee out of a row's details", async () => {

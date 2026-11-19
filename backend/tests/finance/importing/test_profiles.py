@@ -16,6 +16,7 @@ from lararium.modules.finance.importing.profiles import (
     ProfileConfig,
     create_profile,
     get_profile,
+    is_bank_transfer,
     list_profiles,
     update_profile,
 )
@@ -210,3 +211,23 @@ def test_overdraft_label_validated() -> None:
     # The label is looked for only among the footer rows, so it needs some.
     with pytest.raises(ValidationError, match="skip_footer_rows"):
         PROFILE_CONFIG.validate_python(_csv(overdraft_footer_label=label))
+
+
+def test_started_at_needs_a_time() -> None:
+    columns = {
+        "date": "Completed",
+        "description": ["Description"],
+        "amount": "Amount",
+        "started_at": "Started",
+    }
+    config = PROFILE_CONFIG.validate_python(_csv(columns=columns, date_format="%Y-%m-%d %H:%M:%S"))
+    assert config.columns.started_at == "Started"
+    with pytest.raises(ValidationError, match="started_at is a time"):
+        PROFILE_CONFIG.validate_python(_csv(columns=columns, date_format="%Y-%m-%d"))
+
+
+def test_a_card_number_makes_no_bank_transfer() -> None:
+    assert is_bank_transfer(["VIS"], "CR", None)
+    assert not is_bank_transfer(["VIS"], "VIS", None)
+    assert not is_bank_transfer(["VIS"], "CR", "123456******1234")
+    assert not is_bank_transfer([], None, "123456******1234")

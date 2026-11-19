@@ -63,8 +63,18 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     ["Bank reference", row.bank_reference],
     ["Purpose code", row.purpose_code],
     ["Remittance", row.remittance_info],
-    ["Converted from", row.original_currency],
+    ["Started", row.started_at],
+    ["Card", row.card_number],
+    [
+      "Converted from",
+      row.original_amount === null
+        ? row.original_currency
+        : money(row.original_amount, row.original_currency),
+    ],
     ["Exchange rate", row.exchange_rate],
+    // Units of the original currency per one of the row's, as the bank prints them.
+    ["Bank rate", row.fx_rate],
+    ["Reference rate", row.fx_reference_rate],
     ["Type", row.bank_type],
   ];
   return details.flatMap(([label, value]) => (value ? [`${label}: ${value}`] : []));
