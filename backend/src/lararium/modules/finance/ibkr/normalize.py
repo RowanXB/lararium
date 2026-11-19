@@ -41,7 +41,7 @@ from lararium.modules.finance.accounts import (
     set_source_details,
 )
 from lararium.modules.finance.errors import AccountNotFoundError
-from lararium.modules.finance.ibkr import records, reports, tables
+from lararium.modules.finance.ibkr import reconcile, records, reports, tables
 from lararium.modules.finance.ibkr.fields import SECTIONS
 from lararium.modules.finance.ibkr.parser import FlexDataError
 from lararium.modules.finance.ibkr.state import Item, NormalizeReport, Run
@@ -378,11 +378,31 @@ async def _normalize(
         )
     await reports.snapshots(run, positions, by_type[_CASH_REPORT])
 
+    # Reconciliation (design 5.11) at the end of each window this run ingested.
+    given = set(raw_record_ids)
+    windows = {
+        (item.account, item.period_to)
+        for item in items
+        if item.record_type == _ACCOUNT and item.record_id in given
+    }
+    mismatches = await reconcile.check(ctx.command.session, mapped, windows, sections)
+    run.report.mismatches = [m.warning for m in mismatches]
+    notified = await reconcile.publish(
+        ctx, connection, mismatches, {ibkr_id for ibkr_id, _ in windows}, run.report.flagged
+    )
+
     # Only this normaliser's keys: others (the token's reminder) may have changed meanwhile.
     values: dict[str, JSONValue] = {
         ACCOUNT_MAP_KEY: accounts.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
     }
-    if any(connection.config.get(key) != value for key, value in values.items()):
-        await update_config(ctx.command, connection.id, values)
+    if notified:
+        values[reconcile.NOTIFIED_KEY] = notified
+    remove = (
+        []
+        if notified or reconcile.NOTIFIED_KEY not in connection.config
+        else [reconcile.NOTIFIED_KEY]
+    )
+    if remove or any(connection.config.get(key) != value for key, value in values.items()):
+        await update_config(ctx.command, connection.id, values, remove=remove)
     return run.report
