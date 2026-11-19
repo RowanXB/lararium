@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 import pytest
@@ -155,6 +156,17 @@ def test_doctype_refused() -> None:
 )
 def test_a_response_without_statements_is_refused(body: bytes) -> None:
     with pytest.raises(FlexDataError, match="the Flex query returned no statements"):
+        parse_statement(body)
+
+
+def test_a_statement_without_account_information_is_refused() -> None:
+    # Without it no account is created and nothing is posted: taken as a success, a first
+    # sync would move its cursor past a year it never read.
+    body = re.sub(rb"<AccountInformation [^>]*/>", b"", build(RowSpec("Trade", A1), by_day=True))
+    assert b"<AccountInformation" not in body
+    with pytest.raises(
+        FlexDataError, match=r"^AccountInformation is missing: select it in the Flex query$"
+    ):
         parse_statement(body)
 
 

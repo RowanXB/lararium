@@ -212,5 +212,9 @@ def parse_statement(body: bytes) -> Statement:
                     max(held.period_to, row.period_to),
                     held.attributes,
                 )
+    if any(statement.get("accountId") not in latest_info for statement in statements):
+        # Without it no account is made and nothing posted: taken as a success, a first sync
+        # would move its cursor past a year it never read.
+        raise FlexDataError("AccountInformation is missing: select it in the Flex query")
     rows = tuple(latest_info.values()) + tuple(merged.values())
     return Statement(rows, frozenset(flagged), frozenset(sections))
