@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
@@ -88,34 +88,28 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
 @dataclass(frozen=True)
 class Known:
     """What the ledger knows of manual accounts' own rows (design §5.8, "An unrelated row
-    can stand in"): per account and instrument, the days committed imports list in full
-    (M2's complete_from..complete_to). A connected account's history is known from its
+    can stand in"): per account and instrument, the first day committed imports list in
+    full (M2's complete_from). A connected account's history is known from its
     connection, so it isn't in `manual`."""
 
     manual: frozenset[UUID]
-    full_days: Mapping[tuple[UUID, UUID], list[tuple[date, date]]]
+    first_full_day: Mapping[tuple[UUID, UUID], date]
 
-    def lists_in_full(self, record: Pairable, earliest: date, latest: date) -> bool:
-        """Whether the ledger would hold the record's account's own row on every day from
-        earliest to latest, if there were one: always for a connected account; for a
-        manual one, when the days lie within its imports' span, from the first day one
-        lists in full to the last. Not before it (inside the opening snapshot, or before
-        the first statement) nor after it (not imported yet). Between imports, a day
-        counts: an export's edge days, listed in full by no file, and a quiet period no
-        statement can be imported for, have no rows missing; a whole statement left out is
-        the owner's to import, not told apart here."""
+    def holds_from(self, record: Pairable, earliest: date) -> bool:
+        """Whether the ledger would hold the record's account's own row on a day from
+        earliest on, if there were one: always for a connected account; for a manual one,
+        from the first day its imports list in full. Before it the row may be inside the
+        account's opening, never imported, and an unrelated row taken for it would never
+        be found out. After the last day imported, one would be: the next statement brings
+        the real row, and the two go to review."""
         if record.account_id not in self.manual:
             return True
-        ranges = self.full_days.get((record.account_id, record.instrument_id))
-        if not ranges:
-            return False
-        return min(start for start, _ in ranges) <= earliest and latest <= max(
-            end for _, end in ranges
-        )
+        first = self.first_full_day.get((record.account_id, record.instrument_id))
+        return first is not None and first <= earliest
 
 
-# Days an import not yet committed would list in full: (account, instrument, from, to).
-type Listing = tuple[UUID, UUID, date, date]
+# The first day an import not yet committed would list in full: (account, instrument, day).
+type Listing = tuple[UUID, UUID, date]
 
 
 async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Known:
@@ -124,11 +118,10 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
         # Own records are never on a system account, so these needn't be left out.
         await session.scalars(select(a.id).where(a.source_connection_id.is_(None)))
     )
-    full_days: dict[tuple[UUID, UUID], list[tuple[date, date]]] = defaultdict(list)
+    first_full_day: dict[tuple[UUID, UUID], date] = {}
     # A batch speaks only for the instruments it has live rows in (M2's Decision 16).
-    for account_id, instrument_id, start, end in await session.execute(
-        select(b.account_id, r.instrument_id, b.complete_from, b.complete_to)
-        .distinct()
+    for account_id, instrument_id, first in await session.execute(
+        select(b.account_id, r.instrument_id, func.min(b.complete_from))
         .join(r, r.batch_id == b.id)
         .where(
             b.status == "committed",
@@ -136,12 +129,14 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
             r.kind == "statement",
             r.status.in_(("committed", "duplicate")),
         )
+        .group_by(b.account_id, r.instrument_id)
     ):
-        assert instrument_id is not None and start is not None and end is not None
-        full_days[(account_id, instrument_id)].append((start, end))
-    for account_id, instrument_id, start, end in listing:
-        full_days[(account_id, instrument_id)].append((start, end))
-    return Known(manual, full_days)
+        assert instrument_id is not None and first is not None
+        first_full_day[(account_id, instrument_id)] = first
+    for account_id, instrument_id, first in listing:
+        key = (account_id, instrument_id)
+        first_full_day[key] = min(first, first_full_day.get(key, first))
+    return Known(manual, first_full_day)
 
 
 @dataclass(frozen=True)
@@ -255,11 +250,11 @@ class _Timeline:
 
 def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
-    nobody) is taken only if its account's own row would be in the ledger on every day of
-    the identified record's window: otherwise the real row may be missing (inside an
-    opening snapshot, or outside the days its imports span) and an unrelated one stand in."""
+    nobody) is taken only if the identified record's window doesn't start before the days
+    the counterpart's account's imports list (Known.holds_from): there the real row may be
+    inside the opening, and an unrelated one stand in for it for good."""
     identified, other = (s, c) if s.identified else (c, s)
-    return known.lists_in_full(other, *counterpart_bounds(identified, settings))
+    return known.holds_from(other, counterpart_bounds(identified, settings)[0])
 
 
 def _registry_edges(

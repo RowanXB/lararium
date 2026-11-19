@@ -587,8 +587,8 @@ def _scenario(
     )
 
 
-# Design §5.8's caveat "an unrelated row can stand in", closed by M2's import coverage:
-# a counterpart found by amount and date only, on days imports list in full.
+# Design §5.8's caveat "an unrelated row can stand in", closed by M2's import coverage at
+# the start of the days imported, and turned into review by the next statement at the end.
 async def test_no_unrelated_receipt_stands_in_for_a_counterpart_inside_the_opening_snapshot(
     connection: AsyncConnection,
 ) -> None:
@@ -607,19 +607,23 @@ async def test_no_unrelated_receipt_stands_in_for_a_counterpart_inside_the_openi
     )
 
 
-async def test_no_unrelated_receipt_stands_in_for_a_counterpart_after_the_last_import(
+async def test_an_unrelated_receipt_after_the_last_import_goes_to_review_with_the_next(
     connection: AsyncConnection,
 ) -> None:
-    """The same with Bank 1's own row (a BACS on Saturday) after the last day imported
-    (Thursday): the friend's 50 on Wednesday once replaced the placeholder, understating
-    Bank 1 by 50 until the next statement was imported. Monzo's window runs past that
-    day, so the placeholder stays."""
-    await _p4(
-        connection,
-        _scenario(
-            imported_through=START + timedelta(days=3),
+    """The cost of taking a counterpart after the last day imported (design §5.8): with
+    Bank 1's own row (a BACS on Saturday) after the last day imported (Thursday), the
+    friend's 50 on Wednesday is taken for Monzo's payment, understating Bank 1 by 50 for
+    now. The statement that lists Saturday brings the real row: two candidates, so the
+    transfer goes to review rather than staying linked to the friend's 50."""
+    for imported_through, needs_review in ((START + timedelta(days=3), False), (LAST_DAY, True)):
+        scenario = _scenario(
+            imported_through=imported_through,
             snapshot_at=local(START - timedelta(days=5), time(9)),
             received_day=START + timedelta(days=5),
             receipt_day=START + timedelta(days=2),
-        ),
-    )
+        )
+        assert bool(scenario.p4_caveats()) is not needs_review
+        _, _, review = await _arrive_one_by_one(
+            connection, scenario, scenario.items(), every_heal_twice=True
+        )
+        assert review is needs_review
