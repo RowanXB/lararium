@@ -27,6 +27,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 LONDON = ZoneInfo("Europe/London")
 # The zone suffixes a Flex time can carry (Decision 10); any other fails closed.
 _ZONES = {"EST": NEW_YORK, "EDT": NEW_YORK, "GMT": LONDON, "BST": LONDON}
+# Standard time: in the hour that repeats when the clocks go back, the second one (fold 1).
+_STANDARD = frozenset({"EST", "GMT"})
 
 _MOMENT = re.compile(
     r"(\d{8}|\d{4}-\d{2}-\d{2})(?:[;, T]\s*(\d{6}|\d{2}:\d{2}:\d{2})(?:\s+([A-Za-z]+))?)?"
@@ -67,11 +69,13 @@ def parse_moment(value: str, label: str) -> datetime:
     day = parse_date(found[1], label)
     if found[2] is None:
         return datetime.combine(day, time(), NEW_YORK)
-    zone = _ZONES.get((found[3] or "").upper())
+    suffix = (found[3] or "").upper()
+    zone = _ZONES.get(suffix)
     if zone is None:
         raise FlexDataError(f"{label} has a time without a known time zone")
     clock = found[2].replace(":", "")
-    return datetime.combine(day, time(int(clock[:2]), int(clock[2:4]), int(clock[4:])), zone)
+    hms = time(int(clock[:2]), int(clock[2:4]), int(clock[4:]), fold=int(suffix in _STANDARD))
+    return datetime.combine(day, hms, zone)
 
 
 def parse_decimal(value: str, label: str) -> Decimal:

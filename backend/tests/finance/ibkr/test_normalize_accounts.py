@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date
 from decimal import Decimal
 
 import httpx
@@ -365,6 +365,17 @@ def test_trade_detail_key_and_moments() -> None:
     assert moment.isoformat() == "2026-11-10T09:30:00-05:00"
     assert parse_moment("20260710;093000 EDT", "x").utcoffset().total_seconds() == -4 * 3600
     assert parse_moment("20261110", "x").isoformat() == "2026-11-10T00:00:00-05:00"
+    # The hour clocks repeat when they go back: its suffix says which of the two it is.
+    utc = [
+        parse_moment(f"20261101;013000 {suffix}", "x").astimezone(UTC).time().isoformat()
+        for suffix in ("EDT", "EST")
+    ]
+    assert utc == ["05:30:00", "06:30:00"]
+    london = [
+        parse_moment(f"20261025;013000 {suffix}", "x").astimezone(UTC).time().isoformat()
+        for suffix in ("BST", "GMT")
+    ]
+    assert london == ["00:30:00", "01:30:00"]
     with pytest.raises(FlexDataError, match="time zone"):
         parse_moment("20261110;093000 CET", "Trade.dateTime")
 
