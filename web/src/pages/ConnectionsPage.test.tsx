@@ -212,6 +212,7 @@ it("adds an IBKR connection and clears the token", async () => {
     }),
   );
   await waitFor(() => expect(within(form).getByLabelText("Token")).toHaveValue(""));
+  expect(await within(form).findByText("Interactive Brokers connected")).toBeInTheDocument();
   expect(document.body.textContent).not.toContain("tok-123");
   await waitFor(() =>
     expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not
@@ -225,9 +226,9 @@ it("updates the token of an IBKR connection", async () => {
   renderPage();
   expect(await screen.findByText("Token expires on 2027-03-01")).toBeInTheDocument();
   const form = screen.getByRole("form", { name: "Update token" });
-  await user.type(within(form).getByLabelText("Token"), "new-tok");
+  await user.type(within(form).getByLabelText("Token"), " new-tok ");
   await user.type(within(form).getByLabelText("Token expiry date"), "2028-03-01");
-  await user.type(within(form).getByLabelText("Query ID"), "111");
+  await user.type(within(form).getByLabelText("Query ID"), " 111 ");
   await user.click(within(form).getByRole("button", { name: "Update token" }));
 
   expect(updateIbkrConnection).toHaveBeenCalledWith(
@@ -238,6 +239,56 @@ it("updates the token of an IBKR connection", async () => {
   );
   await waitFor(() => expect(within(form).getByLabelText("Token")).toHaveValue(""));
   expect(document.body.textContent).not.toContain("new-tok");
+  expect(await within(form).findByText("Token updated")).toBeInTheDocument();
+});
+
+it("keeps the stored query when the update leaves Query ID empty", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [IBKR] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update token" });
+  expect(within(form).getByText("Leave empty to keep the current query")).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("Token"), "new-tok");
+  await user.type(within(form).getByLabelText("Token expiry date"), "2028-03-01");
+  await user.click(within(form).getByRole("button", { name: "Update token" }));
+  await waitFor(() =>
+    expect(updateIbkrConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ body: { token: "new-tok", token_expires_on: "2028-03-01" } }),
+    ),
+  );
+});
+
+it("gives every IBKR form its own inputs", async () => {
+  const second = { ...IBKR, id: "0190a0b0-0000-7000-8000-0000000000e2", display_name: "IBKR two" };
+  vi.mocked(listConnections).mockResolvedValue({ data: [IBKR, second] } as never);
+  renderPage();
+  await screen.findAllByRole("form", { name: "Update token" });
+  for (const label of ["Token", "Query ID", "Token expiry date"]) {
+    const inputs = screen.getAllByLabelText(label);
+    expect(inputs).toHaveLength(3);
+    expect(new Set(inputs.map((input) => input.id)).size).toBe(3);
+  }
+});
+
+it.each(["created", "disabled"])("does not offer Authorise for a %s IBKR connection", async (status) => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [{ ...IBKR, status }] } as never);
+  renderPage();
+  expect(await screen.findByText("IBKR main")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorise" })).not.toBeInTheDocument();
+});
+
+it("shows why a statement upload failed", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [IBKR] } as never);
+  vi.mocked(uploadIbkrStatement).mockRejectedValueOnce({
+    detail: { error: "not_xml", message: "upload the Flex statement as an XML file" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  await user.upload(
+    await screen.findByLabelText("Upload a Flex statement"),
+    new File(["x"], "statement.xml", { type: "text/xml" }),
+  );
+  expect(await screen.findByText("upload the Flex statement as an XML file")).toBeInTheDocument();
 });
 
 it("highlights a token expiring within 14 days", async () => {

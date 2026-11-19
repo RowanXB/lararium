@@ -1130,8 +1130,8 @@
         "required": [
           "token",
           "token_expires_on",
-          "query_id",
-          "display_name"
+          "display_name",
+          "query_id"
         ],
         "title": "IbkrConnectionCreate",
         "type": "object"
@@ -1139,9 +1139,16 @@
       "IbkrConnectionUpdate": {
         "properties": {
           "query_id": {
-            "pattern": "^[0-9]{1,12}$",
-            "title": "Query Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{1,12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
           },
           "token": {
             "format": "password",
@@ -1159,8 +1166,7 @@
         },
         "required": [
           "token",
-          "token_expires_on",
-          "query_id"
+          "token_expires_on"
         ],
         "title": "IbkrConnectionUpdate",
         "type": "object"

@@ -161,6 +161,29 @@ async def test_update_from_needs_reauth_to_healthy_and_clears_expiry_reminder(
     assert _queued(queue) == ["sync_connection"]
 
 
+@pytest.mark.parametrize("omit", [True, False])
+async def test_update_without_query_id_keeps_the_stored_one(api, session, omit) -> None:
+    created = await _create(api)
+    body = {"token": OTHER_TOKEN, "token_expires_on": "2027-09-01"}
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/ibkr",
+        json=body if omit else body | {"query_id": None},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 200, response.text
+    record = await get_connection(session, created["id"])
+    assert record.config == {"query_id": "123456"}
+    stored = await load_credential(session, KEY, created["id"], "flex_token")
+    assert stored is not None and stored.reveal() == OTHER_TOKEN
+
+
+async def test_create_still_requires_query_id(api) -> None:
+    body = {k: v for k, v in BODY.items() if k != "query_id"}
+    response = await api.post("/api/v1/connections/ibkr", json=body, headers=OWNER)
+    assert response.status_code == 422
+
+
 async def test_update_keeps_a_failing_status(api, session, run) -> None:
     created = await _create(api)
     await run(set_status, created["id"], "failing", error="boom")

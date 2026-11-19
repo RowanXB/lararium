@@ -59,22 +59,25 @@ function tokenExpiry(credentialExpiresAt: string): { date: string; soon: boolean
   return { date, soon: end - Date.now() <= WARN_DAYS * 86400000 };
 }
 
-type IbkrCredentials = { token: string; token_expires_on: string; query_id: string };
+type IbkrCredentials = { token: string; token_expires_on: string; query_id?: string };
 
 // Token, expiry and query id with the token cleared as soon as it is sent; the request
 // variables are dropped from the mutation cache (gcTime 0 and reset) so it is never kept.
 function useIbkrCredentialsForm(
   send: (body: IbkrCredentials) => Promise<unknown>,
   onDone: () => void,
+  options: { doneMessage: string; queryIdOptional?: boolean },
 ) {
   const [token, setToken] = useState("");
   const [expiresOn, setExpiresOn] = useState("");
   const [queryId, setQueryId] = useState("");
   const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
   const mutation = useMutation({
     gcTime: 0,
     mutationFn: send,
     onSuccess: () => {
+      setDone(options.doneMessage);
       setExpiresOn("");
       setQueryId("");
       onDone();
@@ -84,8 +87,14 @@ function useIbkrCredentialsForm(
   function submit(event: FormEvent) {
     event.preventDefault();
     setError(undefined);
+    setDone(undefined);
+    const trimmedQueryId = queryId.trim();
     mutation.mutate(
-      { token, token_expires_on: expiresOn, query_id: queryId.trim() },
+      {
+        token: token.trim(),
+        token_expires_on: expiresOn,
+        ...(trimmedQueryId ? { query_id: trimmedQueryId } : {}),
+      },
       { onSettled: () => mutation.reset() },
     );
     setToken("");
@@ -100,10 +109,20 @@ function useIbkrCredentialsForm(
         onChange={setExpiresOn}
         required
       />
-      <TextField label="Query ID" value={queryId} onChange={setQueryId} required />
+      <TextField
+        label="Query ID"
+        value={queryId}
+        onChange={setQueryId}
+        required={!options.queryIdOptional}
+      />
+      {options.queryIdOptional && (
+        <p className="text-sm text-muted-foreground sm:col-span-3">
+          Leave empty to keep the current query
+        </p>
+      )}
     </>
   );
-  return { fields, submit, error, pending: mutation.isPending };
+  return { fields, submit, error, done, pending: mutation.isPending };
 }
 
 function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
@@ -116,6 +135,7 @@ function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
         throwOnError: true,
       }),
     () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    { doneMessage: "Token updated", queryIdOptional: true },
   );
   return (
     <form aria-label="Update token" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-3">
@@ -125,6 +145,7 @@ function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
           Update token
         </Button>
         {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+        {form.done && <p role="status" className="text-sm">{form.done}</p>}
       </div>
     </form>
   );
@@ -364,13 +385,18 @@ function AddIbkrForm() {
   const form = useIbkrCredentialsForm(
     async (credentials) =>
       await createIbkrConnection({
-        body: { display_name: displayName.trim(), ...credentials },
+        body: {
+          display_name: displayName.trim(),
+          ...credentials,
+          query_id: credentials.query_id ?? "",
+        },
         throwOnError: true,
       }),
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
     },
+    { doneMessage: "Interactive Brokers connected" },
   );
   return (
     <Card>
@@ -394,6 +420,7 @@ function AddIbkrForm() {
               Add Interactive Brokers
             </Button>
             {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+            {form.done && <p role="status" className="text-sm">{form.done}</p>}
           </div>
         </form>
       </CardContent>

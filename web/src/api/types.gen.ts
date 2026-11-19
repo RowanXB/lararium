@@ -550,7 +550,7 @@ export type IbkrConnectionUpdate = {
     /**
      * Query Id
      */
-    query_id: string;
+    query_id?: string | null;
     /**
      * Token Expires On
      */
@@ -1701,7 +1701,7 @@ export type IbkrConnectionUpdateWritable = {
     /**
      * Query Id
      */
-    query_id: string;
+    query_id?: string | null;
     /**
      * Token
      */

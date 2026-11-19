@@ -126,15 +126,20 @@ class MonzoConnectionCreate(BaseModel):
     client_secret: SecretStr = Field(min_length=1, max_length=500)
 
 
-class IbkrConnectionUpdate(BaseModel):
+class _IbkrToken(BaseModel):
     token: SecretStr = Field(min_length=1, max_length=500)
     # The last day the token works, as Client Portal shows it.
     token_expires_on: date
-    query_id: str = Field(pattern=QUERY_ID_PATTERN)
 
 
-class IbkrConnectionCreate(IbkrConnectionUpdate):
+class IbkrConnectionUpdate(_IbkrToken):
+    # Omitted or null keeps the stored query id.
+    query_id: str | None = Field(default=None, pattern=QUERY_ID_PATTERN)
+
+
+class IbkrConnectionCreate(_IbkrToken):
     display_name: str = Field(min_length=1, max_length=200)
+    query_id: str = Field(pattern=QUERY_ID_PATTERN)
 
 
 class IbkrUploadOut(BaseModel):
@@ -444,9 +449,8 @@ async def update_ibkr_connection(
         )
         await set_credential_expiry(ctx, connection_id, expires_at)
         # A new expiry is reminded in its turn.
-        await update_config(
-            ctx, connection_id, {"query_id": body.query_id}, remove=[EXPIRY_NOTIFIED_KEY]
-        )
+        changes = {} if body.query_id is None else {"query_id": body.query_id}
+        await update_config(ctx, connection_id, changes, remove=[EXPIRY_NOTIFIED_KEY])
         await transition_status(
             ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
         )
