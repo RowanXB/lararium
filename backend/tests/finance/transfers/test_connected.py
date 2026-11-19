@@ -32,6 +32,7 @@ from lararium.modules.finance.transfers import (
     list_transfers,
     load_transfer_settings,
     pair,
+    preview_match,
     transfer_contra,
 )
 from lararium.modules.finance.transfers import engine as transfer_engine
@@ -1165,3 +1166,93 @@ async def test_review_counts_the_amount_twice_until_paired(
     assert await in_transit_balance(session, ids) == 0
     assert await net_worth_on(session) == truth
     await assert_consistent(session)
+
+
+@pytest.mark.parametrize("payments_first", [True, False])
+async def test_identical_transfers_pair_in_a_fixed_order(
+    session, ids, a_and_c, connector_tx, heal, payments_first
+) -> None:
+    """A transfer split into equal parts (a daily limit, say): two payments of 5,000 from A
+    to C on one day, and C's two receipts of 5,000. Each record has two candidates, but they
+    are interchangeable, so they pair in a fixed order (time of day, then reference)
+    whichever side arrives first, and nothing needs review."""
+    a, a_id, c, c_id = a_and_c
+    await history(connector_tx, a)
+    await history(connector_tx, c)
+    posted = {}
+
+    async def payments() -> None:
+        for n in (1, 2):
+            posted[f"out_{n}"] = await connector_tx(
+                a,
+                "-5000",
+                external_id=f"out_{n}",
+                occurred_at=WHEN + timedelta(hours=n),
+                identifier_id=c_id,
+            )
+
+    async def receipts() -> None:
+        for n in (1, 2):
+            posted[f"in_{n}"] = await connector_tx(
+                c,
+                "5000",
+                external_id=f"in_{n}",
+                occurred_at=WHEN + timedelta(hours=2 + n),
+                identifier_id=a_id,
+            )
+
+    for side in (payments, receipts) if payments_first else (receipts, payments):
+        await side()
+        await heal()
+
+    key = {record.id: name for name, record in posted.items()}
+    transfers = await list_transfers(session)
+    assert sorted(
+        (t.status, t.review_reason, key[t.out_transaction_id], key[t.in_transaction_id])
+        for t in transfers
+    ) == [("matched", None, "out_1", "in_1"), ("matched", None, "out_2", "in_2")]
+    assert await in_transit_balance(session, ids) == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_preview_within_identical_transfers_needs_the_rows_reference(
+    session, gbp, a_and_c, connector_tx, heal
+) -> None:
+    """Identical records pair by time, then by reference (pairs._twins), so a row not yet
+    posted can't be told its partner without the reference it will have; with it, the
+    preview is what posting does."""
+    a, a_id, c, c_id = a_and_c
+    await history(connector_tx, a)
+    await history(connector_tx, c)
+    outs = {
+        n: await connector_tx(
+            a, "-5000", external_id=f"out_{n}", occurred_at=WHEN, identifier_id=c_id
+        )
+        for n in (1, 2)
+    }
+    await connector_tx(
+        c, "5000", external_id="in_b", occurred_at=WHEN + timedelta(hours=1), identifier_id=a_id
+    )
+    await heal()
+
+    async def preview(source):
+        return await preview_match(
+            session,
+            account_id=c.account.id,
+            instrument_id=gbp.id,
+            quantity=Decimal(5000),
+            occurred_at=WHEN + timedelta(hours=1),
+            counterparty=CounterpartyFields(identifier_id=a_id, bank_transfer=True),
+            source=source,
+        )
+
+    assert await preview(None) is None
+    previewed = await preview(("connection", f"{c.connection_id}:in_a"))
+    assert previewed in {record.id for record in outs.values()}
+    row = await connector_tx(
+        c, "5000", external_id="in_a", occurred_at=WHEN + timedelta(hours=1), identifier_id=a_id
+    )
+    await heal()
+    [linked] = [t for t in await list_transfers(session) if t.in_transaction_id == row.id]
+    assert linked.out_transaction_id == previewed
