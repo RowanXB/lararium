@@ -1,4 +1,4 @@
-.PHONY: check backend-sync backend-check openapi openapi-check web-install web-check up down backup
+.PHONY: check backend-sync backend-check real-check openapi openapi-check web-install web-check up down backup
 
 COMPOSE = docker compose -f infra/compose.yaml --env-file infra/.env
 
@@ -17,6 +17,14 @@ backend-check: backend-sync
 	cd backend && uv run --locked pyright
 	cd backend && uv run --locked lint-imports
 	cd backend && uv run --locked pytest -q
+
+# Your own bank statements, end to end on the throwaway test database (README, "Verifying
+# against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC folders>.
+# Prints counts and pass or fail only.
+real-check: backend-sync
+	$(if $(REAL_ROOT),,$(error set REAL_ROOT to the folder holding one folder per bank))
+	root="$$(cd "$(REAL_ROOT)" && pwd)" && cd backend && LARARIUM_REAL_ROOT="$$root" \
+		uv run --locked pytest -q -s -p no:cacheprovider tests/finance/importing/test_real_files.py
 
 # Regenerate web/openapi.json from the backend, then the typed client from it.
 # The export goes to a temporary file first, so a failed export can't truncate the spec.

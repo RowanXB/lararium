@@ -25,6 +25,17 @@ export function negateDecimalString(value: string): string {
 const DECIMAL = /^-?[0-9]{1,40}(\.[0-9]{1,40})?$/;
 const UNSIGNED_DECIMAL = /^[0-9]{1,40}(\.[0-9]{1,40})?$/;
 
+// "0", "-0.00" and the like: a decimal string that is zero, read without a float.
+export function isZeroDecimal(value: string): boolean {
+  return /^-?0*(\.0*)?$/.test(value) && /[0-9]/.test(value);
+}
+
 export function isDecimalString(value: string, { unsigned = false } = {}): boolean {
   return (unsigned ? UNSIGNED_DECIMAL : DECIMAL).test(value);
+}
+
+// "112233" → "11-22-33"; anything else is shown as it is.
+export function formatSortCode(sortCode: string): string {
+  const parts = /^([0-9]{2})([0-9]{2})([0-9]{2})$/.exec(sortCode);
+  return parts ? `${parts[1]}-${parts[2]}-${parts[3]}` : sortCode;
 }

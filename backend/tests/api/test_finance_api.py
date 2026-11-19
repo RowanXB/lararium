@@ -1,10 +1,15 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
 from lararium.api.export_openapi import render_openapi
 from lararium.modules.finance import errors
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.api import _ERRORS  # pyright: ignore[reportPrivateUsage]
+from lararium.modules.finance.instruments import get_currency
+from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
 
 
 async def _gbp_id(client) -> str:
@@ -244,9 +249,20 @@ async def test_fiat_without_iso4217_code_is_rejected(client) -> None:
     assert response.json()["detail"]["error"] == "invalid_input"
 
 
+def test_every_finance_error_has_a_status() -> None:
+    # An unmapped one would be a 500. LedgerImbalanceError has its own handler.
+    defined = {
+        value
+        for value in vars(errors).values()
+        if isinstance(value, type) and issubclass(value, errors.FinanceError)
+    }
+    assert defined - {errors.FinanceError, errors.LedgerImbalanceError} == set(_ERRORS)
+
+
 @pytest.mark.parametrize(
     "error_class",
-    [c for c in _ERRORS if c is not errors.FinanceValidationError],  # that one takes a sentence
+    # Errors raised with a whole sentence (template "{}") are left out.
+    [c for c in _ERRORS if c.template != "{}"],
 )
 def test_every_error_message_explains_itself(error_class) -> None:
     # The web UI shows the message as is, so a bare id or code would explain nothing.
@@ -293,3 +309,31 @@ async def test_net_worth_range_out_of_bounds_is_rejected(client, params) -> None
     response = await client.get("/api/v1/finance/net-worth", params=params)
     assert response.status_code == 422
     assert response.json()["detail"]["error"] == "invalid_input"
+
+
+async def test_voiding_a_derived_transaction_is_refused(client, session, run) -> None:
+    gbp = await get_currency(session, "GBP")
+    a, b = [
+        await run(
+            create_account, name=name, ledger_type="asset", subtype="bank", balance_mode="hybrid"
+        )
+        for name in ("A", "B")
+    ]
+    placeholder = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 10, 12, tzinfo=UTC),
+            description="Transfer from A",
+            status="inferred",
+            origin="inference",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-100")),
+                PostingInput(b.id, gbp.id, Decimal("100")),
+            ],
+        ),
+    )
+    response = await client.post(f"/api/v1/finance/transactions/{placeholder.id}/void")
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "invalid_input"
+    assert "derived" in detail["message"]

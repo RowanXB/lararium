@@ -1,0 +1,13 @@
+{
+  "format": "csv",
+  "columns": {
+    "date": "Date",
+    "type": "Type",
+    "description": ["Description"],
+    "inflow": "Paid in",
+    "outflow": "Paid out",
+    "balance": "Balance"
+  },
+  "date_format": "%d/%m/%Y",
+  "amount_format": {"thousands_separator": ","}
+}

@@ -1,9 +1,9 @@
-"""Worker jobs: syncing connections, waiting for a new one's approval, and the periodic
-tasks that schedule them."""
+"""Worker jobs: syncing connections, waiting for a new one's approval, checking transfers
+between the owner's accounts, and the periodic tasks that schedule them."""
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -28,6 +28,7 @@ from lararium.core.connections import (
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
 from lararium.core.errors import CredentialRejectedError
+from lararium.core.json_types import JSONValue
 from lararium.core.models import Connection
 from lararium.core.notify import Notifier, notifier_from_settings
 from lararium.core.secrets import Secret
@@ -36,6 +37,12 @@ from lararium.modules import registry
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.monzo.normalize import MonzoFieldError
 from lararium.modules.finance.monzo.webhooks import process_inbox
+from lararium.modules.finance.transfers import (
+    due_notifications,
+    heal_transfers,
+    lock_transfers,
+    mark_notified,
+)
 from lararium.worker.app import defer_await_approval, defer_sync, procrastinate_app
 
 logger = logging.getLogger(__name__)
@@ -53,6 +60,7 @@ APPROVAL_WINDOW = timedelta(minutes=4)
 FULL_HISTORY_WINDOW = timedelta(minutes=5)
 HTTP_TIMEOUT_SECONDS = 30
 APPROVAL_EXPIRED = "Approve the Monzo request in the app within 4 minutes, then authorise again"
+TRANSFERS_ACTOR = Actor("system", "transfers")
 
 
 async def _notify(notifier: Notifier, text: str) -> None:
@@ -157,8 +165,54 @@ async def run_sync(
             )
         return
 
+    # Matching runs after the sync has committed, in a transaction of its own: what the sync
+    # posted already sits in In transit or Unassigned as it should (Decision 9).
+    await _heal(session, args)
     if recovered:
         await _notify(notifier, f"{connection.display_name} has recovered and is syncing again.")
+
+
+async def _heal(session: AsyncSession, args: Mapping[str, JSONValue]) -> None:
+    """heal_transfers in a command of its own; a failure is logged, never raised: the next
+    heal (after a sync, or check_transfers) repairs it, and the ledger is right meanwhile.
+    `args`: what the audit row says it followed (a sync's connection, say)."""
+    try:
+        async with command_context(session, TRANSFERS_ACTOR, "finance.heal_transfers", args) as ctx:
+            await heal_transfers(ctx)
+    except Exception as exc:
+        # The type only: the text may quote the owner's data (a bank account, say).
+        logger.error("healing transfers failed: %s", type(exc).__name__)
+
+
+# More transfers due in one check than this are reported in one summary message.
+MAX_TRANSFER_MESSAGES = 3
+
+
+async def run_check_transfers(
+    session: AsyncSession,
+    *,
+    notifier: Notifier,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> None:
+    """Heal, then tell the owner once about each transfer that is overdue or needs review:
+    a message each, or one summary when there are more than MAX_TRANSFER_MESSAGES (the first
+    check after deploy may find a whole history due).
+
+    The messages are read and marked under the matching lock, so a heal running meanwhile
+    can't reopen a transfer between them (a reopened one keeps its notified_at). They are
+    sent only once that has committed and the lock is free: a slow notifier must not hold
+    up every heal. A message lost to a failed send, or to a crash before it is sent, is not
+    sent again."""
+    await _heal(session, {})
+    async with command_context(session, TRANSFERS_ACTOR, "finance.notify_transfers", {}) as ctx:
+        await lock_transfers(ctx)
+        due = await due_notifications(session, now())
+        await mark_notified(ctx, [transfer_id for transfer_id, _ in due])
+    messages = [text for _, text in due]
+    if len(messages) > MAX_TRANSFER_MESSAGES:
+        messages = [f"{len(messages)} transfers need your attention: see Transfers"]
+    for text in messages:
+        await _notify(notifier, text)
 
 
 def _describe(exc: Exception) -> str:
@@ -418,6 +472,14 @@ async def schedule_syncs(timestamp: int) -> None:
         logger.info("queued %d connection syncs and %d approval checks", queued, approvals)
     finally:
         await engine.dispose()
+
+
+@procrastinate_app.periodic(cron="*/30 * * * *")
+@procrastinate_app.task(name="check_transfers", queueing_lock="check_transfers")
+async def check_transfers(timestamp: int) -> None:
+    settings = get_settings()
+    async with _job_resources(settings) as (http, sessions), sessions() as session:
+        await run_check_transfers(session, notifier=notifier_from_settings(settings, http))
 
 
 @procrastinate_app.periodic(cron="* * * * *")

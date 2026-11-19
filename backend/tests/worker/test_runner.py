@@ -379,6 +379,7 @@ async def test_periodic_schedules() -> None:
     }
     assert crons == {
         "schedule_syncs": "*/30 * * * *",
+        "check_transfers": "*/30 * * * *",
         "process_webhook_inbox": "* * * * *",
         "retry_stalled_jobs": "* * * * *",
     }

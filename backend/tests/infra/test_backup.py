@@ -1,4 +1,5 @@
-"""infra/backup/backup.sh keeps dumps private: owner-only directory and files (R20)."""
+"""infra/backup/backup.sh: a database dump and a tar of the import documents, both private
+(owner-only directory and files, R20)."""
 
 import os
 import shutil
@@ -10,16 +11,34 @@ import pytest
 
 BACKUP_SCRIPT = Path(__file__).parents[3] / "infra" / "backup" / "backup.sh"
 
-# Stands in for `docker compose ... exec db pg_dump`, which writes the dump to stdout.
-FAKE_DOCKER = "#!/bin/sh\necho fake-dump\n"
+# Stands in for `docker compose ... exec`: `db pg_dump` writes to stdout, and the api's
+# command is run as given, with FAKE_TAR in place of tar. With FAKE_API_DOWN set, the api
+# exec fails the way compose does when the container isn't running (exit 1).
+FAKE_DOCKER = """#!/bin/sh
+case "$*" in
+  *" db pg_dump "*) echo fake-dump ;;
+  *" api sh -c "*)
+    if [ -n "${FAKE_API_DOWN:-}" ]; then echo 'service "api" is not running' >&2; exit 1; fi
+    while [ "$1" != api ]; do shift; done
+    shift
+    exec "$@" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+# tar inside the container: writes the archive, then exits with FAKE_TAR_STATUS.
+FAKE_TAR = """#!/bin/sh
+echo fake-tar
+exit "${FAKE_TAR_STATUS:-0}"
+"""
 
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-@pytest.mark.parametrize("existing_dir", [False, True])
-def test_backups_are_owner_only(tmp_path: Path, existing_dir: bool) -> None:
+def _run(
+    tmp_path: Path, *, existing_dir: bool = False, api_down: bool = False, tar_status: int = 0
+) -> int:
     infra = tmp_path / "infra"
     (infra / "backup").mkdir(parents=True)
     shutil.copy(BACKUP_SCRIPT, infra / "backup" / "backup.sh")
@@ -28,19 +47,90 @@ def test_backups_are_owner_only(tmp_path: Path, existing_dir: bool) -> None:
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
-    backups = tmp_path / "backups"
+    (bin_dir / "tar").write_text(FAKE_TAR)
+    (bin_dir / "tar").chmod(0o755)
     if existing_dir:
-        backups.mkdir(mode=0o755)
+        (tmp_path / "backups").mkdir(mode=0o755)
 
-    env = {k: v for k, v in os.environ.items() if not k.startswith("RESTIC_")}
-    subprocess.run(
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RESTIC_", "FAKE_"))}
+    env |= {"PATH": f"{bin_dir}:{env['PATH']}"}
+    if api_down:
+        env["FAKE_API_DOWN"] = "1"
+    env["FAKE_TAR_STATUS"] = str(tar_status)
+    return subprocess.run(
         ["bash", str(infra / "backup" / "backup.sh")],
-        env=env | {"PATH": f"{bin_dir}:{env['PATH']}"},
-        check=True,
+        env=env,
         capture_output=True,
         preexec_fn=lambda: os.umask(0o022),  # a typical permissive login umask
-    )
+    ).returncode
 
-    [dump] = backups.iterdir()
+
+@pytest.mark.parametrize("existing_dir", [False, True])
+def test_backups_are_owner_only(tmp_path: Path, existing_dir: bool) -> None:
+    assert _run(tmp_path, existing_dir=existing_dir) == 0
+
+    backups = tmp_path / "backups"
+    [dump] = backups.glob("lararium-*.dump")
+    [documents] = backups.glob("documents-*.tar")
+    assert sorted(p.name for p in backups.iterdir()) == sorted([dump.name, documents.name])
     assert dump.read_text() == "fake-dump\n"
-    assert (_mode(backups), _mode(dump)) == (0o700, 0o600)
+    assert documents.read_text() == "fake-tar\n"
+    assert (_mode(backups), _mode(dump), _mode(documents)) == (0o700, 0o600, 0o600)
+
+
+def test_documents_share_the_dumps_timestamp(tmp_path: Path) -> None:
+    assert _run(tmp_path) == 0
+    backups = tmp_path / "backups"
+    [dump] = backups.glob("lararium-*.dump")
+    [documents] = backups.glob("documents-*.tar")
+    assert dump.name.removeprefix("lararium-").removesuffix(".dump") == documents.name.removeprefix(
+        "documents-"
+    ).removesuffix(".tar")
+
+
+def test_a_missing_api_fails_the_backup(tmp_path: Path) -> None:
+    # Without the api container the documents can't be read: no finished backup may claim
+    # to be complete, neither the dump nor the tar, and the partial files are removed, so
+    # restic never backs up a half-written one.
+    assert _run(tmp_path, api_down=True) != 0
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_an_upload_during_the_tar_keeps_the_backup(tmp_path: Path) -> None:
+    """Third review: GNU tar exits 1 when a directory changes while it is read, and set -e
+    then threw away that night's dump and tar."""
+    assert _run(tmp_path, tar_status=1) == 0
+    assert len(list((tmp_path / "backups").glob("documents-*.tar"))) == 1
+
+
+def test_a_failing_tar_fails_the_backup(tmp_path: Path) -> None:
+    assert _run(tmp_path, tar_status=2) != 0
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_script_tars_the_document_dir_through_partial_files() -> None:
+    script = BACKUP_SCRIPT.read_text()
+    # .tmp-* files are uploads being written (LocalDocumentStore renames them into place).
+    assert "exec -T api sh -c" in script
+    assert 'tar -C /var/lib/lararium/documents --exclude=".tmp-*" -cf - .' in script
+    umask = script.index("umask 077")
+    for output in ('> "$out.partial"', '> "$out_docs.partial"'):
+        assert umask < script.index(output), output
+    assert script.index('> "$out_docs.partial"') < script.index('mv "$out_docs.partial"')
+
+
+def test_tmp_exclude_skips_files_being_written(tmp_path: Path) -> None:
+    # The pattern the script passes to tar leaves out a half-written upload in a shard dir.
+    shard = tmp_path / "ab" / "cd"
+    shard.mkdir(parents=True)
+    (shard / ("ab" * 32)).write_bytes(b"done")
+    (shard / ".tmp-x1y2").write_bytes(b"half")
+    listing = subprocess.run(
+        ["tar", "-C", str(tmp_path), "--exclude=.tmp-*", "-cf", "-", "."],
+        capture_output=True,
+        check=True,
+    ).stdout
+    names = subprocess.run(
+        ["tar", "-tf", "-"], input=listing, capture_output=True, check=True
+    ).stdout.decode()
+    assert "ab" * 32 in names and ".tmp-" not in names
