@@ -57,6 +57,12 @@ def external_id(item: Item) -> str:
     return f"{PREFIXES[item.record_type]}:{item.account}:{item.text('transactionID')}"
 
 
+def shown(item: Item) -> str:
+    """The row as an error shows it: its transactionID and the last four digits of its
+    account, never the full account id."""
+    return f"{item.text('transactionID')} of ···{item.account[-4:]}"
+
+
 def order(item: Item) -> tuple[str, str]:
     """By report date, then transaction id (numerically, as IBKR's ids are digits)."""
     return item.text("reportDate"), item.text("transactionID").rjust(40, "0")
@@ -149,7 +155,7 @@ async def _rounding(
             continue
         if instrument_id != currency.id or residual.copy_abs() > allowed:
             raise FlexDataError(
-                f"{item.section} {external_id(item)}: its proceeds differ from quantity times"
+                f"{item.section} {shown(item)}: its proceeds differ from quantity times"
                 " tradePrice by more than rounding"
             )
         postings.append(PostingInput(unassigned, instrument_id, -residual, memo="rounding"))

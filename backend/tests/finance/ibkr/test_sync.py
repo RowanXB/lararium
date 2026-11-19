@@ -389,3 +389,90 @@ async def test_a_failing_older_window_leaves_nothing(session, run, tmp_path, mon
     after = await get_connection(session, connection.id)
     assert after.cursor is None
     assert after.status == "failing"
+
+def _serving(statement_for):
+    """A Flex Web Service whose SendRequest succeeds and whose GetStatement answers with
+    statement_for(the window's first day)."""
+    asked: list[date] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("SendRequest"):
+            asked.append(date.fromisoformat(request.url.params["fd"]))
+            return httpx.Response(
+                200,
+                content=b"<FlexStatementResponse><Status>Success</Status>"
+                b"<ReferenceCode>1</ReferenceCode></FlexStatementResponse>",
+            )
+        return httpx.Response(200, content=statement_for(asked[-1]))
+
+    return serve
+
+
+async def _run_sync(session, connection, serve, tmp_path, notifier) -> ConnectionRecord:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as http:
+        await jobs.run_sync(
+            session,
+            connection.id,
+            settings=SETTINGS.model_copy(update={"document_dir": tmp_path}),
+            http=http,
+            notifier=notifier,
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+    return await get_connection(session, connection.id)
+
+
+@pytest.fixture
+def no_sleep(monkeypatch) -> None:
+    async def instantly(seconds: int) -> None:
+        return None
+
+    monkeypatch.setattr(ibkr_sync, "FlexClient", partial(FlexClient, sleep=instantly))
+
+
+async def test_a_failed_sync_names_the_field(session, run, tmp_path, no_sleep) -> None:
+    connection = await _connection(run)
+    account = AccountSpec("U0000001", date_opened=datetime.now(UTC).date() - timedelta(days=30))
+    serve = _serving(
+        lambda fd: build_statement(
+            [account], period=(fd, fd), rows=[RowSpec("Trade", "U0000001", reportDate=None)]
+        )
+    )
+    notifier = RecordingNotifier()
+    for _ in range(jobs.NOTIFY_AFTER_FAILURES):
+        after = await _run_sync(session, connection, serve, tmp_path, notifier)
+    expected = "Trade.reportDate is missing: select it in the Flex query"
+    assert after.status == "failing"
+    assert after.last_error == expected
+    assert len(notifier.messages) == 1
+    assert expected in notifier.messages[0]
+
+
+async def test_a_failed_sync_shows_no_account_id_or_value(session, run, tmp_path, no_sleep) -> None:
+    connection = await _connection(run)
+    account = AccountSpec("U0000001", date_opened=datetime.now(UTC).date() - timedelta(days=30))
+    rows = [
+        RowSpec("Trade", "U0000001", transactionID="9000001", quantity="10"),
+        RowSpec("Trade", "U0000001", transactionID="9000001", quantity="11"),
+    ]
+    serve = _serving(lambda fd: build_statement([account], period=(fd, fd), rows=rows))
+    after = await _run_sync(session, connection, serve, tmp_path, RecordingNotifier())
+    assert after.last_error == "Trade has two different rows for 9000001 of ···0001"
+    assert "U0000001" not in after.last_error
+
+
+async def test_a_response_without_statements_fails_and_keeps_the_cursor(
+    session, run, tmp_path, no_sleep
+) -> None:
+    cursor: JSONValue = {
+        "history_from": "2025-11-18",
+        "fetched_to": "2026-11-10",
+        "fetched_at": "2026-11-11T06:30:00+00:00",
+    }
+    connection = await _connection(run, cursor=cursor)
+    empty = b'<FlexQueryResponse queryName="q"><FlexStatements count="0"/></FlexQueryResponse>'
+    serve = _serving(lambda fd: empty)
+    after = await _run_sync(session, connection, serve, tmp_path, RecordingNotifier())
+    assert after.status == "failing"
+    assert after.cursor == cursor
+    assert after.last_error == "the Flex query returned no statements: select every account"
+

@@ -13,7 +13,7 @@ account's earliest window only; reported snapshots (reports.py).
 
 Account Information holds personal data (name, address, e-mail, date of birth): it is stored
 in ibkr_accounts and never logged or put in a warning. Errors and flags name sections, fields,
-categories and IBKR's transaction ids, never a row's values.
+categories, IBKR's transaction ids and an account's last four digits, never a row's values.
 """
 
 import logging
@@ -187,8 +187,8 @@ async def _items(ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool)
     the connection holds.
 
     The same transaction id with different attributes in one run fails it, naming the
-    section and key (Decision 9): a row repeated unchanged (by overlapping windows, under
-    another period) is one row.
+    section, the transaction id and the account's last four digits (Decision 9): a row
+    repeated unchanged (by overlapping windows, under another period) is one row.
     """
     given = [
         item
@@ -200,7 +200,7 @@ async def _items(ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool)
         key = _key(item)
         held = chosen.get(key)
         if held is not None and key[0] in records.PREFIXES and held.attributes != item.attributes:
-            raise FlexDataError(f"{item.section} has two different rows for {key[1]}")
+            raise FlexDataError(f"{item.section} has two different rows for {records.shown(item)}")
         chosen[key] = item
     if replay:
         given_keys = set(chosen)

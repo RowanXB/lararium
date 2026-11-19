@@ -145,6 +145,25 @@ def test_doctype_refused() -> None:
         parse_statement(body)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'<FlexQueryResponse queryName="q"><FlexStatements count="0"/></FlexQueryResponse>',
+        b"<FlexQueryResponse/>",
+        build_statement([], period=PERIOD, rows=[]),
+    ],
+)
+def test_a_response_without_statements_is_refused(body: bytes) -> None:
+    with pytest.raises(FlexDataError, match="the Flex query returned no statements"):
+        parse_statement(body)
+
+
+def test_a_document_that_is_not_a_flex_response_is_refused() -> None:
+    body = build(RowSpec("Trade", A1)).replace(b"FlexQueryResponse", b"SomethingElse")
+    with pytest.raises(FlexDataError, match="not a Flex statement"):
+        parse_statement(body)
+
+
 def test_not_xml_refused() -> None:
     with pytest.raises(FlexDataError):
         parse_statement(b"<oops")

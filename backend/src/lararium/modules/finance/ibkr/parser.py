@@ -10,6 +10,7 @@ from datetime import date
 from xml.etree import ElementTree
 from xml.parsers import expat
 
+from lararium.core.errors import DisplayableError
 from lararium.modules.finance.ibkr.fields import (
     DERIVABLE_SECTIONS,
     EXECUTION_LEVEL,
@@ -22,7 +23,7 @@ from lararium.modules.finance.ibkr.fields import (
 _SECTION_FIELD_LEVEL = "levelOfDetail"
 
 
-class FlexDataError(ValueError):
+class FlexDataError(DisplayableError, ValueError):
     """The statement does not match the Flex query; the message names a section and field only."""
 
 
@@ -174,11 +175,17 @@ def _statement_rows(
 
 def parse_statement(body: bytes) -> Statement:
     root = _root(body)
+    if root.tag != "FlexQueryResponse":
+        raise FlexDataError("the file is not a Flex statement: its root is not FlexQueryResponse")
+    statements = list(root.iter("FlexStatement"))
+    if not statements:
+        # Taken as an empty success, it would move the sync's cursor past days never read.
+        raise FlexDataError("the Flex query returned no statements: select every account")
     flagged: set[str] = set()
     sections: set[tuple[str, str]] = set()
     merged: dict[tuple[object, ...], Row] = {}
     latest_info: dict[str, Row] = {}
-    for statement in root.iter("FlexStatement"):
+    for statement in statements:
         for row in _statement_rows(statement, flagged, sections):
             if row.section == "AccountInformation":
                 held = latest_info.get(row.account)

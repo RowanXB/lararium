@@ -316,9 +316,10 @@ async def test_rounding_beyond_what_rounding_explains_fails(session, run, tmp_pa
             proceeds="-512.50",
         )
     ]
-    with pytest.raises(FlexDataError, match=r"Trade trade:U0000001:9000001") as raised:
+    with pytest.raises(FlexDataError, match=r"Trade 9000001 of ···0001: ") as raised:
         await _sync(session, connection, tmp_path, rows)
     assert "512" not in str(raised.value)
+    assert "U0000001" not in str(raised.value)
 
 
 async def test_trade_taxes_are_a_fee_in_the_trade_currency(session, run, tmp_path) -> None:
@@ -889,9 +890,10 @@ async def test_duplicate_key_different_content_fails(session, run, tmp_path) -> 
         RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001", quantity="10"),
         RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001", quantity="11"),
     ]
-    with pytest.raises(FlexDataError, match=r"Trade .*trade:U0000001:9000001") as raised:
+    with pytest.raises(
+        FlexDataError, match=r"Trade has two different rows for 9000001 of ···0001$"
+    ):
         await _sync(session, connection, tmp_path, rows)
-    assert "11" not in str(raised.value).replace("9000001", "")
 
 
 async def test_unsupported_category_not_posted_and_flagged(session, run, tmp_path) -> None:

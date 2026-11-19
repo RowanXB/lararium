@@ -16,7 +16,7 @@ from xml.etree import ElementTree
 import httpx
 
 from lararium import __version__
-from lararium.core.errors import CredentialRejectedError
+from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.secrets import Secret
 
 BASE = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
@@ -39,9 +39,19 @@ POLL_AGAIN_CODES = frozenset({1003, 1004, 1005, 1006, 1007, 1008, 1009, 1019})
 
 _URL = re.compile(r"https?://\S+", re.IGNORECASE)
 _MAX_MESSAGE = 200
+# The root element is looked for in this many first bytes: a statement (about 10 MB for a year
+# of three accounts) is parsed once, by the parser, off the event loop.
+_PEEK = 4096
+# A byte order mark, then whitespace, the XML declaration and comments; then the root's name.
+# Nothing else may come before the root: a DOCTYPE, the way entity tricks come in, is refused.
+_ROOT = re.compile(
+    # Possessive: what the prolog matched is never tried again, so a long one costs linear time.
+    rb"\A(?:\xef\xbb\xbf)?(?:\s|<\?.*?\?>|<!--.*?-->)*+<([A-Za-z_][\w.:-]*)",
+    re.DOTALL,
+)
 
 
-class FlexError(Exception):
+class FlexError(DisplayableError):
     """The Flex Web Service answered with an error (code 0: an answer it couldn't read)."""
 
     def __init__(self, code: int) -> None:
@@ -124,9 +134,17 @@ class FlexClient:
             raise FlexError(0)
         return response.content
 
-    def _parse(self, body: bytes) -> ElementTree.Element:
-        if b"<!doctype" in body.lower():
+    @staticmethod
+    def _root_tag(body: bytes) -> str:
+        """The name of the body's root element, from its first bytes only."""
+        found = _ROOT.match(body[:_PEEK])
+        if found is None:
             raise FlexError(0)
+        return found.group(1).decode()
+
+    def _parse(self, body: bytes) -> ElementTree.Element:
+        """A FlexStatementResponse (a request's status or error), which is small."""
+        self._root_tag(body)
         try:
             return ElementTree.fromstring(body)
         except ElementTree.ParseError:
@@ -161,10 +179,11 @@ class FlexClient:
                 raise FlexRetryableError(pending)
             body = await self._get("GetStatement", {"q": reference}, gap)
             gap = MIN_SPACING
-            root = self._parse(body)
-            if root.tag.lower() != "flexstatementresponse":
+            if self._root_tag(body).lower() != "flexstatementresponse":
+                # The statement: the parser refuses one that is not a FlexQueryResponse with
+                # statements in it.
                 return body
-            error = self._error(root)
+            error = self._error(self._parse(body))
             if error.code not in POLL_AGAIN_CODES:
                 raise error
             pending = error.code

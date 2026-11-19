@@ -19,7 +19,9 @@ from lararium.modules.finance.ibkr.client import (
 TOKEN = "tok-9f8e7d6c5b4a"
 REF = "1234567890"
 STATEMENT = (
-    b'<FlexQueryResponse queryName="q" type="AF"><FlexStatements count="0"/></FlexQueryResponse>'
+    b'<FlexQueryResponse queryName="q" type="AF"><FlexStatements count="1">'
+    b'<FlexStatement accountId="U0000001" fromDate="20260101" toDate="20260131"/>'
+    b"</FlexStatements></FlexQueryResponse>"
 )
 
 
@@ -206,6 +208,29 @@ async def test_doctype_refused() -> None:
     with pytest.raises(FlexError) as caught:
         await fetch(env)
     assert caught.value.code == 0
+
+
+@pytest.mark.parametrize(
+    "prolog",
+    [
+        b"<!-- a comment --><!DOCTYPE x>",
+        b"\n  <!DOCTYPE x>",
+        b"<?xml version='1.0'?>" + b" " * 9000,
+    ],
+)
+async def test_a_doctype_or_an_endless_prolog_is_refused(prolog: bytes) -> None:
+    env = Env(send_ok(), prolog + STATEMENT)
+    with pytest.raises(FlexError) as caught:
+        await fetch(env)
+    assert caught.value.code == 0
+
+
+async def test_a_statement_is_returned_without_being_parsed() -> None:
+    # Only its first bytes are read: a body of 10 MB is parsed once, by the parser, off the
+    # event loop. So a statement broken further on still comes back as it is.
+    body = b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\n' + STATEMENT[:-20]
+    env = Env(send_ok(), body)
+    assert await fetch(env) == body
 
 
 async def test_malformed_body_is_flex_error() -> None:
