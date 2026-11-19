@@ -244,7 +244,7 @@ What that query returns (audit, 2026-11-18):
 
 **The closed ISA is uploaded once.** The Flex Web Service cannot select a closed account (audit, 2026-11-18).
 - The owner sets Client Portal's account selector to include closed accounts, runs the same query by hand over the ISA's life, and uploads the XML file to the connection. The file includes all accounts, about 10 MB for a year.
-- The upload is stored as a document and goes through the same parser and normalizer as a fetched statement. Its rows of accounts the Flex Web Service fetches are left out, in every run and replay: they repeat fetched ones, and an older copy among them must not undo what was fetched since (a correction, the account's details, the opening).
+- The upload is stored as a document and goes through the same parser and normalizer as a fetched statement, so rows already fetched for the open accounts are written once. A run applies the copies it is given, so the file should be generated after the latest sync: an older copy of a row IBKR has since corrected would undo the correction.
 - No second login or token is used.
 
 **A closed account** (`dateClosed` present) is closed on that date. Valuation already leaves a closed account out from its closing date. Its history stays, so the ISA's records explain the other side of its movements.
@@ -318,9 +318,9 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 
 **Opening adjustment.**
 - When the earliest window an account has starts with non-zero cash or positions, one "Opening balance adjustment" per instrument is posted against Opening balances, dated the day before the account's earliest record.
-- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the earliest day the window reports them, minus what the ledger holds by that day, so a later difference no postings explain stays a reconciliation difference.
+- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's earliest statement day (none reported that day means none held), minus what the ledger holds by then, so a later difference no postings explain stays a reconciliation difference.
 - This only happens when an account is older than its earliest stored window.
-- A run holding an account's earliest stored window sets its opening afresh. A later window leaves it as it is. So a closed account's first upload sets its opening, and a second one reaching further back moves the opening before the new history, or voids it once the history reaches the day the account opened, so the movements it brings are never counted twice.
+- A run holding an account's earliest stored window sets its opening afresh. A later window leaves it as it is. So a closed account's first upload sets its opening, and a statement reaching further back moves the opening before the new history, or voids it once the history reaches the day the account opened, so the movements it brings are never counted twice. If days between the two are still missing, the reconciliation at the account's latest day reports the difference until they are uploaded.
 
 ### 5.8 Time (pinned)
 

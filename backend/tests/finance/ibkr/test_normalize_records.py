@@ -795,7 +795,8 @@ async def test_opening_only_for_older_account(session, run, tmp_path) -> None:
         for account in ("U0000001", "U0000002")
     ] + [
         RowSpec("CashTransaction", "U0000001", day=days[1], transactionID="8000001", amount="50"),
-        RowSpec("OpenPosition", "U0000001", day=days[2], **ETFA, position="10"),
+        # Held throughout, so every daily statement lists it.
+        *(RowSpec("OpenPosition", "U0000001", day=day, **ETFA, position="10") for day in days),
         RowSpec("OpenPosition", "U0000002", day=days[2], **ETFA, position="3"),
     ]
     await _sync(
@@ -1173,31 +1174,6 @@ async def test_a_row_corrected_to_nothing_voids_its_entry(session, run, tmp_path
     assert (await _transaction(session, "cash:U0000001:8000001")).status == "void"
 
 
-FETCHED: dict[str, JSONValue] = {"query_id": "1000001", "fd": "2026-11-10", "td": "2026-11-10"}
-
-
-async def test_an_upload_leaves_fetched_accounts_alone(session, run, tmp_path) -> None:
-    """The upload is for an account the Flex Web Service can't fetch: its rows of the
-    fetched ones are older copies at best, and must not undo a correction fetched since."""
-    connection = await _connection(run)
-    corrected = {"transactionID": "8000001", "amount": "90"}
-    await _sync(
-        session,
-        connection,
-        tmp_path,
-        [RowSpec("CashTransaction", "U0000001", **corrected)],
-        request=FETCHED,
-    )
-    closed = AccountSpec("U0000003", date_opened=DAY, date_closed=DAY)
-    rows = [
-        RowSpec("CashTransaction", "U0000001", transactionID="8000001", amount="100"),
-        RowSpec("CashTransaction", "U0000003", transactionID="8000003", amount="5"),
-    ]
-    await _sync(session, connection, tmp_path, rows, accounts=(GIA, closed))
-    assert await _live_cash(session, "GBP") == Decimal("90")
-    assert await _external_ids(session) == ["cash:U0000001:8000001", "cash:U0000003:8000003"]
-
-
 async def test_an_uploaded_void_is_ibkrs_so_a_later_copy_posts_again(
     session, run, tmp_path
 ) -> None:
@@ -1253,18 +1229,20 @@ async def test_an_amount_left_out_fails_and_keeps_the_entry(
     assert await _live_cash(session, "GBP") == Decimal("100")
 
 
+@pytest.mark.parametrize("first", ["10", None])
 async def test_opening_takes_the_earliest_positions_so_later_differences_stay(
-    session, run, tmp_path
+    session, run, tmp_path, first
 ) -> None:
-    """IBKR reports 10, then 12 with no trade between: the opening is the 10 held before
-    the history, and the 2 a reconciliation difference, also when all of it is normalized
-    in one run (a replay)."""
+    """IBKR reports 10 (or, listing the section, nothing), then 12 with no trade between:
+    the opening is what was held before the history, and the rest a reconciliation
+    difference, also when all of it is normalized in one run (a replay)."""
     days = [DAY + timedelta(days=n) for n in range(2)]
     connection = await _connection(run)
-    rows = [
-        RowSpec("OpenPosition", "U0000001", day=days[0], **ETFA, position="10"),
-        RowSpec("OpenPosition", "U0000001", day=days[1], **ETFA, position="12"),
-    ]
+    rows = [RowSpec("OpenPosition", "U0000001", day=days[1], **ETFA, position="12")]
+    # As IBKR does, every daily statement has a Cash Report.
+    rows += [RowSpec("CashReportCurrency", "U0000001", day=d, endingCash="0") for d in days]
+    if first is not None:
+        rows.append(RowSpec("OpenPosition", "U0000001", day=days[0], **ETFA, position=first))
     report, _ = await _sync(
         session,
         connection,
@@ -1273,6 +1251,8 @@ async def test_opening_takes_the_earliest_positions_so_later_differences_stay(
         accounts=(AccountSpec("U0000001"),),
         period=(days[0], days[1]),
         by_day=True,
+        empty_sections=("OpenPositions",),
     )
-    assert await _openings(session) == [(days[0] - timedelta(days=1), "ETFA", Decimal("10"))]
+    before = days[0] - timedelta(days=1)
+    assert await _openings(session) == ([(before, "ETFA", Decimal(first))] if first else [])
     assert [m for m in report.mismatches if "ETFA" in m]

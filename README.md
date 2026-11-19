@@ -411,8 +411,8 @@ by hand:
 2. Run the Flex query: Run, format XML, with a period covering the closed account's life. IBKR
    may generate it in the background (Batch Flex Queries); download it when ready.
 3. Once the connection's first sync has finished, choose **Upload a Flex statement** on the
-   IBKR connection on Connections and upload the XML (up to 64 MiB). Its rows of the accounts
-   the Flex Web Service fetches are left out: those come from the syncs.
+   IBKR connection on Connections and upload the XML (up to 64 MiB). Run it after the latest
+   sync: an older file's copy of a row IBKR has since corrected would undo the correction.
 
 ## Webhooks through Cloudflare Tunnel
 

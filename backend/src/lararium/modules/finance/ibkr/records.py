@@ -575,13 +575,10 @@ async def openings(
         else:
             positions_known = True
         positions = [r for r in rows if r.record_type == open_position and is_summary(r)]
-        # The earliest day positions were reported for (a complete list of that day), else
-        # the first statement's end, when the window reported none: a later day could fold a
-        # difference no postings explain into the opening, and hide it from reconciliation.
-        last = min(
-            (r.day("reportDate") for r in positions),
-            default=min(row.period_to for row in rows),
-        )
+        # The day the earliest statement describes: its list is complete, so a security it
+        # doesn't list was not held. A later day could fold a difference no postings explain
+        # into the opening and hide it from reconciliation (10 then 12, or none then 12).
+        last = min(row.period_to for row in rows)
         reported: defaultdict[UUID, Decimal] = defaultdict(Decimal)
         for row in positions:
             if row.day("reportDate") == last:
