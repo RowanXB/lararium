@@ -11,7 +11,7 @@ from sqlalchemy import text
 from lararium.core.connections import create_connection
 from lararium.core.settings_store import set_setting
 from lararium.db import create_engine
-from lararium.modules.finance import transfers_api
+from lararium.modules.finance import identifiers, transfers_api
 from lararium.modules.finance.accounts import AccountRecord, create_account
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import get_currency
@@ -629,3 +629,18 @@ async def test_balance_mode_response_says_whether_the_account_is_the_ledgers(cli
         f"{FINANCE}/accounts/{b_id}/balance-mode", json={"balance_mode": "hybrid"}
     )
     assert (response.status_code, response.json()["system"]) == (200, False)
+
+
+async def test_lists_an_ibkr_account_identifier_and_refuses_to_register_one(client, run) -> None:
+    _, account = await _connected(run, "Broker")
+    identifier_id = await run(get_or_create_identifier, "ibkr_account", "u0000001")
+    await run(identifiers.ensure_identifier, account.id, "ibkr_account", "U0000001")
+    [listed] = (await client.get(f"{FINANCE}/accounts/{account.id}/identifiers")).json()
+    assert listed["id"] == str(identifier_id)
+    assert (listed["kind"], listed["value"]) == ("ibkr_account", "U0000001")
+    assert listed["sort_code"] is None and listed["account_number"] is None
+    refused = await client.post(
+        f"{FINANCE}/accounts/{account.id}/identifiers",
+        json={"kind": "ibkr_account", "value": "U0000002"},
+    )
+    assert refused.status_code == 422

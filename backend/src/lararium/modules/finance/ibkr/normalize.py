@@ -32,7 +32,11 @@ from lararium.modules.finance.accounts import (
 from lararium.modules.finance.errors import AccountNotFoundError
 from lararium.modules.finance.ibkr import tables
 from lararium.modules.finance.ibkr.fields import SECTIONS
-from lararium.modules.finance.identifiers import ensure_identifier, get_or_create_identifier
+from lararium.modules.finance.identifiers import (
+    ensure_identifier,
+    get_or_create_identifier,
+    normalize_identifier,
+)
 from lararium.modules.finance.instruments import get_currency
 
 logger = logging.getLogger(__name__)
@@ -171,7 +175,10 @@ class _Accounts:
         session = self.command.session
         currency = await get_currency(session, attributes["currency"])
         values = await tables.typed_values(session, "ibkr_accounts", _SECTION, attributes)
-        values |= {"ibkr_account_id": ibkr_id, "base_instrument_id": currency.id}
+        values |= {
+            "ibkr_account_id": normalize_identifier("ibkr_account", ibkr_id),
+            "base_instrument_id": currency.id,
+        }
         return await tables.upsert_accounts(self.command, {"account_id": account_id}, values)
 
 

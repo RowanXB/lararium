@@ -540,7 +540,7 @@ export type IdentifierOut = {
     /**
      * Account Number
      */
-    account_number: string;
+    account_number: string | null;
     /**
      * Created At
      */
@@ -560,11 +560,11 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account';
+    kind: 'uk_bank_account' | 'ibkr_account';
     /**
      * Sort Code
      */
-    sort_code: string;
+    sort_code: string | null;
     /**
      * Value
      */

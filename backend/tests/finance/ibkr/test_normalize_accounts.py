@@ -16,11 +16,13 @@ from lararium.core.connectors import SyncContext
 from lararium.core.documents import LocalDocumentStore
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.ibkr.fields import INSTRUMENT_FIELDS, SECTIONS
 from lararium.modules.finance.ibkr.instruments import listing
 from lararium.modules.finance.ibkr.normalize import normalize
 from lararium.modules.finance.ibkr.parser import FlexDataError, Row
 from lararium.modules.finance.ibkr.sync import ingest_statement
 from lararium.modules.finance.ibkr.tables import (
+    column_name,
     parse_moment,
     trade_detail_key,
     typed_values,
@@ -365,3 +367,43 @@ def test_trade_detail_key_and_moments() -> None:
     assert parse_moment("20261110", "x").isoformat() == "2026-11-10T00:00:00-05:00"
     with pytest.raises(FlexDataError, match="time zone"):
         parse_moment("20261110;093000 CET", "Trade.dateTime")
+
+
+async def test_every_routed_attribute_has_a_column(session) -> None:
+    # A misspelt column would drop data silently, as typed_values ignores what has no column.
+    tables_by_section = {
+        "AccountInformation": "ibkr_accounts",
+        "Trade": "ibkr_trades",
+        "TradeDetail": "ibkr_trade_details",
+        "CashTransaction": "ibkr_cash_transactions",
+        "CorporateAction": "ibkr_corporate_actions",
+        "Transfer": "ibkr_transfers",
+        "OpenPosition": "ibkr_positions",
+        "PositionLot": "ibkr_position_lots",
+        "CashReportCurrency": "ibkr_cash_reports",
+        "EquitySummaryByReportDateInBase": "ibkr_nav",
+    }
+    # What the ledger or a caller's reference holds, or is derivable, rather than a column.
+    elsewhere = {
+        "accountId", "currency", "model", "acctAlias", "reportDate", "dateTime", "quantity",
+        "tradePrice", "proceeds", "taxes", "ibCommission", "ibCommissionCurrency", "tradeMoney",
+        "netCash", "netCashInBase", "amount", "description", "position", "positionValue",
+        "positionValueInBase", "date", "settleDate", "settleDateTarget", "cashTransfer",
+        "transactionID", "total", "originatingTransactionID", "dateOpened", "dateClosed",
+        "priorMtmPnl", "price", "actionDescription", "levelOfDetail", "fromDate", "toDate",
+        "assetCategory", "conid",
+    } | INSTRUMENT_FIELDS  # fmt: skip
+    rows = await session.execute(
+        text(
+            "select table_name, column_name from information_schema.columns"
+            " where table_schema = 'finance' and table_name like 'ibkr_%'"
+        )
+    )
+    columns = {(r.table_name, r.column_name) for r in rows}
+    missing = [
+        f"{section}.{attribute}"
+        for section, table in tables_by_section.items()
+        for attribute in sorted(SECTIONS[section].known - elsewhere)
+        if (table, column_name(table, attribute)) not in columns
+    ]
+    assert missing == []

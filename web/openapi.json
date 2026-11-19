@@ -1120,8 +1120,15 @@
             "title": "Account Id"
           },
           "account_number": {
-            "title": "Account Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
           },
           "created_at": {
             "format": "date-time",
@@ -1150,13 +1157,23 @@
             "type": "string"
           },
           "kind": {
-            "const": "uk_bank_account",
+            "enum": [
+              "uk_bank_account",
+              "ibkr_account"
+            ],
             "title": "Kind",
             "type": "string"
           },
           "sort_code": {
-            "title": "Sort Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
           },
           "value": {
             "title": "Value",
