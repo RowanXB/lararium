@@ -97,7 +97,8 @@ tailscale serve --bg 8080
 `lararium_owner` (`migrate`), then starts the API as `lararium_backend` (`api`), the
 background worker (`worker`: connection syncs and periodic jobs) and Caddy
 serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
-`lararium_pgdata` volume, and uploaded statement files in `lararium_documents`.
+`lararium_pgdata` volume, and statement files (uploaded, or fetched from IBKR) in
+`lararium_documents`.
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
@@ -389,11 +390,15 @@ Suggestions. Transfers between your IBKR accounts pair automatically.
 
 ### Reconciliation warnings
 
-After each sync Lararium compares its records with IBKR's own report of positions and cash.
+After each sync or upload Lararium compares its records with IBKR's own report of positions
+and cash, for each account on the latest day IBKR reported them.
 
 - **"IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT"** means Lararium's
   records don't add up to what IBKR reports: a record type not handled yet, or a correction
-  by IBKR. Lararium never corrects it silently.
+  by IBKR. Lararium never corrects it silently. A difference on an earlier day of a sync is
+  sent as a notification only.
+- **A failed sync** shows its reason on the connection, such as a field to select in the
+  Flex query.
 - **"IBKR flagged: …"** names a section or field Lararium doesn't type yet.
 
 ### Closed accounts
@@ -405,8 +410,8 @@ by hand:
    and select every account.
 2. Run the Flex query: Run, format XML, with a period covering the closed account's life. IBKR
    may generate it in the background (Batch Flex Queries); download it when ready.
-3. On Connections choose **Upload a Flex statement** on the IBKR connection and upload the
-   XML (up to 64 MiB).
+3. Once the connection's first sync has finished, choose **Upload a Flex statement** on the
+   IBKR connection on Connections and upload the XML (up to 64 MiB).
 
 ## Webhooks through Cloudflare Tunnel
 
@@ -654,9 +659,9 @@ make backup   # or: infra/backup/backup.sh
 
 This writes `$BACKUP_DIR/lararium-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
 `BACKUP_DIR` is relative to the repository root) and, with the same timestamp,
-`documents-<UTC timestamp>.tar`: the uploaded statement files from the `lararium_documents`
-volume, read through the `api` container. The stack must be running: without the `api`
-container the backup fails rather than leave a dump without its documents. If
+`documents-<UTC timestamp>.tar`: the statement files (uploaded, or fetched from IBKR) from the
+`lararium_documents` volume, read through the `api` container. The stack must be running:
+without the `api` container the backup fails rather than leave a dump without its documents. If
 `RESTIC_REPOSITORY` is set in `infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using
 `RESTIC_PASSWORD`; the `restic` binary must be installed on the host. To run it nightly, add a
 cron entry such as `0 3 * * * cd /path/to/lararium && make backup`.

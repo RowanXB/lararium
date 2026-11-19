@@ -91,7 +91,7 @@ tailscale serve --bg 8080
 
 `make up` 会构建镜像并启动 PostgreSQL（`db`），以 `lararium_owner` 身份执行一次迁移
 （`migrate`），然后以 `lararium_backend` 身份启动 API（`api`）、后台 worker（`worker`：连接同步和
-定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，上传的账单文件保留在 `lararium_documents` 卷中。
+定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，账单文件（上传的，或从 IBKR 获取的）保留在 `lararium_documents` 卷中。
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
@@ -342,11 +342,13 @@ Lararium 中对应一个账户，税务账户类型（ISA 或 GIA）按 IBKR 的
 
 ### 对账警告
 
-每次同步后，Lararium 会把自己的记录与 IBKR 报告的持仓和现金对比。
+每次同步或上传后，Lararium 会按每个账户 IBKR 最近一次报告的那一天，把自己的记录与 IBKR 报告的
+持仓和现金对比。
 
 - **“IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT”** 表示 Lararium 的记录
   与 IBKR 报告的数字对不上：可能是某种记录类型还没处理，或是 IBKR 做了更正。Lararium 绝不会
-  悄悄自动修正。
+  悄悄自动修正。某次同步里更早一天的差异只会发通知。
+- **同步失败** 时，连接上会显示原因，比如需要在 Flex query 里勾选的某个字段。
 - **“IBKR flagged: …”** 指出了 Lararium 还没有给类型的某个 section 或字段。
 
 ### 已关闭的账户
@@ -356,7 +358,8 @@ Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请�
 1. 在 Client Portal 打开账户选择器的筛选，选 Account Status，再选 Closed，并选中所有账户。
 2. 运行 Flex query：Run，格式选 XML，时间段覆盖该已关闭账户的存续期。IBKR 可能在后台生成
    （Batch Flex Queries）；生成后下载。
-3. 在 Connections 页面，在 IBKR 连接上选择 **Upload a Flex statement**，上传这个 XML（最大 64 MiB）。
+3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
+   上传这个 XML（最大 64 MiB）。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
@@ -563,7 +566,7 @@ make backup   # 或：infra/backup/backup.sh
 
 它会写出 `$BACKUP_DIR/lararium-<UTC 时间戳>.dump`（`pg_dump` 自定义格式；`BACKUP_DIR` 为相对
 路径时相对于仓库根目录），并以同一时间戳写出 `documents-<UTC 时间戳>.tar`：经由 `api` 容器读出的
-`lararium_documents` 卷里上传的账单文件。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
+`lararium_documents` 卷里的账单文件（上传的，或从 IBKR 获取的）。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
 一个缺少文档的转储。如果 `infra/.env` 里设置了 `RESTIC_REPOSITORY`，随后还会用
 `RESTIC_PASSWORD` 执行 `restic backup "$BACKUP_DIR"`；主机上需要装有 `restic`。
 如需每晚执行，可添加一条 cron，例如 `0 3 * * * cd /path/to/lararium && make backup`。

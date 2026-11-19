@@ -221,17 +221,17 @@ What that query returns (audit, 2026-11-18):
 
 - **Documents.** Each statement body is stored as a document (`source = "finance.ibkr"`, `application/xml`). The worker therefore mounts the `documents` volume, which today only the api mounts.
 - **Raw records.** Each row of each section becomes a raw record.
-  - Record type: `ibkr.account`, `ibkr.open_position`, `ibkr.prior_period_position`, `ibkr.cash_report`, `ibkr.trade`, `ibkr.cash_transaction`, `ibkr.conversion_rate`, `ibkr.corporate_action`, `ibkr.transfer`, or `ibkr.nav`.
+  - Record type: `ibkr.account_information`, `ibkr.open_position`, `ibkr.position_lot`, `ibkr.prior_period_position`, `ibkr.cash_report`, `ibkr.trade`, `ibkr.trade_detail` (every level of Trades but executions), `ibkr.cash_transaction`, `ibkr.conversion_rate`, `ibkr.corporate_action`, `ibkr.transfer`, or `ibkr.equity_summary` (NAV).
   - Content: the account id, the statement's period for period-level rows, and the row's attributes exactly as strings.
   - Request: the query id, the window, and the document's sha256.
   - Raw records already dedupe by content hash, so a row that overlapping windows repeat unchanged is stored once.
-- **Keys.** Ledger rows are keyed by `(connection, external_id)`:
-  - `trade:<transactionID>`;
-  - `cash:<transactionID>`;
-  - `ca:<transactionID>`;
-  - `transfer:<transactionID>`;
-  - `opening:<account>:<instrument key>`.
-  - `transactionID` is a required field. The same id with different content in one fetch fails the sync, following the convention that a duplicate id blocks the batch.
+- **Keys.** Ledger rows are keyed by `(connection, external_id)`, where `<accountId>` is the IBKR account id:
+  - `trade:<accountId>:<transactionID>`;
+  - `cash:<accountId>:<transactionID>`;
+  - `ca:<accountId>:<transactionID>`;
+  - `transfer:<accountId>:<transactionID>`;
+  - `opening:<accountId>:<instrument id>`.
+  - `transactionID` is a required field. The same id with different content in one fetch fails the sync, following the convention that a duplicate id blocks the batch. The error names the section, the `transactionID` and the account's last four digits, never the full account id.
 
 ### 5.5 Accounts
 
@@ -372,14 +372,15 @@ These are IBKR's own tables. **Generic broker tables (a builder-check call):** w
 
 ### 5.11 Reconciliation
 
-**The check.** After every sync, for each account, at the end date of each fetched window:
-- each instrument's reported quantity (Open Positions for securities; the Cash Report's `endingCash` for each currency, not the `BASE_SUMMARY` row)
-- must equal the sum of the account's non-void postings in that instrument with `booking_date` at or before that date;
-- within the instrument's tolerance.
+**The check.** Each instrument's reported quantity (Open Positions for securities; the Cash Report's `endingCash` for each currency, not the `BASE_SUMMARY` row) must equal the sum of the account's non-void postings in that instrument with `booking_date` at or before the report's day, within the instrument's tolerance. An instrument the ledger holds and the report omits counts as reported 0.
+
+**Where it runs.** After every sync and every upload, for every account of the connection:
+- **At the account's latest stored statement day**, separately for currencies (the latest Cash Report `toDate`) and securities (the latest Open Positions day that reported a position). A kind with no such day is not checked there. The connection's reconciliation warnings (those beginning `IBKR ···`) are replaced in full by what this finds, so they describe the stored reports whatever order statements arrive in: an older statement uploaded late neither clears nor adds a warning about the current day, except by what it posts.
+- **At the end of each window this run fetched**, for the kinds whose section the statement has (an empty Open Positions section says IBKR holds nothing). A difference found only there (an earlier day, or a day whose Open Positions were empty) is notified, never kept as a warning.
 
 **A difference:**
-- becomes a connection warning naming the account's last four digits, the instrument and the date;
-- is sent once per new value, as Monzo's reconciliation is;
+- names the account's last four digits, the instrument and the date;
+- is sent once per new warning text, as Monzo's reconciliation is;
 - is never corrected automatically.
 
 **NAV.** It is not checked at runtime in M5 (M9). The tests and the owner's check (§10) compare Lararium's valuation of the account on a report date with IBKR's NAV total minus interest and dividend accruals.
@@ -401,17 +402,17 @@ These are IBKR's own tables. **Generic broker tables (a builder-check call):** w
 
 Through the existing notifier, never with the token, URLs or values beyond what the message needs:
 - token rejected (`needs_reauth`);
-- token expiring within 14 days;
-- 3 failed syncs in a row, and the recovery afterwards (M3's rule);
-- a reconciliation difference, once per new value;
+- token expiring within 14 days, naming the last day it works;
+- 3 failed syncs in a row, and the recovery afterwards (M3's rule). The connection's `last_error`, and so this message, says what failed: for a statement that does not match the query, the section and field (§5.2); for IBKR's errors, the code;
+- a reconciliation difference, once per new warning text (§5.11);
 - flagged sections, fields or asset categories, once per new set.
 
 ### 5.14 API and UI
 
 **API**, under `/api/v1`, owner-only like the rest:
-- `POST /connections/ibkr` (`create_ibkr_connection`): display name, token, token expiry date, query id → 201 `ConnectionOut`; queues a sync;
+- `POST /connections/ibkr` (`create_ibkr_connection`): display name, token, token expiry date, query id → 201 `ConnectionOut`; queues a sync; an expiry date before today (London) is refused with 422, as by the update;
 - `PUT /connections/{id}/ibkr` (`update_ibkr_connection`): token, expiry date, query id → `ConnectionOut`; `needs_reauth` → `healthy`, and queues a sync;
-- `POST /connections/{id}/ibkr-statement` (`upload_ibkr_statement`): a Flex XML file of at most 64 MiB → 202; ingested and normalized like a fetched statement;
+- `POST /connections/{id}/ibkr-statement` (`upload_ibkr_statement`): a Flex XML file of at most 64 MiB → 202; ingested and normalized like a fetched statement; 409 until the connection's first sync has finished, which writes the same rows;
 - the existing list, sync-now and disable routes work for IBKR as they are.
 
 Audit arguments never include the token.
@@ -443,6 +444,7 @@ Holdings and net worth need no new page: IBKR holdings appear in the existing vi
 | ISA ↔ GIA, cash or positions | Matched through `ibkr_account` identifiers (§5.12). |
 | Statement not ready yet (1003–1008, 1019) | Retried within the request, then at the next tick; counted as a failure only when it persists. |
 | Too many requests (1018) | An ordinary failure, retried at the next tick. |
+| A response with no statements, or not a `FlexQueryResponse` | The sync fails ("the Flex query returned no statements: select every account") and the cursor stays (§5.3). |
 | Token expired or replaced | `needs_reauth` and a notification; the owner updates it (§5.1). |
 | An asset category M5 does not handle | Flagged, not posted; reconciliation shows its effect. |
 | A field outside the list / a required field missing | Flagged by name / the sync fails naming it (§5.2). |
