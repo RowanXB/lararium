@@ -360,7 +360,9 @@ def _twins(
     amount, booking date: a transfer split into equal parts, say). Any pairing of them
     gives the same ledger, so they pair in a fixed order, by time and then by reference,
     which doesn't depend on which side arrived first. Anything less alike stays for the
-    owner's review."""
+    owner's review. A side naming no account is found by amount and date, as a single
+    counterpart is: an unrelated row can be among it until the real one arrives, and the
+    group then no longer matches (design §5.8)."""
 
     def alike(group: frozenset[UUID]) -> bool:
         return (
@@ -377,10 +379,12 @@ def _twins(
         return sorted(group, key=lambda x: (records[x].occurred_at, records[x].source))
 
     twins: dict[UUID, UUID] = {}
+    checked: set[UUID] = set()
     for record_id, found in exact.items():
-        if len(found) < 2 or record_id in twins:
+        if len(found) < 2 or record_id in checked:
             continue
         others = exact.get(next(iter(found)), frozenset())
+        checked |= found | others  # a group is checked once, whichever member comes first
         if (
             len(others) == len(found)
             and all(exact.get(x) == others for x in found)

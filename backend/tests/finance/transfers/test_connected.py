@@ -32,6 +32,7 @@ from lararium.modules.finance.transfers import (
     list_transfers,
     load_transfer_settings,
     pair,
+    preview_match,
     transfer_contra,
 )
 from lararium.modules.finance.transfers import engine as transfer_engine
@@ -1213,3 +1214,45 @@ async def test_identical_transfers_pair_in_a_fixed_order(
     assert await in_transit_balance(session, ids) == 0
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_preview_within_identical_transfers_needs_the_rows_reference(
+    session, gbp, a_and_c, connector_tx, heal
+) -> None:
+    """Identical records pair by time, then by reference (pairs._twins), so a row not yet
+    posted can't be told its partner without the reference it will have; with it, the
+    preview is what posting does."""
+    a, a_id, c, c_id = a_and_c
+    await history(connector_tx, a)
+    await history(connector_tx, c)
+    outs = {
+        n: await connector_tx(
+            a, "-5000", external_id=f"out_{n}", occurred_at=WHEN, identifier_id=c_id
+        )
+        for n in (1, 2)
+    }
+    await connector_tx(
+        c, "5000", external_id="in_b", occurred_at=WHEN + timedelta(hours=1), identifier_id=a_id
+    )
+    await heal()
+
+    async def preview(source):
+        return await preview_match(
+            session,
+            account_id=c.account.id,
+            instrument_id=gbp.id,
+            quantity=Decimal(5000),
+            occurred_at=WHEN + timedelta(hours=1),
+            counterparty=CounterpartyFields(identifier_id=a_id, bank_transfer=True),
+            source=source,
+        )
+
+    assert await preview(None) is None
+    previewed = await preview(("connection", f"{c.connection_id}:in_a"))
+    assert previewed in {record.id for record in outs.values()}
+    row = await connector_tx(
+        c, "5000", external_id="in_a", occurred_at=WHEN + timedelta(hours=1), identifier_id=a_id
+    )
+    await heal()
+    [linked] = [t for t in await list_transfers(session) if t.in_transaction_id == row.id]
+    assert linked.out_transaction_id == previewed
