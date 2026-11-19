@@ -281,6 +281,74 @@ async def test_older_statement_that_completes_the_ledger_clears_the_current_warn
     assert len(notifier.sent) == 1
 
 
+async def test_each_kind_is_replaced_against_its_own_latest_day(session, run, tmp_path) -> None:
+    # Securities were last reported on the 12th, cash on the 14th. The older statement that
+    # posts the missing buy rechecks securities on the 12th: that is their latest day, so the
+    # stale warning goes, though cash was reported later.
+    connection = await _connection(run)
+    notifier = Notifier()
+    await sync(session, connection, tmp_path, [], notifier, empty=("OpenPositions",))
+    await session.execute(
+        text('update core.connections set cursor = \'{"history_from": "2026-11-10"}\'')
+    )
+    securities, currencies, older = date(2026, 11, 12), date(2026, 11, 14), date(2026, 11, 11)
+    await sync(
+        session,
+        connection,
+        tmp_path,
+        [position(ETFA, "10")],
+        notifier,
+        period=(securities, securities),
+    )
+    await sync(
+        session,
+        connection,
+        tmp_path,
+        [cash("USD", "-1001.00")],
+        notifier,
+        period=(currencies, currencies),
+    )
+    assert await warnings_of(session, connection) == [
+        "IBKR ···0001 ETFA differs from IBKR's report on 2026-11-12 by -10",
+        "IBKR ···0001 USD differs from IBKR's report on 2026-11-14 by 1001.00",
+    ]
+    rows = [buy("9000001", ETFA, "10", "100.00", "-1000.00"), position(ETFA, "10")]
+    report = await sync(session, connection, tmp_path, rows, notifier, period=(older, older))
+    assert report.mismatches == []
+    assert await warnings_of(session, connection) == []
+
+
+async def test_a_malformed_reconciled_day_is_ignored(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    await session.execute(
+        text(
+            "update core.connections set config = config"
+            ' || \'{"ibkr_reconciled": {"U0000001": {"securities": "not a day"}, "x": 1}}\''
+        )
+    )
+    report = await sync(session, connection, tmp_path, [position(ETFA, "10")], Notifier())
+    assert report.mismatches == [WARNING_A]
+    stored = (await get_connection(session, connection.id)).config["ibkr_reconciled"]
+    assert stored == {"U0000001": {"securities": "2026-11-10"}}
+
+
+async def test_a_stored_day_without_a_report_of_its_kind_is_dropped(session, run, tmp_path) -> None:
+    # A stored securities day no reported position backs is neither checked again nor
+    # allowed to make this run's statement older.
+    connection = await _connection(run)
+    await session.execute(
+        text(
+            "update core.connections set config = config"
+            ' || \'{"ibkr_reconciled": {"U0000001": {"securities": "2026-11-20"}}}\''
+        )
+    )
+    report = await sync(session, connection, tmp_path, [position(ETFA, "10")], Notifier())
+    assert report.mismatches == [WARNING_A]
+    assert await warnings_of(session, connection) == [WARNING_A]
+    stored = (await get_connection(session, connection.id)).config["ibkr_reconciled"]
+    assert stored == {"U0000001": {"securities": "2026-11-10"}}
+
+
 async def test_other_warnings_survive(session, run, tmp_path) -> None:
     connection = await _connection(run)
     await run(set_warnings, connection.id, ["Sync layer: something else"])

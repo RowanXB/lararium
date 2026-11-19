@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -129,22 +129,57 @@ class Checked:
     # The differences at this run's own window end dates, which the owner is told of even
     # when a later day's check supersedes them.
     found: list[Mismatch] = field(default_factory=list[Mismatch])
+    # The stored reconciled days (check's `previous`) a reported snapshot of their kind
+    # backs, and the pairs whose stored day none backs, which are forgotten.
+    trusted: dict[tuple[str, Kind], date] = field(default_factory=dict[tuple[str, Kind], date])
+    dropped: set[tuple[str, Kind]] = field(default_factory=set[tuple[str, Kind]])
 
 
 def reconciled_days(connection: ConnectionRecord) -> dict[tuple[str, Kind], date]:
-    """The latest day each (account, kind) was reconciled at, from the connection's config."""
+    """The latest day each (account, kind) was reconciled at, from the connection's config.
+    An entry that is not a date is ignored (and logged by the key's name only)."""
     stored = connection.config.get(RECONCILED_KEY)
     result: dict[tuple[str, Kind], date] = {}
+    if stored is None:
+        return result
     if not isinstance(stored, dict):
+        logger.warning("ignoring the connection's %s: it is not an object", RECONCILED_KEY)
         return result
     for ibkr_id, days in stored.items():
         if not isinstance(days, dict):
+            logger.warning("ignoring an entry of the connection's %s", RECONCILED_KEY)
             continue
         for kind in KINDS:
             value = days.get(kind)
-            if isinstance(value, str):
+            if value is None:
+                continue
+            try:
+                if not isinstance(value, str):
+                    raise ValueError
                 result[(ibkr_id, kind)] = date.fromisoformat(value)
+            except ValueError:
+                logger.warning("ignoring an entry of the connection's %s", RECONCILED_KEY)
     return result
+
+
+def _of_kind(kind: Kind) -> ColumnElement[bool]:
+    i = models.Instrument
+    return i.kind == "fiat" if kind == "currencies" else i.kind != "fiat"
+
+
+async def _latest_reported(
+    session: AsyncSession, account_id: UUID, kind: Kind, on: date | None = None
+) -> date | None:
+    """The latest day the account has a reported snapshot of the kind (on `on`, when given)."""
+    s, i = models.BalanceSnapshot, models.Instrument
+    query = (
+        select(func.max(s.as_of_date))
+        .join(i, i.id == s.instrument_id)
+        .where(s.account_id == account_id, s.kind == "reported", _of_kind(kind))
+    )
+    if on is not None:
+        query = query.where(s.as_of_date == on)
+    return await session.scalar(query)
 
 
 async def check(
@@ -172,8 +207,18 @@ async def check(
             if present[kind]:
                 own[(ibkr_id, day)].add(kind)
                 reached[(ibkr_id, kind)] = max(day, reached.get((ibkr_id, kind), day))
-    again: defaultdict[tuple[str, date], set[Kind]] = defaultdict(set)
+    # A stored day is trusted only where a reported snapshot of its kind backs it.
+    trusted: dict[tuple[str, Kind], date] = {}
+    dropped: set[tuple[str, Kind]] = set()
     for (ibkr_id, kind), day in (previous or {}).items():
+        if ibkr_id not in accounts:
+            continue
+        if await _latest_reported(session, accounts[ibkr_id], kind, day) is None:
+            dropped.add((ibkr_id, kind))
+        else:
+            trusted[(ibkr_id, kind)] = day
+    again: defaultdict[tuple[str, date], set[Kind]] = defaultdict(set)
+    for (ibkr_id, kind), day in trusted.items():
         if (ibkr_id, kind) not in reached or reached[(ibkr_id, kind)] < day:
             again[(ibkr_id, day)].add(kind)
 
@@ -231,7 +276,7 @@ async def check(
     def ordered(found: Iterable[Mismatch]) -> list[Mismatch]:
         return sorted(found, key=lambda m: (m.ibkr_id, m.symbol, m.day))
 
-    return Checked(ordered(current), reconciled, ordered(latest_own.values()))
+    return Checked(ordered(current), reconciled, ordered(latest_own.values()), trusted, dropped)
 
 
 async def _notify(ctx: SyncContext, text: str) -> None:
@@ -247,17 +292,21 @@ async def replaceable(
     session: AsyncSession, accounts: Mapping[str, UUID], checked: Checked
 ) -> set[tuple[str, Kind]]:
     """The (account, kind) pairs whose warnings this run may replace: those it reconciled at
-    the account's latest stored report date. An older statement (uploaded late) must not
-    replace what the newest one says."""
-    s = models.BalanceSnapshot
+    the latest day of that kind, the latest reported snapshot of the kind or the trusted
+    stored reconciled day, whichever is later. An older statement (uploaded late) must not
+    replace what the newest one says, and one kind's later report does not make the other's
+    older."""
     result: set[tuple[str, Kind]] = set()
     for (ibkr_id, kind), day in checked.reconciled.items():
-        stored = await session.scalar(
-            select(func.max(s.as_of_date)).where(
-                s.account_id == accounts[ibkr_id], s.kind == "reported"
+        latest = [
+            d
+            for d in (
+                await _latest_reported(session, accounts[ibkr_id], kind),
+                checked.trusted.get((ibkr_id, kind)),
             )
-        )
-        if stored is None or day >= stored:
+            if d is not None
+        ]
+        if not latest or day >= max(latest):
             result.add((ibkr_id, kind))
     return result
 
@@ -309,14 +358,18 @@ async def publish(
     values: dict[str, JSONValue] = {}
     if kept != recorded:
         values[RECORD_KEY] = [dict(e) for e in kept]
-    days = reconciled_days(connection)
-    merged = dict(days)
+    merged = {
+        pair: day
+        for pair, day in reconciled_days(connection).items()
+        if pair not in checked.dropped
+    }
     for pair, day in checked.reconciled.items():
         merged[pair] = max(day, merged.get(pair, day))
-    if merged != days:
-        stored: dict[str, dict[str, JSONValue]] = {}
-        for (ibkr_id, kind), day in sorted(merged.items()):
-            stored.setdefault(ibkr_id, {})[kind] = day.isoformat()
-        values[RECONCILED_KEY] = {k: v for k, v in stored.items()}
+    by_account: dict[str, dict[str, JSONValue]] = {}
+    for (ibkr_id, kind), day in sorted(merged.items()):
+        by_account.setdefault(ibkr_id, {})[kind] = day.isoformat()
+    days: JSONValue = {ibkr_id: kinds for ibkr_id, kinds in by_account.items()}
+    if days != connection.config.get(RECONCILED_KEY, {}):
+        values[RECONCILED_KEY] = days
     if values:
         await update_config(ctx.command, connection.id, values)
