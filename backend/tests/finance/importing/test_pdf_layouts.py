@@ -1109,3 +1109,23 @@ def test_skipped_rows_count_towards_the_row_limit(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(FileFormatError, match="more than 4 rows"):
         _revolut(pending=[pending])
+
+
+def test_revolut_current_whole_amounts_in_a_currency_without_pence() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(
+        rows[2], rate=("Revolut Rate £1.00 = ¥190.50 (ECB rate* £1.00 = ¥191)", "¥3,000")
+    )
+
+    foreign = _rows(_revolut(pages=[rows]))[2]
+
+    assert (foreign.original_currency, foreign.original_amount) == ("JPY", Decimal("-3000"))
+    assert (foreign.fx_rate, foreign.fx_reference_rate) == (Decimal("190.50"), Decimal("191"))
+
+
+def test_revolut_current_refuses_a_whole_amount_in_a_currency_with_cents() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(rows[2], rate=("Revolut Rate £1.00 = $1.30 (ECB rate* £1.00 = $1.31)", "$20"))
+
+    with pytest.raises(FileFormatError, match="original amount is not an amount"):
+        _revolut(pages=[rows])

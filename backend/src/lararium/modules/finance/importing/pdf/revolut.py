@@ -63,7 +63,9 @@ _SYMBOLS = {
     "MX$": "MXN",
     "R$": "BRL",
 }
-_MONEY = re.compile(r"(?P<sign>-?)(?P<symbol>[^\d\s,.-]+)(?P<number>[\d,]+\.\d+)")
+# Currencies with no minor unit, whose amounts en-US prints whole ("¥1,000").
+_WHOLE = {"JPY", "KRW"}
+_MONEY = re.compile(r"(?P<sign>-?)(?P<symbol>[^\d\s,.-]+)(?P<number>\d[\d,]*(?:\.\d+)?)")
 _SHORT = r"[A-Z][a-z]{2} \d{1,2}, \d{4}"
 _LONG = r"[A-Z][a-z]+ \d{1,2}, \d{4}"
 _DAY = re.compile(_SHORT)
@@ -88,14 +90,22 @@ _ALIGN = Decimal(3)
 _RIGHT = Decimal(300)
 
 
+def _is_money(printed: str) -> bool:
+    """Whether a word is an amount: with a decimal point, or whole in a currency printed so."""
+    match = _MONEY.fullmatch(printed)
+    return match is not None and ("." in match["number"] or _SYMBOLS.get(match["symbol"]) in _WHOLE)
+
+
 def _money(printed: str, what: str) -> tuple[str, Decimal]:
-    """(currency, amount) of an amount as printed ("£1,234.50", "-£5.00", "$96.00")."""
+    """(currency, amount) of an amount as printed ("£1,234.50", "-£5.00", "$96.00", "¥1,000")."""
     match = _MONEY.fullmatch(printed)
     if match is None:
         raise FileFormatError(f"{what} is not an amount: {printed!r}")
     code = _SYMBOLS.get(match["symbol"])
     if code is None:
         raise FileFormatError(f"{what} is in a currency this layout doesn't know: {printed!r}")
+    if "." not in match["number"] and code not in _WHOLE:
+        raise FileFormatError(f"{what} is not an amount: {printed!r}")
     return code, amount(match["sign"] + match["number"], what)
 
 
@@ -260,10 +270,10 @@ def _content(page: list[list[Word]]) -> list[list[Word]]:
 
 def _summary_row(line: list[Word], section: _Section) -> bool:
     """A balance summary row: a label and four amounts (opening, out, in, closing)."""
-    if len(line) < 5 or _MONEY.fullmatch(line[-5].text):
+    if len(line) < 5 or _is_money(line[-5].text):
         return False
     printed = [word.text for word in line[-4:]]
-    if not all(_MONEY.fullmatch(value) for value in printed):
+    if not all(_is_money(value) for value in printed):
         return False
     what = f"the balance summary's {text(line[:-4])!r}"
     section.summary.append(
@@ -592,7 +602,7 @@ def _savings_header(first: list[list[Word]]) -> tuple[_SavingsHeader, int]:
             return header, n
         elif summary_start is not None and len(line) > 1:
             label = text(line[:-1])
-            if label in _TOTALS and _MONEY.fullmatch(line[-1].text):
+            if label in _TOTALS and _is_money(line[-1].text):
                 totals[label] = _money(line[-1].text, f"the balance summary's {label}")
                 last_total = n
     raise FileFormatError(
