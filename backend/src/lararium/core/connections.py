@@ -266,6 +266,13 @@ async def set_warnings(
     return await _update(ctx, connection_id, warnings=warnings)
 
 
+async def set_credential_expiry(
+    ctx: CommandContext, connection_id: UUID, expires_at: datetime | None
+) -> ConnectionRecord:
+    """When the connection's credential stops working (a reminder is due before it)."""
+    return await _update(ctx, connection_id, credential_expires_at=expires_at)
+
+
 async def update_config(
     ctx: CommandContext,
     connection_id: UUID,

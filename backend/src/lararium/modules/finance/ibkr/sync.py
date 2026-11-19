@@ -3,7 +3,9 @@ then normalise (normalize.py). Rows are stored as IBKR sent them, personal field
 nothing here logs or reports a row's values.
 """
 
+import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
@@ -103,11 +105,22 @@ def _filename(request: dict[str, JSONValue]) -> str:
     return f"ibkr-flex-{request.get('fd')}-{request.get('td')}.xml"
 
 
+# A statement is decoded in full in memory (a year of three accounts is about 10 MB), under the
+# api container's memory cap that everything the process serves shares: so it is parsed off the
+# event loop, but one at a time, as M2's imports are (staging._parse_alone).
+_PARSING = threading.Lock()
+
+
+def _parse_alone(body: bytes) -> Statement:
+    with _PARSING:
+        return parse_statement(body)
+
+
 async def _ingest(
     ctx: SyncContext, body: bytes, request: dict[str, JSONValue]
 ) -> tuple[IngestResult, Statement]:
     # Parsed first: a statement that is refused leaves no file behind.
-    statement = parse_statement(body)
+    statement = await asyncio.to_thread(_parse_alone, body)
     if ctx.documents is None:
         raise RuntimeError("no document store in the sync context")
     document = await store_document(
