@@ -1,7 +1,7 @@
 # M5 design: IBKR Flex
 
 - Date: 2026-11-18
-- Status: approved for planning (see §9); updated after the audit of the owner's real statements, 2026-11-18
+- Status: implemented on branch `feat/claude-ibkr-flex` (approved for planning, see §9; updated after the audit of the owner's real statements, 2026-11-18)
 - Builds on: `main` with M0–M4 merged, plus the M2 import PR (#12), which adds `core.documents`; migrations up to `0018`
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§6.3, §6.5, §6.6, §7.1, §7.3, §8, §9, §13 M5, §14)
 - Related: the M4 transfer-matching design (`docs/superpowers/specs/2026-11-15-transfer-matching-design.md`), whose engine pairs IBKR deposits and withdrawals; the M3 Monzo plan (`docs/superpowers/plans/2026-11-12-connectors-monzo.md`), whose connector this one follows.
@@ -294,12 +294,12 @@ Every row below is one connector transaction. Its postings on the IBKR account a
 - `proceeds` in the quote currency;
 - the commission, as above.
 
-**Rounding.** IBKR's `proceeds` is rounded to cents, so a trade's residual (quantity × `tradePrice` + `proceeds`) is normally at most half a cent, within the ledger's tolerance. If a rounded `tradePrice` (an FX rate, say) leaves more, the residual is posted as one more Unassigned posting in that currency (memo "rounding"), so the sync never fails on it. The cash posting is always IBKR's `proceeds`, and `tradePrice` stays the unit cost or price. (Builder-check call.)
+**Rounding.** IBKR's `proceeds` is rounded to cents, so a trade's residual (quantity × `tradePrice` + `proceeds`) is normally at most half a cent, within the ledger's tolerance. If a rounded `tradePrice` (an FX rate, say) leaves more, the residual is posted as one more Unassigned posting in that currency (memo "rounding"), but only up to |quantity| × half a unit of `tradePrice`'s last decimal place, plus the currency tolerance. Beyond that the sync fails, naming the record and not the amounts, because the difference is not rounding. The cash posting is always IBKR's `proceeds`, and `tradePrice` stays the unit cost or price. (Builder-check call.)
 
 **Cash transaction:**
 - `amount` in its currency, and the contra.
 - For type "Deposits/Withdrawals", the contra comes from `transfer_contra`, with `bank_transfer = true` and no counterparty identifier. This is the deposit that pairs with Monzo (§5.12).
-- **A movement between two IBKR accounts is posted once, and never as a bank transfer.** The audit (2026-11-18) shows internal movements only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions. So every "Deposits/Withdrawals" row is a movement with an outside bank. Every "Deposits/Withdrawals" row is posted. If IBKR ever listed one movement in both sections, it would be posted twice, and the reconciliation (§5.11) would show the difference.
+- **Every "Deposits/Withdrawals" row is posted; internal movements come from Transfers.** The audit (2026-11-18) shows movements between two IBKR accounts only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions, so every "Deposits/Withdrawals" row is a movement with an outside bank, and none is posted as a bank transfer between IBKR accounts. A movement IBKR ever listed in both sections would be posted twice, and the reconciliation (§5.11) would show the difference.
 - Every other type (dividends, withholding tax, broker interest, other fees, payment in lieu, commission adjustments) posts against Unassigned.
 
 **Corporate action:**
