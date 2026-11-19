@@ -905,6 +905,14 @@ export type ImportStatementOut = {
      */
     account_number: string | null;
     /**
+     * Account Opened On
+     */
+    account_opened_on: string | null;
+    /**
+     * Account Reference
+     */
+    account_reference: string | null;
+    /**
      * Account Type
      */
     account_type: string | null;
@@ -1185,7 +1193,7 @@ export type PdfProfileConfig = {
     /**
      * Layout
      */
-    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement';
+    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'tembo_statement';
     timezone?: TimezoneName | null;
 };
 

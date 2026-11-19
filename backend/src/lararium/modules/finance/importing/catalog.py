@@ -110,4 +110,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
         recommended=True,
     ),
+    CatalogEntry(
+        "Tembo",
+        "PDF statement",
+        PdfProfileConfig(format="pdf", layout="tembo_statement"),
+        recommended=True,
+    ),
 )

@@ -2,7 +2,7 @@
 REAL_ROOT=<dir>` (README, "Verifying against your real statements"). Skipped unless
 LARARIUM_REAL_ROOT is set, so `make check` and CI never run it.
 
-<dir> holds one folder per bank, its name starting HSBC, Lloy or BOC, each with one account's
+<dir> holds one folder per bank, its name starting HSBC, Lloy, BOC or Tembo, each with one account's
 files in any of the catalog's formats. In two orders (statements first, exports first) every
 file must commit with no error row, every statement's closing balance must hold on its own
 date, and rolling everything back, newest first, must be allowed and leave a zero balance.
@@ -42,7 +42,7 @@ ROOT = os.environ.get("LARARIUM_REAL_ROOT")
 pytestmark = pytest.mark.skipif(not ROOT, reason="set LARARIUM_REAL_ROOT (make real-check)")
 
 # A bank folder's name starts with one of these (compared case-insensitively).
-BANKS = {"hsbc": "HSBC UK", "lloy": "Lloyds", "boc": "BOC UK"}
+BANKS = {"hsbc": "HSBC UK", "lloy": "Lloyds", "boc": "BOC UK", "tembo": "Tembo"}
 PDF = "PDF statement"
 
 

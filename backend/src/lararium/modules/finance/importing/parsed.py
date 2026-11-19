@@ -91,6 +91,9 @@ class StatementAccount:
     # ", "), as the mailing block prints them.
     addressee: str | None = None
     address: str | None = None
+    # An identifier that isn't a number, as printed (Tembo's "ACC-…"); account_number holds
+    # digits only.
+    account_reference: str | None = None
 
     def __post_init__(self) -> None:
         _blank_as_absent(self)
@@ -185,6 +188,7 @@ class ParsedStatement:
     available_balance_date: date | None = None
     overdraft_limit: Decimal | None = None
     overdraft_limit_date: date | None = None
+    account_opened_on: date | None = None
     rates: list[StatementRate] = field(default_factory=list[StatementRate])
 
 

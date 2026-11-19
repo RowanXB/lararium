@@ -149,6 +149,8 @@ class StatementRecord:
     overdraft_limit_date: date | None
     available_balance: Decimal | None
     available_balance_date: date | None
+    account_reference: str | None
+    account_opened_on: date | None
     rates: list[StatementRate]
 
 
@@ -1761,6 +1763,8 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
         "overdraft_limit_date": statement.overdraft_limit_date,
         "available_balance": statement.available_balance,
         "available_balance_date": statement.available_balance_date,
+        "account_reference": account.account_reference,
+        "account_opened_on": statement.account_opened_on,
     }
     assert set(values) == set(_STATEMENT_FIELDS)
     if all(value is None for value in values.values()) and not statement.rates:

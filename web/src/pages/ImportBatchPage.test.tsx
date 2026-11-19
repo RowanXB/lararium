@@ -216,6 +216,8 @@ it("shows warnings, the statement summary and row details", async () => {
         overdraft_limit: null,
         overdraft_limit_date: null,
         statement_reference: null,
+        account_reference: null,
+        account_opened_on: null,
         rates: [],
       },
       rows: [
