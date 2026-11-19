@@ -41,7 +41,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
   # No published ports: only Caddy (web) reaches the api, over the compose network.
-  # Uploaded statements are kept in the `documents` volume; only the api mounts it.
+  # Uploaded statements are kept in the `documents` volume; the api and the worker mount it.
   api:
     build: ../backend
     networks: [app]
@@ -78,6 +78,9 @@ services:
     # ledger and commit. A job killed anyway is retried by the stalled-job task, but a killed
     # backfill can't be repeated outside the window, so the approval would be lost.
     stop_grace_period: 15m
+    # Fetched IBKR statements are kept as documents, in the volume the api uses.
+    volumes:
+      - documents:/var/lib/lararium/documents
     environment:
       LARARIUM_DATABASE_URL: postgresql+psycopg://lararium_backend:${LARARIUM_BACKEND_PASSWORD:?set LARARIUM_BACKEND_PASSWORD in infra/.env}@db:5432/lararium
       LARARIUM_AUTH_MODE: tailscale
@@ -88,6 +91,7 @@ services:
       LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
       LARARIUM_FEISHU_WEBHOOK_URL: ${LARARIUM_FEISHU_WEBHOOK_URL:-}
       LARARIUM_FEISHU_SECRET: ${LARARIUM_FEISHU_SECRET:-}
+      LARARIUM_DOCUMENT_DIR: /var/lib/lararium/documents
     depends_on:
       migrate: { condition: service_completed_successfully }
   # Webhook ingress, in the stack only with COMPOSE_PROFILES=webhook in infra/.env, so that
