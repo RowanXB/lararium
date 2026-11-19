@@ -376,7 +376,13 @@ async def disable_connection(
 
 
 def _expires_at(token_expires_on: date) -> datetime:
-    """The token works through its expiry day: it stops at the start of the next, in London."""
+    """The token works through its expiry day: it stops at the start of the next, in London.
+    A day already past is refused."""
+    if token_expires_on < datetime.now(LONDON).date():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"error": "expiry_in_past", "message": "the token's expiry date is in the past"},
+        )
     stops = datetime.combine(token_expires_on + timedelta(days=1), time(0), tzinfo=LONDON)
     return stops.astimezone(UTC)
 
@@ -427,11 +433,6 @@ async def update_ibkr_connection(
     """Replace the token, its expiry and the query id (a new token after the old one expired)."""
     settings = _settings(request)
     master_key = _require_master_key(settings)
-    if body.token_expires_on < datetime.now(LONDON).date():
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            {"error": "expiry_in_past", "message": "the token's expiry date is in the past"},
-        )
     expires_at = _expires_at(body.token_expires_on)
     args = body.model_dump(mode="json", exclude={"token"}) | {"connection_id": str(connection_id)}
     async with command_context(session, actor, "update_ibkr_connection", args) as ctx:
@@ -492,6 +493,13 @@ async def upload_ibkr_statement(
     connection = await get_connection(session, connection_id)
     if (refusal := _not_ibkr(connection)) is not None:
         raise refusal
+    if not connection.cursor:
+        # The first sync (queued when the connection was made) writes the same rows: an
+        # upload meanwhile would collide with it.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"error": "first_sync_pending", "message": "wait for the first sync to finish"},
+        )
     _statement_type(file)
     body = await read_upload(file, MAX_IBKR_UPLOAD_BYTES)
     filename = (file.filename or "statement.xml").replace("\\", "/").rsplit("/", 1)[-1][:200]

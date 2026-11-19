@@ -86,6 +86,16 @@ async def _logged(session: AsyncSession) -> str:
     return logged or ""
 
 
+async def _synced(api: httpx.AsyncClient, session: AsyncSession) -> dict[str, Any]:
+    """A connection whose first sync has finished: only then does it take an upload."""
+    created = await _create(api)
+    await session.execute(
+        text("update core.connections set cursor = cast(:c as jsonb) where id = :i"),
+        {"c": '{"history_from": "2025-11-18", "fetched_to": "2026-11-17"}', "i": created["id"]},
+    )
+    return created
+
+
 def _queued(queue) -> list[str]:
     return [job["task_name"] for job in queue.jobs.values()]
 
@@ -289,7 +299,7 @@ async def _upload(
 
 
 async def test_upload_ingests_and_normalizes(api, session) -> None:
-    created = await _create(api)
+    created = await _synced(api, session)
 
     response = await _upload(api, created["id"], _isa_statement())
 
@@ -306,7 +316,7 @@ async def test_upload_ingests_and_normalizes(api, session) -> None:
 
 
 async def test_upload_twice_writes_nothing(api, session) -> None:
-    created = await _create(api)
+    created = await _synced(api, session)
     content = _isa_statement()
     await _upload(api, created["id"], content)
 
@@ -324,8 +334,8 @@ async def test_upload_twice_writes_nothing(api, session) -> None:
     assert await counts() == before
 
 
-async def test_upload_too_large_413(api, monkeypatch) -> None:
-    created = await _create(api)
+async def test_upload_too_large_413(api, session, monkeypatch) -> None:
+    created = await _synced(api, session)
     monkeypatch.setattr(connections_api, "MAX_IBKR_UPLOAD_BYTES", 1024)
 
     response = await _upload(api, created["id"], b"<x>" + b" " * 2048 + b"</x>")
@@ -338,8 +348,8 @@ async def test_upload_limit_is_64_mib() -> None:
     assert connections_api.MAX_IBKR_UPLOAD_BYTES == 64 * 1024 * 1024
 
 
-async def test_upload_rejects_other_content_type_415(api) -> None:
-    created = await _create(api)
+async def test_upload_rejects_other_content_type_415(api, session) -> None:
+    created = await _synced(api, session)
 
     response = await _upload(api, created["id"], _isa_statement(), "application/pdf")
 
@@ -347,7 +357,7 @@ async def test_upload_rejects_other_content_type_415(api) -> None:
 
 
 async def test_upload_bad_statement_422_names_the_field_only(api, session) -> None:
-    created = await _create(api)
+    created = await _synced(api, session)
     bad = build_statement(
         [ISA],
         period=(date(2026, 11, 1), date(2026, 11, 10)),
@@ -361,8 +371,8 @@ async def test_upload_bad_statement_422_names_the_field_only(api, session) -> No
     assert await session.scalar(text("select count(*) from finance.accounts")) == 0
 
 
-async def test_upload_not_xml_422(api) -> None:
-    created = await _create(api)
+async def test_upload_not_xml_422(api, session) -> None:
+    created = await _synced(api, session)
 
     response = await _upload(api, created["id"], b"hello")
 
@@ -383,7 +393,7 @@ async def test_upload_to_non_ibkr_connection_422(api, run) -> None:
 
 @pytest.mark.parametrize("content_type", ["application/octet-stream", ""])
 async def test_upload_accepts_generic_type_for_xml_name(api, session, content_type) -> None:
-    created = await _create(api)
+    created = await _synced(api, session)
 
     response = await _upload(api, created["id"], _isa_statement(), content_type)
 
@@ -392,8 +402,8 @@ async def test_upload_accepts_generic_type_for_xml_name(api, session, content_ty
 
 
 @pytest.mark.parametrize("content_type", ["application/octet-stream", ""])
-async def test_upload_generic_type_needs_xml_name_415(api, content_type) -> None:
-    created = await _create(api)
+async def test_upload_generic_type_needs_xml_name_415(api, session, content_type) -> None:
+    created = await _synced(api, session)
 
     response = await api.post(
         f"/api/v1/connections/{created['id']}/ibkr-statement",
@@ -404,8 +414,8 @@ async def test_upload_generic_type_needs_xml_name_415(api, content_type) -> None
     assert response.status_code == 415
 
 
-async def test_upload_accepts_uppercase_xml_name(api) -> None:
-    created = await _create(api)
+async def test_upload_accepts_uppercase_xml_name(api, session) -> None:
+    created = await _synced(api, session)
 
     response = await api.post(
         f"/api/v1/connections/{created['id']}/ibkr-statement",
@@ -423,7 +433,7 @@ async def test_upload_pairs_transfers(api, session) -> None:
 
     from ..finance.ibkr.test_normalize_records import ETFA
 
-    created = await _create(api)
+    created = await _synced(api, session)
     day = date(2026, 11, 10)
     gia = AccountSpec("U0000001", date_opened=day)
     other = AccountSpec("U0000002", date_opened=day)
@@ -460,7 +470,7 @@ async def test_upload_pairs_transfers(api, session) -> None:
 
 
 async def test_upload_to_disabled_connection_keeps_it_disabled(api, session, run) -> None:
-    created = await _create(api)
+    created = await _synced(api, session)
     await run(set_status, created["id"], "disabled")
 
     response = await _upload(api, created["id"], _isa_statement())
@@ -508,3 +518,26 @@ async def test_update_checks_status_under_the_row_lock(api, session, run, monkey
     assert response.status_code == 422
     stored = await load_credential(session, KEY, created["id"], "flex_token")
     assert stored is not None and stored.reveal() == TOKEN
+
+
+async def test_upload_waits_for_the_first_sync_409(api, session) -> None:
+    # Until the first sync has finished, the worker may be writing the same rows.
+    created = await _create(api)
+
+    response = await _upload(api, created["id"], _isa_statement())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["message"] == "wait for the first sync to finish"
+    assert await session.scalar(text("select count(*) from core.raw_records")) == 0
+
+
+async def test_create_rejects_expiry_in_past_422(api, session) -> None:
+    response = await api.post(
+        "/api/v1/connections/ibkr",
+        json=BODY | {"token_expires_on": "2020-01-01"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["message"] == "the token's expiry date is in the past"
+    assert await session.scalar(text("select count(*) from core.connections")) == 0

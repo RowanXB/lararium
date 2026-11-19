@@ -197,15 +197,17 @@ async def notify_expiry(ctx: SyncContext) -> None:
     now = datetime.now(UTC)
     if expires_at - now > timedelta(days=REMIND_DAYS):
         return
-    day = expires_at.astimezone(LONDON).date().isoformat()
+    # expires_at is the start of the day after the last one the token works on, in London.
+    day = (expires_at - timedelta(microseconds=1)).astimezone(LONDON).date().isoformat()
     verb = "expires" if expires_at > now else "expired"
     try:
         await ctx.notifier.send(
             f"{connection.display_name}: the IBKR Flex token {verb} on {day}."
             " Create a new token in Client Portal and update the connection."
         )
-    except Exception:
-        logger.warning("sending the IBKR token reminder failed", exc_info=True)
+    except Exception as error:
+        # The class only: the message could carry the notifier's webhook URL.
+        logger.warning("sending the IBKR token reminder failed (%s)", type(error).__name__)
         return
     args = {"connection_id": str(connection.id)}
     async with (

@@ -1,7 +1,7 @@
 import base64
 import json
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 
 import httpx
@@ -28,6 +28,7 @@ from lararium.modules.finance.ibkr import sync as ibkr_sync
 from lararium.modules.finance.ibkr.client import FlexClient
 from lararium.modules.finance.ibkr.parser import FlexDataError, parse_statement
 from lararium.modules.finance.ibkr.sync import (
+    LONDON,
     IbkrConnector,
     _opened,
     due,
@@ -390,6 +391,7 @@ async def test_a_failing_older_window_leaves_nothing(session, run, tmp_path, mon
     assert after.cursor is None
     assert after.status == "failing"
 
+
 def _serving(statement_for):
     """A Flex Web Service whose SendRequest succeeds and whose GetStatement answers with
     statement_for(the window's first day)."""
@@ -476,3 +478,29 @@ async def test_a_response_without_statements_fails_and_keeps_the_cursor(
     assert after.cursor == cursor
     assert after.last_error == "the Flex query returned no statements: select every account"
 
+
+async def test_the_reminder_names_the_last_day_the_token_works(session, run, tmp_path) -> None:
+    last_day = datetime.now(LONDON).date() + timedelta(days=10)
+    # As the API stores it: the start of the next day in London.
+    expires_at = datetime.combine(last_day + timedelta(days=1), time(0), tzinfo=LONDON)
+    cursor: JSONValue = {"fetched_at": datetime.now(UTC).isoformat()}
+    connection = await _connection(run, cursor=cursor, expires_at=expires_at.astimezone(UTC))
+    notifier = RecordingNotifier()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
+        await IbkrConnector().sync(await _context(session, connection, http, tmp_path, notifier))
+    [message] = notifier.messages
+    assert f"expires on {last_day.isoformat()}." in message
+
+
+async def test_a_failing_reminder_logs_the_class_only(session, run, tmp_path, caplog) -> None:
+    class Failing:
+        async def send(self, text: str) -> None:
+            raise RuntimeError("https://hooks.example.test/SECRET-TOKEN")
+
+    expires_at = datetime.now(UTC) + timedelta(days=10)
+    cursor: JSONValue = {"fetched_at": datetime.now(UTC).isoformat()}
+    connection = await _connection(run, cursor=cursor, expires_at=expires_at)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
+        await IbkrConnector().sync(await _context(session, connection, http, tmp_path, Failing()))
+    assert "SECRET-TOKEN" not in caplog.text
+    assert "RuntimeError" in caplog.text
