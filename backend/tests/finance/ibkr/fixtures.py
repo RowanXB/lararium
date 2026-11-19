@@ -80,6 +80,7 @@ def _defaults(section: str, account: AccountSpec, end: date) -> dict[str, str]:
         "CashReportCurrency": {
             "fromDate": _ymd(end),
             "toDate": _ymd(end),
+            "startingCash": "0",
             "endingCash": "100",
             "levelOfDetail": "Currency",
         },

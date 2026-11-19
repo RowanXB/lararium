@@ -182,18 +182,44 @@ async def _connection_records(ctx: SyncContext) -> list[RawRecord]:
     return await get_raw_records(ctx.command.session, list(ids))
 
 
+async def _fetched_accounts(ctx: SyncContext) -> set[str]:
+    """The accounts the Flex Web Service fetches for the connection."""
+    r = core_models.RawRecord
+    rows = await ctx.command.session.scalars(
+        select(r.content["account"].astext)
+        .distinct()
+        .where(r.connection_id == ctx.connection.id, ~r.request.has_key("upload"))
+    )
+    return {account for account in rows if account}
+
+
+def _uploaded_over_fetched(record: RawRecord, fetched: set[str]) -> bool:
+    """An uploaded row of an account the Flex Web Service fetches. The upload is for the
+    closed ISA, which it can't fetch (design 5.5): the file's rows of the other accounts
+    repeat fetched ones, and an older copy among them must not undo what was fetched since
+    (a correction, the account's details, the opening)."""
+    content = record.content
+    return (
+        "upload" in record.request
+        and isinstance(content, dict)
+        and str(content.get("account")) in fetched
+    )
+
+
 async def _items(ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool) -> list[Item]:
     """This run's rows, one per key; with `replay`, also the latest copy of every other row
-    the connection holds.
+    the connection holds. Uploaded rows of accounts the Flex Web Service fetches are left
+    out (_uploaded_over_fetched).
 
     The same transaction id with different attributes in one run fails it, naming the
     section, the transaction id and the account's last four digits (Decision 9): a row
     repeated unchanged (by overlapping windows, under another period) is one row.
     """
+    fetched = await _fetched_accounts(ctx)
     given = [
         item
-        for item in map(_item, await get_raw_records(ctx.command.session, raw_record_ids))
-        if item is not None
+        for record in await get_raw_records(ctx.command.session, raw_record_ids)
+        if not _uploaded_over_fetched(record, fetched) and (item := _item(record)) is not None
     ]
     chosen: dict[tuple[str, ...], Item] = {}
     for item in sorted(given, key=lambda i: (i.fetched_at, i.record_id)):
@@ -205,6 +231,8 @@ async def _items(ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool)
     if replay:
         given_keys = set(chosen)
         for record in await _connection_records(ctx):
+            if _uploaded_over_fetched(record, fetched):
+                continue
             item = _item(record)
             if item is not None and (key := _key(item)) not in given_keys:
                 chosen[key] = item  # oldest first, so the latest copy stays

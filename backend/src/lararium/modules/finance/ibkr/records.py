@@ -357,7 +357,7 @@ async def transfer(run: Run, item: Item) -> None:
     account_id = run.account_id(item)
     if item.text("assetCategory") == _CASH:
         instrument_id = (await run.currency(item.text("currency"))).id
-        amount = item.number("cashTransfer")
+        amount = item.amount("cashTransfer")
     else:
         found = await run.instrument(item)
         if found is None:
@@ -402,7 +402,8 @@ async def _void(run: Run, key: str) -> None:
         )
     )
     if posted is not None:
-        await void_transaction(run.command, posted)
+        # IBKR's data decided it, whoever uploaded the file: a later copy may post it again.
+        await void_transaction(run.command, posted, voided_by="connector")
 
 
 async def _unposted(run: Run, item: Item, section: str) -> None:
@@ -564,7 +565,7 @@ async def openings(
         for code, row in sorted(first_report.items()):
             currency = await run.currency(code)
             held = await _held(run, account_id, currency.id, before=row.day("fromDate"))
-            targets[currency.id] = row.number("startingCash") - held
+            targets[currency.id] = row.amount("startingCash") - held
 
         if (ibkr_id, POSITIONS_SECTION) not in sections:
             # A window without the section says nothing about positions (an empty one says
@@ -574,11 +575,12 @@ async def openings(
         else:
             positions_known = True
         positions = [r for r in rows if r.record_type == open_position and is_summary(r)]
-        # The last day positions were reported for (a complete list of that day), else the
-        # window's end, when the window reported none.
-        last = max(
+        # The earliest day positions were reported for (a complete list of that day), else
+        # the first statement's end, when the window reported none: a later day could fold a
+        # difference no postings explain into the opening, and hide it from reconciliation.
+        last = min(
             (r.day("reportDate") for r in positions),
-            default=max(row.period_to for row in rows),
+            default=min(row.period_to for row in rows),
         )
         reported: defaultdict[UUID, Decimal] = defaultdict(Decimal)
         for row in positions:

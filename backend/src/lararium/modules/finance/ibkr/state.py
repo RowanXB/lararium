@@ -68,6 +68,13 @@ class Item:
         value = self.text(name)
         return tables.parse_decimal(value, f"{self.section}.{name}") if value else Decimal(0)
 
+    def amount(self, name: str) -> Decimal:
+        """A number the row must print, where 0 would void or zero an entry: one left out
+        (not selected in the query) or blank fails the run, naming the field."""
+        if not self.text(name):
+            raise FlexDataError(f"{self.section}.{name} is missing: select it in the Flex query")
+        return self.number(name)
+
     def day(self, name: str) -> date:
         return tables.parse_date(self.text(name), f"{self.section}.{name}")
 

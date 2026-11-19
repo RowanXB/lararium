@@ -359,7 +359,7 @@ Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请�
 2. 运行 Flex query：Run，格式选 XML，时间段覆盖该已关闭账户的存续期。IBKR 可能在后台生成
    （Batch Flex Queries）；生成后下载。
 3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
-   上传这个 XML（最大 64 MiB）。
+   上传这个 XML（最大 64 MiB）。文件里 Flex Web Service 能抓取的账户的行会被跳过，它们以同步为准。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 

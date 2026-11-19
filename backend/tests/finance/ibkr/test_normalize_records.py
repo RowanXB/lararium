@@ -62,9 +62,9 @@ def _refuse(request: httpx.Request) -> httpx.Response:
     raise AssertionError("no HTTP in this test")
 
 
-async def _ctx(session, connection, tmp_path, http) -> SyncContext:
+async def _ctx(session, connection, tmp_path, http, actor=CONNECTOR) -> SyncContext:
     return SyncContext(
-        command=CommandContext(session, CONNECTOR, uuid.uuid4()),
+        command=CommandContext(session, actor, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),
         master_key=bytes(32),
@@ -85,16 +85,17 @@ async def _sync(
     period=(DAY, DAY),
     by_day=False,
     empty_sections=(),
+    request: dict[str, JSONValue] | None = None,
+    actor=CONNECTOR,
 ) -> tuple[NormalizeReport, SyncContext]:
     """Ingest a synthetic statement and normalize it, as a sync does."""
     body = build_statement(
         list(accounts), period=period, rows=rows, by_day=by_day, empty_sections=empty_sections
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
-        ctx = await _ctx(session, connection, tmp_path, http)
-        request: dict[str, JSONValue] = {"upload": "x.xml"}
-        ingested = await ingest_statement(ctx, body, request)
-        ctx = await _ctx(session, connection, tmp_path, http)
+        ctx = await _ctx(session, connection, tmp_path, http, actor)
+        ingested = await ingest_statement(ctx, body, request or {"upload": "x.xml"})
+        ctx = await _ctx(session, connection, tmp_path, http, actor)
         report = await normalize(ctx, ingested.raw_record_ids, ingested.flagged, ingested.sections)
         return report, ctx
 
@@ -1170,3 +1171,108 @@ async def test_a_row_corrected_to_nothing_voids_its_entry(session, run, tmp_path
     assert report.flagged == {"CashTransaction.unposted"}
     assert await _live_cash(session, "GBP") == Decimal("0")
     assert (await _transaction(session, "cash:U0000001:8000001")).status == "void"
+
+
+FETCHED: dict[str, JSONValue] = {"query_id": "1000001", "fd": "2026-11-10", "td": "2026-11-10"}
+
+
+async def test_an_upload_leaves_fetched_accounts_alone(session, run, tmp_path) -> None:
+    """The upload is for an account the Flex Web Service can't fetch: its rows of the
+    fetched ones are older copies at best, and must not undo a correction fetched since."""
+    connection = await _connection(run)
+    corrected = {"transactionID": "8000001", "amount": "90"}
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        [RowSpec("CashTransaction", "U0000001", **corrected)],
+        request=FETCHED,
+    )
+    closed = AccountSpec("U0000003", date_opened=DAY, date_closed=DAY)
+    rows = [
+        RowSpec("CashTransaction", "U0000001", transactionID="8000001", amount="100"),
+        RowSpec("CashTransaction", "U0000003", transactionID="8000003", amount="5"),
+    ]
+    await _sync(session, connection, tmp_path, rows, accounts=(GIA, closed))
+    assert await _live_cash(session, "GBP") == Decimal("90")
+    assert await _external_ids(session) == ["cash:U0000001:8000001", "cash:U0000003:8000003"]
+
+
+async def test_an_uploaded_void_is_ibkrs_so_a_later_copy_posts_again(
+    session, run, tmp_path
+) -> None:
+    owner = Actor("user", "owner")
+    connection = await _connection(run)
+    row = {"transactionID": "8000001"}
+    for amount in ("100", "0", "80"):
+        await _sync(
+            session,
+            connection,
+            tmp_path,
+            [RowSpec("CashTransaction", "U0000001", **row, amount=amount)],
+            actor=owner,
+        )
+    assert await _live_cash(session, "GBP") == Decimal("80")
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "rows"),
+    [
+        (
+            "Transfer",
+            "cashTransfer",
+            lambda **a: [
+                RowSpec(
+                    "Transfer",
+                    "U0000001",
+                    assetCategory="CASH",
+                    transactionID="6000001",
+                    quantity="0",
+                    account="U0000002",
+                    **a,
+                )
+            ],
+        ),
+        (
+            "CashReportCurrency",
+            "startingCash",
+            lambda **a: [RowSpec("CashReportCurrency", "U0000001", endingCash="100", **a)],
+        ),
+    ],
+)
+async def test_an_amount_left_out_fails_and_keeps_the_entry(
+    session, run, tmp_path, section, field, rows
+) -> None:
+    """Read as 0, a field not selected in the query would void a transfer or the opening."""
+    connection = await _connection(run)
+    older = (AccountSpec("U0000001"),)  # opened before the window: it gets an opening
+    await _sync(session, connection, tmp_path, rows(**{field: "100"}), accounts=older)
+    assert await _live_cash(session, "GBP") == Decimal("100")
+    with pytest.raises(FlexDataError, match=f"^{section}.{field} is missing"):
+        await _sync(session, connection, tmp_path, rows(**{field: None}), accounts=older)
+    assert await _live_cash(session, "GBP") == Decimal("100")
+
+
+async def test_opening_takes_the_earliest_positions_so_later_differences_stay(
+    session, run, tmp_path
+) -> None:
+    """IBKR reports 10, then 12 with no trade between: the opening is the 10 held before
+    the history, and the 2 a reconciliation difference, also when all of it is normalized
+    in one run (a replay)."""
+    days = [DAY + timedelta(days=n) for n in range(2)]
+    connection = await _connection(run)
+    rows = [
+        RowSpec("OpenPosition", "U0000001", day=days[0], **ETFA, position="10"),
+        RowSpec("OpenPosition", "U0000001", day=days[1], **ETFA, position="12"),
+    ]
+    report, _ = await _sync(
+        session,
+        connection,
+        tmp_path,
+        rows,
+        accounts=(AccountSpec("U0000001"),),
+        period=(days[0], days[1]),
+        by_day=True,
+    )
+    assert await _openings(session) == [(days[0] - timedelta(days=1), "ETFA", Decimal("10"))]
+    assert [m for m in report.mismatches if "ETFA" in m]
