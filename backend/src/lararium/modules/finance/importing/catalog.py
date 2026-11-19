@@ -6,9 +6,11 @@ information-complete format is the recommended one.
 
 from dataclasses import dataclass
 
+from lararium.modules.finance.importing.pdf import lemfi
 from lararium.modules.finance.importing.profiles import (
     AmountFormat,
     CsvColumns,
+    CsvExtract,
     CsvProfileConfig,
     OfxProfileConfig,
     PdfProfileConfig,
@@ -109,5 +111,32 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "PDF statement",
         PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
         recommended=True,
+    ),
+    # One layout and one CSV profile serve both the GBP account and the savings account.
+    CatalogEntry(
+        "LemFi",
+        "PDF statement",
+        PdfProfileConfig(format="pdf", layout="lemfi_statement"),
+        recommended=True,
+    ),
+    CatalogEntry(
+        "LemFi",
+        "CSV",
+        CsvProfileConfig(
+            format="csv",
+            columns=CsvColumns(
+                date="Date",
+                description=["Description"],
+                inflow="Money in (GBP)",
+                outflow="Money out (GBP)",
+                balance="Balance (GBP)",
+            ),
+            date_format="%d %b, %Y %H:%M",
+            amount_format=_GROUPED,
+            extract=[
+                CsvExtract(column="Description", patterns=lemfi.DESCRIPTION_PATTERNS),
+                CsvExtract(column="Details", patterns=lemfi.DETAILS_PATTERNS),
+            ],
+        ),
     ),
 )

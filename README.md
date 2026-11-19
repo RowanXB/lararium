@@ -437,11 +437,12 @@ because their snapshots anchor the balance.
 **Everything the file says is stored.** Each row keeps its date and value date, payee and memo,
 cheque number, the bank's type code, counterparty name, sort code, account number and payment
 reference, and further fields where a statement prints them (payment kind, bank reference,
-purpose code, remittance text, counterparty bank), each in its own column, plus the whole source
-row. Each statement keeps its period, opening and closing balance, money in and out, payment
+purpose code, remittance text, counterparty bank, the last digits of a masked counterparty
+account), each in its own column, plus the whole source row. Each statement keeps its period,
+opening and closing balance, money in and out, interest paid when it totals that apart, payment
 counts, reference number and date, the account as printed (type, name, sort code, account
-number, IBAN, BIC, customer number, branch), the arranged overdraft limit and its interest rate
-table. The account a file names must agree with the earlier imports into the same ledger
+number, IBAN, BIC, customer number, branch, the bank holding it), the arranged overdraft limit
+and its interest rates (with the days a rate applies on and how often it pays, when printed). The account a file names must agree with the earlier imports into the same ledger
 account, or the upload is refused (the message shows only the last four digits).
 
 **Imports and transfers.** Committing a statement registers the sort code and account number it
@@ -476,11 +477,22 @@ for each bank use the recommended one, which carries the most information.
 | Lloyds | CSV | yes |
 | Lloyds | PDF statement, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
+| LemFi | PDF statement (GBP account and savings) | yes |
+| LemFi | CSV (GBP account and savings) | |
+
+LemFi's PDF carries everything its CSV does (the same rows, with each row's time and its
+payment details) and more: the statement period, opening and closing balance, money in and out,
+the savings account's interest, the account's IBAN, sort code and bank, and the savings rate.
+A file of a period without transactions (LemFi exports one for an empty month) is refused as
+empty: there is nothing to import.
 
 A PDF statement is read by a layout written for that bank, which checks itself: the summary
 (opening and closing balance, money in and out, payment counts) must equal the rows, every
 printed balance must follow from the amounts, every row must have exactly one amount, a date
-inside the statement period and a type code, and every word in the table must belong to a row.
+inside the statement period and a type code (where the bank prints them; LemFi doesn't), and
+every word in the table must belong to a row. LemFi's money in and out totals may each be a
+penny below their rows' sum (LemFi cuts them down to the penny); the closing balance must still
+follow from the rows exactly.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
@@ -511,9 +523,16 @@ by amount and date (below).
   `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
   `counterparty_account_number`, `reference` (the payment reference), and the statement's own
   `account_sort_code` and `account_number`.
+- **`extract`** reads typed fields out of a column that holds several:
+  `[{"column": "Details", "patterns": ["<regex>", ...]}]`. The first pattern that matches a
+  non-empty cell in full fills the fields its named groups name (`payee`, `memo`,
+  `check_number`, `counterparty_name`, `counterparty_sort_code`, `counterparty_account_number`,
+  `counterparty_account_ending`, `counterparty_bank`, `reference`); a cell no pattern matches
+  makes the row an error. A field comes from one place: a mapped column or one extract.
 - **`ofx`**: `sign`.
 - **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
-- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement` or `boc_uk_statement`.
+- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement` or
+  `lemfi_statement`.
 
 **Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
 one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
@@ -524,7 +543,8 @@ purchases as positive numbers needs `"sign": "outflow_positive"`.
 
 **Duplicates.** A row is a duplicate when a committed row of the same account has the same key:
 its external ID (an OFX `FITID`, or a mapped `external_id` column) when it has one; otherwise its
-date, amount, currency, description and running balance; otherwise those without the balance
+date (and time of day, when the file gives one), amount, currency, description and running
+balance; otherwise those without the balance
 plus how many identical rows come before it in the same file, so two real identical purchases on
 one day are both imported, and both are duplicates when the file comes again. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
@@ -541,7 +561,8 @@ pick GBP at upload, and import into a manual `transactions` account to try the f
 
 The tests use synthetic files. To check that your own statements still import correctly, for
 example after changing the import code, put each bank's files in a folder of its own, named
-starting `HSBC`, `Lloy` (Lloyds) or `BOC`, one account per folder, all under one directory, and
+starting `HSBC`, `Lloy` (Lloyds), `BOC` or `LemF` (LemFi), one account per folder (LemFi's GBP
+and savings accounts each get one), all under one directory, and
 run:
 
 ```bash

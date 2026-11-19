@@ -585,6 +585,192 @@ def boc_pdf(statement: BocStatement) -> bytes:
     return pdf.finish()
 
 
+# LemFi ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LemfiRow:
+    date: str  # "30 May, 2027"
+    description: tuple[str, ...]  # its lines, as wrapped
+    details: tuple[str, ...] = ()  # printed smaller, under the description
+    paid_out: str | None = None
+    paid_in: str | None = None
+    time: str | None = "13:28"
+    balance: str | None = None  # None: the running balance
+
+
+@dataclass
+class LemfiStatement:
+    pages: list[list[LemfiRow]]
+    savings: bool = False
+    opening: str = "0.00"
+    period: str = "01 May, 2027 - 31 May, 2027"
+    # Overrides of the summary's figures, by label ("Money in": "12.34").
+    summary: dict[str, str] = field(default_factory=dict[str, str])
+    iban: str = "GB99EXAM40123412345678"
+    sort_code: str = "401234"
+    bank: str = "Example Bank"
+    rate: str = (
+        "4.10% AER (4.02% Gross, paid monthly) from 02 May 2027 to 29 October 2027. Interest "
+        "statements are provided monthly and yearly."
+    )
+    # The last row of each page but the last prints its time and further lines on the next.
+    carry_over: bool = False
+    extra: list[Extra] = field(default_factory=list[Extra])
+
+
+_LEMFI_FONT, _LEMFI_BOLD = "Helvetica", "Helvetica-Bold"
+_LEMFI_OUT, _LEMFI_IN, _LEMFI_BALANCE = 357.0, 460.0, 563.0
+
+
+def _lemfi_title(pdf: _Pdf, statement: LemfiStatement) -> None:
+    title = "Savings statement" if statement.savings else "GBP Statement"
+    pdf.text(563.0, 37.0, title, size=20, font=_LEMFI_BOLD, right=True)
+    pdf.text(563.0, 62.4, "Generated on 19 Jun, 2027", size=10, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_header(pdf: _Pdf, top: float) -> None:
+    pdf.text(32.0, top, "DATE", size=10, font=_LEMFI_BOLD)
+    pdf.text(102.0, top, "DESCRIPTION", size=10, font=_LEMFI_BOLD)
+    for x, label, right in (
+        (269.8, "MONEY OUT", _LEMFI_OUT),
+        (383.4, "MONEY IN", _LEMFI_IN),
+        (480.0, "BALANCE", _LEMFI_BALANCE),
+    ):
+        pdf.text(x, top, label, size=10, font=_LEMFI_BOLD)
+        pdf.text(right, top + 0.7, "(GBP)", size=9, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_footer(pdf: _Pdf, number: int, total: int) -> None:
+    pdf.text(32.0, 798.4, "© 2027 LemFi. All rights reserved.", size=10, font=_LEMFI_FONT)
+    pdf.text(563.0, 798.3, f"Page {number} of {total}", size=10, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_lines(row: LemfiRow) -> list[tuple[float, str, float]]:
+    """A row's lines below its first: (offset from the row's top, text, size)."""
+    lines = [(16.0 * n, line, 10.0) for n, line in enumerate(row.description[1:], start=1)]
+    below = 16.0 * len(row.description) - 1.3
+    lines += [(below + 12.6 * n, line, 9.0) for n, line in enumerate(row.details)]
+    return lines
+
+
+def _wrapped(value: str, width: int) -> list[str]:
+    lines: list[str] = []
+    for word in value.split():
+        if lines and len(lines[-1]) + len(word) < width:
+            lines[-1] += f" {word}"
+        else:
+            lines.append(word)
+    return lines
+
+
+def lemfi_pdf(statement: LemfiStatement) -> bytes:
+    pdf = _Pdf(595.28, 841.88)
+    rows = [row for page in statement.pages for row in page]
+    opening = _plain(statement.opening)
+    interest = [_plain(r.paid_in) for r in rows if r.paid_in and "Interest" in r.description[0]]
+    paid_in = [_plain(r.paid_in) for r in rows if r.paid_in and "Interest" not in r.description[0]]
+    paid_out = [_plain(row.paid_out) for row in rows if row.paid_out]
+    total_in, total_out = sum(paid_in, Decimal(0)), sum(paid_out, Decimal(0))
+    closing = opening + total_in + sum(interest, Decimal(0)) - total_out
+    labels = {
+        "Opening balance": _money(opening),
+        "Money out": _money(total_out),
+        "Money in": _money(total_in),
+    }
+    if statement.savings:
+        labels["Interest accrued"] = _money(sum(interest, Decimal(0)))
+    labels |= {"Closing balance": _money(closing)} | statement.summary
+    info_pages = 1 if statement.savings else 0
+    total = len(statement.pages) + info_pages
+
+    _lemfi_title(pdf, statement)
+    pdf.text(32.0, 123.8, "A Example", size=16, font=_LEMFI_BOLD)
+    for n, line in enumerate(("1 Example Street,Exampletown,", "Exampleshire", "EX1 2MP")):
+        pdf.text(32.0, 151.3 + 15.6 * n, line, size=12, font=_LEMFI_FONT)
+    if not statement.savings:
+        for top, label, value in (
+            (122.6, ("Account", "number"), statement.iban),
+            (157.8, ("Bank", "name"), statement.bank),
+            (193.0, ("Sort code",), statement.sort_code),
+        ):
+            for n, part in enumerate(label):
+                pdf.text(331.2, top + 15.6 * n, part, size=12, font=_LEMFI_BOLD)
+            pdf.text(400.5, top, value, size=12, font=_LEMFI_FONT)
+    pdf.text(32.0, 239.0, f"Statement period {statement.period}", size=16, font=_LEMFI_BOLD)
+    step = 530.8 / len(labels)
+    for n, (label, value) in enumerate(labels.items()):
+        x = 32.0 + step * n
+        pdf.text(x, 295.5, label, size=12, font=_LEMFI_FONT)
+        # A long figure wraps below its currency.
+        if len(value) >= 9:
+            pdf.text(x, 315.9, "GBP", size=14, font=_LEMFI_BOLD)
+            pdf.text(x, 334.0, value, size=14, font=_LEMFI_BOLD)
+        else:
+            pdf.text(x, 315.9, f"GBP {value}", size=14, font=_LEMFI_BOLD)
+    pdf.text(32.0, 389.9, "Your transactions", size=14, font=_LEMFI_BOLD)
+    _lemfi_header(pdf, 435.1)
+
+    running = opening
+    top = 470.0
+    carried: list[tuple[float, str, float]] = []
+    for number, page_rows in enumerate(statement.pages, start=1):
+        if number > 1:
+            pdf.next_page()
+            _lemfi_title(pdf, statement)
+            _lemfi_header(pdf, 120.0)
+            top = 155.0
+            for offset, line, size in carried:
+                pdf.text(32.0 if size == 0 else 102.0, top + offset, line, size=size or 10)
+            top += (carried[-1][0] + 34.0) if carried else 0
+            carried = []
+        for n, row in enumerate(page_rows):
+            pdf.text(32.0, top, row.date, size=10, font=_LEMFI_FONT)
+            pdf.text(102.0, top, row.description[0], size=10, font=_LEMFI_FONT)
+            for amount, x in ((row.paid_out, _LEMFI_OUT), (row.paid_in, _LEMFI_IN)):
+                if amount is not None:
+                    pdf.text(x, top, amount, size=10, font=_LEMFI_FONT, right=True)
+            running += _plain(row.paid_in or "0") - _plain(row.paid_out or "0")
+            balance = row.balance or _money(running)
+            pdf.text(_LEMFI_BALANCE, top, balance, size=10, font=_LEMFI_FONT, right=True)
+            below = _lemfi_lines(row)
+            # size 0 marks the time, printed in the date column.
+            if row.time is not None:
+                below = [(16.0, row.time, 0.0), *below]
+            last = n == len(page_rows) - 1 and number < len(statement.pages)
+            if statement.carry_over and last:
+                carried = [(offset - below[0][0], line, size) for offset, line, size in below]
+                below = []
+            for offset, line, size in below:
+                pdf.text(32.0 if size == 0 else 102.0, top + offset, line, size=size or 10)
+            top += max([offset for offset, _, _ in below], default=0.0) + 34.0
+        if number == len(statement.pages):
+            pdf.text(
+                32.0,
+                top + 10,
+                "LemFi is a trading name of Example Payments Limited.",
+                size=10,
+                font=_LEMFI_FONT,
+            )
+        _lemfi_footer(pdf, number, total)
+        pdf.extras(statement.extra)
+    if statement.savings:
+        pdf.next_page()
+        _lemfi_title(pdf, statement)
+        pdf.text(32.0, 120.0, "Account information", size=14, font=_LEMFI_BOLD)
+        pdf.text(40.0, 150.0, "Name of account", size=10, font=_LEMFI_FONT)
+        pdf.text(230.0, 150.0, "Example Instant Saver", size=10, font=_LEMFI_FONT)
+        pdf.text(40.0, 180.0, "Interest rate", size=10, font=_LEMFI_FONT)
+        lines = _wrapped(statement.rate, 60)
+        for n, line in enumerate(lines):
+            pdf.text(230.0, 180.0 + 15.0 * n, line, size=10, font=_LEMFI_FONT)
+        top = 180.0 + 15.0 * len(lines) + 15.0
+        pdf.text(40.0, top, "Additional information", size=10, font=_LEMFI_FONT)
+        pdf.text(230.0, top, "See the example FAQs.", size=10, font=_LEMFI_FONT)
+        _lemfi_footer(pdf, total, total)
+    return pdf.finish()
+
+
 # Other files ---------------------------------------------------------------------------
 
 

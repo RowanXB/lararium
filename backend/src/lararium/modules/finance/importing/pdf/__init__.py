@@ -5,10 +5,12 @@ changed design fails one of the checks below, and the whole file is refused.
 """
 
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from lararium.modules.finance.errors import FileFormatError
+from lararium.modules.finance.errors import EmptyStatementError, FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.parsed import (
     ParsedRow,
@@ -16,12 +18,14 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
 )
-from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lloyds
-from lararium.modules.finance.importing.pdf.layout import LayoutResult
+from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lemfi, lloyds
+from lararium.modules.finance.importing.pdf.layout import LayoutResult, LayoutRow
 from lararium.modules.finance.importing.pdf.words import Word, visible_lines
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
 
 PARSER_VERSION = "pdf-1"
+
+_PENNY = Decimal("0.01")
 
 type _Layout = tuple[Decimal, Callable[[list[list[Word]]], LayoutResult]]
 
@@ -29,6 +33,7 @@ _LAYOUTS: dict[str, _Layout] = {
     "hsbc_uk_statement": (hsbc_uk.X_TOLERANCE, hsbc_uk.parse),
     "lloyds_statement": (lloyds.X_TOLERANCE, lloyds.parse),
     "boc_uk_statement": (boc_uk.X_TOLERANCE, boc_uk.parse),
+    "lemfi_statement": (lemfi.X_TOLERANCE, lemfi.parse),
 }
 
 
@@ -39,7 +44,7 @@ def _rows_check(result: LayoutResult) -> None:
         where = f"row {n} (page {layout_row.page + 1})"
         if layout_row.amounts != 1:
             raise FileFormatError(f"{where} has {layout_row.amounts} amounts, not one")
-        if not row.bank_type:
+        if result.type_codes and not row.bank_type:
             raise FileFormatError(f"{where} has no type code")
         if not start <= row.booking_date <= end:
             raise FileFormatError(
@@ -49,14 +54,19 @@ def _rows_check(result: LayoutResult) -> None:
 
 
 def _summary_check(result: LayoutResult) -> None:
-    paid_in = [r.paid_in for r in result.rows if r.paid_in is not None]
+    """Interest rows count towards the summary's interest, the others towards money in. A
+    total the layout says is cut down to the penny may be up to a penny below its rows'."""
+    paid_in = [r.paid_in for r in result.rows if r.paid_in is not None and not r.interest]
     paid_out = [r.paid_out for r in result.rows if r.paid_out is not None]
+    interest = [r.paid_in for r in result.rows if r.paid_in is not None and r.interest]
+    shortfall = _PENNY if result.truncated_totals else Decimal(0)
     for what, stated, rows in (
         ("money in", result.money_in, paid_in),
         ("money out", result.money_out, paid_out),
+        ("interest", Decimal(0) if result.interest is None else result.interest, interest),
     ):
         total = sum(rows, Decimal(0))
-        if total != stated:
+        if not total - shortfall <= stated <= total:
             raise FileFormatError(
                 f"the statement's {what} is {stated} but its rows add up to {total}"
             )
@@ -68,7 +78,8 @@ def _summary_check(result: LayoutResult) -> None:
             raise FileFormatError(
                 f"the statement counts {count} payments {what} but has {len(rows)} rows paid {what}"
             )
-    closing = result.opening_balance + result.money_in - result.money_out
+    # From the rows, not the totals: they are equal unless the totals are cut down.
+    closing = result.opening_balance + sum((r.row.quantity for r in result.rows), Decimal(0))
     if closing != result.closing_balance:
         raise FileFormatError(
             f"the statement's opening balance {result.opening_balance} and its rows give "
@@ -102,18 +113,28 @@ def check(result: LayoutResult) -> None:
     _balances_check(result)
 
 
+def _row(layout_row: LayoutRow, local_tz: ZoneInfo) -> ParsedRow:
+    """The row, at the time of day it prints in local_tz; without one occurred_at stays None."""
+    row = layout_row.row
+    if layout_row.time_of_day is None:
+        return row
+    return replace(
+        row, occurred_at=datetime.combine(row.booking_date, layout_row.time_of_day, local_tz)
+    )
+
+
 @parsed.exact_decimals
 def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
-    """local_tz is unused: statements print dates only, so occurred_at stays None."""
-    del local_tz
+    """local_tz places the times of day a statement prints, if any."""
     x_tolerance, layout = _LAYOUTS[config.layout]
     result = layout(visible_lines(content, x_tolerance=x_tolerance))
-    if not result.rows:
-        raise FileFormatError("no rows")
     if len(result.rows) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
+    # The checks first: a statement without rows is empty only if its summary says so.
     check(result)
-    rows: list[ParsedRow | RowError | SkippedRow] = [r.row for r in result.rows]
+    if not result.rows:
+        raise EmptyStatementError()
+    rows: list[ParsedRow | RowError | SkippedRow] = [_row(r, local_tz) for r in result.rows]
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
@@ -123,6 +144,7 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
         opening_balance=result.opening_balance,
         money_in=result.money_in,
         money_out=result.money_out,
+        interest=result.interest,
         payments_in=result.payments_in,
         payments_out=result.payments_out,
         account=result.account,

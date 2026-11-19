@@ -19,7 +19,7 @@ backend-check: backend-sync
 	cd backend && uv run --locked pytest -q
 
 # Your own bank statements, end to end on the throwaway test database (README, "Verifying
-# against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC folders>.
+# against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC/LemF folders>.
 # Prints counts and pass or fail only.
 real-check: backend-sync
 	$(if $(REAL_ROOT),,$(error set REAL_ROOT to the folder holding one folder per bank))

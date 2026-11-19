@@ -67,11 +67,15 @@ class Counterparty:
     account_number: str | None = None
     reference: str | None = None
     bank: str | None = None
+    # The last digits of the account, when the file masks the rest ("*1234"): never taken
+    # for the account number, which identifies the account (M4's registry).
+    account_ending: str | None = None
 
     def __post_init__(self) -> None:
         _blank_as_absent(self)
         object.__setattr__(self, "sort_code", normalise_sort_code(self.sort_code))
         object.__setattr__(self, "account_number", normalise_account_number(self.account_number))
+        object.__setattr__(self, "account_ending", normalise_account_number(self.account_ending))
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ class StatementAccount:
     customer_number: str | None = None
     clearing_account_number: str | None = None
     branch: str | None = None  # name and address as one text
+    bank: str | None = None  # the bank that holds the account, as printed (LemFi's "Bank name")
     # Whom the statement is addressed to, and their postal address (its lines joined with
     # ", "), as the mailing block prints them.
     addressee: str | None = None
@@ -103,17 +108,24 @@ class StatementAccount:
 @dataclass(frozen=True)
 class StatementRate:
     """One row of a statement's rate table, in percent a year: the rate as printed (AER or
-    nominal) and the EAR, at least one of them."""
+    nominal) and the EAR, at least one of them. A statement printing both a gross rate and
+    its AER (LemFi) gives the gross rate as rate and the AER, an annual equivalent, as ear."""
 
     kind: str  # as printed
     band_from: Decimal | None
     band_to: Decimal | None
     rate: Decimal | None
     ear: Decimal | None
+    # The days the rate applies on, and how often its interest is paid ("monthly"), as printed.
+    valid_from: date | None = None
+    valid_to: date | None = None
+    frequency: str | None = None
 
     def __post_init__(self) -> None:
         if self.rate is None and self.ear is None:
             raise ValueError("a rate row needs a rate or an EAR")
+        if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
+            raise ValueError("a rate row's validity ends before it starts")
 
 
 @dataclass(frozen=True)
@@ -175,6 +187,8 @@ class ParsedStatement:
     opening_balance: Decimal | None = None
     money_in: Decimal | None = None
     money_out: Decimal | None = None
+    # Interest paid in the period, which the statement totals apart from money in (LemFi).
+    interest: Decimal | None = None
     payments_in: int | None = None
     payments_out: int | None = None
     account: StatementAccount | None = None
@@ -267,6 +281,17 @@ def keyed(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
         seen[key] = n
         values[candidate] = value
     return values
+
+
+def extract_fields(patterns: list[str], value: str, what: str) -> dict[str, str]:
+    """The named groups that matched, by name, of the first pattern that matches all of
+    value; ValueError when none does (naming `what`, not the value, which may hold an
+    account number)."""
+    for pattern in patterns:
+        match = re.fullmatch(pattern, value)
+        if match is not None:
+            return {name: text for name, text in match.groupdict().items() if text is not None}
+    raise ValueError(f"{what} matches none of the profile's patterns for it")
 
 
 def clean_description(parts: list[str]) -> str:

@@ -58,7 +58,16 @@ from .staging_helpers import (
     _rows,
     _statuses,
 )
-from .synthetic_pdfs import BocRow, BocStatement, HsbcStatement, boc_pdf, hsbc_pdf
+from .synthetic_pdfs import (
+    BocRow,
+    BocStatement,
+    HsbcStatement,
+    LemfiRow,
+    LemfiStatement,
+    boc_pdf,
+    hsbc_pdf,
+    lemfi_pdf,
+)
 
 # Counts, statuses, keys --------------------------------------------------------------
 
@@ -802,6 +811,68 @@ async def test_typed_fields_stored(
     assert batch.statement.overdraft_limit == Decimal("100.00")
     assert batch.statement.overdraft_limit_date == date(2026, 11, 1)
     assert "error" not in _statuses(await _rows(session, batch))
+
+    # LemFi: the bank holding the account, a masked counterparty account; the savings
+    # statement's interest and its rate's validity.
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    received = LemfiRow(
+        "03 May, 2027", ("Received from A Example",), ("Via EXAMPLE BANK *1234",), paid_in="9.00"
+    )
+    content = lemfi_pdf(LemfiStatement([[received]]))
+    batch = await stage(lemfi, content, account_id=await fresh("Example LemFi"), default=None)
+    (row,) = await _rows(session, batch)
+    assert (row.counterparty_bank, row.counterparty_account_ending) == ("EXAMPLE BANK", "1234")
+    assert row.counterparty_account_number is None
+    assert row.occurred_at == datetime(2027, 5, 3, 12, 28, tzinfo=UTC)  # 13:28 in London
+    assert batch.statement is not None
+    assert (batch.statement.bank, batch.statement.iban) == (
+        "Example Bank",
+        "GB99EXAM40123412345678",
+    )
+    assert batch.statement.interest is None
+    payout = LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12")
+    content = lemfi_pdf(LemfiStatement([[payout]], savings=True, opening="100.00"))
+    parsed = parse_pdf(
+        content, PdfProfileConfig(format="pdf", layout="lemfi_statement"), ZoneInfo("UTC")
+    )
+    batch = await stage(lemfi, content, account_id=await fresh("Example saver"), default=None)
+    assert batch.statement is not None
+    assert batch.statement.interest == Decimal("80.12")
+    assert batch.statement.money_in == Decimal("0.00")
+    assert parsed.rates and batch.statement.rates == parsed.rates
+    assert batch.statement.rates[0].valid_to == date(2027, 10, 29)
+    assert batch.statement.rates[0].frequency == "monthly"
+    assert batch.statement.account_name == "Example Instant Saver"
+
+
+async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
+    """Money in and straight back out twice a day leaves the same amount, description and
+    balance: the time of day the file gives keeps the rows apart, in the file and again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    text = (
+        "Date,Description,Amount,Balance\n"
+        "10/11/2026 09:00,Top up,5.00,5.00\n"
+        "10/11/2026 09:01,Sent on,-5.00,0.00\n"
+        "10/11/2026 17:00,Top up,5.00,5.00\n"
+        "10/11/2026 17:01,Sent on,-5.00,0.00\n"
+    )
+    batch = await stage(profile, text)
+    assert batch.counts["new"] == 4 and batch.counts["error"] == 0
+    await commit(batch.id)
+    again = await stage(profile, text)
+    assert again.counts["duplicate"] == 4
+    same_minute = text.replace("17:00", "09:00").replace("17:01", "09:01")
+    repeated = await stage(profile, same_minute)
+    assert repeated.counts["error"] == 2
 
 
 async def test_statement_account_mismatch_refused(

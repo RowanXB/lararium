@@ -45,6 +45,7 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     row.counterparty_name,
     row.counterparty_sort_code,
     row.counterparty_account_number,
+    row.counterparty_account_ending && `account ending ${row.counterparty_account_ending}`,
     row.counterparty_bank,
   ]
     .filter(Boolean)
@@ -84,6 +85,7 @@ function StatementSummary({ statement }: { statement: ImportStatementOut }) {
     ["Closing balance", statement.closing_balance],
     ["Money in", statement.money_in],
     ["Money out", statement.money_out],
+    ["Interest", statement.interest],
   ];
   for (const [label, value] of amounts) {
     if (value !== null) items.push([label, money(value, statement.currency)]);
