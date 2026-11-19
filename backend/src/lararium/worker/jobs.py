@@ -27,6 +27,7 @@ from lararium.core.connections import (
     transition_status,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
+from lararium.core.documents import LocalDocumentStore
 from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Connection
@@ -118,6 +119,7 @@ async def run_sync(
                     session_factory=session_factory,
                     webhook=_webhook_target(settings),
                     full_backfill=backfill,
+                    documents=LocalDocumentStore(settings.document_dir),
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
