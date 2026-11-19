@@ -378,25 +378,24 @@ async def _normalize(
         )
     await reports.snapshots(run, positions, by_type[_CASH_REPORT])
 
-    # Reconciliation (design 5.11) at the end of each window this run ingested.
+    # Reconciliation (design 5.11): every account at its latest reported day, and the end
+    # of each window this run ingested.
     given = set(raw_record_ids)
     windows = {
         (item.account, item.period_to)
         for item in items
         if item.record_type == _ACCOUNT and item.record_id in given
     }
-    checked = await reconcile.check(
-        ctx.command.session, mapped, windows, sections, reconcile.reconciled_days(connection)
-    )
+    checked = await reconcile.check(ctx.command.session, mapped, windows, sections)
     run.report.mismatches = [m.warning for m in checked.mismatches]
-    replace = await reconcile.replaceable(ctx.command.session, mapped, checked)
-    await reconcile.publish(ctx, connection, checked, replace, run.report.flagged)
+    await reconcile.publish(ctx, connection, checked, run.report.flagged)
 
     # Only this normaliser's keys: others (the token's reminder) may have changed meanwhile.
     values: dict[str, JSONValue] = {
         ACCOUNT_MAP_KEY: accounts.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
     }
-    if any(connection.config.get(key) != value for key, value in values.items()):
-        await update_config(ctx.command, connection.id, values)
+    old = [key for key in reconcile.OLD_KEYS if key in connection.config]
+    if old or any(connection.config.get(key) != value for key, value in values.items()):
+        await update_config(ctx.command, connection.id, values, remove=old)
     return run.report

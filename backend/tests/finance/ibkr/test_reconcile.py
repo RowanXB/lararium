@@ -51,10 +51,23 @@ class Notifier:
 
 
 async def sync(
-    session, connection, tmp_path, rows, notifier, *, accounts=(GIA,), period=(DAY, DAY), empty=()
+    session,
+    connection,
+    tmp_path,
+    rows,
+    notifier,
+    *,
+    accounts=(GIA,),
+    period=(DAY, DAY),
+    empty=(),
+    later=(),
 ):
-    """Ingest a synthetic statement and normalize it, as a sync does."""
-    body = build_statement(list(accounts), period=period, rows=rows, empty_sections=empty)
+    """Ingest a synthetic statement and normalize it, as a sync does; with `later`, a
+    (rows, period) per further window, all normalized in one run as one sync's windows are."""
+    bodies = [
+        build_statement(list(accounts), period=window, rows=window_rows, empty_sections=empty)
+        for window_rows, window in [(rows, period), *later]
+    ]
     async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
 
         async def context() -> SyncContext:
@@ -70,10 +83,15 @@ async def sync(
             )
 
         request: dict[str, JSONValue] = {"upload": "x.xml"}
-        ingested = await ingest_statement(await context(), body, request)
-        return await normalize(
-            await context(), ingested.raw_record_ids, ingested.flagged, ingested.sections
-        )
+        ids: list[uuid.UUID] = []
+        flagged: set[str] = set()
+        sections: set[tuple[str, str]] = set()
+        for body in bodies:
+            ingested = await ingest_statement(await context(), body, request)
+            ids += ingested.raw_record_ids
+            flagged |= ingested.flagged
+            sections |= ingested.sections
+        return await normalize(await context(), ids, frozenset(flagged), frozenset(sections))
 
 
 async def warnings_of(session, connection) -> list[str]:
@@ -156,7 +174,8 @@ async def test_omitted_instrument_counts_as_zero_only_when_the_section_is_there(
     # No Open Positions section: securities are not checked; cash is, and agrees.
     await sync(session, connection, tmp_path, [trade, cash("USD", "-1001.00")], notifier)
     assert await warnings_of(session, connection) == []
-    # An empty Open Positions section says IBKR holds nothing: the ledger's 10 is a difference.
+    # An empty Open Positions section says IBKR holds nothing: the ledger's 10 is a difference
+    # the owner is told of. It is no warning: no day has reported positions to keep it by.
     await sync(
         session,
         connection,
@@ -165,9 +184,54 @@ async def test_omitted_instrument_counts_as_zero_only_when_the_section_is_there(
         notifier,
         empty=("OpenPositions",),
     )
-    assert await warnings_of(session, connection) == [
-        "IBKR ···0001 ETFA differs from IBKR's report on 2026-11-10 by 10"
+    assert notifier.sent == [
+        "IBKR: IBKR ···0001 ETFA differs from IBKR's report on 2026-11-10 by 10"
     ]
+    assert await warnings_of(session, connection) == []
+
+
+async def test_an_empty_positions_day_after_a_reported_one_is_told_only(
+    session, run, tmp_path
+) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    trade = buy("9000001", ETFA, "10", "100.00", "-1000.00")
+    await sync(session, connection, tmp_path, [trade, position(ETFA, "10")], notifier)
+    await session.execute(
+        text('update core.connections set cursor = \'{"history_from": "2026-11-10"}\'')
+    )
+    later = date(2026, 11, 12)
+    await sync(
+        session, connection, tmp_path, [], notifier, period=(later, later), empty=("OpenPositions",)
+    )
+    # The latest day with reported positions (the 10th) agrees: no warning; the 12th's
+    # difference is told.
+    assert await warnings_of(session, connection) == []
+    assert notifier.sent == [
+        "IBKR: IBKR ···0001 ETFA differs from IBKR's report on 2026-11-12 by 10"
+    ]
+
+
+async def test_a_later_clean_window_of_the_same_run_leaves_no_warning(
+    session, run, tmp_path
+) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    later = date(2026, 11, 11)
+    newer = [buy("9000001", ETFA, "10", "100.00", "-1000.00"), position(ETFA, "10")]
+    report = await sync(
+        session,
+        connection,
+        tmp_path,
+        [position(ETFA, "10")],
+        notifier,
+        later=[(newer, (later, later))],
+    )
+    # The first window's end differs (the buy is on the 11th): told; the second window's,
+    # the latest day, agrees, so nothing is kept.
+    assert report.mismatches == []
+    assert await warnings_of(session, connection) == []
+    assert notifier.sent == [f"IBKR: {WARNING_A}"]
 
 
 async def test_cash_difference_names_the_currency(session, run, tmp_path) -> None:
@@ -318,35 +382,22 @@ async def test_each_kind_is_replaced_against_its_own_latest_day(session, run, tm
     assert await warnings_of(session, connection) == []
 
 
-async def test_a_malformed_reconciled_day_is_ignored(session, run, tmp_path) -> None:
+async def test_the_old_reconciliation_records_are_removed(session, run, tmp_path) -> None:
+    # Warnings were once kept by a record of their own and of the days reconciled at; the
+    # current warnings now follow from the stored reports alone.
     connection = await _connection(run)
     await session.execute(
         text(
             "update core.connections set config = config"
-            ' || \'{"ibkr_reconciled": {"U0000001": {"securities": "not a day"}, "x": 1}}\''
+            ' || \'{"ibkr_reconciled": {"U0000001": {"securities": "2026-11-20"}},'
+            ' "ibkr_warnings": []}\''
         )
     )
     report = await sync(session, connection, tmp_path, [position(ETFA, "10")], Notifier())
     assert report.mismatches == [WARNING_A]
-    stored = (await get_connection(session, connection.id)).config["ibkr_reconciled"]
-    assert stored == {"U0000001": {"securities": "2026-11-10"}}
-
-
-async def test_a_stored_day_without_a_report_of_its_kind_is_dropped(session, run, tmp_path) -> None:
-    # A stored securities day no reported position backs is neither checked again nor
-    # allowed to make this run's statement older.
-    connection = await _connection(run)
-    await session.execute(
-        text(
-            "update core.connections set config = config"
-            ' || \'{"ibkr_reconciled": {"U0000001": {"securities": "2026-11-20"}}}\''
-        )
-    )
-    report = await sync(session, connection, tmp_path, [position(ETFA, "10")], Notifier())
-    assert report.mismatches == [WARNING_A]
-    assert await warnings_of(session, connection) == [WARNING_A]
-    stored = (await get_connection(session, connection.id)).config["ibkr_reconciled"]
-    assert stored == {"U0000001": {"securities": "2026-11-10"}}
+    config = (await get_connection(session, connection.id)).config
+    assert "ibkr_reconciled" not in config
+    assert "ibkr_warnings" not in config
 
 
 async def test_other_warnings_survive(session, run, tmp_path) -> None:
@@ -399,7 +450,8 @@ async def test_accounts_sharing_last_four_digits_do_not_clear_each_other(
         accounts=accounts,
     )
     assert await warnings_of(session, connection) == [WARNING_A[:-3] + "-7"]
-    # A statement of the first account alone leaves the second's warning as it is.
+    # A statement of the first account alone leaves the second's warning as it is: every run
+    # checks every account at its latest day.
     await sync(session, connection, tmp_path, [fixed, held("U0000001", "10")], notifier)
     assert await warnings_of(session, connection) == [WARNING_A[:-3] + "-7"]
 
