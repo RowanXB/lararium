@@ -26,8 +26,10 @@ from lararium.core.documents import LocalDocumentStore
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.ibkr import sync as ibkr_sync
 from lararium.modules.finance.ibkr.client import FlexClient
+from lararium.modules.finance.ibkr.parser import FlexDataError, parse_statement
 from lararium.modules.finance.ibkr.sync import (
     IbkrConnector,
+    _opened,
     due,
     ingest_statement,
     windows,
@@ -156,7 +158,7 @@ async def test_ingest_stores_document_and_rows(session, run, tmp_path) -> None:
     request: dict[str, JSONValue] = {"query_id": "111111", "fd": "2026-11-10", "td": "2026-11-10"}
     async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
         ctx = await _context(session, connection, http, tmp_path)
-        result = await run_in(ctx, body, request)
+        result = await ingest_statement(ctx, body, request)
 
     docs = (await session.execute(text("select source, sha256 from core.documents"))).all()
     assert [d.source for d in docs] == ["finance.ibkr"]
@@ -183,10 +185,6 @@ async def test_ingest_stores_document_and_rows(session, run, tmp_path) -> None:
     assert cash.request == {**request, "document_sha256": docs[0].sha256}
 
 
-async def run_in(ctx, body, request):
-    return await ingest_statement(ctx, body, request)
-
-
 async def test_overlapping_rows_stored_once(session, run, tmp_path) -> None:
     connection = await _connection(run)
     shared = RowSpec("CashTransaction", "U0000001", day=date(2026, 11, 3), transactionID="8000002")
@@ -205,7 +203,6 @@ async def test_overlapping_rows_stored_once(session, run, tmp_path) -> None:
     [only] = (await session.execute(cash)).scalars().all()
     assert only in a.raw_record_ids
     assert only in b.raw_record_ids
-    assert len(set(a.raw_record_ids) & set(b.raw_record_ids)) >= 1
 
 
 async def test_not_due_makes_no_request(session, run, tmp_path) -> None:
@@ -250,7 +247,8 @@ async def test_a_far_expiry_is_not_reminded(session, run, tmp_path) -> None:
     assert notifier.messages == []
 
 
-async def test_token_rejected_sets_needs_reauth(session, run, monkeypatch) -> None:
+@pytest.mark.parametrize("code", [1011, 1012, 1013, 1014, 1015, 1016])
+async def test_token_rejected_sets_needs_reauth(session, run, monkeypatch, code: int) -> None:
     async def no_sleep(seconds: int) -> None:
         return None
 
@@ -262,8 +260,10 @@ async def test_token_rejected_sets_needs_reauth(session, run, monkeypatch) -> No
         return httpx.Response(
             200,
             content=(
-                b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1012</ErrorCode>"
-                b"<ErrorMessage>Token has expired.</ErrorMessage></FlexStatementResponse>"
+                (
+                    f"<FlexStatementResponse><Status>Fail</Status><ErrorCode>{code}</ErrorCode>"
+                    "<ErrorMessage>Token has expired.</ErrorMessage></FlexStatementResponse>"
+                ).encode()
             ),
         )
 
@@ -328,3 +328,64 @@ def test_connector_identity() -> None:
     connector = IbkrConnector()
     assert (connector.name, connector.version) == ("ibkr", "ibkr-sync-1")
     assert connector.capabilities == {"balances", "holdings", "transactions"}
+
+
+def test_a_bad_date_opened_is_named_without_its_value() -> None:
+    body = build_statement(
+        [ACCOUNT],
+        period=(date(2026, 11, 10), date(2026, 11, 10)),
+        rows=[RowSpec("AccountInformation", "U0000001", dateOpened="not-a-date")],
+    )
+    with pytest.raises(FlexDataError) as error:
+        _opened(parse_statement(body))
+    assert "AccountInformation.dateOpened" in str(error.value)
+    assert "not-a-date" not in str(error.value)
+
+
+async def test_a_failing_older_window_leaves_nothing(session, run, tmp_path, monkeypatch) -> None:
+    async def no_sleep(seconds: int) -> None:
+        return None
+
+    monkeypatch.setattr(ibkr_sync, "FlexClient", partial(FlexClient, sleep=no_sleep))
+    connection = await _connection(run)
+    account = AccountSpec("U0000001", date_opened=datetime.now(UTC).date() - timedelta(days=400))
+    sent: list[str] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("SendRequest"):
+            sent.append(request.url.params["fd"])
+            if len(sent) == 2:
+                return httpx.Response(
+                    200,
+                    content=b"<FlexStatementResponse><Status>Fail</Status>"
+                    b"<ErrorCode>1018</ErrorCode></FlexStatementResponse>",
+                )
+            return httpx.Response(
+                200,
+                content=b"<FlexStatementResponse><Status>Success</Status>"
+                b"<ReferenceCode>1</ReferenceCode></FlexStatementResponse>",
+            )
+        fd = date.fromisoformat(sent[-1])
+        return httpx.Response(
+            200, content=build_statement([account], period=(fd, fd), rows=[], by_day=True)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as http:
+        await jobs.run_sync(
+            session,
+            connection.id,
+            settings=SETTINGS.model_copy(update={"document_dir": tmp_path}),
+            http=http,
+            notifier=RecordingNotifier(),
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+
+    assert len(sent) == 2
+    count = await session.scalar(
+        text("select count(*) from core.raw_records where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert count == 0
+    after = await get_connection(session, connection.id)
+    assert after.cursor is None
+    assert after.status == "failing"

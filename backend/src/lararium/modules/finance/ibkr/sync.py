@@ -20,7 +20,7 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.ibkr.client import FlexClient
 from lararium.modules.finance.ibkr.fields import SECTIONS
 from lararium.modules.finance.ibkr.normalize import normalize
-from lararium.modules.finance.ibkr.parser import Statement, parse_statement
+from lararium.modules.finance.ibkr.parser import FlexDataError, Statement, parse_statement
 
 logger = logging.getLogger(__name__)
 
@@ -153,11 +153,15 @@ async def ingest_statement(
 
 def _opened(statement: Statement) -> date | None:
     """The earliest dateOpened among the statement's accounts."""
-    dates = [
-        date.fromisoformat(row.attributes["dateOpened"])
-        for row in statement.rows
-        if row.section == "AccountInformation"
-    ]
+    dates: list[date] = []
+    for row in statement.rows:
+        if row.section != "AccountInformation":
+            continue
+        try:
+            dates.append(date.fromisoformat(row.attributes["dateOpened"]))
+        except (KeyError, ValueError):
+            # The field only: its value is the owner's data.
+            raise FlexDataError("AccountInformation.dateOpened is not a date") from None
     return min(dates, default=None)
 
 
@@ -241,6 +245,10 @@ class IbkrConnector:
         if _cursor_date(connection.cursor, "fetched_to") is None:
             # A first sync: the latest year is fetched first, as it says how far back to go.
             opened = _opened(statements[-1]) if statements else None
+            # All of this is one transaction: if an older window fails, every raw record of
+            # this sync rolls back and the retry fetches every window again. That cost buys
+            # atomicity. Documents written meanwhile are content-addressed, so the retry
+            # reuses any orphaned file rather than duplicating it.
             for window in windows(connection.cursor, today, opened)[:-1]:
                 await fetch(window)
         await normalize(ctx, ids, frozenset(flagged))
