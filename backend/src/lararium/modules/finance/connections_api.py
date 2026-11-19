@@ -40,6 +40,7 @@ from lararium.core.connections import (
     get_connection,
     list_connections,
     load_credential,
+    lock_connection,
     set_credential_expiry,
     set_status,
     store_credential,
@@ -74,7 +75,7 @@ from lararium.modules.finance.ibkr.sync import (
 )
 from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
-from lararium.modules.finance.transfers import heal_transfers
+from lararium.modules.finance.transfers_api import healing_command
 from lararium.worker.app import defer_await_approval, defer_sync
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "author
 # A one-year, all-sections, three-account Flex statement is about 10 MB: M2's 5 MiB is too small.
 MAX_IBKR_UPLOAD_BYTES = 64 * 1024 * 1024
 XML_TYPES = ("application/xml", "text/xml")
+GENERIC_TYPE = "application/octet-stream"
 QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
 
 router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
@@ -420,17 +422,23 @@ async def update_ibkr_connection(
     """Replace the token, its expiry and the query id (a new token after the old one expired)."""
     settings = _settings(request)
     master_key = _require_master_key(settings)
-    connection = await get_connection(session, connection_id)
-    if (refusal := _not_ibkr(connection)) is not None:
-        raise refusal
-    if connection.status == "disabled":
+    if body.token_expires_on < datetime.now(LONDON).date():
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            {"error": "not_updatable", "message": "a disabled connection can't be updated"},
+            {"error": "expiry_in_past", "message": "the token's expiry date is in the past"},
         )
     expires_at = _expires_at(body.token_expires_on)
     args = body.model_dump(mode="json", exclude={"token"}) | {"connection_id": str(connection_id)}
     async with command_context(session, actor, "update_ibkr_connection", args) as ctx:
+        # Checked under the row lock: a disable made meanwhile can't slip in before the write.
+        connection = await lock_connection(ctx, connection_id)
+        if (refusal := _not_ibkr(connection)) is not None:
+            raise refusal
+        if connection.status == "disabled":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {"error": "not_updatable", "message": "a disabled connection can't be updated"},
+            )
         await store_credential(
             ctx, master_key, connection_id, TOKEN_PURPOSE, body.token.get_secret_value(), expires_at
         )
@@ -448,12 +456,15 @@ async def update_ibkr_connection(
 
 
 def _statement_type(file: UploadFile) -> None:
+    """XML by its type, or by its name when the browser sends no type or a generic one."""
     content_type = (file.content_type or "").split(";")[0].strip().lower()
-    if content_type not in XML_TYPES:
-        raise HTTPException(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            {"error": "not_xml", "message": "upload the Flex statement as an XML file"},
-        )
+    named_xml = (file.filename or "").lower().endswith(".xml")
+    if content_type in XML_TYPES or (named_xml and content_type in ("", GENERIC_TYPE)):
+        return
+    raise HTTPException(
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        {"error": "not_xml", "message": "upload the Flex statement as an XML file"},
+    )
 
 
 @router.post(
@@ -488,7 +499,7 @@ async def upload_ibkr_statement(
         "sha256": hashlib.sha256(body).hexdigest(),
     }
     try:
-        async with command_context(session, actor, "upload_ibkr_statement", args) as ctx:
+        async with healing_command(session, actor, "upload_ibkr_statement", args) as ctx:
             sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
             sync_ctx = SyncContext(
                 command=ctx,
@@ -502,7 +513,6 @@ async def upload_ibkr_statement(
             )
             result = await ingest_statement(sync_ctx, body, {"upload": filename})
             await normalize(sync_ctx, result.raw_record_ids, result.flagged, result.sections)
-            await heal_transfers(ctx)
     except FlexDataError as exc:
         # The message names a section and field only, never a value.
         raise HTTPException(

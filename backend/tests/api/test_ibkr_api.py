@@ -356,3 +356,132 @@ async def test_upload_to_non_ibkr_connection_422(api, run) -> None:
     response = await _upload(api, str(monzo.id), _isa_statement())
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("content_type", ["application/octet-stream", ""])
+async def test_upload_accepts_generic_type_for_xml_name(api, session, content_type) -> None:
+    created = await _create(api)
+
+    response = await _upload(api, created["id"], _isa_statement(), content_type)
+
+    assert response.status_code == 202, response.text
+    assert await session.scalar(text("select count(*) from finance.accounts")) == 1
+
+
+@pytest.mark.parametrize("content_type", ["application/octet-stream", ""])
+async def test_upload_generic_type_needs_xml_name_415(api, content_type) -> None:
+    created = await _create(api)
+
+    response = await api.post(
+        f"/api/v1/connections/{created['id']}/ibkr-statement",
+        files={"file": ("statement.pdf", _isa_statement(), content_type)},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 415
+
+
+async def test_upload_accepts_uppercase_xml_name(api) -> None:
+    created = await _create(api)
+
+    response = await api.post(
+        f"/api/v1/connections/{created['id']}/ibkr-statement",
+        files={"file": ("STATEMENT.XML", _isa_statement(), "application/octet-stream")},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 202
+
+
+async def test_upload_pairs_transfers(api, session) -> None:
+    from lararium.core.actors import Actor
+    from lararium.core.commands import command_context
+    from lararium.modules.finance.transfers import heal_transfers, list_transfers
+
+    from ..finance.ibkr.test_normalize_records import ETFA
+
+    created = await _create(api)
+    day = date(2026, 11, 10)
+    gia = AccountSpec("U0000001", date_opened=day)
+    other = AccountSpec("U0000002", date_opened=day)
+    legs = [
+        RowSpec(
+            "Transfer",
+            "U0000001",
+            **ETFA,
+            transactionID="6000001",
+            quantity="5",
+            direction="IN",
+            account="U0000002",
+        ),
+        RowSpec(
+            "Transfer",
+            "U0000002",
+            **ETFA,
+            transactionID="6000002",
+            quantity="5",
+            direction="OUT",
+            account="U0000001",
+        ),
+    ]
+    content = build_statement([gia, other], period=(day, day), rows=legs)
+
+    response = await _upload(api, created["id"], content)
+
+    assert response.status_code == 202, response.text
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "matched"
+    # The upload's own heal paired them: nothing is left for another one.
+    async with command_context(session, Actor("system", "t"), "t", {}) as ctx:
+        assert await heal_transfers(ctx) == 0
+
+
+async def test_upload_to_disabled_connection_keeps_it_disabled(api, session, run) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], "disabled")
+
+    response = await _upload(api, created["id"], _isa_statement())
+
+    assert response.status_code == 202
+    assert (await get_connection(session, created["id"])).status == "disabled"
+
+
+async def test_update_rejects_expiry_in_past_422(api, session) -> None:
+    created = await _create(api)
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/ibkr",
+        json={"token": OTHER_TOKEN, "token_expires_on": "2020-01-01", "query_id": "654321"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["message"] == "the token's expiry date is in the past"
+    stored = await load_credential(session, KEY, created["id"], "flex_token")
+    assert stored is not None and stored.reveal() == TOKEN
+
+
+async def test_update_checks_status_under_the_row_lock(api, session, run, monkeypatch) -> None:
+    """A disable that lands after the route's first read must still be seen."""
+    created = await _create(api)
+    real = connections_api.lock_connection
+    seen: list[str] = []
+
+    async def disable_then_lock(ctx, connection_id):
+        await run(set_status, connection_id, "disabled")
+        record = await real(ctx, connection_id)
+        seen.append(record.status)
+        return record
+
+    monkeypatch.setattr(connections_api, "lock_connection", disable_then_lock)
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/ibkr",
+        json={"token": OTHER_TOKEN, "token_expires_on": "2027-09-01", "query_id": "654321"},
+        headers=OWNER,
+    )
+
+    assert seen == ["disabled"]
+    assert response.status_code == 422
+    stored = await load_credential(session, KEY, created["id"], "flex_token")
+    assert stored is not None and stored.reveal() == TOKEN

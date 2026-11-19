@@ -191,6 +191,13 @@ async def _change_status(
     return record
 
 
+async def lock_connection(ctx: CommandContext, connection_id: UUID) -> ConnectionRecord:
+    """The connection as it is now, its row locked until the command ends: what is checked
+    then can't change before the command writes."""
+    await _locked_status(ctx, connection_id)
+    return await get_connection(ctx.session, connection_id)
+
+
 async def set_status(
     ctx: CommandContext,
     connection_id: UUID,
