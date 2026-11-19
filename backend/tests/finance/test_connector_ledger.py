@@ -17,7 +17,9 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance import ledger
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import (
+    CategorySplit,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     post_transaction,
     upsert_connector_transaction,
@@ -350,3 +352,124 @@ async def test_voids_from_before_0012_get_who_made_them_from_the_audit_log(
         (await session.execute(text("select id, voided_by from finance.transactions"))).all()
     )
     assert (rows[reversed_.id], rows[owners[0].id]) == ("connector", "user")
+
+
+def _details(usd, **kw) -> TransactionDetails:
+    values: dict[str, Any] = {
+        "original_quantity": Decimal("6.50"),
+        "original_instrument_id": usd.id,
+        "category": "eating_out",
+        "labels": ("work", "lunch"),
+        "include_in_spending": True,
+        "payment_scheme": "mastercard",
+        "category_splits": (
+            CategorySplit("eating_out", Decimal("3.00")),
+            CategorySplit("groceries", Decimal("2.00")),
+        ),
+    }
+    return TransactionDetails(**(values | kw))
+
+
+async def test_details_are_written_and_loaded(session, run, make_account, gbp, usd) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    details = _details(usd)
+    record, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=details)
+    )
+    assert outcome == "created"
+    assert record.details == details
+    row = (
+        await session.execute(
+            text(
+                "select original_quantity, category, labels, include_in_spending, payment_scheme"
+                " from finance.transactions where id = :i"
+            ),
+            {"i": record.id},
+        )
+    ).one()
+    assert (row.original_quantity, row.category, row.labels) == (
+        Decimal("6.50"),
+        "eating_out",
+        ["work", "lunch"],
+    )
+    assert (row.include_in_spending, row.payment_scheme) == (True, "mastercard")
+    splits = (
+        await session.execute(
+            text(
+                "select position, category, quantity from finance.transaction_category_splits"
+                " where transaction_id = :i order by position"
+            ),
+            {"i": record.id},
+        )
+    ).all()
+    assert [tuple(r) for r in splits] == [
+        (0, "eating_out", Decimal("3.00")),
+        (1, "groceries", Decimal("2.00")),
+    ]
+    plain = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=WHEN,
+            description="plain",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-1")),
+                PostingInput(b.id, gbp.id, Decimal("1")),
+            ],
+        ),
+    )
+    assert plain.details == TransactionDetails()
+
+
+async def test_changed_details_update_in_place(session, run, make_account, gbp, usd) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    created, _ = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=_details(usd))
+    )
+    changed = _details(
+        usd,
+        category="groceries",
+        category_splits=(CategorySplit("groceries", Decimal("5.00")),),
+    )
+    updated, outcome = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=changed)
+    )
+    assert outcome == "updated"
+    assert updated.id == created.id
+    assert updated.details == changed
+    assert await session.scalar(text("select count(*) from finance.transactions")) == 1
+    assert (
+        await session.scalar(text("select count(*) from finance.transaction_category_splits")) == 1
+    )
+    cleared, outcome = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    assert outcome == "updated"
+    assert cleared.details == TransactionDetails()
+    assert (
+        await session.scalar(text("select count(*) from finance.transaction_category_splits")) == 0
+    )
+
+
+async def test_same_details_are_unchanged(session, run, make_account, gbp, usd) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    tx = _tx(conn.id, a, b, gbp, "5.00", details=_details(usd))
+    await run(upsert_connector_transaction, tx)
+    events = await session.scalar(text("select count(*) from core.events"))
+    _, outcome = await run(upsert_connector_transaction, tx)
+    assert outcome == "unchanged"
+    assert await session.scalar(text("select count(*) from core.events")) == events
+
+
+async def test_original_amount_needs_both_fields(run, make_account, gbp, usd) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    for bad in (
+        TransactionDetails(original_quantity=Decimal("6.50")),
+        TransactionDetails(original_instrument_id=usd.id),
+    ):
+        with pytest.raises(FinanceValidationError):
+            await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=bad))
+    nan_split = TransactionDetails(category_splits=(CategorySplit("x", Decimal("NaN")),))
+    with pytest.raises(FinanceValidationError):
+        await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=nan_split))

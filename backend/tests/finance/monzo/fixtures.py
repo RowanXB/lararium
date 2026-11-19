@@ -14,9 +14,41 @@ def make_account(**overrides: Any) -> dict[str, Any]:
         "type": "uk_retail",
         "currency": "GBP",
         "country_code": "GB",
+        # Synthetic bank details.
+        "sort_code": "998877",
+        "account_number": "87654321",
         "owners": [{"user_id": "user_TEST1", "preferred_name": "Test Owner"}],
+        "product_type": "standard",
+        "owner_type": "personal",
     }
     return account | overrides
+
+
+def make_merchant(**overrides: Any) -> dict[str, Any]:
+    """An expanded merchant, with every key Monzo's merchant object has that is mapped."""
+    merchant: dict[str, Any] = {
+        "id": "merch_TEST1",
+        "group_id": "grp_TEST1",
+        "name": "Test Grocer",
+        "logo": "https://logos.example/test-grocer.png",
+        "online": False,
+        "category": "groceries",
+        "metadata": {"website": "https://test-grocer.example"},
+        "address": {
+            "address": "1 Test Street",
+            "city": "Testford",
+            "region": "Testshire",
+            "country": "GBR",
+            "postcode": "TE1 1ST",
+            "latitude": 51.5,
+            "longitude": -0.1278,
+            "formatted": "1 Test Street, Testford TE1 1ST",
+            "short_formatted": "1 Test Street",
+            "zoom_level": 17,
+            "approximate": False,
+        },
+    }
+    return merchant | overrides
 
 
 def make_transaction(**overrides: Any) -> dict[str, Any]:
@@ -50,6 +82,12 @@ def make_pot(**overrides: Any) -> dict[str, Any]:
         "updated": "2026-03-01T09:00:00.000Z",
         "deleted": False,
         "current_account_id": ACCOUNT_ID,
+        "type": "flexible_savings",
+        "isa_wrapper": "",
+        "locked": False,
+        "round_up": False,
+        "round_up_multiplier": None,
+        # goal_amount is only present when the pot has a goal: pass it as an override.
     }
     return pot | overrides
 

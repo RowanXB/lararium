@@ -1,16 +1,23 @@
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, exists, insert, select, update
+from sqlalchemy import ColumnElement, Text, exists, func, insert, or_, select, update
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
+from lararium.core.models import Setting
 from lararium.modules.finance import models
-from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
+from lararium.modules.finance.errors import (
+    AccountAlreadyClosedError,
+    AccountNotFoundError,
+    FinanceValidationError,
+)
 
 LedgerType = Literal["asset", "liability", "income", "expense", "equity"]
 AccountSubtype = Literal[
@@ -20,6 +27,10 @@ TaxWrapper = Literal["none", "isa", "sipp", "lisa", "gia"]
 BalanceMode = Literal["transactions", "snapshots", "hybrid"]
 SourceKind = Literal["manual", "connection"]
 AccountStatus = Literal["open", "closed"]
+
+# The settings remembering the ledger's own accounts (system_accounts): an account is one
+# when a setting under this prefix holds its id.
+SYSTEM_ACCOUNT_SETTING_PREFIX = "finance.system_account."
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,31 @@ class AccountRecord:
     status: AccountStatus
     opened_on: date | None
     closed_on: date | None
+    # One the ledger keeps for itself (Unassigned, Opening balances, In transit): the owner
+    # can't close, rename or snapshot it.
+    system: bool
+    product_type: str | None
+    owner_type: str | None
+    goal_amount: Decimal | None
+    locked: bool | None
+    round_up: bool | None
+    round_up_multiplier: Decimal | None
+
+
+@dataclass(frozen=True)
+class SourceDetails:
+    """What a source says about an account. None clears a field, except tax_wrapper, which it
+    leaves as it is; so does every field named in `unknown`: one the source states in a shape
+    that cannot be read."""
+
+    product_type: str | None = None
+    owner_type: str | None = None
+    goal_amount: Decimal | None = None
+    locked: bool | None = None
+    round_up: bool | None = None
+    round_up_multiplier: Decimal | None = None
+    tax_wrapper: TaxWrapper | None = None
+    unknown: frozenset[str] = frozenset()
 
 
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[AccountRecord]:
@@ -60,6 +96,18 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             a.status,
             a.opened_on,
             a.closed_on,
+            exists()
+            .where(
+                Setting.key.startswith(SYSTEM_ACCOUNT_SETTING_PREFIX),
+                Setting.value == func.to_jsonb(sql_cast(a.id, Text)),
+            )
+            .label("system"),
+            a.product_type,
+            a.owner_type,
+            a.goal_amount,
+            a.locked,
+            a.round_up,
+            a.round_up_multiplier,
         )
         .where(*conditions)
         .order_by(a.name, a.id)
@@ -80,6 +128,13 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             status=cast(AccountStatus, row.status),
             opened_on=row.opened_on,
             closed_on=row.closed_on,
+            system=row.system,
+            product_type=row.product_type,
+            owner_type=row.owner_type,
+            goal_amount=row.goal_amount,
+            locked=row.locked,
+            round_up=row.round_up,
+            round_up_multiplier=row.round_up_multiplier,
         )
         for row in rows
     ]
@@ -105,6 +160,12 @@ def _change_data(record: AccountRecord) -> dict[str, JSONValue]:
         "status": record.status,
         "opened_on": _optional_str(record.opened_on),
         "closed_on": _optional_str(record.closed_on),
+        "product_type": record.product_type,
+        "owner_type": record.owner_type,
+        "goal_amount": _optional_str(record.goal_amount),
+        "locked": record.locked,
+        "round_up": record.round_up,
+        "round_up_multiplier": _optional_str(record.round_up_multiplier),
     }
 
 
@@ -122,6 +183,14 @@ async def get_account(session: AsyncSession, account_id: UUID) -> AccountRecord:
 
 async def list_accounts(session: AsyncSession) -> list[AccountRecord]:
     return await _load(session)
+
+
+def require_owner_account(record: AccountRecord, action: str) -> None:
+    """Refuse an owner's command on one of the ledger's own accounts."""
+    if record.system:
+        raise FinanceValidationError(
+            f"{record.name} belongs to the ledger, which keeps it; it can't be {action}"
+        )
 
 
 async def create_account(
@@ -167,6 +236,7 @@ async def create_account(
 
 
 async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> AccountRecord:
+    require_owner_account(await get_account(ctx.session, account_id), "renamed")
     updated = await ctx.session.scalar(
         update(models.Account)
         .where(models.Account.id == account_id)
@@ -180,7 +250,40 @@ async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> Ac
     return record
 
 
+async def set_source_details(ctx: CommandContext, account_id: UUID, details: SourceDetails) -> bool:
+    """Write what the source says about the account; False (and no event) if nothing differs."""
+    a = models.Account
+    values: dict[str, object] = {
+        "product_type": details.product_type,
+        "owner_type": details.owner_type,
+        "goal_amount": details.goal_amount,
+        "locked": details.locked,
+        "round_up": details.round_up,
+        "round_up_multiplier": details.round_up_multiplier,
+    }
+    if not details.unknown <= values.keys():
+        raise ValueError(f"not source detail fields: {sorted(details.unknown - values.keys())}")
+    for name in details.unknown:
+        del values[name]
+    if details.tax_wrapper is not None:
+        values["tax_wrapper"] = details.tax_wrapper
+    if not values:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    differs = or_(*(getattr(a, name).is_distinct_from(value) for name, value in values.items()))
+    written = await ctx.session.scalar(
+        update(a).where(a.id == account_id, differs).values(**values).returning(a.id)
+    )
+    if written is None:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    _publish(ctx, "finance.account.updated", await get_account(ctx.session, account_id))
+    return True
+
+
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
+    # Closing In transit would drop the transfers it holds from net worth.
+    require_owner_account(await get_account(ctx.session, account_id), "closed")
     # Conditional update, so two concurrent closes can't both succeed.
     closed = await ctx.session.scalar(
         update(models.Account)
@@ -193,4 +296,33 @@ async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) 
         raise AccountAlreadyClosedError(str(account_id))
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.closed", record)
+    return record
+
+
+async def set_balance_mode(
+    ctx: CommandContext, account_id: UUID, mode: BalanceMode
+) -> AccountRecord:
+    """Switch a snapshots account to hybrid, the only change allowed.
+
+    Hybrid values it exactly as before (the latest snapshot) plus whatever is posted after
+    it; any other change would revalue its history. The current mode is a no-op.
+    """
+    record = await get_account(ctx.session, account_id)
+    if record.balance_mode == mode:
+        return record
+    if (record.balance_mode, mode) != ("snapshots", "hybrid"):
+        raise FinanceValidationError(
+            f"an account can only switch from snapshots to hybrid, not from"
+            f" {record.balance_mode} to {mode}"
+        )
+    # Conditional update, so a concurrent switch can't apply twice.
+    switched = await ctx.session.scalar(
+        update(models.Account)
+        .where(models.Account.id == account_id, models.Account.balance_mode == "snapshots")
+        .values(balance_mode=mode)
+        .returning(models.Account.id)
+    )
+    record = await get_account(ctx.session, account_id)
+    if switched is not None:
+        _publish(ctx, "finance.account.updated", record)
     return record

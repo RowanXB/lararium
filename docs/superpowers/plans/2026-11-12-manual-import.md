@@ -2,9 +2,24 @@
 
 > **Status: deferred (2026-11-12), scope widened (2026-11-15).** The owner mostly relies on the Monzo API, so M3 (Monzo) came first; it is now merged. When this plan is resumed:
 > - **Task 1 (documents)** is still needed: M3 stores Monzo's JSON responses as raw records and does not build documents.
-> - **Migrations are renumbered.** `main` now ends at `0012`, so this plan's `0008`, `0009` and `0010` become `0013`, `0014` and `0015`.
+> - **Migrations are renumbered.** `main` now ends at `0015` (structured source fields, PR #11; account identifiers and transfers, PR #14), so this plan's `0008`, `0009` and `0010` become `0016`, `0017` and `0018`.
 > - **Every format the owner's banks export is supported** (Decision 14): CSV (with or without a header row), OFX (no longer optional: HSBC UK exports it), QIF, the UK midata CSV, and PDF statements through per-bank layouts (Task 4B). For each bank the most information-complete format is recommended. The owner's real exports were checked with throwaway prototypes on 2026-11-15; every format matched the others transaction by transaction over the dates they share. Only their structure is described here.
 > - **BOC UK** offers only PDF e-statements in internet and mobile banking. Its statements were checked the same way on 2026-11-15 and get a layout (Task 4B).
+> - **Implementation rulings (2026-11-15).**
+>   - Every field a file provides is stored as a typed field, for rows and for the statement: its summary, the account as printed, overdraft limits and rate tables (Decision 18, the owner's rule; new Task 3A).
+>   - Imports reuse M3's system accounts (`system_accounts.get_or_create_system_account(ctx, "unassigned")` and `"opening_balances"`) instead of an "Unassigned (imports)" account and new settings. That means one Unassigned for every source, which M4 re-points.
+>   - M4's matching calls (`transfer_contra`, `match_transaction`, `unlink_transaction`, `preview_match`) are wired in by whichever branch merges second.
+> - **M4 wired in (2026-11-16, M2 merged second).** Rulings, each closing a root cause rather than a symptom:
+>   - Each committed row gets its other leg from `transfer_contra`, under the source kind `"import"` keyed by its dedupe key, so the owner's decisions follow a row that is rolled back and imported again. It carries the counterparty (sort code and account number to the registry through `get_or_create_identifier`, name, reference) and `bank_transfer`. Commit ends with `heal_transfers`; rollback unlinks each row (`unlink_transaction`) before voiding it, then heals.
+>   - **`bank_transfer` is every row not of a card type.** Formats state a transfer inconsistently, but card payments, cash withdrawals and cheques always have their own codes. So each profile has `card_types` (the catalog sets HSBC's and Lloyds'; OFX defaults to `POS`, `ATM`, `CHECK`), and a row whose `bank_type` is one of them, and only such a row, is no bank transfer.
+>   - **One-sided pairs are gated by import coverage** (M4 design §5.8, "An unrelated row can stand in"). Treating untyped rows as bank transfers makes the amount-and-date fallback reach more rows, so it is taken for a manual account's row only when the window doesn't start before the first day the account's committed imports list in full (the first `complete_from`, per instrument with live rows). Before it the real row may be inside the opening, never imported, and a stand-in would never be found out; the first-snapshot condition the design proposed needs no rule of its own, as a day inside an opening snapshot is never listed in full. After the last day imported a row is taken (owner's decision, 2026-11-19): a wrong pick there is found out by the next statement, which puts both rows up for review, while requiring the window to end by the last day listed in full too (2026-11-16 to 2026-11-19) counted the real row twice, the usual case, until the next statement.
+>   - **The statement's own account is registered** to the ledger account at commit (`ensure_identifier` for its sort code and account number); a clash with another account's registration leaves it unregistered rather than failing the import, and the consistency check against earlier batches stays. The registration follows the statements that show it: rollback takes it off once no committed import of the account names it, so a statement imported into the wrong account and rolled back leaves nothing behind. Who registered it is not tracked (no provenance, by the owner's rule against designing for rare cases): an identical registration the owner made comes off too when every import into the account is rolled back, and the next import registers it again.
+>   - **Placeholders only where imports haven't reached** (whole-branch review, 2026-11-17, first principles). The money not yet in a manual account's ledger has two stand-ins, its opening and M4's placeholders, and they must never cover the same days. For a transactions account with imports, each day up to the last one its committed imports list in full is a statement's (the real rows are there) or lies before one (inside its opening or gap adjustment), so M4's `manual_predates` settles a transfer whose window ends by that day as `before_history`, as it does before a hybrid account's first snapshot. Only a side that may come later gets a placeholder. The opening walk leaves placeholders out: they are matching's estimates, which change at any time (another account's import, a sync), and must not move an adjustment. This replaces three earlier attempts that each fixed one side of the overlap (placeholders out of the walk, then in, then a line drawn only at the first import, which missed skipped months and transfers across the start).
+>   - **The ledger's own accounts take no imports**: In transit is an asset, but holds M4's transfers in flight.
+>   - **Lock order**: healing commands take the matching lock first, as commit and rollback do, so the two can't deadlock.
+>   - **Not flagged for review (owner's decision, 2026-11-18):** on a transactions account, a transfer settled because its window lies on days the statements list in full, while its own row arrived after the window and so stays on Unassigned, shows as *before history* under Recent, not as needing attention. It is rare (the window covers BACS's three working days), the balances are right, and flagging it would need three changes beyond this PR: telling it apart from transfers before the first statement or in a skipped month (which have no row to pair), a candidate search past the window, and a new review reason (a migration of M4's `review_reason` check). Revisit if real data shows it happens.
+>   - **Hardening** (whole-branch review minors, 2026-11-18): statement parsing runs in a worker thread (`asyncio.to_thread`), so a long PDF doesn't hold up the other requests the api serves, one at a time per process (a lock, so parses arriving together don't add up under the memory cap); the api container has `mem_limit: 1g`, so a hostile PDF (a decompression bomb) kills only the api, which restarts, not the host and its database. Parsing the owner's real statements peaks under 200 MiB.
+>   - **Deferred:** a staging preview of which transfer each row would complete (`preview_match` takes the batch's `complete` range for it), until the review page needs it.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -22,9 +37,10 @@
 
 Choices the spec leaves open, made here so the tasks don't have to:
 
-1. **The other leg of an imported row.** A bank row is single-entry; the ledger is double-entry. Each row becomes a transaction with two postings: the imported account, and one system account **"Unassigned (imports)"** (`ledger_type` `equity`, subtype `other`, balance mode `transactions`), created on first use and remembered in the setting `finance.import_contra_account_id`. Net worth counts only asset and liability accounts, so this account never changes net worth. Transfer matching (M4) will later re-point these legs.
-2. **Sign convention.** Profiles speak in **inflow** (the account's balance goes up) and **outflow**. On a credit card (a liability), a purchase is an outflow (the balance becomes more negative) and a payment to the card is an inflow. A profile maps either one signed amount column with `sign: "inflow_positive" | "outflow_positive"`, or two unsigned columns `inflow` and `outflow` (quantity = inflow − outflow).
+1. **The other leg of an imported row.** A bank row is single-entry; the ledger is double-entry. Each row becomes a transaction with two postings: the imported account, and the system account **"Unassigned"** that M3 already created for connectors (`system_accounts.get_or_create_system_account(ctx, "unassigned")`: `equity`, subtype `other`, balance mode `transactions`). Net worth counts only asset and liability accounts, so this account never changes net worth. Transfer matching (M4) will later re-point these legs.
+2. **Sign convention.** Profiles speak in **inflow** (the account's balance goes up) and **outflow**. On a credit card (a liability), a purchase is an outflow (the balance becomes more negative) and a payment to the card is an inflow. A profile maps either one signed amount column with `sign: "inflow_positive" | "outflow_positive"`, or two unsigned columns `inflow` and `outflow` (quantity = inflow − outflow). A negative value in either is a row error, never a flipped sign (review ruling, 2026-11-15).
 3. **Which accounts accept imports.** Only open, manual accounts whose balance mode is `transactions` or `hybrid`. Valuation ignores transactions on `snapshots` accounts, so importing into one would be silently invisible; it is refused instead.
+    - Only assets and liabilities (fourth review ruling, 2026-11-15). A statement is a bank account's or a card's, never an income, expense or equity account's. The system accounts an import posts its other legs to are equity: choosing "Opening balances" posted an adjustment to itself.
 4. **Errors block the commit; zeros and filtered rows are skipped.** A row that fails to parse, or that breaks the balance chain (Decision 12), is stored with status `error` and its message, and a batch with any error row cannot be committed (fix the profile or the file, then upload again). A row whose amount is zero, or that the profile's `include_only` filter leaves out (e.g. a `PENDING` card payment), has status `skipped` with the reason in `note`, and does not block. Duplicates are never committed. There is no per-row override in M2.
 5. **Deduplication key** (spec §6.4), per account:
    - the row has an external ID (OFX `FITID`, or a mapped CSV column): `sha256("ext", account, external_id)`;
@@ -32,6 +48,7 @@ Choices the spec leaves open, made here so the tasks don't have to:
    - otherwise: `sha256("seq", account, date, quantity, currency, description, n)`, where `n` counts earlier rows in the **same file** with the same date, quantity, currency and description. Two genuine identical purchases get `n = 0` and `n = 1`; a re-export that contains both reproduces both keys.
 
    Quantities and balances are canonicalised with `to_plain_str(value.normalize())`; descriptions are case-folded with whitespace collapsed. A row is a duplicate when a **committed** row on the same account has the same key. A partial unique index on committed rows is the database backstop.
+    - A key match keeps the amount and currency (fourth review ruling, 2026-11-15). An external id's key leaves both out, so a row it matches may be dated differently but never move another amount or currency: one that does is an error naming the file and both amounts.
 6. **Dates.** `booking_date` is always the date as written in the file, never shifted by UTC conversion.
    - Date-only values (CSV, or an OFX `DTPOSTED` without a time): `occurred_at` is local midnight of that date, with `occurred_tz` set to the zone's name.
    - CSV values with a time (a `date_format` containing `%H`, `%I`, `%M`, `%S` or `%p`, e.g. `15 Oct, 2026 09:05`): the wall-clock time is read in the profile's `timezone` and `occurred_tz` is set to it.
@@ -48,11 +65,25 @@ Choices the spec leaves open, made here so the tasks don't have to:
 13. **The opening balance is aligned automatically.** A statement rarely starts at the account's first day, so the sum of its rows is not the account's balance.
     - **Deriving it.** Staging works out the statement's opening balance per instrument: from the chronologically first row with a balance (its balance minus the net of the rows up to and including it), or else from the OFX `LEDGERBAL` (closing balance minus the net of all importable rows).
     - **Comparing.** It compares that with the ledger: the sum of the account's non-void postings in that instrument booked before the statement's first date.
-    - **Adjusting.** If the two differ, staging adds one row per instrument with `kind = 'opening_adjustment'`, a negative `position`, the description "Opening balance adjustment", the difference as its quantity, and booking date the day before the statement's first date. Its other leg goes to a second system account **"Opening balances"** (`equity`, setting `finance.opening_balance_account_id`).
+    - **Adjusting.** If the two differ, staging adds one row per instrument with `kind = 'opening_adjustment'`, a negative `position`, the description "Opening balance adjustment", the difference as its quantity, and booking date the day before the statement's first date. Its other leg goes to M3's system account **"Opening balances"** (`get_or_create_system_account(ctx, "opening_balances")`).
     - **What it means.** On a first import this row is the opening balance. Later, a non-zero adjustment usually means a statement period is missing: the review page says so, and the user can discard the batch and import the gap first.
-    - **When it doesn't apply.** Hybrid accounts skip the adjustment, because their snapshots anchor the balance; the chain check still runs. A file with neither balances nor `LEDGERBAL` gets the batch warning "This file has no balances, so its opening balance can't be checked".
+    - **When it doesn't apply.** Hybrid accounts skip the adjustment, because their snapshots anchor the balance; the chain check still runs. A file with neither balances nor `LEDGERBAL` gets the batch warning "This file gives no balance to take its opening from, so its opening balance can't be checked".
     - **At commit.** The adjustment is recomputed. If the ledger moved since staging (another batch was committed), the commit is refused with `ImportBatchStaleError`, and the user uploads the file again.
+    - **Adjustments are derived, and re-aligned whenever history changes** (ruling, 2026-11-15). A statement staged after a later one must not count the opening balance twice. Example: OFX for 20 Nov–5 Dec is committed first with an adjustment dated 19 Nov; then the PDF for 1–30 Nov arrives.
+      - **The invariant.** For each `transactions` account and instrument, every committed statement's opening balance holds at its first date.
+      - **The walk.** `align_openings` walks the committed batches that state an opening, ordered by first date (ties by commit time). For each batch it computes `needed = opening − (the account's non-void postings in that instrument booked before the first date, excluding opening adjustments) − (the adjustments already assigned to earlier batches in this walk)`.
+      - **Applying the result.** Where a batch's live adjustment differs from `needed`, its adjustment transaction is voided and, if `needed ≠ 0`, a new one is posted. The row is updated, or a new adjustment row is added. An adjustment that becomes zero turns its row `rolled_back` with the note "superseded".
+      - **When it runs.** At commit (after the batch's rows are posted) and at rollback (after its rows are voided).
+      - **What staging shows.** Staging previews the same walk, with this batch included. A batch whose adjustment would change gets a warning: "committing this changes the opening adjustment of <filename> from X to Y".
 
+    - **The walk goes by what each file lists** (third review ruling, 2026-11-15). A claim's opening is the balance just before the file's first listed row. "Before" is every live movement up to and including its first day, except the movements the file lists itself: its own rows and the originals its duplicates stand for, whatever their dates. An id matched across days is then not counted twice. On a first day the file lists only in part, another file's movement it doesn't list counts as before it, because an export may start partway through a day. On a first day it lists in full, no other movement counts.
+    - **Vouching is per claim** (fourth review ruling, 2026-11-15). Each claim carries its own `vouched_to`, the end of its days listed in full, or the day before its first day when they end before it or there are none, never the batch's first day across instruments. A claim opening partway through its first day is vouched by an earlier one only if that one lists the whole day, or lists the claim's first row: both then give the balance before the same row. Its adjustment is dated on its first day, not the day before, so it never lands inside a day another file lists in full. A claim that lists its first day in full keeps the day before. The row's balance-gap flag is read from the claims, not inferred from the adjustment's date.
+    - **A closing anchors only its own currency's chain**: the statement's currency, or the one picked at upload, and only when every row is in it. It must also be dated no later than the file's period end or its last row, whichever is later: an OFX `LEDGERBAL` is often the balance on the download day, after `DTEND` (fifth and sixth review rulings, 2026-11-15).
+    - **One place an opening sits** (fifth review ruling, 2026-11-15): `OpeningClaim.opens_on`. A claim that lists its first day in full opens at the start of its first day listed in full, the statement period's start for a PDF, since nothing lies between that and its first row. A claim that lists its first day only in part opens partway through that day. The walk orders claims by it, a start of day before partway through the same day, and only then by commit time. Adjustments are dated by it: the day before for a start of day, on the day otherwise. The gap flag compares it too. So the same files give the same dated history and the same adjustment owner in either order. Sixth review ruling (2026-11-15): an opening at a start of day, or partway through a day some file lists in full, is carried back through every run of days that any file of the account lists in full, with an opening of its own or not (a QIF, a CSV without balances). Its adjustment is dated before that run, but never before the opening of the claim ahead of it in the walk. A partly listed claim is vouched by an earlier file that lists any of its first-day rows, a set and not "the first row", so the file's row order doesn't matter: an OFX may list newest first.
+    - **Accepted as it stands** (owner's decision, 2026-11-15, after six review rounds). Rounds 4 to 6 found nothing critical, and each found two or three important findings, all in the opening model. They were closed by tightening one definition each time, not by adding mechanisms. The residual risk is the dated history, never a final balance or a statement's own date: days around an opening, where three or more files overlap and one has no balances. Simplifying the model, by dropping partly listed days and refusing ambiguity, was rejected. It would refuse the owner's own overlapping exports, the case review round 1 fixed. The guard is `make real-check` (README, "Verifying against your real statements"): the owner's real files must commit in both orders, hold every closing on its date, and roll back to zero. Revisit the model if a format arrives that can only be exported as the last N transactions.
+    - **Vouching starts at the first day listed in full.** For final review C1, a later claim is compared with an earlier file from its first day listed in full when that day is not after its first row. Consecutive monthly statements are compared even when the later one's first row isn't on the 1st.
+    - **An imported transaction is voided only by rolling its import back** (third review ruling, 2026-11-15). The import tables take a committed row's transaction to be live; a hand void through `POST /transactions/{id}/void` would leave them saying it stands, with its openings never re-aligned. That route refuses with `TransactionImportedError` (409 `transaction_imported`), naming the file.
+    - **One definition of what a batch speaks for**: the instruments of its live statement rows (`new`, `duplicate`, `committed`), on both the committed and the new side, at stage and at commit. A statement whose rows all matched another file's still lists its days in full.
 14. **Formats, and one recommended format per bank.** Every format a bank exports is supported; the most information-complete one is recommended. A static catalog, `importing/catalog.py`, lists each institution's formats with a ready profile config and marks the recommended one; the UI offers "Add profile from catalog" and labels the recommended format. The catalog as checked against the owner's real exports:
 
     | Institution | Format | Per transaction | Range | Recommended |
@@ -78,10 +109,46 @@ Choices the spec leaves open, made here so the tasks don't have to:
     - **HSBC UK** (OpenText output): columns "Paid out", "Paid in" and "Balance" are told apart only by x position, measured from the table header. The date is printed only on a day's first row and is carried forward; the balance is printed only after a day's last row, with a trailing `D` when overdrawn (negative). Each row starts with a type code (`VIS`, `)))`, `CR`, `DR`, `BP`, `OBP`, …) and its description may span lines. Long statements continue on the next page between "BALANCE CARRIED FORWARD" and "BALANCE BROUGHT FORWARD"; a first statement has no brought-forward line, and its opening balance comes from the summary. The details column is set tight: word extraction needs `x_tolerance` below the default, or words run together.
     - **BOC UK** (iTextSharp, bilingual English/Chinese labels): the statement period ("From/起始日期", "To/截止日期"), a per-currency summary with opening and closing balance, money in and out **and the number of payments each way**, then a table with trade date, value date (both dd/mm/yy), details over several lines, "Paid out", "Paid in" and a balance on every row, between horizontal rules. Amount columns are positioned under the header labels. Pages after the last "Page N of M" are terms and conditions. A statement holds one currency; a statement with several currency sections is refused until one is seen.
     - **Lloyds** (iText, tagged for screen readers): a second text layer of 0.1 pt white text repeats the column labels and writes empty cells as "blank."; it must be filtered out by size and colour before reading. Amount columns are positioned under the table header's "Money In", "Money Out" and "Balance".
-16. **Overlapping imports from different formats.** Dedupe keys (Decision 5) differ between formats, so a PDF statement and an OFX export covering the same days would both commit. Each committed batch therefore records the date range it covers (a PDF's statement period; otherwise its first to last row date). When a new batch's rows fall on days a committed batch of the same account already covers, they are matched to the committed rows of those days by `(booking_date, quantity)` as a multiset: matched rows become `duplicate`; an unmatched row is an `error` ("this period was already imported from another file, and this row is not in it"). This lets the owner import HSBC PDF statements for history and the OFX export for the weeks since the last statement, in either order.
+16. **Overlapping imports from different formats.** Dedupe keys (Decision 5) differ between formats, so a PDF statement and an OFX export covering the same days would both commit. Each committed batch therefore records the date range it covers (a PDF's statement period; otherwise its first to last row date). When a new batch's rows fall on days a committed batch of the same account already covers, they are matched to the committed rows of those days by `(booking_date, quantity)` as a multiset: matched rows become `duplicate`; an unmatched row is an `error` ("this period was already imported from another file, and this row is not in it"). The match is two-way and keyed on `(date, instrument, quantity)` (ruling, 2026-11-15). On every day both files cover, each committed statement row must also be matched by a row of the new file. A committed row left unmatched refuses the file with `ImportNotAllowedError`, naming the day, the amount and the other file; at commit the same check gives `ImportBatchStaleError`. This lets the owner import HSBC PDF statements for history and the OFX export for the weeks since the last statement, in either order. A row that is `duplicate` because of a committed row (by key or by covered day) records it in `import_rows.duplicate_of`. A committed batch whose rows are the `duplicate_of` of another committed batch's rows cannot be rolled back until that batch is rolled back (`ImportBatchStateError` naming its file), so a rollback never leaves days that a later batch skipped uncovered.
+    - **Covered versus listed in full** (review ruling, 2026-11-15). A batch records two ranges. `covered_from..covered_to` is where it has rows, as above. `complete_from..complete_to` is the part it lists in full, or NULL.
+      - A PDF statement is closed and self-checked, so it lists its whole period in full (`ParsedStatement.period_complete`).
+      - An export (CSV, OFX, QIF) may be taken partway through a day, so it lists in full only the days strictly between its first and last day.
+      - An export whose `include_only` filter left any row out lists no day in full: a pending payment left out reappears later, completed.
+      - Matching runs on every day either file covers. An unmatched new row is an `error` only on a day a committed batch lists in full. Anywhere else it is `new`; on a day a committed batch lists only in part, its note names that file, so the review shows it. A committed row is checked as missing only on the days the new file lists in full.
+      - A batch speaks only for the instruments it has rows in (second review ruling, 2026-11-15): one currency's statement says nothing about another currency's days on the same account.
+      - The missing-row check runs before the balance chain check, so a row that matched and then fails the chain still counts as listed: the file is staged with that row as an error, not refused for lacking it.
+      - At commit, a row that is newly on a day another file lists only in part makes the batch stale, so it is reviewed before it posts.
+      - Decision 13's vouching follows the same days: an earlier file vouches for the balance only through the day after the last day it lists in full (`complete_to`), or only for its opening when it lists none in full. A payment on an export's partial last day, in neither file, is then a gap that takes an adjustment, not a disagreement.
+      - Without this, a second export of the same account was refused whenever the first export's last day was partial, or a pending row sat between its rows. Matching on covered days rather than only on complete ones still stops a PDF row and an OFX row on a shared edge day from both committing.
 17. **The bank's transaction type is kept.** A mapped `type` column (CSV), the type code of a PDF row, or OFX `TRNTYPE` is stored in `import_rows.bank_type` and in `raw`. M4 uses it (e.g. `FPO`/`FPI` and `CR`/`BP` mark likely transfers).
+18. **Every field a file provides is stored as a typed field** (owner's rule, 2026-11-15). `raw` and the stored document are a lossless copy, but they don't count as storing a field. Two exceptions: a field that can be computed from other stored data (a running balance follows from the opening balance and the amounts; it is kept only for the chain check), and a field with a better structured home.
+    - **`raw` holds the whole source row.** That means every CSV column, mapped or not; every OFX leaf; every QIF tag; and every printed field of a PDF row.
+    - **Per row**, `ParsedRow` and `import_rows` carry, besides the fields above:
+      - `value_date`: BOC's value date, OFX `DTUSER`, or a mapped CSV column;
+      - `payee` and `memo`, kept separately even though `description` still joins them: QIF `P`/`M`, OFX `NAME`/`MEMO`, or mapped CSV columns;
+      - `check_number`: QIF `N`, OFX `CHECKNUM`, or a mapped column;
+      - the counterparty: its name, sort code, account number and payment reference, each optional (`ParsedRow.counterparty`; on `import_rows`, the typed columns `counterparty_name`, `counterparty_sort_code`, `counterparty_account_number` and `payment_reference`). At commit, once M4 lands, the bank account goes to M4's registry (`identifiers.get_or_create_identifier(ctx, "uk_bank_account", ...)`) and the transaction's `counterparty_identifier_id`, `counterparty_name`, `payment_reference` and `bank_transfer` (from `bank_type`) are set. They are parsed at parse time where the format states them: BOC's details lines, or mapped CSV columns. HSBC and Lloyds PDF descriptions have no reliable boundary between name and reference, so those layouts leave `counterparty` empty.
+    - **Per statement**, `ParsedStatement` and `import_statements` carry at least:
+      - the opening and closing balance and the closing date;
+      - money in and money out;
+      - the payment counts in and out (BOC);
+      - the statement's own account, as a sort code and an account number, from the PDF header, OFX `BANKACCTFROM`/`CCACCTFROM`, or mapped CSV columns such as Lloyds' "Sort Code" and "Account Number".
 
-**Not in this plan:** pairing staged rows with inferred postings (needs M4), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), LLM extraction, PDF layouts for further banks, background workers.
+      `covered_from` and `covered_to` stay as they are.
+    - **Statement-level data is stored too** (the owner's follow-up, 2026-11-15). The statement fields live in their own table, `finance.import_statements`, one row per batch. The batch holds the workflow (status, profile, covered days); the statement holds what the file says. That is:
+    - **The mailing block** (ruling, 2026-11-15, from the owner's real statements). Each PDF layout reads it into `addressee` and `address` (its lines joined with ", "), columns of `import_statements`. HSBC's sits in the left column below "Your Statement", Lloyds' below "Document requested by:", and BOC's opens page 1. A line of only punctuation (BOC prints "." for an empty one) is left out.
+      - **The period and the money:** period, currency, opening and closing balance with the closing date, money in and out, payment counts.
+      - **The document:** the statement or sheet reference number and the document date.
+      - **The account as printed:** `account_type` (a product line, BOC's account type, or OFX `ACCTTYPE`), the account name, sort code, account number, IBAN, BIC/SWIFT, customer number, the clearing account number, and the branch (name and address as one text).
+      - **Overdraft:** the arranged overdraft limit with its date (midata's footer).
+      - **Rate tables:** a statement's rate table (HSBC's credit and overdraft interest tiers) is stored as typed child rows in `finance.import_statement_rates`: `kind` as printed, `band_from`/`band_to`, the annual `rate` and the `ear`, each in percent. Each row is dated by its statement.
+
+      `ParsedStatement` carries all of this as `account: StatementAccount` (the identifiers above), `rates: list[StatementRate]` and plain fields (Task 3A). A layout fills what its statement prints and leaves the rest `None`.
+    - **Per row, beyond the fields above**, a layout that can tell them apart fills `payment_kind` (BOC: "local clearing", "international inward remittance", as printed), `bank_reference` (BOC's business and reference numbers such as `/PTG…`, `/TI…`), `purpose_code` (BOC `/PURP/…`), `remittance_info` (the remittance text) and `counterparty_bank` (the counterparty's bank name).
+    - **The own-account identifiers have their structured home on the account.** Once M4 lands, sort code with account number, and the IBAN, go to M4's registry. Until then they are stored on the statement and checked for consistency, as the next bullet describes. Names are never compared, because the owner's name is printed in different forms.
+    - **The statement's account is checked, not stored per row.** The check compares sort code, account number and IBAN, each only when both statements state it. A file whose rows name two different own accounts is a `FileFormatError` ("export one account per file"). A file whose account differs from the one stated by an earlier committed batch of the chosen account is refused with `ImportNotAllowedError`. The message names only the last four digits of each account number. Once M4's registry (`finance.account_identifiers`) is on `main`, whichever of M2 and M4 merges second assigns the statement's account to the ledger account through `ensure_identifier` and checks against the registry.
+
+**Not in this plan:** previewing staged rows' pairs on the review page (M4 is wired in at commit, see the status note), alerts when a snapshot and the ledger drift apart (M9), regenerating the ledger from documents (§6.6; this plan stores the document, a snapshot of the profile and the parser version so it can be done later), LLM extraction, PDF layouts for further banks, background workers.
 
 ## Global Constraints
 
@@ -123,9 +190,9 @@ Found by checking the owner's HSBC UK and Lloyds exports (2026-11-15):
 ```
 backend/
   migrations/versions/
-    0013_core_documents.py          # Task 1
-    0014_finance_import_profiles.py # Task 2
-    0015_finance_import_batches.py  # Task 5
+    0016_core_documents.py          # Task 1
+    0017_finance_import_profiles.py # Task 2
+    0018_finance_import_batches.py  # Task 5
   src/lararium/
     config.py                       # + document_dir (Task 1)
     deps.py                         # + get_document_store (Task 7)
@@ -180,7 +247,7 @@ backend/Dockerfile                                                 # Task 9
 ### Task 1: Documents (core)
 
 **Files:**
-- Create: `backend/migrations/versions/0013_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
+- Create: `backend/migrations/versions/0016_core_documents.py`, `backend/src/lararium/core/documents.py`, `backend/tests/core/test_documents.py`
 - Modify: `backend/src/lararium/core/models.py`, `backend/src/lararium/core/errors.py`, `backend/src/lararium/config.py`
 
 **Interfaces:**
@@ -190,6 +257,7 @@ backend/Dockerfile                                                 # Task 9
   - `class LocalDocumentStore(DocumentStore)`: `__init__(self, root: Path)`. Stores at `root / sha[:2] / sha[2:4] / sha`, writing a temporary file in the same directory and `os.replace`-ing it into place; `put` of an existing hash is a no-op.
   - `@dataclass(frozen=True) class DocumentRecord`: `id: UUID, sha256: str, size_bytes: int, media_type: str, original_filename: str, source: str, created_at: datetime`.
   - `async def store_document(ctx: CommandContext, store: DocumentStore, content: bytes, *, filename: str, media_type: str, source: str) -> DocumentRecord`: writes the content first, then inserts with `ON CONFLICT (sha256) DO NOTHING` and returns the existing row on conflict (keeping the first filename). It emits `core.document.stored` only for a new row and calls `ctx.record_change("document", {...})`.
+  - `async def record_document(ctx, content, *, filename, media_type, source) -> DocumentRecord` (review ruling, 2026-11-15): the row alone. Its caller writes the bytes with `store.put` before the command commits, so a committed row never lacks its bytes; `store_document` is the two together.
   - `async def get_document(session: AsyncSession, document_id: UUID) -> DocumentRecord`: raises `DocumentNotFoundError`.
   - `async def read_document(session: AsyncSession, store: DocumentStore, document_id: UUID) -> bytes`: re-hashes and raises `DocumentIntegrityError` on mismatch or a missing file.
   - `Settings.document_dir: Path = Path("/var/lib/lararium/documents")` (env `LARARIUM_DOCUMENT_DIR`).
@@ -210,7 +278,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
 ### Task 2: Parse profiles
 
 **Files:**
-- Create: `backend/migrations/versions/0014_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
+- Create: `backend/migrations/versions/0017_finance_import_profiles.py`, `backend/src/lararium/modules/finance/importing/__init__.py`, `.../importing/profiles.py`, `backend/tests/finance/importing/test_profiles.py`
 - Modify: `backend/src/lararium/modules/finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
@@ -232,7 +300,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
     - `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`
     - `amount_format: AmountFormat = AmountFormat()`
   - `class OfxProfileConfig`: `format: Literal["ofx"]`; `sign: Literal["inflow_positive", "outflow_positive"] = "inflow_positive"`; `timezone: str | None = None`.
-  - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `sign` as for OFX; `timezone: str | None = None`.
+  - `class QifProfileConfig`: `format: Literal["qif"]`; `date_format: str` (validated like the CSV one; QIF dates vary by bank, e.g. `%d/%m/%Y`); `encoding` as for CSV; `amount_format: AmountFormat = AmountFormat(thousands_separator=",")` (QIF amounts are written in the bank's locale); `sign` as for OFX; `timezone: str | None = None`.
   - `class PdfProfileConfig`: `format: Literal["pdf"]`; `layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]`; `timezone: str | None = None`.
   - `type ProfileConfig = Annotated[CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig, Field(discriminator="format")]`.
   - `@dataclass(frozen=True) class ImportProfileRecord`: `id: UUID, name: str, config: ProfileConfigModel, version: int, updated_at: datetime`, where `ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig`.
@@ -241,7 +309,7 @@ Migration `0013`: `core.documents(id uuid PK DEFAULT uuidv7(), sha256 text NOT N
   - `async def get_profile(session, profile_id: UUID) -> ImportProfileRecord`; `async def list_profiles(session) -> list[ImportProfileRecord]` (by name).
   - Errors in `finance/errors.py`: `ImportProfileNotFoundError`, `DuplicateProfileNameError`.
 
-Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name text NOT NULL, format text NOT NULL CHECK (format IN ('csv','ofx','qif','pdf')), config jsonb NOT NULL, version integer NOT NULL DEFAULT 1 CHECK (version >= 1), owner_entity_id uuid NOT NULL REFERENCES core.entities, created_at/updated_at timestamptz NOT NULL DEFAULT now(), CHECK (config->>'format' = format))`, plus a unique index on `lower(btrim(name))`. Names are stripped on write, and an empty name is a `FinanceValidationError`.
+Migration `0014`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name text NOT NULL, format text NOT NULL CHECK (format IN ('csv','ofx','qif','pdf')), config jsonb NOT NULL, version integer NOT NULL DEFAULT 1 CHECK (version >= 1), owner_entity_id uuid NOT NULL REFERENCES core.entities, created_at/updated_at timestamptz NOT NULL DEFAULT now(), CHECK (config->>'format' = format))`, plus a unique index on `lower(btrim(name))`. Names are stripped on write, and an empty name is a `FinanceValidationError`.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_amount_xor_inflow_outflow`: `CsvColumns(date="D", description=["X"])` raises; giving `amount` together with `inflow`/`outflow` raises; `inflow` without `outflow` raises.
@@ -262,21 +330,23 @@ Migration `0009`: `finance.import_profiles(id uuid PK DEFAULT uuidv7(), name tex
 
 **Files:**
 - Create: `.../importing/parsed.py`, `.../importing/csv_parser.py`, `backend/tests/finance/importing/test_csv_parser.py`
-- Modify: `.../finance/errors.py` (+ `FileFormatError(FinanceError)`)
+- Modify: `.../finance/errors.py` (+ `FileFormatError(FinanceError)`), `.../importing/profiles.py` (Decision 18: `CsvColumns` gains the optional single-column mappings `value_date`, `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`, `counterparty_account_number`, `reference`, `account_sort_code`, `account_number`, each `str | None = None` and checked against `header` like the other columns)
 
 **Interfaces:**
 - Consumes: `CsvProfileConfig`, `AmountFormat` (Task 2); `money.require_amount`.
 - Produces:
   - In `parsed.py`:
-    - `@dataclass(frozen=True) class ParsedRow`: `position: int, booking_date: date, occurred_at: datetime | None, description: str, quantity: Decimal, fee: Decimal, currency: str | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, raw: dict[str, str]`.
+    - `@dataclass(frozen=True) class Counterparty`: `name: str | None = None, sort_code: str | None = None, account_number: str | None = None, reference: str | None = None` (Decision 18). A sort code is normalised to six digits with no separators, and an account number to its digits.
+    - `@dataclass(frozen=True) class StatementAccount`: `sort_code: str | None, account_number: str | None`, normalised the same way.
+    - `@dataclass(frozen=True) class ParsedRow`: `position: int, booking_date: date, occurred_at: datetime | None, description: str, quantity: Decimal, fee: Decimal, currency: str | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, raw: dict[str, str]`, then the Decision 18 fields with defaults: `value_date: date | None = None, payee: str | None = None, memo: str | None = None, check_number: str | None = None, counterparty: Counterparty | None = None`.
       - `quantity` is already in ledger sign (inflow positive).
       - `fee` is `Decimal(0)` when no fee is mapped or the cell is empty; the balance changes by `quantity - fee`.
       - `occurred_at` is aware when the source gives a time, else `None`.
     - `@dataclass(frozen=True) class RowError`: `position: int, message: str, raw: dict[str, str]`.
     - `@dataclass(frozen=True) class SkippedRow`: `position: int, reason: str, raw: dict[str, str]`. Used for rows the `include_only` filter leaves out.
-    - `@dataclass(frozen=True) class ParsedStatement`: `rows: list[ParsedRow | RowError | SkippedRow]`, `closing_balance: Decimal | None = None`, `closing_balance_date: date | None = None`, `period: tuple[date, date] | None = None`. OFX sets the closing fields (and `period` from `DTSTART`/`DTEND`); PDF layouts set `period` and the closing fields from the statement.
+    - `@dataclass(frozen=True) class ParsedStatement`: `rows: list[ParsedRow | RowError | SkippedRow]`, `closing_balance: Decimal | None = None`, `closing_balance_date: date | None = None`, `period: tuple[date, date] | None = None`, and (Decision 18) `opening_balance: Decimal | None = None`, `money_in: Decimal | None = None`, `money_out: Decimal | None = None`, `payments_in: int | None = None`, `payments_out: int | None = None`, `account: StatementAccount | None = None`. OFX sets the closing fields, `period` from `DTSTART`/`DTEND`, and `account` from `BANKACCTFROM`/`CCACCTFROM`. PDF layouts set every statement field they print.
     - `MAX_IMPORT_ROWS = 20_000`.
-    - `def parse_amount(text: str, fmt: AmountFormat) -> Decimal`: strips whitespace; accepts one leading `+`/`-`, or wrapping parentheses meaning negative; strips one leading currency symbol from `£ $ €` after the sign; removes thousands separators; maps the decimal separator to `.`; then requires `^[0-9]+(\.[0-9]+)?$` with ASCII digits only and calls `require_amount`. Anything else raises `ValueError` with a message naming the text.
+    - `def parse_amount(text: str, fmt: AmountFormat) -> Decimal`: strips whitespace; accepts one leading `+`/`-`, or wrapping parentheses meaning negative; strips one leading currency symbol from `£ $ €` after the sign; removes thousands separators, which must group the integer part in threes (`1,234.56`; `12,50` with `,` as thousands separator is an error, never `1250`); maps the decimal separator to `.`; then requires `^[0-9]+(\.[0-9]+)?$` with ASCII digits only and calls `require_amount`. Anything else raises `ValueError` with a message naming the text.
     - `def clean_description(parts: list[str]) -> str`: joins the parts with a space, collapses whitespace, strips, and truncates to 1000 characters.
   - In `csv_parser.py`: `PARSER_VERSION = "csv-1"`; `def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement`. `local_tz` is the profile's `timezone` when set; the caller resolves it.
 
@@ -285,7 +355,8 @@ Rules for `parse_csv`:
 - Drop `skip_rows` physical lines, then read with `csv.DictReader(delimiter=config.delimiter, fieldnames=config.header)` (with `header` set, the first line is data). After dropping all-empty lines, drop the last `skip_footer_rows` lines.
 - A header missing any mapped column, or any `include_only` column, raises `FileFormatError` naming the missing columns. A file with no data rows raises `FileFormatError("no rows")`. More than `MAX_IMPORT_ROWS` data rows raises `FileFormatError`.
 - Lines whose cells are all empty are ignored. `position` is the 0-based index among the remaining data rows.
-- `raw` is the row's mapped and `include_only` columns as written.
+- `raw` is every column of the row as written, mapped or not (Decision 18).
+- **Decision 18 fields.** The mapped `value_date` (parsed with `date_format`; a bad value is a `RowError`), `payee`, `memo`, `check_number` and the counterparty columns fill the row's typed fields. An empty cell gives `None`, and a counterparty with no field set gives `None`. The mapped `account_sort_code`/`account_number` set `ParsedStatement.account`; rows that name two different accounts raise `FileFormatError("export one account per file")`.
 - **Filter first.** A row whose `include_only` column holds a value not in the list becomes `SkippedRow(reason="State is PENDING")` (the column name and value) **before** any other field is parsed. A pending row typically has an empty completion date and balance, and must not become an error.
 - For each remaining row, any of the following gives a `RowError` with a specific message, never an exception:
   - a date that does not match `date_format`;
@@ -294,7 +365,9 @@ Rules for `parse_csv`:
   - a currency cell that is not three ASCII letters (it is upper-cased and stripped first).
 - **Empty optional cells.** An empty balance cell gives `balance = None`; an empty fee cell gives `fee = 0`.
 - **Dates and times.** When `config.has_time`, the parsed wall-clock time is made aware with `local_tz` (`occurred_at`), and `booking_date` is its date as written. Otherwise `occurred_at = None`.
-- **Signs.** With `amount`, quantity = amount for `inflow_positive` and −amount for `outflow_positive`; with `inflow`/`outflow`, quantity = inflow − outflow, and `sign` is ignored. The fee is taken as written; a positive fee is a charge.
+- **Signs.** With `amount`, quantity = amount for `inflow_positive` and −amount for `outflow_positive`; with `inflow`/`outflow`, quantity = inflow − outflow, and `sign` is ignored. A negative `inflow` or `outflow` cell is a row error.
+- **Footer lines are checked** (third review ruling, 2026-11-15). A line that `skip_footer_rows` would drop but that reads as a transaction refuses the file, so a file without the footer doesn't lose its last row.
+- **Row width** (review ruling, 2026-11-15). A row's raw dict holds the cells the line has, less empty cells under an unnamed header cell; the mapped columns a short row leaves out read as empty. Empty cells past the header are padding. So the work stays proportional to the file's size, however wide its header. The fee is taken as written; a positive fee is a charge.
 
 - [ ] **Step 1: Write the failing tests** (configs built inline; bytes literals):
   - `test_signed_amount_column`: `Date,Description,Amount\n10/11/2026,Coffee,-3.50\n11/11/2026,Salary,2000.00\n` with `%d/%m/%Y` gives quantities `Decimal("-3.50")` and `Decimal("2000.00")` and booking dates `2026-11-10` and `2026-11-11`.
@@ -317,10 +390,31 @@ Rules for `parse_csv`:
   - `test_signed_pound_amounts`: `-£12.34` and `+£1,000.00` parse as `-12.34` and `1000.00`.
   - `test_whole_number_amounts`: `85` in a debit column gives `-85`.
   - `test_type_column_kept`: a mapped `type` column fills `ParsedRow.bank_type`.
+  - `test_raw_keeps_unmapped_columns`: an unmapped `Notes` column appears in `raw`.
+  - `test_typed_fields_from_columns`: mapped value date, payee, memo, check number and counterparty columns (sort code `"12-34-56"`) fill the typed fields, with the sort code normalised to `"123456"`; empty cells give `None`.
+  - `test_statement_account_from_columns`: Lloyds-shaped `Sort Code`/`Account Number` columns set `ParsedStatement.account`; a second account number in the file raises `FileFormatError`.
 - [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_csv_parser.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement** `parsed.py` and `csv_parser.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
 - [ ] **Step 5: Commit** `feat: parse CSV statements through profiles`.
+
+### Task 3A: Statement-level fields
+
+**Files:**
+- Modify: `.../importing/parsed.py`, `.../importing/profiles.py`, `.../importing/csv_parser.py`, `backend/tests/finance/importing/test_csv_parser.py`, `test_profiles.py`
+
+**Interfaces (Decision 18, the owner's follow-up):**
+- `StatementAccount` gains `iban: str | None = None` (upper-cased, spaces removed), `bic: str | None = None`, `name: str | None = None`, `account_type: str | None = None`, `customer_number: str | None = None`, `clearing_account_number: str | None = None` and `branch: str | None = None`. `sort_code` and `account_number` get defaults of `None`.
+- `@dataclass(frozen=True) class StatementRate`: `kind: str, band_from: Decimal | None, band_to: Decimal | None, rate: Decimal | None, ear: Decimal | None` (at least one of `rate` and `ear`).
+- `ParsedStatement` gains `currency: str | None = None`, `statement_reference: str | None = None`, `document_date: date | None = None`, `available_balance: Decimal | None = None`, `available_balance_date: date | None = None`, `overdraft_limit: Decimal | None = None`, `overdraft_limit_date: date | None = None` and `rates: list[StatementRate] = field(default_factory=list)`.
+- `Counterparty` gains `bank: str | None = None`. `ParsedRow` gains `payment_kind`, `bank_reference`, `purpose_code` and `remittance_info`, each `str | None = None`.
+- `CsvProfileConfig` gains `overdraft_footer_label: str | None = None`. When it is set, a footer line among the dropped `skip_footer_rows` whose first cell equals the label (after stripping) gives `overdraft_limit` and `overdraft_limit_date`. The date is the first cell that parses with `date_format`; the amount is the last cell, through `parse_amount`. Any other footer line is still dropped. A labelled line that doesn't parse raises `FileFormatError`.
+
+- [ ] **Step 1: Write the failing tests:** `test_midata_overdraft_footer` (the footer from `test_footer_rows_skipped` with `overdraft_footer_label="Arranged overdraft limit"` gives `overdraft_limit == Decimal("100.00")` and its date); `test_statement_account_normalises_iban` (`"gb29 nwbk 6016 1331 9268 19"` → `"GB29NWBK60161331926819"`); `test_overdraft_label_validated` in `test_profiles.py` (an empty label is rejected).
+- [ ] **Step 2: Run**; expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
+- [ ] **Step 5: Commit** `feat: carry statement-level fields through the parsers`.
 
 ### Task 4: OFX parser
 
@@ -335,11 +429,17 @@ Rules:
 - **Decoding.** Decode as UTF-8 when the header says `ENCODING:UTF-8` or the XML declaration says `encoding="UTF-8"`, otherwise as cp1252. Undecodable bytes raise `FileFormatError`.
 - **Tokenizing.** Tokenize everything after the header with `<(/?)([A-Za-z0-9.]+)>([^<]*)`. A leaf's value is the stripped text after its opening tag, with `html.unescape` applied. Aggregates (`STMTTRN`, `STMTRS`, `CCSTMTRS`, `BANKTRANLIST`) are closed in both OFX 1.x and 2.x.
 - **One statement per file.** Exactly one `STMTRS` or `CCSTMTRS` is allowed; zero or several raise `FileFormatError` ("export one account per file").
-- **Currency.** Each row's currency is the statement's `CURDEF`, overridden by a transaction-level `CURRENCY/CURSYM` or `ORIGCURRENCY/CURSYM` when present.
+- **Currency.** Each row's currency is the statement's `CURDEF`, overridden by a transaction-level `CURRENCY/CURSYM` when present. `ORIGCURRENCY` does not override it: per the OFX spec, `TRNAMT` is then already in `CURDEF`, and `ORIGCURRENCY` only records the original currency. It is typed as `original_currency`, and `CURRATE` from either aggregate as `exchange_rate` (third review ruling, 2026-11-15).
+- **The response envelope** (ruling, 2026-11-15, from the owner's real exports). Every `STATUS` must be `CODE` 0, or the file is refused: anything else is the bank saying the response failed or is incomplete. `SONRS`'s `DTSERVER`, the day the bank made the file, is the statement's `document_date`. `TRNUID`, `LANGUAGE` and `INTU.BID` describe the exchange, not the account, and stay in the stored document. A well-formed character reference (`&amp;`, `&#38;`) is decoded and a bare `&` is kept as written. An XML declaration without an encoding means UTF-8. A statement-level aggregate given twice refuses the file, as a repeated leaf does. An unclosed CDATA section refuses it too, read in one pass.
+- **Typed transaction aggregates** (third review ruling, 2026-11-15). `PAYEE/NAME` stands in for `NAME`. `BANKACCTTO`/`CCACCTTO` give the counterparty's sort code and account number, normalised as for `BANKACCTFROM`. `PAYEE`'s address stays in `raw`; it has no typed home yet.
+- **One value per leaf** (third review ruling, 2026-11-15). Every leaf the parser reads is read through `parsed.single`. A transaction that gives one twice is a row error; it is usually a second transaction run into the same record. A statement-level aggregate that gives one twice refuses the file. QIF reads its tags the same way. An aggregate the parser walks through and leaves open refuses the file. CDATA is read as text.
+- **Corrections** (review ruling, 2026-11-15). A transaction with `CORRECTFITID` or `CORRECTACTION` deletes or replaces another transaction, perhaps one an earlier file imported. Booked as its own transaction it would count the money twice, so it is a row error.
+- **Statement fields.** `DTSTART`/`DTEND` → `period` (by their written dates); `AVAILBAL/BALAMT` and `DTASOF` → `available_balance` and `available_balance_date` (same sign rule as `LEDGERBAL`).
 - **Fields of each `STMTTRN`.** `DTPOSTED` is required. `TRNAMT` is required and parsed with `parse_amount` using `AmountFormat()`. `FITID` becomes `external_id` (`None` when missing). The description is `clean_description([NAME, MEMO])`, skipping missing parts. `raw` holds every leaf of the transaction.
 - **`DTPOSTED`.** The format is `YYYYMMDD[HHMMSS[.XXX]][[±H[H][.MM]][:TZ]]`. `booking_date` comes from the first 8 characters. `occurred_at` is `None` without a time part; with one, it is aware, using the bracketed offset or UTC when there is none. A malformed value is a `RowError`.
 - **Signs.** `TRNAMT` is already from the account holder's view, so `inflow_positive` uses it as written and `outflow_positive` negates it.
 - **Fees and balances.** Rows have `fee = 0` and `balance = None`.
+- **Typed fields (Decision 18).** `NAME` → `payee`, `MEMO` → `memo`, `CHECKNUM` → `check_number`, the date of `DTUSER` → `value_date` (a malformed `DTUSER` is a `RowError`), `TRNTYPE` → `bank_type`. `BANKACCTFROM/BANKID` + `ACCTID` + `ACCTTYPE` (or `CCACCTFROM/ACCTID`) → `ParsedStatement.account` (`sort_code`, `account_number`, `account_type`; a UK `BANKID` of six digits is the sort code; HSBC writes `ACCTID` as the `BANKID` followed by the 8-digit account number, so a 14-digit `ACCTID` starting with the `BANKID` gives the remaining 8 digits), `CURDEF` → `ParsedStatement.currency`.
 - **Closing balance.** `LEDGERBAL/BALAMT` becomes `closing_balance` (same sign rule), and the date of `LEDGERBAL/DTASOF` becomes `closing_balance_date`. When it is absent, both are `None`.
 
 - [ ] **Step 1: Write the failing tests** with two synthetic files written in the test module (Example Bank, fake FITIDs):
@@ -351,6 +451,7 @@ Rules:
   - `test_ledgerbal_is_closing_balance`: `<LEDGERBAL><BALAMT>1234.56<DTASOF>20261130` gives `closing_balance == Decimal("1234.56")` and `closing_balance_date == date(2026, 11, 30)`; a file without it gives `None`.
   - `test_multiple_statements_rejected` and `test_no_statement_rejected`: each raises `FileFormatError`.
   - `test_bad_trnamt_is_row_error`.
+  - `test_typed_fields`: `NAME`, `MEMO`, `CHECKNUM`, `DTUSER` and `TRNTYPE` fill `payee`, `memo`, `check_number`, `value_date` and `bank_type`; `BANKACCTFROM` fills `ParsedStatement.account`.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** `ofx_parser.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -368,9 +469,9 @@ Rules:
 Rules:
 - Decode with `config.encoding`; strip `\r`. The first non-empty line must be `!Type:Bank`, `!Type:CCard` or `!Type:Cash` (any case, optional space after the colon), else `FileFormatError`. Another `!` line later is a `FileFormatError` ("one account per file").
 - A record runs to a line `^`. `D` is the date (parsed with `date_format`), `T` (or `U`) the signed amount, `P` the payee, `M` the memo, `N` a check number (kept in `raw`). Other tags are kept in `raw`. A record without `D` or `T`, or with an unparseable one, is a `RowError`.
-- The description is `clean_description([P, M])`; `bank_type`, `external_id`, `balance` and `fee` are empty. Signs as for OFX.
+- The description is `clean_description([P, M])`, and `P`, `M` and `N` also fill `payee`, `memo` and `check_number` (Decision 18). `raw` holds every tag of the record. `bank_type`, `external_id`, `balance` and `fee` are empty. Signs are as for OFX.
 
-- [ ] **Step 1: Write the failing tests:** `test_bank_records` (two records, `!Type:Bank`, dd/mm/yyyy); `test_header_variants` (`!Type: Bank`, `!type:bank`); `test_crlf`; `test_missing_amount_is_row_error`; `test_second_account_rejected`; `test_unknown_type_rejected`.
+- [ ] **Step 1: Write the failing tests:** `test_bank_records` (two records, `!Type:Bank`, dd/mm/yyyy, with `payee`, `memo` and `check_number` filled); `test_header_variants` (`!Type: Bank`, `!type:bank`); `test_crlf`; `test_missing_amount_is_row_error`; `test_second_account_rejected`; `test_unknown_type_rejected`.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** `qif_parser.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -390,14 +491,28 @@ Rules:
   - Each layout module: `def parse(lines: list[list[Word]]) -> LayoutResult`, a pure function returning the rows (with `bank_type` set), the statement period, the summary (opening, money in, money out, closing) and every printed balance with the row it follows, plus the words it could not place.
   - In `__init__.py`: `def check(result: LayoutResult) -> None`, the self-checks of Decision 15, raising `FileFormatError` with the first failure ("the statement's money out is 120.00 but its rows add up to 117.50", "words outside any column on page 1"). `closing_balance`, `closing_balance_date` and `period` are set from the statement.
 
-Rules: as observed in Decision 15. Rows carry `balance` only where the statement prints one (HSBC: after the last row of a day; Lloyds and BOC UK: after every row), so the staging chain check (Decision 12) runs on them too. A file that is not a PDF, is encrypted, or has no text layer (a scan) raises `FileFormatError("this PDF has no text layer; scanned statements are not supported")`.
+Rules: as observed in Decision 15, plus Decision 18:
+- every statement field the layout prints is set on `ParsedStatement` (Decision 18 and Task 3A). This covers:
+  - the opening and closing balance, money in and out, and the payment counts (BOC);
+  - the currency, the statement or sheet reference, and the document date (Lloyds);
+  - the account type or product line, and the account name;
+  - sort code, account number, IBAN and BIC/SWIFT;
+  - BOC's customer number, clearing account number, and opening branch with its address;
+  - HSBC's rate table, as `StatementRate` rows (credit interest, and overdraft tiers with their balance band and EAR).
+
+  The rate table is outside the transaction table, so the unplaced-words check does not apply to it, but a rate row that doesn't parse refuses the file;
+- each row's `raw` holds its printed fields;
+- BOC rows carry `value_date`, `counterparty` (name, bank, sort code and account number when printed), `payment_kind`, `bank_reference`, `purpose_code` and `remittance_info`, parsed from the details lines; the HSBC and Lloyds layouts leave `counterparty` empty.
+
+Rows carry `balance` only where the statement prints one (HSBC: after the last row of a day; Lloyds and BOC UK: after every row), so the staging chain check (Decision 12) runs on them too. A file that is not a PDF, is encrypted, or has no text layer (a scan) raises `FileFormatError("this PDF has no text layer; scanned statements are not supported")`.
 
 `synthetic_pdfs.py` draws statements with `reportlab` at the positions each layout expects: invented names and amounts, the real labels and type codes, and for Lloyds the hidden 0.1 pt white layer with column labels and "blank." cells.
 
 - [ ] **Step 1: Write the failing tests** (all on synthetic PDFs):
   - HSBC UK: `test_hsbc_rows_and_summary` (two days, three rows, summary agrees); `test_hsbc_date_carried_and_day_end_balance` (a day with two rows and one printed balance); `test_hsbc_overdrawn_balance` (a balance with `D` is negative); `test_hsbc_multipage_continuation` (carried and brought forward lines); `test_hsbc_first_statement_without_brought_forward`; `test_hsbc_multiline_description` (lines joined with spaces, words not run together).
   - Lloyds: `test_lloyds_rows_and_summary`; `test_lloyds_hidden_layer_ignored` (no "blank." or column labels in any description).
-  - BOC UK: `test_boc_rows_summary_and_counts` (payment counts checked); `test_boc_multiline_details` (details lines joined; value date kept in `raw`); `test_boc_terms_pages_ignored`; `test_boc_several_currencies_refused`.
+  - BOC UK: `test_boc_rows_summary_and_counts` (payment counts checked and set on `ParsedStatement`); `test_boc_multiline_details` (details lines joined; `value_date` set; `counterparty` name, sort code and account number parsed);
+  - every layout: `test_statement_account_and_summary_fields` (every printed statement field above on `ParsedStatement`); `test_hsbc_rate_table` (two overdraft tiers and a credit rate become `StatementRate` rows); `test_boc_payment_fields` (payment kind, references, purpose code and remittance text parsed); `test_boc_terms_pages_ignored`; `test_boc_several_currencies_refused`.
   - Self-checks: `test_layout_refuses_when_summary_differs`; `test_layout_refuses_when_printed_balance_differs`; `test_layout_refuses_unplaced_words` (a stray amount right of the columns); `test_scanned_pdf_refused` (an image-only page).
 - [ ] **Step 2: Run** `uv run --locked pytest tests/finance/importing/test_pdf_layouts.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement** `words.py`, the three layouts and the checks.
@@ -407,7 +522,7 @@ Rules: as observed in Decision 15. Rows carry `balance` only where the statement
 ### Task 5: Staging
 
 **Files:**
-- Create: `backend/migrations/versions/0015_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
+- Create: `backend/migrations/versions/0018_finance_import_batches.py`, `.../importing/staging.py`, `backend/tests/finance/importing/test_staging.py`, `backend/tests/finance/importing/conftest.py`
 - Modify: `.../finance/models.py`, `.../finance/errors.py`
 
 **Interfaces:**
@@ -420,9 +535,9 @@ Rules: as observed in Decision 15. Rows carry `balance` only where the statement
   - `BatchStatus = Literal["staged", "committed", "discarded", "rolled_back"]`.
   - `RowStatus = Literal["new", "duplicate", "skipped", "error", "committed", "rolled_back"]`.
   - `RowKind = Literal["statement", "opening_adjustment"]`.
-  - `@dataclass(frozen=True) class ImportRowRecord`: `id, position, kind: RowKind, status: RowStatus, booking_date: date | None, occurred_at: datetime | None, description: str, quantity: Decimal | None, fee: Decimal | None, instrument_id: UUID | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, error: str | None, note: str | None, raw: dict[str, str], transaction_id: UUID | None`.
-  - `@dataclass(frozen=True) class ImportBatchRecord`: `id, account_id, profile_id, profile_version: int, document_id, filename: str, status: BatchStatus, created_at, committed_at: datetime | None, rolled_back_at: datetime | None, counts: dict[RowStatus, int]` (every status present, zeros included), `warnings: list[str]`.
-  - `OPENING_SETTING = "finance.opening_balance_account_id"`. `async def get_or_create_system_account(ctx, setting: str, name: str) -> UUID` creates or reuses an `equity`/`other`/`transactions` account remembered in that setting, and creates a new one if the setting points at a missing account. Task 6 uses it for both system accounts (Decisions 1 and 13).
+  - `@dataclass(frozen=True) class ImportRowRecord`: `id, position, kind: RowKind, status: RowStatus, booking_date: date | None, occurred_at: datetime | None, description: str, quantity: Decimal | None, fee: Decimal | None, instrument_id: UUID | None, balance: Decimal | None, external_id: str | None, bank_type: str | None, value_date: date | None, payee: str | None, memo: str | None, check_number: str | None, counterparty_name: str | None, counterparty_sort_code: str | None, counterparty_account_number: str | None, counterparty_bank: str | None, payment_reference: str | None, payment_kind: str | None, bank_reference: str | None, purpose_code: str | None, remittance_info: str | None, error: str | None, note: str | None, raw: dict[str, str], transaction_id: UUID | None`.
+  - `@dataclass(frozen=True) class ImportBatchRecord`: `id, account_id, profile_id, profile_version: int, document_id, filename: str, status: BatchStatus, created_at, committed_at: datetime | None, rolled_back_at: datetime | None, counts: dict[RowStatus, int]` (every status present, zeros included), `warnings: list[str]`, `statement: StatementRecord | None`.
+  - `@dataclass(frozen=True) class StatementRecord` (Decision 18): every field of `finance.import_statements` below except `batch_id`, plus `rates: list[StatementRate]`.
   - `async def ledger_balance_before(session, account_id: UUID, instrument_id: UUID, day: date) -> Decimal`: the sum of the account's postings in that instrument whose transaction is not void and is booked before `day`.
   - `def opening_adjustments(rows: list[ParsedRow], instrument_of: Callable[[ParsedRow], UUID], closing: tuple[Decimal, date] | None, row_order: str) -> dict[UUID, tuple[Decimal, date]]`: a pure function returning the statement's opening balance and first date per instrument (Decision 13). Instruments without a balance or closing balance are absent.
   - `def check_balance_chain(rows: list[ParsedRow], instrument_of: Callable[[ParsedRow], UUID], row_order: str) -> dict[int, str]`: pure; maps position → error message for chain breaks (Decision 12). Callers pass only importable rows, with `None` standing in for a parse error so the chain resets.
@@ -432,21 +547,38 @@ Rules: as observed in Decision 15. Rows carry `balance` only where the statement
   - Errors: `ImportNotAllowedError` (account not open, not manual, or balance mode `snapshots`), `ImportBatchNotFoundError`.
 
 Migration `0015`:
-- `finance.import_batches`. Columns: `id`; `account_id` FK; `profile_id` FK; `profile_version int`; `profile_config jsonb` (a snapshot of the profile at upload); `parser_version text`; `document_id` FK `core.documents`; `filename text`; `default_instrument_id` FK NULL; `status text CHECK IN (...)`; `warnings jsonb NOT NULL DEFAULT '[]'`; `covered_from date`, `covered_to date` (the dates the file covers, Decision 16; both or neither); `owner_entity_id`; `created_at`; `committed_at NULL`; `rolled_back_at NULL`. CHECKs tie `committed_at` to statuses `committed`/`rolled_back` and `rolled_back_at` to `rolled_back`.
-- `finance.import_rows`. Columns: `id`; `batch_id` FK `ON DELETE CASCADE`; `account_id` FK (denormalised for the index); `position int`; `kind text NOT NULL DEFAULT 'statement' CHECK IN ('statement','opening_adjustment')`; `status text CHECK IN (...)`; `booking_date date`; `occurred_at timestamptz`; `occurred_tz text`; `description text NOT NULL DEFAULT ''`; `quantity numeric`; `fee numeric NOT NULL DEFAULT 0`; `instrument_id` FK; `balance numeric`; `external_id text`; `bank_type text`; `dedupe_key text`; `error text`; `note text`; `raw jsonb NOT NULL`; `transaction_id` FK `finance.transactions` NULL.
+- `finance.import_batches`. Columns: `id`; `account_id` FK; `profile_id` FK; `profile_version int`; `profile_config jsonb` (a snapshot of the profile at upload); `parser_version text`; `document_id` FK `core.documents`; `filename text`; `default_instrument_id` FK NULL; `status text CHECK IN (...)`; `warnings jsonb NOT NULL DEFAULT '[]'`; `covered_from date`, `covered_to date` (the dates the file covers, Decision 16; both or neither); `complete_from date`, `complete_to date` (the covered days it lists in full; both or neither, inside the covered range); `owner_entity_id`; `created_at`; `committed_at NULL`; `rolled_back_at NULL`. CHECKs tie `committed_at` to statuses `committed`/`rolled_back` and `rolled_back_at` to `rolled_back`.
+- `finance.import_statements` (Decision 18), one row per batch when the file states anything at statement level. Columns, all nullable except the key:
+  - `batch_id` PK, FK `ON DELETE CASCADE`;
+  - `period_from date`, `period_to date` (both or neither);
+  - `currency text` (3 letters);
+  - `opening_balance`, `closing_balance numeric`, `closing_balance_date date`;
+  - `money_in`, `money_out numeric`, `payments_in`, `payments_out int` (`>= 0`);
+  - `statement_reference text`, `document_date date`;
+  - `account_type`, `account_name text`;
+  - `sort_code text CHECK (~ '^[0-9]{6}$')`, `account_number text CHECK (~ '^[0-9]+$')`;
+  - `iban text CHECK (~ '^[A-Z]{2}[0-9]{2}[A-Z0-9]{1,30}$')`, `bic text`;
+  - `customer_number`, `clearing_account_number`, `branch text`;
+  - `overdraft_limit numeric`, `overdraft_limit_date date`;
+  - `available_balance numeric`, `available_balance_date date` (OFX `AVAILBAL`).
+
+  It also carries NaN/Infinity CHECKs on the numeric columns.
+- `finance.import_statement_rates`: `id`, `batch_id` FK `import_statements ON DELETE CASCADE`, `position int` (`UNIQUE (batch_id, position)`), `kind text NOT NULL`, `band_from numeric`, `band_to numeric`, `rate numeric`, `ear numeric`, with `CHECK (rate IS NOT NULL OR ear IS NOT NULL)` (HSBC's overdraft tiers print only an EAR).
+- `finance.import_rows`. Columns: `id`; `batch_id` FK `ON DELETE CASCADE`; `account_id` FK (denormalised for the index); `position int`; `kind text NOT NULL DEFAULT 'statement' CHECK IN ('statement','opening_adjustment')`; `status text CHECK IN (...)`; `booking_date date`; `occurred_at timestamptz`; `occurred_tz text`; `description text NOT NULL DEFAULT ''`; `quantity numeric`; `fee numeric NOT NULL DEFAULT 0`; `instrument_id` FK; `balance numeric`; `external_id text`; `bank_type text`; `value_date date`; `payee text`; `memo text`; `check_number text`; `counterparty_name text`; `counterparty_sort_code text CHECK (~ '^[0-9]{6}$')`; `counterparty_account_number text CHECK (~ '^[0-9]+$')`; `counterparty_bank text`; `payment_reference text`; `payment_kind text`; `bank_reference text`; `purpose_code text`; `remittance_info text`; `dedupe_key text`; `duplicate_of uuid NULL REFERENCES finance.import_rows` (Decision 16); `error text`; `note text`; `raw jsonb NOT NULL`; `transaction_id` FK `finance.transactions` NULL.
   - Constraints:
     - `UNIQUE (batch_id, position)`;
     - `CHECK ((status = 'error') = (error IS NOT NULL))`;
     - a CHECK that rows in `new`, `duplicate`, `committed` and `rolled_back` have `booking_date`, `occurred_at`, `quantity`, `instrument_id` and `dedupe_key`; skipped rows may lack them;
     - `CHECK ((kind = 'opening_adjustment') = (position < 0))`;
     - `CHECK ((status IN ('committed','rolled_back')) = (transaction_id IS NOT NULL))`;
-    - NaN/Infinity CHECKs on `quantity`, `fee` and `balance`, as in migration 0005.
+    - NaN/Infinity CHECKs on `quantity`, `fee` and `balance` (and on the batch's balance and money columns), as in migration 0005.
   - Index: `CREATE UNIQUE INDEX import_rows_committed_once ON finance.import_rows (account_id, dedupe_key) WHERE status = 'committed'`.
 
 Rules for `stage_import`:
-1. **Account check.** The account must be open, `source_kind == "manual"`, and in balance mode `transactions` or `hybrid`; otherwise `ImportNotAllowedError` with a message saying why.
+1. **Account check.** The account must be open, `source_kind == "manual"`, and in balance mode `transactions` or `hybrid`; otherwise `ImportNotAllowedError` with a message saying why. After parsing, the statement's own account (Decision 18) must agree with every earlier committed (not rolled back) statement of this account, comparing sort code, account number and IBAN, each only when both state it; otherwise `ImportNotAllowedError` naming only the last four digits of each.
 2. **Default currency.** `default_instrument_id`, when given, must be a fiat instrument, else `NotACurrencyError`.
-3. **Store the document.** `store_document(ctx, store, content, filename=..., media_type=..., source="finance.import")`.
+2a. **No NUL characters.** A parsed row or statement holding NUL, from any format, refuses the file and names the row. PostgreSQL text can't hold NUL.
+3. **Record the document.** `record_document(ctx, content, filename=..., media_type=..., source="finance.import")`, after every check that can refuse the file except the opening check. The bytes are put last, after the opening check, so a refused upload leaves no bank statement on disk or in the backups (review ruling, 2026-11-15).
 4. **Parse** by `profile.config.format`, with `local_tz` = `ZoneInfo(profile timezone)` or `get_timezone(session)`. `FileFormatError` propagates, and `command_context` rolls back everything (the stored file may remain; it is content-addressed and harmless).
 5. **Classify each row:**
    - a `SkippedRow` becomes `skipped`, with its reason in `note`;
@@ -455,19 +587,22 @@ Rules for `stage_import`:
    - `quantity == 0` and `fee == 0` becomes `skipped`, with the note "zero amount";
    - otherwise compute the key, with occurrence counting per Decision 5;
    - the row is `duplicate` if a committed row on the account has that key or an earlier row of this batch does; else `new`.
-   - **Covered days (Decision 16).** Rows still `new` whose `booking_date` falls in a committed batch's `covered_from..covered_to` on the same account are matched against that day's committed rows by `(booking_date, quantity)` as a multiset: a match is `duplicate` (note "already imported from <filename>"); a row left over is an `error`.
-   - `covered_from`/`covered_to` are the parsed `period` when present, else the first and last `booking_date` of the importable rows.
+   - **Covered days (Decision 16).** Rows still `new` whose `booking_date` falls in this batch's or a committed batch's `covered_from..covered_to` on the same account are matched against that day's committed rows by `(booking_date, instrument, quantity)` as a multiset: a match is `duplicate` (note "already imported from <filename>"); a row left over is an `error` when a committed batch lists that day in full (`complete_from..complete_to`), and stays `new` otherwise.
+   - `covered_from`/`covered_to` span the parsed `period` and the importable rows' `booking_date`s. `complete_from`/`complete_to` follow Decision 16's "Covered versus listed in full".
 6. **Balance chain.** Run `check_balance_chain` over the rows still `new` or `duplicate`, passing parse errors as resets. Each reported position becomes `error` with that message (Decision 12).
-7. **Opening adjustment.** For `transactions` accounts only, and only when the batch has no `error` rows, compare `opening_adjustments(...)` with `ledger_balance_before(...)` per instrument. Each difference adds a row per Decision 13: `kind='opening_adjustment'`, status `new`, and `dedupe_key = sha256("open", account, date, quantity, currency)`. `position` is `-1, -2, …` in instrument-symbol order. When balances are unavailable, add the batch warning from Decision 13 instead.
-8. **Times.** `occurred_at` is the row's value, or local midnight of `booking_date` in the local zone (step 4), with `occurred_tz` set to the zone name.
-9. **Event.** Emit `finance.import.staged` with the batch id and counts.
+7. **Opening adjustment.** For `transactions` accounts only, and only when the batch has no `error` rows, compare `opening_adjustments(...)` with `ledger_balance_before(...)` per instrument. Each difference adds a row per Decision 13: `kind='opening_adjustment'`, status `new`, and `dedupe_key = sha256("open", account, batch, date, quantity, currency)` (with the batch id: under re-alignment, two batches may need the same adjustment on the same day). `position` is `-1, -2, …` in instrument-symbol order. When balances are unavailable, add the batch warning from Decision 13 instead.
+8. **Typed fields (Decision 18).** Each row's `value_date`, `payee`, `memo`, `check_number` counterparty and BOC payment fields are stored on `import_rows`; the statement fields and rates on `import_statements` and `import_statement_rates`.
+9. **Times.** `occurred_at` is the row's value, or local midnight of `booking_date` in the local zone (step 4), with `occurred_tz` set to the zone name.
+10. **Event.** Emit `finance.import.staged` with the batch id and counts.
 
 Add a `store` fixture (`LocalDocumentStore(tmp_path)`) and a `csv_profile` fixture (an Example Bank CSV profile with `Date,Description,Amount` and `%d/%m/%Y`) in `tests/finance/importing/conftest.py`.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_stage_counts_and_rows`: a 3-row file (one valid, one bad date, one zero amount) gives counts `new 1, error 1, skipped 1`; rows in position order; the error row's message mentions the date.
   - `test_identical_rows_in_one_file_are_both_new`: two identical `10/11/2026,Coffee,-3.50` rows both give `new`, with different `dedupe_key`s.
-  - `test_external_id_duplicate_within_file`: an OFX file with the same FITID twice gives `new` then `duplicate`.
+  - `test_external_id_duplicate_within_file`: an OFX file with the same FITID twice gives `new` then `error` ("the file lists transaction id … twice"); the same holds for a repeated `bal` key. Ruling 2026-11-15: a within-file repeat counts in the chain and the opening derivation but would never be committed, so it must block the commit.
+  - `test_older_statement_after_newer_realigns`: commit December (first import, adjustment dated 30 Nov), then stage November: the preview warns that December's adjustment changes to zero; after commit the account's balance on every statement date equals the statement's. The same holds for OFX 20 Nov–5 Dec, then PDF 1–30 Nov.
+  - `test_large_amounts_keep_precision`: amounts and balances with more than 28 significant digits are keyed, chained and adjusted exactly (all staging arithmetic runs in `localcontext(prec=MAX_PREC)`, as `ledger.py` does).
   - `test_snapshots_account_refused`, `test_closed_account_refused`: each raises `ImportNotAllowedError`.
   - `test_file_format_error_persists_nothing`: a bad header raises `FileFormatError`, and no batch or document row remains.
   - `test_currency_resolution`: with no currency column and no default, every row is an `error`; with default GBP, rows are `new` with the GBP id; a currency column with `XYZ` makes that row an `error`.
@@ -485,6 +620,8 @@ Add a `store` fixture (`LocalDocumentStore(tmp_path)`) and a `csv_profile` fixtu
   - `test_multi_currency_chains_separately`: a file with a currency column, where GBP and EUR rows each carry their own balance, raises no chain error and adds one adjustment per currency.
   - `test_covered_days_match_across_formats`: with a committed CSV batch covering 1–30 Nov, staging an OFX file for 20 Nov–5 Dec marks the 20–30 Nov rows `duplicate` and the December rows `new`; an extra 25 Nov row in the OFX is an `error`.
   - `test_bank_type_stored`: a CSV `type` column and a PDF row's type code reach `import_rows.bank_type`.
+  - `test_typed_fields_stored`: a synthetic BOC PDF's value date and counterparty, and a QIF file's payee, memo and check number, reach their `import_rows` columns; the PDF's summary and account reach `import_statements`; a synthetic HSBC PDF's rate table reaches `import_statement_rates`; a midata file's overdraft limit reaches `import_statements`.
+  - `test_statement_account_mismatch_refused`: after committing a file for account number ending `1234`, staging a file for one ending `5678` on the same ledger account raises `ImportNotAllowedError` whose message contains `1234` and `5678` and no other digits of the numbers.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** the migration, the ORM models and `staging.py`. Keep `check_balance_chain` and `opening_adjustments` pure, and test them through `stage_import`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -501,20 +638,20 @@ Add a `store` fixture (`LocalDocumentStore(tmp_path)`) and a `csv_profile` fixtu
   - from Task 5: everything;
   - from plan 1: `ledger.post_transaction`, `ledger.void_transaction`, `TransactionInput`, `PostingInput`, `accounts.create_account`, `get_setting`/`set_setting`, `valuation.balances_asof`.
 - Produces:
-  - `CONTRA_SETTING = "finance.import_contra_account_id"`. The contra account comes from `get_or_create_system_account(ctx, CONTRA_SETTING, "Unassigned (imports)")` (Decision 1), and the opening account from `get_or_create_system_account(ctx, OPENING_SETTING, "Opening balances")` (Decision 13).
+  - The contra account comes from `system_accounts.get_or_create_system_account(ctx, "unassigned")` (Decision 1), and the opening account from `get_or_create_system_account(ctx, "opening_balances")` (Decision 13).
   - `async def commit_batch(ctx, batch_id: UUID) -> ImportBatchRecord`
   - `async def discard_batch(ctx, batch_id: UUID) -> ImportBatchRecord`
   - `async def rollback_batch(ctx, batch_id: UUID) -> ImportBatchRecord`
   - Errors: `ImportBatchStateError` (wrong status for the action), `ImportHasErrorsError`, `ImportBatchStaleError` (the ledger moved since staging, Decision 13).
 
 Rules:
-- Every action first locks the batch row with `SELECT … FOR UPDATE`.
+- Every action first locks the account row, then the batch row, with `SELECT … FOR UPDATE`. That order is used everywhere, so `align_openings` always runs under the account lock.
 - **`commit_batch`:**
   - The status must be `staged`.
   - The covered-days matching (Decision 16) is repeated under the batch lock, as the duplicate check is, so two overlapping batches committed one after the other cannot both post a day.
   - There must be no `error` rows.
   - The account is re-checked with the same rule as staging, since its mode may have changed since.
-  - For `transactions` accounts, the expected adjustment per instrument is recomputed with `opening_adjustments` over the batch's statement rows and `ledger_balance_before`. If it differs from the staged adjustment rows (including one appearing or disappearing), raise `ImportBatchStaleError("the account changed since this file was uploaded; discard it and upload again")`.
+  - For `transactions` accounts, the expected adjustment per instrument is recomputed with staging's `preview_openings(...)` (the same walk as `align_openings`, Decision 13). If it differs from the staged adjustment rows (including one appearing or disappearing), raise `ImportBatchStaleError("the account changed since this file was uploaded; discard it and upload again")`.
   - Then, for each `new` row by position (adjustment rows first, since their positions are negative):
     - if a committed row with the same `(account_id, dedupe_key)` now exists, the row becomes `duplicate`;
     - otherwise `post_transaction` with `occurred_at`, `occurred_tz`, `booking_date` and `description`, all postings in the row's instrument:
@@ -523,11 +660,13 @@ Rules:
       - an adjustment row: the account `+quantity` and the opening account `−quantity`.
 
       The row becomes `committed` with its `transaction_id`.
+  - Then `align_openings` re-aligns the adjustments of the account's other committed batches (Decision 13).
   - Finally the batch becomes `committed` with `committed_at = now()`, and the action emits `finance.import.committed` with counts.
 - **`discard_batch`:** `staged` → `discarded`.
 - **`rollback_batch`:**
-  - The status must be `committed`.
+  - The status must be `committed`, and no other committed batch may have rows whose `duplicate_of` points into this batch (Decision 16).
   - For each `committed` row, void its transaction unless it is already void; the row becomes `rolled_back`.
+  - Then `align_openings` re-aligns the remaining batches' adjustments (Decision 13).
   - The batch becomes `rolled_back` with `rolled_back_at`, and the action emits `finance.import.rolled_back`.
 
 - [ ] **Step 1: Write the failing tests** (stage through `stage_import` with the Task 5 fixtures, then act):
@@ -549,7 +688,8 @@ Rules:
   - `test_discard`: staged → discarded; committing it afterwards raises `ImportBatchStateError`.
   - `test_pdf_then_ofx_overlap_commits_once`: commit a synthetic HSBC PDF statement, then stage and commit an OFX export overlapping its last week and running past it: only the later rows post, and the account ends at the OFX `LEDGERBAL`.
   - `test_ofx_then_pdf_overlap_commits_once`: the same in the other order.
-  - `test_rollback_frees_covered_days`: after rolling back the PDF batch, the OFX rows for those days stage as `new`.
+  - `test_rollback_frees_covered_days`: after rolling back the OFX batch and then the PDF batch, the PDF re-stages as `new`; rolling back the PDF first while the OFX relies on it raises `ImportBatchStateError`.
+  - `test_rollback_realigns_adjustments`: commit November, then December (no adjustment); roll back November: December's adjustment reappears and the account's balance equals December's closing balance.
 - [ ] **Step 2: Run**; expected: FAIL.
 - [ ] **Step 3: Implement** `commit.py`.
 - [ ] **Step 4: Run**; expected: all pass; `make backend-check` green.
@@ -574,8 +714,8 @@ Rules:
   - **Schemas.** Amounts use `DecimalStr`.
     - `ImportProfileCreate { name: str (1–100 chars), config: ProfileConfig }`.
     - `ImportProfileOut { id, name, config, version, updated_at }`.
-    - `ImportBatchOut { id, account_id, profile_id, profile_version, document_id, filename, status, created_at, committed_at, rolled_back_at, counts: dict[str, int], warnings: list[str] }`.
-    - `ImportRowOut { id, position, kind, status, booking_date, description, quantity: DecimalStr | None, fee: DecimalStr | None, instrument_id, balance: DecimalStr | None, external_id, bank_type, error, note, raw: dict[str, str], transaction_id }`.
+    - `ImportBatchOut { id, account_id, profile_id, profile_version, document_id, filename, status, created_at, committed_at, rolled_back_at, counts: dict[str, int], warnings: list[str], statement: ImportStatementOut | None }`. `ImportStatementOut` has every `StatementRecord` field (amounts as `DecimalStr | None`) and `rates: list[ImportStatementRateOut]` (Decision 18).
+    - `ImportRowOut { id, position, kind, status, booking_date, value_date, description, payee, memo, check_number, counterparty_name, counterparty_sort_code, counterparty_account_number, counterparty_bank, payment_reference, payment_kind, bank_reference, purpose_code, remittance_info, quantity: DecimalStr | None, fee: DecimalStr | None, instrument_id, balance: DecimalStr | None, external_id, bank_type, error, note, raw: dict[str, str], transaction_id }`.
     - `ImportBatchDetailOut(ImportBatchOut) { rows: list[ImportRowOut] }`.
   - **Routes.** The route name is the operationId:
 
@@ -613,7 +753,7 @@ Rules:
     - `example-bank.ofx`: OFX 1.x SGML, GBP, 5 transactions with FITIDs.
     - `example-bank-ofx.json`: `{"format": "ofx"}`.
     - `example-bank.qif`: `!Type:Bank`, 4 records.
-  - **Catalog** (`catalog.py`): the rows of Decision 14 with the profile config for each (e.g. HSBC transaction CSV: `header=["Date", "Description", "Amount"]`, `%d/%m/%Y`; midata: ISO dates, `amount="Debit/Credit"`, `balance="Balance"`, `type="Type"`, `row_order="newest_first"`, `skip_footer_rows=1`; Lloyds CSV: `inflow`/`outflow` = `Credit Amount`/`Debit Amount`, `type="Transaction Type"`, `row_order="newest_first"`). Every config validates as a `ProfileConfig`, and exactly one entry per institution with formats is `recommended` (`test_catalog.py`).
+  - **Catalog** (`catalog.py`): the rows of Decision 14 with the profile config for each (e.g. HSBC transaction CSV: `header=["Date", "Description", "Amount"]`, `%d/%m/%Y`; midata: ISO dates, `amount="Debit/Credit"`, `balance="Balance"`, `type="Type"`, `row_order="newest_first"`, `skip_footer_rows=1`, `overdraft_footer_label="Arranged overdraft limit"`; Lloyds CSV: `inflow`/`outflow` = `Credit Amount`/`Debit Amount`, `type="Transaction Type"`, `account_sort_code="Sort Code"`, `account_number="Account Number"`, `row_order="newest_first"`). Every config validates as a `ProfileConfig`, and exactly one entry per institution with formats is `recommended` (`test_catalog.py`).
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_example_csv_end_to_end`: create the profile from `example-bank-csv.json`, create a manual `transactions` account, and upload `example-bank.csv` with GBP: 201, `counts.new` equals the number of non-zero rows, and `counts.skipped == 1`. Then commit: holdings show the account at the file's closing `Balance`. Upload again: all rows are `duplicate`.
@@ -652,9 +792,9 @@ Behaviour:
   - **Submitting** sends `stageImport` with the form data. On success it navigates to the batch page; on failure it shows the server `message`.
   - **Below the form**, a table of batches: filename, account, status, counts, created time.
 - **`/imports/$batchId` (ImportBatchPage).**
-  - **Header:** counts per status, and the batch `warnings`.
+  - **Header:** counts per status, the batch `warnings`, and the statement summary when the file gives one (period, opening and closing balance, money in and out, the account's last four digits).
   - **Adjustment rows** are shown first, labelled "Opening balance adjustment". On an account that already has imported history, the label reads "Balance gap: a statement period may be missing".
-  - **Row table:** position, date, description, amount via `formatMoney(quantity, code)` where `code` is the row instrument's ISO code, status badge, the error message on error rows, and the note on skipped rows.
+  - **Row table:** position, date, description, amount via `formatMoney(quantity, code)` where `code` is the row instrument's ISO code, status badge, the error message on error rows, and the note on skipped rows. A row's typed details (value date, payee, memo, check number, counterparty, payment kind and references, bank type) show under its description when present.
   - **When the batch is `staged`:**
     - "Commit" is disabled while `counts.error > 0`, with the text "Fix the errors in the file or profile and upload again";
     - "Discard" is available.
@@ -699,7 +839,7 @@ Changes:
     - the supported formats per bank and the recommended one (Decision 14), and that PDF layouts refuse a statement that doesn't add up;
     - the inflow/outflow sign rule, with the credit-card example;
     - how duplicates are recognised (Decision 5);
-    - the "Unassigned (imports)" account (Decision 1);
+    - the "Unassigned" account (Decision 1), and that every field a file provides is stored (Decision 18);
     - where the Example Bank files are.
   - In the backup section: documents are backed up as a tar alongside the dump, and restoring means untarring into the `lararium_documents` volume (give the one-line `docker run --rm -v lararium_documents:/d -i alpine tar -C /d -xf - < documents-….tar`).
 

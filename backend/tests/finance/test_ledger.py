@@ -97,6 +97,35 @@ async def test_void_transaction(run, make_account, gbp) -> None:
     assert (await run(void_transaction, tx.id)).status == "void"
 
 
+@pytest.mark.parametrize(("origin", "status"), [("inference", "inferred"), ("rule", "booked")])
+async def test_derived_transactions_cannot_be_voided(
+    session, run, make_account, gbp, origin, status
+) -> None:
+    # A transfer's placeholder or settlement follows its transfer: replacing or dissolving
+    # it deletes it, so a void would leave the transfer pointing at a row that counts for
+    # nothing.
+    a, b = await make_account(name="A"), await make_account(name="B")
+    tx = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=LATE_31_MARCH,
+            description="Transfer from A",
+            status=status,
+            origin=origin,
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-1")),
+                PostingInput(b.id, gbp.id, Decimal("1")),
+            ],
+        ),
+    )
+    with pytest.raises(FinanceValidationError, match="derived"):
+        await run(void_transaction, tx.id)
+    stored = await session.scalar(
+        text("select status from finance.transactions where id = :i"), {"i": tx.id}
+    )
+    assert stored == status
+
+
 async def test_integrity_check_finds_tampered_transaction(session, run, make_account, gbp) -> None:
     a, b = await make_account(name="A"), await make_account(name="B")
     tx = await run(

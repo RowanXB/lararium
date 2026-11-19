@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from psycopg.errors import QueryCanceled, UniqueViolation
+from psycopg.errors import LockNotAvailable, QueryCanceled, UniqueViolation
 from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalError
 
 from lararium import __version__
 from lararium.api import core_routes
 from lararium.config import Settings, get_settings
+from lararium.core.documents import LocalDocumentStore
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.registry import MODULES
 from lararium.worker.app import procrastinate_app
@@ -38,7 +39,9 @@ def _database_error_response(exc: DBAPIError) -> tuple[int, str, str, str | None
     if isinstance(exc, DataError):
         message = "a value is malformed or out of range for the database"
         return status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_value", message, None
-    if isinstance(exc.orig, QueryCanceled):
+    # The statement timeout, or a lock_timeout (a request waiting on the transfer matching
+    # lock, say): both mean the database was busy for too long.
+    if isinstance(exc.orig, QueryCanceled | LockNotAvailable):
         message = "the request took too long and was stopped"
         return status.HTTP_503_SERVICE_UNAVAILABLE, "query_timeout", message, None
     message = "the database is unavailable"
@@ -83,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Read by lararium.deps.
     app.state.settings = settings
     app.state.sessionmaker = make_sessionmaker(engine)
+    app.state.document_store = LocalDocumentStore(settings.document_dir)
     for error_class in (IntegrityError, DataError, OperationalError):
         app.add_exception_handler(error_class, _database_error)
     app.include_router(core_routes.public_router)
