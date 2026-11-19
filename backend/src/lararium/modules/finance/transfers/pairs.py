@@ -334,6 +334,8 @@ class PairRelation:
     exact: Mapping[UUID, frozenset[UUID]]
     # A record's candidates of another amount: mutually identified ones.
     differing: Mapping[UUID, frozenset[UUID]]
+    # Partners within groups of interchangeable candidates (_twins).
+    twins: Mapping[UUID, UUID]
 
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
@@ -341,12 +343,58 @@ class PairRelation:
         return sorted(found)
 
     def partner(self, record_id: UUID) -> UUID | None:
-        """The record's unique partner: its only candidate, whose only candidate it is."""
+        """The record's unique partner: its only candidate, whose only candidate it is; or,
+        among interchangeable candidates, the one a fixed order gives it (_twins)."""
         found = self.exact.get(record_id, frozenset())
         if len(found) != 1:
-            return None
+            return self.twins.get(record_id)
         [partner] = found
         return partner if len(self.exact.get(partner, frozenset())) == 1 else None
+
+
+def _twins(
+    records: Mapping[UUID, Pairable], exact: Mapping[UUID, frozenset[UUID]]
+) -> dict[UUID, UUID]:
+    """Partners for groups of interchangeable records: n records whose candidates are
+    exactly the same n others, and the reverse, each side alike (account, instrument,
+    amount, booking date: a transfer split into equal parts, say). Any pairing of them
+    gives the same ledger, so they pair in a fixed order, by time and then by reference,
+    which doesn't depend on which side arrived first. Anything less alike stays for the
+    owner's review. A side naming no account is found by amount and date, as a single
+    counterpart is: an unrelated row can be among it until the real one arrives, and the
+    group then no longer matches (design §5.8)."""
+
+    def alike(group: frozenset[UUID]) -> bool:
+        return (
+            len(
+                {
+                    (r.account_id, r.instrument_id, r.quantity, r.booking_date)
+                    for r in (records[x] for x in group)
+                }
+            )
+            == 1
+        )
+
+    def order(group: frozenset[UUID]) -> list[UUID]:
+        return sorted(group, key=lambda x: (records[x].occurred_at, records[x].source))
+
+    twins: dict[UUID, UUID] = {}
+    checked: set[UUID] = set()
+    for record_id, found in exact.items():
+        if len(found) < 2 or record_id in checked:
+            continue
+        others = exact.get(next(iter(found)), frozenset())
+        checked |= found | others  # a group is checked once, whichever member comes first
+        if (
+            len(others) == len(found)
+            and all(exact.get(x) == others for x in found)
+            and all(exact.get(x) == found for x in others)
+            and alike(found)
+            and alike(others)
+        ):
+            for x, y in zip(order(others), order(found), strict=True):
+                twins[x], twins[y] = y, x
+    return twins
 
 
 async def pair_relation(
@@ -387,4 +435,5 @@ async def pair_relation(
         tiers={r: dict(found) for r, found in same.tiers.items()},
         exact={r: found for r, found in exact.items() if found},
         differing={r: frozenset(found) for r, found in differing.tiers.items()},
+        twins=_twins({x.id: x for x in records}, exact),
     )

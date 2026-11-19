@@ -738,7 +738,8 @@ async def preview_match(
     transfer, or replacing whatever transfer the record is in.
 
     `source`: the reference the row will have once posted (a re-imported row keeps its
-    own), so the owner's decisions about it apply; None for a row with none yet.
+    own), so the owner's decisions about it apply, and its place among identical rows
+    (pairs._twins) is known; None for a row with none yet.
     `booking_date`: the one the row will be posted with, if given; else it gets the one
     posting would give it (ledger.resolve_booking_date), which the window is counted in.
     `complete`: the days the row's import lists in full, which committing it would add
@@ -763,6 +764,8 @@ async def preview_match(
     )
     listing = [] if complete is None else [(account_id, instrument_id, *complete)]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
+    if source is None and row.id in relation.twins:
+        return None  # identical ones pair by reference (pairs._twins): which one is unknown
     return relation.partner(row.id)
 
 
