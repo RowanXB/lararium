@@ -211,7 +211,8 @@ async def test_isa_to_gia_position_transfer_matched(session, run, tmp_path) -> N
         ),
     ]
     await _sync(session, connection, tmp_path, rows, accounts=(GIA, OTHER))
-    assert await heal(session) >= 0
+    # The worker's heal pairs the two legs once, and has nothing left afterwards.
+    assert await heal(session) == 1
     [transfer] = await list_transfers(session)
     assert (transfer.status, transfer.review_reason) == ("matched", None)
     assert transfer.amount == Decimal(5)
@@ -219,6 +220,7 @@ async def test_isa_to_gia_position_transfer_matched(session, run, tmp_path) -> N
     assert transfer.instrument_id == etfa
     assert await in_transit(session, etfa) == 0
     assert await in_transit(session) == 0
+    assert await heal(session) == 0
     await assert_consistent(session)
 
 

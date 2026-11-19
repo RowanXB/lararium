@@ -9,17 +9,18 @@ account id, the instrument's symbol and the day, never a personal value.
 """
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.connections import ConnectionRecord, set_warnings
+from lararium.core.connections import ConnectionRecord, set_warnings, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
@@ -29,8 +30,6 @@ from lararium.modules.finance.money import to_plain_str, tolerance
 logger = logging.getLogger(__name__)
 
 CASH_SECTION = "CashReport"
-# The last difference the owner was told about, per account and instrument (Monzo's pattern).
-NOTIFIED_KEY = "reconciliation_notified"
 WARNING_PREFIX = "IBKR ···"
 FLAGGED_PREFIX = "IBKR flagged: "
 
@@ -89,10 +88,17 @@ async def reported_on(session: AsyncSession, account_id: UUID, day: date) -> dic
     return {row.instrument_id: row.quantity for row in rows}
 
 
+type Kind = Literal["securities", "currencies"]
+# The machine-readable record of this module's warnings in the connection's config: a list
+# of {account, kind, text}, so a warning is replaced by the full account id and kind, never
+# by the last four digits its text shows.
+RECORD_KEY = "ibkr_warnings"
+
+
 @dataclass(frozen=True)
 class Mismatch:
     ibkr_id: str
-    instrument_id: UUID
+    kind: Kind
     symbol: str
     day: date
     difference: Decimal
@@ -104,9 +110,12 @@ class Mismatch:
             f" on {self.day.isoformat()} by {to_plain_str(self.difference)}"
         )
 
-    @property
-    def key(self) -> str:
-        return f"{self.ibkr_id}:{self.instrument_id}"
+
+@dataclass(frozen=True)
+class Checked:
+    mismatches: list[Mismatch]
+    # The latest window end date each (IBKR account id, kind) was actually reconciled at.
+    reconciled: dict[tuple[str, Kind], date]
 
 
 async def check(
@@ -114,77 +123,118 @@ async def check(
     accounts: Mapping[str, UUID],
     windows: Iterable[tuple[str, date]],
     sections: frozenset[tuple[str, str]],
-) -> list[Mismatch]:
+) -> Checked:
     """The differences at each (IBKR account id, window end date), the latest day of each
-    instrument only: a difference that persists is one warning, not one per day."""
+    instrument only: a difference that persists is one warning, not one per day. A kind is
+    reconciled only where the window's statement has its section."""
     latest: dict[tuple[str, UUID], Mismatch] = {}
+    reconciled: dict[tuple[str, Kind], date] = {}
     for ibkr_id, day in sorted(set(windows), key=lambda w: (w[1], w[0])):
         account_id = accounts.get(ibkr_id)
         if account_id is None:
             continue
+        kinds: dict[Kind, bool] = {
+            "securities": (ibkr_id, POSITIONS_SECTION) in sections,
+            "currencies": (ibkr_id, CASH_SECTION) in sections,
+        }
+        for kind, present in kinds.items():
+            if present:
+                reconciled[(ibkr_id, kind)] = day
         found = await reconcile(
             session,
             account_id,
             day,
             await reported_on(session, account_id, day),
-            securities=(ibkr_id, POSITIONS_SECTION) in sections,
-            currencies=(ibkr_id, CASH_SECTION) in sections,
+            securities=kinds["securities"],
+            currencies=kinds["currencies"],
         )
-        symbols = {
-            row.id: row.symbol
+        i = models.Instrument
+        described = {
+            row.id: row
             for row in await session.execute(
-                select(models.Instrument.id, models.Instrument.symbol).where(
-                    models.Instrument.id.in_([instrument_id for instrument_id, _ in found])
+                select(i.id, i.symbol, i.kind).where(
+                    i.id.in_([instrument_id for instrument_id, _ in found])
                 )
             )
         }
         for instrument_id, difference in found:
-            latest[(ibkr_id, instrument_id)] = Mismatch(
-                ibkr_id, instrument_id, symbols[instrument_id], day, difference
-            )
-    return sorted(latest.values(), key=lambda m: (m.ibkr_id, m.symbol, m.day))
+            row = described[instrument_id]
+            kind: Kind = "currencies" if row.kind == "fiat" else "securities"
+            latest[(ibkr_id, instrument_id)] = Mismatch(ibkr_id, kind, row.symbol, day, difference)
+    mismatches = sorted(latest.values(), key=lambda m: (m.ibkr_id, m.symbol, m.day))
+    return Checked(mismatches, reconciled)
 
 
 async def _notify(ctx: SyncContext, text: str) -> None:
-    """Tell the owner; a failure to send is logged and never fails the sync."""
+    """Tell the owner; a failure to send is logged and never fails the sync. Only the
+    exception's class is logged: its message could carry the notifier's webhook URL."""
     try:
         await ctx.notifier.send(text)
-    except Exception:
-        logger.warning("sending an IBKR notification failed", exc_info=True)
+    except Exception as error:
+        logger.warning("sending an IBKR notification failed (%s)", type(error).__name__)
+
+
+async def replaceable(
+    session: AsyncSession, accounts: Mapping[str, UUID], checked: Checked
+) -> set[tuple[str, Kind]]:
+    """The (account, kind) pairs whose warnings this run may replace: those it reconciled at
+    the account's latest stored report date. An older statement (uploaded late) must not
+    replace what the newest one says."""
+    s = models.BalanceSnapshot
+    result: set[tuple[str, Kind]] = set()
+    for (ibkr_id, kind), day in checked.reconciled.items():
+        stored = await session.scalar(
+            select(func.max(s.as_of_date)).where(
+                s.account_id == accounts[ibkr_id], s.kind == "reported"
+            )
+        )
+        if stored is None or day >= stored:
+            result.add((ibkr_id, kind))
+    return result
+
+
+def _recorded(connection: ConnectionRecord) -> list[dict[str, str]]:
+    stored = connection.config.get(RECORD_KEY)
+    if not isinstance(stored, list):
+        return []
+    return [
+        {"account": str(e["account"]), "kind": str(e["kind"]), "text": str(e["text"])}
+        for e in stored
+        if isinstance(e, dict) and {"account", "kind", "text"} <= e.keys()
+    ]
 
 
 async def publish(
     ctx: SyncContext,
     connection: ConnectionRecord,
-    mismatches: Sequence[Mismatch],
-    checked: Iterable[str],
+    checked: Checked,
+    replace: set[tuple[str, Kind]],
     flagged: Iterable[str],
-) -> dict[str, JSONValue]:
-    """Replace the reconciliation warnings of the accounts checked, keep the flagged ones
-    and add the new, tell the owner about each new difference and set of flags once, and
-    return the connection's notified-differences config value (for the caller to store)."""
-    checked = set(checked)
-    stored = connection.config.get(NOTIFIED_KEY)
-    notified: dict[str, JSONValue] = dict(stored) if isinstance(stored, dict) else {}
-    warnings = [
-        w
-        for w in connection.warnings
-        if not any(w.startswith(f"{WARNING_PREFIX}{ibkr_id[-4:]} ") for ibkr_id in checked)
-    ]
-    new_flags = [name for name in sorted(flagged) if (FLAGGED_PREFIX + name) not in warnings]
-    warnings += [FLAGGED_PREFIX + name for name in new_flags]
-    current = {m.key for m in mismatches}
-    for key in [k for k in notified if k.split(":", 1)[0] in checked and k not in current]:
-        del notified[key]
-    for mismatch in mismatches:
-        warnings.append(mismatch.warning)
-        difference = to_plain_str(mismatch.difference)
-        if notified.get(mismatch.key) != difference:
-            notified[mismatch.key] = difference
-            await _notify(ctx, f"{connection.display_name}: {mismatch.warning}")
-    if new_flags:
-        listed = "; ".join(FLAGGED_PREFIX + name for name in new_flags)
-        await _notify(ctx, f"{connection.display_name}: {listed}")
-    if warnings != connection.warnings:
+) -> None:
+    """Set the connection's warnings and tell the owner about each warning text that was not
+    among the previous ones.
+
+    Flagged warnings are replaced by this run's. Reconciliation warnings are replaced for
+    the (account, kind) pairs in `replace`; a difference for any other pair is only
+    notified, and the warnings of pairs this run did not reconcile stay. Warnings of other
+    origins are kept."""
+    previous = connection.warnings
+    recorded = _recorded(connection)
+    dropped = {e["text"] for e in recorded if (e["account"], e["kind"]) in replace}
+    kept = [e for e in recorded if e["text"] not in dropped]
+    warnings = [w for w in previous if not w.startswith(FLAGGED_PREFIX) and w not in dropped]
+    flags = [FLAGGED_PREFIX + name for name in sorted(flagged)]
+    warnings += flags
+    added = [m for m in checked.mismatches if (m.ibkr_id, m.kind) in replace]
+    for mismatch in added:
+        if mismatch.warning not in warnings:
+            warnings.append(mismatch.warning)
+        kept.append({"account": mismatch.ibkr_id, "kind": mismatch.kind, "text": mismatch.warning})
+    for warning in [*flags, *(m.warning for m in checked.mismatches)]:
+        if warning not in previous:
+            await _notify(ctx, f"{connection.display_name}: {warning}")
+    if warnings != previous:
         await set_warnings(ctx.command, connection.id, warnings)
-    return notified
+    if kept != recorded:
+        record: JSONValue = [dict(e) for e in kept]
+        await update_config(ctx.command, connection.id, {RECORD_KEY: record})

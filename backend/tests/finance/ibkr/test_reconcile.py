@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from lararium.core.commands import CommandContext
-from lararium.core.connections import get_connection
+from lararium.core.connections import get_connection, set_warnings
 from lararium.core.connectors import SyncContext
 from lararium.core.documents import LocalDocumentStore
 from lararium.core.json_types import JSONValue
@@ -20,7 +20,7 @@ from lararium.modules.finance.ibkr.sync import ingest_statement
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.valuation import holdings_asof
 
-from .fixtures import RowSpec, build_statement
+from .fixtures import AccountSpec, RowSpec, build_statement
 from .test_normalize_records import (
     CONNECTOR,
     DAY,
@@ -180,18 +180,154 @@ async def test_cash_difference_names_the_currency(session, run, tmp_path) -> Non
     ]
 
 
-async def test_flagged_items_warn_and_notify_once_per_new_set(session, run, tmp_path) -> None:
+FLAG_OPT = "IBKR flagged: OpenPosition.assetCategory=OPT"
+
+
+def flags(warnings: list[str]) -> list[str]:
+    return [w for w in warnings if w.startswith("IBKR flagged: ")]
+
+
+async def test_flagged_items_are_replaced_and_told_once_per_new_name(
+    session, run, tmp_path
+) -> None:
     connection = await _connection(run)
     notifier = Notifier()
     rows = [RowSpec("OpenPosition", "U0000001", **(ETFA | {"assetCategory": "OPT"}), position="1")]
     await sync(session, connection, tmp_path, rows, notifier)
-    flagged = [w for w in await warnings_of(session, connection) if w.startswith("IBKR flagged: ")]
-    assert flagged == ["IBKR flagged: OpenPosition.assetCategory=OPT"]
-    assert len(notifier.sent) == 1
-    assert "IBKR flagged: OpenPosition.assetCategory=OPT" in notifier.sent[0]
+    assert flags(await warnings_of(session, connection)) == [FLAG_OPT]
+    assert [FLAG_OPT in n for n in notifier.sent] == [True]
     await sync(session, connection, tmp_path, rows, notifier)
     assert len(notifier.sent) == 1
-    assert [w for w in await warnings_of(session, connection) if "flagged" in w] == flagged
+    # A flag that stops appearing goes; when it comes back it is told again.
+    await sync(session, connection, tmp_path, [], notifier)
+    assert flags(await warnings_of(session, connection)) == []
+    await sync(session, connection, tmp_path, rows, notifier)
+    assert flags(await warnings_of(session, connection)) == [FLAG_OPT]
+    assert len(notifier.sent) == 2
+
+
+async def test_flags_and_notifications_carry_no_other_values(session, run, tmp_path) -> None:
+    # Only IBKR's vocabulary attributes (here assetCategory, when it looks like a category)
+    # put a value in a flag; any other value is the owner's data.
+    connection = await _connection(run)
+    notifier = Notifier()
+    odd = ETFA | {"assetCategory": "secret thing", "brandNewField": "PERSONAL-VALUE"}
+    rows = [RowSpec("OpenPosition", "U0000001", **odd, position="1")]
+    await sync(session, connection, tmp_path, rows, notifier)
+    seen = [*await warnings_of(session, connection), *notifier.sent]
+    assert "OpenPosition.assetCategory" in " ".join(seen)
+    assert "OpenPosition.brandNewField" in " ".join(seen)
+    assert not any("PERSONAL" in w or "secret" in w for w in seen)
+
+
+async def test_same_amount_on_another_day_is_told_again(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], notifier)
+    assert len(notifier.sent) == 1
+    day = date(2026, 11, 11)
+    for _ in range(2):  # the second time is a repeat of an identical warning
+        await sync(
+            session, connection, tmp_path, [position(ETFA, "10")], notifier, period=(DAY, day)
+        )
+    assert await warnings_of(session, connection) == [
+        "IBKR ···0001 ETFA differs from IBKR's report on 2026-11-11 by -10"
+    ]
+    assert len(notifier.sent) == 2
+
+
+async def test_older_statement_leaves_current_warnings_alone(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    day = date(2026, 11, 11)
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], notifier, period=(DAY, day))
+    current = ["IBKR ···0001 ETFA differs from IBKR's report on 2026-11-11 by -10"]
+    assert await warnings_of(session, connection) == current
+    # An older statement (uploaded late) with its own difference: the current warning stays,
+    # nothing is added, and the owner hears of the new difference.
+    await sync(session, connection, tmp_path, [position(ETFA, "12")], notifier)
+    assert await warnings_of(session, connection) == current
+    assert len(notifier.sent) == 2
+    assert notifier.sent[1].endswith("on 2026-11-10 by -12")
+    # A clean older statement clears nothing either.
+    await sync(session, connection, tmp_path, [], notifier)
+    assert await warnings_of(session, connection) == current
+
+
+async def test_other_warnings_survive(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    await run(set_warnings, connection.id, ["Sync layer: something else"])
+    notifier = Notifier()
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], notifier)
+    assert await warnings_of(session, connection) == ["Sync layer: something else", WARNING_A]
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], notifier)
+    assert await warnings_of(session, connection) == ["Sync layer: something else", WARNING_A]
+    await sync(
+        session,
+        connection,
+        tmp_path,
+        [buy("9000001", ETFA, "10", "100", "-1000"), position(ETFA, "10")],
+        notifier,
+    )
+    assert await warnings_of(session, connection) == ["Sync layer: something else"]
+
+
+async def test_accounts_sharing_last_four_digits_do_not_clear_each_other(
+    session, run, tmp_path
+) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    other = AccountSpec("X0000001", date_opened=DAY)
+    accounts = (GIA, other)
+
+    def held(account: str, quantity: str) -> RowSpec:
+        return RowSpec("OpenPosition", account, **ETFA, position=quantity, markPrice="100")
+
+    await sync(
+        session,
+        connection,
+        tmp_path,
+        [held("U0000001", "10"), held("X0000001", "7")],
+        notifier,
+        accounts=accounts,
+    )
+    assert await warnings_of(session, connection) == [WARNING_A, WARNING_A[:-3] + "-7"]
+    # The first account's difference is fixed; the second's stays, though it shows the same
+    # last four digits.
+    fixed = buy("9000001", ETFA, "10", "100.00", "-1000.00")
+    await sync(
+        session,
+        connection,
+        tmp_path,
+        [fixed, held("U0000001", "10"), held("X0000001", "7")],
+        notifier,
+        accounts=accounts,
+    )
+    assert await warnings_of(session, connection) == [WARNING_A[:-3] + "-7"]
+    # A statement of the first account alone leaves the second's warning as it is.
+    await sync(session, connection, tmp_path, [fixed, held("U0000001", "10")], notifier)
+    assert await warnings_of(session, connection) == [WARNING_A[:-3] + "-7"]
+
+
+async def test_a_section_not_in_the_statement_keeps_its_warnings(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], notifier)
+    # This statement has a Cash Report only: cash is reconciled (and agrees), securities not.
+    await sync(session, connection, tmp_path, [cash("USD", "0")], notifier)
+    assert await warnings_of(session, connection) == [WARNING_A]
+
+
+async def test_a_failing_notifier_leaks_nothing(session, run, tmp_path, caplog) -> None:
+    class Failing:
+        async def send(self, text: str) -> None:
+            raise RuntimeError("https://hooks.example.test/SECRET-TOKEN")
+
+    connection = await _connection(run)
+    await sync(session, connection, tmp_path, [position(ETFA, "10")], Failing())
+    assert await warnings_of(session, connection) == [WARNING_A]
+    assert "SECRET-TOKEN" not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 async def test_reconcile_function(session, run, tmp_path) -> None:

@@ -385,24 +385,16 @@ async def _normalize(
         for item in items
         if item.record_type == _ACCOUNT and item.record_id in given
     }
-    mismatches = await reconcile.check(ctx.command.session, mapped, windows, sections)
-    run.report.mismatches = [m.warning for m in mismatches]
-    notified = await reconcile.publish(
-        ctx, connection, mismatches, {ibkr_id for ibkr_id, _ in windows}, run.report.flagged
-    )
+    checked = await reconcile.check(ctx.command.session, mapped, windows, sections)
+    run.report.mismatches = [m.warning for m in checked.mismatches]
+    replace = await reconcile.replaceable(ctx.command.session, mapped, checked)
+    await reconcile.publish(ctx, connection, checked, replace, run.report.flagged)
 
     # Only this normaliser's keys: others (the token's reminder) may have changed meanwhile.
     values: dict[str, JSONValue] = {
         ACCOUNT_MAP_KEY: accounts.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
     }
-    if notified:
-        values[reconcile.NOTIFIED_KEY] = notified
-    remove = (
-        []
-        if notified or reconcile.NOTIFIED_KEY not in connection.config
-        else [reconcile.NOTIFIED_KEY]
-    )
-    if remove or any(connection.config.get(key) != value for key, value in values.items()):
-        await update_config(ctx.command, connection.id, values, remove=remove)
+    if any(connection.config.get(key) != value for key, value in values.items()):
+        await update_config(ctx.command, connection.id, values)
     return run.report
