@@ -44,6 +44,8 @@ class IngestResult:
     raw_record_ids: list[UUID]
     # The parser's flags ("<Section>.<attribute>"), for the normalizer and the upload route.
     flagged: frozenset[str]
+    # (accountId, section) of every section the statement lists (Statement.sections).
+    sections: frozenset[tuple[str, str]] = frozenset()
 
 
 def _cursor_text(cursor: JSONValue, key: str) -> str | None:
@@ -136,7 +138,7 @@ async def _ingest(
             )
         )
     # The same row can occur more than once (a conversion rate repeats for every account).
-    result = IngestResult(list(dict.fromkeys(ids)), statement.flagged)
+    result = IngestResult(list(dict.fromkeys(ids)), statement.flagged, statement.sections)
     return result, statement
 
 
@@ -225,6 +227,7 @@ class IbkrConnector:
         today = now.astimezone(LONDON).date()
         ids: list[UUID] = []
         flagged: set[str] = set()
+        sections: set[tuple[str, str]] = set()
         fetched: list[tuple[date, date]] = []
 
         async def fetch(window: tuple[date, date]) -> Statement:
@@ -238,6 +241,7 @@ class IbkrConnector:
             result, statement = await _ingest(ctx, body, request)
             ids.extend(result.raw_record_ids)
             flagged.update(result.flagged)
+            sections.update(result.sections)
             fetched.append(window)
             return statement
 
@@ -251,7 +255,7 @@ class IbkrConnector:
             # reuses any orphaned file rather than duplicating it.
             for window in windows(connection.cursor, today, opened)[:-1]:
                 await fetch(window)
-        await normalize(ctx, ids, frozenset(flagged))
+        await normalize(ctx, ids, frozenset(flagged), frozenset(sections))
         history_from = min(
             [w[0] for w in fetched]
             + [d for d in [_cursor_date(connection.cursor, "history_from")] if d]

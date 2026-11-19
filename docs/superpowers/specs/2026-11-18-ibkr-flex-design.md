@@ -299,7 +299,7 @@ Every row below is one connector transaction. Its postings on the IBKR account a
 **Cash transaction:**
 - `amount` in its currency, and the contra.
 - For type "Deposits/Withdrawals", the contra comes from `transfer_contra`, with `bank_transfer = true` and no counterparty identifier. This is the deposit that pairs with Monzo (§5.12).
-- **A movement between two IBKR accounts is posted once, and never as a bank transfer.** The audit (2026-11-18) shows internal movements only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions. So every "Deposits/Withdrawals" row is a movement with an outside bank. If a later statement ever lists an internal movement in Cash Transactions too, the normalizer posts the Transfers row and flags the other.
+- **A movement between two IBKR accounts is posted once, and never as a bank transfer.** The audit (2026-11-18) shows internal movements only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions. So every "Deposits/Withdrawals" row is a movement with an outside bank. Every "Deposits/Withdrawals" row is posted. If IBKR ever listed one movement in both sections, it would be posted twice, and the reconciliation (§5.11) would show the difference.
 - Every other type (dividends, withholding tax, broker interest, other fees, payment in lieu, commission adjustments) posts against Unassigned.
 
 **Corporate action:**

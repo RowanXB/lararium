@@ -144,8 +144,10 @@ def build_statement(
     period: tuple[date, date],
     rows: Sequence[RowSpec],
     by_day: bool = False,
+    empty_sections: Sequence[str] = (),
 ) -> bytes:
-    """Valid synthetic Flex XML. With by_day, one FlexStatement per account per day."""
+    """Valid synthetic Flex XML. With by_day, one FlexStatement per account per day.
+    `empty_sections` are container elements listed in every statement even without rows."""
     windows = [(day, day) for day in _days(period)] if by_day else [period]
     root = ElementTree.Element("FlexQueryResponse", {"queryName": "synthetic", "type": "AF"})
     statements = ElementTree.SubElement(root, "FlexStatements")
@@ -170,7 +172,9 @@ def build_statement(
                 if spec.section == "AccountInformation" and spec.account_id == account.account_id:
                     info.update(spec.attributes)
             _element(statement, "AccountInformation", info)
-            containers: dict[str, ElementTree.Element] = {}
+            containers: dict[str, ElementTree.Element] = {
+                name: ElementTree.SubElement(statement, name) for name in empty_sections
+            }
             for spec in rows:
                 if spec.account_id != account.account_id or spec.section == "AccountInformation":
                     continue

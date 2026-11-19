@@ -140,9 +140,14 @@ class Run:
         """The listing of the row's security, found or created once per conid in a run;
         None for a category M5 does not handle, which is flagged unless `flag` is False."""
         conid = item.text("conid")
-        if conid not in self._instruments:
-            self._instruments[conid] = await listing(self.command, item.row())
-        found = self._instruments[conid]
+        if not conid:
+            # Not cached: rows without a conid are not one security (listing refuses one of a
+            # supported category, and returns None for the others).
+            found = await listing(self.command, item.row())
+        else:
+            if conid not in self._instruments:
+                self._instruments[conid] = await listing(self.command, item.row())
+            found = self._instruments[conid]
         if found is None and flag:
             self.flag(category_flag(item))
         return found

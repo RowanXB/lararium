@@ -40,6 +40,9 @@ class Statement:
     rows: tuple[Row, ...]
     # "<Section>.<attribute>", or "<Section>" for an unknown section that has rows.
     flagged: frozenset[str]
+    # (accountId, container element) of every section a FlexStatement lists, empty or not:
+    # an empty section says the account had nothing there, an absent one says nothing.
+    sections: frozenset[tuple[str, str]] = frozenset()
 
 
 def _refuse_doctype(*_: object) -> None:
@@ -135,7 +138,9 @@ def _section_of(container: str, element: ElementTree.Element) -> str | None:
     return None
 
 
-def _statement_rows(statement: ElementTree.Element, flagged: set[str]) -> list[Row]:
+def _statement_rows(
+    statement: ElementTree.Element, flagged: set[str], sections: set[tuple[str, str]]
+) -> list[Row]:
     account = statement.get("accountId")
     if not account:
         raise FlexDataError("FlexStatement.accountId is missing: select it in the Flex query")
@@ -145,6 +150,7 @@ def _statement_rows(statement: ElementTree.Element, flagged: set[str]) -> list[R
     )
     found: list[Row] = []
     for container in statement:
+        sections.add((account, container.tag))
         if container.tag in DERIVABLE_SECTIONS:
             continue
         if container.tag in SINGLE_ROW_SECTIONS:
@@ -169,10 +175,11 @@ def _statement_rows(statement: ElementTree.Element, flagged: set[str]) -> list[R
 def parse_statement(body: bytes) -> Statement:
     root = _root(body)
     flagged: set[str] = set()
+    sections: set[tuple[str, str]] = set()
     merged: dict[tuple[object, ...], Row] = {}
     latest_info: dict[str, Row] = {}
     for statement in root.iter("FlexStatement"):
-        for row in _statement_rows(statement, flagged):
+        for row in _statement_rows(statement, flagged, sections):
             if row.section == "AccountInformation":
                 held = latest_info.get(row.account)
                 if held is None or row.period_to >= held.period_to:
@@ -199,4 +206,4 @@ def parse_statement(body: bytes) -> Statement:
                     held.attributes,
                 )
     rows = tuple(latest_info.values()) + tuple(merged.values())
-    return Statement(rows, frozenset(flagged))
+    return Statement(rows, frozenset(flagged), frozenset(sections))

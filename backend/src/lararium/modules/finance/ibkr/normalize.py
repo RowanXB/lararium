@@ -303,19 +303,27 @@ def _history_fetched(cursor: JSONValue) -> bool:
 
 
 async def normalize(
-    ctx: SyncContext, raw_record_ids: Sequence[UUID], flagged: frozenset[str] = frozenset()
+    ctx: SyncContext,
+    raw_record_ids: Sequence[UUID],
+    flagged: frozenset[str] = frozenset(),
+    sections: frozenset[tuple[str, str]] = frozenset(),
 ) -> NormalizeReport:
     """Apply raw records to the ledger. `flagged` (the parser's flags) is reported with this
-    run's own (unsupported categories, rows it could not post).
+    run's own (unsupported categories, rows it could not post). `sections` are the
+    (accountId, section) pairs the ingested statements list (IngestResult.sections): an
+    opening counts a window's positions only when its statements list Open Positions.
 
     Its arithmetic on amounts is exact, as the ledger's balance check is: the default context
     rounds to 28 digits, which could leave postings that do not balance."""
     with localcontext(prec=MAX_PREC):
-        return await _normalize(ctx, raw_record_ids, flagged)
+        return await _normalize(ctx, raw_record_ids, flagged, sections)
 
 
 async def _normalize(
-    ctx: SyncContext, raw_record_ids: Sequence[UUID], flagged: frozenset[str]
+    ctx: SyncContext,
+    raw_record_ids: Sequence[UUID],
+    flagged: frozenset[str],
+    sections: frozenset[tuple[str, str]],
 ) -> NormalizeReport:
     connection = await get_connection(ctx.command.session, ctx.connection.id)
     replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
@@ -346,11 +354,10 @@ async def _normalize(
     await reports.nav(run, by_type[_NAV])
     await reports.trade_details(run, by_type[_TRADE_DETAIL])
 
-    internal = records.internal_movements(by_type[_TRANSFER])
     for item in sorted(by_type[_TRADE], key=records.order):
         await records.trade(run, item)
     for item in sorted(by_type[_CASH_TRANSACTION], key=records.order):
-        await records.cash_transaction(run, item, internal)
+        await records.cash_transaction(run, item)
     for item in sorted(by_type[_CORPORATE_ACTION], key=records.order):
         await records.corporate_action(run, item)
     for item in sorted(by_type[_TRANSFER], key=records.order):
@@ -367,6 +374,7 @@ async def _normalize(
             cash_report=_CASH_REPORT,
             open_position=_OPEN_POSITION,
             is_summary=lambda item: not reports.is_lot(item),
+            sections=sections,
         )
     await reports.snapshots(run, positions, by_type[_CASH_REPORT])
 

@@ -21,7 +21,7 @@ from lararium.modules.finance.ibkr import tables
 from lararium.modules.finance.ibkr.parser import FlexDataError
 from lararium.modules.finance.ibkr.state import Item, Run, zone_name
 from lararium.modules.finance.identifiers import get_or_create_identifier, normalize_identifier
-from lararium.modules.finance.instruments import get_instrument
+from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
@@ -45,6 +45,8 @@ PREFIXES: Mapping[str, str] = {
 }
 OPENING_DESCRIPTION = "Opening balance adjustment"
 _OPENING = "opening:"
+# The container element of Open Positions; a statement lists it even when it is empty.
+POSITIONS_SECTION = "OpenPositions"
 _DEPOSITS = "Deposits/Withdrawals"
 _CASH = "CASH"
 
@@ -122,14 +124,35 @@ def _fees(
     return postings
 
 
-async def _rounding(run: Run, postings: list[PostingInput], unassigned: UUID) -> None:
-    """IBKR rounds proceeds to cents. A residual within the ledger's tolerance stays; one
-    beyond it (a rounded FX rate as tradePrice) is posted to Unassigned (design 5.7)."""
-    alone = len(postings) < 2
+async def _rounding(
+    run: Run,
+    item: Item,
+    postings: list[PostingInput],
+    unassigned: UUID,
+    currency: InstrumentRecord,
+    quantity: Decimal,
+    price: Decimal,
+) -> None:
+    """IBKR rounds proceeds to cents and may round tradePrice. A residual within the ledger's
+    tolerance stays; one beyond it is posted to Unassigned (memo "rounding", design 5.7), up
+    to what rounding can explain: |quantity| times half a unit of tradePrice's last decimal
+    place, plus the currency's tolerance. More than that (proceeds in pence against a price
+    in pounds, say) fails the sync, naming the row's key but no amount."""
+    allowed = tolerance(currency.decimals)
+    if price != 0:
+        exponent = price.as_tuple().exponent
+        assert isinstance(exponent, int)  # finite
+        allowed += quantity.copy_abs() * Decimal(1).scaleb(exponent) / 2
     for instrument_id, residual in compute_residuals(postings).items():
         decimals = (await get_instrument(run.session, instrument_id)).decimals
-        if alone or residual.copy_abs() > tolerance(decimals):
-            postings.append(PostingInput(unassigned, instrument_id, -residual, memo="rounding"))
+        if residual.copy_abs() <= tolerance(decimals):
+            continue
+        if instrument_id != currency.id or residual.copy_abs() > allowed:
+            raise FlexDataError(
+                f"{item.section} {external_id(item)}: its proceeds differ from quantity times"
+                " tradePrice by more than rounding"
+            )
+        postings.append(PostingInput(unassigned, instrument_id, -residual, memo="rounding"))
 
 
 async def trade(run: Run, item: Item) -> None:
@@ -150,10 +173,14 @@ async def trade(run: Run, item: Item) -> None:
         if found is None:
             return
         instrument_id = found
+    unassigned = await run.system_account("unassigned")
     postings: list[PostingInput] = []
     if quantity != 0:
         if price == 0:
+            # Nothing to weigh it by: the security comes from (or goes to) Unassigned, as in
+            # a corporate action, and the proceeds must then be within tolerance of zero.
             postings.append(PostingInput(account_id, instrument_id, quantity))
+            postings.append(PostingInput(unassigned, instrument_id, -quantity))
         elif conversion or quantity < 0:
             # Currencies have no lots, and a sell is weighed by its price: realised P/L is a
             # typed field, not a posting.
@@ -183,7 +210,6 @@ async def trade(run: Run, item: Item) -> None:
     commission_currency = (
         (await run.currency(item.text("ibCommissionCurrency"))).id if commission else currency.id
     )
-    unassigned = await run.system_account("unassigned")
     postings += _fees(
         account_id,
         unassigned,
@@ -195,7 +221,7 @@ async def trade(run: Run, item: Item) -> None:
     if not postings:
         run.flag("Trade.unposted")
         return
-    await _rounding(run, postings, unassigned)
+    await _rounding(run, item, postings, unassigned, currency, quantity, price)
     side = "Buy" if quantity > 0 else "Sell" if quantity < 0 else ""
     description = f"{side} {to_plain_str(abs(quantity))} {symbol}" if side else symbol
     transaction_id = await _post(
@@ -206,25 +232,6 @@ async def trade(run: Run, item: Item) -> None:
         value_date=item.optional_day("settleDateTarget"),
     )
     await _typed(run, tables.upsert_trades, "ibkr_trades", item, transaction_id, account_id)
-
-
-def _movement_key(account: str, currency: str, day: str, amount: Decimal) -> tuple[object, ...]:
-    return account, currency, day, amount
-
-
-def internal_movements(transfers: Iterable[Item]) -> set[tuple[object, ...]]:
-    """The cash movements the Transfers section lists, so a Cash Transactions row of the same
-    movement is not posted a second time (design 5.7)."""
-    return {
-        _movement_key(
-            item.account,
-            item.text("currency"),
-            item.text("reportDate"),
-            item.number("cashTransfer"),
-        )
-        for item in transfers
-        if item.text("assetCategory") == _CASH
-    }
 
 
 async def _transfer_contra(
@@ -242,7 +249,7 @@ async def _transfer_contra(
     )
 
 
-async def cash_transaction(run: Run, item: Item, internal: set[tuple[object, ...]]) -> None:
+async def cash_transaction(run: Run, item: Item) -> None:
     account_id = run.account_id(item)
     currency = await run.currency(item.text("currency"))
     amount = item.number("amount")
@@ -251,10 +258,7 @@ async def cash_transaction(run: Run, item: Item, internal: set[tuple[object, ...
         return
     kind = item.text("type")
     if kind == _DEPOSITS:
-        key = _movement_key(item.account, currency.symbol, item.text("reportDate"), amount)
-        if key in internal:
-            run.flag("CashTransaction.internalTransfer")
-            return
+        # Every one is posted: IBKR lists internal movements in Transfers only (design 5.7).
         # A movement with an outside bank: the deposit that pairs with Monzo (design 5.12).
         counterparty = CounterpartyFields(bank_transfer=True)
         contra = await _transfer_contra(run, item, account_id, None)
@@ -352,7 +356,12 @@ async def transfer(run: Run, item: Item) -> None:
         if found is None:
             return
         instrument_id = found
-        amount = item.number("quantity")
+        # A security's quantity is signed by direction; cashTransfer carries its own sign.
+        direction = item.text("direction").upper()
+        if direction not in ("IN", "OUT"):
+            raise FlexDataError("Transfer.direction is not IN or OUT")
+        amount = item.number("quantity").copy_abs()
+        amount = -amount if direction == "OUT" else amount
     if amount == 0:
         run.flag("Transfer.unposted")
         return
@@ -474,6 +483,7 @@ async def openings(
     cash_report: str,
     open_position: str,
     is_summary: Callable[[Item], bool],
+    sections: frozenset[tuple[str, str]],
 ) -> None:
     """For an account older than the window, what it held before it (design 5.7): cash from
     the earliest Cash Report's startingCash, positions from the window's last reported ones
@@ -501,6 +511,13 @@ async def openings(
             held = await _held(run, account_id, currency.id, before=row.day("fromDate"))
             targets[currency.id] = row.number("startingCash") - held
 
+        if (ibkr_id, POSITIONS_SECTION) not in sections:
+            # A window without the section says nothing about positions (an empty one says
+            # there were none): its securities get no opening.
+            run.flag(POSITIONS_SECTION)
+            positions_known = False
+        else:
+            positions_known = True
         positions = [r for r in rows if r.record_type == open_position and is_summary(r)]
         # The last day positions were reported for (a complete list of that day), else the
         # window's end, when the window reported none.
@@ -514,7 +531,8 @@ async def openings(
                 instrument_id = await run.instrument(row, flag=False)
                 if instrument_id is not None:
                     reported[instrument_id] += row.number("position")
-        for instrument_id in sorted(set(reported) | await _securities_posted(run, account_id)):
+        securities = set(reported) | await _securities_posted(run, account_id)
+        for instrument_id in sorted(securities) if positions_known else ():
             held = await _held(run, account_id, instrument_id, through=last)
             targets[instrument_id] = reported.get(instrument_id, Decimal(0)) - held
 

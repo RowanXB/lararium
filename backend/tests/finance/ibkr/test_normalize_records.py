@@ -84,15 +84,18 @@ async def _sync(
     accounts=(GIA,),
     period=(DAY, DAY),
     by_day=False,
+    empty_sections=(),
 ) -> tuple[NormalizeReport, SyncContext]:
     """Ingest a synthetic statement and normalize it, as a sync does."""
-    body = build_statement(list(accounts), period=period, rows=rows, by_day=by_day)
+    body = build_statement(
+        list(accounts), period=period, rows=rows, by_day=by_day, empty_sections=empty_sections
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
         ctx = await _ctx(session, connection, tmp_path, http)
         request: dict[str, JSONValue] = {"upload": "x.xml"}
         ingested = await ingest_statement(ctx, body, request)
         ctx = await _ctx(session, connection, tmp_path, http)
-        report = await normalize(ctx, ingested.raw_record_ids, ingested.flagged)
+        report = await normalize(ctx, ingested.raw_record_ids, ingested.flagged, ingested.sections)
         return report, ctx
 
 
@@ -300,6 +303,59 @@ async def test_rounding_within_tolerance_not_posted(session, run, tmp_path) -> N
     assert await find_unbalanced_transactions(session) == []
 
 
+async def test_rounding_beyond_what_rounding_explains_fails(session, run, tmp_path) -> None:
+    # Proceeds in pounds against a price in pence: 100 x 512.5 is not -512.50 by any rounding.
+    connection = await _connection(run)
+    rows = [
+        RowSpec(
+            "Trade",
+            "U0000001",
+            **(ETFA | {"currency": "GBP"}),
+            quantity="100",
+            tradePrice="512.5",
+            proceeds="-512.50",
+        )
+    ]
+    with pytest.raises(FlexDataError, match=r"Trade trade:U0000001:9000001") as raised:
+        await _sync(session, connection, tmp_path, rows)
+    assert "512" not in str(raised.value)
+
+
+async def test_trade_taxes_are_a_fee_in_the_trade_currency(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    rows = [
+        RowSpec(
+            "Trade",
+            "U0000001",
+            **ETFA,
+            quantity="10",
+            tradePrice="100",
+            proceeds="-1000",
+            ibCommission="-1.00",
+            ibCommissionCurrency="USD",
+            taxes="-0.50",
+        )
+    ]
+    await _sync(session, connection, tmp_path, rows)
+    assert (await _postings(session, "trade:U0000001:9000001"))[2:] == [
+        (ACCOUNT, "USD", Decimal("-1.00"), None, None, None, None, True, "commission"),
+        (ACCOUNT, "USD", Decimal("-0.50"), None, None, None, None, True, "taxes"),
+        ("Unassigned", "USD", Decimal("1.50"), None, None, None, None, False, ""),
+    ]
+
+
+async def test_conversion_selling_the_base_currency(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    rows = [_conversion(quantity="-1000", tradePrice="1.27", proceeds="1270.00")]
+    await _sync(session, connection, tmp_path, rows)
+    assert (await _postings(session, "trade:U0000001:9000003"))[:2] == [
+        (ACCOUNT, "GBP", Decimal("-1000"), None, None, Decimal("1.27"), "USD", False, ""),
+        (ACCOUNT, "USD", Decimal("1270.00"), None, None, None, None, False, ""),
+    ]
+    tx = await _transaction(session, "trade:U0000001:9000003")
+    assert tx.description == "Sell 1000 GBP.USD"
+
+
 async def test_deposit_is_bank_transfer(session, run, tmp_path) -> None:
     connection = await _connection(run)
     rows = [
@@ -493,7 +549,10 @@ async def test_internal_transfer_sides_share_an_id(session, run, tmp_path) -> No
     assert await session.scalar(text("select count(*) from finance.ibkr_transfers")) == 2
 
 
-async def test_cash_movement_with_transfer_row_posted_once(session, run, tmp_path) -> None:
+async def test_deposit_and_internal_transfer_of_one_amount_both_posted(
+    session, run, tmp_path
+) -> None:
+    # Every Deposits/Withdrawals row is posted, whatever Transfers lists the same day.
     connection = await _connection(run)
     rows = [
         RowSpec(
@@ -508,8 +567,33 @@ async def test_cash_movement_with_transfer_row_posted_once(session, run, tmp_pat
         RowSpec("CashTransaction", "U0000001", transactionID="8000009", amount="-250.00"),
     ]
     report, _ = await _sync(session, connection, tmp_path, rows, accounts=(GIA, OTHER))
-    assert await _external_ids(session) == ["transfer:U0000001:6000003"]
-    assert "CashTransaction.internalTransfer" in report.flagged
+    assert await _external_ids(session) == [
+        "cash:U0000001:8000009",
+        "transfer:U0000001:6000003",
+    ]
+    assert (await _transaction(session, "cash:U0000001:8000009")).bank_transfer is True
+    assert await session.scalar(text("select count(*) from finance.ibkr_cash_transactions")) == 1
+    assert not {f for f in report.flagged if f.startswith("CashTransaction")}
+
+
+async def test_security_transfer_out_is_negative(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    rows = [
+        RowSpec(
+            "Transfer",
+            "U0000001",
+            **ETFA,
+            transactionID="6000005",
+            quantity="5",
+            account="U0000002",
+            direction="OUT",
+        )
+    ]
+    await _sync(session, connection, tmp_path, rows, accounts=(GIA, OTHER))
+    assert [p[:3] for p in await _postings(session, "transfer:U0000001:6000005")] == [
+        (ACCOUNT, "ETFA", Decimal("-5")),
+        ("In transit", "ETFA", Decimal("5")),
+    ]
 
 
 async def test_prices_and_fx_recorded(session, run, tmp_path) -> None:
@@ -896,3 +980,49 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     )
     stored = await get_connection(session, connection.id)
     assert stored.config["normalizer_version"] == NORMALIZER_VERSION
+
+
+@pytest.mark.parametrize("listed", [False, True])
+async def test_security_opening_needs_the_open_positions_section(
+    session, run, tmp_path, listed
+) -> None:
+    # An account older than the window that bought 10 in it and reports no positions: an
+    # empty Open Positions says it holds none (so 10 were held before and sold), an absent
+    # one says nothing, and no opening is guessed.
+    connection = await _connection(run)
+    rows = [RowSpec("Trade", "U0000001", **ETFA)]
+    report, _ = await _sync(
+        session,
+        connection,
+        tmp_path,
+        rows,
+        accounts=(AccountSpec("U0000001"),),
+        empty_sections=("OpenPositions",) if listed else (),
+    )
+    openings = [e for e in await _external_ids(session) if e.startswith("opening:")]
+    if listed:
+        assert len(openings) == 1
+        assert "OpenPositions" not in report.flagged
+    else:
+        assert openings == []
+        assert "OpenPositions" in report.flagged
+
+
+async def test_rows_without_conid_are_not_one_security(session, run, tmp_path) -> None:
+    # An unsupported row without a conid must not hide a stock row without one.
+    connection = await _connection(run)
+    stock = {k: v for k, v in ETFA.items() if k != "conid"}
+    rows = [
+        RowSpec(
+            "Trade",
+            "U0000001",
+            assetCategory="OPT",
+            symbol="ETFA  261218C00100000",
+            currency="USD",
+            transactionID="9000007",
+            reportDate=_ymd(DAY - timedelta(days=1)),
+        ),
+        RowSpec("Trade", "U0000001", **stock, transactionID="9000008"),
+    ]
+    with pytest.raises(FlexDataError, match=r"Trade\.conid is missing"):
+        await _sync(session, connection, tmp_path, rows)
