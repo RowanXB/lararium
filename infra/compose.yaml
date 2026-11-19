@@ -62,6 +62,9 @@ services:
       LARARIUM_PUBLIC_BASE_URL: ${LARARIUM_PUBLIC_BASE_URL:-}
       LARARIUM_WEBHOOK_BASE_URL: ${LARARIUM_WEBHOOK_BASE_URL:-}
       LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
+      # An IBKR statement upload reconciles in the api, and tells the owner from here.
+      LARARIUM_FEISHU_WEBHOOK_URL: ${LARARIUM_FEISHU_WEBHOOK_URL:-}
+      LARARIUM_FEISHU_SECRET: ${LARARIUM_FEISHU_SECRET:-}
       LARARIUM_DOCUMENT_DIR: /var/lib/lararium/documents
     depends_on:
       migrate: { condition: service_completed_successfully }

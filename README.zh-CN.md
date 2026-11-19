@@ -409,7 +409,7 @@ SQL
 
 连接需要重新授权、或同步持续失败时，Lararium 可以给你发消息。在飞书群里添加一个自定义机器人，
 开启签名校验，把 webhook 地址和签名密钥分别填进 `infra/.env` 的 `LARARIUM_FEISHU_WEBHOOK_URL`
-和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker）。两者都不设置就不发通知。消息里
+和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker 和 api）。两者都不设置就不发通知。消息里
 不会出现任何凭据。
 
 ## 导入账单

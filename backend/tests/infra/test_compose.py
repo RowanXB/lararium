@@ -117,11 +117,11 @@ def test_api_and_worker_get_the_connector_settings(name: str) -> None:
         "LARARIUM_PUBLIC_BASE_URL",
         "LARARIUM_WEBHOOK_BASE_URL",
         "LARARIUM_WEBHOOK_SECRET",
+        # Both tell the owner: the worker after a sync, the api after an IBKR upload.
+        "LARARIUM_FEISHU_WEBHOOK_URL",
+        "LARARIUM_FEISHU_SECRET",
     ):
         assert variable in environment, variable
-    if name == "worker":
-        assert "LARARIUM_FEISHU_WEBHOOK_URL" in environment
-        assert "LARARIUM_FEISHU_SECRET" in environment
 
 
 @pytest.mark.parametrize("name", ["webhook-in", "cloudflared"])

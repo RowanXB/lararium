@@ -466,7 +466,7 @@ SQL
 Lararium can message you when a connection needs re-authorising or a sync keeps failing. In
 a Feishu group add a custom bot, turn on signature verification, and copy the webhook URL and
 the signing secret into `LARARIUM_FEISHU_WEBHOOK_URL` and `LARARIUM_FEISHU_SECRET` (both in
-`infra/.env`; `make up` passes them to the worker). With neither set there are no notifications.
+`infra/.env`; `make up` passes them to the worker and the api). With neither set there are no notifications.
 Messages never contain credentials.
 
 ## Importing statements
