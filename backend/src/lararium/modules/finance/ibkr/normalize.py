@@ -385,7 +385,9 @@ async def _normalize(
         for item in items
         if item.record_type == _ACCOUNT and item.record_id in given
     }
-    checked = await reconcile.check(ctx.command.session, mapped, windows, sections)
+    checked = await reconcile.check(
+        ctx.command.session, mapped, windows, sections, reconcile.reconciled_days(connection)
+    )
     run.report.mismatches = [m.warning for m in checked.mismatches]
     replace = await reconcile.replaceable(ctx.command.session, mapped, checked)
     await reconcile.publish(ctx, connection, checked, replace, run.report.flagged)

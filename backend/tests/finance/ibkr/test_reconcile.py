@@ -254,6 +254,33 @@ async def test_older_statement_leaves_current_warnings_alone(session, run, tmp_p
     assert await warnings_of(session, connection) == current
 
 
+async def test_older_statement_that_completes_the_ledger_clears_the_current_warning(
+    session, run, tmp_path
+) -> None:
+    # Found by the property tests: a newer statement fetched first, before the days that
+    # hold the buy, warns; the older statement fetched later posts the buy, so the newest
+    # report now agrees. Its warning was once kept, as only a newer statement replaced it.
+    connection = await _connection(run)
+    notifier = Notifier()
+    # The first sync: the day the account opened, with nothing in it.
+    await sync(session, connection, tmp_path, [], notifier, empty=("OpenPositions",))
+    await session.execute(
+        text('update core.connections set cursor = \'{"history_from": "2026-11-10"}\'')
+    )
+    newest, older = date(2026, 11, 12), date(2026, 11, 11)
+    await sync(
+        session, connection, tmp_path, [position(ETFA, "10")], notifier, period=(newest, newest)
+    )
+    assert await warnings_of(session, connection) == [
+        "IBKR ···0001 ETFA differs from IBKR's report on 2026-11-12 by -10"
+    ]
+    rows = [buy("9000001", ETFA, "10", "100.00", "-1000.00"), position(ETFA, "10")]
+    report = await sync(session, connection, tmp_path, rows, notifier, period=(older, older))
+    assert report.mismatches == []
+    assert await warnings_of(session, connection) == []
+    assert len(notifier.sent) == 1
+
+
 async def test_other_warnings_survive(session, run, tmp_path) -> None:
     connection = await _connection(run)
     await run(set_warnings, connection.id, ["Sync layer: something else"])

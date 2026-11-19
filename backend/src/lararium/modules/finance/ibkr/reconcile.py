@@ -6,11 +6,16 @@ equal the sum of the account's non-void postings with a booking date at or befor
 within the instrument's tolerance. A difference becomes a connection warning and, once per
 new value, a notification; it is never corrected. Warnings name the last four digits of the
 account id, the instrument's symbol and the day, never a personal value.
+
+The latest day each account's securities and currencies were reconciled at is kept in the
+connection's config, and a run whose own statements end earlier (an older statement fetched
+late) checks that day again: what it posts may settle, or make, a difference there.
 """
 
 import logging
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Literal
@@ -89,10 +94,13 @@ async def reported_on(session: AsyncSession, account_id: UUID, day: date) -> dic
 
 
 type Kind = Literal["securities", "currencies"]
+KINDS: tuple[Kind, ...] = ("securities", "currencies")
 # The machine-readable record of this module's warnings in the connection's config: a list
 # of {account, kind, text}, so a warning is replaced by the full account id and kind, never
 # by the last four digits its text shows.
 RECORD_KEY = "ibkr_warnings"
+# The latest day each (account, kind) was reconciled at: {account: {kind: "YYYY-MM-DD"}}.
+RECONCILED_KEY = "ibkr_reconciled"
 
 
 @dataclass(frozen=True)
@@ -113,9 +121,30 @@ class Mismatch:
 
 @dataclass(frozen=True)
 class Checked:
+    # The current differences: the latest day of each instrument, the rechecked latest
+    # reconciled day included.
     mismatches: list[Mismatch]
-    # The latest window end date each (IBKR account id, kind) was actually reconciled at.
+    # The latest day each (IBKR account id, kind) was actually reconciled at.
     reconciled: dict[tuple[str, Kind], date]
+    # The differences at this run's own window end dates, which the owner is told of even
+    # when a later day's check supersedes them.
+    found: list[Mismatch] = field(default_factory=list[Mismatch])
+
+
+def reconciled_days(connection: ConnectionRecord) -> dict[tuple[str, Kind], date]:
+    """The latest day each (account, kind) was reconciled at, from the connection's config."""
+    stored = connection.config.get(RECONCILED_KEY)
+    result: dict[tuple[str, Kind], date] = {}
+    if not isinstance(stored, dict):
+        return result
+    for ibkr_id, days in stored.items():
+        if not isinstance(days, dict):
+            continue
+        for kind in KINDS:
+            value = days.get(kind)
+            if isinstance(value, str):
+                result[(ibkr_id, kind)] = date.fromisoformat(value)
+    return result
 
 
 async def check(
@@ -123,30 +152,40 @@ async def check(
     accounts: Mapping[str, UUID],
     windows: Iterable[tuple[str, date]],
     sections: frozenset[tuple[str, str]],
+    previous: Mapping[tuple[str, Kind], date] | None = None,
 ) -> Checked:
     """The differences at each (IBKR account id, window end date), the latest day of each
     instrument only: a difference that persists is one warning, not one per day. A kind is
-    reconciled only where the window's statement has its section."""
-    latest: dict[tuple[str, UUID], Mismatch] = {}
-    reconciled: dict[tuple[str, Kind], date] = {}
-    for ibkr_id, day in sorted(set(windows), key=lambda w: (w[1], w[0])):
-        account_id = accounts.get(ibkr_id)
-        if account_id is None:
-            continue
-        kinds: dict[Kind, bool] = {
+    reconciled only where the window's statement has its section.
+
+    `previous` (reconciled_days) is where each (account, kind) was last reconciled: when this
+    run's windows end earlier, that day is checked again for that kind, as this run's
+    postings may have changed the ledger up to it."""
+    own: defaultdict[tuple[str, date], set[Kind]] = defaultdict(set)
+    reached: dict[tuple[str, Kind], date] = {}
+    for ibkr_id, day in set(windows):
+        present: dict[Kind, bool] = {
             "securities": (ibkr_id, POSITIONS_SECTION) in sections,
             "currencies": (ibkr_id, CASH_SECTION) in sections,
         }
-        for kind, present in kinds.items():
-            if present:
-                reconciled[(ibkr_id, kind)] = day
+        for kind in KINDS:
+            if present[kind]:
+                own[(ibkr_id, day)].add(kind)
+                reached[(ibkr_id, kind)] = max(day, reached.get((ibkr_id, kind), day))
+    again: defaultdict[tuple[str, date], set[Kind]] = defaultdict(set)
+    for (ibkr_id, kind), day in (previous or {}).items():
+        if (ibkr_id, kind) not in reached or reached[(ibkr_id, kind)] < day:
+            again[(ibkr_id, day)].add(kind)
+
+    async def differences(ibkr_id: str, day: date, kinds: set[Kind]) -> list[tuple[UUID, Mismatch]]:
+        account_id = accounts[ibkr_id]
         found = await reconcile(
             session,
             account_id,
             day,
             await reported_on(session, account_id, day),
-            securities=kinds["securities"],
-            currencies=kinds["currencies"],
+            securities="securities" in kinds,
+            currencies="currencies" in kinds,
         )
         i = models.Instrument
         described = {
@@ -157,12 +196,42 @@ async def check(
                 )
             )
         }
+        result: list[tuple[UUID, Mismatch]] = []
         for instrument_id, difference in found:
             row = described[instrument_id]
             kind: Kind = "currencies" if row.kind == "fiat" else "securities"
-            latest[(ibkr_id, instrument_id)] = Mismatch(ibkr_id, kind, row.symbol, day, difference)
-    mismatches = sorted(latest.values(), key=lambda m: (m.ibkr_id, m.symbol, m.day))
-    return Checked(mismatches, reconciled)
+            result.append((instrument_id, Mismatch(ibkr_id, kind, row.symbol, day, difference)))
+        return result
+
+    # By (account, instrument): the latest day of each instrument only.
+    latest_own: dict[tuple[str, UUID], Mismatch] = {}
+    reconciled: dict[tuple[str, Kind], date] = {}
+    for (ibkr_id, day), kinds in sorted(own.items(), key=lambda w: (w[0][1], w[0][0])):
+        if ibkr_id not in accounts:
+            continue
+        for kind in kinds:
+            reconciled[(ibkr_id, kind)] = day
+        for instrument_id, mismatch in await differences(ibkr_id, day, kinds):
+            latest_own[(ibkr_id, instrument_id)] = mismatch
+    rechecked: dict[tuple[str, UUID], Mismatch] = {}
+    again_kinds: set[tuple[str, Kind]] = set()
+    for (ibkr_id, day), kinds in sorted(again.items(), key=lambda w: (w[0][1], w[0][0])):
+        if ibkr_id not in accounts:
+            continue
+        for kind in kinds:
+            reconciled[(ibkr_id, kind)] = day
+            again_kinds.add((ibkr_id, kind))
+        for instrument_id, mismatch in await differences(ibkr_id, day, kinds):
+            rechecked[(ibkr_id, instrument_id)] = mismatch
+    # For a kind checked again, the current differences are that day's: this run's own,
+    # older days are only told.
+    current = [m for m in latest_own.values() if (m.ibkr_id, m.kind) not in again_kinds]
+    current += rechecked.values()
+
+    def ordered(found: Iterable[Mismatch]) -> list[Mismatch]:
+        return sorted(found, key=lambda m: (m.ibkr_id, m.symbol, m.day))
+
+    return Checked(ordered(current), reconciled, ordered(latest_own.values()))
 
 
 async def _notify(ctx: SyncContext, text: str) -> None:
@@ -217,7 +286,8 @@ async def publish(
     Flagged warnings are replaced by this run's. Reconciliation warnings are replaced for
     the (account, kind) pairs in `replace`; a difference for any other pair is only
     notified, and the warnings of pairs this run did not reconcile stay. Warnings of other
-    origins are kept."""
+    origins are kept. The latest day each pair was reconciled at is recorded for the next
+    run (check's `previous`)."""
     previous = connection.warnings
     recorded = _recorded(connection)
     dropped = {e["text"] for e in recorded if (e["account"], e["kind"]) in replace}
@@ -230,11 +300,23 @@ async def publish(
         if mismatch.warning not in warnings:
             warnings.append(mismatch.warning)
         kept.append({"account": mismatch.ibkr_id, "kind": mismatch.kind, "text": mismatch.warning})
-    for warning in [*flags, *(m.warning for m in checked.mismatches)]:
+    told = dict.fromkeys([*flags, *(m.warning for m in [*checked.found, *checked.mismatches])])
+    for warning in told:
         if warning not in previous:
             await _notify(ctx, f"{connection.display_name}: {warning}")
     if warnings != previous:
         await set_warnings(ctx.command, connection.id, warnings)
+    values: dict[str, JSONValue] = {}
     if kept != recorded:
-        record: JSONValue = [dict(e) for e in kept]
-        await update_config(ctx.command, connection.id, {RECORD_KEY: record})
+        values[RECORD_KEY] = [dict(e) for e in kept]
+    days = reconciled_days(connection)
+    merged = dict(days)
+    for pair, day in checked.reconciled.items():
+        merged[pair] = max(day, merged.get(pair, day))
+    if merged != days:
+        stored: dict[str, dict[str, JSONValue]] = {}
+        for (ibkr_id, kind), day in sorted(merged.items()):
+            stored.setdefault(ibkr_id, {})[kind] = day.isoformat()
+        values[RECONCILED_KEY] = {k: v for k, v in stored.items()}
+    if values:
+        await update_config(ctx.command, connection.id, values)
