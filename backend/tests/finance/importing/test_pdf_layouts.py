@@ -1099,3 +1099,13 @@ def test_revolut_statement_made_on_its_last_day_has_an_undated_closing() -> None
     assert statement.closing_balance == Decimal("1300.00")
     assert statement.closing_balance_date is None
     assert _revolut().closing_balance_date == date(2027, 10, 31)
+
+
+def test_skipped_rows_count_towards_the_row_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lararium.modules.finance.importing import parsed
+
+    monkeypatch.setattr(parsed, "MAX_IMPORT_ROWS", len(REVOLUT_ROWS))
+    pending = RevolutRow("Oct 30, 2027", "Example Shop", paid_out="£9.99")
+
+    with pytest.raises(FileFormatError, match="more than 4 rows"):
+        _revolut(pending=[pending])

@@ -112,7 +112,7 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
     result = layout(visible_lines(content, x_tolerance=x_tolerance))
     if not result.rows:
         raise FileFormatError("no rows")
-    if len(result.rows) > parsed.MAX_IMPORT_ROWS:
+    if len(result.rows) + len(result.skipped) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
     check(result)
     rows: list[ParsedRow | RowError | SkippedRow] = [r.row for r in result.rows]
