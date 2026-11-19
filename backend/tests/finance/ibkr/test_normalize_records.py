@@ -132,14 +132,6 @@ async def _transaction(session, external_id: str):
     ).one()
 
 
-async def _set_history_from(session, connection, day: date) -> None:
-    """What the sync stores once a window is fetched (Decision 5)."""
-    await session.execute(
-        text("update core.connections set cursor = cast(:c as jsonb) where id = :i"),
-        {"c": f'{{"history_from": "{day.isoformat()}"}}', "i": connection.id},
-    )
-
-
 async def _external_ids(session) -> list[str]:
     rows = await session.scalars(
         text("select external_id from finance.transactions order by external_id")
@@ -834,12 +826,149 @@ async def test_opening_only_for_older_account(session, run, tmp_path) -> None:
     assert all(r[0].startswith("opening:U0000001:") for r in openings)
 
 
-async def test_no_opening_once_history_is_fetched(session, run, tmp_path) -> None:
+async def _openings(session) -> list[tuple]:
+    """(booking date, instrument symbol, quantity) of the account's live openings."""
+    rows = await session.execute(
+        text(
+            "select t.booking_date, i.symbol, p.quantity from finance.transactions t"
+            " join finance.postings p on p.transaction_id = t.id"
+            " join finance.accounts a on a.id = p.account_id"
+            " join finance.instruments i on i.id = p.instrument_id"
+            " where t.external_id like 'opening:%' and t.status <> 'void' and a.name = :a"
+            " order by i.symbol"
+        ),
+        {"a": ACCOUNT},
+    )
+    return [tuple(r) for r in rows]
+
+
+async def _live_cash(session, symbol: str) -> Decimal:
+    return await session.scalar(
+        text(
+            "select coalesce(sum(p.quantity), 0) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " join finance.accounts a on a.id = p.account_id"
+            " join finance.instruments i on i.id = p.instrument_id"
+            " where a.name = :a and i.symbol = :s and t.status <> 'void'"
+        ),
+        {"a": ACCOUNT, "s": symbol},
+    )
+
+
+async def test_later_window_leaves_the_opening(session, run, tmp_path) -> None:
+    days = [DAY + timedelta(days=n) for n in range(2)]
     connection = await _connection(run)
-    await _set_history_from(session, connection, date(2026, 1, 1))
-    rows = [RowSpec("CashReportCurrency", "U0000001", startingCash="200", endingCash="200")]
-    await _sync(session, connection, tmp_path, rows, accounts=(AccountSpec("U0000001"),))
-    assert await _external_ids(session) == []
+    first = [RowSpec("CashReportCurrency", "U0000001", startingCash="200", endingCash="200")]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        first,
+        period=(days[0], days[0]),
+        accounts=(AccountSpec("U0000001"),),
+    )
+    # A later window's starting cash says nothing about what came before the earliest one.
+    later = [RowSpec("CashReportCurrency", "U0000001", startingCash="999", endingCash="999")]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        later,
+        period=(days[1], days[1]),
+        accounts=(AccountSpec("U0000001"),),
+    )
+    assert await _openings(session) == [(days[0] - timedelta(days=1), "GBP", Decimal("200"))]
+
+
+@pytest.mark.parametrize("opened_offset", [None, 0, 1])
+async def test_upload_of_earlier_history_replaces_the_opening(
+    session, run, tmp_path, opened_offset
+) -> None:
+    """Statements reaching further back than the first sync (an upload) re-derive the
+    opening from the new earliest window, so the deposits they bring aren't counted twice.
+    The account opened before both windows, on the earlier one's first day, or inside it."""
+    days = [DAY + timedelta(days=n) for n in range(4)]
+    opened = date(2020, 1, 15) if opened_offset is None else days[opened_offset]
+    account = AccountSpec("U0000001", date_opened=opened)
+    connection = await _connection(run)
+    later = [
+        RowSpec(
+            "CashReportCurrency",
+            "U0000001",
+            day=day,
+            startingCash="10000",
+            endingCash="10000",
+        )
+        for day in days[2:]
+    ]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        later,
+        accounts=(account,),
+        period=(days[2], days[3]),
+        by_day=True,
+    )
+    assert await _openings(session) == [(days[1], "GBP", Decimal("10000"))]
+    assert await _live_cash(session, "GBP") == Decimal("10000")
+
+    earlier = [
+        RowSpec(
+            "CashReportCurrency", "U0000001", day=days[0], startingCash="0", endingCash="10000"
+        ),
+        RowSpec(
+            "CashReportCurrency", "U0000001", day=days[1], startingCash="10000", endingCash="10000"
+        ),
+        RowSpec(
+            "CashTransaction", "U0000001", day=days[0], transactionID="8000001", amount="10000"
+        ),
+    ]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        earlier,
+        accounts=(account,),
+        period=(days[0], days[1]),
+        by_day=True,
+    )
+    assert await _openings(session) == []
+    assert await _live_cash(session, "GBP") == Decimal("10000")
+    assert await find_unbalanced_transactions(session) == []
+
+
+async def test_upload_of_earlier_history_keeps_what_came_before_it(session, run, tmp_path) -> None:
+    """An earlier window that still starts after the account opened: the opening moves to
+    before it, sized by its starting cash."""
+    days = [DAY + timedelta(days=n) for n in range(4)]
+    connection = await _connection(run)
+    later = [RowSpec("CashReportCurrency", "U0000001", startingCash="700", endingCash="700")]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        later,
+        accounts=(AccountSpec("U0000001"),),
+        period=(days[3], days[3]),
+    )
+    earlier = [
+        RowSpec(
+            "CashReportCurrency", "U0000001", day=days[0], startingCash="200", endingCash="700"
+        ),
+        RowSpec("CashTransaction", "U0000001", day=days[0], transactionID="8000001", amount="500"),
+    ]
+    await _sync(
+        session,
+        connection,
+        tmp_path,
+        earlier,
+        accounts=(AccountSpec("U0000001"),),
+        period=(days[0], days[0]),
+        by_day=True,
+    )
+    assert await _openings(session) == [(days[0] - timedelta(days=1), "GBP", Decimal("200"))]
+    assert await _live_cash(session, "GBP") == Decimal("700")
 
 
 async def test_overlapping_windows_write_once(session, run, tmp_path) -> None:
@@ -868,7 +997,6 @@ async def test_overlapping_windows_write_once(session, run, tmp_path) -> None:
         session, connection, tmp_path, rows, period=(days[0], days[4]), by_day=True
     )
     assert first.created == 3
-    await _set_history_from(session, connection, days[0])
     second, ctx = await _sync(
         session, connection, tmp_path, rows, period=(days[2], days[6]), by_day=True
     )
@@ -1028,3 +1156,17 @@ async def test_rows_without_conid_are_not_one_security(session, run, tmp_path) -
     ]
     with pytest.raises(FlexDataError, match=r"Trade\.conid is missing"):
         await _sync(session, connection, tmp_path, rows)
+
+
+async def test_a_row_corrected_to_nothing_voids_its_entry(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    deposit = {"transactionID": "8000001", "amount": "100"}
+    await _sync(session, connection, tmp_path, [RowSpec("CashTransaction", "U0000001", **deposit)])
+    assert await _live_cash(session, "GBP") == Decimal("100")
+    corrected = {**deposit, "amount": "0"}
+    report, _ = await _sync(
+        session, connection, tmp_path, [RowSpec("CashTransaction", "U0000001", **corrected)]
+    )
+    assert report.flagged == {"CashTransaction.unposted"}
+    assert await _live_cash(session, "GBP") == Decimal("0")
+    assert (await _transaction(session, "cash:U0000001:8000001")).status == "void"

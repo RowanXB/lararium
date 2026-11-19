@@ -119,16 +119,9 @@ class Connector:
             documents=self.documents,
         )
 
-    async def _set_history_from(self, value: str | None) -> None:
-        cursor = "{}" if value is None else f'{{"history_from": "{value}"}}'
-        await self.session.execute(
-            text("update core.connections set cursor = cast(:c as jsonb) where id = :i"),
-            {"c": cursor, "i": self.connection_id},
-        )
-
     async def fetch(self, windows: list[Window]) -> Run:
         """Ingest the windows' statements and normalize them in one run, as a sync does;
-        after the first, the cursor says history was fetched (Decision 5)."""
+        the earliest window it holds sets the opening (design 5.7)."""
         ids: list[UUID] = []
         flagged: set[str] = set()
         sections: set[tuple[str, str]] = set()
@@ -148,10 +141,6 @@ class Connector:
         ctx = await self.context()
         report = await normalize(ctx, ids, frozenset(flagged), frozenset(sections))
         events = len(ctx.command._events)  # pyright: ignore[reportPrivateUsage]
-        cursor = ctx.connection.cursor
-        if not isinstance(cursor, dict) or "history_from" not in cursor:
-            first = min(w.first for w in windows)
-            await self._set_history_from(self.history.date_of(first).isoformat())
         self.sections |= sections
         self.flagged |= flagged
         return Run(windows, report, events)
@@ -227,6 +216,8 @@ class Connector:
                 "select id, external_id, status, occurred_at, occurred_tz, booking_date,"
                 " value_date, description, bank_transfer, counterparty_identifier_id"
                 " from finance.transactions where connection_id = :c"
+                # An opening a later run voided (history reached further back) holds nothing.
+                " and not (external_id like 'opening:%' and status = 'void')"
             ),
             {"c": self.connection_id},
         )
@@ -301,7 +292,6 @@ class Connector:
             await self.session.execute(text(f"delete from finance.{name}"))
         await self.session.execute(text("delete from finance.prices where source = 'ibkr'"))
         await self.session.execute(text("delete from finance.fx_rates where source = 'ibkr'"))
-        await self._set_history_from(None)
 
 
 def _label(value: Any, labels: dict[UUID, str]) -> Any:
@@ -431,7 +421,13 @@ async def test_renormalize_writes_nothing(
         again = await connector.renormalize()
         report = again.report
         assert (report.created, report.updated) == (0, 0)
-        assert report.unchanged == len(history.events)
+        openings = await connector.session.scalar(
+            text(
+                "select count(*) from finance.transactions"
+                " where external_id like 'opening:%' and status <> 'void'"
+            )
+        )
+        assert report.unchanged == len(history.events) + openings
         assert (report.accounts_created, report.accounts_updated) == (0, 0)
         assert again.events == 0
         assert await connector.everything() == before

@@ -47,6 +47,7 @@ OPENING_DESCRIPTION = "Opening balance adjustment"
 _OPENING = "opening:"
 # The container element of Open Positions; a statement lists it even when it is empty.
 POSITIONS_SECTION = "OpenPositions"
+CASH_SECTION = "CashReport"
 _DEPOSITS = "Deposits/Withdrawals"
 _CASH = "CASH"
 
@@ -225,7 +226,7 @@ async def trade(run: Run, item: Item) -> None:
         ],
     )
     if not postings:
-        run.flag("Trade.unposted")
+        await _unposted(run, item, "Trade")
         return
     await _rounding(run, item, postings, unassigned, currency, quantity, price)
     side = "Buy" if quantity > 0 else "Sell" if quantity < 0 else ""
@@ -260,7 +261,7 @@ async def cash_transaction(run: Run, item: Item) -> None:
     currency = await run.currency(item.text("currency"))
     amount = item.number("amount")
     if amount == 0:
-        run.flag("CashTransaction.unposted")
+        await _unposted(run, item, "CashTransaction")
         return
     kind = item.text("type")
     if kind == _DEPOSITS:
@@ -310,7 +311,7 @@ async def corporate_action(run: Run, item: Item) -> None:
     ]
     moves = [(i, amount) for i, amount in moves if amount != 0]
     if not moves:
-        run.flag("CorporateAction.unposted")
+        await _unposted(run, item, "CorporateAction")
         return
     unassigned = await run.system_account("unassigned")
     # A split, spin-off or merger is quantity from or to Unassigned (equity).
@@ -369,7 +370,7 @@ async def transfer(run: Run, item: Item) -> None:
         amount = item.number("quantity").copy_abs()
         amount = -amount if direction == "OUT" else amount
     if amount == 0:
-        run.flag("Transfer.unposted")
+        await _unposted(run, item, "Transfer")
         return
     identifier_id = await _other_account(run, item.text("account"))
     contra = await _transfer_contra(run, item, account_id, identifier_id)
@@ -390,6 +391,25 @@ async def transfer(run: Run, item: Item) -> None:
 
 
 # Openings ------------------------------------------------------------------------------------
+
+
+async def _void(run: Run, key: str) -> None:
+    """Void the connection's live transaction with this external id, if there is one."""
+    t = models.Transaction
+    posted = await run.session.scalar(
+        select(t.id).where(
+            t.connection_id == run.connection_id, t.external_id == key, t.status != "void"
+        )
+    )
+    if posted is not None:
+        await void_transaction(run.command, posted)
+
+
+async def _unposted(run: Run, item: Item, section: str) -> None:
+    """A row with nothing to post. One IBKR corrected to that (an amount now 0) leaves no
+    entry: what an earlier copy posted is voided."""
+    run.flag(f"{section}.unposted")
+    await _void(run, external_id(item))
 
 
 def _not_opening() -> ColumnElement[bool]:
@@ -445,19 +465,29 @@ async def _earliest_booking(run: Run, account_id: UUID) -> date | None:
     )
 
 
+async def _current_openings(run: Run, ibkr_id: str, account_id: UUID) -> dict[UUID, bool]:
+    """The instruments of the account's live openings, each with whether it is a currency."""
+    t, p, i = models.Transaction, models.Posting, models.Instrument
+    rows = await run.session.execute(
+        select(p.instrument_id, i.kind == "fiat")
+        .join(t, t.id == p.transaction_id)
+        .join(i, i.id == p.instrument_id)
+        .where(
+            t.connection_id == run.connection_id,
+            t.external_id.like(f"{_OPENING}{ibkr_id}:%"),
+            t.status != "void",
+            p.account_id == account_id,
+        )
+    )
+    return {instrument_id: bool(fiat) for instrument_id, fiat in rows}
+
+
 async def _opening(
     run: Run, ibkr_id: str, account_id: UUID, instrument_id: UUID, difference: Decimal, day: date
 ) -> None:
     key = f"{_OPENING}{ibkr_id}:{instrument_id}"
     if difference == 0:
-        t = models.Transaction
-        posted = await run.session.scalar(
-            select(t.id).where(
-                t.connection_id == run.connection_id, t.external_id == key, t.status != "void"
-            )
-        )
-        if posted is not None:
-            await void_transaction(run.command, posted)
+        await _void(run, key)
         return
     occurred_at = datetime.combine(day, time(), tables.NEW_YORK)
     _, outcome = await upsert_connector_transaction(
@@ -485,34 +515,53 @@ async def openings(
     run: Run,
     items: Sequence[Item],
     opened: Mapping[str, date],
+    earliest: Mapping[str, date],
     *,
     cash_report: str,
     open_position: str,
     is_summary: Callable[[Item], bool],
     sections: frozenset[tuple[str, str]],
 ) -> None:
-    """For an account older than the window, what it held before it (design 5.7): cash from
-    the earliest Cash Report's startingCash, positions from the window's last reported ones
-    less what the window posted; dated the day before the account's earliest record, against
-    Opening balances. The caller runs it for the account's earliest window only."""
+    """For an account older than its earliest window, what it held before it (design 5.7):
+    cash from the earliest Cash Report's startingCash, positions from the window's last
+    reported ones less what the ledger holds by then; dated the day before the account's
+    earliest record, against Opening balances.
+
+    Only a run holding the account's earliest stored window (`earliest`, per account) sets
+    it, and it sets it afresh each time: an upload reaching further back moves the opening
+    before the new history, or voids it once the history reaches the day the account opened,
+    so the movements it brings are not counted twice."""
     by_account: defaultdict[str, list[Item]] = defaultdict(list)
     for item in items:
         by_account[item.account].append(item)
     for ibkr_id, rows in sorted(by_account.items()):
         start = min(row.period_from for row in rows)
-        if ibkr_id not in opened or opened[ibkr_id] >= start or ibkr_id not in run.accounts:
+        if ibkr_id not in opened or ibkr_id not in run.accounts:
             continue
+        if start > earliest.get(ibkr_id, start):
+            continue  # an earlier window set the opening, and still does
         account_id = run.accounts[ibkr_id]
+        current = await _current_openings(run, ibkr_id, account_id)
+        if opened[ibkr_id] >= start:
+            for instrument_id in current:
+                await _opening(run, ibkr_id, account_id, instrument_id, Decimal(0), start)
+            continue
         targets: dict[UUID, Decimal] = {}
+        if (ibkr_id, CASH_SECTION) in sections:
+            # A currency this window's Cash Report doesn't list started it at nothing.
+            for instrument_id, fiat in current.items():
+                if fiat:
+                    held = await _held(run, account_id, instrument_id, before=start)
+                    targets[instrument_id] = -held
 
-        earliest: dict[str, Item] = {}
+        first_report: dict[str, Item] = {}
         for row in rows:
             if row.record_type != cash_report or row.text("currency") == "BASE_SUMMARY":
                 continue
             code = row.text("currency")
-            if code not in earliest or row.day("fromDate") < earliest[code].day("fromDate"):
-                earliest[code] = row
-        for code, row in sorted(earliest.items()):
+            if code not in first_report or row.day("fromDate") < first_report[code].day("fromDate"):
+                first_report[code] = row
+        for code, row in sorted(first_report.items()):
             currency = await run.currency(code)
             held = await _held(run, account_id, currency.id, before=row.day("fromDate"))
             targets[currency.id] = row.number("startingCash") - held
@@ -538,6 +587,7 @@ async def openings(
                 if instrument_id is not None:
                     reported[instrument_id] += row.number("position")
         securities = set(reported) | await _securities_posted(run, account_id)
+        securities |= {i for i, fiat in current.items() if not fiat}
         for instrument_id in sorted(securities) if positions_known else ():
             held = await _held(run, account_id, instrument_id, through=last)
             targets[instrument_id] = reported.get(instrument_id, Decimal(0)) - held

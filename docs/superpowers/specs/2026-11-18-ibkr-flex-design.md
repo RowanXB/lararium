@@ -318,9 +318,9 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 
 **Opening adjustment.**
 - When the earliest window an account has starts with non-zero cash or positions, one "Opening balance adjustment" per instrument is posted against Opening balances, dated the day before the account's earliest record.
-- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's reported end positions minus the window's postings.
-- This only happens when an account is older than IBKR serves.
-- It is computed once, when that window is first fetched. No later fetch reaches further back, so it never moves. For the owner it is never needed.
+- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's last reported positions minus what the ledger holds by that day.
+- This only happens when an account is older than its earliest stored window.
+- A run holding an account's earliest stored window sets its opening afresh. An upload reaching further back than the first sync therefore moves the opening before the new history, or voids it once the history reaches the day the account opened, so the movements it brings are never counted twice. A later window leaves it as it is.
 
 ### 5.8 Time (pinned)
 

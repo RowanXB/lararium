@@ -547,11 +547,17 @@ def windowings(draw: st.DrawFn, days: int) -> list[Window]:
 def fetches(draw: st.DrawFn, days: int) -> list[list[Window]]:
     """The windows in the order they are fetched, grouped by the normalize run each is in.
 
-    The first run is the first sync: it holds the earliest window (with others after it, as
-    a first sync fetches several), for a first sync starts at the account's history (Decision
-    5). The rest arrive in any order, one or more per run (a later sync, a late upload)."""
+    The first run is the first sync: it usually holds the earliest window (with others after
+    it, as a first sync fetches several), for a first sync starts at the account's history
+    (Decision 5). The rest arrive in any order, one or more per run (a later sync, a late
+    upload). Sometimes an upload reaches back further than the first sync did, and the
+    earliest window comes in a later run."""
     windows = draw(windowings(days))
-    first_batch = draw(st.just(1) | st.integers(1, len(windows)), label="first sync windows")
+    if draw(st.booleans(), label="upload reaches further back"):
+        windows = draw(st.permutations(windows), label="order")
+        first_batch = 1
+    else:
+        first_batch = draw(st.just(1) | st.integers(1, len(windows)), label="first sync windows")
     rest = draw(st.permutations(windows[first_batch:]), label="order")
     runs = [windows[:first_batch]]
     while rest:

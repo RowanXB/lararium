@@ -31,12 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.connections import ConnectionRecord, set_warnings
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance import models
-from lararium.modules.finance.ibkr.records import POSITIONS_SECTION
+from lararium.modules.finance.ibkr.records import CASH_SECTION, POSITIONS_SECTION
 from lararium.modules.finance.money import to_plain_str, tolerance
 
 logger = logging.getLogger(__name__)
 
-CASH_SECTION = "CashReport"
 WARNING_PREFIX = "IBKR ···"
 FLAGGED_PREFIX = "IBKR flagged: "
 

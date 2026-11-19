@@ -23,7 +23,7 @@ from datetime import date
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from lararium.core import models as core_models
 from lararium.core.commands import CommandContext, command_context
@@ -297,9 +297,18 @@ class _Accounts:
         return await tables.upsert_accounts(self.command, {"account_id": account_id}, values)
 
 
-def _history_fetched(cursor: JSONValue) -> bool:
-    """Whether a window was fetched before: then this run's windows are not the earliest."""
-    return isinstance(cursor, dict) and isinstance(cursor.get("history_from"), str)
+async def _earliest_history(ctx: SyncContext) -> dict[str, date]:
+    """The first day of the earliest statement the connection holds for each account, this
+    run's included: a run holding it sets the account's opening (design 5.7). That may be a
+    later run than the first sync, when an upload reaches further back."""
+    r = core_models.RawRecord
+    account = r.content["account"].astext
+    rows = await ctx.command.session.execute(
+        select(account, func.min(r.content["period"]["from"].astext))
+        .where(r.connection_id == ctx.connection.id, r.content.has_key("period"))
+        .group_by(account)
+    )
+    return {ibkr_id: date.fromisoformat(day) for ibkr_id, day in rows if ibkr_id and day}
 
 
 async def normalize(
@@ -362,20 +371,20 @@ async def _normalize(
         await records.corporate_action(run, item)
     for item in sorted(by_type[_TRANSFER], key=records.order):
         await records.transfer(run, item)
-    if not _history_fetched(connection.cursor):
-        opened = {
-            ibkr_id: tables.parse_date(attributes["dateOpened"], f"{_SECTION}.dateOpened")
-            for ibkr_id, attributes in latest.items()
-        }
-        await records.openings(
-            run,
-            items,
-            opened,
-            cash_report=_CASH_REPORT,
-            open_position=_OPEN_POSITION,
-            is_summary=lambda item: not reports.is_lot(item),
-            sections=sections,
-        )
+    opened = {
+        ibkr_id: tables.parse_date(attributes["dateOpened"], f"{_SECTION}.dateOpened")
+        for ibkr_id, attributes in latest.items()
+    }
+    await records.openings(
+        run,
+        items,
+        opened,
+        await _earliest_history(ctx),
+        cash_report=_CASH_REPORT,
+        open_position=_OPEN_POSITION,
+        is_summary=lambda item: not reports.is_lot(item),
+        sections=sections,
+    )
     await reports.snapshots(run, positions, by_type[_CASH_REPORT])
 
     # Reconciliation (design 5.11): every account at its latest reported day, and the end
