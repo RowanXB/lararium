@@ -901,6 +901,31 @@ async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Com
     assert repeated.counts["error"] == 2
 
 
+async def test_a_row_with_an_id_never_times_another_rows_key(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row keyed by its id counted as a repeat of a row without one, so that
+    row took the time into its key, missed its committed self, and was committed again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+            "external_id": "Id",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    header = "Date,Description,Amount,Balance,Id\n"
+    evening = "10/11/2026 17:00,Top up,5.00,5.00,\n"
+    first = await stage(profile, header + evening)
+    await commit(first.id)
+    morning = "10/11/2026 09:00,Top up,5.00,5.00,X\n10/11/2026 09:01,Sent on,-5.00,0.00,\n"
+    full = await stage(profile, header + morning + evening)
+    assert _statuses(await _rows(session, full)) == ["new", "new", "duplicate"]
+
+
 async def test_statement_account_mismatch_refused(
     run: Run, stage: Stage, commit: Commit, gbp: InstrumentRecord
 ) -> None:

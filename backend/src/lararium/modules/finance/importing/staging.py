@@ -1381,7 +1381,8 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
         keyed.append((row, parsed, row.currency))
 
     def balance_key(parsed: ParsedRow, currency: str) -> tuple[str, ...] | None:
-        if parsed.balance is None:
+        """The fields of the key by balance, for a row keyed so (dedupe_key)."""
+        if parsed.external_id is not None or parsed.balance is None:
             return None
         return (*_same_row(parsed, currency), _plain(parsed.balance))
 
@@ -1391,7 +1392,8 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
     balances = Counter(balance_key(parsed, currency) for _, parsed, currency in keyed)
     occurrences: Counter[tuple[str, ...]] = Counter()
     for row, parsed, currency in keyed:
-        timed = balances[balance_key(parsed, currency)] > 1 and parsed.balance is not None
+        bal = balance_key(parsed, currency)
+        timed = bal is not None and balances[bal] > 1
         same = _same_row(parsed, currency)
         row.dedupe_key = dedupe_key(account_id, parsed, currency, occurrences[same], timed)
         occurrences[same] += 1
