@@ -1048,6 +1048,39 @@ async def test_partial_first_day_counts_the_earlier_rows_of_that_day(
     assert await _balance(session, account.id) == Decimal("984.00")
 
 
+async def test_later_row_on_a_partly_listed_last_day_is_not_before_the_opening(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
+) -> None:
+    """The first export lists 31 May only in part. The walk took the later export's 20.00,
+    which its balances put after the 50.00 both files list, as before the first file's
+    opening, and refused the two files as disagreeing about it."""
+    profile = await _csv_profile(run, columns=BALANCE_COLUMNS)
+    await commit((await stage(profile, BALANCE_HEADER + "31/05/2027,Deposit,50.00,50.00\n")).id)
+
+    later = BALANCE_HEADER + "31/05/2027,Deposit,50.00,50.00\n31/05/2027,Deposit,20.00,70.00\n"
+    staged = await stage(profile, later)
+    rows = await _rows(session, staged)
+    assert [(row.kind, row.status) for row in rows] == [
+        ("statement", "duplicate"),
+        ("statement", "new"),
+    ]
+    await commit(staged.id)
+    assert await _balance(session, account.id) == Decimal("70.00")
+
+
+async def test_earlier_row_on_a_partly_listed_first_day_still_disagrees(
+    run: Run, stage: Stage, commit: Commit
+) -> None:
+    """The guard the fix above keeps: the later export lists its 20.00 before the 50.00
+    both files list, so it puts the balance before that row at 20.00, not the first's 0."""
+    profile = await _csv_profile(run, columns=BALANCE_COLUMNS)
+    await commit((await stage(profile, BALANCE_HEADER + "31/05/2027,Deposit,50.00,50.00\n")).id)
+
+    later = BALANCE_HEADER + "31/05/2027,Deposit,20.00,20.00\n31/05/2027,Deposit,50.00,70.00\n"
+    with pytest.raises(ImportNotAllowedError, match="disagree"):
+        await stage(profile, later)
+
+
 async def test_consecutive_statements_that_disagree_are_refused(
     run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
 ) -> None:
