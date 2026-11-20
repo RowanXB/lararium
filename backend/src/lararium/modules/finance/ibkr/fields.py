@@ -75,16 +75,22 @@ _CASH_REPORT = _f(
     withholdingTax"""
 )
 
-_EQUITY_SUMMARY = _f(
-    """accountId acctAlias bondInterestAccrualsComponent bonds brokerCashComponent
+_NAV_AMOUNTS = _f(
+    """bondInterestAccrualsComponent bonds brokerCashComponent
     brokerFeesAccrualsComponent brokerInterestAccrualsComponent cash cfdUnrealizedPl
-    cgtWithholdingAccruals commodities crypto currency dividendAccruals
+    cgtWithholdingAccruals commodities crypto dividendAccruals
     eventContractInterestAccruals fdicInsuredAccountInterestAccrualsComponent
     fdicInsuredBankSweepAccountCashComponent forexCfdUnrealizedPl funds
     incentiveCouponAccruals insuredBankDepositRedemptionCashComponent interestAccruals
-    ipoSubscription liteSurchargeAccruals marginFinancingChargeAccruals model notes options
-    physDel providerCryptoCash reportDate slbCashCollateral slbDirectSecuritiesBorrowed
+    ipoSubscription liteSurchargeAccruals marginFinancingChargeAccruals notes options
+    physDel providerCryptoCash slbCashCollateral slbDirectSecuritiesBorrowed
     slbDirectSecuritiesLent softDollars stock total"""
+)
+# Each NAV amount also comes split into its long and short parts (e.g. stockLong, stockShort).
+_EQUITY_SUMMARY = (
+    _f("accountId acctAlias currency model reportDate")
+    | _NAV_AMOUNTS
+    | {f"{amount}{side}" for amount in _NAV_AMOUNTS for side in ("Long", "Short")}
 )
 
 _CONVERSION_RATE = _f("fromCurrency rate reportDate toCurrency")

@@ -177,7 +177,7 @@ Everything in the earlier plans' global constraints applies:
 
 The owner's query (created 2026-11-18, and described in the README) is:
 - an Activity Flex Query in XML, with every account selected;
-- **every section, with every field and every option ticked**: summary and lot positions; executions, orders, closed lots and the other trade levels; Cash Report with the currency breakout and base summary; and so on;
+- **every section, with every field and every option that adds data ticked** (options that drop data, "Exclude …" and "Totals Only", stay off; so does Corporate Actions' Summary, as corporate action rows are not told apart by level and a summary row would read as another action; where two options exclude each other, the finer one): summary and lot positions; executions, orders, closed lots and the other trade levels; Cash Report with the currency breakout and base summary; and so on. A Cash Report whose base summary holds cash without a single currency row fails the sync, naming Currency Breakout: without it every currency would read as 0;
 - date format `yyyyMMdd`, time format `HH:mm:ss TimeZone`, separator `;`;
 - Include Currency Rates, Audit Trail Fields, Offsetting Trade/Cancel Pairs and Breakout by Day all set to Yes.
 
@@ -360,7 +360,7 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 | `finance.ibkr_position_lots` | reported snapshot, lot | each lot's open date and time, cost basis, originating order and transaction |
 | `finance.ibkr_trade_details` | account, level of detail, row | the order, closed-lot and wash-sale levels of Trades (executions are the ledger rows) |
 | `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation |
-| `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency |
+| `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency, each also as its long and short parts |
 
 These are IBKR's own tables. **Generic broker tables (a builder-check call):** whether eToro's or Trading 212's fields are shared enough for those tables is M6's call, made against those APIs once they are verified. Designing them now would be guesswork.
 
@@ -406,6 +406,8 @@ Through the existing notifier, never with the token, URLs or values beyond what 
 - 3 failed syncs in a row, and the recovery afterwards (M3's rule). The connection's `last_error`, and so this message, says what failed: for a statement that does not match the query, the section and field (§5.2); for IBKR's errors, the code;
 - a reconciliation difference, once per new warning text (§5.11);
 - flagged sections, fields or asset categories, once per new set.
+
+A run tells everything new in one message: the new flags share one line, each new difference has its own.
 
 ### 5.14 API and UI
 

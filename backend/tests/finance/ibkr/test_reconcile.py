@@ -270,6 +270,23 @@ async def test_flagged_items_are_replaced_and_told_once_per_new_name(
     assert len(notifier.sent) == 2
 
 
+async def test_one_run_tells_its_new_flags_and_differences_in_one_message(
+    session, run, tmp_path
+) -> None:
+    connection = await _connection(run)
+    notifier = Notifier()
+    extra = {"newFieldA": "1", "newFieldB": "2"}
+    rows = [RowSpec("OpenPosition", "U0000001", **(ETFA | extra), position="10")]
+    await sync(session, connection, tmp_path, rows, notifier)
+    assert flags(await warnings_of(session, connection)) == [
+        "IBKR flagged: OpenPosition.newFieldA",
+        "IBKR flagged: OpenPosition.newFieldB",
+    ]
+    assert notifier.sent == [
+        "IBKR: IBKR flagged: OpenPosition.newFieldA, OpenPosition.newFieldB\n" + WARNING_A
+    ]
+
+
 async def test_flags_and_notifications_carry_no_other_values(session, run, tmp_path) -> None:
     # Only IBKR's vocabulary attributes (here assetCategory, when it looks like a category)
     # put a value in a flag; any other value is the owner's data.

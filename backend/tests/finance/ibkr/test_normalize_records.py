@@ -685,7 +685,13 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             endingCash="196",
         ),
         RowSpec(
-            "EquitySummaryByReportDateInBase", "U0000001", total="1000", cash="200", stock="800"
+            "EquitySummaryByReportDateInBase",
+            "U0000001",
+            total="1000",
+            cash="200",
+            stock="800",
+            stockLong="800",
+            stockShort="0",
         ),
     ]
     await _sync(session, connection, tmp_path, rows)
@@ -735,9 +741,16 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
         ("USD", DAY, DAY, Decimal("0"), Decimal("-5")),
     ]
     nav = (
-        await session.execute(text("select report_date, total, cash, stock from finance.ibkr_nav"))
+        await session.execute(
+            text(
+                "select report_date, total, cash, stock, stock_long, stock_short"
+                " from finance.ibkr_nav"
+            )
+        )
     ).one()
-    assert tuple(nav) == (DAY, Decimal("1000"), Decimal("200"), Decimal("800"))
+    assert tuple(nav) == (
+        DAY, Decimal("1000"), Decimal("200"), Decimal("800"), Decimal("800"), Decimal("0")
+    )  # fmt: skip
     # The mark price is the day's price as well.
     assert await session.scalar(
         text("select price from finance.prices where source = 'ibkr'")

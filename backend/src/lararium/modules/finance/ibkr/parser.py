@@ -7,6 +7,7 @@ hold personal data.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
 from xml.parsers import expat
 
@@ -170,7 +171,33 @@ def _statement_rows(
                 flagged.add(child.tag)
         if not len(container) and container.attrib and container.tag not in SECTIONS:
             flagged.add(container.tag)
+        if container.tag == "CashReport":
+            _check_currency_breakout(container)
     return found
+
+
+def _nonzero(value: str | None) -> bool:
+    try:
+        return Decimal((value or "0").strip() or "0") != 0
+    except InvalidOperation:
+        return False
+
+
+def _check_currency_breakout(report: ElementTree.Element) -> None:
+    """Cash is read per currency: a base summary that holds cash without a single currency row
+    means the query leaves the currency breakout out, and every currency would read as 0."""
+    levels = [row.get(_SECTION_FIELD_LEVEL) for row in report]
+    spec = SECTIONS["CashReportCurrency"]
+    if spec.level in levels:
+        return
+    if any(
+        row.get(_SECTION_FIELD_LEVEL) in spec.levels - {spec.level}
+        and (_nonzero(row.get("startingCash")) or _nonzero(row.get("endingCash")))
+        for row in report
+    ):
+        raise FlexDataError(
+            "CashReport has no currency rows: select Currency Breakout in the Flex query"
+        )
 
 
 def parse_statement(body: bytes) -> Statement:
