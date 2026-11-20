@@ -281,6 +281,7 @@ class PdfProfileConfig(BaseModel):
         "boc_uk_statement",
         "revolut_current_statement",
         "revolut_savings_statement",
+        "tembo_statement",
     ]
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])

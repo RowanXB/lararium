@@ -16,7 +16,7 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
 )
-from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lloyds, revolut
+from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lloyds, revolut, tembo
 from lararium.modules.finance.importing.pdf.layout import LayoutResult
 from lararium.modules.finance.importing.pdf.words import Word, visible_lines
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
@@ -31,6 +31,7 @@ _LAYOUTS: dict[str, _Layout] = {
     "boc_uk_statement": (boc_uk.X_TOLERANCE, boc_uk.parse),
     "revolut_current_statement": (revolut.X_TOLERANCE, revolut.parse_current),
     "revolut_savings_statement": (revolut.X_TOLERANCE, revolut.parse_savings),
+    "tembo_statement": (tembo.X_TOLERANCE, tembo.parse),
 }
 
 
@@ -50,6 +51,19 @@ def _rows_check(result: LayoutResult) -> None:
             )
 
 
+def _opening(result: LayoutResult) -> Decimal:
+    """The printed opening balance or, when the statement prints none, the one its first
+    printed balance implies: that balance then checks nothing, and every later one and the
+    closing balance still do."""
+    if result.opening_balance is not None:
+        return result.opening_balance
+    if not result.balances:
+        raise FileFormatError("the statement prints no opening balance and no row balance")
+    first = result.balances[0]
+    moved = sum((r.row.quantity for r in result.rows[: first.after]), Decimal(0))
+    return first.amount - moved
+
+
 def _summary_check(result: LayoutResult) -> None:
     paid_in = [r.paid_in for r in result.rows if r.paid_in is not None]
     paid_out = [r.paid_out for r in result.rows if r.paid_out is not None]
@@ -57,6 +71,8 @@ def _summary_check(result: LayoutResult) -> None:
         ("money in", result.money_in, paid_in),
         ("money out", result.money_out, paid_out),
     ):
+        if stated is None:
+            continue
         total = sum(rows, Decimal(0))
         if total != stated:
             raise FileFormatError(
@@ -70,16 +86,17 @@ def _summary_check(result: LayoutResult) -> None:
             raise FileFormatError(
                 f"the statement counts {count} payments {what} but has {len(rows)} rows paid {what}"
             )
-    closing = result.opening_balance + result.money_in - result.money_out
+    opening = _opening(result)
+    closing = opening + sum((r.row.quantity for r in result.rows), Decimal(0))
     if closing != result.closing_balance:
         raise FileFormatError(
-            f"the statement's opening balance {result.opening_balance} and its rows give "
+            f"the statement's opening balance {opening} and its rows give "
             f"{closing}, but its closing balance is {result.closing_balance}"
         )
 
 
 def _balances_check(result: LayoutResult) -> None:
-    running = [result.opening_balance]
+    running = [_opening(result)]
     for layout_row in result.rows:
         running.append(running[-1] + layout_row.row.quantity)
     for printed in result.balances:
@@ -117,16 +134,18 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
     check(result)
     rows: list[ParsedRow | RowError | SkippedRow] = [r.row for r in result.rows]
     rows += result.skipped
-    # A statement made on or before its period's last day (Revolut's) closes with the
-    # balance when it was made, which is no day's closing: later payments that day move it.
+    # Only a statement that lists its last day in full closes at that day's end. One made on
+    # or before its period's last day (Revolut's) closes with the balance when it was made,
+    # which is no day's closing: later payments that day move it.
     made = result.document_date
-    closed = result.period[1] if made is None or made > result.period[1] else None
+    lists_last_day = result.period_complete and (made is None or made > result.period[1])
+    closed = result.period[1] if lists_last_day else None
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
         closing_balance_date=closed,
         period=result.period,
-        period_complete=True,
+        period_complete=result.period_complete,
         opening_balance=result.opening_balance,
         money_in=result.money_in,
         money_out=result.money_out,
@@ -137,4 +156,7 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
         statement_reference=result.statement_reference,
         document_date=result.document_date,
         rates=result.rates,
+        available_balance=result.available_balance,
+        available_balance_date=result.available_balance_date,
+        account_opened_on=result.account_opened_on,
     )

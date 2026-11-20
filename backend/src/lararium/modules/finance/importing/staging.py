@@ -154,6 +154,8 @@ class StatementRecord:
     overdraft_limit_date: date | None
     available_balance: Decimal | None
     available_balance_date: date | None
+    account_reference: str | None
+    account_opened_on: date | None
     rates: list[StatementRate]
 
 
@@ -1172,11 +1174,11 @@ async def _check_statement_account(
         return
     b, s = models.ImportBatch, models.ImportStatement
     earlier = await session.execute(
-        select(s.sort_code, s.account_number, s.iban)
+        select(s.sort_code, s.account_number, s.iban, s.account_reference)
         .join(b, b.id == s.batch_id)
         .where(b.account_id == account_id, b.status == "committed")
     )
-    for sort_code, account_number, iban in earlier:
+    for sort_code, account_number, iban, reference in earlier:
         if stated.account_number and account_number and stated.account_number != account_number:
             raise ImportNotAllowedError(
                 f"this file is for account number ending {_ending(stated.account_number)}, but "
@@ -1191,6 +1193,12 @@ async def _check_statement_account(
         if stated.sort_code and sort_code and stated.sort_code != sort_code:
             raise ImportNotAllowedError(
                 "this file is for another sort code than earlier imports into this account"
+            )
+        if stated.account_reference and reference and stated.account_reference != reference:
+            raise ImportNotAllowedError(
+                f"this file is for the account ending {_ending(stated.account_reference)}, but "
+                f"earlier imports into this account were for the account ending "
+                f"{_ending(reference)}"
             )
 
 
@@ -1659,7 +1667,7 @@ async def recheck_statement_account(session: AsyncSession, batch_id: UUID) -> No
     b, s = models.ImportBatch, models.ImportStatement
     found = (
         await session.execute(
-            select(b.account_id, s.sort_code, s.account_number, s.iban)
+            select(b.account_id, s.sort_code, s.account_number, s.iban, s.account_reference)
             .join(s, s.batch_id == b.id)
             .where(b.id == batch_id)
         )
@@ -1667,7 +1675,10 @@ async def recheck_statement_account(session: AsyncSession, batch_id: UUID) -> No
     if found is None:
         return
     stated = StatementAccount(
-        sort_code=found.sort_code, account_number=found.account_number, iban=found.iban
+        sort_code=found.sort_code,
+        account_number=found.account_number,
+        iban=found.iban,
+        account_reference=found.account_reference,
     )
     if stated != StatementAccount():
         await _check_statement_account(session, found.account_id, stated)
@@ -1775,6 +1786,8 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
         "overdraft_limit_date": statement.overdraft_limit_date,
         "available_balance": statement.available_balance,
         "available_balance_date": statement.available_balance_date,
+        "account_reference": account.account_reference,
+        "account_opened_on": statement.account_opened_on,
     }
     assert set(values) == set(_STATEMENT_FIELDS)
     if all(value is None for value in values.values()) and not statement.rates:

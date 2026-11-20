@@ -554,6 +554,7 @@ for each bank use the recommended one, which carries the most information.
 | Lloyds | CSV | yes |
 | Lloyds | PDF statement, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
+| Tembo | PDF statement | yes (the only format) |
 | Revolut Current | PDF statement | yes |
 | Revolut Current | CSV | |
 | Revolut Savings | PDF statement | yes |
@@ -576,6 +577,10 @@ made on or before the last day of its period (Revolut's, when the period runs to
 download it) lists that day only in part, as an export does, and its closing balance, taken
 when it was made, is kept with no date; end a Revolut statement on a day that is over to have it
 all.
+Tembo prints no opening balance and no totals: there its Plan value must equal the rows' last
+balance, its transaction type gives each amount's direction, and its page numbers and period
+(first to last row) must leave nothing out. A Tembo statement is made on demand, so like an
+export it lists in full only the days between its first and last.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
@@ -612,7 +617,7 @@ by amount and date (below).
 - **`ofx`**: `sign`.
 - **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
 - **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement`,
-  `revolut_current_statement` or `revolut_savings_statement`.
+  `revolut_current_statement`, `revolut_savings_statement` or `tembo_statement`.
 
 **Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
 one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
@@ -644,7 +649,7 @@ pick GBP at upload, and import into a manual `transactions` account to try the f
 
 The tests use synthetic files. To check that your own statements still import correctly, for
 example after changing the import code, put each bank's files in a folder of its own, named
-starting `HSBC`, `Lloy` (Lloyds), `BOC` or `Revolut`, one account per folder, all under one
+starting `HSBC`, `Lloy` (Lloyds), `BOC`, `Revolut` or `Tembo`, one account per folder, all under one
 directory (for Revolut, say `Revolut current` and `Revolut savings`: the files tell which
 account a folder holds), and run:
 

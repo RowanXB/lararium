@@ -102,8 +102,10 @@ function StatementSummary({ statement }: { statement: ImportStatementOut }) {
   if (statement.payments_out !== null) {
     items.push(["Payments out", String(statement.payments_out)]);
   }
-  if (statement.account_number) {
-    items.push(["Account", `Account ending ${statement.account_number.slice(-4)}`]);
+  // Tembo prints an identifier that isn't a number instead.
+  const account = statement.account_number ?? statement.account_reference;
+  if (account) {
+    items.push(["Account", `Account ending ${account.slice(-4)}`]);
   }
   if (items.length === 0) return null;
   return (

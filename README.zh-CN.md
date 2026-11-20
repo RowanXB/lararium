@@ -476,6 +476,7 @@ SQL
 | Lloyds | CSV | 是 |
 | Lloyds | PDF 账单、QIF | |
 | BOC UK | PDF 账单 | 是（唯一格式） |
+| Tembo | PDF 账单 | 是（唯一格式） |
 | Revolut Current | PDF 账单 | 是 |
 | Revolut Current | CSV | |
 | Revolut Savings | PDF 账单 | 是 |
@@ -491,7 +492,7 @@ PDF 账单由为该银行编写的版式读取，它会自我校验：汇总（�
 汇总不计入的待处理（pending）和已撤销（reverted）付款作为跳过的行保留。一份 Revolut 账单只能有一个
 币种有金额，两个币种都有的会被拒绝。在账单期间最后一天当天或之前生成的账单（Revolut 账单的期间截止到
 你下载的那天时就是这样），和导出文件一样只部分列出那一天，它的期末余额是生成那一刻的余额，保存时不带日期；要完整
-列出，Revolut 账单请截止到已经过完的一天。对不上的账单会被整体拒绝，
+列出，Revolut 账单请截止到已经过完的一天。Tembo 不印期初余额和收支合计：它的 Plan value 必须等于各行最后的余额，每笔金额的方向由交易类型决定，页码和期间（第一行到最后一行）不能有遗漏。Tembo 账单是按需生成的，所以和导出文件一样，只有首末两天之间的日子算作完整列出。对不上的账单会被整体拒绝，
 并写明哪项校验失败，而不是带着错误的数字导入。同一个账户可以用不同格式导入重叠的日期，例如过去用
 PDF 账单、最近几周用 OFX 导出，先后顺序不限：落在之前导入已覆盖日期上的行，会与那次导入的行核对。
 
@@ -521,7 +522,7 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 - **`ofx`**：`sign`。
 - **`qif`**：`date_format`、`encoding`、`amount_format`（默认以 `,` 作千位分隔符）和 `sign`。
 - **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement`、`boc_uk_statement`、
-  `revolut_current_statement` 或 `revolut_savings_statement`。
+  `revolut_current_statement`、`revolut_savings_statement` 或 `tembo_statement`。
 
 **正负号。** Profile 用 **inflow**（流入：账户余额增加）和 **outflow**（流出）来表述。只有一个
 `amount` 列时，`sign` 说明它的方向：`inflow_positive`（默认）或 `outflow_positive`；有 `inflow`
@@ -545,7 +546,7 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 ### 用真实账单验证
 
 测试用的是合成文件。要确认你自己的账单仍能正确导入（例如改了导入代码之后），把每家银行的文件
-各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC` 或 `Revolut` 开头，每个文件夹一个
+各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC`、`Revolut` 或 `Tembo` 开头，每个文件夹一个
 账户，都放在同一个目录下（Revolut 可以叫 `Revolut current` 和 `Revolut savings`：文件本身会说明
 文件夹里是哪个账户），然后运行：
 

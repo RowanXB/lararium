@@ -328,6 +328,8 @@ class ImportStatementOut(_Out):
     overdraft_limit_date: date | None
     available_balance: DecimalStr | None
     available_balance_date: date | None
+    account_reference: str | None
+    account_opened_on: date | None
     rates: list[ImportStatementRateOut]
 
 

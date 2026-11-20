@@ -221,6 +221,8 @@ it("shows warnings, the statement summary and row details", async () => {
         overdraft_limit: null,
         overdraft_limit_date: null,
         statement_reference: null,
+        account_reference: null,
+        account_opened_on: null,
         rates: [],
       },
       rows: [
@@ -242,6 +244,58 @@ it("shows warnings, the statement summary and row details", async () => {
   expect(screen.getByText(/Payee: Example Coffee Ltd/)).toBeInTheDocument();
   expect(screen.getByText(/Counterparty: Example Payee/)).toBeInTheDocument();
   expect(screen.getByText(/Type: DEB/)).toBeInTheDocument();
+});
+
+it("shows the ending of an account identifier that is not a number", async () => {
+  const warning =
+    "committing this changes the opening adjustment of example-november.csv from 10.00 to 0";
+  show(
+    batch({
+      warnings: [warning],
+      statement: {
+        period_from: "2026-10-01",
+        period_to: "2026-10-31",
+        currency: "GBP",
+        opening_balance: "100.00",
+        closing_balance: "96.50",
+        closing_balance_date: "2026-10-31",
+        money_in: "0.00",
+        money_out: "3.50",
+        payments_in: null,
+        payments_out: null,
+        account_number: null,
+        sort_code: "00-00-00",
+        account_name: null,
+        account_type: null,
+        available_balance: null,
+        available_balance_date: null,
+        bic: null,
+        branch: null,
+        addressee: null,
+        address: null,
+        clearing_account_number: null,
+        customer_number: null,
+        document_date: null,
+        iban: null,
+        overdraft_limit: null,
+        overdraft_limit_date: null,
+        statement_reference: null,
+        account_reference: "ACC-EX01AB-CD1234",
+        account_opened_on: null,
+        rates: [],
+      },
+      rows: [
+        row(0, {
+          payee: "Example Coffee Ltd",
+          counterparty_name: "Example Payee",
+          payment_reference: "REF 42",
+          bank_type: "DEB",
+        }),
+      ],
+    }),
+  );
+
+  expect(await screen.findByText("Account ending 1234")).toBeInTheDocument();
 });
 
 const adjustment = row(-1, {

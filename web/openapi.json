@@ -2113,6 +2113,29 @@
             ],
             "title": "Account Number"
           },
+          "account_opened_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Opened On"
+          },
+          "account_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Reference"
+          },
           "account_type": {
             "anyOf": [
               {
@@ -2436,6 +2459,8 @@
           "overdraft_limit_date",
           "available_balance",
           "available_balance_date",
+          "account_reference",
+          "account_opened_on",
           "rates"
         ],
         "title": "ImportStatementOut",
@@ -2783,7 +2808,8 @@
               "lloyds_statement",
               "boc_uk_statement",
               "revolut_current_statement",
-              "revolut_savings_statement"
+              "revolut_savings_statement",
+              "tembo_statement"
             ],
             "title": "Layout",
             "type": "string"

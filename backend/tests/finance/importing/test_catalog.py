@@ -7,6 +7,7 @@ from lararium.modules.finance.importing.profiles import (
     CsvProfileConfig,
     ProfileConfig,
     ProfileConfigModel,
+    is_bank_transfer,
 )
 
 _CONFIG: TypeAdapter[ProfileConfigModel] = TypeAdapter(ProfileConfig)
@@ -22,7 +23,14 @@ def test_every_config_validates() -> None:
 def test_one_recommended_format_per_institution() -> None:
     recommended = Counter(entry.institution for entry in CATALOG if entry.recommended)
     institutions = {entry.institution for entry in CATALOG}
-    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "Revolut Current", "Revolut Savings"}
+    assert institutions == {
+        "HSBC UK",
+        "Lloyds",
+        "BOC UK",
+        "Revolut Current",
+        "Revolut Savings",
+        "Tembo",
+    }
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
 
@@ -37,6 +45,7 @@ def test_decision_14_formats() -> None:
         "BOC UK": ["pdf"],
         "Revolut Current": ["csv", "pdf"],
         "Revolut Savings": ["csv", "pdf"],
+        "Tembo": ["pdf"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
     assert recommended == {
@@ -45,6 +54,7 @@ def test_decision_14_formats() -> None:
         ("BOC UK", "pdf"),
         ("Revolut Current", "pdf"),
         ("Revolut Savings", "pdf"),
+        ("Tembo", "pdf"),
     }
 
 
@@ -109,3 +119,13 @@ def test_revolut_savings_csv() -> None:
         "Description",
     )
     assert config.date_format == "%b %d, %Y"
+
+
+def test_tembo_interest_is_no_bank_transfer() -> None:
+    """Review: Tembo pays interest itself; only deposits and withdrawals move money between
+    bank accounts."""
+    [entry] = [e for e in CATALOG if e.institution == "Tembo"]
+    for kind in ("Interest", "Interest Adjustment"):
+        assert not is_bank_transfer(entry.config.card_types, kind, None)
+    for kind in ("Deposit", "Withdrawal", "Transfer In", "Transfer Out"):
+        assert is_bank_transfer(entry.config.card_types, kind, None)

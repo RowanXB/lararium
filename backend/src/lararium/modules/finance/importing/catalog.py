@@ -167,4 +167,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
             amount_format=_REVOLUT_AMOUNTS,
         ),
     ),
+    CatalogEntry(
+        "Tembo",
+        "PDF statement",
+        # Interest is paid by Tembo, never from another bank account.
+        PdfProfileConfig(
+            format="pdf", layout="tembo_statement", card_types=["Interest", "Interest Adjustment"]
+        ),
+        recommended=True,
+    ),
 )

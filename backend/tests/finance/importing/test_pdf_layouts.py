@@ -32,6 +32,8 @@ from .synthetic_pdfs import (
     RevolutRow,
     RevolutSavingsRow,
     RevolutSavingsStatement,
+    TemboRow,
+    TemboStatement,
     boc_pdf,
     encrypted_pdf,
     hsbc_pdf,
@@ -39,6 +41,7 @@ from .synthetic_pdfs import (
     revolut_current_pdf,
     revolut_savings_pdf,
     scanned_pdf,
+    tembo_pdf,
 )
 
 LONDON = ZoneInfo("Europe/London")
@@ -48,6 +51,13 @@ type Layout = Literal[
     "boc_uk_statement",
     "revolut_current_statement",
     "revolut_savings_statement",
+    "tembo_statement",
+]
+LAYOUTS: list[Layout] = [
+    "hsbc_uk_statement",
+    "lloyds_statement",
+    "boc_uk_statement",
+    "tembo_statement",
 ]
 
 
@@ -71,6 +81,10 @@ def _lloyds(statement: LloydsStatement) -> ParsedStatement:
 
 def _boc(statement: BocStatement) -> ParsedStatement:
     return _parse(boc_pdf(statement), "boc_uk_statement")
+
+
+def _tembo(statement: TemboStatement) -> ParsedStatement:
+    return _parse(tembo_pdf(statement), "tembo_statement")
 
 
 THREE_ROWS = [
@@ -574,6 +588,198 @@ def test_boc_several_currencies_refused() -> None:
         _parse(content, "boc_uk_statement")
 
 
+# Tembo ---------------------------------------------------------------------------------
+
+TEMBO_ROWS = [
+    TemboRow("03/05/2027", "Deposit", "£50.00"),
+    TemboRow("10/05/2027", "Withdrawal", "£5.50"),
+    TemboRow("31/05/2027", "Interest", "£0.12"),
+    TemboRow("31/05/2027", "Interest Adjustment", "-£0.02"),
+]
+
+
+def test_tembo_rows_and_summary() -> None:
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS]))
+    rows = _rows(statement)
+    assert [(r.booking_date, r.bank_type, r.quantity, r.balance) for r in rows] == [
+        (date(2027, 5, 3), "Deposit", Decimal("50.00"), Decimal("50.00")),
+        (date(2027, 5, 10), "Withdrawal", Decimal("-5.50"), Decimal("44.50")),
+        (date(2027, 5, 31), "Interest", Decimal("0.12"), Decimal("44.62")),
+        (date(2027, 5, 31), "Interest Adjustment", Decimal("-0.02"), Decimal("44.60")),
+    ]
+    assert [r.description for r in rows] == [r.bank_type for r in rows]
+    assert {r.currency for r in rows} == {"GBP"}
+    assert rows[1].raw == {
+        "Date": "10/05/2027",
+        "Transaction type": "Withdrawal",
+        "Amount": "£5.50",
+        "Balance": "£44.50",
+    }
+    assert statement.period == (date(2027, 5, 3), date(2027, 5, 31))
+    # Made on demand, it may stop partway through its last day.
+    assert not statement.period_complete
+    assert statement.account == StatementAccount(
+        account_reference="ACC-EX01AB-CD23EF",
+        account_type="Regular Saver",
+        addressee="Alex Example",
+        address="FLAT 1 Example House 2 Example Road, Exampletown, EX1 2MP",
+    )
+    assert statement.currency == "GBP"
+    # The Plan value: undated, as the last day may not be listed in full.
+    assert (statement.closing_balance, statement.closing_balance_date) == (Decimal("44.60"), None)
+    # Tembo prints no opening balance and no totals: nothing is stored for them.
+    assert (statement.opening_balance, statement.money_in, statement.money_out) == (
+        None,
+        None,
+        None,
+    )
+    assert (statement.payments_in, statement.payments_out) == (None, None)
+    assert (statement.available_balance, statement.available_balance_date) == (
+        Decimal("44.60"),
+        date(2027, 6, 1),
+    )
+    assert statement.document_date == date(2027, 6, 1)
+    assert statement.account_opened_on == date(2027, 2, 3)
+
+
+def test_tembo_available_to_withdraw_is_its_own_field() -> None:
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS], available="£40.00"))
+    assert statement.available_balance == Decimal("40.00")
+    assert statement.closing_balance == Decimal("44.60")
+
+
+def test_tembo_multipage_and_terms_page() -> None:
+    more = [
+        TemboRow("12/05/2027", "Transfer In", "£1,000.00"),
+        TemboRow("20/05/2027", "Transfer Out", "£200.00"),
+    ]
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS[:2], more, TEMBO_ROWS[2:]]))
+    rows = _rows(statement)
+    assert [r.quantity for r in rows] == [
+        Decimal("50.00"),
+        Decimal("-5.50"),
+        Decimal("1000.00"),
+        Decimal("-200.00"),
+        Decimal("0.12"),
+        Decimal("-0.02"),
+    ]
+    assert [r.position for r in rows] == list(range(6))
+    assert statement.closing_balance == Decimal("844.60")
+
+
+def test_tembo_newest_first_is_read_oldest_first() -> None:
+    oldest_first = _rows(_tembo(TemboStatement(pages=[TEMBO_ROWS[:2], TEMBO_ROWS[2:3]])))
+    newest_first = _rows(
+        _tembo(TemboStatement(pages=[TEMBO_ROWS[:2], TEMBO_ROWS[2:3]], newest_first=True))
+    )
+    assert newest_first == oldest_first
+
+
+def test_tembo_rows_out_of_date_order_refused() -> None:
+    rows = [TEMBO_ROWS[1], TEMBO_ROWS[0], TEMBO_ROWS[2]]
+    with pytest.raises(FileFormatError, match="aren't in date order"):
+        _tembo(TemboStatement(pages=[rows]))
+
+
+def test_tembo_plan_value_must_equal_the_rows() -> None:
+    with pytest.raises(
+        FileFormatError,
+        match=re.escape("its rows give 44.60, but its closing balance is 45.00"),
+    ):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], plan_value="£45.00"))
+
+
+def test_tembo_unknown_transaction_type_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Bonus", "£5.00")]
+    with pytest.raises(FileFormatError, match="transaction type the statement terms don't list"):
+        _tembo(TemboStatement(pages=[rows]))
+
+
+def test_tembo_money_in_printed_negative_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "-£5.00", balance="£5.00")]
+    with pytest.raises(FileFormatError, match="is a Deposit printed as money out"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+def test_tembo_withdrawal_printed_negative_is_money_out() -> None:
+    rows = [TEMBO_ROWS[0], TemboRow("10/05/2027", "Withdrawal", "-£5.50")]
+    assert _rows(_tembo(TemboStatement(pages=[rows])))[1].quantity == Decimal("-5.50")
+
+
+def test_tembo_amount_without_pounds_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "5.00", balance="£5.00")]
+    with pytest.raises(FileFormatError, match="isn't in pounds"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+def test_tembo_row_without_an_amount_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "", balance="£0.00")]
+    with pytest.raises(FileFormatError, match="has 0 amounts, not one"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£0.00"))
+
+
+def test_tembo_row_with_two_amounts_refused() -> None:
+    extra = [(0, 381.0, 391.7, "£1.00")]
+    with pytest.raises(FileFormatError, match="has 2 amounts, not one"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_no_printed_balance_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "£5.00", balance="")]
+    with pytest.raises(FileFormatError, match="no opening balance and no row balance"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("01/05/2027", "31/05/2027"), ("03/05/2027", "01/06/2027"), ("04/05/2027", "31/05/2027")],
+)
+def test_tembo_period_must_run_from_the_first_row_to_the_last(start: str, end: str) -> None:
+    """Review: with the first row unread, the opening taken from the next printed balance
+    hid it, and the whole period was taken as listed."""
+    with pytest.raises(FileFormatError, match="doesn't run from its first row's date"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], start=start, end=end))
+
+
+def test_tembo_missing_page_refused() -> None:
+    """Review: a page with +£20 and -£20 left out of the file kept every check passing."""
+    pair = [
+        TemboRow("12/05/2027", "Transfer In", "£20.00"),
+        TemboRow("13/05/2027", "Transfer Out", "£20.00"),
+    ]
+    pages = [TEMBO_ROWS[:2], pair, TEMBO_ROWS[2:]]
+    assert len(_rows(_tembo(TemboStatement(pages=pages)))) == 6
+    with pytest.raises(FileFormatError, match="may be missing a page"):
+        _tembo(TemboStatement(pages=pages, omit_page=2))
+    # Its table unreadable, its page number not: no row of it can be read.
+    with pytest.raises(FileFormatError, match="page 2 has no transaction table"):
+        _tembo(TemboStatement(pages=pages, unreadable_page=2))
+    # Review: its header readable, its rows not.
+    with pytest.raises(FileFormatError, match="page 2's transaction table has no row"):
+        _tembo(TemboStatement(pages=pages, unreadable_rows_page=2))
+    # The last page, the terms, left out: the count no longer matches.
+    with pytest.raises(FileFormatError, match="page 1 of 3 doesn't print that page number"):
+        _tembo(TemboStatement(pages=pages, omit_page=4))
+
+
+def test_tembo_stray_word_in_the_table_refused() -> None:
+    extra = [(0, 560.0, 425.4, "12.00")]
+    with pytest.raises(FileFormatError, match="words outside any column on page 1"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_dated_line_on_a_page_without_the_table_refused() -> None:
+    # On the terms page: a row there would be read by nothing.
+    extra = [(1, 62.8, 300.0, "04/05/2027"), (1, 191.1, 300.0, "Deposit")]
+    with pytest.raises(FileFormatError, match="words outside any column on page 2"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_wrong_bank_refused() -> None:
+    with pytest.raises(FileFormatError, match="not a Tembo statement"):
+        _parse(lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS)), "tembo_statement")
+
+
 # Every layout --------------------------------------------------------------------------
 
 
@@ -682,7 +888,7 @@ def test_layout_refuses_when_summary_differs() -> None:
         _parse(content, "hsbc_uk_statement")
 
 
-@pytest.mark.parametrize("layout", ["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"])
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
     if layout == "hsbc_uk_statement":
         rows = list(THREE_ROWS)
@@ -696,6 +902,9 @@ def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
             LloydsRow("21 Jun 27", ("A EXAMPLE",), "FPO", money_out="7.25", balance="76.67"),
         ]
         content = lloyds_pdf(LloydsStatement(rows=rows))
+    elif layout == "tembo_statement":
+        wrong = TemboRow("20/05/2027", "Withdrawal", "£10.00", balance="£45.00")
+        content = tembo_pdf(TemboStatement(pages=[[TEMBO_ROWS[0], wrong]]))
     else:
         wrong = BocRow(
             "24/05/27", "24/05/27", ("///Transfer A EXAMPLE",), paid_in="1.00", balance="2.00"
@@ -706,7 +915,7 @@ def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
         _parse(content, layout)
 
 
-@pytest.mark.parametrize("layout", ["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"])
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_layout_refuses_a_row_with_two_balances(layout: Layout) -> None:
     # A second word in the balance column of one row must not replace the first unchecked.
     if layout == "hsbc_uk_statement":
@@ -714,6 +923,9 @@ def test_layout_refuses_a_row_with_two_balances(layout: Layout) -> None:
         content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], extra=extra))
     elif layout == "lloyds_statement":
         content = lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS, extra=[(0, 520.0, 352.0, "12.00")]))
+    elif layout == "tembo_statement":
+        extra = [(0, 500.0, 391.7, "£1.00")]
+        content = tembo_pdf(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
     else:
         extra = [(1, 540.0, 193.5, "12.00")]
         content = boc_pdf(BocStatement(pages=[[LOCAL_OUT]], extra=extra))

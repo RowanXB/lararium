@@ -43,9 +43,11 @@ class PrintedBalance:
 class LayoutResult:
     rows: list[LayoutRow]
     period: tuple[date, date]
-    opening_balance: Decimal
-    money_in: Decimal
-    money_out: Decimal
+    # None when the statement doesn't print it (Tembo prints neither an opening balance
+    # nor totals): the checks then take the opening from the first printed balance.
+    opening_balance: Decimal | None
+    money_in: Decimal | None
+    money_out: Decimal | None
     closing_balance: Decimal
     balances: list[PrintedBalance]
     # Words inside the transaction table that belong to no row field.
@@ -57,6 +59,13 @@ class LayoutResult:
     statement_reference: str | None = None
     document_date: date | None = None
     rates: list[StatementRate] = field(default_factory=list[StatementRate])
+    available_balance: Decimal | None = None
+    available_balance_date: date | None = None
+    account_opened_on: date | None = None
+    # Whether the statement lists every transaction of its whole period (Decision 16). False:
+    # like an export, only the days between its first and last (Tembo's is made on demand
+    # and may stop partway through its last day).
+    period_complete: bool = True
     # Rows the statement lists apart from its transactions and leaves out of its summary
     # (Revolut's pending payments), numbered after the rows.
     skipped: list[SkippedRow] = field(default_factory=list[SkippedRow])
