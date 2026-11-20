@@ -95,22 +95,27 @@ async def test_real_files_end_to_end(
 
 
 def closings(statements: list[ParsedStatement]) -> tuple[list[tuple[date, Decimal]], int]:
-    """(day, closing) to check each stated closing balance on, and how many have no day: a
-    closing the statement doesn't date (Tembo's Plan value, as its last day may not be
-    listed in full) is checked on its last row's day, the balance its rows reach."""
+    """(day, balance) pairs: the ledger's balance before `day` must be `balance`; and how
+    many closings have no day to check on. A dated closing holds at its day's end. One the
+    statement doesn't date (Tembo's Plan value) was taken partway through its last row's
+    day, which a later file may add to: less its own rows that day, it is the balance
+    that day starts with."""
     found: list[tuple[date, Decimal]] = []
     undated = 0
     for statement in statements:
-        if statement.closing_balance is None:
+        closing = statement.closing_balance
+        if closing is None:
             continue
-        day = statement.closing_balance_date or max(
-            (row.booking_date for row in statement.rows if isinstance(row, ParsedRow)),
-            default=None,
-        )
-        if day is None:
+        if statement.closing_balance_date is not None:
+            found.append((statement.closing_balance_date + timedelta(days=1), closing))
+            continue
+        rows = [row for row in statement.rows if isinstance(row, ParsedRow)]
+        if not rows:
             undated += 1
-        else:
-            found.append((day, statement.closing_balance))
+            continue
+        last = max(row.booking_date for row in rows)
+        that_day = sum((row.quantity for row in rows if row.booking_date == last), Decimal(0))
+        found.append((last, closing - that_day))
     return found, undated
 
 
@@ -208,9 +213,8 @@ async def _bank(
     if undated:
         failures.append(f"{tag}: {undated} closings have no day to check them on")
     held = 0
-    for day, closing in checked:
-        balance = await ledger_balance_before(session, account.id, gbp.id, day + timedelta(days=1))
-        held += balance == closing
+    for before, closing in checked:
+        held += await ledger_balance_before(session, account.id, gbp.id, before) == closing
     if held != len(checked):
         failures.append(
             f"{tag}: {len(checked) - held} of {len(checked)} closings don't hold on their date"

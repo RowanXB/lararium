@@ -603,6 +603,8 @@ class TemboStatement:
     end: str | None = None  # None: the last row's date
     account_no: str = "ACC-EX01AB-CD23EF"
     omit_page: int | None = None  # a page (from 1) left out of the file, its number kept
+    # A page (from 1) whose table has no text layer (an image, say); its number still has.
+    unreadable_page: int | None = None
     plan_value: str | None = None  # None: the rows' last balance
     available: str | None = None  # None: the plan value
     newest_first: bool = False
@@ -685,6 +687,10 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
             continue
         if number > 1:
             pdf.next_page()
+        if number == statement.unreadable_page:
+            position += len(page_rows)
+            _tembo_footer(pdf, number, total)
+            continue
         top = 347.3 if number == 1 else 62.0
         _tembo(pdf, 62.8, top, "Date")
         _tembo(pdf, 191.1, top, "Transaction type")

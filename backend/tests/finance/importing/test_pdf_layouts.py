@@ -739,6 +739,9 @@ def test_tembo_missing_page_refused() -> None:
     assert len(_rows(_tembo(TemboStatement(pages=pages)))) == 6
     with pytest.raises(FileFormatError, match="may be missing a page"):
         _tembo(TemboStatement(pages=pages, omit_page=2))
+    # Its table unreadable, its page number not: no row of it can be read.
+    with pytest.raises(FileFormatError, match="page 2 has no transaction table"):
+        _tembo(TemboStatement(pages=pages, unreadable_page=2))
     # The last page, the terms, left out: the count no longer matches.
     with pytest.raises(FileFormatError, match="page 1 of 3 doesn't print that page number"):
         _tembo(TemboStatement(pages=pages, omit_page=4))

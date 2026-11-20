@@ -322,9 +322,17 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
         raise FileFormatError(f"the statement's account: {error}") from None
 
     table = _Table()
+    terms = False
     for number in sorted(by_page):
         page_lines = by_page[number]
         start = next((n for n, line in enumerate(page_lines) if _columns(line) is not None), None)
+        terms = terms or any(text(line) == _TERMS for line in page_lines)
+        if start is None and not terms:
+            # Before the terms every page holds the table: one whose table can't be read
+            # (an image, say) would leave its rows out unseen.
+            raise FileFormatError(
+                f"page {number + 1} has no transaction table and is not the statement terms"
+            )
         if start is None:
             # A page without the table's header holds no rows: a dated line there would
             # be one, read by nothing.
