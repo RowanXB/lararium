@@ -1,7 +1,7 @@
 # M5 design: IBKR Flex
 
 - Date: 2026-11-18
-- Status: approved for planning (see §9); updated after the audit of the owner's real statements, 2026-11-18
+- Status: implemented on branch `feat/claude-ibkr-flex` (approved for planning, see §9; updated after the audit of the owner's real statements, 2026-11-18)
 - Builds on: `main` with M0–M4 merged, plus the M2 import PR (#12), which adds `core.documents`; migrations up to `0018`
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§6.3, §6.5, §6.6, §7.1, §7.3, §8, §9, §13 M5, §14)
 - Related: the M4 transfer-matching design (`docs/superpowers/specs/2026-11-15-transfer-matching-design.md`), whose engine pairs IBKR deposits and withdrawals; the M3 Monzo plan (`docs/superpowers/plans/2026-11-12-connectors-monzo.md`), whose connector this one follows.
@@ -221,17 +221,17 @@ What that query returns (audit, 2026-11-18):
 
 - **Documents.** Each statement body is stored as a document (`source = "finance.ibkr"`, `application/xml`). The worker therefore mounts the `documents` volume, which today only the api mounts.
 - **Raw records.** Each row of each section becomes a raw record.
-  - Record type: `ibkr.account`, `ibkr.open_position`, `ibkr.prior_period_position`, `ibkr.cash_report`, `ibkr.trade`, `ibkr.cash_transaction`, `ibkr.conversion_rate`, `ibkr.corporate_action`, `ibkr.transfer`, or `ibkr.nav`.
+  - Record type: `ibkr.account_information`, `ibkr.open_position`, `ibkr.position_lot`, `ibkr.prior_period_position`, `ibkr.cash_report`, `ibkr.trade`, `ibkr.trade_detail` (every level of Trades but executions), `ibkr.cash_transaction`, `ibkr.conversion_rate`, `ibkr.corporate_action`, `ibkr.transfer`, or `ibkr.equity_summary` (NAV).
   - Content: the account id, the statement's period for period-level rows, and the row's attributes exactly as strings.
   - Request: the query id, the window, and the document's sha256.
   - Raw records already dedupe by content hash, so a row that overlapping windows repeat unchanged is stored once.
-- **Keys.** Ledger rows are keyed by `(connection, external_id)`:
-  - `trade:<transactionID>`;
-  - `cash:<transactionID>`;
-  - `ca:<transactionID>`;
-  - `transfer:<transactionID>`;
-  - `opening:<account>:<instrument key>`.
-  - `transactionID` is a required field. The same id with different content in one fetch fails the sync, following the convention that a duplicate id blocks the batch.
+- **Keys.** Ledger rows are keyed by `(connection, external_id)`, where `<accountId>` is the IBKR account id:
+  - `trade:<accountId>:<transactionID>`;
+  - `cash:<accountId>:<transactionID>`;
+  - `ca:<accountId>:<transactionID>`;
+  - `transfer:<accountId>:<transactionID>`;
+  - `opening:<accountId>:<instrument id>`.
+  - `transactionID` is a required field. The same id with different content in one fetch fails the sync, following the convention that a duplicate id blocks the batch. The error names the section, the `transactionID` and the account's last four digits, never the full account id.
 
 ### 5.5 Accounts
 
@@ -244,7 +244,7 @@ What that query returns (audit, 2026-11-18):
 
 **The closed ISA is uploaded once.** The Flex Web Service cannot select a closed account (audit, 2026-11-18).
 - The owner sets Client Portal's account selector to include closed accounts, runs the same query by hand over the ISA's life, and uploads the XML file to the connection. The file includes all accounts, about 10 MB for a year.
-- The upload is stored as a document and goes through the same parser and normalizer as a fetched statement, so rows already fetched for the open accounts are written once.
+- The upload is stored as a document and goes through the same parser and normalizer as a fetched statement, so rows already fetched for the open accounts are written once. A run applies the copies it is given, so the file should be generated after the latest sync: an older copy of a row IBKR has since corrected would undo the correction.
 - No second login or token is used.
 
 **A closed account** (`dateClosed` present) is closed on that date. Valuation already leaves a closed account out from its closing date. Its history stays, so the ISA's records explain the other side of its movements.
@@ -294,12 +294,12 @@ Every row below is one connector transaction. Its postings on the IBKR account a
 - `proceeds` in the quote currency;
 - the commission, as above.
 
-**Rounding.** IBKR's `proceeds` is rounded to cents, so a trade's residual (quantity × `tradePrice` + `proceeds`) is normally at most half a cent, within the ledger's tolerance. If a rounded `tradePrice` (an FX rate, say) leaves more, the residual is posted as one more Unassigned posting in that currency (memo "rounding"), so the sync never fails on it. The cash posting is always IBKR's `proceeds`, and `tradePrice` stays the unit cost or price. (Builder-check call.)
+**Rounding.** IBKR's `proceeds` is rounded to cents, so a trade's residual (quantity × `tradePrice` + `proceeds`) is normally at most half a cent, within the ledger's tolerance. If a rounded `tradePrice` (an FX rate, say) leaves more, the residual is posted as one more Unassigned posting in that currency (memo "rounding"), but only up to |quantity| × half a unit of `tradePrice`'s last decimal place, plus the currency tolerance. Beyond that the sync fails, naming the record and not the amounts, because the difference is not rounding. The cash posting is always IBKR's `proceeds`, and `tradePrice` stays the unit cost or price. (Builder-check call.)
 
 **Cash transaction:**
 - `amount` in its currency, and the contra.
 - For type "Deposits/Withdrawals", the contra comes from `transfer_contra`, with `bank_transfer = true` and no counterparty identifier. This is the deposit that pairs with Monzo (§5.12).
-- **A movement between two IBKR accounts is posted once, and never as a bank transfer.** The audit (2026-11-18) shows internal movements only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions. So every "Deposits/Withdrawals" row is a movement with an outside bank. If a later statement ever lists an internal movement in Cash Transactions too, the normalizer posts the Transfers row and flags the other.
+- **Every "Deposits/Withdrawals" row is posted; internal movements come from Transfers.** The audit (2026-11-18) shows movements between two IBKR accounts only in the Transfers section (`type="INTERNAL"`, naming the other account in `account`), never in Cash Transactions, so every "Deposits/Withdrawals" row is a movement with an outside bank, and none is posted as a bank transfer between IBKR accounts. A movement IBKR ever listed in both sections would be posted twice, and the reconciliation (§5.11) would show the difference.
 - Every other type (dividends, withholding tax, broker interest, other fees, payment in lieu, commission adjustments) posts against Unassigned.
 
 **Corporate action:**
@@ -318,9 +318,9 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 
 **Opening adjustment.**
 - When the earliest window an account has starts with non-zero cash or positions, one "Opening balance adjustment" per instrument is posted against Opening balances, dated the day before the account's earliest record.
-- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's reported end positions minus the window's postings.
-- This only happens when an account is older than IBKR serves.
-- It is computed once, when that window is first fetched. No later fetch reaches further back, so it never moves. For the owner it is never needed.
+- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's earliest statement day (none reported that day means none held), minus what the ledger holds by then, so a later difference no postings explain stays a reconciliation difference. That day is known by the rows its statement lists: with every section ticked (§5.2) each daily statement has a NAV row (all 1,315 audited statements do), so an empty first day is not lost.
+- This only happens when an account is older than its earliest stored window.
+- A run holding an account's earliest stored window sets its opening afresh. A later window leaves it as it is. So a closed account's first upload sets its opening, and a statement reaching further back moves the opening before the new history, or voids it once the history reaches the day the account opened, so the movements it brings are never counted twice. If days between the two are still missing, the reconciliation at the account's latest day reports the difference until they are uploaded.
 
 ### 5.8 Time (pinned)
 
@@ -372,14 +372,15 @@ These are IBKR's own tables. **Generic broker tables (a builder-check call):** w
 
 ### 5.11 Reconciliation
 
-**The check.** After every sync, for each account, at the end date of each fetched window:
-- each instrument's reported quantity (Open Positions for securities; the Cash Report's `endingCash` for each currency, not the `BASE_SUMMARY` row)
-- must equal the sum of the account's non-void postings in that instrument with `booking_date` at or before that date;
-- within the instrument's tolerance.
+**The check.** Each instrument's reported quantity (Open Positions for securities; the Cash Report's `endingCash` for each currency, not the `BASE_SUMMARY` row) must equal the sum of the account's non-void postings in that instrument with `booking_date` at or before the report's day, within the instrument's tolerance. An instrument the ledger holds and the report omits counts as reported 0.
+
+**Where it runs.** After every sync and every upload, for every account of the connection:
+- **At the account's latest stored statement day**, separately for currencies (the latest Cash Report `toDate`) and securities (the latest Open Positions day that reported a position). A kind with no such day is not checked there. The connection's reconciliation warnings (those beginning `IBKR ···`) are replaced in full by what this finds, so they describe the stored reports whatever order statements arrive in: an older statement uploaded late neither clears nor adds a warning about the current day, except by what it posts.
+- **At the end of each window this run fetched**, for the kinds whose section the statement has (an empty Open Positions section says IBKR holds nothing). A difference found only there (an earlier day, or a day whose Open Positions were empty) is notified, never kept as a warning.
 
 **A difference:**
-- becomes a connection warning naming the account's last four digits, the instrument and the date;
-- is sent once per new value, as Monzo's reconciliation is;
+- names the account's last four digits, the instrument and the date;
+- is sent once per new warning text, as Monzo's reconciliation is;
 - is never corrected automatically.
 
 **NAV.** It is not checked at runtime in M5 (M9). The tests and the owner's check (§10) compare Lararium's valuation of the account on a report date with IBKR's NAV total minus interest and dividend accruals.
@@ -401,17 +402,17 @@ These are IBKR's own tables. **Generic broker tables (a builder-check call):** w
 
 Through the existing notifier, never with the token, URLs or values beyond what the message needs:
 - token rejected (`needs_reauth`);
-- token expiring within 14 days;
-- 3 failed syncs in a row, and the recovery afterwards (M3's rule);
-- a reconciliation difference, once per new value;
+- token expiring within 14 days, naming the last day it works;
+- 3 failed syncs in a row, and the recovery afterwards (M3's rule). The connection's `last_error`, and so this message, says what failed: for a statement that does not match the query, the section and field (§5.2); for IBKR's errors, the code;
+- a reconciliation difference, once per new warning text (§5.11);
 - flagged sections, fields or asset categories, once per new set.
 
 ### 5.14 API and UI
 
 **API**, under `/api/v1`, owner-only like the rest:
-- `POST /connections/ibkr` (`create_ibkr_connection`): display name, token, token expiry date, query id → 201 `ConnectionOut`; queues a sync;
+- `POST /connections/ibkr` (`create_ibkr_connection`): display name, token, token expiry date, query id → 201 `ConnectionOut`; queues a sync; an expiry date before today (London) is refused with 422, as by the update;
 - `PUT /connections/{id}/ibkr` (`update_ibkr_connection`): token, expiry date, query id → `ConnectionOut`; `needs_reauth` → `healthy`, and queues a sync;
-- `POST /connections/{id}/ibkr-statement` (`upload_ibkr_statement`): a Flex XML file of at most 64 MiB → 202; ingested and normalized like a fetched statement;
+- `POST /connections/{id}/ibkr-statement` (`upload_ibkr_statement`): a Flex XML file of at most 64 MiB → 202; ingested and normalized like a fetched statement; 409 until the connection's first sync has finished, which writes the same rows;
 - the existing list, sync-now and disable routes work for IBKR as they are.
 
 Audit arguments never include the token.
@@ -443,6 +444,7 @@ Holdings and net worth need no new page: IBKR holdings appear in the existing vi
 | ISA ↔ GIA, cash or positions | Matched through `ibkr_account` identifiers (§5.12). |
 | Statement not ready yet (1003–1008, 1019) | Retried within the request, then at the next tick; counted as a failure only when it persists. |
 | Too many requests (1018) | An ordinary failure, retried at the next tick. |
+| A response with no statements, or not a `FlexQueryResponse` | The sync fails ("the Flex query returned no statements: select every account") and the cursor stays (§5.3). |
 | Token expired or replaced | `needs_reauth` and a notification; the owner updates it (§5.1). |
 | An asset category M5 does not handle | Flagged, not posted; reconciliation shows its effect. |
 | A field outside the list / a required field missing | Flagged by name / the sync fails naming it (§5.2). |

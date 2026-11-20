@@ -9,7 +9,14 @@
 	# response secrets and request input in one compressed body (the BREACH pattern).
 	# The api reads a whole request body before it can refuse one (an upload is spooled to
 	# disk before the cross-site check runs), so the body is capped here: a little above
-	# the largest import file (5 MiB) and its multipart framing.
+	# the largest import file (5 MiB) and its multipart framing. An IBKR statement upload
+	# (a year of Client Portal export is about 10 MB) gets its route's own 64 MiB and framing.
+	handle /api/v1/connections/*/ibkr-statement {
+		request_body {
+			max_size 65MiB
+		}
+		reverse_proxy api:8000
+	}
 	handle /api/* {
 		request_body {
 			max_size 6MB
@@ -19,7 +26,7 @@
 	# Caddy's own 413 has no body; answer in the api's error shape so the page can say why.
 	handle_errors 413 {
 		header Content-Type application/json
-		respond `{"detail":{"error":"file_too_large","message":"the upload is larger than 6 MB"}}` 413
+		respond `{"detail":{"error":"file_too_large","message":"the upload is too large"}}` 413
 	}
 	# Vite names each built file by its content hash, so a changed file gets a new name and
 	# one that exists can be cached for good. No fallback here: a missing asset is a 404,

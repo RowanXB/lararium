@@ -8,8 +8,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Uuid, any_, bindparam, select
+from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models
@@ -119,6 +119,8 @@ async def get_raw_records(session: AsyncSession, ids: Sequence[UUID]) -> list[Ra
     for several identical responses comes back once per id."""
     if not ids:
         return []
-    rows = await session.execute(select(*_columns()).where(models.RawRecord.id.in_(set(ids))))
+    # One array parameter: a list of ids could pass the 65,535 parameters a statement takes.
+    wanted = bindparam("ids", list(set(ids)), type_=ARRAY(Uuid()))
+    rows = await session.execute(select(*_columns()).where(models.RawRecord.id == any_(wanted)))
     by_id = {row.id: _record(row) for row in rows}
     return [by_id[record_id] for record_id in ids]

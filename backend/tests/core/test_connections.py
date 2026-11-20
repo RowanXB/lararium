@@ -245,6 +245,25 @@ async def test_get_raw_records_by_id(session, run) -> None:
     assert await get_raw_records(session, []) == []
 
 
+async def test_get_raw_records_past_the_parameter_limit(session, run) -> None:
+    # A replay of years of IBKR statements reads more records than a statement can take
+    # parameters (65,535).
+    connection = await _create(run)
+    ids = list(
+        await session.scalars(
+            text(
+                "insert into core.raw_records (connection_id, sync_id, record_type, request,"
+                " content, content_hash, connector_version)"
+                " select :c, :s, 'x', '{}', jsonb_build_object('n', g), md5(g::text), '1'"
+                " from generate_series(1, 70000) g returning id"
+            ),
+            {"c": connection.id, "s": uuid.uuid4()},
+        )
+    )
+    records = await get_raw_records(session, ids)
+    assert [r.id for r in records] == ids
+
+
 @pytest.mark.parametrize(
     "statement", ["update core.raw_records set record_type = 'x'", "delete from core.raw_records"]
 )
