@@ -259,7 +259,7 @@ class PdfProfileConfig(BaseModel):
     model_config = _CONFIG
 
     format: Literal["pdf"]
-    layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]
+    layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement", "tembo_statement"]
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])
 
