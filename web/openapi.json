@@ -808,6 +808,31 @@
         "title": "CsvColumns",
         "type": "object"
       },
+      "CsvExtract": {
+        "additionalProperties": false,
+        "description": "Typed fields read out of one column: the first pattern that matches a non-empty cell\nin full fills the fields its named groups name (those that match); a cell no pattern\nmatches makes the row an error.",
+        "properties": {
+          "column": {
+            "title": "Column",
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "$ref": "#/components/schemas/Pattern"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Patterns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "column",
+          "patterns"
+        ],
+        "title": "CsvExtract",
+        "type": "object"
+      },
       "CsvProfileConfig": {
         "additionalProperties": false,
         "properties": {
@@ -824,6 +849,18 @@
           "columns": {
             "$ref": "#/components/schemas/CsvColumns"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{3}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
           "date_format": {
             "$ref": "#/components/schemas/DateFormat"
           },
@@ -834,6 +871,14 @@
           "encoding": {
             "$ref": "#/components/schemas/Encoding",
             "default": "utf-8-sig"
+          },
+          "extract": {
+            "items": {
+              "$ref": "#/components/schemas/CsvExtract"
+            },
+            "maxItems": 10,
+            "title": "Extract",
+            "type": "array"
           },
           "format": {
             "const": "csv",
@@ -1701,6 +1746,17 @@
             ],
             "title": "Check Number"
           },
+          "counterparty_account_ending": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Account Ending"
+          },
           "counterparty_account_number": {
             "anyOf": [
               {
@@ -2060,6 +2116,7 @@
           "counterparty_sort_code",
           "counterparty_account_number",
           "counterparty_bank",
+          "counterparty_account_ending",
           "payment_reference",
           "payment_kind",
           "bank_reference",
@@ -2193,6 +2250,17 @@
             ],
             "title": "Available Balance Date"
           },
+          "bank": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank"
+          },
           "bic": {
             "anyOf": [
               {
@@ -2294,6 +2362,18 @@
               }
             ],
             "title": "Iban"
+          },
+          "interest": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interest"
           },
           "money_in": {
             "anyOf": [
@@ -2440,6 +2520,7 @@
           "closing_balance_date",
           "money_in",
           "money_out",
+          "interest",
           "payments_in",
           "payments_out",
           "statement_reference",
@@ -2453,6 +2534,7 @@
           "customer_number",
           "clearing_account_number",
           "branch",
+          "bank",
           "addressee",
           "address",
           "overdraft_limit",
@@ -2504,6 +2586,17 @@
             ],
             "title": "Ear"
           },
+          "frequency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency"
+          },
           "kind": {
             "title": "Kind",
             "type": "string"
@@ -2519,6 +2612,30 @@
               }
             ],
             "title": "Rate"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
           }
         },
         "required": [
@@ -2526,7 +2643,10 @@
           "band_from",
           "band_to",
           "rate",
-          "ear"
+          "ear",
+          "valid_from",
+          "valid_to",
+          "frequency"
         ],
         "title": "ImportStatementRateOut",
         "type": "object"
@@ -2791,6 +2911,11 @@
         "title": "OfxProfileConfig",
         "type": "object"
       },
+      "Pattern": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
+      },
       "PdfProfileConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2809,7 +2934,8 @@
               "boc_uk_statement",
               "revolut_current_statement",
               "revolut_savings_statement",
-              "tembo_statement"
+              "tembo_statement",
+              "lemfi_statement"
             ],
             "title": "Layout",
             "type": "string"

@@ -2,12 +2,15 @@
 REAL_ROOT=<dir>` (README, "Verifying against your real statements"). Skipped unless
 LARARIUM_REAL_ROOT is set, so `make check` and CI never run it.
 
-<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Revolut or Tembo, each
-with one account's files in any of the catalog's formats. A Revolut folder's files say which
-account they are for (current or savings). In two orders (statements first, exports first) every
-file must commit with no error row, every statement's closing balance must hold on its own
+<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Revolut, Tembo or LemF
+(LemFi's GBP and savings accounts each get their own), each with one account's files in
+any of the catalog's formats. A Revolut folder's files say which account they are for (current
+or savings). In two orders (statements first, exports first) every file
+must commit with no error row, every statement's closing balance must hold on its own
 date (an undated one, such as Tembo's Plan value, on its last row's day), and rolling
-everything back, newest first, must be allowed and leave a zero balance.
+everything back, newest first, must be allowed and leave a zero balance. A file of a
+period without transactions is refused as empty (EmptyStatementError), as intended: it
+is counted, not failed.
 
 Nothing of the files is printed or kept: only counts and pass or fail. Error text has its
 digits and the file names masked, and the stored documents live in a temporary directory
@@ -28,6 +31,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.documents import LocalDocumentStore
+from lararium.modules.finance.errors import EmptyStatementError
 from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.commit import commit_batch, rollback_batch
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
@@ -48,7 +52,14 @@ pytestmark = pytest.mark.skipif(not ROOT, reason="set LARARIUM_REAL_ROOT (make r
 
 # A bank folder's name starts with one of these (compared case-insensitively); a Revolut
 # folder's institution is told by its files.
-BANKS = {"hsbc": "HSBC UK", "lloy": "Lloyds", "boc": "BOC UK", "revolut": REVOLUT, "tembo": "Tembo"}
+BANKS = {
+    "hsbc": "HSBC UK",
+    "lloy": "Lloyds",
+    "boc": "BOC UK",
+    "revolut": REVOLUT,
+    "tembo": "Tembo",
+    "lemf": "LemFi",
+}
 PDF = "PDF statement"
 
 
@@ -151,13 +162,17 @@ class _File:
     statement: ParsedStatement
 
 
-def _load(folder: Path, institution: str, tag: str) -> tuple[list[_File], list[str], list[str]]:
-    """(the folder's files in catalog formats, their names, failures), read and parsed."""
+def _load(
+    folder: Path, institution: str, tag: str
+) -> tuple[list[_File], list[str], list[str], int]:
+    """(the folder's files in catalog formats, their names, failures, how many are empty),
+    read and parsed."""
     paths = sorted(path for path in folder.iterdir() if path.is_file())
     names = [path.name for path in paths]
     entries = {entry.label: entry for entry in CATALOG if entry.institution == institution}
     loaded: list[_File] = []
     failures: list[str] = []
+    empty = 0
     for path in paths:
         label = _label(institution, path)
         if label is None or label not in entries:
@@ -166,12 +181,15 @@ def _load(folder: Path, institution: str, tag: str) -> tuple[list[_File], list[s
         content = path.read_bytes()
         try:
             statement, _ = _parse(content, entries[label].config, ZoneInfo("Europe/London"))
+        except EmptyStatementError:
+            empty += 1
+            continue
         except Exception as error:  # reported, masked, as a failure
             kind = f"{type(error).__name__}: {_mask(str(error), names)}"
             failures.append(f"{tag}: a {label} doesn't parse ({kind})")
             continue
         loaded.append(_File(label, content, statement))
-    return loaded, names, failures
+    return loaded, names, failures, empty
 
 
 async def _bank(
@@ -185,7 +203,7 @@ async def _bank(
     order: str,
 ) -> list[str]:
     tag = f"{folder.name} [{order}]"
-    files, names, failures = _load(folder, institution, tag)
+    files, names, failures, empty = _load(folder, institution, tag)
     entries = {entry.label: entry for entry in CATALOG if entry.institution == institution}
     statements = sorted(
         (file for file in files if file.label == PDF),
@@ -258,7 +276,7 @@ async def _bank(
         failures.append(f"{tag}: the balance isn't 0 after every rollback")
 
     print(
-        f"\n{tag}: {len(names)} files, committed {dict(outcome)}; "
+        f"\n{tag}: {len(names)} files, committed {dict(outcome)}, empty {empty}; "
         f"closings holding {held}/{len(checked)}; rollbacks refused {refused}"
     )
     return failures

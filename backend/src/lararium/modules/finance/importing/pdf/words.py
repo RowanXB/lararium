@@ -23,13 +23,15 @@ _POINT = Decimal("0.01")
 
 @dataclass(frozen=True)
 class Word:
-    """A word as printed, in points from the page's top-left corner; page counts from 0."""
+    """A word as printed, in points from the page's top-left corner; page counts from 0.
+    size is its font size in points (its first character's)."""
 
     text: str
     x0: Decimal
     x1: Decimal
     top: Decimal
     page: int
+    size: Decimal
 
 
 def _white(color: object) -> bool:
@@ -78,7 +80,9 @@ def visible_lines(content: bytes, *, x_tolerance: Decimal) -> list[list[Word]]:
     try:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for number, page in enumerate(pdf.pages):
-                for found in page.filter(_visible).extract_words(x_tolerance=tolerance):
+                visible = page.filter(_visible)
+                # return_chars, not extra_attrs: a size change must not split a word.
+                for found in visible.extract_words(x_tolerance=tolerance, return_chars=True):
                     words.append(
                         Word(
                             text=found["text"],
@@ -86,6 +90,7 @@ def visible_lines(content: bytes, *, x_tolerance: Decimal) -> list[list[Word]]:
                             x1=_position(found["x1"]),
                             top=_position(found["top"]),
                             page=number,
+                            size=_position(found["chars"][0]["size"]),
                         )
                     )
     except PdfminerException as error:

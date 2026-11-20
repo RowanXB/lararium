@@ -685,7 +685,13 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             endingCash="196",
         ),
         RowSpec(
-            "EquitySummaryByReportDateInBase", "U0000001", total="1000", cash="200", stock="800"
+            "EquitySummaryByReportDateInBase",
+            "U0000001",
+            total="1000",
+            cash="200",
+            stock="800",
+            stockLong="800",
+            stockShort="0",
         ),
     ]
     await _sync(session, connection, tmp_path, rows)
@@ -735,9 +741,16 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
         ("USD", DAY, DAY, Decimal("0"), Decimal("-5")),
     ]
     nav = (
-        await session.execute(text("select report_date, total, cash, stock from finance.ibkr_nav"))
+        await session.execute(
+            text(
+                "select report_date, total, cash, stock, stock_long, stock_short"
+                " from finance.ibkr_nav"
+            )
+        )
     ).one()
-    assert tuple(nav) == (DAY, Decimal("1000"), Decimal("200"), Decimal("800"))
+    assert tuple(nav) == (
+        DAY, Decimal("1000"), Decimal("200"), Decimal("800"), Decimal("800"), Decimal("0")
+    )  # fmt: skip
     # The mark price is the day's price as well.
     assert await session.scalar(
         text("select price from finance.prices where source = 'ibkr'")
@@ -1093,7 +1106,7 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     rows = [RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001")]
     await _sync(session, connection, tmp_path, rows)
     stored = await get_connection(session, connection.id)
-    assert stored.config["normalizer_version"] == NORMALIZER_VERSION
+    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-2"
     # An older version that did not fill ibkr_trades: the next run, with nothing new,
     # replays every raw record of the connection and fills it in.
     await session.execute(text("delete from finance.ibkr_trades"))

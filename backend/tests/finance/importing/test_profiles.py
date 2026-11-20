@@ -231,3 +231,43 @@ def test_a_card_number_makes_no_bank_transfer() -> None:
     assert not is_bank_transfer(["VIS"], "VIS", None)
     assert not is_bank_transfer(["VIS"], "CR", "123456******1234")
     assert not is_bank_transfer([], None, "123456******1234")
+
+
+def test_extract_patterns_validated() -> None:
+    details = {"column": "Details", "patterns": [r"(?P<counterparty_bank>[^,]+), (?P<memo>.+)"]}
+    config = PROFILE_CONFIG.validate_python(_csv(extract=[details]))
+    assert config.extract[0].fields() == {"counterparty_bank", "memo"}
+    assert "Details" in config.read_columns()
+    for patterns, message in [
+        ([], "at least 1"),
+        (["(unclosed"], "not a regular expression"),
+        ([r"(?P<colour>.+)"], "can't fill: colour"),
+    ]:
+        with pytest.raises(ValidationError, match=message):
+            PROFILE_CONFIG.validate_python(_csv(extract=[{"column": "D", "patterns": patterns}]))
+
+
+def test_extract_fills_a_field_once() -> None:
+    memo = {"column": "Details", "patterns": [r"(?P<memo>.+)"]}
+    with pytest.raises(ValidationError, match="fields filled twice: memo"):
+        PROFILE_CONFIG.validate_python(_csv(extract=[memo, memo]))
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount", "memo": "Note"}
+    with pytest.raises(ValidationError, match="fields filled twice: memo"):
+        PROFILE_CONFIG.validate_python(_csv(columns=columns, extract=[memo]))
+
+
+def test_extract_column_checked_against_header() -> None:
+    extract = [{"column": "Details", "patterns": [r"(?P<memo>.+)"]}]
+    header = ["Date", "Description", "Amount"]
+    with pytest.raises(ValidationError, match="columns not in the header: Details"):
+        PROFILE_CONFIG.validate_python(_csv(extract=extract, header=header))
+    PROFILE_CONFIG.validate_python(_csv(extract=extract, header=[*header, "Details"]))
+
+
+def test_currency_set_once_or_by_column() -> None:
+    assert PROFILE_CONFIG.validate_python(_csv(currency="GBP")).currency == "GBP"
+    with pytest.raises(ValidationError):
+        PROFILE_CONFIG.validate_python(_csv(currency="gbp"))
+    columns = {"date": "Date", "description": ["D"], "amount": "A", "currency": "Currency"}
+    with pytest.raises(ValidationError, match="not both"):
+        PROFILE_CONFIG.validate_python(_csv(columns=columns, currency="GBP"))

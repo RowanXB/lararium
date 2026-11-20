@@ -996,7 +996,7 @@ def test_mailing_block_passes_over_the_other_column() -> None:
     from lararium.modules.finance.importing.pdf.words import Word
 
     def line(top: str, x0: str, text: str) -> list[Word]:
-        return [Word(text, D(x0), D(x0) + 50, D(top), 0)]
+        return [Word(text, D(x0), D(x0) + 50, D(top), 0, D(8))]
 
     lines = [
         line("155", "60.8", "Mr A Example"),

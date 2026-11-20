@@ -30,6 +30,7 @@ def test_one_recommended_format_per_institution() -> None:
         "Revolut Current",
         "Revolut Savings",
         "Tembo",
+        "LemFi",
     }
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
@@ -46,6 +47,7 @@ def test_decision_14_formats() -> None:
         "Revolut Current": ["csv", "pdf"],
         "Revolut Savings": ["csv", "pdf"],
         "Tembo": ["pdf"],
+        "LemFi": ["csv", "pdf"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
     assert recommended == {
@@ -55,6 +57,7 @@ def test_decision_14_formats() -> None:
         ("Revolut Current", "pdf"),
         ("Revolut Savings", "pdf"),
         ("Tembo", "pdf"),
+        ("LemFi", "pdf"),
     }
 
 

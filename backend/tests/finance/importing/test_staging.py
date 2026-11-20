@@ -62,10 +62,13 @@ from .synthetic_pdfs import (
     BocRow,
     BocStatement,
     HsbcStatement,
+    LemfiRow,
+    LemfiStatement,
     TemboRow,
     TemboStatement,
     boc_pdf,
     hsbc_pdf,
+    lemfi_pdf,
     tembo_pdf,
 )
 
@@ -877,6 +880,38 @@ async def test_typed_fields_stored(
     assert batch.statement.overdraft_limit_date == date(2026, 11, 1)
     assert "error" not in _statuses(await _rows(session, batch))
 
+    # LemFi: the bank holding the account, a masked counterparty account; the savings
+    # statement's interest and its rate's validity.
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    received = LemfiRow(
+        "03 May, 2027", ("Received from A Example",), ("Via EXAMPLE BANK *1234",), paid_in="9.00"
+    )
+    content = lemfi_pdf(LemfiStatement([[received]]))
+    batch = await stage(lemfi, content, account_id=await fresh("Example LemFi"), default=None)
+    (row,) = await _rows(session, batch)
+    assert (row.counterparty_bank, row.counterparty_account_ending) == ("EXAMPLE BANK", "1234")
+    assert row.counterparty_account_number is None
+    assert row.occurred_at == datetime(2027, 5, 3, 12, 28, tzinfo=UTC)  # 13:28 in London
+    assert batch.statement is not None
+    assert (batch.statement.bank, batch.statement.iban) == (
+        "Example Bank",
+        "GB99EXAM40123412345678",
+    )
+    assert batch.statement.interest is None
+    payout = LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12")
+    content = lemfi_pdf(LemfiStatement([[payout]], savings=True, opening="100.00"))
+    parsed = parse_pdf(
+        content, PdfProfileConfig(format="pdf", layout="lemfi_statement"), ZoneInfo("UTC")
+    )
+    batch = await stage(lemfi, content, account_id=await fresh("Example saver"), default=None)
+    assert batch.statement is not None
+    assert batch.statement.interest == Decimal("80.12")
+    assert batch.statement.money_in == Decimal("0.00")
+    assert parsed.rates and batch.statement.rates == parsed.rates
+    assert batch.statement.rates[0].valid_to == date(2027, 10, 29)
+    assert batch.statement.rates[0].frequency == "monthly"
+    assert batch.statement.account_name == "Example Instant Saver"
+
     # Tembo: an account identifier that isn't a number, the open date, the available
     # balance; no opening balance or totals.
     tembo = await _profile(run, format="pdf", layout="tembo_statement")
@@ -899,6 +934,61 @@ async def test_typed_fields_stored(
     )
     (row,) = [row for row in await _rows(session, batch) if row.kind == "statement"]
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
+
+
+async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
+    """Money in and straight back out twice a day leaves the same amount, description and
+    balance: the time of day the file gives keeps the rows apart, in the file and again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    text = (
+        "Date,Description,Amount,Balance\n"
+        "10/11/2026 09:00,Top up,5.00,5.00\n"
+        "10/11/2026 09:01,Sent on,-5.00,0.00\n"
+        "10/11/2026 17:00,Top up,5.00,5.00\n"
+        "10/11/2026 17:01,Sent on,-5.00,0.00\n"
+    )
+    batch = await stage(profile, text)
+    assert batch.counts["new"] == 4 and batch.counts["error"] == 0
+    await commit(batch.id)
+    again = await stage(profile, text)
+    assert again.counts["duplicate"] == 4
+    same_minute = text.replace("17:00", "09:00").replace("17:01", "09:01")
+    repeated = await stage(profile, same_minute)
+    assert repeated.counts["error"] == 2
+
+
+async def test_a_row_with_an_id_never_times_another_rows_key(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row keyed by its id counted as a repeat of a row without one, so that
+    row took the time into its key, missed its committed self, and was committed again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+            "external_id": "Id",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    header = "Date,Description,Amount,Balance,Id\n"
+    evening = "10/11/2026 17:00,Top up,5.00,5.00,\n"
+    first = await stage(profile, header + evening)
+    await commit(first.id)
+    morning = "10/11/2026 09:00,Top up,5.00,5.00,X\n10/11/2026 09:01,Sent on,-5.00,0.00,\n"
+    full = await stage(profile, header + morning + evening)
+    assert _statuses(await _rows(session, full)) == ["new", "new", "duplicate"]
 
 
 async def test_statement_account_mismatch_refused(
@@ -1078,3 +1168,20 @@ async def test_only_assets_and_liabilities_take_imports(
     )
     with pytest.raises(ImportNotAllowedError, match="equity"):
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", account_id=equity.id)
+
+
+async def test_a_time_leaves_the_key_of_a_row_nothing_else_is_like(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row's time went into its key, so a row committed before 0022 kept
+    another key; imported again, it was paired by date and amount alone, with another row."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    header = "Date,Description,Amount\n"
+    dated = await _csv_profile(run, columns=columns)
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    old = await stage(dated, header + "10/11/2026,A,10.00\n10/11/2026,B,10.00\n")
+    await commit(old.id)
+    b = (await _rows(session, old))[1]
+    again = await stage(timed, header + "10/11/2026 09:00,B,10.00\n")
+    [row] = await _rows(session, again)
+    assert (row.status, row.duplicate_of) == ("duplicate", b.id)

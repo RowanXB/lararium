@@ -296,6 +296,9 @@ class ImportStatementRateOut(_Out):
     band_to: DecimalStr | None
     rate: DecimalStr | None
     ear: DecimalStr | None
+    valid_from: date | None
+    valid_to: date | None
+    frequency: str | None
 
 
 class ImportStatementOut(_Out):
@@ -309,6 +312,7 @@ class ImportStatementOut(_Out):
     closing_balance_date: date | None
     money_in: DecimalStr | None
     money_out: DecimalStr | None
+    interest: DecimalStr | None
     payments_in: int | None
     payments_out: int | None
     statement_reference: str | None
@@ -322,6 +326,7 @@ class ImportStatementOut(_Out):
     customer_number: str | None
     clearing_account_number: str | None
     branch: str | None
+    bank: str | None
     addressee: str | None
     address: str | None
     overdraft_limit: DecimalStr | None
@@ -365,6 +370,7 @@ class ImportRowOut(_Out):
     counterparty_sort_code: str | None
     counterparty_account_number: str | None
     counterparty_bank: str | None
+    counterparty_account_ending: str | None
     payment_reference: str | None
     payment_kind: str | None
     bank_reference: str | None

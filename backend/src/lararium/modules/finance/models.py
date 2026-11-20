@@ -281,6 +281,7 @@ class ImportStatement(Base):
     closing_balance_date: Mapped[date | None]
     money_in: Mapped[Decimal | None] = mapped_column(Numeric)
     money_out: Mapped[Decimal | None] = mapped_column(Numeric)
+    interest: Mapped[Decimal | None] = mapped_column(Numeric)
     payments_in: Mapped[int | None]
     payments_out: Mapped[int | None]
     statement_reference: Mapped[str | None] = mapped_column(Text)
@@ -294,6 +295,7 @@ class ImportStatement(Base):
     customer_number: Mapped[str | None] = mapped_column(Text)
     clearing_account_number: Mapped[str | None] = mapped_column(Text)
     branch: Mapped[str | None] = mapped_column(Text)
+    bank: Mapped[str | None] = mapped_column(Text)
     addressee: Mapped[str | None] = mapped_column(Text)
     address: Mapped[str | None] = mapped_column(Text)
     overdraft_limit: Mapped[Decimal | None] = mapped_column(Numeric)
@@ -318,6 +320,9 @@ class ImportStatementRate(Base):
     band_to: Mapped[Decimal | None] = mapped_column(Numeric)
     rate: Mapped[Decimal | None] = mapped_column(Numeric)
     ear: Mapped[Decimal | None] = mapped_column(Numeric)
+    valid_from: Mapped[date | None]
+    valid_to: Mapped[date | None]
+    frequency: Mapped[str | None] = mapped_column(Text)
 
 
 class ImportRow(Base):
@@ -350,6 +355,7 @@ class ImportRow(Base):
     counterparty_sort_code: Mapped[str | None] = mapped_column(Text)
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
     counterparty_bank: Mapped[str | None] = mapped_column(Text)
+    counterparty_account_ending: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     payment_kind: Mapped[str | None] = mapped_column(Text)
     bank_reference: Mapped[str | None] = mapped_column(Text)
