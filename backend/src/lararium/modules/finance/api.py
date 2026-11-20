@@ -415,8 +415,9 @@ async def get_import_catalog() -> list[ImportCatalogEntryOut]:
     return [ImportCatalogEntryOut.model_validate(entry) for entry in catalog.CATALOG]
 
 
-async def _read_upload(file: UploadFile) -> bytes:
-    """The upload's content, read in chunks: 413 as soon as it passes MAX_IMPORT_BYTES.
+async def read_upload(file: UploadFile, limit: int = parsed.MAX_IMPORT_BYTES) -> bytes:
+    """The upload's content, read in chunks: 413 as soon as it passes `limit` (M2's
+    MAX_IMPORT_BYTES unless a route has its own).
 
     This bounds what is parsed and stored, not what is received: Starlette has already
     spooled the whole multipart body to a temporary file before the route runs (and before
@@ -426,12 +427,12 @@ async def _read_upload(file: UploadFile) -> bytes:
     size = 0
     while chunk := await file.read(_UPLOAD_CHUNK):
         size += len(chunk)
-        if size > parsed.MAX_IMPORT_BYTES:
+        if size > limit:
             raise HTTPException(
                 status.HTTP_413_CONTENT_TOO_LARGE,
                 {
                     "error": "file_too_large",
-                    "message": f"the file is larger than {parsed.MAX_IMPORT_BYTES} bytes",
+                    "message": f"the file is larger than {limit} bytes",
                 },
             )
         chunks.append(chunk)
@@ -461,7 +462,7 @@ async def stage_import(
     instrument_id: Annotated[UUID | None, Form()] = None,
 ) -> ImportBatchDetailOut:
     """Upload a statement file and stage it for review; nothing is posted until commit."""
-    content = await _read_upload(file)
+    content = await read_upload(file)
     filename = file.filename or "upload"
     # The audit records which file, never its content.
     args: dict[str, JSONValue] = {

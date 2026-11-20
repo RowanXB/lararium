@@ -384,6 +384,20 @@
         "title": "Body_stage_import",
         "type": "object"
       },
+      "Body_upload_ibkr_statement": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_ibkr_statement",
+        "type": "object"
+      },
       "CandidateOut": {
         "properties": {
           "account_id": {
@@ -1086,6 +1100,90 @@
         "title": "HoldingOut",
         "type": "object"
       },
+      "IbkrConnectionCreate": {
+        "properties": {
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "query_id": {
+            "pattern": "^[0-9]{1,12}$",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          },
+          "token_expires_on": {
+            "format": "date",
+            "title": "Token Expires On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "token_expires_on",
+          "display_name",
+          "query_id"
+        ],
+        "title": "IbkrConnectionCreate",
+        "type": "object"
+      },
+      "IbkrConnectionUpdate": {
+        "properties": {
+          "query_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{1,12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          },
+          "token_expires_on": {
+            "format": "date",
+            "title": "Token Expires On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "token_expires_on"
+        ],
+        "title": "IbkrConnectionUpdate",
+        "type": "object"
+      },
+      "IbkrUploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "IbkrUploadOut",
+        "type": "object"
+      },
       "IdentifierCreate": {
         "properties": {
           "kind": {
@@ -1120,8 +1218,15 @@
             "title": "Account Id"
           },
           "account_number": {
-            "title": "Account Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
           },
           "created_at": {
             "format": "date-time",
@@ -1150,13 +1255,23 @@
             "type": "string"
           },
           "kind": {
-            "const": "uk_bank_account",
+            "enum": [
+              "uk_bank_account",
+              "ibkr_account"
+            ],
             "title": "Kind",
             "type": "string"
           },
           "sort_code": {
-            "title": "Sort Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
           },
           "value": {
             "title": "Value",
@@ -3476,6 +3591,47 @@
         ]
       }
     },
+    "/api/v1/connections/ibkr": {
+      "post": {
+        "operationId": "create_ibkr_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IbkrConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Ibkr Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/oauth/monzo/callback": {
       "get": {
         "description": "Where Monzo sends the browser back: exchange the code, then wait for approval.",
@@ -3618,6 +3774,114 @@
           }
         },
         "summary": "Disable Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/ibkr": {
+      "put": {
+        "description": "Replace the token, its expiry and the query id (a new token after the old one expired).",
+        "operationId": "update_ibkr_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IbkrConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Ibkr Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/ibkr-statement": {
+      "post": {
+        "description": "Ingest a Flex statement the owner downloaded: the closed ISA, which the Flex Web\nService can't fetch. It goes through the same ingest and normalise as a fetched one.",
+        "operationId": "upload_ibkr_statement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_ibkr_statement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IbkrUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Ibkr Statement",
         "tags": [
           "connections"
         ]

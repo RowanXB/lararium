@@ -70,7 +70,11 @@ def _args(body: JSONValue | None = None, **path: UUID) -> dict[str, JSONValue]:
 
 
 def _identifier_out(record: identifiers.IdentifierRecord) -> IdentifierOut:
-    sort_code, account_number = identifiers.uk_bank_account_parts(record.value)
+    sort_code, account_number = (
+        identifiers.uk_bank_account_parts(record.value)
+        if record.kind == "uk_bank_account"
+        else (None, None)
+    )
     return IdentifierOut(
         id=record.id,
         kind=record.kind,

@@ -91,7 +91,7 @@ tailscale serve --bg 8080
 
 `make up` 会构建镜像并启动 PostgreSQL（`db`），以 `lararium_owner` 身份执行一次迁移
 （`migrate`），然后以 `lararium_backend` 身份启动 API（`api`）、后台 worker（`worker`：连接同步和
-定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，上传的账单文件保留在 `lararium_documents` 卷中。
+定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，账单文件（上传的，或从 IBKR 获取的）保留在 `lararium_documents` 卷中。
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
@@ -299,6 +299,71 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 页面可以修改它们。每一项都是 1 到 3650 之间的整天数，前后两个窗口加起来必须短于 7 天，这样每周
 一次的转账不会和下一周的配上。
 
+## 连接 Interactive Brokers
+
+Interactive Brokers（IBKR）是一个连接器：`worker` 通过 IBKR 的 Flex Web Service 同步它，
+该服务返回你事先定义好的一份 Flex query 报表。它只读取数据。拉取到的报表会作为文档保存在
+`documents` 卷中，`worker` 和 `api` 一样挂载这个卷；升级后运行 `make up`，worker 才会挂上它。
+
+### 1. 创建 Activity Flex Query
+
+在 Client Portal 打开 Performance & Reports，再进入 Flex Queries，创建一个 **Activity Flex
+Query**：
+
+- 选择**所有账户**（只选一个账户的 query 会漏掉其他账户）。
+- 格式选 **XML**，日期格式 `yyyyMMdd`，时间格式 `HH:mm:ss TimeZone`，分隔符 `;`。
+- 把 **Include Currency Rates**、**Include Audit Trail Fields**、**Include Offsetting
+  Trade/Cancel Pairs** 和 **Breakout by Day** 都设为 Yes。
+- **勾选每一个 section，以及每个字段和选项。** Lararium 会把 IBKR 发来的每个字段都按类型存下来。
+  个人信息字段（姓名、地址、邮箱、出生日期、受益人、客户经理）是可选的：勾选后同样会存储，但绝不
+  出现在日志、警告或通知里。
+- 时间段无关紧要：Lararium 会自己发送日期。
+
+保存后记下 **query ID**。
+
+### 2. 创建 token
+
+在 Flex Web Service Configuration 中启用该服务并生成 token。有效期最长一年。IP 限制是可选的；
+家里是动态 IP 时请留空。**记下到期日**：IBKR 没有查询到期日的 API，所以由你告诉 Lararium，
+它会在到期前 14 天提醒你。生成新 token 会让旧 token 失效。
+
+### 3. 添加连接
+
+在 Connections 页面选择 **Add Interactive Brokers**，填写显示名称、token、到期日和 query ID。
+每个 IBKR 连接都会显示 token 到期日（14 天内高亮），并有 **Update token**（填新 token 和到期日；
+query ID 留空表示沿用当前的）和 **Upload a Flex statement**（见下文）。
+
+worker 每天伦敦时间 06:00 之后同步，点击 **Sync now** 时也会同步。首次同步最多拉取一年，再往前
+拉取到账户开立为止（以 IBKR 提供的为限）；**Sync now** 遵循同样的规则。每个 IBKR 账户在
+Lararium 中对应一个账户，税务账户类型（ISA 或 GIA）按 IBKR 的账户类型自动设置。
+
+### 与 Monzo 之间的转账
+
+在 IBKR 账户上登记 IBKR 的收款银行账户（Monzo 显示的 sort code 和账号），做法见
+[登记标识](#登记标识)，这样 Monzo 的付款就能与 IBKR 的入金配对。如果 IBKR 从另一个账户付款给你，
+它会出现在 Suggestions 里。你自己的 IBKR 账户之间的转账会自动配对。
+
+### 对账警告
+
+每次同步或上传后，Lararium 会按每个账户 IBKR 最近一次报告的那一天，把自己的记录与 IBKR 报告的
+持仓和现金对比。
+
+- **“IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT”** 表示 Lararium 的记录
+  与 IBKR 报告的数字对不上：可能是某种记录类型还没处理，或是 IBKR 做了更正。Lararium 绝不会
+  悄悄自动修正。某次同步里更早一天的差异只会发通知。
+- **同步失败** 时，连接上会显示原因，比如需要在 Flex query 里勾选的某个字段。
+- **“IBKR flagged: …”** 指出了 Lararium 还没有给类型的某个 section 或字段。
+
+### 已关闭的账户
+
+Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请手动获取它的报表：
+
+1. 在 Client Portal 打开账户选择器的筛选，选 Account Status，再选 Closed，并选中所有账户。
+2. 运行 Flex query：Run，格式选 XML，时间段覆盖该已关闭账户的存续期。IBKR 可能在后台生成
+   （Batch Flex Queries）；生成后下载。
+3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
+   上传这个 XML（最大 64 MiB）。请在最近一次同步之后再运行导出：旧文件里某行若已被 IBKR 更正，上传会把更正覆盖回去。
+
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
 不做这一步，每 30 分钟轮询一次也能用。想在大约一分钟内看到付款，就需要给 Monzo 一个它能调用的公网
@@ -347,7 +412,7 @@ SQL
 
 连接需要重新授权、或同步持续失败时，Lararium 可以给你发消息。在飞书群里添加一个自定义机器人，
 开启签名校验，把 webhook 地址和签名密钥分别填进 `infra/.env` 的 `LARARIUM_FEISHU_WEBHOOK_URL`
-和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker）。两者都不设置就不发通知。消息里
+和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker 和 api）。两者都不设置就不发通知。消息里
 不会出现任何凭据。
 
 ## 导入账单
@@ -504,7 +569,7 @@ make backup   # 或：infra/backup/backup.sh
 
 它会写出 `$BACKUP_DIR/lararium-<UTC 时间戳>.dump`（`pg_dump` 自定义格式；`BACKUP_DIR` 为相对
 路径时相对于仓库根目录），并以同一时间戳写出 `documents-<UTC 时间戳>.tar`：经由 `api` 容器读出的
-`lararium_documents` 卷里上传的账单文件。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
+`lararium_documents` 卷里的账单文件（上传的，或从 IBKR 获取的）。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
 一个缺少文档的转储。如果 `infra/.env` 里设置了 `RESTIC_REPOSITORY`，随后还会用
 `RESTIC_PASSWORD` 执行 `restic backup "$BACKUP_DIR"`；主机上需要装有 `restic`。
 如需每晚执行，可添加一条 cron，例如 `0 3 * * * cd /path/to/lararium && make backup`。

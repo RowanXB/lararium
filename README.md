@@ -97,7 +97,8 @@ tailscale serve --bg 8080
 `lararium_owner` (`migrate`), then starts the API as `lararium_backend` (`api`), the
 background worker (`worker`: connection syncs and periodic jobs) and Caddy
 serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
-`lararium_pgdata` volume, and uploaded statement files in `lararium_documents`.
+`lararium_pgdata` volume, and statement files (uploaded, or fetched from IBKR) in
+`lararium_documents`.
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
@@ -342,6 +343,82 @@ dated Friday pairs with a Monzo payment any time on Wednesday; overdue after 7 d
 3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
 with the next week's.
 
+## Connecting Interactive Brokers
+
+Interactive Brokers (IBKR) is a connector: the `worker` syncs it through IBKR's Flex Web
+Service, which returns a statement you define once as a Flex query. It only reads. Fetched
+statements are kept as documents in the `documents` volume, which the `worker` mounts like
+the `api`; after upgrading, run `make up` so the worker gets it.
+
+### 1. Create the Activity Flex Query
+
+In Client Portal open Performance & Reports, then Flex Queries, and create an **Activity Flex
+Query**:
+
+- Select **all accounts** (a query for one account misses the others).
+- Format **XML**, date format `yyyyMMdd`, time format `HH:mm:ss TimeZone`, separator `;`.
+- Set **Include Currency Rates**, **Include Audit Trail Fields**, **Include Offsetting
+  Trade/Cancel Pairs** and **Breakout by Day** to Yes.
+- Tick **every section, with every field and option**. Lararium stores every field IBKR
+  sends, typed. The personal fields (name, addresses, email, date of birth, beneficiaries,
+  account representative) are optional: if you tick them they are stored too, and are never
+  shown in logs, warnings or notifications.
+- The period doesn't matter: Lararium sends its own dates.
+
+Save it and note the **query ID**.
+
+### 2. Create the token
+
+Under Flex Web Service Configuration, enable the service and generate a token. Choose a
+validity of up to one year. An IP restriction is optional; leave it blank on a dynamic home
+IP. **Note the expiry date**: IBKR has no API for it, so you give it to Lararium, which
+reminds you 14 days before. Generating a new token invalidates the old one.
+
+### 3. Add the connection
+
+On Connections choose **Add Interactive Brokers** and enter a display name, the token, its
+expiry date and the query ID. Each IBKR connection shows its token expiry date (highlighted
+within 14 days) and has **Update token** (enter the new token and expiry date; leave the query
+ID empty to keep the current one) and **Upload a Flex statement** (below).
+
+The worker syncs daily after 06:00 Europe/London, and on **Sync now**. The first sync
+fetches up to a year, then earlier years back to the account's opening, as far as IBKR
+serves them; **Sync now** follows the same rule. Each IBKR account becomes an account in
+Lararium, with its tax wrapper (ISA or GIA) set from IBKR's account type.
+
+### Transfers with Monzo
+
+Register IBKR's receiving bank account (sort code and account number, as Monzo shows it) on
+the IBKR account, as in [Registering identifiers](#registering-identifiers), so Monzo
+payments pair with IBKR deposits. If IBKR pays you from a different account it shows in
+Suggestions. Transfers between your IBKR accounts pair automatically.
+
+### Reconciliation warnings
+
+After each sync or upload Lararium compares its records with IBKR's own report of positions
+and cash, for each account on the latest day IBKR reported them.
+
+- **"IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT"** means Lararium's
+  records don't add up to what IBKR reports: a record type not handled yet, or a correction
+  by IBKR. Lararium never corrects it silently. A difference on an earlier day of a sync is
+  sent as a notification only.
+- **A failed sync** shows its reason on the connection, such as a field to select in the
+  Flex query.
+- **"IBKR flagged: …"** names a section or field Lararium doesn't type yet.
+
+### Closed accounts
+
+The Flex Web Service can't select a closed account (a closed ISA, say). Fetch its statement
+by hand:
+
+1. In Client Portal, open the account selector's filter, choose Account Status, then Closed,
+   and select every account.
+2. Run the Flex query: Run, format XML, with a period covering the closed account's life. IBKR
+   may generate it in the background (Batch Flex Queries); download it when ready.
+3. Once the connection's first sync has finished, choose **Upload a Flex statement** on the
+   IBKR connection on Connections and upload the XML (up to 64 MiB). Run it after the latest
+   sync: an older file's copy of a row IBKR has since corrected would undo the correction.
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo
@@ -395,7 +472,7 @@ SQL
 Lararium can message you when a connection needs re-authorising or a sync keeps failing. In
 a Feishu group add a custom bot, turn on signature verification, and copy the webhook URL and
 the signing secret into `LARARIUM_FEISHU_WEBHOOK_URL` and `LARARIUM_FEISHU_SECRET` (both in
-`infra/.env`; `make up` passes them to the worker). With neither set there are no notifications.
+`infra/.env`; `make up` passes them to the worker and the api). With neither set there are no notifications.
 Messages never contain credentials.
 
 ## Importing statements
@@ -590,9 +667,9 @@ make backup   # or: infra/backup/backup.sh
 
 This writes `$BACKUP_DIR/lararium-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
 `BACKUP_DIR` is relative to the repository root) and, with the same timestamp,
-`documents-<UTC timestamp>.tar`: the uploaded statement files from the `lararium_documents`
-volume, read through the `api` container. The stack must be running: without the `api`
-container the backup fails rather than leave a dump without its documents. If
+`documents-<UTC timestamp>.tar`: the statement files (uploaded, or fetched from IBKR) from the
+`lararium_documents` volume, read through the `api` container. The stack must be running:
+without the `api` container the backup fails rather than leave a dump without its documents. If
 `RESTIC_REPOSITORY` is set in `infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using
 `RESTIC_PASSWORD`; the `restic` binary must be installed on the host. To run it nightly, add a
 cron entry such as `0 3 * * * cd /path/to/lararium && make backup`.

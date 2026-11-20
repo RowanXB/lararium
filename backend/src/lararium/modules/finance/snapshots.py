@@ -73,8 +73,12 @@ async def record_snapshot(
     quantity: Decimal,
     as_of: datetime,
     kind: SnapshotKind = "manual",
+    as_of_date: date | None = None,
 ) -> SnapshotRecord:
-    """Record an observed balance of one instrument in one account at a moment."""
+    """Record an observed balance of one instrument in one account at a moment.
+
+    `as_of_date` defaults to as_of's date in the owner's time zone; a source that dates its
+    figures by its own day (IBKR's report date, in New York) gives that day instead."""
     if as_of.utcoffset() is None:
         raise FinanceValidationError("as_of needs a timezone")
     require_amount("quantity", quantity)
@@ -90,7 +94,7 @@ async def record_snapshot(
                 instrument_id=instrument_id,
                 quantity=quantity,
                 as_of=as_of,
-                as_of_date=local_date(as_of, await get_timezone(session)),
+                as_of_date=as_of_date or local_date(as_of, await get_timezone(session)),
                 kind=kind,
                 owner_entity_id=await get_self_entity_id(session),
             )

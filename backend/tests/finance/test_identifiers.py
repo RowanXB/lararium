@@ -261,3 +261,16 @@ async def test_dismissed_row_cannot_be_assigned_by_database(session, make_accoun
             ),
             {"v": VALUE, "a": account.id},
         )
+
+
+@pytest.mark.parametrize("spelling", ["U1234567", " u1234567 ", "DU123456"])
+def test_normalize_ibkr_account_upper_cases(spelling) -> None:
+    assert normalize_identifier("ibkr_account", spelling) == spelling.strip().upper()
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "1234567", "U12", "ABCD1234567", "U123456789012345", "U12 345"]
+)
+def test_normalize_ibkr_account_rejects_anything_else(bad) -> None:
+    with pytest.raises(FinanceValidationError, match="IBKR account id"):
+        normalize_identifier("ibkr_account", bad)

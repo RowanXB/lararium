@@ -23,3 +23,8 @@ class DocumentNotFoundError(Exception):
 
 class DocumentIntegrityError(Exception):
     """Raised when a document's stored file is missing or no longer matches its hash."""
+
+
+class DisplayableError(Exception):
+    """An error whose message is written to be shown to the owner (a failed sync's last_error
+    and notification): it names what to fix, never a credential, URL or personal value."""

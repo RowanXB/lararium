@@ -396,16 +396,17 @@ class ImportBatchDetailOut(ImportBatchOut):
 
 
 class IdentifierCreate(BaseModel):
-    kind: IdentifierKind
+    # Only a UK bank account is registered by hand; the connectors register their own ids.
+    kind: Literal["uk_bank_account"]
     value: str  # a sort code and account number, e.g. "11-22-33 12345678"
 
 
 class IdentifierOut(BaseModel):
     id: UUID
     kind: IdentifierKind
-    value: str  # as stored: "<sort code>:<account number>"
-    sort_code: str
-    account_number: str
+    value: str  # as stored: "<sort code>:<account number>" for a UK bank account
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     account_id: UUID | None
     dismissed_at: AwareDatetime | None
     created_by: str
