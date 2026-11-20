@@ -523,10 +523,15 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
         raise FileFormatError(f"the statement's account: {error}") from None
 
     table = _Table(columns)
+    informing = False  # the savings statement's account information, after the table
     for number in sorted(by_page):
         page_lines = by_page[number]
+        informing = informing or any(text(line) == "Account information" for line in page_lines)
         at = next((n for n, line in enumerate(page_lines) if _columns(line) is not None), None)
         if at is None:
+            # Skipped, a page of the table would take its rows and carried-over lines along.
+            if not informing:
+                raise FileFormatError(f"page {number + 1} has no transactions table")
             continue
         found = _columns(page_lines[at])
         assert found is not None

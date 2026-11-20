@@ -8,7 +8,7 @@ from decimal import Decimal, localcontext
 from functools import wraps
 
 from lararium.modules.finance.errors import FinanceValidationError
-from lararium.modules.finance.importing.profiles import AmountFormat
+from lararium.modules.finance.importing.profiles import AmountFormat, TimePrecision
 from lararium.modules.finance.money import require_amount
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -134,7 +134,8 @@ class StatementRate:
 @dataclass(frozen=True)
 class ParsedRow:
     """One transaction. quantity is in ledger sign (inflow positive); the account's balance
-    changes by quantity - fee. occurred_at is aware when the file gives a time, else None."""
+    changes by quantity - fee. occurred_at is aware when the file gives a time, else None;
+    time_precision says to what the file gives it."""
 
     position: int
     booking_date: date
@@ -160,6 +161,11 @@ class ParsedRow:
     # between the row's currency and the statement's.
     original_currency: str | None = None
     exchange_rate: Decimal | None = None
+    time_precision: TimePrecision | None = None
+
+    def __post_init__(self) -> None:
+        if (self.occurred_at is None) != (self.time_precision is None):
+            raise ValueError("a row's time and its precision come together")
 
 
 @dataclass(frozen=True)

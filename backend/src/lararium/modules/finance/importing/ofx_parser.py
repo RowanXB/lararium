@@ -307,6 +307,7 @@ def _row(
         position=position,
         booking_date=booking_date,
         occurred_at=occurred_at,
+        time_precision=None if occurred_at is None else "second",
         description=clean_description([part for part in (payee, memo) if part is not None]),
         quantity=quantity,
         fee=Decimal(0),

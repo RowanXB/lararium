@@ -50,6 +50,7 @@ from lararium.modules.finance.importing.profiles import (
     PdfProfileConfig,
     ProfileConfigModel,
     QifProfileConfig,
+    TimePrecision,
     get_profile,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
@@ -1150,10 +1151,55 @@ def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
     return datetime.combine(day, time(), tzinfo=local_tz)
 
 
-def _minute(when: datetime | None) -> datetime | None:
-    """A time as files that give one can be compared: in UTC, to the minute (a CSV may print
-    10:30 where the OFX of the same payment gives 10:30:42)."""
-    return None if when is None else when.astimezone(UTC).replace(second=0, microsecond=0)
+type _Time = tuple[datetime, TimePrecision] | None
+
+
+def _time(row: ParsedRow) -> _Time:
+    if row.occurred_at is None or row.time_precision is None:
+        return None
+    return row.occurred_at, row.time_precision
+
+
+def _precision(stored: str | None) -> TimePrecision | None:
+    """A stored precision (the table's CHECK keeps it to these)."""
+    assert stored in (None, "minute", "second")
+    return stored
+
+
+def _same_time(
+    a: datetime, a_precision: TimePrecision, b: datetime, b_precision: TimePrecision
+) -> bool:
+    """Whether two stated times can be one payment's: in UTC, to what both files give (a CSV
+    may print 10:30 where the OFX of the same payment gives 10:30:42)."""
+    to_minute = "minute" in (a_precision, b_precision)
+
+    def cut(when: datetime) -> datetime:
+        when = when.astimezone(UTC).replace(microsecond=0)
+        return when.replace(second=0) if to_minute else when
+
+    return cut(a) == cut(b)
+
+
+def _largest_pairing(options: list[list[int]]) -> dict[int, int]:
+    """A pairing of rows with candidates as large as any: options[n] lists the candidates row
+    n may take, best first. A row that took a candidate gives it up for another of its own
+    when that frees it for a row with no other (augmenting paths), so the order the rows come
+    in never leaves one unpaired that a full pairing would pair."""
+    holder: dict[int, int] = {}
+
+    def take(n: int, tried: set[int]) -> bool:
+        for candidate in options[n]:
+            if candidate in tried:
+                continue
+            tried.add(candidate)
+            if candidate not in holder or take(holder[candidate], tried):
+                holder[candidate] = n
+                return True
+        return False
+
+    for n in range(len(options)):
+        take(n, set())
+    return {n: candidate for candidate, n in holder.items()}
 
 
 # Checks ---------------------------------------------------------------------------------
@@ -1513,9 +1559,9 @@ async def _match_covered_days(
     }
     if not days:
         return
-    # Each day's committed rows, as (row id, its file's name, the minute its file gave) by
+    # Each day's committed rows, as (row id, its file's name, the time its file gave) by
     # (day, instrument, quantity).
-    available: dict[_DayKey, list[tuple[UUID, str, datetime | None]]] = defaultdict(list)
+    available: dict[_DayKey, list[tuple[UUID, str, _Time]]] = defaultdict(list)
     for (
         row_id,
         day,
@@ -1523,7 +1569,7 @@ async def _match_covered_days(
         quantity,
         filename,
         occurred_at,
-        stated,
+        precision,
     ) in await session.execute(
         select(
             r.id,
@@ -1532,7 +1578,7 @@ async def _match_covered_days(
             r.quantity,
             b.filename,
             r.occurred_at,
-            r.time_stated,
+            r.time_precision,
         )
         .join(b, b.id == r.batch_id)
         .where(
@@ -1545,7 +1591,8 @@ async def _match_covered_days(
     ):
         # Committed rows have all three (the table's CHECK).
         assert day is not None and instrument_id is not None and quantity is not None
-        when = _minute(occurred_at) if stated else None
+        stated = _precision(precision)
+        when = None if stated is None or occurred_at is None else (occurred_at, stated)
         available[(day, instrument_id, quantity)].append((row_id, filename, when))
 
     def key(row: _Row) -> _DayKey:
@@ -1562,31 +1609,30 @@ async def _match_covered_days(
         for row in rows
         if row.parsed is not None and row.status == "new" and row.parsed.booking_date in days
     ]
-    # Rows giving the same minute pair first; only then does a row pair with one where either
-    # gives no time, so a date-only row never takes the committed row a timed one matches.
+    # A row may pair with a committed row of its key whose time, where both files give one,
+    # is its own; rows giving the same time are tried first. The pairing is as large as any,
+    # so a date-only row never takes the committed row only a timed one fits.
+    groups: dict[_DayKey, list[int]] = defaultdict(list)
+    for n, row in enumerate(pending):
+        groups[key(row)].append(n)
     matched: dict[int, tuple[UUID, str]] = {}
-    for exact in (True, False):
-        for n, row in enumerate(pending):
+    for group_key, members in groups.items():
+        candidates = available.get(group_key, [])
+        options: list[list[int]] = []
+        for n in members:
+            row = pending[n]
             assert row.parsed is not None
-            if n in matched:
-                continue
-            when = _minute(row.parsed.occurred_at)
-            candidates = available.get(key(row), [])
-            match = next(
-                (
-                    e
-                    for e in candidates
-                    if (
-                        (when is not None and e[2] == when)
-                        if exact
-                        else (when is None or e[2] is None)
-                    )
-                ),
-                None,
-            )
-            if match is not None:
-                candidates.remove(match)
-                matched[n] = match[0], match[1]
+            mine = _time(row.parsed)
+            fits: list[tuple[bool, int]] = []
+            for c, (_, _, theirs) in enumerate(candidates):
+                if mine is None or theirs is None:
+                    fits.append((False, c))
+                elif _same_time(*mine, *theirs):
+                    fits.append((True, c))
+            options.append([c for _, c in sorted(fits, key=lambda fit: not fit[0])])
+        for m, c in _largest_pairing(options).items():
+            row_id, filename, _ = candidates[c]
+            matched[members[m]] = row_id, filename
     for n, row in enumerate(pending):
         assert row.parsed is not None
         if n in matched:
@@ -1692,7 +1738,8 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
                 parsed=ParsedRow(
                     position=row.position,
                     booking_date=row.booking_date,
-                    occurred_at=row.occurred_at if row.time_stated else None,
+                    occurred_at=row.occurred_at if row.time_precision else None,
+                    time_precision=_precision(row.time_precision),
                     description=row.description,
                     quantity=row.quantity,
                     fee=row.fee,
@@ -1797,7 +1844,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "booking_date": parsed.booking_date,
         "occurred_at": parsed.occurred_at or _midnight(parsed.booking_date, local_tz),
         "occurred_tz": local_tz.key,
-        "time_stated": parsed.occurred_at is not None,
+        "time_precision": parsed.time_precision,
         "description": parsed.description,
         "quantity": parsed.quantity,
         "fee": parsed.fee,

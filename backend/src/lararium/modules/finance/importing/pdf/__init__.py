@@ -137,7 +137,9 @@ def _row(layout_row: LayoutRow, local_tz: ZoneInfo) -> ParsedRow:
     if layout_row.time_of_day is None:
         return row
     return replace(
-        row, occurred_at=datetime.combine(row.booking_date, layout_row.time_of_day, local_tz)
+        row,
+        occurred_at=datetime.combine(row.booking_date, layout_row.time_of_day, local_tz),
+        time_precision="minute",
     )
 
 

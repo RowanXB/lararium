@@ -633,9 +633,9 @@ balance; otherwise those without the balance
 plus how many identical rows come before it in the same file, so two real identical purchases on
 one day are both imported, and both are duplicates when the file comes again. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
-import's rows by date and amount instead (and time of day to the minute when both give one;
-rows of the same minute pair first, then rows without a time): the matched ones are duplicates and any other is an
-error. A file that lacks a row the earlier import has on those days is refused at upload; if
+import's rows by date and amount instead (and time of day when both give one, to the second
+if both give seconds, else to the minute), pairing as many rows as can be paired: the matched
+ones are duplicates and any other is an error. A file that lacks a row the earlier import has on those days is refused at upload; if
 the new file is right, roll the earlier import back first.
 
 **Example files.** `backend/src/lararium/modules/finance/importing/examples/` holds synthetic

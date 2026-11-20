@@ -765,6 +765,8 @@ class LemfiStatement:
     carry_over: bool = False
     # The page count the footers print, when not the real one (a statement missing a page).
     printed_pages: int | None = None
+    # A page (from 1) whose table header doesn't print as the layout knows it.
+    unreadable_header_page: int | None = None
     extra: list[Extra] = field(default_factory=list[Extra])
 
 
@@ -867,7 +869,8 @@ def lemfi_pdf(statement: LemfiStatement) -> bytes:
         if number > 1:
             pdf.next_page()
             _lemfi_title(pdf, statement)
-            _lemfi_header(pdf, 120.0)
+            if number != statement.unreadable_header_page:
+                _lemfi_header(pdf, 120.0)
             top = 155.0
             for offset, line, size in carried:
                 pdf.text(32.0 if size == 0 else 102.0, top + offset, line, size=size or 10)

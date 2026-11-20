@@ -142,6 +142,16 @@ def test_a_missing_page_refuses_the_statement() -> None:
         _parse(LemfiStatement([ACCOUNT_ROWS], printed_pages=2))
 
 
+def test_a_page_without_a_readable_table_refuses_the_statement() -> None:
+    """Review finding: a second page whose header didn't read was skipped, with the time and
+    lines its first row carried over, and the statement still counted as complete."""
+    pages = [[FROM_SAVINGS, IN_FROM_BANK, OUT_TO_BANK], []]
+    assert _rows(_parse(LemfiStatement(pages, carry_over=True)))[-1].occurred_at is not None
+    statement = LemfiStatement(pages, carry_over=True, unreadable_header_page=2)
+    with pytest.raises(FileFormatError, match="page 2 has no transactions table"):
+        _parse(statement)
+
+
 def test_page_numbers_are_read_from_the_footer_only() -> None:
     """Review finding: a reference printing "Page 1 of 2" refused a whole statement."""
     out = LemfiRow(

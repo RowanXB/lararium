@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import threading
 import time
@@ -9,7 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
@@ -1114,3 +1115,72 @@ async def test_only_assets_and_liabilities_take_imports(
     )
     with pytest.raises(ImportNotAllowedError, match="equity"):
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", account_id=equity.id)
+
+
+async def test_covered_days_find_a_pairing_whatever_the_row_order(
+    run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: the new file's date-only row took the old date-only row, leaving its
+    17:00 row, which only that one fits, to be committed again: two payments became three."""
+    ofx = await _profile(run, format="ofx")
+    old = [("20261110", "10.00", "A"), ("20261110090000", "10.00", "B")]
+    await commit((await stage(ofx, _ofx(old, start="20261110", end="20261110"))).id)
+    new = [("20261110", "10.00", "C"), ("20261110170000", "10.00", "D")]
+    again = await stage(ofx, _ofx(new, start="20261110", end="20261110"))
+    assert again.counts["duplicate"] == 2 and again.counts["new"] == 0
+    await commit(again.id)
+
+
+async def test_covered_days_compare_seconds_when_both_files_give_them(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: two payments at 10:30:05 and 10:30:55, each in its own export, were cut
+    to the same minute and taken for one."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    seconds = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M:%S")
+    header = "Date,Description,Amount\n"
+    await commit((await stage(seconds, header + "10/11/2026 10:30:05,X,10.00\n")).id)
+    later = await stage(seconds, header + "10/11/2026 10:30:55,Y,10.00\n")
+    assert later.counts["new"] == 1
+    await commit(later.id)
+    assert _statuses(await _rows(session, later)) == ["committed"]
+
+
+def _migration(name: str) -> Any:
+    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_0021_backfills_the_time_rows_were_imported_with(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: rows imported before 0021 kept no note of the time their file gave, so
+    a later 17:00 row was taken for a duplicate of a committed 09:00 one."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    header = "Date,Description,Amount\n"
+    minutes = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    dated = await _csv_profile(run, columns=columns)
+    ofx = await _profile(run, format="ofx")
+    batches = {
+        "minute": await stage(minutes, header + "10/11/2026 00:00,Top up,10.00\n"),
+        "second": await stage(
+            ofx, _ofx([("20261111090000", "10.00", "A")], start="20261111", end="20261111")
+        ),
+        None: await stage(dated, header + "12/11/2026,Top up,10.00\n"),
+    }
+    for batch in batches.values():
+        await commit(batch.id)
+    # As 0021 finds them: rows imported before it have no precision.
+    await session.execute(text("UPDATE finance.import_rows SET time_precision = NULL"))
+    await session.execute(text(_migration("0021_finance_import_lemfi_fields").BACKFILL_TIME))
+    for precision, batch in batches.items():
+        stored = select(models.ImportRow.time_precision).where(
+            models.ImportRow.batch_id == batch.id, models.ImportRow.kind == "statement"
+        )
+        assert list(await session.scalars(stored)) == [precision]
+    evening = await stage(minutes, header + "10/11/2026 17:00,Top up,10.00\n")
+    assert evening.counts["new"] == 1
