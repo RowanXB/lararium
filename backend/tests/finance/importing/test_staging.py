@@ -863,6 +863,49 @@ async def test_covered_days_match_by_time_when_both_files_give_one(
     assert again.counts["duplicate"] == 2
 
 
+async def test_a_real_midnight_is_a_time(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a 00:00 row read as having no time at commit's recheck, and was then
+    taken for a duplicate of the committed 17:00 row it was told apart from at staging."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    header = "Date,Description,Amount\n"
+    await commit((await stage(timed, header + "10/11/2026 17:00,Top up,10.00\n")).id)
+    midnight = await stage(timed, header + "10/11/2026 00:00,Top up,10.00\n")
+    assert midnight.counts["new"] == 1
+    await commit(midnight.id)
+    assert _statuses(await _rows(session, midnight)) == ["committed"]
+
+
+async def test_covered_days_pair_exact_times_first(run: Run, stage: Stage, commit: Commit) -> None:
+    """Review findings: a 09:00 row took a committed row without a time, leaving the 17:00
+    row unmatched; a CSV's 10:30 is the OFX's 10:30:42; and one instant on the day clocks go
+    back (00:30 UTC in the OFX, 01:30 BST in the CSV) matches at staging and at commit."""
+    ofx = await _profile(run, format="ofx")
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    header = "Date,Description,Amount\n"
+    content = _ofx(
+        [
+            ("20261110", "10.00", "A"),
+            ("20261110090000", "10.00", "B"),
+            ("20261111103042", "10.00", "C"),
+            ("20261025003000", "10.00", "D"),
+        ],
+        start="20261025",
+        end="20261111",
+    )
+    await commit((await stage(ofx, content, filename="export.ofx")).id)
+    same_day = await stage(timed, header + "10/11/2026 09:00,X,10.00\n10/11/2026 17:00,Y,10.00\n")
+    assert same_day.counts["duplicate"] == 2 and same_day.counts["new"] == 0
+    minute = await stage(timed, header + "11/11/2026 10:30,Z,10.00\n")
+    assert minute.counts["duplicate"] == 1
+    clocks_back = await stage(timed, header + "25/10/2026 01:30,W,10.00\n")
+    assert clocks_back.counts["duplicate"] == 1
+    await commit(clocks_back.id)
+
+
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
     """Money in and straight back out twice a day leaves the same amount, description and
     balance: the time of day the file gives keeps the rows apart, in the file and again."""

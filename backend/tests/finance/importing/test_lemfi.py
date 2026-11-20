@@ -142,6 +142,19 @@ def test_a_missing_page_refuses_the_statement() -> None:
         _parse(LemfiStatement([ACCOUNT_ROWS], printed_pages=2))
 
 
+def test_page_numbers_are_read_from_the_footer_only() -> None:
+    """Review finding: a reference printing "Page 1 of 2" refused a whole statement."""
+    out = LemfiRow(
+        "04 May, 2027",
+        ("Sent money to A Example",),
+        ("Example Bank, 12345678, Page 1 of 2",),
+        paid_out="5.00",
+    )
+    [row] = _rows(_parse(LemfiStatement([[out]], opening="5.00")))
+    assert row.counterparty is not None
+    assert row.counterparty.reference == "Page 1 of 2"
+
+
 def test_details_line_like_a_footer_stays_in_the_row() -> None:
     """Review finding: a details line starting "©" ended the table."""
     out = LemfiRow(

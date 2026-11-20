@@ -1,6 +1,7 @@
 """Finance import fields LemFi statements print: the interest a statement totals apart from
 money in, the bank that holds the account, a rate's validity and how often it pays, and a
-counterparty's masked account ending ("*1234").
+counterparty's masked account ending ("*1234"), and whether a row's file gave its time of
+day (else occurred_at is the day's midnight), which covered-day matching compares.
 
 Numbered after M5's 0019, which isn't on main yet: until it is, this revises 0018, and
 whichever of the two merges later renumbers.
@@ -35,12 +36,16 @@ UPGRADE = [
     """
     ALTER TABLE finance.import_rows
       ADD COLUMN counterparty_account_ending text
-        CHECK (counterparty_account_ending ~ '^[0-9]+$')
+        CHECK (counterparty_account_ending ~ '^[0-9]+$'),
+      ADD COLUMN time_stated boolean NOT NULL DEFAULT false
     """,
 ]
 
 DOWNGRADE = [
-    "ALTER TABLE finance.import_rows DROP COLUMN counterparty_account_ending",
+    """
+    ALTER TABLE finance.import_rows
+      DROP COLUMN counterparty_account_ending, DROP COLUMN time_stated
+    """,
     """
     ALTER TABLE finance.import_statement_rates
       DROP COLUMN valid_from, DROP COLUMN valid_to, DROP COLUMN frequency

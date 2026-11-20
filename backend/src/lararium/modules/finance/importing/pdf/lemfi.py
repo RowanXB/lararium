@@ -72,7 +72,7 @@ _TITLE = re.compile(r"(?:(?P<currency>[A-Z]{3}) Statement|Savings statement)")
 _DAY = re.compile(r"\d{2} [A-Z][a-z]{2}, \d{4}")
 _TIME = re.compile(r"(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)")
 _MONEY = re.compile(r"(?P<currency>[A-Z]{3}) (?P<amount>\S+)")
-_PAGE = re.compile(r"Page (?P<number>\d+) of (?P<total>\d+)")
+_PAGE = re.compile(r"Page (?P<number>\d+) of (?P<total>\d+)$")
 _HEADER_CURRENCY = re.compile(r"\((?P<currency>[A-Z]{3})\)")
 _RATE = re.compile(
     r"(?P<aer>[0-9.]+)% AER \((?P<gross>[0-9.]+)% Gross, paid (?P<frequency>[a-z]+)\) "
@@ -452,12 +452,15 @@ def _table_ends(line: list[Word], columns: _Columns) -> bool:
 
 
 def _check_pages(by_page: dict[int, list[list[Word]]]) -> None:
-    """Every page prints "Page n of N", for all N pages: a statement missing one (a row's
-    last lines, say) would still add up."""
+    """Every page's footer, its last line, ends "Page n of N", for all N pages: a statement
+    missing one (a row's last lines, say) would still add up."""
     total = len(by_page)
     for number in sorted(by_page):
-        printed = [m for line in by_page[number] if (m := _PAGE.search(text(line)))]
-        if [(int(m["number"]), int(m["total"])) for m in printed] != [(number + 1, total)]:
+        printed = _PAGE.search(text(by_page[number][-1]))
+        if printed is None or (int(printed["number"]), int(printed["total"])) != (
+            number + 1,
+            total,
+        ):
             raise FileFormatError(
                 f"page {number + 1} isn't numbered {number + 1} of {total}: "
                 "the statement may be missing a page"

@@ -1148,14 +1148,10 @@ def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
     return datetime.combine(day, time(), tzinfo=local_tz)
 
 
-def _stated_time(
-    occurred_at: datetime | None, day: date | None, zone: str | None
-) -> datetime | None:
-    """The time of day a stored row's file gave, or None. A row without one is stored at its
-    day's midnight, so a real midnight reads as none too: it then matches by day alone."""
-    if occurred_at is None or day is None or zone is None:
-        return None
-    return None if occurred_at == _midnight(day, ZoneInfo(zone)) else occurred_at
+def _minute(when: datetime | None) -> datetime | None:
+    """A time as files that give one can be compared: in UTC, to the minute (a CSV may print
+    10:30 where the OFX of the same payment gives 10:30:42)."""
+    return None if when is None else when.astimezone(UTC).replace(second=0, microsecond=0)
 
 
 # Checks ---------------------------------------------------------------------------------
@@ -1509,10 +1505,18 @@ async def _match_covered_days(
     }
     if not days:
         return
-    # Each day's committed rows, as (row id, its file's name, the time it gave) by (day,
-    # instrument, quantity).
+    # Each day's committed rows, as (row id, its file's name, the minute its file gave) by
+    # (day, instrument, quantity).
     available: dict[_DayKey, list[tuple[UUID, str, datetime | None]]] = defaultdict(list)
-    for row_id, day, instrument_id, quantity, filename, occurred_at, zone in await session.execute(
+    for (
+        row_id,
+        day,
+        instrument_id,
+        quantity,
+        filename,
+        occurred_at,
+        stated,
+    ) in await session.execute(
         select(
             r.id,
             r.booking_date,
@@ -1520,7 +1524,7 @@ async def _match_covered_days(
             r.quantity,
             b.filename,
             r.occurred_at,
-            r.occurred_tz,
+            r.time_stated,
         )
         .join(b, b.id == r.batch_id)
         .where(
@@ -1533,8 +1537,8 @@ async def _match_covered_days(
     ):
         # Committed rows have all three (the table's CHECK).
         assert day is not None and instrument_id is not None and quantity is not None
-        stated = _stated_time(occurred_at, day, zone)
-        available[(day, instrument_id, quantity)].append((row_id, filename, stated))
+        when = _minute(occurred_at) if stated else None
+        available[(day, instrument_id, quantity)].append((row_id, filename, when))
 
     def key(row: _Row) -> _DayKey:
         assert row.parsed is not None and row.instrument_id is not None
@@ -1545,15 +1549,40 @@ async def _match_covered_days(
     claimed = {row.duplicate_of for row in rows if row.duplicate_of is not None}
     for pool in available.values():
         pool[:] = [entry for entry in pool if entry[0] not in claimed]
-    for row in rows:
-        if row.parsed is None or row.status != "new" or row.parsed.booking_date not in days:
-            continue
-        when = row.parsed.occurred_at
-        candidates = available.get(key(row), [])
-        match = next((e for e in candidates if when is None or e[2] is None or e[2] == when), None)
-        if match is not None:
-            candidates.remove(match)
-            row_id, filename, _ = match
+    pending = [
+        row
+        for row in rows
+        if row.parsed is not None and row.status == "new" and row.parsed.booking_date in days
+    ]
+    # Rows giving the same minute pair first; only then does a row pair with one where either
+    # gives no time, so a date-only row never takes the committed row a timed one matches.
+    matched: dict[int, tuple[UUID, str]] = {}
+    for exact in (True, False):
+        for n, row in enumerate(pending):
+            assert row.parsed is not None
+            if n in matched:
+                continue
+            when = _minute(row.parsed.occurred_at)
+            candidates = available.get(key(row), [])
+            match = next(
+                (
+                    e
+                    for e in candidates
+                    if (
+                        (when is not None and e[2] == when)
+                        if exact
+                        else (when is None or e[2] is None)
+                    )
+                ),
+                None,
+            )
+            if match is not None:
+                candidates.remove(match)
+                matched[n] = match[0], match[1]
+    for n, row in enumerate(pending):
+        assert row.parsed is not None
+        if n in matched:
+            row_id, filename = matched[n]
             row.status, row.duplicate_of = "duplicate", row_id
             row.note = f"already imported from {filename}"
             continue
@@ -1655,7 +1684,7 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
                 parsed=ParsedRow(
                     position=row.position,
                     booking_date=row.booking_date,
-                    occurred_at=_stated_time(row.occurred_at, row.booking_date, row.occurred_tz),
+                    occurred_at=row.occurred_at if row.time_stated else None,
                     description=row.description,
                     quantity=row.quantity,
                     fee=row.fee,
@@ -1757,6 +1786,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "booking_date": parsed.booking_date,
         "occurred_at": parsed.occurred_at or _midnight(parsed.booking_date, local_tz),
         "occurred_tz": local_tz.key,
+        "time_stated": parsed.occurred_at is not None,
         "description": parsed.description,
         "quantity": parsed.quantity,
         "fee": parsed.fee,
