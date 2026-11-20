@@ -32,7 +32,7 @@ Why build it rather than use an existing open-source project: Firefly III leans 
 
 1. **A trustworthy net-worth view**: for any day (including past dates), the balance and valuation of every account, every asset and every currency, aggregated in the reporting currency. How far back history goes depends on what each data source can actually provide; there is no fixed starting point.
 2. **Connect all financial data sources**:
-   - Automatic: Monzo, IBKR (Flex Web Service), Binance, SnapTrade Personal (other brokers), eToro (§7.6), self-custodied wallets (read-only).
+   - Automatic: Monzo, IBKR (Flex Web Service), Binance, SnapTrade Personal (other brokers), eToro and Trading 212 (§7.6), self-custodied wallets (read-only).
    - Manual import: banks that can export CSV or OFX.
    - Manual balance snapshots: accounts that can only export PDF, or whose statements can only be viewed in the app; plus assets that have no transactions, such as fixed-term deposits, pensions and property.
 3. **The Monzo self-transfer rule**: when Monzo transfers money to one of the user's own other accounts, or receives money from one, the counterpart account's balance increases or decreases accordingly and automatically; when the counterpart account has its own data source, nothing may be counted twice. See §8.
@@ -79,7 +79,8 @@ Why build it rather than use an existing open-source project: Firefly III leans 
   - **IBKR**: Flex Web Service tokens are generated in Client Portal, with a selectable validity from 6 hours to 1 year, and can be bound to an IP. Data is end-of-day. The Web API / TWS used by individual accounts requires a gateway login and periodic re-authentication (including 2FA), which makes it unsuitable for unattended operation.
   - **Binance**: read-only API key; binding an IP whitelist is recommended (this requires a fixed egress IP). Trade history can only be fetched one trading pair at a time.
   - **SnapTrade Personal**: free, up to 20 broker connections, but the pricing page says "free for a limited time". Choose read-only (`connectionType=read`) when connecting a broker. The data available differs by broker; for example, some brokers provide only holdings and no transaction history.
-  - **eToro**: has its own public API, authenticated with a Public API Key plus a User Key, which can read positions, balances, P&L and transaction history. It has not yet been established whether this key can be set to read-only. SnapTrade also supports eToro, with read-only access.
+  - **eToro**: has its own public API, authenticated with a Public API Key plus a User Key, which can read positions, balances, P&L and transaction history. Its portal offers a "Read" permission when a key is created (seen 2026-11-18, not yet verified: cash transactions may need a scope of their own). SnapTrade also supports eToro, with read-only access.
+  - **Trading 212** (added 2026-11-18): has its own public API with an API key whose permissions are chosen per scope, so a key can be read-only; history (orders, dividends, transactions) is paginated by cursor. It covers Invest and Stocks ISA accounts only. Re-verify before M6.
   - **On-chain data**: third-party APIs change. For example, Etherscan moved Base, BNB, OP and other chains out of its free tier at the end of 2025.
   - **Manual import**: export formats vary widely between institutions: some can export CSV, OFX or QIF, some only have PDF statements, and some fintech apps only allow downloading statements inside the app. The import design must be configured per institution and must not assume any single format.
   - **Future automatic sync**: GoCardless Bank Account Data has stopped accepting new sign-ups. Enable Banking has a "restricted mode": it can only read accounts you have linked yourself, its terms state it is for evaluation or personal use only, the number of linked accounts may be limited, and each authorisation lasts at most 90 days; the official pages do not state a price for this mode, and the claim that it is "free" comes from third-party documentation. Its officially stated coverage is 30 countries in the European Economic Area (EEA); the UK is not among them, and whether UK banks are supported has not been confirmed.
@@ -89,7 +90,7 @@ Why build it rather than use an existing open-source project: Firefly III leans 
 ### 4.1 How data flows
 
 ```
-Sources      Monzo · IBKR Flex · Binance · SnapTrade · eToro · on-chain
+Sources      Monzo · IBKR Flex · Binance · SnapTrade · eToro · Trading 212 · on-chain
    │         CSV/OFX upload · manual snapshots
    │         scheduled pull │ webhook = "sync now" │ file → staging → review
    ▼
@@ -137,7 +138,7 @@ The specific libraries are default choices; the implementer may replace them wit
 | Background jobs | Procrastinate (uses Postgres as the queue; supports scheduled jobs, retries and locks) |
 | Database | PostgreSQL 18+ (uses `uuidv7()`, `NUMERIC`, `JSONB`, `LISTEN/NOTIFY`) |
 | Frontend | React + Vite + TanStack Router / Query / Table + shadcn/ui + ECharts; TypeScript client generated from OpenAPI |
-| Data source SDKs | Binance: CCXT plus a few native SAPI calls; SnapTrade: official Python SDK; eToro, Monzo, IBKR Flex: direct HTTP calls |
+| Data source SDKs | Binance: CCXT plus a few native SAPI calls; SnapTrade: official Python SDK; eToro, Trading 212, Monzo, IBKR Flex: direct HTTP calls |
 | On-chain data | BTC: descriptor-derived addresses (e.g. bdkpython or embit), with balance lookups through an Esplora-compatible API or a self-hosted Electrum server; EVM chains: data services such as Alchemy or Blockscout; all behind replaceable interfaces |
 | Crypto prices | CoinGecko (the free tier is enough), with Binance public market data as a supplement |
 | Deployment | Docker Compose: postgres, api, worker, webhook-in, web (Caddy), cloudflared |
@@ -261,16 +262,14 @@ Every object has an `owner` field, which defaults to the entity representing the
 ### 7.3 IBKR (Flex Web Service)
 
 - **Credentials**: the Flex token and query ID, stored as credentials.
-- **Two kinds of Flex Query**:
-  - Activity: positions, cash per currency, trades, cash transactions (deposits and withdrawals, dividends, withholding tax, interest, fees), corporate actions, FX rates.
-  - Trade Confirmation: the day's trades.
+- **One Activity Flex Query**: positions, cash per currency, trades, cash transactions (deposits and withdrawals, dividends, withholding tax, interest, fees), corporate actions, transfers, FX rates, daily prices and NAV. The Trade Confirmation query is not used: it only adds same-day trades, and end-of-day valuation is enough (decided 2026-11-18; M5 design `2026-11-18-ibkr-flex-design.md`).
 - **Flow**: call SendRequest first, then GetStatement, in two steps. Run daily after IBKR has generated its statements. The original XML is stored as a document, and the parsed results are stored as raw records.
 - **Mapping**:
   - Each IBKR account → broker account, with multi-currency cash.
   - Positions → institution-reported snapshots, with the cost basis reported by IBKR and the day's price attached.
   - Trades → transactions with cost, commission, and the FX rate at execution.
   - Deposits and withdrawals → the other side of a transfer match, paired with outgoing transfers from Monzo.
-- **History**: a single Flex query has a maximum time range, which needs to be verified. Older history can be fetched in segments, or exported from Client Portal and brought in through manual import.
+- **History**: one request covers at most 365 days (its dates are given in the request), and IBKR serves history back to the start of the fourth previous calendar year (checked 2026-11-18), so older history is fetched in 365-day windows.
 - **Token expiry**: record the expiry date and send a reminder two weeks in advance.
 
 ### 7.4 Binance
@@ -290,7 +289,7 @@ Every object has an `owner` field, which defaults to the entity representing the
 - **Avoid duplication**: IBKR is already connected directly and must not be connected again through SnapTrade; each account can only have one authoritative source.
 - **Replaceable**: the pricing page says "free for a limited time", so it is only a connector that can be swapped out.
 
-### 7.6 eToro
+### 7.6 eToro and Trading 212
 
 There are two paths, chosen according to the read-only constraint:
 
@@ -298,6 +297,8 @@ There are two paths, chosen according to the read-only constraint:
 - **Otherwise, through SnapTrade**: SnapTrade's access to eToro is read-only.
 
 The implementer must first verify whether an eToro key can be restricted to read-only, and only then decide which path to take. The two paths must not both record entries at the same time.
+
+**Trading 212** (added 2026-11-18) is connected through its own public API with a read-only key, covering its Invest and Stocks ISA accounts. Both brokers are M6.
 
 ### 7.7 Self-custodied wallets
 
@@ -356,7 +357,7 @@ This is a **generic engine** in the core; Monzo is just the first data source to
 - **Valuation** = quantity × the most recent price on or before that day × the most recent FX rate on or before that day (converting from the quote currency to the reporting currency).
 - **Sources of prices and FX rates**:
   - Daily prices and FX rates from IBKR Flex.
-  - Holding prices reported by SnapTrade and eToro.
+  - Holding prices reported by SnapTrade, eToro and Trading 212.
   - Crypto assets: CoinGecko (by asset ID or contract address), with Binance public market data as a supplement.
   - ECB reference rates (e.g. obtained through Frankfurter), for common currencies. Currencies the ECB does not cover (e.g. some African and South American currencies) need a separate FX source, chosen by the implementer.
   - Manually entered prices and valuations.
@@ -467,11 +468,12 @@ For these modules, Phase 1 must:
 - **M2 Manual import**: generic CSV mapper, OFX, QIF and midata parsing, PDF statements of the owner's banks (HSBC UK, Lloyds, BOC UK) through per-bank layouts, staging review, batch rollback; example profiles with synthetic data only.
 - **M3 Monzo**: OAuth, backfill within the 5-minute window, incremental sync, pots, the webhook receiver, re-authorisation reminders.
 - **M4 Transfer matching**: registry, inferred postings, the in-transit clearing account, intermediary institutions, review UI. The Monzo self-transfer rule works end to end at this step: tests in the repository use synthetic statements, and the user separately verifies it locally with their own real statements.
-- **M5 IBKR Flex**: positions, cash, trades, deposits and withdrawals; prices and FX rates; valuation; pairing with outgoing transfers from Monzo.
-- **M6 Binance**: balance snapshots for each wallet, deposits and withdrawals, CoinGecko prices.
-- **M7 Self-custodied wallets**: BTC (xpub / descriptor) and EVM chains; pairing with Binance withdrawals and deposits by transaction hash.
-- **M8 Brokers**: SnapTrade (the brokers the user connects) and eToro (path chosen per §7.6).
-- **M9 Wrap-up**: reconciliation alerts, Beancount and Parquet export, restore rehearsal, dependency license scan.
+- **M5 IBKR Flex**: positions, cash, trades, deposits and withdrawals; prices and FX rates; valuation; pairing with outgoing transfers from Monzo (design: `2026-11-18-ibkr-flex-design.md`).
+- **M6 eToro and Trading 212**: each through its own API (path for eToro per §7.6); transfers whose two sides differ in currency or amount, with FX and fee postings.
+- **M7 Binance**: balance snapshots for each wallet, deposits and withdrawals, CoinGecko prices.
+- **M8 Self-custodied wallets**: BTC (xpub / descriptor) and EVM chains; pairing with Binance withdrawals and deposits by transaction hash.
+- **M9 SnapTrade**: the other brokers the user connects.
+- **M10 Wrap-up**: reconciliation alerts, Beancount and Parquet export, restore rehearsal, dependency license scan.
 
 The roadmap after that:
 
@@ -481,7 +483,7 @@ The roadmap after that:
 ## 14. Acceptance criteria
 
 - For any chosen day, the net worth computed by the system matches a manual calculation, within the tolerance.
-- Each data source's balances match what the institution itself reports: Monzo must match exactly; IBKR must match the NAV it reports, Binance, SnapTrade and eToro their reported balances and holdings, and wallets the balances shown on block explorers, each within the tolerance.
+- Each data source's balances match what the institution itself reports: Monzo must match exactly; IBKR must match the NAV it reports, Binance, SnapTrade, eToro and Trading 212 their reported balances and holdings, and wallets the balances shown on block explorers, each within the tolerance.
 - Transfer money from Monzo to a manually imported bank account: both balances change correctly; importing that bank's CSV afterwards does not create duplicate entries.
 - Transfer money from Monzo to IBKR: the money first appears in the in-transit account; once IBKR reports the deposit, it is paired automatically. Throughout the process, net worth neither loses a chunk out of nowhere nor counts anything twice.
 - Withdraw crypto from Binance to your own wallet: both sides are paired automatically by transaction hash, and gas fees and service fees are recorded separately.
@@ -496,7 +498,7 @@ The roadmap after that:
 
 | Decision | Status |
 |---|---|
-| Aggregate and track all assets; data sources include Monzo, IBKR, Binance, SnapTrade Personal, eToro, self-custodied wallets, plus manual import and balance snapshots for banks | Requirement |
+| Aggregate and track all assets; data sources include Monzo, IBKR, Binance, SnapTrade Personal, eToro, Trading 212 (added 2026-11-18), self-custodied wallets, plus manual import and balance snapshots for banks | Requirement |
 | Monzo self-transfers automatically increase or decrease the counterpart account's balance | Requirement |
 | Extend into a personal OS later; prioritise forward compatibility at this stage | Requirement |
 | Open source under AGPL-3.0-or-later; bring your own credentials, self-deploy, no hosted service | Confirmed |
@@ -517,7 +519,7 @@ The roadmap after that:
 | Joint accounts count 100% in Phase 1 | Default |
 | All test data is synthetic; personal notes go in `private/`, which is not tracked by git | Confirmed |
 | Documentation is in English. Only the README also has a Chinese translation, `README.zh-CN.md` (changed 2026-11-14: every doc used to have a `*.zh-CN.md` translation) | Confirmed |
-| Milestone order (M0–M9) and the roadmap after it | Default |
+| Milestone order (M0–M10) and the roadmap after it; eToro and Trading 212 moved up to M6, before Binance (2026-11-18) | Default |
 | Project name: Lararium (renamed from financial-gate before publication); the future AI assistant module is named `lares` | Confirmed |
 | A posting's cost or price is in another instrument than the posting's own; otherwise it could rescale the quantity and balance anything. The database enforces this too | Default |
 | An instrument has an ISO 4217 code if and only if it is a fiat currency | Default |
@@ -531,6 +533,9 @@ The roadmap after that:
 | A snapshots-mode account carries no identifiers, as valuation ignores its postings; it is switched to `hybrid` first (2026-11-15) | Confirmed |
 | Counterparty bank accounts live in the "my accounts" registry as typed fields (a row per bank account any source names, assigned to an own account or not), and transactions reference them; no JSON (2026-11-15) | Confirmed |
 | Transfer matching links two records only on a match unique from both sides; anything ambiguous goes to review (2026-11-15) | Confirmed |
+| IBKR's records are the ledger's truth (`transactions` mode, as Monzo); its reported positions and cash are `reported` snapshots that reconcile them after every sync (2026-11-18, M5) | Confirmed |
+| IBKR uses one Activity Flex query, synced daily; no Trade Confirmation query (2026-11-18, M5) | Default |
+| Transfers whose two sides differ in currency or amount, with FX and fee postings, come in M6 (2026-11-18; M4 had left them to M5, and IBKR transfers are same-currency) | Confirmed |
 
 ## 16. Left to the implementer
 
@@ -549,7 +554,7 @@ The roadmap after that:
 ## 17. Open questions (not blocking the start of work)
 
 - **Automatic sync for UK banks** (only needed in Phase 2): Enable Banking's officially stated coverage is 30 EEA countries; the UK is not in the EEA, and whether UK banks are supported has not been confirmed. When Phase 2 comes, one can register and check the available banks by country in its console; if the UK is not supported, look for another aggregator that covers the UK and is available to individuals.
-- **Whether an eToro key can be set to read-only**: verify before implementing M8.
+- **Whether an eToro key can be set to read-only**: its portal offers a "Read" permission (seen 2026-11-18); verify, including the cash-transactions scope, before implementing M6.
 - **Ingress hardening (decided 2026-11-15: accepted on a trusted LAN).** The API trusts the `Tailscale-User-Login` header, so anything that reaches Caddy or the api without going through `tailscale serve` can claim to be the owner. Two things can reach them:
   1. **Other machines on the LAN, when the host runs Linux with Docker Engine older than 28.** When the host's iptables `FORWARD` policy is `ACCEPT`, those versions let a LAN machine that adds a route reach container addresses directly: past a `127.0.0.1` binding, and to ports that aren't published at all, the api's included. The Synology NAS (Docker 24) was checked on 2026-11-15: forwarding on, `FORWARD` `ACCEPT`, `DOCKER-USER` empty. Docker Desktop (macOS, Windows) is not affected. A Tailscale sidecar would remove only the published port, not this route, and the NAS already runs Tailscale, so no sidecar is built; the NAS uses the host's `tailscale serve`. Accepted while the LAN is trusted: no devices the owner doesn't control, guest Wi-Fi isolated. If that stops holding, upgrade Docker to 28 or later, or add a `DOCKER-USER` rule dropping new connections from the LAN into Lararium's bridges only (one over every Docker bridge would also cut off other containers' published ports; Synology resets iptables on boot, so it needs a boot-up task). Reassess when any of these happens: a device the owner doesn't trust joins the LAN; the NAS moves to another network (a different home or office network, or one shared with others); Docker on the host is upgraded to 28 or later, which closes the route, so check that it did and record it here.
   2. **Any process on the host itself.** Accepted on a single-user host.
