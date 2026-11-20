@@ -226,16 +226,20 @@ async def publish(
     ctx: SyncContext, connection: ConnectionRecord, checked: Checked, flagged: Iterable[str]
 ) -> None:
     """Replace the connection's own warnings (flags and reconciliation differences, by their
-    prefixes) with this run's, keeping warnings of other origins; and tell the owner about
-    each flag and difference whose text was not among the previous warnings."""
+    prefixes) with this run's, keeping warnings of other origins; and tell the owner, in one
+    message, about each flag and difference whose text was not among the previous warnings."""
     previous = connection.warnings
     warnings = [w for w in previous if not w.startswith((FLAGGED_PREFIX, WARNING_PREFIX))]
-    flags = [FLAGGED_PREFIX + name for name in sorted(flagged)]
+    names = sorted(flagged)
+    flags = [FLAGGED_PREFIX + name for name in names]
     differences = list(dict.fromkeys(m.warning for m in checked.mismatches))
     warnings += flags + differences
-    told = dict.fromkeys([*flags, *differences, *(m.warning for m in checked.found)])
-    for warning in told:
-        if warning not in previous:
-            await _notify(ctx, f"{connection.display_name}: {warning}")
+    # A new query can flag dozens of fields at once: they share one line.
+    new_names = [name for name, flag in zip(names, flags, strict=True) if flag not in previous]
+    lines = [FLAGGED_PREFIX + ", ".join(new_names)] if new_names else []
+    told = dict.fromkeys([*differences, *(m.warning for m in checked.found)])
+    lines += [warning for warning in told if warning not in previous]
+    if lines:
+        await _notify(ctx, f"{connection.display_name}: " + "\n".join(lines))
     if warnings != previous:
         await set_warnings(ctx.command, connection.id, warnings)
