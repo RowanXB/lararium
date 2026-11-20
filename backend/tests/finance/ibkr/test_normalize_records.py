@@ -673,7 +673,14 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             position="4",
             costBasisPrice="101.5",
         ),
-        RowSpec("CashReportCurrency", "U0000001", startingCash="150", endingCash="200"),
+        RowSpec(
+            "CashReportCurrency",
+            "U0000001",
+            startingCash="150",
+            endingCash="200",
+            endingCashCom="0",
+            endingCashSec="200",
+        ),
         RowSpec(
             "CashReportCurrency", "U0000001", currency="USD", startingCash="0", endingCash="-5"
         ),
@@ -731,14 +738,14 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
     assert lots[0][0].startswith("sha256:") and lots[0][1:] == (Decimal("4"), Decimal("101.5"))
     reports = await session.execute(
         text(
-            "select i.symbol, c.from_date, c.to_date, c.starting_cash, c.ending_cash"
-            " from finance.ibkr_cash_reports c"
+            "select i.symbol, c.from_date, c.to_date, c.starting_cash, c.ending_cash,"
+            " c.ending_cash_com, c.ending_cash_sec from finance.ibkr_cash_reports c"
             " join finance.instruments i on i.id = c.currency_instrument_id order by i.symbol"
         )
     )
     assert [tuple(r) for r in reports] == [
-        ("GBP", DAY, DAY, Decimal("150"), Decimal("200")),
-        ("USD", DAY, DAY, Decimal("0"), Decimal("-5")),
+        ("GBP", DAY, DAY, Decimal("150"), Decimal("200"), Decimal("0"), Decimal("200")),
+        ("USD", DAY, DAY, Decimal("0"), Decimal("-5"), None, None),
     ]
     nav = (
         await session.execute(
@@ -1106,7 +1113,7 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     rows = [RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001")]
     await _sync(session, connection, tmp_path, rows)
     stored = await get_connection(session, connection.id)
-    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-2"
+    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-3"
     # An older version that did not fill ibkr_trades: the next run, with nothing new,
     # replays every raw record of the connection and fills it in.
     await session.execute(text("delete from finance.ibkr_trades"))
