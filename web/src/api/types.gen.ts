@@ -369,15 +369,41 @@ export type CsvColumns = {
 };
 
 /**
+ * CsvExtract
+ *
+ * Typed fields read out of one column: the first pattern that matches a non-empty cell
+ * in full fills the fields its named groups name (those that match); a cell no pattern
+ * matches makes the row an error.
+ */
+export type CsvExtract = {
+    /**
+     * Column
+     */
+    column: string;
+    /**
+     * Patterns
+     */
+    patterns: Array<Pattern>;
+};
+
+/**
  * CsvProfileConfig
  */
 export type CsvProfileConfig = {
     amount_format?: AmountFormat;
     card_types?: CardTypes;
     columns: CsvColumns;
+    /**
+     * Currency
+     */
+    currency?: string | null;
     date_format: DateFormat;
     delimiter?: Delimiter;
     encoding?: Encoding;
+    /**
+     * Extract
+     */
+    extract?: Array<CsvExtract>;
     /**
      * Format
      */
@@ -823,6 +849,10 @@ export type ImportRowOut = {
      */
     check_number: string | null;
     /**
+     * Counterparty Account Ending
+     */
+    counterparty_account_ending: string | null;
+    /**
      * Counterparty Account Number
      */
     counterparty_account_number: string | null;
@@ -985,6 +1015,10 @@ export type ImportStatementOut = {
      */
     available_balance_date: string | null;
     /**
+     * Bank
+     */
+    bank: string | null;
+    /**
      * Bic
      */
     bic: string | null;
@@ -1020,6 +1054,10 @@ export type ImportStatementOut = {
      * Iban
      */
     iban: string | null;
+    /**
+     * Interest
+     */
+    interest: string | null;
     /**
      * Money In
      */
@@ -1087,6 +1125,10 @@ export type ImportStatementRateOut = {
      */
     ear: string | null;
     /**
+     * Frequency
+     */
+    frequency: string | null;
+    /**
      * Kind
      */
     kind: string;
@@ -1094,6 +1136,14 @@ export type ImportStatementRateOut = {
      * Rate
      */
     rate: string | null;
+    /**
+     * Valid From
+     */
+    valid_from: string | null;
+    /**
+     * Valid To
+     */
+    valid_to: string | null;
 };
 
 /**
@@ -1233,6 +1283,8 @@ export type OfxProfileConfig = {
     timezone?: TimezoneName | null;
 };
 
+export type Pattern = string;
+
 /**
  * PdfProfileConfig
  */
@@ -1245,7 +1297,7 @@ export type PdfProfileConfig = {
     /**
      * Layout
      */
-    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'tembo_statement';
+    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
 

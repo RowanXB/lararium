@@ -101,6 +101,7 @@ class ImportRowRecord:
     counterparty_sort_code: str | None
     counterparty_account_number: str | None
     counterparty_bank: str | None
+    counterparty_account_ending: str | None
     payment_reference: str | None
     payment_kind: str | None
     bank_reference: str | None
@@ -130,6 +131,7 @@ class StatementRecord:
     closing_balance_date: date | None
     money_in: Decimal | None
     money_out: Decimal | None
+    interest: Decimal | None
     payments_in: int | None
     payments_out: int | None
     statement_reference: str | None
@@ -143,6 +145,7 @@ class StatementRecord:
     customer_number: str | None
     clearing_account_number: str | None
     branch: str | None
+    bank: str | None
     addressee: str | None
     address: str | None
     overdraft_limit: Decimal | None
@@ -198,12 +201,23 @@ def _hash(*parts: str) -> str:
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
-def dedupe_key(account_id: UUID, row: ParsedRow, currency: str, occurrence: int) -> str:
+def _same_row(row: ParsedRow, currency: str, timed: bool = False) -> tuple[str, ...]:
+    """What tells a row from others without an external id: its day, amount, currency and
+    description, and its time of day when timed (see _deduplicate)."""
+    day = (row.booking_date.isoformat(),)
+    if timed and row.occurred_at is not None:
+        day += (row.occurred_at.astimezone(UTC).isoformat(),)
+    return (*day, _plain(row.quantity), currency, _text(row.description))
+
+
+def dedupe_key(
+    account_id: UUID, row: ParsedRow, currency: str, occurrence: int, timed: bool = False
+) -> str:
     """Decision 5: by external id, else by running balance, else by occurrence in the file."""
     account = str(account_id)
     if row.external_id is not None:
         return _hash("ext", account, row.external_id)
-    common = (row.booking_date.isoformat(), _plain(row.quantity), currency, _text(row.description))
+    common = _same_row(row, currency, timed)
     if row.balance is not None:
         return _hash("bal", account, *common, _plain(row.balance))
     return _hash("seq", account, *common, str(occurrence))
@@ -401,12 +415,31 @@ async def _load_batches(
         counts[batch_id][cast(RowStatus, status)] = n
     rates: dict[UUID, list[StatementRate]] = defaultdict(list)
     for rate in await session.execute(
-        select(q.batch_id, q.kind, q.band_from, q.band_to, q.rate, q.ear)
+        select(
+            q.batch_id,
+            q.kind,
+            q.band_from,
+            q.band_to,
+            q.rate,
+            q.ear,
+            q.valid_from,
+            q.valid_to,
+            q.frequency,
+        )
         .where(q.batch_id.in_(ids))
         .order_by(q.batch_id, q.position)
     ):
         rates[rate.batch_id].append(
-            StatementRate(rate.kind, rate.band_from, rate.band_to, rate.rate, rate.ear)
+            StatementRate(
+                rate.kind,
+                rate.band_from,
+                rate.band_to,
+                rate.rate,
+                rate.ear,
+                rate.valid_from,
+                rate.valid_to,
+                rate.frequency,
+            )
         )
     statements: dict[UUID, StatementRecord] = {}
     columns = [getattr(s, name) for name in _STATEMENT_FIELDS]
@@ -1337,7 +1370,7 @@ def _classify(statement: ParsedStatement) -> list[_Row]:
 async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]) -> None:
     """Zero rows are skipped; the rest get a key (Decision 5). A key that repeats within the
     file is an error; a key a committed row has is a duplicate."""
-    occurrences: Counter[tuple[str, ...]] = Counter()
+    keyed: list[tuple[_Row, ParsedRow, str]] = []
     for row in rows:
         parsed = row.parsed
         if parsed is None or row.status != "new" or row.currency is None:
@@ -1345,13 +1378,24 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
         if parsed.quantity == 0 and parsed.fee == 0:
             row.status, row.note = "skipped", "zero amount"
             continue
-        same = (
-            parsed.booking_date.isoformat(),
-            _plain(parsed.quantity),
-            row.currency,
-            _text(parsed.description),
-        )
-        row.dedupe_key = dedupe_key(account_id, parsed, row.currency, occurrences[same])
+        keyed.append((row, parsed, row.currency))
+
+    def balance_key(parsed: ParsedRow, currency: str) -> tuple[str, ...] | None:
+        """The fields of the key by balance, for a row keyed so (dedupe_key)."""
+        if parsed.external_id is not None or parsed.balance is None:
+            return None
+        return (*_same_row(parsed, currency), _plain(parsed.balance))
+
+    # A balance can come back (a debit, its refund, the same debit): only the time of day,
+    # when the file gives one, tells such rows apart. It goes into their keys alone, so every
+    # key a committed row can have stays as it was (such a file was refused before).
+    balances = Counter(balance_key(parsed, currency) for _, parsed, currency in keyed)
+    occurrences: Counter[tuple[str, ...]] = Counter()
+    for row, parsed, currency in keyed:
+        bal = balance_key(parsed, currency)
+        timed = bal is not None and balances[bal] > 1
+        same = _same_row(parsed, currency)
+        row.dedupe_key = dedupe_key(account_id, parsed, currency, occurrences[same], timed)
         occurrences[same] += 1
     await _mark_duplicates(session, account_id, [row for row in rows if row.dedupe_key])
 
@@ -1382,8 +1426,9 @@ async def _mark_duplicates(session: AsyncSession, account_id: UUID, keyed: list[
             row.fail(
                 f"the file lists transaction id {external_id} twice"
                 if external_id is not None
-                else "the file lists this row twice, with the same date, amount, description "
-                "and balance"
+                else "the file lists this row twice, with the same date"
+                + (", time" if row.parsed.occurred_at is not None else "")
+                + ", amount, description and balance"
             )
         elif row.dedupe_key in committed:
             row_id, quantity, instrument_id, filename = committed[row.dedupe_key]
@@ -1730,6 +1775,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "counterparty_sort_code": counterparty and counterparty.sort_code,
         "counterparty_account_number": counterparty and counterparty.account_number,
         "counterparty_bank": counterparty and counterparty.bank,
+        "counterparty_account_ending": counterparty and counterparty.account_ending,
         "payment_reference": counterparty and counterparty.reference,
         "payment_kind": parsed.payment_kind,
         "bank_reference": parsed.bank_reference,
@@ -1753,6 +1799,7 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
         "closing_balance_date": statement.closing_balance_date,
         "money_in": statement.money_in,
         "money_out": statement.money_out,
+        "interest": statement.interest,
         "payments_in": statement.payments_in,
         "payments_out": statement.payments_out,
         "statement_reference": statement.statement_reference,
@@ -1766,6 +1813,7 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
         "customer_number": account.customer_number,
         "clearing_account_number": account.clearing_account_number,
         "branch": account.branch,
+        "bank": account.bank,
         "addressee": account.addressee,
         "address": account.address,
         "overdraft_limit": statement.overdraft_limit,
@@ -1957,6 +2005,9 @@ async def stage_import(
                         "band_to": rate.band_to,
                         "rate": rate.rate,
                         "ear": rate.ear,
+                        "valid_from": rate.valid_from,
+                        "valid_to": rate.valid_to,
+                        "frequency": rate.frequency,
                     }
                     for position, rate in enumerate(statement.rates)
                 ],

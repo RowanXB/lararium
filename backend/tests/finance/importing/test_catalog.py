@@ -23,7 +23,7 @@ def test_every_config_validates() -> None:
 def test_one_recommended_format_per_institution() -> None:
     recommended = Counter(entry.institution for entry in CATALOG if entry.recommended)
     institutions = {entry.institution for entry in CATALOG}
-    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "Tembo"}
+    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "Tembo", "LemFi"}
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
 
@@ -37,6 +37,7 @@ def test_decision_14_formats() -> None:
         "Lloyds": ["csv", "pdf", "qif"],
         "BOC UK": ["pdf"],
         "Tembo": ["pdf"],
+        "LemFi": ["csv", "pdf"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
     assert recommended == {
@@ -44,6 +45,7 @@ def test_decision_14_formats() -> None:
         ("Lloyds", "csv"),
         ("BOC UK", "pdf"),
         ("Tembo", "pdf"),
+        ("LemFi", "pdf"),
     }
 
 

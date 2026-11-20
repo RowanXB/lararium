@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from lararium.modules.finance.errors import FileFormatError
+from lararium.modules.finance.errors import EmptyStatementError, FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.csv_parser import parse_csv
 from lararium.modules.finance.importing.parsed import (
@@ -148,7 +148,8 @@ def test_missing_column_is_file_error() -> None:
 
 
 def test_empty_file_is_file_error() -> None:
-    with pytest.raises(FileFormatError, match="no rows"):
+    # A header and no rows: an export of a period without transactions, nothing to import.
+    with pytest.raises(EmptyStatementError, match="lists no transactions"):
         _parse(b"Date,Description,Amount\n\n,,\n")
     with pytest.raises(FileFormatError, match="no rows"):
         _parse(b"")
@@ -347,6 +348,33 @@ def test_missing_footer_refuses_rather_than_drops_a_row() -> None:
         _parse(no_footer, **MIDATA_CONFIG, **label)
 
 
+def test_one_row_without_its_footer_is_not_an_empty_statement() -> None:
+    """Review finding: with one row and no footer, the row was cut off as the footer and the
+    file then read as empty, which real-check counts rather than fails."""
+    one_row = b"Date,Type,Merchant/Description,Debit/Credit,Balance\n" + (
+        "2026-11-03,DD,EXAMPLE ENERGY,-£40.00,£960.00\n".encode()
+    )
+    with pytest.raises(FileFormatError, match="reads as a transaction") as raised:
+        _parse(one_row, **MIDATA_CONFIG)
+    assert not isinstance(raised.value, EmptyStatementError)
+    only_footer = MIDATA.split(b"\n")[0] + b"\n" + MIDATA.split(b"\n\n")[1]
+    with pytest.raises(EmptyStatementError):
+        _parse(only_footer, **MIDATA_CONFIG)
+
+
+def test_footer_check_ignores_extracts() -> None:
+    """Review finding: a last row whose Details no extract matches was taken for a footer
+    and dropped, as the footer check read any failure as "not a transaction"."""
+    content = (
+        b"Date,Description,Details,Amount\n"
+        b"10/11/2026,Rent,FLAT 1,-500.00\n"
+        b"11/11/2026,Coffee,odd,-3.50\n"
+    )
+    extract = [{"column": "Details", "patterns": [r"FLAT (?P<reference>[0-9]+)"]}]
+    with pytest.raises(FileFormatError, match="reads as a transaction"):
+        _parse(content, extract=extract, skip_footer_rows=1)
+
+
 def test_padded_midata_footer_keeps_its_amount() -> None:
     """Review finding: a spreadsheet re-save pads every line with commas, and the footer's
     amount was then read from an empty last cell."""
@@ -461,6 +489,35 @@ def test_typed_fields_from_columns() -> None:
     assert isinstance(bad, RowError)
     assert "30/02/2026" in bad.message
     assert statement.account is None
+
+
+def test_typed_fields_extracted_from_a_column() -> None:
+    """The first pattern that matches a non-empty cell fills its groups' fields; a cell no
+    pattern matches is a row error; an empty cell fills nothing."""
+    content = (
+        b"Date,Description,Details,Amount\n"
+        b'10/11/2026,Rent,"Example Bank, 12-34-56 12345678, FLAT 1",-500.00\n'
+        b"10/11/2026,Refund,Via EXAMPLE BANK *1234,3.50\n"
+        b"10/11/2026,Coffee,,-3.50\n"
+        b"10/11/2026,Odd,Somewhere,-1.00\n"
+    )
+    out = (
+        r"(?P<counterparty_bank>[^,]+), (?P<counterparty_sort_code>[0-9-]+) "
+        r"(?P<counterparty_account_number>[0-9]+), (?P<reference>.+)"
+    )
+    received = r"Via (?P<counterparty_bank>.+) \*(?P<counterparty_account_ending>[0-9]+)"
+    rent, refund, coffee, odd = _parse(
+        content, extract=[{"column": "Details", "patterns": [out, received]}]
+    ).rows
+    assert isinstance(rent, ParsedRow) and isinstance(refund, ParsedRow)
+    assert rent.counterparty == Counterparty(
+        bank="Example Bank", sort_code="123456", account_number="12345678", reference="FLAT 1"
+    )
+    assert refund.counterparty == Counterparty(bank="EXAMPLE BANK", account_ending="1234")
+    assert isinstance(coffee, ParsedRow) and coffee.counterparty is None
+    assert isinstance(odd, RowError)
+    assert odd.message == "Details matches none of the profile's patterns for it"
+    assert odd.raw["Details"] == "Somewhere"
 
 
 def test_counterparty_normalisation() -> None:

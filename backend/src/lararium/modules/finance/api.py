@@ -99,6 +99,7 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.DuplicateProfileNameError: (status.HTTP_409_CONFLICT, "duplicate_profile_name"),
     errors.ImportNotAllowedError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "import_not_allowed"),
     errors.FileFormatError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "file_format"),
+    errors.EmptyStatementError: (status.HTTP_422_UNPROCESSABLE_CONTENT, "empty_statement"),
     errors.ImportBatchStateError: (status.HTTP_409_CONFLICT, "import_batch_state"),
     errors.ImportHasErrorsError: (status.HTTP_409_CONFLICT, "import_has_errors"),
     errors.ImportBatchStaleError: (status.HTTP_409_CONFLICT, "import_batch_stale"),

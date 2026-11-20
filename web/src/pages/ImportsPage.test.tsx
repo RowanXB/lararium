@@ -120,6 +120,18 @@ vi.mock("../api", () => ({
         updated_at: "2026-11-01T10:00:00Z",
         config: { format: "pdf", layout: "boc_uk_statement" },
       },
+      {
+        id: "0190a0b0-0000-7000-8000-0000000000d3",
+        name: "Example Bank GBP CSV",
+        version: 1,
+        updated_at: "2026-11-01T10:00:00Z",
+        config: {
+          format: "csv",
+          columns: { date: "Date", description: ["Description"], amount: "Amount" },
+          date_format: "%d/%m/%Y",
+          currency: "GBP",
+        },
+      },
     ],
   })),
   listImportBatches: vi.fn(async () => ({
@@ -243,6 +255,13 @@ it("leaves the currency to the file for a PDF profile", async () => {
       body: { account_id: CURRENT_ID, profile_id: PDF_PROFILE_ID, file },
     }),
   );
+});
+
+it("offers the file's currency for a CSV profile that sets it", async () => {
+  const form = await uploadForm();
+  await choose(form, "Profile", "Example Bank GBP CSV");
+  await choose(form, "Currency", "From the file");
+  expect(form.getByRole("combobox", { name: "Currency" })).toHaveTextContent("From the file");
 });
 
 it("falls back to the reporting currency for a profile that can't state one", async () => {
