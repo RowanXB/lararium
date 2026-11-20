@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
+import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateIbkrConnectionData, CreateIbkrConnectionErrors, CreateIbkrConnectionResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateIbkrConnectionData, UpdateIbkrConnectionErrors, UpdateIbkrConnectionResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, UploadIbkrStatementData, UploadIbkrStatementErrors, UploadIbkrStatementResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -36,6 +36,18 @@ export const createMonzoConnection = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
+ * Create Ibkr Connection
+ */
+export const createIbkrConnection = <ThrowOnError extends boolean = false>(options: Options<CreateIbkrConnectionData, ThrowOnError>): RequestResult<CreateIbkrConnectionResponses, CreateIbkrConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateIbkrConnectionResponses, CreateIbkrConnectionErrors, ThrowOnError>({
+    url: '/api/v1/connections/ibkr',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Monzo Oauth Callback
  *
  * Where Monzo sends the browser back: exchange the code, then wait for approval.
@@ -51,6 +63,36 @@ export const authorizeConnection = <ThrowOnError extends boolean = false>(option
  * Disable Connection
  */
 export const disableConnection = <ThrowOnError extends boolean = false>(options: Options<DisableConnectionData, ThrowOnError>): RequestResult<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError> => (options.client ?? client).post<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/disable', ...options });
+
+/**
+ * Update Ibkr Connection
+ *
+ * Replace the token, its expiry and the query id (a new token after the old one expired).
+ */
+export const updateIbkrConnection = <ThrowOnError extends boolean = false>(options: Options<UpdateIbkrConnectionData, ThrowOnError>): RequestResult<UpdateIbkrConnectionResponses, UpdateIbkrConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateIbkrConnectionResponses, UpdateIbkrConnectionErrors, ThrowOnError>({
+    url: '/api/v1/connections/{connection_id}/ibkr',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Upload Ibkr Statement
+ *
+ * Ingest a Flex statement the owner downloaded: the closed ISA, which the Flex Web
+ * Service can't fetch. It goes through the same ingest and normalise as a fetched one.
+ */
+export const uploadIbkrStatement = <ThrowOnError extends boolean = false>(options: Options<UploadIbkrStatementData, ThrowOnError>): RequestResult<UploadIbkrStatementResponses, UploadIbkrStatementErrors, ThrowOnError> => (options.client ?? client).post<UploadIbkrStatementResponses, UploadIbkrStatementErrors, ThrowOnError>({
+    ...formDataBodySerializer,
+    url: '/api/v1/connections/{connection_id}/ibkr-statement',
+    ...options,
+    headers: {
+        'Content-Type': null,
+        ...options.headers
+    }
+});
 
 /**
  * Sync Connection Now

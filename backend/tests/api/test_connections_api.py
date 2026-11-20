@@ -852,6 +852,9 @@ def test_connection_operation_ids() -> None:
         ("get", "/api/v1/connections/oauth/monzo/callback"): "monzo_oauth_callback",
         ("post", "/api/v1/connections/{connection_id}/sync"): "sync_connection_now",
         ("post", "/api/v1/connections/{connection_id}/disable"): "disable_connection",
+        ("post", "/api/v1/connections/ibkr"): "create_ibkr_connection",
+        ("put", "/api/v1/connections/{connection_id}/ibkr"): "update_ibkr_connection",
+        ("post", "/api/v1/connections/{connection_id}/ibkr-statement"): "upload_ibkr_statement",
     }
     schema = spec["components"]["schemas"]["MonzoConnectionCreate"]
     assert schema["properties"]["client_secret"]["writeOnly"] is True

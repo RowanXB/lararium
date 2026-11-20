@@ -47,7 +47,7 @@ PR #11 reads its new typed fields through `_Reader`. The fields the normalizer r
    - a pot's `id`: the account map key, which a pot move posts against;
    - the balance's `balance` and `currency`: the account's snapshot, its opening and its reconciliation.
 
-   All of them fail today too, by `KeyError`, `ValueError` or a database error; the reader makes the failure the same everywhere and closes the shapes that passed silently (`true`, a float, a time without an offset). This keeps the owner's rule as given, so it needs no new approval. The worker shows a `MonzoFieldError`'s message as the sync's `last_error`, since it names only the path.
+   All of them fail today too, by `KeyError`, `ValueError` or a database error; the reader makes the failure the same everywhere and closes the shapes that passed silently (`true`, a float, a time without an offset). This keeps the owner's rule as given, so it needs no new approval. `MonzoFieldError` is a `DisplayableError`, so the worker shows its message as the sync's `last_error`: it names only the path.
 5. **Not in this plan:** `sync.py` reads an account's `id`, `created` and `closed`, and each transaction's `created`, to page and to register webhooks. They are core except `closed`, and they fail loudly already; `closed` only decides which accounts get a webhook. A follow-up can move them onto the reader.
 
 ## Tasks
@@ -68,10 +68,10 @@ PR #11 reads its new typed fields through `_Reader`. The fields the normalizer r
 
 ### Task 2: Route every read through the reader
 
-**Files:** `backend/src/lararium/modules/finance/monzo/normalize.py`, `backend/src/lararium/worker/jobs.py`
+**Files:** `backend/src/lararium/modules/finance/monzo/normalize.py`
 
 - [ ] **Step 1:** Give `_Reader` `time`, `amounts`, `texts`, `warn_if_stated`, `states`, `text(keep_empty=True)` and the required reads `required_text`, `required_minor_units` and `required_time`, which raise `MonzoFieldError`.
 - [ ] **Step 2:** Read every field in `account`, `pot`, `transaction`, `declined`, `_postings`, `_details`, `_category_splits`, `_description`, `_statement_time`, `opening` and `_normalize` through it. An account's or pot's unknown source fields are the reader's unreadable ones that are `SourceDetails` fields.
-- [ ] **Step 3:** In `jobs._describe`, show a `MonzoFieldError`'s message.
+- [ ] **Step 3:** Make `MonzoFieldError` a `DisplayableError`, so `jobs._describe` shows its message.
 - [ ] **Step 4: Run** the tests of Task 1, then `make check`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix: read every Monzo field through the reader, and fail clearly on a core one`.

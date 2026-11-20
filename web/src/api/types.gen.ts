@@ -185,6 +185,16 @@ export type BodyStageImport = {
 };
 
 /**
+ * Body_upload_ibkr_statement
+ */
+export type BodyUploadIbkrStatement = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * CandidateOut
  */
 export type CandidateOut = {
@@ -516,6 +526,48 @@ export type HoldingOut = {
 };
 
 /**
+ * IbkrConnectionCreate
+ */
+export type IbkrConnectionCreate = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Query Id
+     */
+    query_id: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrConnectionUpdate
+ */
+export type IbkrConnectionUpdate = {
+    /**
+     * Query Id
+     */
+    query_id?: string | null;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrUploadOut
+ */
+export type IbkrUploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
+
+/**
  * IdentifierCreate
  */
 export type IdentifierCreate = {
@@ -540,7 +592,7 @@ export type IdentifierOut = {
     /**
      * Account Number
      */
-    account_number: string;
+    account_number: string | null;
     /**
      * Created At
      */
@@ -560,11 +612,11 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account';
+    kind: 'uk_bank_account' | 'ibkr_account';
     /**
      * Sort Code
      */
-    sort_code: string;
+    sort_code: string | null;
     /**
      * Value
      */
@@ -1621,6 +1673,46 @@ export type ValidationError = {
 };
 
 /**
+ * IbkrConnectionCreate
+ */
+export type IbkrConnectionCreateWritable = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Query Id
+     */
+    query_id: string;
+    /**
+     * Token
+     */
+    token: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrConnectionUpdate
+ */
+export type IbkrConnectionUpdateWritable = {
+    /**
+     * Query Id
+     */
+    query_id?: string | null;
+    /**
+     * Token
+     */
+    token: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
  * MonzoConnectionCreate
  */
 export type MonzoConnectionCreateWritable = {
@@ -1680,6 +1772,31 @@ export type CreateMonzoConnectionResponses = {
 };
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
+
+export type CreateIbkrConnectionData = {
+    body: IbkrConnectionCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/ibkr';
+};
+
+export type CreateIbkrConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateIbkrConnectionError = CreateIbkrConnectionErrors[keyof CreateIbkrConnectionErrors];
+
+export type CreateIbkrConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateIbkrConnectionResponse = CreateIbkrConnectionResponses[keyof CreateIbkrConnectionResponses];
 
 export type MonzoOauthCallbackData = {
     body?: never;
@@ -1765,6 +1882,66 @@ export type DisableConnectionResponses = {
 };
 
 export type DisableConnectionResponse = DisableConnectionResponses[keyof DisableConnectionResponses];
+
+export type UpdateIbkrConnectionData = {
+    body: IbkrConnectionUpdateWritable;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/ibkr';
+};
+
+export type UpdateIbkrConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateIbkrConnectionError = UpdateIbkrConnectionErrors[keyof UpdateIbkrConnectionErrors];
+
+export type UpdateIbkrConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateIbkrConnectionResponse = UpdateIbkrConnectionResponses[keyof UpdateIbkrConnectionResponses];
+
+export type UploadIbkrStatementData = {
+    body: BodyUploadIbkrStatement;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/ibkr-statement';
+};
+
+export type UploadIbkrStatementErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadIbkrStatementError = UploadIbkrStatementErrors[keyof UploadIbkrStatementErrors];
+
+export type UploadIbkrStatementResponses = {
+    /**
+     * Successful Response
+     */
+    202: IbkrUploadOut;
+};
+
+export type UploadIbkrStatementResponse = UploadIbkrStatementResponses[keyof UploadIbkrStatementResponses];
 
 export type SyncConnectionNowData = {
     body?: never;

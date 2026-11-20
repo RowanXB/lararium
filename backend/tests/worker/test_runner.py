@@ -237,15 +237,13 @@ async def test_last_error_names_the_monzo_error_code(session, run, fake, notifie
 
 async def test_last_error_names_the_monzo_field(session, run, fake, notifier) -> None:
     connection = await _healthy_connection(run)
-    # Its message names the field's path only, never its value.
+    # A DisplayableError: its message names the field's path only, never its value.
     fake.error = MonzoFieldError("balance.currency")
 
     await _run_sync(session, connection, notifier)
 
     after = await get_connection(session, connection.id)
-    assert after.last_error == (
-        "MonzoFieldError: Monzo field balance.currency is missing or unreadable"
-    )
+    assert after.last_error == "Monzo field balance.currency is missing or unreadable"
 
 
 async def test_credential_rejected_sets_needs_reauth(session, run, fake, notifier) -> None:

@@ -50,6 +50,7 @@ from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.entities import PlaceDetails, get_or_create_organization, get_or_create_place
+from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.models import RawRecord
 from lararium.core.raw_records import get_raw_records
@@ -121,11 +122,11 @@ _ACCOUNT_NAMES = {
 _TAX_WRAPPERS: dict[str, TaxWrapper] = {"isa": "isa", "lisa": "lisa", "sipp": "sipp", "gia": "gia"}
 
 
-class MonzoFieldError(ValueError):
+class MonzoFieldError(DisplayableError, ValueError):
     """A field the sync cannot do without is missing or unreadable: a transaction's id or
     amount, say (the reader-everywhere plan, Decision 4). The sync fails rather than post
-    what Monzo did not say. The message names the field's path, never its value, so it can
-    be shown as the sync's error."""
+    what Monzo did not say. The message names the field's path, never its value, so it is
+    shown as the sync's error."""
 
     def __init__(self, path: str) -> None:
         super().__init__(f"Monzo field {path} is missing or unreadable")

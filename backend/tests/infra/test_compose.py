@@ -117,11 +117,11 @@ def test_api_and_worker_get_the_connector_settings(name: str) -> None:
         "LARARIUM_PUBLIC_BASE_URL",
         "LARARIUM_WEBHOOK_BASE_URL",
         "LARARIUM_WEBHOOK_SECRET",
+        # Both tell the owner: the worker after a sync, the api after an IBKR upload.
+        "LARARIUM_FEISHU_WEBHOOK_URL",
+        "LARARIUM_FEISHU_SECRET",
     ):
         assert variable in environment, variable
-    if name == "worker":
-        assert "LARARIUM_FEISHU_WEBHOOK_URL" in environment
-        assert "LARARIUM_FEISHU_SECRET" in environment
 
 
 @pytest.mark.parametrize("name", ["webhook-in", "cloudflared"])
@@ -255,12 +255,19 @@ def test_api_keeps_documents_in_their_own_volume() -> None:
     assert "documents" in config["volumes"]
 
 
-def test_only_the_api_mounts_the_documents() -> None:
-    # Uploaded statements are read and written by the api alone: migrate and web (and the
-    # internet-facing services) have no business with them.
+def test_worker_mounts_documents() -> None:
+    # The worker keeps each fetched IBKR statement as a document, in the same volume.
+    worker = _config()["services"]["worker"]
+    assert _volume_mounts(worker)["documents"] == DOCUMENT_DIR
+    assert worker["environment"]["LARARIUM_DOCUMENT_DIR"] == DOCUMENT_DIR
+
+
+def test_only_the_api_and_worker_mount_the_documents() -> None:
+    # Statements are read and written by the api and the worker alone: migrate and web (and
+    # the internet-facing services) have no business with them.
     mounting = {
         name
         for name, service in _config()["services"].items()
         if "documents" in _volume_mounts(service)
     }
-    assert mounting == {"api"}
+    assert mounting == {"api", "worker"}

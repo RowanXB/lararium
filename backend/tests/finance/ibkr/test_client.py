@@ -1,0 +1,281 @@
+import itertools
+from datetime import date
+from decimal import Decimal
+from urllib.parse import parse_qs
+
+import httpx
+import pytest
+
+from lararium import __version__
+from lararium.core.errors import CredentialRejectedError
+from lararium.core.secrets import Secret
+from lararium.modules.finance.ibkr.client import (
+    FlexClient,
+    FlexConfigError,
+    FlexError,
+    FlexRetryableError,
+)
+
+TOKEN = "tok-9f8e7d6c5b4a"
+REF = "1234567890"
+STATEMENT = (
+    b'<FlexQueryResponse queryName="q" type="AF"><FlexStatements count="1">'
+    b'<FlexStatement accountId="U0000001" fromDate="20260101" toDate="20260131"/>'
+    b"</FlexStatements></FlexQueryResponse>"
+)
+
+
+def send_ok(url_tag: str = "Url") -> bytes:
+    return (
+        f"<FlexStatementResponse timestamp='x'><Status>Success</Status>"
+        f"<ReferenceCode>{REF}</ReferenceCode>"
+        f"<{url_tag}>https://example.invalid/GetStatement</{url_tag}>"
+        f"</FlexStatementResponse>"
+    ).encode()
+
+
+def failure(code: int, message: str = "msg") -> bytes:
+    return (
+        f"<FlexStatementResponse timestamp='x'><Status>Warn</Status>"
+        f"<ErrorCode>{code}</ErrorCode><ErrorMessage>{message}</ErrorMessage>"
+        f"</FlexStatementResponse>"
+    ).encode()
+
+
+class Env:
+    """A fake clock that sleeping advances, and a transport that records each request."""
+
+    def __init__(self, *responses: bytes, repeat_last: bool = False) -> None:
+        self.now = Decimal(1000)
+        self.sleeps: list[int] = []
+        self.requests: list[tuple[Decimal, httpx.Request]] = []
+        self._responses = list(responses)
+        self._repeat_last = repeat_last
+
+    async def sleep(self, seconds: int) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> Decimal:
+        return self.now
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((self.now, request))
+        body = self._responses[0] if self._repeat_last else self._responses.pop(0)
+        return httpx.Response(200, content=body)
+
+    def client(self) -> tuple[FlexClient, httpx.AsyncClient]:
+        http = httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+        return FlexClient(http, Secret(TOKEN), sleep=self.sleep, clock=self.clock), http
+
+
+async def fetch(env: Env) -> bytes:
+    client, http = env.client()
+    async with http:
+        return await client.fetch("777", date(2026, 1, 1), date(2026, 1, 31))
+
+
+async def test_send_request_params() -> None:
+    env = Env(send_ok(), STATEMENT)
+    assert await fetch(env) == STATEMENT
+    send = env.requests[0][1]
+    params = parse_qs(send.url.query.decode())
+    assert send.url.path.endswith("/FlexWebService/SendRequest")
+    assert params == {
+        "t": [TOKEN],
+        "q": ["777"],
+        "v": ["3"],
+        "fd": ["20260101"],
+        "td": ["20260131"],
+    }
+    assert send.headers["User-Agent"] == f"Lararium/{__version__}"
+    get = env.requests[1][1]
+    assert get.url.path.endswith("/FlexWebService/GetStatement")
+    assert parse_qs(get.url.query.decode()) == {"t": [TOKEN], "q": [REF], "v": ["3"]}
+    assert get.headers["User-Agent"] == f"Lararium/{__version__}"
+
+
+async def test_poll_until_ready() -> None:
+    env = Env(send_ok(), failure(1019), failure(1019), STATEMENT)
+    assert await fetch(env) == STATEMENT
+    assert env.sleeps == [5, 6, 6]
+    times = [t for t, _ in env.requests]
+    assert [b - a for a, b in itertools.pairwise(times)] == [5, 6, 6]
+
+
+class Endless(Env):
+    """SendRequest succeeds, then every poll answers with the same body."""
+
+    def __init__(self, poll: bytes) -> None:
+        super().__init__()
+        self._poll = poll
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((self.now, request))
+        body = send_ok() if len(self.requests) == 1 else self._poll
+        return httpx.Response(200, content=body)
+
+
+# A first poll after 5 s, then one every 6 s while the next still starts within 120 s.
+BUDGET_SLEEPS = [5, *[6] * 19]
+
+
+async def test_not_ready_is_ordinary_failure() -> None:
+    env = Endless(failure(1003))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert not isinstance(caught.value, CredentialRejectedError)
+    assert caught.value.code == 1003
+    assert env.sleeps == BUDGET_SLEEPS
+
+
+@pytest.mark.parametrize("code", range(1011, 1017))
+async def test_config_errors_are_credential_rejected(code: int) -> None:
+    env = Env(failure(code, "Token has expired."))
+    with pytest.raises(FlexConfigError) as caught:
+        await fetch(env)
+    assert isinstance(caught.value, CredentialRejectedError)
+    assert str(caught.value) == f"IBKR Flex error {code}: Token has expired."
+
+
+@pytest.mark.parametrize("code", [1003, 1004, 1005, 1006, 1007, 1008, 1009, 1019])
+async def test_not_ready_codes_poll_until_the_budget(code: int) -> None:
+    env = Endless(failure(code))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert str(caught.value) == f"IBKR Flex error {code}"
+    assert env.sleeps == BUDGET_SLEEPS
+
+
+@pytest.mark.parametrize("code", [1001, 1018, 1021])
+async def test_other_retryable_codes_on_get_statement_raise_after_one_poll(code: int) -> None:
+    env = Endless(failure(code))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert caught.value.code == code
+    assert len(env.requests) == 2
+    assert env.sleeps == [5]
+
+
+@pytest.mark.parametrize("code", [1001, 1018, 1021])
+async def test_retryable_code_on_send_request_raises_at_once(code: int) -> None:
+    env = Env(failure(code))
+    with pytest.raises(FlexRetryableError) as caught:
+        await fetch(env)
+    assert caught.value.code == code
+    assert len(env.requests) == 1
+    assert env.sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"), [(429, True), (500, True), (503, True), (400, False), (403, False)]
+)
+async def test_http_error_status(status: int, retryable: bool) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=b"<html>x</html>")
+
+    env = Env()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client = FlexClient(http, Secret(TOKEN), sleep=env.sleep, clock=env.clock)
+    async with http:
+        with pytest.raises(FlexError) as caught:
+            await client.fetch("1", date(2026, 1, 1), date(2026, 1, 2))
+    assert isinstance(caught.value, FlexRetryableError) is retryable
+    assert caught.value.code == 0
+
+
+async def test_unknown_code_is_plain_flex_error() -> None:
+    env = Env(failure(1099))
+    with pytest.raises(FlexError) as caught:
+        await fetch(env)
+    assert type(caught.value) is FlexError
+    assert caught.value.code == 1099
+
+
+@pytest.mark.parametrize("tag", ["Url", "url"])
+async def test_url_element_any_case(tag: str) -> None:
+    env = Env(send_ok(tag), STATEMENT)
+    assert await fetch(env) == STATEMENT
+    assert all(r.url.host == "ndcdyn.interactivebrokers.com" for _, r in env.requests)
+
+
+async def test_doctype_refused() -> None:
+    bomb = (
+        b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>'
+        b"<FlexQueryResponse>&a;</FlexQueryResponse>"
+    )
+    env = Env(send_ok(), bomb)
+    with pytest.raises(FlexError) as caught:
+        await fetch(env)
+    assert caught.value.code == 0
+
+
+@pytest.mark.parametrize(
+    "prolog",
+    [
+        b"<!-- a comment --><!DOCTYPE x>",
+        b"\n  <!DOCTYPE x>",
+        b"<?xml version='1.0'?>" + b" " * 9000,
+    ],
+)
+async def test_a_doctype_or_an_endless_prolog_is_refused(prolog: bytes) -> None:
+    env = Env(send_ok(), prolog + STATEMENT)
+    with pytest.raises(FlexError) as caught:
+        await fetch(env)
+    assert caught.value.code == 0
+
+
+async def test_a_statement_is_returned_without_being_parsed() -> None:
+    # Only its first bytes are read: a body of 10 MB is parsed once, by the parser, off the
+    # event loop. So a statement broken further on still comes back as it is.
+    body = b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\n' + STATEMENT[:-20]
+    env = Env(send_ok(), body)
+    assert await fetch(env) == body
+
+
+async def test_malformed_body_is_flex_error() -> None:
+    env = Env(b"<html>oops")
+    with pytest.raises(FlexError) as caught:
+        await fetch(env)
+    assert caught.value.code == 0
+
+
+async def test_errors_never_contain_token() -> None:
+    echoed = f"bad token {TOKEN} at https://x.invalid/?t={TOKEN}"
+    bodies: list[tuple[list[bytes], int]] = [
+        ([failure(1015, echoed)], 1015),
+        ([failure(1099, echoed)], 1099),
+        ([b"<html>" + TOKEN.encode()], 0),
+    ]
+    for responses, _ in bodies:
+        env = Env(*responses)
+        with pytest.raises(FlexError) as caught:
+            await fetch(env)
+        for text in (str(caught.value), repr(caught.value), repr(caught.value.args)):
+            assert TOKEN not in text
+            assert "http" not in text
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+
+    env = Env()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(boom))
+    client = FlexClient(http, Secret(TOKEN), sleep=env.sleep, clock=env.clock)
+    async with http:
+        with pytest.raises(FlexRetryableError) as caught:
+            await client.fetch("1", date(2026, 1, 1), date(2026, 1, 2))
+    assert TOKEN not in str(caught.value) + repr(caught.value)
+    assert caught.value.__cause__ is None
+
+
+async def test_spacing_across_calls() -> None:
+    env = Env(send_ok(), STATEMENT, send_ok(), failure(1019), STATEMENT)
+    client, http = env.client()
+    async with http:
+        await client.fetch("1", date(2026, 1, 1), date(2026, 1, 2))
+        await client.fetch("1", date(2026, 1, 3), date(2026, 1, 4))
+    assert len(env.requests) == 5
+    for (t0, r0), (t1, r1) in itertools.pairwise(env.requests):
+        first_poll = r0.url.path.endswith("SendRequest") and r1.url.path.endswith("GetStatement")
+        # The first poll follows its SendRequest after 5 s; any other two requests, 6 s.
+        assert t1 - t0 >= (5 if first_poll else 6)
