@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.actors import ActorType
 from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
@@ -703,10 +704,13 @@ async def delete_derived_transaction(ctx: CommandContext, transaction_id: UUID) 
     ctx.record_change(f"transaction:{record.id}", {"before": _change_data(record), "after": None})
 
 
-async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> TransactionRecord:
-    """Void the transaction, recording who did. One already void is left as it is: the first
-    void stands, so a connector acting on an older reading can't make the owner's void its
-    own (and so let a later sync undo it).
+async def void_transaction(
+    ctx: CommandContext, transaction_id: UUID, *, voided_by: ActorType | None = None
+) -> TransactionRecord:
+    """Void the transaction, recording who did: the command's actor, or `voided_by` when
+    the decision is another's (a connector applying a statement the owner uploaded). One
+    already void is left as it is: the first void stands, so a connector acting on an older
+    reading can't make the owner's void its own (and so let a later sync undo it).
 
     A transaction the ledger derived (a transfer's placeholder or settlement) is refused: it
     follows its transfer, which deletes it when replaced or dissolved."""
@@ -722,7 +726,7 @@ async def void_transaction(ctx: CommandContext, transaction_id: UUID) -> Transac
     voided = await ctx.session.scalar(
         update(t)
         .where(t.id == transaction_id, t.status != "void")
-        .values(status="void", voided_by=ctx.actor.type)
+        .values(status="void", voided_by=voided_by or ctx.actor.type)
         .returning(t.id)
     )
     if voided is None:

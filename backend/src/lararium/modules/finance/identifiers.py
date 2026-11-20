@@ -29,9 +29,10 @@ from lararium.modules.finance.errors import (
 
 logger = logging.getLogger(__name__)
 
-IdentifierKind = Literal["uk_bank_account"]
+IdentifierKind = Literal["uk_bank_account", "ibkr_account"]
 
 _UK_BANK_ACCOUNT = re.compile(r"([0-9]{6})[:/]?([0-9]{8})")
+_IBKR_ACCOUNT = re.compile(r"[A-Z]{1,3}[0-9]{3,12}")
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,15 @@ class IdentifierRecord:
 
 
 def normalize_identifier(kind: IdentifierKind, value: str) -> str:
-    """The stored form: `<6-digit sort code>:<8-digit account number>`."""
+    """The stored form: `<6-digit sort code>:<8-digit account number>` for a UK bank account,
+    the upper-case account id for an IBKR account."""
+    if kind == "ibkr_account":
+        account_id = value.strip().upper()
+        if _IBKR_ACCOUNT.fullmatch(account_id) is None:
+            raise FinanceValidationError(
+                "an IBKR account id is 1 to 3 letters followed by 3 to 12 digits"
+            )
+        return account_id
     # Spaces and dashes go, so whitespace between the two parts works as a separator too.
     found = _UK_BANK_ACCOUNT.fullmatch(re.sub(r"[\s-]", "", value))
     if found is None:

@@ -474,7 +474,7 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         )
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
-        .where(i.account_id.is_(None), i.dismissed_at.is_(None))
+        .where(i.kind == "uk_bank_account", i.account_id.is_(None), i.dismissed_at.is_(None))
         .group_by(i.id, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )

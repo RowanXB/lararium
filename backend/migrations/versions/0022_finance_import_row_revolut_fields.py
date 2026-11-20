@@ -4,12 +4,11 @@ A Revolut CSV gives when a payment was started as well as when it completed; its
 statement prints the card a payment was made with and, for a payment in another currency,
 the amount in that currency with Revolut's rate and the ECB's.
 
-Numbered after M5's 0019 (PR #19, not merged when this was written), but revising 0018,
-main's head: whichever of the two PRs merges later renumbers its migration and rebases the
-chain onto the other.
+Numbered 0022 by the owner's merge order for the import PRs: Tembo (0020), LemFi (0021),
+then this. It revises 0019 until LemFi's 0021 is on main, then 0021.
 
-Revision ID: 0020
-Revises: 0018
+Revision ID: 0022
+Revises: 0019
 Create Date: 2026-11-19
 """
 
@@ -17,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0020"
-down_revision: str | None = "0018"
+revision: str = "0022"
+down_revision: str | None = "0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
