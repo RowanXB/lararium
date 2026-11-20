@@ -72,6 +72,7 @@ _TITLE = re.compile(r"(?:(?P<currency>[A-Z]{3}) Statement|Savings statement)")
 _DAY = re.compile(r"\d{2} [A-Z][a-z]{2}, \d{4}")
 _TIME = re.compile(r"(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)")
 _MONEY = re.compile(r"(?P<currency>[A-Z]{3}) (?P<amount>\S+)")
+_PAGE = re.compile(r"Page (?P<number>\d+) of (?P<total>\d+)")
 _HEADER_CURRENCY = re.compile(r"\((?P<currency>[A-Z]{3})\)")
 _RATE = re.compile(
     r"(?P<aer>[0-9.]+)% AER \((?P<gross>[0-9.]+)% Gross, paid (?P<frequency>[a-z]+)\) "
@@ -445,13 +446,27 @@ class _Table:
             pending.details.append(text(small))
 
 
-def _table_ends(line: list[Word]) -> bool:
-    printed = text(line)
-    return printed.startswith(_TABLE_ENDS)
+def _table_ends(line: list[Word], columns: _Columns) -> bool:
+    """The page's footer or the closing notice: in the date column, not a row's details."""
+    return line[0].x0 < columns.description_from and text(line).startswith(_TABLE_ENDS)
+
+
+def _check_pages(by_page: dict[int, list[list[Word]]]) -> None:
+    """Every page prints "Page n of N", for all N pages: a statement missing one (a row's
+    last lines, say) would still add up."""
+    total = len(by_page)
+    for number in sorted(by_page):
+        printed = [m for line in by_page[number] if (m := _PAGE.search(text(line)))]
+        if [(int(m["number"]), int(m["total"])) for m in printed] != [(number + 1, total)]:
+            raise FileFormatError(
+                f"page {number + 1} isn't numbered {number + 1} of {total}: "
+                "the statement may be missing a page"
+            )
 
 
 def parse(lines: list[list[Word]]) -> LayoutResult:
     by_page = pages(lines)
+    _check_pages(by_page)
     first = by_page.get(0, [])
     header = next((n for n, line in enumerate(first) if _columns(line) is not None), None)
     titled = next((match for line in first[:3] if (match := _TITLE.search(text(line)))), None)
@@ -516,7 +531,7 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             raise FileFormatError("the statement's pages name different currencies")
         table.columns = found
         for line in page_lines[at + 1 :]:
-            if _table_ends(line):
+            if _table_ends(line, table.columns):
                 break
             table.line(line)
     # Not at each page's end: a row's time and wrapped lines may carry over to the next page.

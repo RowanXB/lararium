@@ -135,6 +135,26 @@ def test_rows_over_pages_and_carried_over() -> None:
         assert rows[1].occurred_at == datetime(2027, 5, 3, 9, 5, tzinfo=LONDON)
 
 
+def test_a_missing_page_refuses_the_statement() -> None:
+    """Review finding: without its last page a statement still added up (that page held only
+    a row's carried-over lines), so it would vouch for a period it doesn't list in full."""
+    with pytest.raises(FileFormatError, match="page 1 isn't numbered 1 of 1"):
+        _parse(LemfiStatement([ACCOUNT_ROWS], printed_pages=2))
+
+
+def test_details_line_like_a_footer_stays_in_the_row() -> None:
+    """Review finding: a details line starting "©" ended the table."""
+    out = LemfiRow(
+        "04 May, 2027",
+        ("Sent money to A Example",),
+        ("Example Bank, 12345678, A", "© invoice 24"),
+        paid_out="5.00",
+    )
+    [row] = _rows(_parse(LemfiStatement([[out]], opening="5.00")))
+    assert row.counterparty is not None
+    assert row.counterparty.reference == "A © invoice 24"
+
+
 def test_details_that_read_as_neither_shape_refuse_the_statement() -> None:
     odd = LemfiRow("04 May, 2027", ("Sent money to A Example",), ("Somewhere else",), "1.00")
     with pytest.raises(FileFormatError, match=r"row 1 \(page 1\): the details"):
@@ -223,6 +243,12 @@ def test_savings_period_with_a_dash() -> None:
     assert statement.period == (date(2027, 5, 1), date(2027, 5, 31))
 
 
+def test_interest_must_add_up_exactly() -> None:
+    """Review finding: the penny allowed on money in and out let interest be a penny short."""
+    with pytest.raises(FileFormatError, match=r"interest is 80.11"):
+        _parse(_savings(SAVINGS_ROWS, summary={"Interest accrued": "80.11"}))
+
+
 def test_interest_counts_apart_from_money_in() -> None:
     with pytest.raises(FileFormatError, match=r"interest is 0.00 but its rows add up to 80.12"):
         _parse(_savings(SAVINGS_ROWS, summary={"Interest accrued": "0.00"}))
@@ -263,7 +289,15 @@ def test_csv_rows_equal_the_pdf_rows() -> None:
     """Same typed fields, description and balance: the two formats' dedupe keys agree."""
     csv_rows = _rows(_csv(*ACCOUNT_CSV))
     pdf_rows = _rows(_parse(LemfiStatement([ACCOUNT_ROWS])))
-    fields = ("booking_date", "occurred_at", "description", "quantity", "balance", "counterparty")
+    fields = (
+        "booking_date",
+        "occurred_at",
+        "description",
+        "quantity",
+        "currency",
+        "balance",
+        "counterparty",
+    )
     for csv_row, pdf_row in zip(csv_rows, pdf_rows, strict=True):
         assert {f: getattr(csv_row, f) for f in fields} == {f: getattr(pdf_row, f) for f in fields}
         assert csv_row.raw == {"Money in (GBP)": "", "Money out (GBP)": ""} | pdf_row.raw

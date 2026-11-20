@@ -241,3 +241,12 @@ def test_extract_column_checked_against_header() -> None:
     with pytest.raises(ValidationError, match="columns not in the header: Details"):
         PROFILE_CONFIG.validate_python(_csv(extract=extract, header=header))
     PROFILE_CONFIG.validate_python(_csv(extract=extract, header=[*header, "Details"]))
+
+
+def test_currency_set_once_or_by_column() -> None:
+    assert PROFILE_CONFIG.validate_python(_csv(currency="GBP")).currency == "GBP"
+    with pytest.raises(ValidationError):
+        PROFILE_CONFIG.validate_python(_csv(currency="gbp"))
+    columns = {"date": "Date", "description": ["D"], "amount": "A", "currency": "Currency"}
+    with pytest.raises(ValidationError, match="not both"):
+        PROFILE_CONFIG.validate_python(_csv(columns=columns, currency="GBP"))

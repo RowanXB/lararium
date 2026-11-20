@@ -132,6 +132,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
                 balance="Balance (GBP)",
             ),
             date_format="%d %b, %Y %H:%M",
+            currency="GBP",
             amount_format=_GROUPED,
             extract=[
                 CsvExtract(column="Description", patterns=lemfi.DESCRIPTION_PATTERNS),

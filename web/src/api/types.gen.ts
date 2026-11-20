@@ -383,6 +383,10 @@ export type CsvProfileConfig = {
     amount_format?: AmountFormat;
     card_types?: CardTypes;
     columns: CsvColumns;
+    /**
+     * Currency
+     */
+    currency?: string | null;
     date_format: DateFormat;
     delimiter?: Delimiter;
     encoding?: Encoding;

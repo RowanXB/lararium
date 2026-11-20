@@ -616,6 +616,8 @@ class LemfiStatement:
     )
     # The last row of each page but the last prints its time and further lines on the next.
     carry_over: bool = False
+    # The page count the footers print, when not the real one (a statement missing a page).
+    printed_pages: int | None = None
     extra: list[Extra] = field(default_factory=list[Extra])
 
 
@@ -682,7 +684,7 @@ def lemfi_pdf(statement: LemfiStatement) -> bytes:
         labels["Interest accrued"] = _money(sum(interest, Decimal(0)))
     labels |= {"Closing balance": _money(closing)} | statement.summary
     info_pages = 1 if statement.savings else 0
-    total = len(statement.pages) + info_pages
+    total = statement.printed_pages or len(statement.pages) + info_pages
 
     _lemfi_title(pdf, statement)
     pdf.text(32.0, 123.8, "A Example", size=16, font=_LEMFI_BOLD)

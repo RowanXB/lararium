@@ -348,6 +348,33 @@ def test_missing_footer_refuses_rather_than_drops_a_row() -> None:
         _parse(no_footer, **MIDATA_CONFIG, **label)
 
 
+def test_one_row_without_its_footer_is_not_an_empty_statement() -> None:
+    """Review finding: with one row and no footer, the row was cut off as the footer and the
+    file then read as empty, which real-check counts rather than fails."""
+    one_row = b"Date,Type,Merchant/Description,Debit/Credit,Balance\n" + (
+        "2026-11-03,DD,EXAMPLE ENERGY,-£40.00,£960.00\n".encode()
+    )
+    with pytest.raises(FileFormatError, match="reads as a transaction") as raised:
+        _parse(one_row, **MIDATA_CONFIG)
+    assert not isinstance(raised.value, EmptyStatementError)
+    only_footer = MIDATA.split(b"\n")[0] + b"\n" + MIDATA.split(b"\n\n")[1]
+    with pytest.raises(EmptyStatementError):
+        _parse(only_footer, **MIDATA_CONFIG)
+
+
+def test_footer_check_ignores_extracts() -> None:
+    """Review finding: a last row whose Details no extract matches was taken for a footer
+    and dropped, as the footer check read any failure as "not a transaction"."""
+    content = (
+        b"Date,Description,Details,Amount\n"
+        b"10/11/2026,Rent,FLAT 1,-500.00\n"
+        b"11/11/2026,Coffee,odd,-3.50\n"
+    )
+    extract = [{"column": "Details", "patterns": [r"FLAT (?P<reference>[0-9]+)"]}]
+    with pytest.raises(FileFormatError, match="reads as a transaction"):
+        _parse(content, extract=extract, skip_footer_rows=1)
+
+
 def test_padded_midata_footer_keeps_its_amount() -> None:
     """Review finding: a spreadsheet re-save pads every line with commas, and the footer's
     amount was then read from an empty last cell."""

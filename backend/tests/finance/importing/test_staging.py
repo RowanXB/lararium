@@ -845,6 +845,24 @@ async def test_typed_fields_stored(
     assert batch.statement.account_name == "Example Instant Saver"
 
 
+async def test_covered_days_match_by_time_when_both_files_give_one(
+    run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: an export of a day's 17:00 rows matched, by day and amount, the 09:00
+    rows of one committed earlier, and was taken for duplicates of them."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    header = "Date,Description,Amount\n"
+    morning = "10/11/2026 09:00,Top up,5.00\n10/11/2026 09:01,Sent on,-5.00\n"
+    await commit((await stage(timed, header + morning)).id)
+    evening = await stage(timed, header + morning.replace("09:0", "17:0"))
+    assert evening.counts["new"] == 2 and evening.counts["duplicate"] == 0
+    # A file without times still matches by day and amount.
+    dated = await _csv_profile(run, columns=columns)
+    again = await stage(dated, header + "10/11/2026,Top up,5.00\n10/11/2026,Sent on,-5.00\n")
+    assert again.counts["duplicate"] == 2
+
+
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
     """Money in and straight back out twice a day leaves the same amount, description and
     balance: the time of day the file gives keeps the rows apart, in the file and again."""

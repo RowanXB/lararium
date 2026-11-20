@@ -491,8 +491,9 @@ A PDF statement is read by a layout written for that bank, which checks itself: 
 printed balance must follow from the amounts, every row must have exactly one amount, a date
 inside the statement period and a type code (where the bank prints them; LemFi doesn't), and
 every word in the table must belong to a row. LemFi's money in and out totals may each be a
-penny below their rows' sum (LemFi cuts them down to the penny); the closing balance must still
-follow from the rows exactly.
+penny below their rows' sum (LemFi cuts them down to the penny); interest and the closing balance
+must still follow from the rows exactly. A LemFi statement must also number all its pages ("Page
+n of N"), so one missing a page is refused.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
@@ -515,8 +516,10 @@ by amount and date (below).
   `skip_footer_rows` (0–20) and `overdraft_footer_label` (the first cell of the footer line
   with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
   another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
-  `newest_first`), `sign` (below) and `amount_format` (`decimal_separator`, `.` or `,`;
-  `thousands_separator`, none by default, or `,` `.` space `'`).
+  `newest_first`), `sign` (below), `amount_format` (`decimal_separator`, `.` or `,`;
+  `thousands_separator`, none by default, or `,` `.` space `'`) and `currency` (every row's
+  currency, for a file that states it once rather than per row, such as LemFi's `Money in
+  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column).
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
@@ -548,7 +551,7 @@ balance; otherwise those without the balance
 plus how many identical rows come before it in the same file, so two real identical purchases on
 one day are both imported, and both are duplicates when the file comes again. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
-import's rows by date and amount instead: the matched ones are duplicates and any other is an
+import's rows by date and amount instead (and time of day, when both give one): the matched ones are duplicates and any other is an
 error. A file that lacks a row the earlier import has on those days is refused at upload; if
 the new file is right, roll the earlier import back first.
 

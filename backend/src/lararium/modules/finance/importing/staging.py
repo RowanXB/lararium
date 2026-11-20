@@ -1148,6 +1148,16 @@ def _midnight(day: date, local_tz: ZoneInfo) -> datetime:
     return datetime.combine(day, time(), tzinfo=local_tz)
 
 
+def _stated_time(
+    occurred_at: datetime | None, day: date | None, zone: str | None
+) -> datetime | None:
+    """The time of day a stored row's file gave, or None. A row without one is stored at its
+    day's midnight, so a real midnight reads as none too: it then matches by day alone."""
+    if occurred_at is None or day is None or zone is None:
+        return None
+    return None if occurred_at == _midnight(day, ZoneInfo(zone)) else occurred_at
+
+
 # Checks ---------------------------------------------------------------------------------
 
 
@@ -1473,7 +1483,9 @@ async def _match_covered_days(
     session: AsyncSession, account_id: UUID, rows: list[_Row], own: _Coverage
 ) -> None:
     """Decision 16: on a day this file or a committed batch covers, new rows are matched
-    with that day's committed rows by (date, instrument, quantity) as a multiset. A new row
+    with that day's committed rows by (date, instrument, quantity) as a multiset, and by the
+    time of day when both files give one (two payments of an amount at 09:00 and 17:00 are
+    two payments, though each file may list only one of them). A new row
     left unmatched on a day a committed batch lists in full contradicts that file, so it is
     an error; on a day a committed batch lists only in part it is new, with a note naming
     that file for review (the file may lack it, or list it under another date or amount).
@@ -1497,10 +1509,19 @@ async def _match_covered_days(
     }
     if not days:
         return
-    # Each day's committed rows, as (row id, its file's name) by (day, instrument, quantity).
-    available: dict[_DayKey, list[tuple[UUID, str]]] = defaultdict(list)
-    for row_id, day, instrument_id, quantity, filename in await session.execute(
-        select(r.id, r.booking_date, r.instrument_id, r.quantity, b.filename)
+    # Each day's committed rows, as (row id, its file's name, the time it gave) by (day,
+    # instrument, quantity).
+    available: dict[_DayKey, list[tuple[UUID, str, datetime | None]]] = defaultdict(list)
+    for row_id, day, instrument_id, quantity, filename, occurred_at, zone in await session.execute(
+        select(
+            r.id,
+            r.booking_date,
+            r.instrument_id,
+            r.quantity,
+            b.filename,
+            r.occurred_at,
+            r.occurred_tz,
+        )
         .join(b, b.id == r.batch_id)
         .where(
             r.account_id == account_id,
@@ -1512,7 +1533,8 @@ async def _match_covered_days(
     ):
         # Committed rows have all three (the table's CHECK).
         assert day is not None and instrument_id is not None and quantity is not None
-        available[(day, instrument_id, quantity)].append((row_id, filename))
+        stated = _stated_time(occurred_at, day, zone)
+        available[(day, instrument_id, quantity)].append((row_id, filename, stated))
 
     def key(row: _Row) -> _DayKey:
         assert row.parsed is not None and row.instrument_id is not None
@@ -1526,9 +1548,12 @@ async def _match_covered_days(
     for row in rows:
         if row.parsed is None or row.status != "new" or row.parsed.booking_date not in days:
             continue
-        matches = available.get(key(row))
-        if matches:
-            row_id, filename = matches.pop(0)
+        when = row.parsed.occurred_at
+        candidates = available.get(key(row), [])
+        match = next((e for e in candidates if when is None or e[2] is None or e[2] == when), None)
+        if match is not None:
+            candidates.remove(match)
+            row_id, filename, _ = match
             row.status, row.duplicate_of = "duplicate", row_id
             row.note = f"already imported from {filename}"
             continue
@@ -1630,7 +1655,7 @@ async def recheck_duplicates(session: AsyncSession, batch_id: UUID) -> int:
                 parsed=ParsedRow(
                     position=row.position,
                     booking_date=row.booking_date,
-                    occurred_at=None,
+                    occurred_at=_stated_time(row.occurred_at, row.booking_date, row.occurred_tz),
                     description=row.description,
                     quantity=row.quantity,
                     fee=row.fee,

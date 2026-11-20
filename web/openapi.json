@@ -813,6 +813,18 @@
           "columns": {
             "$ref": "#/components/schemas/CsvColumns"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{3}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
           "date_format": {
             "$ref": "#/components/schemas/DateFormat"
           },

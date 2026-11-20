@@ -85,7 +85,9 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Li
     repeated = [name for name in used if header.count(name) > 1]
     if repeated:
         raise FileFormatError(f"columns named more than once in the header: {', '.join(repeated)}")
-    if not lines:
+    # Lines that are all footer go to _check_footer first: a row in a file without the footer
+    # isn't an empty statement.
+    if not lines and not footer:
         raise EmptyStatementError()
     if len(lines) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
@@ -222,7 +224,7 @@ def _row(
         description=clean_description([raw[column] for column in columns.description]),
         quantity=_quantity(raw, config),
         fee=_optional_amount(raw, columns.fee, config) or Decimal(0),
-        currency=_currency(raw, config),
+        currency=_currency(raw, config) or config.currency,
         balance=_optional_amount(raw, columns.balance, config),
         external_id=_optional(raw, columns.external_id),
         bank_type=_optional(raw, columns.type),
@@ -254,12 +256,14 @@ def _check_footer(
 ) -> None:
     """skip_footer_rows drops the last lines unread, so one that reads as a transaction
     means the file has no footer (an account without an overdraft line, say): refuse it
-    rather than lose that transaction."""
+    rather than lose that transaction. A transaction whose extract doesn't match is one
+    still, so extracts are left out here."""
+    plain = config.model_copy(update={"extract": []})
     for line in footer:
         if len(line) > len(header):
             continue
         try:
-            _row(0, _raw(header, line, used), config, local_tz)
+            _row(0, _raw(header, line, used), plain, local_tz)
         except ValueError:
             continue
         raise FileFormatError(
@@ -299,6 +303,8 @@ def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> P
     header, lines, footer = _read_rows(content, config)
     used = config.read_columns()
     _check_footer(header, footer, used, config, local_tz)
+    if not lines:
+        raise EmptyStatementError()
     overdraft_limit, overdraft_limit_date = _overdraft(footer, config, local_tz)
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()

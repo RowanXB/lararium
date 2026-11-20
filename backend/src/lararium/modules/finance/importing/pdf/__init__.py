@@ -54,19 +54,20 @@ def _rows_check(result: LayoutResult) -> None:
 
 
 def _summary_check(result: LayoutResult) -> None:
-    """Interest rows count towards the summary's interest, the others towards money in. A
-    total the layout says is cut down to the penny may be up to a penny below its rows'."""
+    """Interest rows count towards the summary's interest, the others towards money in. Money
+    in or out the layout says is cut down to the penny may be up to a penny below its rows';
+    interest is exact."""
     paid_in = [r.paid_in for r in result.rows if r.paid_in is not None and not r.interest]
     paid_out = [r.paid_out for r in result.rows if r.paid_out is not None]
     interest = [r.paid_in for r in result.rows if r.paid_in is not None and r.interest]
     shortfall = _PENNY if result.truncated_totals else Decimal(0)
-    for what, stated, rows in (
-        ("money in", result.money_in, paid_in),
-        ("money out", result.money_out, paid_out),
-        ("interest", Decimal(0) if result.interest is None else result.interest, interest),
+    for what, stated, rows, short in (
+        ("money in", result.money_in, paid_in, shortfall),
+        ("money out", result.money_out, paid_out, shortfall),
+        ("interest", Decimal(0) if result.interest is None else result.interest, interest, 0),
     ):
         total = sum(rows, Decimal(0))
-        if not total - shortfall <= stated <= total:
+        if not total - short <= stated <= total:
             raise FileFormatError(
                 f"the statement's {what} is {stated} but its rows add up to {total}"
             )

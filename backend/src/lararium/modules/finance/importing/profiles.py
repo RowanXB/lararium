@@ -252,6 +252,9 @@ class CsvProfileConfig(BaseModel):
     amount_format: AmountFormat = AmountFormat()
     card_types: CardTypes = Field(default_factory=list[str])
     extract: list[CsvExtract] = Field(default_factory=list[CsvExtract], max_length=10)
+    # The currency of every row, for a file that states it once, not per row (LemFi's
+    # column labels, "Money in (GBP)"): rather than the one picked at upload.
+    currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")] | None = None
 
     def read_columns(self) -> list[str]:
         """Every column the profile reads: mapped, filtered on or extracted from."""
@@ -260,6 +263,12 @@ class CsvProfileConfig(BaseModel):
             *self.include_only,
             *(extract.column for extract in self.extract),
         ]
+
+    @model_validator(mode="after")
+    def _one_currency_source(self) -> Self:
+        if self.currency is not None and self.columns.currency is not None:
+            raise ValueError("set currency or map a currency column, not both")
+        return self
 
     @model_validator(mode="after")
     def _extracts_fill_unmapped_fields(self) -> Self:
