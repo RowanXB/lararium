@@ -1106,7 +1106,7 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     rows = [RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001")]
     await _sync(session, connection, tmp_path, rows)
     stored = await get_connection(session, connection.id)
-    assert stored.config["normalizer_version"] == NORMALIZER_VERSION
+    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-2"
     # An older version that did not fill ibkr_trades: the next run, with nothing new,
     # replays every raw record of the connection and fills it in.
     await session.execute(text("delete from finance.ibkr_trades"))
