@@ -318,7 +318,7 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 
 **Opening adjustment.**
 - When the earliest window an account has starts with non-zero cash or positions, one "Opening balance adjustment" per instrument is posted against Opening balances, dated the day before the account's earliest record.
-- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's earliest statement day (none reported that day means none held), minus what the ledger holds by then, so a later difference no postings explain stays a reconciliation difference.
+- Cash comes from the earliest Cash Report's `startingCash`. Positions come from the window's earliest statement day (none reported that day means none held), minus what the ledger holds by then, so a later difference no postings explain stays a reconciliation difference. That day is known by the rows its statement lists: with every section ticked (§5.2) each daily statement has a NAV row (all 1,315 audited statements do), so an empty first day is not lost.
 - This only happens when an account is older than its earliest stored window.
 - A run holding an account's earliest stored window sets its opening afresh. A later window leaves it as it is. So a closed account's first upload sets its opening, and a statement reaching further back moves the opening before the new history, or voids it once the history reaches the day the account opened, so the movements it brings are never counted twice. If days between the two are still missing, the reconciliation at the account's latest day reports the difference until they are uploaded.
 
