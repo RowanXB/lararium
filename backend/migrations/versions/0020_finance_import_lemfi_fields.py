@@ -3,11 +3,8 @@ money in, the bank that holds the account, a rate's validity and how often it pa
 counterparty's masked account ending ("*1234"), and whether a row's file gave its time of
 day (else occurred_at is the day's midnight), which covered-day matching compares.
 
-Numbered after M5's 0019, which isn't on main yet: until it is, this revises 0018, and
-whichever of the two merges later renumbers.
-
 Revision ID: 0020
-Revises: 0018
+Revises: 0019
 Create Date: 2026-11-19
 """
 
@@ -16,7 +13,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0020"
-down_revision: str | None = "0018"
+down_revision: str | None = "0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

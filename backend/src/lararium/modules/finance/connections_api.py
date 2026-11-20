@@ -4,17 +4,29 @@ Each route's name is its OpenAPI operationId. Credentials (the client secret, to
 the OAuth code and state never reach a response, the audit log or the logs.
 """
 
+import hashlib
 import logging
 import secrets
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, cast
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, SecretStr
+from sqlalchemy import func, select
 
 from lararium.config import Settings, load_master_key
 from lararium.core.actors import Actor
@@ -28,25 +40,42 @@ from lararium.core.connections import (
     get_connection,
     list_connections,
     load_credential,
+    lock_connection,
+    set_credential_expiry,
     set_status,
     store_credential,
     store_oauth_state,
     transition_status,
     update_config,
 )
+from lararium.core.connectors import SyncContext
 from lararium.core.errors import (
     ConnectionNotFoundError,
     CredentialDecryptError,
     CredentialRejectedError,
 )
+from lararium.core.json_types import JSONValue
+from lararium.core.notify import notifier_from_settings
 from lararium.deps import (
     ActorDep,
+    DocumentStoreDep,
     SessionDep,
+    SessionFactoryDep,
     get_actor,
     get_actor_allowing_navigation,
 )
+from lararium.modules.finance.api import read_upload
+from lararium.modules.finance.ibkr.normalize import normalize
+from lararium.modules.finance.ibkr.parser import FlexDataError
+from lararium.modules.finance.ibkr.sync import (
+    EXPIRY_NOTIFIED_KEY,
+    LONDON,
+    TOKEN_PURPOSE,
+    ingest_statement,
+)
 from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
+from lararium.modules.finance.transfers_api import healing_command
 from lararium.worker.app import defer_await_approval, defer_sync
 
 logger = logging.getLogger(__name__)
@@ -63,6 +92,12 @@ DONE = "/connections"
 # dropped (see AUTHORISED_AT_KEY). Disabled is included because authorising again is how a
 # connection is re-enabled.
 AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "authorising", "disabled")
+
+# A one-year, all-sections, three-account Flex statement is about 10 MB: M2's 5 MiB is too small.
+MAX_IBKR_UPLOAD_BYTES = 64 * 1024 * 1024
+XML_TYPES = ("application/xml", "text/xml")
+GENERIC_TYPE = "application/octet-stream"
+QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
 
 router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
 # The callback alone may be a cross-site navigation (from auth.monzo.com).
@@ -89,6 +124,27 @@ class MonzoConnectionCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     client_id: str = Field(min_length=1, max_length=200)
     client_secret: SecretStr = Field(min_length=1, max_length=500)
+
+
+class _IbkrToken(BaseModel):
+    token: SecretStr = Field(min_length=1, max_length=500)
+    # The last day the token works, as Client Portal shows it.
+    token_expires_on: date
+
+
+class IbkrConnectionUpdate(_IbkrToken):
+    # Omitted or null keeps the stored query id.
+    query_id: str | None = Field(default=None, pattern=QUERY_ID_PATTERN)
+
+
+class IbkrConnectionCreate(_IbkrToken):
+    display_name: str = Field(min_length=1, max_length=200)
+    query_id: str = Field(pattern=QUERY_ID_PATTERN)
+
+
+class IbkrUploadOut(BaseModel):
+    # The rows the statement holds, once each.
+    raw_records: int
 
 
 class AuthorizeOut(BaseModel):
@@ -317,3 +373,162 @@ async def disable_connection(
     async with command_context(session, actor, "disable_connection", args) as ctx:
         record = await set_status(ctx, connection_id, "disabled")
     return _out(record, _settings(request))
+
+
+def _expires_at(token_expires_on: date) -> datetime:
+    """The token works through its expiry day: it stops at the start of the next, in London.
+    A day already past is refused."""
+    if token_expires_on < datetime.now(LONDON).date():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"error": "expiry_in_past", "message": "the token's expiry date is in the past"},
+        )
+    stops = datetime.combine(token_expires_on + timedelta(days=1), time(0), tzinfo=LONDON)
+    return stops.astimezone(UTC)
+
+
+@router.post("/ibkr", name="create_ibkr_connection", status_code=status.HTTP_201_CREATED)
+async def create_ibkr_connection(
+    body: IbkrConnectionCreate, request: Request, session: SessionDep, actor: ActorDep
+) -> ConnectionOut:
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    expires_at = _expires_at(body.token_expires_on)
+    args = body.model_dump(mode="json", exclude={"token"})
+    async with command_context(session, actor, "create_ibkr_connection", args) as ctx:
+        created = await create_connection(
+            ctx,
+            connector="ibkr",
+            display_name=body.display_name,
+            config={"query_id": body.query_id},
+        )
+        await store_credential(
+            ctx, master_key, created.id, TOKEN_PURPOSE, body.token.get_secret_value(), expires_at
+        )
+        await set_credential_expiry(ctx, created.id, expires_at)
+        # There is no approval step: the token works as soon as it is created.
+        record = await set_status(ctx, created.id, "healthy")
+    # After the commit, so the job finds the connection.
+    await defer_sync(record.id)
+    return _out(record, settings)
+
+
+def _not_ibkr(connection: ConnectionRecord) -> HTTPException | None:
+    if connection.connector != "ibkr":
+        return HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"error": "not_ibkr", "message": "this is not an IBKR connection"},
+        )
+    return None
+
+
+@router.put("/{connection_id}/ibkr", name="update_ibkr_connection")
+async def update_ibkr_connection(
+    connection_id: UUID,
+    body: IbkrConnectionUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> ConnectionOut:
+    """Replace the token, its expiry and the query id (a new token after the old one expired)."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    expires_at = _expires_at(body.token_expires_on)
+    args = body.model_dump(mode="json", exclude={"token"}) | {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "update_ibkr_connection", args) as ctx:
+        # Checked under the row lock: a disable made meanwhile can't slip in before the write.
+        connection = await lock_connection(ctx, connection_id)
+        if (refusal := _not_ibkr(connection)) is not None:
+            raise refusal
+        if connection.status == "disabled":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {"error": "not_updatable", "message": "a disabled connection can't be updated"},
+            )
+        await store_credential(
+            ctx, master_key, connection_id, TOKEN_PURPOSE, body.token.get_secret_value(), expires_at
+        )
+        await set_credential_expiry(ctx, connection_id, expires_at)
+        # A new expiry is reminded in its turn.
+        changes = {} if body.query_id is None else {"query_id": body.query_id}
+        await update_config(ctx, connection_id, changes, remove=[EXPIRY_NOTIFIED_KEY])
+        await transition_status(
+            ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
+        )
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
+    return _out(record, settings)
+
+
+def _statement_type(file: UploadFile) -> None:
+    """XML by its type, or by its name when the browser sends no type or a generic one."""
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    named_xml = (file.filename or "").lower().endswith(".xml")
+    if content_type in XML_TYPES or (named_xml and content_type in ("", GENERIC_TYPE)):
+        return
+    raise HTTPException(
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        {"error": "not_xml", "message": "upload the Flex statement as an XML file"},
+    )
+
+
+@router.post(
+    "/{connection_id}/ibkr-statement",
+    name="upload_ibkr_statement",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_ibkr_statement(
+    connection_id: UUID,
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+    store: DocumentStoreDep,
+    session_factory: SessionFactoryDep,
+) -> IbkrUploadOut:
+    """Ingest a Flex statement the owner downloaded: the closed ISA, which the Flex Web
+    Service can't fetch. It goes through the same ingest and normalise as a fetched one."""
+    settings = _settings(request)
+    connection = await get_connection(session, connection_id)
+    if (refusal := _not_ibkr(connection)) is not None:
+        raise refusal
+    if not connection.cursor:
+        # The first sync (queued when the connection was made) writes the same rows: an
+        # upload meanwhile would collide with it.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"error": "first_sync_pending", "message": "wait for the first sync to finish"},
+        )
+    _statement_type(file)
+    body = await read_upload(file, MAX_IBKR_UPLOAD_BYTES)
+    filename = (file.filename or "statement.xml").replace("\\", "/").rsplit("/", 1)[-1][:200]
+    # The audit records which file, never its content.
+    args: dict[str, JSONValue] = {
+        "connection_id": str(connection_id),
+        "filename": filename,
+        "size_bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+    try:
+        async with healing_command(session, actor, "upload_ibkr_statement", args) as ctx:
+            sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
+            sync_ctx = SyncContext(
+                command=ctx,
+                connection=connection,
+                sync_id=sync_id,
+                master_key=_require_master_key(settings),
+                http=http,
+                notifier=notifier_from_settings(settings, http),
+                session_factory=session_factory,
+                documents=store,
+            )
+            result = await ingest_statement(sync_ctx, body, {"upload": filename})
+            await normalize(sync_ctx, result.raw_record_ids, result.flagged, result.sections)
+    except FlexDataError as exc:
+        # The message names a section and field only, never a value.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"error": "statement_invalid", "message": str(exc)},
+        ) from exc
+    return IbkrUploadOut(raw_records=len(result.raw_record_ids))
