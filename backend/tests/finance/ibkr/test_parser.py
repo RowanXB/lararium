@@ -88,7 +88,14 @@ def test_derivable_section_skipped_silently() -> None:
 def test_summary_rows_skipped() -> None:
     body = build(
         RowSpec("CashTransaction", A1, levelOfDetail="SUMMARY", transactionID=None),
-        RowSpec("CashReportCurrency", A1, levelOfDetail="BaseCurrency", currency="BASE_SUMMARY"),
+        RowSpec(
+            "CashReportCurrency",
+            A1,
+            levelOfDetail="BaseCurrency",
+            currency="BASE_SUMMARY",
+            startingCash="0",
+            endingCash="0",
+        ),
         accounts=ACCOUNTS[:1],
     )
     statement = parse_statement(body)
@@ -277,6 +284,21 @@ def test_unknown_level_flagged_and_skipped(section: str) -> None:
     statement = parse_statement(body)
     assert statement.flagged == {f"{section}.levelOfDetail"}
     assert all(r.section != section for r in statement.rows)
+
+
+def test_cash_held_without_currency_rows_needs_the_currency_breakout() -> None:
+    base = {"levelOfDetail": "BaseCurrency", "currency": "BASE_SUMMARY"}
+    held = build(RowSpec("CashReportCurrency", A1, **base, endingCash="100"), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match="Currency Breakout"):
+        parse_statement(held)
+    # No cash at all, or the currency rows there: nothing is missing.
+    empty = RowSpec("CashReportCurrency", A1, **base, startingCash="0", endingCash="0")
+    parse_statement(build(empty, accounts=ACCOUNTS[:1]))
+    both = [
+        RowSpec("CashReportCurrency", A1, **base, endingCash="100"),
+        RowSpec("CashReportCurrency", A1, endingCash="100"),
+    ]
+    parse_statement(build(*both, accounts=ACCOUNTS[:1]))
 
 
 def _only(statement, section: str):
