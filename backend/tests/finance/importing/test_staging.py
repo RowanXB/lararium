@@ -1155,10 +1155,10 @@ def _migration(name: str) -> Any:
     return module
 
 
-async def test_0021_backfills_the_time_rows_were_imported_with(
+async def test_0022_backfills_the_time_rows_were_imported_with(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit
 ) -> None:
-    """Review finding: rows imported before 0021 kept no note of the time their file gave, so
+    """Review finding: rows imported before 0022 kept no note of the time their file gave, so
     a later 17:00 row was taken for a duplicate of a committed 09:00 one."""
     columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
     header = "Date,Description,Amount\n"
@@ -1174,9 +1174,9 @@ async def test_0021_backfills_the_time_rows_were_imported_with(
     }
     for batch in batches.values():
         await commit(batch.id)
-    # As 0021 finds them: rows imported before it have no precision.
+    # As 0022 finds them: rows imported before it have no precision.
     await session.execute(text("UPDATE finance.import_rows SET time_precision = NULL"))
-    await session.execute(text(_migration("0021_finance_import_lemfi_fields").BACKFILL_TIME))
+    await session.execute(text(_migration("0022_finance_import_lemfi_fields").BACKFILL_TIME))
     for precision, batch in batches.items():
         stored = select(models.ImportRow.time_precision).where(
             models.ImportRow.batch_id == batch.id, models.ImportRow.kind == "statement"

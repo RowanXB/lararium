@@ -4,8 +4,8 @@ counterparty's masked account ending ("*1234"), and to what a row's file gave it
 day (None: it gave none, and occurred_at is the day's midnight), which covered-day matching
 compares. Rows imported before take it from their batch's profile and their raw row.
 
-Revision ID: 0021
-Revises: 0020
+Revision ID: 0022
+Revises: 0021
 Create Date: 2026-11-19
 """
 
@@ -13,8 +13,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0021"
-down_revision: str | None = "0020"
+revision: str = "0022"
+down_revision: str | None = "0021"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -39,7 +39,7 @@ UPGRADE = [
     """,
 ]
 
-# Before 0021 only CSVs whose date format has a time directive (as the profile reads it,
+# Before 0022 only CSVs whose date format has a time directive (as the profile reads it,
 # "%%" being a literal "%") and OFX rows whose DTPOSTED has one gave a time; PDF layouts
 # printed none.
 BACKFILL_TIME = """
