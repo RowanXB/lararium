@@ -628,14 +628,14 @@ purchases as positive numbers needs `"sign": "outflow_positive"`.
 
 **Duplicates.** A row is a duplicate when a committed row of the same account has the same key:
 its external ID (an OFX `FITID`, or a mapped `external_id` column) when it has one; otherwise its
-date (and time of day, when the file gives one), amount, currency, description and running
-balance; otherwise those without the balance
+date, amount, currency, description and running balance (with the time of day, when the file
+gives one, only for rows whose other fields are all alike: money in and back out twice a day can
+leave the same balance); otherwise those without the balance
 plus how many identical rows come before it in the same file, so two real identical purchases on
 one day are both imported, and both are duplicates when the file comes again. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
-import's rows by date and amount instead (and time of day when both give one, to the second
-if both give seconds, else to the minute), pairing as many rows as can be paired: the matched
-ones are duplicates and any other is an error. A file that lacks a row the earlier import has on those days is refused at upload; if
+import's rows by date and amount instead: the matched ones are duplicates and any other is an
+error. A file that lacks a row the earlier import has on those days is refused at upload; if
 the new file is right, roll the earlier import back first.
 
 **Example files.** `backend/src/lararium/modules/finance/importing/examples/` holds synthetic

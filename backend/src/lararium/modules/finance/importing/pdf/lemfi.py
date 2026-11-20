@@ -508,30 +508,25 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
         _account_box([[w for w in line if w.x0 >= x_limit] for line in block]) if box_word else {}
     )
     sort_code, account_number, iban = _identifiers(values)
-    information = [line for number in sorted(by_page) if number > 0 for line in by_page[number]]
-    try:
-        account = StatementAccount(
-            sort_code=sort_code,
-            account_number=account_number,
-            iban=iban,
-            name=_value(information, "Name of account"),
-            bank=values.get("bank"),
-            addressee=addressee,
-            address=address,
-        )
-    except ValueError as error:
-        raise FileFormatError(f"the statement's account: {error}") from None
 
     table = _Table(columns)
-    informing = False  # the savings statement's account information, after the table
+    # The savings statement's account information: the pages after the table's, the first
+    # opening with its heading (a row's lines print right of the date column, it in it).
+    information: list[list[Word]] = []
     for number in sorted(by_page):
         page_lines = by_page[number]
-        informing = informing or any(text(line) == "Account information" for line in page_lines)
         at = next((n for n, line in enumerate(page_lines) if _columns(line) is not None), None)
-        if at is None:
-            # Skipped, a page of the table would take its rows and carried-over lines along.
-            if not informing:
+        if at is None and not information:
+            left = (line for line in page_lines if line[0].x0 < table.columns.description_from)
+            if text(next(left, list[Word]())) != "Account information":
+                # Skipped, a page of the table would take its rows and carried-over lines.
                 raise FileFormatError(f"page {number + 1} has no transactions table")
+        if at is None or information:
+            if at is not None:
+                raise FileFormatError(
+                    f"page {number + 1} prints a table after the account information"
+                )
+            information += page_lines
             continue
         found = _columns(page_lines[at])
         assert found is not None
@@ -544,6 +539,18 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             table.line(line)
     # Not at each page's end: a row's time and wrapped lines may carry over to the next page.
     table.close()
+    try:
+        account = StatementAccount(
+            sort_code=sort_code,
+            account_number=account_number,
+            iban=iban,
+            name=_value(information, "Name of account"),
+            bank=values.get("bank"),
+            addressee=addressee,
+            address=address,
+        )
+    except ValueError as error:
+        raise FileFormatError(f"the statement's account: {error}") from None
     return LayoutResult(
         rows=table.rows,
         period=(start, end),

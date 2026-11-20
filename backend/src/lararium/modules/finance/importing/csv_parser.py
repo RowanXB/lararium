@@ -221,7 +221,6 @@ def _row(
         position=position,
         booking_date=when.date(),
         occurred_at=when if config.has_time else None,
-        time_precision=config.time_precision,
         description=clean_description([raw[column] for column in columns.description]),
         quantity=_quantity(raw, config),
         fee=_optional_amount(raw, columns.fee, config) or Decimal(0),

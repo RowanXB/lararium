@@ -356,9 +356,6 @@ class ImportRow(Base):
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
     counterparty_bank: Mapped[str | None] = mapped_column(Text)
     counterparty_account_ending: Mapped[str | None] = mapped_column(Text)
-    # To what the file gave the time of day; None: it gave none, and occurred_at is the
-    # day's midnight.
-    time_precision: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     payment_kind: Mapped[str | None] = mapped_column(Text)
     bank_reference: Mapped[str | None] = mapped_column(Text)

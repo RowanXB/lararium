@@ -152,6 +152,43 @@ def test_a_page_without_a_readable_table_refuses_the_statement() -> None:
         _parse(statement)
 
 
+def test_account_information_is_read_from_its_own_pages_only() -> None:
+    """Review finding: a payment's details carried onto page 2 and starting "Interest rate"
+    refused the statement, and one starting "Name of account" named the account."""
+    for line in ("Interest rate adjustment", "Name of account refund"):
+        out = LemfiRow(
+            "30 May, 2027",
+            ("Sent money to A Example",),
+            ("Example Bank, 12345678, transfer from", line),
+            paid_out="2,000.00",
+        )
+        pages = [[*SAVINGS_ROWS[:2], out], []]
+        statement = _parse(
+            LemfiStatement(pages, savings=True, opening="20,000.00", carry_over=True)
+        )
+        assert statement.account is not None
+        assert statement.account.name == "Example Instant Saver"
+        assert [rate.ear for rate in statement.rates] == [Decimal("4.10")]
+        assert _rows(statement)[-1].counterparty is not None
+
+
+def test_a_row_line_never_opens_the_account_information() -> None:
+    """Review finding: a description line reading "Account information" carried onto a page
+    whose header didn't read let that page, and the row's lines on it, be skipped."""
+    out = LemfiRow(
+        "30 May, 2027",
+        ("Savings Withdrawal", "Account information"),
+        paid_out="2,000.00",
+        time=None,
+    )
+    pages = [[*SAVINGS_ROWS[:2], out], []]
+    statement = LemfiStatement(
+        pages, savings=True, opening="20,000.00", carry_over=True, unreadable_header_page=2
+    )
+    with pytest.raises(FileFormatError, match="page 2 has no transactions table"):
+        _parse(statement)
+
+
 def test_page_numbers_are_read_from_the_footer_only() -> None:
     """Review finding: a reference printing "Page 1 of 2" refused a whole statement."""
     out = LemfiRow(

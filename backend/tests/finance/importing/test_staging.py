@@ -1,4 +1,3 @@
-import importlib.util
 import re
 import threading
 import time
@@ -10,7 +9,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
@@ -872,67 +871,6 @@ async def test_typed_fields_stored(
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
 
 
-async def test_covered_days_match_by_time_when_both_files_give_one(
-    run: Run, stage: Stage, commit: Commit
-) -> None:
-    """Review finding: an export of a day's 17:00 rows matched, by day and amount, the 09:00
-    rows of one committed earlier, and was taken for duplicates of them."""
-    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
-    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
-    header = "Date,Description,Amount\n"
-    morning = "10/11/2026 09:00,Top up,5.00\n10/11/2026 09:01,Sent on,-5.00\n"
-    await commit((await stage(timed, header + morning)).id)
-    evening = await stage(timed, header + morning.replace("09:0", "17:0"))
-    assert evening.counts["new"] == 2 and evening.counts["duplicate"] == 0
-    # A file without times still matches by day and amount.
-    dated = await _csv_profile(run, columns=columns)
-    again = await stage(dated, header + "10/11/2026,Top up,5.00\n10/11/2026,Sent on,-5.00\n")
-    assert again.counts["duplicate"] == 2
-
-
-async def test_a_real_midnight_is_a_time(
-    session: AsyncSession, run: Run, stage: Stage, commit: Commit
-) -> None:
-    """Review finding: a 00:00 row read as having no time at commit's recheck, and was then
-    taken for a duplicate of the committed 17:00 row it was told apart from at staging."""
-    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
-    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
-    header = "Date,Description,Amount\n"
-    await commit((await stage(timed, header + "10/11/2026 17:00,Top up,10.00\n")).id)
-    midnight = await stage(timed, header + "10/11/2026 00:00,Top up,10.00\n")
-    assert midnight.counts["new"] == 1
-    await commit(midnight.id)
-    assert _statuses(await _rows(session, midnight)) == ["committed"]
-
-
-async def test_covered_days_pair_exact_times_first(run: Run, stage: Stage, commit: Commit) -> None:
-    """Review findings: a 09:00 row took a committed row without a time, leaving the 17:00
-    row unmatched; a CSV's 10:30 is the OFX's 10:30:42; and one instant on the day clocks go
-    back (00:30 UTC in the OFX, 01:30 BST in the CSV) matches at staging and at commit."""
-    ofx = await _profile(run, format="ofx")
-    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
-    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
-    header = "Date,Description,Amount\n"
-    content = _ofx(
-        [
-            ("20261110", "10.00", "A"),
-            ("20261110090000", "10.00", "B"),
-            ("20261111103042", "10.00", "C"),
-            ("20261025003000", "10.00", "D"),
-        ],
-        start="20261025",
-        end="20261111",
-    )
-    await commit((await stage(ofx, content, filename="export.ofx")).id)
-    same_day = await stage(timed, header + "10/11/2026 09:00,X,10.00\n10/11/2026 17:00,Y,10.00\n")
-    assert same_day.counts["duplicate"] == 2 and same_day.counts["new"] == 0
-    minute = await stage(timed, header + "11/11/2026 10:30,Z,10.00\n")
-    assert minute.counts["duplicate"] == 1
-    clocks_back = await stage(timed, header + "25/10/2026 01:30,W,10.00\n")
-    assert clocks_back.counts["duplicate"] == 1
-    await commit(clocks_back.id)
-
-
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
     """Money in and straight back out twice a day leaves the same amount, description and
     balance: the time of day the file gives keeps the rows apart, in the file and again."""
@@ -1117,70 +1055,18 @@ async def test_only_assets_and_liabilities_take_imports(
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", account_id=equity.id)
 
 
-async def test_covered_days_find_a_pairing_whatever_the_row_order(
-    run: Run, stage: Stage, commit: Commit
-) -> None:
-    """Review finding: the new file's date-only row took the old date-only row, leaving its
-    17:00 row, which only that one fits, to be committed again: two payments became three."""
-    ofx = await _profile(run, format="ofx")
-    old = [("20261110", "10.00", "A"), ("20261110090000", "10.00", "B")]
-    await commit((await stage(ofx, _ofx(old, start="20261110", end="20261110"))).id)
-    new = [("20261110", "10.00", "C"), ("20261110170000", "10.00", "D")]
-    again = await stage(ofx, _ofx(new, start="20261110", end="20261110"))
-    assert again.counts["duplicate"] == 2 and again.counts["new"] == 0
-    await commit(again.id)
-
-
-async def test_covered_days_compare_seconds_when_both_files_give_them(
+async def test_a_time_leaves_the_key_of_a_row_nothing_else_is_like(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit
 ) -> None:
-    """Review finding: two payments at 10:30:05 and 10:30:55, each in its own export, were cut
-    to the same minute and taken for one."""
-    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
-    seconds = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M:%S")
-    header = "Date,Description,Amount\n"
-    await commit((await stage(seconds, header + "10/11/2026 10:30:05,X,10.00\n")).id)
-    later = await stage(seconds, header + "10/11/2026 10:30:55,Y,10.00\n")
-    assert later.counts["new"] == 1
-    await commit(later.id)
-    assert _statuses(await _rows(session, later)) == ["committed"]
-
-
-def _migration(name: str) -> Any:
-    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-async def test_0022_backfills_the_time_rows_were_imported_with(
-    session: AsyncSession, run: Run, stage: Stage, commit: Commit
-) -> None:
-    """Review finding: rows imported before 0022 kept no note of the time their file gave, so
-    a later 17:00 row was taken for a duplicate of a committed 09:00 one."""
+    """Review finding: a row's time went into its key, so a row committed before 0022 kept
+    another key; imported again, it was paired by date and amount alone, with another row."""
     columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
     header = "Date,Description,Amount\n"
-    minutes = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
     dated = await _csv_profile(run, columns=columns)
-    ofx = await _profile(run, format="ofx")
-    batches = {
-        "minute": await stage(minutes, header + "10/11/2026 00:00,Top up,10.00\n"),
-        "second": await stage(
-            ofx, _ofx([("20261111090000", "10.00", "A")], start="20261111", end="20261111")
-        ),
-        None: await stage(dated, header + "12/11/2026,Top up,10.00\n"),
-    }
-    for batch in batches.values():
-        await commit(batch.id)
-    # As 0022 finds them: rows imported before it have no precision.
-    await session.execute(text("UPDATE finance.import_rows SET time_precision = NULL"))
-    await session.execute(text(_migration("0022_finance_import_lemfi_fields").BACKFILL_TIME))
-    for precision, batch in batches.items():
-        stored = select(models.ImportRow.time_precision).where(
-            models.ImportRow.batch_id == batch.id, models.ImportRow.kind == "statement"
-        )
-        assert list(await session.scalars(stored)) == [precision]
-    evening = await stage(minutes, header + "10/11/2026 17:00,Top up,10.00\n")
-    assert evening.counts["new"] == 1
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    old = await stage(dated, header + "10/11/2026,A,10.00\n10/11/2026,B,10.00\n")
+    await commit(old.id)
+    b = (await _rows(session, old))[1]
+    again = await stage(timed, header + "10/11/2026 09:00,B,10.00\n")
+    [row] = await _rows(session, again)
+    assert (row.status, row.duplicate_of) == ("duplicate", b.id)
