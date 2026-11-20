@@ -302,6 +302,8 @@ class ImportStatement(Base):
     overdraft_limit_date: Mapped[date | None]
     available_balance: Mapped[Decimal | None] = mapped_column(Numeric)
     available_balance_date: Mapped[date | None]
+    account_reference: Mapped[str | None] = mapped_column(Text)
+    account_opened_on: Mapped[date | None]
 
 
 class ImportStatementRate(Base):

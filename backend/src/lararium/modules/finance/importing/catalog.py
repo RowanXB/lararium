@@ -112,6 +112,15 @@ CATALOG: tuple[CatalogEntry, ...] = (
         PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
         recommended=True,
     ),
+    CatalogEntry(
+        "Tembo",
+        "PDF statement",
+        # Interest is paid by Tembo, never from another bank account.
+        PdfProfileConfig(
+            format="pdf", layout="tembo_statement", card_types=["Interest", "Interest Adjustment"]
+        ),
+        recommended=True,
+    ),
     # One layout and one CSV profile serve both the GBP account and the savings account.
     CatalogEntry(
         "LemFi",

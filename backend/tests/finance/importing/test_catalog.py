@@ -7,6 +7,7 @@ from lararium.modules.finance.importing.profiles import (
     CsvProfileConfig,
     ProfileConfig,
     ProfileConfigModel,
+    is_bank_transfer,
 )
 
 _CONFIG: TypeAdapter[ProfileConfigModel] = TypeAdapter(ProfileConfig)
@@ -22,7 +23,7 @@ def test_every_config_validates() -> None:
 def test_one_recommended_format_per_institution() -> None:
     recommended = Counter(entry.institution for entry in CATALOG if entry.recommended)
     institutions = {entry.institution for entry in CATALOG}
-    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "LemFi"}
+    assert institutions == {"HSBC UK", "Lloyds", "BOC UK", "Tembo", "LemFi"}
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
 
@@ -35,6 +36,7 @@ def test_decision_14_formats() -> None:
         "HSBC UK": ["csv", "csv", "ofx", "pdf", "qif"],
         "Lloyds": ["csv", "pdf", "qif"],
         "BOC UK": ["pdf"],
+        "Tembo": ["pdf"],
         "LemFi": ["csv", "pdf"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
@@ -42,6 +44,7 @@ def test_decision_14_formats() -> None:
         ("HSBC UK", "pdf"),
         ("Lloyds", "csv"),
         ("BOC UK", "pdf"),
+        ("Tembo", "pdf"),
         ("LemFi", "pdf"),
     }
 
@@ -86,3 +89,13 @@ def test_lloyds_csv() -> None:
     assert (columns.account_sort_code, columns.account_number) == ("Sort Code", "Account Number")
     assert config.row_order == "newest_first"
     assert config.amount_format.thousands_separator == ","
+
+
+def test_tembo_interest_is_no_bank_transfer() -> None:
+    """Review: Tembo pays interest itself; only deposits and withdrawals move money between
+    bank accounts."""
+    [entry] = [e for e in CATALOG if e.institution == "Tembo"]
+    for kind in ("Interest", "Interest Adjustment"):
+        assert not is_bank_transfer(entry.config.card_types, kind)
+    for kind in ("Deposit", "Withdrawal", "Transfer In", "Transfer Out"):
+        assert is_bank_transfer(entry.config.card_types, kind)

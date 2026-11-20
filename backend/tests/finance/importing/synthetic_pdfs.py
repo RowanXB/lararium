@@ -585,6 +585,153 @@ def boc_pdf(statement: BocStatement) -> bytes:
     return pdf.finish()
 
 
+# Tembo ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TemboRow:
+    date: str
+    type: str
+    amount: str  # as printed, "£" included
+    balance: str | None = None  # None: the running balance; "": none printed
+
+
+@dataclass
+class TemboStatement:
+    pages: list[list[TemboRow]]
+    start: str | None = None  # None: the first row's date, as Tembo prints it
+    end: str | None = None  # None: the last row's date
+    account_no: str = "ACC-EX01AB-CD23EF"
+    omit_page: int | None = None  # a page (from 1) left out of the file, its number kept
+    # A page (from 1) whose table has no text layer (an image, say); its number still has.
+    unreadable_page: int | None = None
+    # A page (from 1) whose table header has a text layer but whose rows don't.
+    unreadable_rows_page: int | None = None
+    plan_value: str | None = None  # None: the rows' last balance
+    available: str | None = None  # None: the plan value
+    newest_first: bool = False
+    terms: bool = True
+    extra: list[Extra] = field(default_factory=list[Extra])
+
+
+def _tembo(pdf: _Pdf, x: float, top: float, value: str, *, right: bool = False) -> None:
+    pdf.text(x, top, value, size=8.2, font="Helvetica", right=right)
+
+
+def _tembo_heading(pdf: _Pdf, x: float, top: float, value: str, *, size: float = 11.2) -> None:
+    pdf.text(x, top, value, size=size, font="Times-Bold")
+
+
+def _tembo_footer(pdf: _Pdf, number: int, total: int) -> None:
+    pdf.text(
+        64.0,
+        791,
+        "Tembo, Tembo Savings, Example Saver and Example are trading names of Example "
+        "Savings Limited, which is authorised and",
+        size=6,
+        font="Helvetica",
+    )
+    pdf.text(56.6, 797, "regulated by the Example Authority (FRN: 000000).", size=6)
+    _tembo(pdf, 297.6, 815, f"{number} / {total}")
+
+
+def _tembo_money(value: Decimal) -> str:
+    return f"-£{-value:,.2f}" if value < 0 else f"£{value:,.2f}"
+
+
+def _tembo_signed(row: TemboRow) -> Decimal:
+    if not row.amount:
+        return Decimal(0)
+    value = _plain(row.amount.lstrip("+-"))
+    if row.type in ("Withdrawal", "Transfer Out") or row.amount.startswith("-"):
+        return -value
+    return value
+
+
+def tembo_pdf(statement: TemboStatement) -> bytes:
+    pdf = _Pdf(595.276, 841.89)
+    running = Decimal(0)
+    balances: dict[int, str] = {}
+    flat = [row for page in statement.pages for row in page]
+    for n, row in enumerate(flat):
+        running += _tembo_signed(row)
+        balances[n] = _tembo_money(running) if row.balance is None else row.balance
+    plan_value = statement.plan_value or _tembo_money(running)
+    total = len(statement.pages) + (1 if statement.terms else 0)
+    start = statement.start or (flat[0].date if flat else "01/05/2027")
+    end = statement.end or (flat[-1].date if flat else "31/05/2027")
+
+    _tembo_heading(pdf, 62.0, 127.9, "Personal details")
+    _tembo(pdf, 62.0, 149.3, "Alex Example")
+    _tembo(pdf, 62.0, 159.8, "FLAT 1 Example House 2 Example Road")
+    _tembo(pdf, 62.0, 180.8, "Exampletown")
+    _tembo(pdf, 62.0, 191.3, "EX1 2MP")
+    _tembo_heading(pdf, 62.0, 227.7, "Account summary")
+    for top, left, left_value, right, right_value in [
+        (249.0, "Account no:", statement.account_no, "Available to withdraw*:", None),
+        (259.5, "Account open date:", "03/02/2027", "Plan value:", plan_value),
+        (270.0, "Account type:", "Regular Saver", "Valuation date:", "01/06/2027"),
+    ]:
+        _tembo(pdf, 62.0, top, left)
+        _tembo(pdf, 283.5, top, left_value, right=True)
+        _tembo(pdf, 311.8, top, right)
+        _tembo(pdf, 533.3, top, right_value or statement.available or plan_value, right=True)
+    _tembo_heading(pdf, 62.0, 314.7, "Transactions:")
+    _tembo_heading(pdf, 138.8, 316.4, f"{start} - {end}", size=9)
+
+    position = 0
+    order = list(range(len(flat)))
+    if statement.newest_first:
+        order.reverse()
+    for number, page_rows in enumerate(statement.pages, start=1):
+        if number == statement.omit_page:
+            position += len(page_rows)
+            continue
+        if number > 1:
+            pdf.next_page()
+        if number == statement.unreadable_page:
+            position += len(page_rows)
+            _tembo_footer(pdf, number, total)
+            continue
+        top = 347.3 if number == 1 else 62.0
+        _tembo(pdf, 62.8, top, "Date")
+        _tembo(pdf, 191.1, top, "Transaction type")
+        _tembo(pdf, 399.7, top, "Amount", right=True)
+        _tembo(pdf, 518.3, top, "Balance", right=True)
+        top += 34.4
+        for _ in page_rows:
+            if number == statement.unreadable_rows_page:
+                position += 1
+                continue
+            n = order[position]
+            row = flat[n]
+            _tembo(pdf, 62.8, top, row.date)
+            _tembo(pdf, 191.1, top, row.type)
+            _tembo(pdf, 399.7, top, row.amount, right=True)
+            if balances[n]:
+                _tembo(pdf, 518.3, top, balances[n], right=True)
+            position += 1
+            top += 34.4
+        _tembo_footer(pdf, number, total)
+        pdf.extras(statement.extra)
+    if statement.terms and statement.omit_page != total:
+        pdf.next_page()
+        _tembo_heading(pdf, 62.0, 62.0, "Statement terms")
+        _tembo(pdf, 62.0, 90.0, "Plan value - Amount in your account, including contributions")
+        _tembo_heading(pdf, 62.0, 130.0, "Transaction types")
+        for n, line in enumerate(
+            [
+                "Deposit - Money added to your account",
+                "Withdrawal - Money removed from your account",
+                "Interest Adjustment - Adjustment to previously accrued interest",
+            ]
+        ):
+            _tembo(pdf, 62.0, 150.0 + 12 * n, line)
+        _tembo_footer(pdf, total, total)
+        pdf.extras(statement.extra)
+    return pdf.finish()
+
+
 # LemFi ---------------------------------------------------------------------------------
 
 

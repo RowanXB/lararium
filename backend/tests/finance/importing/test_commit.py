@@ -48,7 +48,14 @@ from .staging_helpers import (
     _rows,
     _statuses,
 )
-from .synthetic_pdfs import HsbcRow, HsbcStatement, hsbc_pdf
+from .synthetic_pdfs import (
+    HsbcRow,
+    HsbcStatement,
+    TemboRow,
+    TemboStatement,
+    hsbc_pdf,
+    tembo_pdf,
+)
 
 END = date(2027, 12, 31)
 TWO_ROWS = HEADER + "10/11/2026,Coffee,-3.50\n11/11/2026,Refund,100.00\n"
@@ -272,6 +279,53 @@ async def test_commit_rechecks_the_statement_account(
 
     with pytest.raises(ImportNotAllowedError, match="5678"):
         await commit(second.id)
+
+
+async def test_tembo_account_reference_checked(
+    run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """Review: two Tembo accounts' statements committed into one ledger account, as only
+    numeric account numbers, sort codes and IBANs were compared."""
+    account = (await make_account(name="Example Tembo", balance_mode="transactions")).id
+    profile = await _profile(run, format="pdf", layout="tembo_statement")
+    may = [TemboRow("03/05/2027", "Deposit", "£50.00")]
+    june = [TemboRow("03/06/2027", "Deposit", "£50.00")]
+
+    def pdf(rows: list[TemboRow], account_no: str) -> bytes:
+        return tembo_pdf(TemboStatement(pages=[rows], account_no=account_no))
+
+    first = await stage(profile, pdf(may, "ACC-EX01AB-001234"), account_id=account, default=None)
+    # Staged before the first commits: only commit's recheck can see the other account.
+    second = await stage(profile, pdf(june, "ACC-EX01AB-005678"), account_id=account, default=None)
+    await commit(first.id)
+    with pytest.raises(ImportNotAllowedError, match="5678"):
+        await commit(second.id)
+    with pytest.raises(ImportNotAllowedError, match="account ending 5678"):
+        await stage(profile, pdf(june, "ACC-EX01AB-005678"), account_id=account, default=None)
+
+
+async def test_tembo_lists_only_the_days_between_its_first_and_last_in_full(
+    session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
+) -> None:
+    """Review: a statement is made on demand, and one made on its last row's day took that
+    day as listed in full, so a later row that day in the next statement was an error."""
+    account = (await make_account(name="Example Tembo", balance_mode="transactions")).id
+    profile = await _profile(run, format="pdf", layout="tembo_statement")
+    rows = [
+        TemboRow("03/05/2027", "Deposit", "£50.00"),
+        TemboRow("10/05/2027", "Withdrawal", "£5.00"),
+        TemboRow("31/05/2027", "Deposit", "£20.00"),
+    ]
+    batch = await stage(
+        profile, tembo_pdf(TemboStatement(pages=[rows])), account_id=account, default=None
+    )
+    stored = await session.get(models.ImportBatch, batch.id)
+    assert stored is not None
+    assert (stored.complete_from, stored.complete_to) == (date(2027, 5, 4), date(2027, 5, 30))
+    # Its Plan value is no end-of-day balance of a day it may not list in full.
+    assert batch.statement is not None
+    assert batch.statement.closing_balance == Decimal("65.00")
+    assert batch.statement.closing_balance_date is None
 
 
 async def test_liability_import_signs(

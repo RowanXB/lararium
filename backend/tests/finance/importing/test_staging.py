@@ -64,9 +64,12 @@ from .synthetic_pdfs import (
     HsbcStatement,
     LemfiRow,
     LemfiStatement,
+    TemboRow,
+    TemboStatement,
     boc_pdf,
     hsbc_pdf,
     lemfi_pdf,
+    tembo_pdf,
 )
 
 # Counts, statuses, keys --------------------------------------------------------------
@@ -843,6 +846,29 @@ async def test_typed_fields_stored(
     assert batch.statement.rates[0].valid_to == date(2027, 10, 29)
     assert batch.statement.rates[0].frequency == "monthly"
     assert batch.statement.account_name == "Example Instant Saver"
+
+    # Tembo: an account identifier that isn't a number, the open date, the available
+    # balance; no opening balance or totals.
+    tembo = await _profile(run, format="pdf", layout="tembo_statement")
+    content = tembo_pdf(TemboStatement(pages=[[TemboRow("03/05/2027", "Deposit", "£50.00")]]))
+    batch = await stage(tembo, content, account_id=await fresh("Example Tembo"), default=None)
+    statement = batch.statement
+    assert statement is not None
+    assert statement.account_reference == "ACC-EX01AB-CD23EF"
+    assert statement.account_number is None
+    assert statement.account_opened_on == date(2027, 2, 3)
+    assert statement.account_type == "Regular Saver"
+    assert (statement.available_balance, statement.available_balance_date) == (
+        Decimal("50.00"),
+        date(2027, 6, 1),
+    )
+    assert (statement.opening_balance, statement.money_in, statement.money_out) == (
+        None,
+        None,
+        None,
+    )
+    (row,) = [row for row in await _rows(session, batch) if row.kind == "statement"]
+    assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
 
 
 async def test_covered_days_match_by_time_when_both_files_give_one(

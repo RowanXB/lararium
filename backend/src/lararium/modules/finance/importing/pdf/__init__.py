@@ -18,7 +18,7 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
 )
-from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lemfi, lloyds
+from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lemfi, lloyds, tembo
 from lararium.modules.finance.importing.pdf.layout import LayoutResult, LayoutRow
 from lararium.modules.finance.importing.pdf.words import Word, visible_lines
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
@@ -34,6 +34,7 @@ _LAYOUTS: dict[str, _Layout] = {
     "lloyds_statement": (lloyds.X_TOLERANCE, lloyds.parse),
     "boc_uk_statement": (boc_uk.X_TOLERANCE, boc_uk.parse),
     "lemfi_statement": (lemfi.X_TOLERANCE, lemfi.parse),
+    "tembo_statement": (tembo.X_TOLERANCE, tembo.parse),
 }
 
 
@@ -53,6 +54,19 @@ def _rows_check(result: LayoutResult) -> None:
             )
 
 
+def _opening(result: LayoutResult) -> Decimal:
+    """The printed opening balance or, when the statement prints none, the one its first
+    printed balance implies: that balance then checks nothing, and every later one and the
+    closing balance still do."""
+    if result.opening_balance is not None:
+        return result.opening_balance
+    if not result.balances:
+        raise FileFormatError("the statement prints no opening balance and no row balance")
+    first = result.balances[0]
+    moved = sum((r.row.quantity for r in result.rows[: first.after]), Decimal(0))
+    return first.amount - moved
+
+
 def _summary_check(result: LayoutResult) -> None:
     """Interest rows count towards the summary's interest, the others towards money in. Money
     in or out the layout says is cut down to the penny may be up to a penny below its rows';
@@ -66,6 +80,8 @@ def _summary_check(result: LayoutResult) -> None:
         ("money out", result.money_out, paid_out, shortfall),
         ("interest", Decimal(0) if result.interest is None else result.interest, interest, 0),
     ):
+        if stated is None:
+            continue
         total = sum(rows, Decimal(0))
         if not total - short <= stated <= total:
             raise FileFormatError(
@@ -80,16 +96,17 @@ def _summary_check(result: LayoutResult) -> None:
                 f"the statement counts {count} payments {what} but has {len(rows)} rows paid {what}"
             )
     # From the rows, not the totals: they are equal unless the totals are cut down.
-    closing = result.opening_balance + sum((r.row.quantity for r in result.rows), Decimal(0))
+    opening = _opening(result)
+    closing = opening + sum((r.row.quantity for r in result.rows), Decimal(0))
     if closing != result.closing_balance:
         raise FileFormatError(
-            f"the statement's opening balance {result.opening_balance} and its rows give "
+            f"the statement's opening balance {opening} and its rows give "
             f"{closing}, but its closing balance is {result.closing_balance}"
         )
 
 
 def _balances_check(result: LayoutResult) -> None:
-    running = [result.opening_balance]
+    running = [_opening(result)]
     for layout_row in result.rows:
         running.append(running[-1] + layout_row.row.quantity)
     for printed in result.balances:
@@ -139,9 +156,10 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
-        closing_balance_date=result.period[1],
+        # Only a statement that lists its last day in full closes at that day's end.
+        closing_balance_date=result.period[1] if result.period_complete else None,
         period=result.period,
-        period_complete=True,
+        period_complete=result.period_complete,
         opening_balance=result.opening_balance,
         money_in=result.money_in,
         money_out=result.money_out,
@@ -153,4 +171,7 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
         statement_reference=result.statement_reference,
         document_date=result.document_date,
         rates=result.rates,
+        available_balance=result.available_balance,
+        available_balance_date=result.available_balance_date,
+        account_opened_on=result.account_opened_on,
     )

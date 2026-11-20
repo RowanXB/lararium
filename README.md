@@ -554,6 +554,7 @@ for each bank use the recommended one, which carries the most information.
 | Lloyds | CSV | yes |
 | Lloyds | PDF statement, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
+| Tembo | PDF statement | yes (the only format) |
 | LemFi | PDF statement (GBP account and savings) | yes |
 | LemFi | CSV (GBP account and savings) | |
 
@@ -567,10 +568,14 @@ A PDF statement is read by a layout written for that bank, which checks itself: 
 (opening and closing balance, money in and out, payment counts) must equal the rows, every
 printed balance must follow from the amounts, every row must have exactly one amount, a date
 inside the statement period and a type code (where the bank prints them; LemFi doesn't), and
-every word in the table must belong to a row. LemFi's money in and out totals may each be a
-penny below their rows' sum (LemFi cuts them down to the penny); interest and the closing balance
-must still follow from the rows exactly. A LemFi statement must also number all its pages ("Page
-n of N"), so one missing a page is refused.
+every word in the table must belong to a row. Tembo prints no opening balance and no totals:
+there its Plan value must equal the rows' last balance, its transaction type gives each
+amount's direction, and its page numbers and period (first to last row) must leave nothing
+out. A Tembo statement is made on demand, so like an export it lists in full only the days
+between its first and last. LemFi's money in and out totals may each be a penny below their
+rows' sum (LemFi cuts them down to the penny); interest and the closing balance must still
+follow from the rows exactly. A LemFi statement must also number all its pages ("Page n of
+N"), so one missing a page is refused.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
@@ -611,8 +616,8 @@ by amount and date (below).
   makes the row an error. A field comes from one place: a mapped column or one extract.
 - **`ofx`**: `sign`.
 - **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
-- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement` or
-  `lemfi_statement`.
+- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement`,
+  `tembo_statement` or `lemfi_statement`.
 
 **Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
 one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
@@ -642,8 +647,8 @@ pick GBP at upload, and import into a manual `transactions` account to try the f
 
 The tests use synthetic files. To check that your own statements still import correctly, for
 example after changing the import code, put each bank's files in a folder of its own, named
-starting `HSBC`, `Lloy` (Lloyds), `BOC` or `LemF` (LemFi), one account per folder (LemFi's GBP
-and savings accounts each get one), all under one directory, and
+starting `HSBC`, `Lloy` (Lloyds), `BOC`, `Tembo` or `LemF` (LemFi), one account per
+folder (LemFi's GBP and savings accounts each get one), all under one directory, and
 run:
 
 ```bash

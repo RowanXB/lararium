@@ -476,6 +476,7 @@ SQL
 | Lloyds | CSV | 是 |
 | Lloyds | PDF 账单、QIF | |
 | BOC UK | PDF 账单 | 是（唯一格式） |
+| Tembo | PDF 账单 | 是（唯一格式） |
 | LemFi | PDF 账单（GBP 账户和储蓄账户） | 是 |
 | LemFi | CSV（GBP 账户和储蓄账户） | |
 
@@ -485,7 +486,7 @@ LemFi 的 PDF 包含其 CSV 的全部内容（相同的行，以及每行的时�
 
 PDF 账单由为该银行编写的版式读取，它会自我校验：汇总（期初和期末余额、收入和支出、笔数）必须等于
 各行，每个印出的余额都必须能由金额推出，每一行都必须恰好有一个金额、一个落在账单期间内的日期和一个交易类型代码（银行印出类型代码时；LemFi
-不印），表格里的每个词都必须属于某一行。LemFi 的收入和支出合计可能各比各行之和少一便士（LemFi 把它们
+不印），表格里的每个词都必须属于某一行。Tembo 不印期初余额和收支合计：它的 Plan value 必须等于各行最后的余额，每笔金额的方向由交易类型决定，页码和期间（第一行到最后一行）不能有遗漏。Tembo 账单是按需生成的，所以和导出文件一样，只有首末两天之间的日子算作完整列出。LemFi 的收入和支出合计可能各比各行之和少一便士（LemFi 把它们
 向下截到便士）；利息和期末余额仍必须由各行精确推出。LemFi 账单还必须为所有页编号（"Page n of N"），
 缺页的账单会被拒绝。对不上的账单会被整体拒绝，
 并写明哪项校验失败，而不是带着错误的数字导入。同一个账户可以用不同格式导入重叠的日期，例如过去用
@@ -520,8 +521,8 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   该行成为错误行。一个字段只能有一个来源：映射的列或某一个 extract。
 - **`ofx`**：`sign`。
 - **`qif`**：`date_format`、`encoding`、`amount_format`（默认以 `,` 作千位分隔符）和 `sign`。
-- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement`、`boc_uk_statement` 或
-  `lemfi_statement`。
+- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement`、`boc_uk_statement`、
+  `tembo_statement` 或 `lemfi_statement`。
 
 **正负号。** Profile 用 **inflow**（流入：账户余额增加）和 **outflow**（流出）来表述。只有一个
 `amount` 列时，`sign` 说明它的方向：`inflow_positive`（默认）或 `outflow_positive`；有 `inflow`
@@ -543,7 +544,7 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 ### 用真实账单验证
 
 测试用的是合成文件。要确认你自己的账单仍能正确导入（例如改了导入代码之后），把每家银行的文件
-各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC` 或 `LemF`（LemFi）开头，每个文件夹一个账户（LemFi 的
+各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC`、`Tembo` 或 `LemF`（LemFi）开头，每个文件夹一个账户（LemFi 的
 GBP 账户和储蓄账户各一个），都放在
 同一个目录下，然后运行：
 
