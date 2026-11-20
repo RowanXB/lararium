@@ -605,6 +605,8 @@ class TemboStatement:
     omit_page: int | None = None  # a page (from 1) left out of the file, its number kept
     # A page (from 1) whose table has no text layer (an image, say); its number still has.
     unreadable_page: int | None = None
+    # A page (from 1) whose table header has a text layer but whose rows don't.
+    unreadable_rows_page: int | None = None
     plan_value: str | None = None  # None: the rows' last balance
     available: str | None = None  # None: the plan value
     newest_first: bool = False
@@ -698,6 +700,9 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
         _tembo(pdf, 518.3, top, "Balance", right=True)
         top += 34.4
         for _ in page_rows:
+            if number == statement.unreadable_rows_page:
+                position += 1
+                continue
             n = order[position]
             row = flat[n]
             _tembo(pdf, 62.8, top, row.date)

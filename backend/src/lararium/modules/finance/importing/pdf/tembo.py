@@ -342,11 +342,15 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             continue
         columns = _columns(page_lines[start])
         assert columns is not None
+        before = len(table.entries)
         for line in page_lines[start + 1 :]:
             if _ends_table(line):
                 break
             table.line(line, columns)
         table.close()
+        if len(table.entries) == before:
+            # Tembo prints a table only over rows: one with none read has them unseen.
+            raise FileFormatError(f"page {number + 1}'s transaction table has no row it can read")
     rows, balances = _rows(table.entries)
     if rows and (rows[0].row.booking_date, rows[-1].row.booking_date) != period:
         raise FileFormatError(
