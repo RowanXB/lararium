@@ -163,3 +163,75 @@ async def test_overlapping_exports_preserve_the_ledger(
             await rollback(first_batch.id)
             assert await worth() == before
             assert await find_unbalanced_transactions(session) == []
+
+
+@st.composite
+def two_cuts(draw: st.DrawFn) -> tuple[list[int], list[int], tuple[int, int], tuple[int, int]]:
+    """Movements over one to three days, and two slices of them, each cut at any row, that
+    share at least one row. Amounts are distinct, so each row is told apart by its amount."""
+    per_day = draw(st.lists(st.integers(1, 3), min_size=1, max_size=3))
+    days = [day for day, count in enumerate(per_day) for _ in range(count)]
+    cents = draw(
+        st.lists(
+            st.integers(-9999, 9999).filter(bool),
+            min_size=len(days),
+            max_size=len(days),
+            unique=True,
+        )
+    )
+    shared = draw(st.integers(0, len(days) - 1))
+    first = (draw(st.integers(0, shared)), draw(st.integers(shared + 1, len(days))))
+    second = (draw(st.integers(0, shared)), draw(st.integers(shared + 1, len(days))))
+    return days, cents, first, second
+
+
+@example(  # one day: the first lists its 50.00, the second that and a later 20.00
+    opening_cents=0, cuts=([0, 0], [5000, 2000], (0, 1), (0, 2))
+)
+@given(opening_cents=st.integers(-100_000, 100_000), cuts=two_cuts())
+async def test_exports_cut_anywhere_in_a_day_agree(
+    session: AsyncSession,
+    account: AccountRecord,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    rollback: Rollback,
+    opening_cents: int,
+    cuts: tuple[list[int], list[int], tuple[int, int], tuple[int, int]],
+) -> None:
+    """Two balance-bearing exports of the same movements, each starting and ending at any
+    point of a day, give the same opening wherever they overlap: neither order is refused,
+    every listed movement posts once, and each listed day ends on the bank's balance."""
+    days, cents, first, second = cuts
+    start = date(2027, 5, 30)
+    balance = Decimal(opening_cents).scaleb(-2)
+    lines = []
+    for i, amount in enumerate(Decimal(c).scaleb(-2) for c in cents):
+        balance += amount
+        lines.append((start + days[i] * DAY, amount, balance))
+    lo, hi = min(first[0], second[0]), max(first[1], second[1])
+    listed = lines[lo:hi]
+    end_of_day = {day: after for day, _, after in listed}  # the last listed row's balance
+
+    def export(cut: tuple[int, int]) -> str:
+        rows = lines[cut[0] : cut[1]]
+        return BALANCE_HEADER + "".join(f"{d:%d/%m/%Y},Deposit,{a},{b}\n" for d, a, b in rows)
+
+    async with isolated_example(session):
+        profile = await _csv_profile(run)
+        for files in ((first, second), (second, first)):
+            batches = [await commit((await stage(profile, export(cut))).id) for cut in files]
+            posted = Counter(
+                [
+                    (row.booking_date, row.quantity)
+                    for batch in batches
+                    for row in await _rows(session, batch)
+                    if row.kind == "statement" and row.status == "committed"
+                ]
+            )
+            assert posted == Counter((day, amount) for day, amount, _ in listed)
+            for day, expected in end_of_day.items():
+                assert await _balance_after(session, account.id, day) == expected
+            for batch in reversed(batches):
+                await rollback(batch.id)
+            assert await _balance_after(session, account.id, listed[-1][0]) == 0

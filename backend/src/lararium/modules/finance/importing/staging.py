@@ -507,6 +507,10 @@ class OpeningClaim:
     # start of that day's run too, so it speaks of the same opening: no row order needed
     # (an OFX may list newest first, and its positions are file order).
     first_day_sources: frozenset[UUID] = frozenset()
+    # The movements on first_day it doesn't list that another file's running balance puts
+    # after one it lists that day: after its opening, though not its own. On a first day it
+    # lists only in part, the file may end that day too, not only start partway through it.
+    after_opening: frozenset[UUID] = frozenset()
     # The day its adjustment is dated (adjustment_day): before the run of days that every
     # file of the account, with an opening or not, lists in full up to its opening, so the
     # adjustment lands inside none of them. Set by _claims; None means opens_on's.
@@ -577,8 +581,9 @@ def plan_openings(
     originals its duplicates stand for come after its opening even when a duplicate's
     original is dated earlier (an id matched across days). On a first day it lists only in
     part (an export may start partway through a day), another file's movement it doesn't
-    list came before it too; on a first day it lists in full there is no such movement
-    (staging refuses one), and none is counted.
+    list came before it too, unless another file's running balance puts it after a row the
+    claim lists that day (after_opening: the file ends that day as well). On a first day it
+    lists in full there is no such movement (staging refuses one), and none is counted.
     """
 
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)
@@ -592,7 +597,11 @@ def plan_openings(
                     if movement.source not in claim.own
                     and (
                         movement.day < claim.first_day
-                        or (movement.day == claim.first_day and not claim.first_day_in_full)
+                        or (
+                            movement.day == claim.first_day
+                            and not claim.first_day_in_full
+                            and movement.source not in claim.after_opening
+                        )
                     )
                 ),
                 Decimal(0),
@@ -747,6 +756,13 @@ async def _claims(
         )
         if transaction_id is not None
     }
+    row_orders = {
+        batch.id: order
+        if isinstance(order := configs[batch.id].get("row_order"), str)
+        else "oldest_first"
+        for batch in batches
+    }
+    after = _listed_after(batches, stored, row_orders, original_of)
     claims: dict[UUID, list[OpeningClaim]] = {}
     for batch in batches:
         instruments: dict[int, UUID] = {}
@@ -773,16 +789,20 @@ async def _claims(
                     raw={},
                 )
             )
-        row_order = configs[batch.id].get("row_order", "oldest_first")
         openings = opening_adjustments(
-            rows,
-            _by_position(instruments),
-            closings.get(batch.id),
-            row_order if isinstance(row_order, str) else "oldest_first",
+            rows, _by_position(instruments), closings.get(batch.id), row_orders[batch.id]
         )
         start, end = batch.complete_from, batch.complete_to
-        claims[batch.id] = [
-            OpeningClaim(
+        claims[batch.id] = []
+        for instrument_id, (opening, first_day) in openings.items():
+            first_sources = frozenset(
+                source
+                for row in stored[batch.id]
+                if row.instrument_id == instrument_id
+                and row.booking_date == first_day
+                and (source := _movement_source(row, original_of)) is not None
+            )
+            claim = OpeningClaim(
                 batch.id,
                 instrument_id,
                 opening,
@@ -798,16 +818,15 @@ async def _claims(
                     if end is None
                     else max(first_day - timedelta(days=1), end)
                 ),
-                first_day_sources=frozenset(
-                    source
-                    for row in stored[batch.id]
-                    if row.instrument_id == instrument_id
-                    and row.booking_date == first_day
-                    and (source := _movement_source(row, original_of)) is not None
+                first_day_sources=first_sources,
+                after_opening=frozenset(
+                    later
+                    for source in first_sources
+                    for later in after[(instrument_id, source)]
+                    if later not in own
                 ),
             )
-            for instrument_id, (opening, first_day) in openings.items()
-        ]
+            claims[batch.id].append(claim)
     # Dated only once every claim is known: a run may carry an adjustment back no further
     # than the opening of the claim before it in the walk, which must still hold there.
     flat = sorted((claim for found in claims.values() for claim in found), key=_walk_order)
@@ -823,6 +842,34 @@ async def _claims(
             replace(claim, dated_on=dated[(batch_id, claim.instrument_id)]) for claim in found
         ]
     return claims
+
+
+def _listed_after(
+    batches: list[_BatchInfo],
+    stored: dict[UUID, list[models.ImportRow]],
+    row_orders: dict[UUID, str],
+    original_of: dict[UUID, UUID],
+) -> dict[tuple[UUID, UUID], set[UUID]]:
+    """(instrument, movement) -> the movements some file lists after it on the same day,
+    past a running balance that includes it and not them: the bank's own word on their
+    order. File order alone is not taken (an OFX may list newest first, unchecked)."""
+    after: dict[tuple[UUID, UUID], set[UUID]] = defaultdict(set)
+    for batch in batches:
+        days: dict[tuple[UUID | None, date | None], list[models.ImportRow]] = defaultdict(list)
+        for row in _chronological(stored[batch.id], row_orders[batch.id]):
+            days[(row.instrument_id, row.booking_date)].append(row)
+        for (instrument_id, _), run in days.items():
+            listed: list[UUID] = []
+            balanced: list[UUID] = []  # the day's movements up to its last balance so far
+            for row in run:
+                source = _movement_source(row, original_of)
+                if source is not None and instrument_id is not None:
+                    for earlier in balanced:
+                        after[(instrument_id, earlier)].add(source)
+                    listed.append(source)
+                if row.balance is not None:
+                    balanced = list(listed)
+    return after
 
 
 def _dated_on(claim: OpeningClaim, full_days: list[tuple[date, date]]) -> date:
