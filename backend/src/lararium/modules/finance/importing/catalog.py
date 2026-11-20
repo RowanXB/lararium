@@ -113,7 +113,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         "Tembo",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="tembo_statement"),
+        # Interest is paid by Tembo, never from another bank account.
+        PdfProfileConfig(
+            format="pdf", layout="tembo_statement", card_types=["Interest", "Interest Adjustment"]
+        ),
         recommended=True,
     ),
 )

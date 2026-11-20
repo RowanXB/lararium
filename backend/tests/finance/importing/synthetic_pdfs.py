@@ -599,8 +599,10 @@ class TemboRow:
 @dataclass
 class TemboStatement:
     pages: list[list[TemboRow]]
-    start: str = "01/05/2027"
-    end: str = "31/05/2027"
+    start: str | None = None  # None: the first row's date, as Tembo prints it
+    end: str | None = None  # None: the last row's date
+    account_no: str = "ACC-EX01AB-CD23EF"
+    omit_page: int | None = None  # a page (from 1) left out of the file, its number kept
     plan_value: str | None = None  # None: the rows' last balance
     available: str | None = None  # None: the plan value
     newest_first: bool = False
@@ -652,6 +654,8 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
         balances[n] = _tembo_money(running) if row.balance is None else row.balance
     plan_value = statement.plan_value or _tembo_money(running)
     total = len(statement.pages) + (1 if statement.terms else 0)
+    start = statement.start or (flat[0].date if flat else "01/05/2027")
+    end = statement.end or (flat[-1].date if flat else "31/05/2027")
 
     _tembo_heading(pdf, 62.0, 127.9, "Personal details")
     _tembo(pdf, 62.0, 149.3, "Alex Example")
@@ -660,7 +664,7 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
     _tembo(pdf, 62.0, 191.3, "EX1 2MP")
     _tembo_heading(pdf, 62.0, 227.7, "Account summary")
     for top, left, left_value, right, right_value in [
-        (249.0, "Account no:", "ACC-EX01AB-CD23EF", "Available to withdraw*:", None),
+        (249.0, "Account no:", statement.account_no, "Available to withdraw*:", None),
         (259.5, "Account open date:", "03/02/2027", "Plan value:", plan_value),
         (270.0, "Account type:", "Regular Saver", "Valuation date:", "01/06/2027"),
     ]:
@@ -669,13 +673,16 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
         _tembo(pdf, 311.8, top, right)
         _tembo(pdf, 533.3, top, right_value or statement.available or plan_value, right=True)
     _tembo_heading(pdf, 62.0, 314.7, "Transactions:")
-    _tembo_heading(pdf, 138.8, 316.4, f"{statement.start} - {statement.end}", size=9)
+    _tembo_heading(pdf, 138.8, 316.4, f"{start} - {end}", size=9)
 
     position = 0
     order = list(range(len(flat)))
     if statement.newest_first:
         order.reverse()
     for number, page_rows in enumerate(statement.pages, start=1):
+        if number == statement.omit_page:
+            position += len(page_rows)
+            continue
         if number > 1:
             pdf.next_page()
         top = 347.3 if number == 1 else 62.0
@@ -696,7 +703,7 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
             top += 34.4
         _tembo_footer(pdf, number, total)
         pdf.extras(statement.extra)
-    if statement.terms:
+    if statement.terms and statement.omit_page != total:
         pdf.next_page()
         _tembo_heading(pdf, 62.0, 62.0, "Statement terms")
         _tembo(pdf, 62.0, 90.0, "Plan value - Amount in your account, including contributions")

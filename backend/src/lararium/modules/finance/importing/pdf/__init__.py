@@ -134,9 +134,10 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
-        closing_balance_date=result.period[1],
+        # Only a statement that lists its last day in full closes at that day's end.
+        closing_balance_date=result.period[1] if result.period_complete else None,
         period=result.period,
-        period_complete=True,
+        period_complete=result.period_complete,
         opening_balance=result.opening_balance,
         money_in=result.money_in,
         money_out=result.money_out,

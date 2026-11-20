@@ -603,8 +603,9 @@ def test_tembo_rows_and_summary() -> None:
         "Amount": "£5.50",
         "Balance": "£44.50",
     }
-    assert statement.period == (date(2027, 5, 1), date(2027, 5, 31))
-    assert statement.period_complete
+    assert statement.period == (date(2027, 5, 3), date(2027, 5, 31))
+    # Made on demand, it may stop partway through its last day.
+    assert not statement.period_complete
     assert statement.account == StatementAccount(
         account_reference="ACC-EX01AB-CD23EF",
         account_type="Regular Saver",
@@ -612,10 +613,8 @@ def test_tembo_rows_and_summary() -> None:
         address="FLAT 1 Example House 2 Example Road, Exampletown, EX1 2MP",
     )
     assert statement.currency == "GBP"
-    assert (statement.closing_balance, statement.closing_balance_date) == (
-        Decimal("44.60"),
-        date(2027, 5, 31),
-    )
+    # The Plan value: undated, as the last day may not be listed in full.
+    assert (statement.closing_balance, statement.closing_balance_date) == (Decimal("44.60"), None)
     # Tembo prints no opening balance and no totals: nothing is stored for them.
     assert (statement.opening_balance, statement.money_in, statement.money_out) == (
         None,
@@ -719,10 +718,30 @@ def test_tembo_no_printed_balance_refused() -> None:
         _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
 
 
-def test_tembo_row_outside_the_period_refused() -> None:
-    rows = [TemboRow("30/04/2027", "Deposit", "£5.00")]
-    with pytest.raises(FileFormatError, match="outside the statement period"):
-        _tembo(TemboStatement(pages=[rows]))
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("01/05/2027", "31/05/2027"), ("03/05/2027", "01/06/2027"), ("04/05/2027", "31/05/2027")],
+)
+def test_tembo_period_must_run_from_the_first_row_to_the_last(start: str, end: str) -> None:
+    """Review: with the first row unread, the opening taken from the next printed balance
+    hid it, and the whole period was taken as listed."""
+    with pytest.raises(FileFormatError, match="doesn't run from its first row's date"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], start=start, end=end))
+
+
+def test_tembo_missing_page_refused() -> None:
+    """Review: a page with +£20 and -£20 left out of the file kept every check passing."""
+    pair = [
+        TemboRow("12/05/2027", "Transfer In", "£20.00"),
+        TemboRow("13/05/2027", "Transfer Out", "£20.00"),
+    ]
+    pages = [TEMBO_ROWS[:2], pair, TEMBO_ROWS[2:]]
+    assert len(_rows(_tembo(TemboStatement(pages=pages)))) == 6
+    with pytest.raises(FileFormatError, match="may be missing a page"):
+        _tembo(TemboStatement(pages=pages, omit_page=2))
+    # The last page, the terms, left out: the count no longer matches.
+    with pytest.raises(FileFormatError, match="page 1 of 3 doesn't print that page number"):
+        _tembo(TemboStatement(pages=pages, omit_page=4))
 
 
 def test_tembo_stray_word_in_the_table_refused() -> None:

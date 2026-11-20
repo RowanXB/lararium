@@ -2,10 +2,11 @@
 REAL_ROOT=<dir>` (README, "Verifying against your real statements"). Skipped unless
 LARARIUM_REAL_ROOT is set, so `make check` and CI never run it.
 
-<dir> holds one folder per bank, its name starting HSBC, Lloy, BOC or Tembo, each with one account's
-files in any of the catalog's formats. In two orders (statements first, exports first) every
-file must commit with no error row, every statement's closing balance must hold on its own
-date, and rolling everything back, newest first, must be allowed and leave a zero balance.
+<dir> holds one folder per bank, its name starting HSBC, Lloy, BOC or Tembo, each with one
+account's files in any of the catalog's formats. In two orders (statements first, exports
+first) every file must commit with no error row, every statement's closing balance must hold
+on its own date (an undated one, such as Tembo's Plan value, on its last row's day), and
+rolling everything back, newest first, must be allowed and leave a zero balance.
 
 Nothing of the files is printed or kept: only counts and pass or fail. Error text has its
 digits and the file names masked, and the stored documents live in a temporary directory
@@ -18,6 +19,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.commit import commit_batch, rollback_batch
-from lararium.modules.finance.importing.parsed import ParsedStatement
+from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.profiles import create_profile
 from lararium.modules.finance.importing.staging import (
     _parse,  # pyright: ignore[reportPrivateUsage]
@@ -90,6 +92,26 @@ async def test_real_files_end_to_end(
                 session, run, make_account, gbp, store, folder, institution, order
             )
     assert not failures, "\n".join(failures)
+
+
+def closings(statements: list[ParsedStatement]) -> tuple[list[tuple[date, Decimal]], int]:
+    """(day, closing) to check each stated closing balance on, and how many have no day: a
+    closing the statement doesn't date (Tembo's Plan value, as its last day may not be
+    listed in full) is checked on its last row's day, the balance its rows reach."""
+    found: list[tuple[date, Decimal]] = []
+    undated = 0
+    for statement in statements:
+        if statement.closing_balance is None:
+            continue
+        day = statement.closing_balance_date or max(
+            (row.booking_date for row in statement.rows if isinstance(row, ParsedRow)),
+            default=None,
+        )
+        if day is None:
+            undated += 1
+        else:
+            found.append((day, statement.closing_balance))
+    return found, undated
 
 
 @dataclass(frozen=True)
@@ -182,20 +204,16 @@ async def _bank(
         committed.append(batch.id)
         outcome[label] += 1
 
-    closings = [
-        (file.statement.closing_balance_date, file.statement.closing_balance)
-        for file in files
-        if file.statement.closing_balance is not None
-        and file.statement.closing_balance_date is not None
-    ]
+    checked, undated = closings([file.statement for file in files])
+    if undated:
+        failures.append(f"{tag}: {undated} closings have no day to check them on")
     held = 0
-    for day, closing in closings:
-        assert day is not None
+    for day, closing in checked:
         balance = await ledger_balance_before(session, account.id, gbp.id, day + timedelta(days=1))
         held += balance == closing
-    if held != len(closings):
+    if held != len(checked):
         failures.append(
-            f"{tag}: {len(closings) - held} of {len(closings)} closings don't hold on their date"
+            f"{tag}: {len(checked) - held} of {len(checked)} closings don't hold on their date"
         )
 
     refused = 0
@@ -212,6 +230,6 @@ async def _bank(
 
     print(
         f"\n{tag}: {len(names)} files, committed {dict(outcome)}; "
-        f"closings holding {held}/{len(closings)}; rollbacks refused {refused}"
+        f"closings holding {held}/{len(checked)}; rollbacks refused {refused}"
     )
     return failures

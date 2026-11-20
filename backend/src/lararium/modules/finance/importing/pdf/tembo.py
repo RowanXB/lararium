@@ -10,7 +10,10 @@ valued on the Valuation date, is the closing balance, which the rows' balances m
 The type gives a row's direction; an Interest Adjustment goes either way, as printed.
 
 The printed period runs from the first row's date to the last's, not to the Valuation date
-(two statements valued a week apart print the same one), so it claims only those days.
+(two statements valued a week apart print the same one): a row missing at either end shows
+as a period that doesn't match, and a missing page as a gap in the "n / N" every page
+prints. The statement is made on demand and may stop partway through its last day, so it
+lists in full only the days between its first and last.
 """
 
 import re
@@ -268,12 +271,26 @@ def _ends_table(line: list[Word]) -> bool:
     return printed.startswith(_FOOTER) or printed == _TERMS or bool(_PAGE.fullmatch(printed))
 
 
+def _page_numbers(by_page: dict[int, list[list[Word]]]) -> None:
+    """Every page prints "n / N": a page left out of the file shows as a gap or a count
+    that differs from the file's."""
+    count = max(by_page) + 1
+    for number in range(count):
+        printed = [text(line) for line in by_page.get(number, []) if _PAGE.fullmatch(text(line))]
+        if printed != [f"{number + 1} / {count}"]:
+            raise FileFormatError(
+                f"page {number + 1} of {count} doesn't print that page number: "
+                "the file may be missing a page"
+            )
+
+
 def parse(lines: list[list[Word]]) -> LayoutResult:
     by_page = pages(lines)
     first = by_page.get(0, [])
     header = next((n for n, line in enumerate(first) if _columns(line) is not None), None)
     if header is None:
         raise FileFormatError("this is not a Tembo statement: page 1 has no transaction table")
+    _page_numbers(by_page)
     above = first[:header]
     period = next(
         (
@@ -323,6 +340,11 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             table.line(line, columns)
         table.close()
     rows, balances = _rows(table.entries)
+    if rows and (rows[0].row.booking_date, rows[-1].row.booking_date) != period:
+        raise FileFormatError(
+            "the statement's period doesn't run from its first row's date to its last's: "
+            "a row may be missing"
+        )
     return LayoutResult(
         rows=rows,
         period=period,
@@ -340,4 +362,5 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
         ),
         available_balance_date=valued_on if available is not None else None,
         account_opened_on=None if opened is None else _date(opened, "the account open date"),
+        period_complete=False,
     )

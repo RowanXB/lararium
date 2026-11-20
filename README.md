@@ -560,7 +560,9 @@ A PDF statement is read by a layout written for that bank, which checks itself: 
 printed balance must follow from the amounts, every row must have exactly one amount, a date
 inside the statement period and a type code, and every word in the table must belong to a row.
 Tembo prints no opening balance and no totals: there its Plan value must equal the rows' last
-balance, and its transaction type gives each amount's direction. A statement that doesn't add
+balance, its transaction type gives each amount's direction, and its page numbers and period
+(first to last row) must leave nothing out. A Tembo statement is made on demand, so like an
+export it lists in full only the days between its first and last. A statement that doesn't add
 up is refused as a whole, naming the failed check, rather than imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
 since, in either order: rows on days an earlier import already covers are matched against it.

@@ -7,6 +7,7 @@ from lararium.modules.finance.importing.profiles import (
     CsvProfileConfig,
     ProfileConfig,
     ProfileConfigModel,
+    is_bank_transfer,
 )
 
 _CONFIG: TypeAdapter[ProfileConfigModel] = TypeAdapter(ProfileConfig)
@@ -86,3 +87,13 @@ def test_lloyds_csv() -> None:
     assert (columns.account_sort_code, columns.account_number) == ("Sort Code", "Account Number")
     assert config.row_order == "newest_first"
     assert config.amount_format.thousands_separator == ","
+
+
+def test_tembo_interest_is_no_bank_transfer() -> None:
+    """Review: Tembo pays interest itself; only deposits and withdrawals move money between
+    bank accounts."""
+    [entry] = [e for e in CATALOG if e.institution == "Tembo"]
+    for kind in ("Interest", "Interest Adjustment"):
+        assert not is_bank_transfer(entry.config.card_types, kind)
+    for kind in ("Deposit", "Withdrawal", "Transfer In", "Transfer Out"):
+        assert is_bank_transfer(entry.config.card_types, kind)
