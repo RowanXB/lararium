@@ -54,8 +54,8 @@ from lararium.modules.finance.instruments import get_currency
 
 logger = logging.getLogger(__name__)
 
-# 2: the NAV long/short parts have columns; 3: so do the Cash Report's segment parts. Each
-# bump replays the stored rows into the new columns.
+# 2: the NAV long/short parts have columns; 3: so do the Cash Report's segment parts and its
+# month and year to date totals. Each bump replays the stored rows into the new columns.
 NORMALIZER_VERSION = "ibkr-norm-3"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"

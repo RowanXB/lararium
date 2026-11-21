@@ -680,6 +680,8 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             endingCash="200",
             endingCashCom="0",
             endingCashSec="200",
+            depositsMTD="50",
+            withholding871mYTD="-1",
         ),
         RowSpec(
             "CashReportCurrency", "U0000001", currency="USD", startingCash="0", endingCash="-5"
@@ -739,14 +741,16 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
     reports = await session.execute(
         text(
             "select i.symbol, c.from_date, c.to_date, c.starting_cash, c.ending_cash,"
-            " c.ending_cash_com, c.ending_cash_sec from finance.ibkr_cash_reports c"
+            " c.ending_cash_com, c.ending_cash_sec, c.deposits_mtd, c.withholding871m_ytd"
+            " from finance.ibkr_cash_reports c"
             " join finance.instruments i on i.id = c.currency_instrument_id order by i.symbol"
         )
     )
     assert [tuple(r) for r in reports] == [
-        ("GBP", DAY, DAY, Decimal("150"), Decimal("200"), Decimal("0"), Decimal("200")),
-        ("USD", DAY, DAY, Decimal("0"), Decimal("-5"), None, None),
-    ]
+        ("GBP", DAY, DAY, Decimal("150"), Decimal("200"), Decimal("0"), Decimal("200"),
+         Decimal("50"), Decimal("-1")),
+        ("USD", DAY, DAY, Decimal("0"), Decimal("-5"), None, None, None, None),
+    ]  # fmt: skip
     nav = (
         await session.execute(
             text(

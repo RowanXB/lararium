@@ -359,7 +359,7 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 | `finance.ibkr_positions` | reported snapshot | mark price, cost basis price and money, open price, unrealised P/L, percent of NAV, side, FX rate to base |
 | `finance.ibkr_position_lots` | reported snapshot, lot | each lot's open date and time, cost basis, originating order and transaction |
 | `finance.ibkr_trade_details` | account, level of detail, row | the order, closed-lot and wash-sale levels of Trades (executions are the ledger rows) |
-| `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation, each also as its commodities and securities parts |
+| `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation, each also as its commodities and securities parts, and each flow also as its month and year to date totals |
 | `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency, each also as its long and short parts |
 
 These are IBKR's own tables. **Generic broker tables (a builder-check call):** whether eToro's or Trading 212's fields are shared enough for those tables is M6's call, made against those APIs once they are verified. Designing them now would be guesswork.

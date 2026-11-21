@@ -73,11 +73,20 @@ _CASH_AMOUNTS = _f(
     slbStartingCashCollateral startingCash taxReceivables transactionTax withdrawals
     withholding871m withholdingCollectedTax withholdingTax"""
 )
+# The flows (not the balances, FX translation, linking adjustments or other) also come as month
+# and year to date totals, e.g. depositsMTD, depositsYTD: a week's statement gave them, a year's
+# did not.
+_CASH_PERIOD_AMOUNTS = _CASH_AMOUNTS - _f(
+    """startingCash endingCash endingSettledCash fxTranslationGainLoss linkingAdjustments other
+    slbEndingCashCollateral slbNetCash slbNetSecuritiesLentActivity slbNetSettledCash
+    slbStartingCashCollateral"""
+)
 # Each cash amount also comes split by segment: commodities (Com) and securities (Sec).
 _CASH_REPORT = (
     _f("accountId acctAlias currency fromDate levelOfDetail model toDate")
     | _CASH_AMOUNTS
     | {f"{amount}{segment}" for amount in _CASH_AMOUNTS for segment in ("Com", "Sec")}
+    | {f"{amount}{period}" for amount in _CASH_PERIOD_AMOUNTS for period in ("MTD", "YTD")}
 )
 
 _NAV_AMOUNTS = _f(
