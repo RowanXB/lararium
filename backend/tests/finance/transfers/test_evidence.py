@@ -5,7 +5,8 @@ account. And the weakest (§5.3): a row that prints only a sort code pairs with 
 counterpart naming no bank account. Rows are simulated by the statement_row and
 duplicate_row fixtures."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -13,9 +14,11 @@ from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
+from lararium.modules.finance.ledger import CounterpartyFields
 from lararium.modules.finance.transfers import (
     list_transfers,
     pair,
+    preview_match,
     reject,
     unassign_identifier_and_rematch,
     unpair,
@@ -27,6 +30,7 @@ from .conftest import (
     A_IDENTIFIER,
     C_IDENTIFIER,
     DAY,
+    IMPORTED,
     WHEN,
     Connected,
     RowDetails,
@@ -316,6 +320,33 @@ async def test_a_sort_code_alone_never_pairs_with_a_row_naming_an_account(
     await heal()
 
     assert await list_transfers(session) == []
+
+
+async def test_preview_match_takes_no_staged_row_naming_a_stranger_for_a_sort_code(
+    session, run, gbp, imported_bank, statement_row, heal
+) -> None:
+    """preview_match reads the relation matching does: a row not yet posted that names
+    someone else's account names a bank account, so a sort code alone pairs it with
+    nothing, as once it is posted (the test above)."""
+    x = await imported_bank("X")
+    h = await imported_bank("H", identifier=H_ID)
+    stranger = await run(get_or_create_identifier, "uk_bank_account", STRANGER)
+    sent = await statement_row(x, "-100", details=H_SORT_CODE)
+    await heal()
+
+    async def preview(identifier_id):
+        return await preview_match(
+            session,
+            account_id=h.id,
+            instrument_id=gbp.id,
+            quantity=Decimal(100),
+            occurred_at=datetime.combine(DAY, time(), UTC),
+            counterparty=CounterpartyFields(identifier_id=identifier_id, bank_transfer=True),
+            complete=IMPORTED,
+        )
+
+    assert await preview(None) == sent  # naming nobody, it would pair weakly
+    assert await preview(stranger) is None
 
 
 async def test_a_sort_code_alone_with_two_candidates_pairs_nothing_and_asks_nothing(

@@ -759,6 +759,8 @@ async def preview_match(
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
+        # A row naming a bank account, someone else's too, is never a weak counterpart.
+        names_account=counterparty.identifier_id is not None,
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
