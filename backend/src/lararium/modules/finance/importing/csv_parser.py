@@ -228,12 +228,14 @@ def _row(
     columns = config.columns
     when = _datetime(raw[columns.date], config, local_tz)
     extracted = _extracted(raw, config)
+    description = clean_description([raw[column] for column in columns.description])
     row = ParsedRow(
         position=position,
         booking_date=when.date(),
         occurred_at=when if config.has_time else None,
         time_unit=config.time_unit,
-        description=clean_description([raw[column] for column in columns.description]),
+        description=description,
+        interest=description in config.interest_descriptions,
         quantity=_quantity(raw, config),
         fee=_optional_amount(raw, columns.fee, config) or Decimal(0),
         currency=_currency(raw, config) or config.currency,

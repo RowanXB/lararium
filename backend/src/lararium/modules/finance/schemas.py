@@ -363,6 +363,8 @@ class ImportRowOut(_Out):
     occurred_at: AwareDatetime | None
     # What the file gave occurred_at to; "day": only a date, so it is that day's midnight.
     time_unit: TimeUnit | None
+    # The row pays interest, so it is never a bank transfer.
+    interest: bool
     value_date: date | None
     description: str
     payee: str | None

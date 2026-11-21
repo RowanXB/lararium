@@ -1004,6 +1004,50 @@ def _migration(name: str) -> Any:
     return module
 
 
+async def test_0025_marks_lemfi_interest_imported_before(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """0025 marks the interest payouts LemFi statements gave before rows knew they paid
+    interest, and takes them out of the bank transfers; no other row changes."""
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    account = await make_account(name="Example LemFi saver", balance_mode="transactions")
+    rows = [
+        LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12"),
+        LemfiRow("10 May, 2027", ("Savings Funding",), paid_in="1,000.00"),
+    ]
+    content = lemfi_pdf(LemfiStatement([rows], savings=True, opening="100.00"))
+    batch = await stage(lemfi, content, account_id=account.id, default=None)
+    await commit(batch.id)
+    r, t = models.ImportRow, models.Transaction
+    state = (
+        select(r.description, r.interest, t.bank_transfer)
+        .join(t, t.id == r.transaction_id)
+        .where(r.batch_id == batch.id, r.kind == "statement")
+        .order_by(r.position)
+    )
+    assert [tuple(x) for x in await session.execute(state)] == [
+        ("Savings Interest Payout", True, False),
+        ("Savings Funding", False, True),
+    ]
+    # As 0025 finds them: no row marked, every transaction a bank transfer.
+    await session.execute(text("UPDATE finance.import_rows SET interest = false"))
+    await session.execute(
+        text(
+            "UPDATE finance.transactions AS t SET bank_transfer = true "
+            "FROM finance.import_rows AS r WHERE r.transaction_id = t.id AND r.batch_id = :b"
+        ),
+        {"b": batch.id},
+    )
+    migration = _migration("0025_finance_import_row_interest")
+    await session.execute(text(migration.BACKFILL_INTEREST))
+    await session.execute(text(migration.NO_TRANSFER))
+    session.expire_all()
+    assert [tuple(x) for x in await session.execute(state)] == [
+        ("Savings Interest Payout", True, False),
+        ("Savings Funding", False, True),
+    ]
+
+
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
     """Money in and straight back out twice a day leaves the same amount, description and
     balance: the time of day the file gives keeps the rows apart, in the file and again."""

@@ -54,6 +54,13 @@ def test_signed_amount_column() -> None:
     assert all(row.balance is None and row.currency is None for row in rows)
 
 
+def test_interest_descriptions_mark_interest_rows() -> None:
+    content = b"Date,Description,Amount\n10/11/2026,Interest,1.00\n11/11/2026,Deposit,2.00\n"
+    rows = _rows(_parse(content, interest_descriptions=["Interest"]))
+    assert [r.interest for r in rows] == [True, False]
+    assert [r.interest for r in _rows(_parse(content))] == [False, False]
+
+
 def test_outflow_positive_sign() -> None:
     rows = _rows(_parse(SIMPLE, sign="outflow_positive"))
     assert [row.quantity for row in rows] == [Decimal("3.50"), Decimal("-2000.00")]

@@ -40,14 +40,17 @@ from lararium.modules.finance.transfers import (
 
 from .staging_helpers import (
     Commit,
+    MakeAccount,
     Rollback,
     Run,
     Stage,
     _adjustments,
     _balance_after,
     _csv_profile,
+    _profile,
     isolated_example,
 )
+from .synthetic_pdfs import LemfiRow, LemfiStatement, lemfi_pdf
 
 SORT_CODE, ACCOUNT_NUMBER = "401234", "12345678"
 HEADER = "Date,Type,Description,Amount,Balance,Sort Code,Account Number\n"
@@ -578,3 +581,29 @@ async def test_a_wrong_pick_at_the_end_is_flagged_by_the_next_statement(
     assert (transfer.review_reason, transfer.in_transaction_id) == ("several_candidates", None)
     assert await _balance_after(session, account.id, END) == Decimal("698")
     assert await find_transfer_violations(session) == []
+
+
+async def test_an_interest_payout_is_no_bank_transfer(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """LemFi prints no type codes, so only its own text tells a savings interest payout from
+    a deposit: the payout is no bank transfer, a deposit stays one."""
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    account = await make_account(name="Example LemFi saver", balance_mode="transactions")
+    rows = [
+        LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12"),
+        LemfiRow("10 May, 2027", ("Savings Funding",), paid_in="1,000.00"),
+    ]
+    content = lemfi_pdf(LemfiStatement([rows], savings=True, opening="100.00"))
+    batch = await stage(lemfi, content, account_id=account.id, default=None)
+    await commit(batch.id)
+    r, t = models.ImportRow, models.Transaction
+    found = await session.execute(
+        select(r.description, t.bank_transfer)
+        .join(t, t.id == r.transaction_id)
+        .where(r.batch_id == batch.id, r.kind == "statement")
+    )
+    assert {d: b for d, b in found} == {
+        "Savings Interest Payout": False,
+        "Savings Funding": True,
+    }

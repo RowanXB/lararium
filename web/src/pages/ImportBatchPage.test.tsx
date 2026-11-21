@@ -54,6 +54,7 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     booking_date: "2026-10-03",
     occurred_at: "2026-10-02T23:00:00Z",
     time_unit: "day",
+    interest: false,
     value_date: null,
     description: "Example Coffee",
     payee: null,

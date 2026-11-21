@@ -426,6 +426,10 @@ export type CsvProfileConfig = {
     include_only?: {
         [key: string]: Array<string>;
     };
+    /**
+     * Interest Descriptions
+     */
+    interest_descriptions?: Array<string>;
     overdraft_footer_label?: FooterLabel | null;
     /**
      * Row Order
@@ -920,6 +924,10 @@ export type ImportRowOut = {
      * Instrument Id
      */
     instrument_id: string | null;
+    /**
+     * Interest
+     */
+    interest: boolean;
     /**
      * Is Gap
      */

@@ -911,6 +911,13 @@
             "title": "Include Only",
             "type": "object"
           },
+          "interest_descriptions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Interest Descriptions",
+            "type": "array"
+          },
           "overdraft_footer_label": {
             "anyOf": [
               {
@@ -1897,6 +1904,10 @@
             ],
             "title": "Instrument Id"
           },
+          "interest": {
+            "title": "Interest",
+            "type": "boolean"
+          },
           "is_gap": {
             "anyOf": [
               {
@@ -2118,6 +2129,7 @@
           "booking_date",
           "occurred_at",
           "time_unit",
+          "interest",
           "value_date",
           "description",
           "payee",

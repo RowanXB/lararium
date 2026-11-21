@@ -141,3 +141,7 @@ def test_tembo_interest_is_no_bank_transfer() -> None:
         assert not is_bank_transfer(entry.config.card_types, kind, None)
     for kind in ("Deposit", "Withdrawal", "Transfer In", "Transfer Out"):
         assert is_bank_transfer(entry.config.card_types, kind, None)
+
+
+def test_lemfi_csv_marks_its_interest() -> None:
+    assert _csv("LemFi", "CSV").interest_descriptions == ["Savings Interest Payout"]

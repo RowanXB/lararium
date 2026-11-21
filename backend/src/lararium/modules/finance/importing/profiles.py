@@ -264,6 +264,9 @@ class CsvProfileConfig(BaseModel):
     sign: Sign = "inflow_positive"
     amount_format: AmountFormat = AmountFormat()
     card_types: CardTypes = Field(default_factory=list[str])
+    # A row whose description is one of these pays interest, for a bank that prints no type
+    # codes (LemFi).
+    interest_descriptions: list[str] = Field(default_factory=list[str])
     extract: list[CsvExtract] = Field(default_factory=list[CsvExtract], max_length=10)
     # The currency of every row, for a file that states it once, not per row (LemFi's
     # column labels, "Money in (GBP)"): rather than the one picked at upload.
