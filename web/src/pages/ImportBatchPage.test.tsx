@@ -53,6 +53,7 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     status: "new",
     booking_date: "2026-10-03",
     occurred_at: "2026-10-02T23:00:00Z",
+    time_unit: "day",
     value_date: null,
     description: "Example Coffee",
     payee: null,
@@ -337,6 +338,8 @@ it("shows a card payment's card and foreign amount in its details", async () => 
       rows: [
         row(0, {
           quantity: "-75.00",
+          occurred_at: "2026-10-01T22:31:00Z",
+          time_unit: "second",
           started_at: "2026-10-01T22:30:00Z",
           card_number: "123456******1234",
           original_currency: "USD",
@@ -348,10 +351,30 @@ it("shows a card payment's card and foreign amount in its details", async () => 
     }),
   );
   expect(await screen.findByText(/Card: 123456\*{6}1234/)).toBeInTheDocument();
-  expect(screen.getByText(/Started: 2026-10-01T22:30:00Z/)).toBeInTheDocument();
+  expect(screen.getByText(/Started: \d+ \w+ 2026, \d{2}:\d{2}:00 \S+/)).toBeInTheDocument();
   expect(screen.getByText(/Converted from: -US\$100\.00/)).toBeInTheDocument();
   expect(screen.getByText(/Bank rate: 1\.33/)).toBeInTheDocument();
   expect(screen.getByText(/Reference rate: 1\.34/)).toBeInTheDocument();
+});
+
+it("shows a row's time to the unit its file gave, and none for a date", async () => {
+  // Review: 00:05 and 00:05:00 showed as the same UTC string, a day early in London.
+  show(
+    batch({
+      rows: [
+        row(0, { occurred_at: "2026-06-30T23:05:00Z", time_unit: "minute", payee: "Minutes" }),
+        row(1, { occurred_at: "2026-06-30T23:05:00Z", time_unit: "second", payee: "Seconds" }),
+        row(2, { payee: "Dated" }),
+      ],
+    }),
+  );
+  const minutes = (await screen.findByText(/Payee: Minutes/)).textContent ?? "";
+  const seconds = screen.getByText(/Payee: Seconds/).textContent ?? "";
+  // The viewer's zone is named; the test can run in any.
+  expect(minutes).toMatch(/Time: \d+ \w+ 2026, \d{2}:\d{2} \S+/);
+  expect(minutes).not.toMatch(/\d{2}:\d{2}:\d{2}/);
+  expect(seconds).toMatch(/Time: \d+ \w+ 2026, \d{2}:\d{2}:00 \S+/);
+  expect(screen.getByText(/Payee: Dated/).textContent).not.toMatch(/Time:/);
 });
 
 it("leaves a zero fee out of a row's details", async () => {

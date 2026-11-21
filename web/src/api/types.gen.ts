@@ -990,6 +990,7 @@ export type ImportRowOut = {
      * Status
      */
     status: 'new' | 'duplicate' | 'skipped' | 'error' | 'committed' | 'rolled_back';
+    time_unit: TimeUnit | null;
     /**
      * Transaction Id
      */
@@ -1586,6 +1587,8 @@ export type SyncQueuedOut = {
      */
     queued: boolean;
 };
+
+export type TimeUnit = 'day' | 'minute' | 'second';
 
 export type TimezoneName = string;
 

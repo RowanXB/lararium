@@ -50,6 +50,7 @@ from lararium.modules.finance.importing.profiles import (
     PdfProfileConfig,
     ProfileConfigModel,
     QifProfileConfig,
+    TimeUnit,
     get_profile,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
@@ -86,6 +87,7 @@ class ImportRowRecord:
     status: RowStatus
     booking_date: date | None
     occurred_at: datetime | None
+    time_unit: TimeUnit | None  # what the file gave occurred_at to; None with it
     description: str
     quantity: Decimal | None
     fee: Decimal  # NOT NULL: 0 when the file states none
@@ -1135,6 +1137,7 @@ async def align_openings(ctx: CommandContext, account_id: UUID) -> None:
             "quantity": need,
             "booking_date": day,
             "occurred_at": _midnight(day, local_tz),
+            "time_unit": "day",
             "occurred_tz": local_tz.key,
             "transaction_id": transaction_id,
             "dedupe_key": _opening_key(account_id, batch_id, day, need, currency),
@@ -1780,6 +1783,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
     return values | {
         "booking_date": parsed.booking_date,
         "occurred_at": parsed.occurred_at or _midnight(parsed.booking_date, local_tz),
+        "time_unit": parsed.time_unit,
         "occurred_tz": local_tz.key,
         "description": parsed.description,
         "quantity": parsed.quantity,

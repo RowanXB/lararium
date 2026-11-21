@@ -39,6 +39,9 @@ _NAME_INDEX = "import_profiles_name_unique"
 # The csv module quotes with '"' and splits records on line breaks.
 _FORBIDDEN_DELIMITERS = frozenset({'"', "\n", "\r"})
 _TIME_DIRECTIVES = ("%H", "%I", "%M", "%S", "%p")
+# What a row's file gave its time to: only a date ("day": the row is at the day's midnight),
+# or a time to the minute or to the second.
+type TimeUnit = Literal["day", "minute", "second"]
 # Formatted with a date format and parsed back: the format must keep day, month and year.
 _PROBE = datetime(2026, 12, 31, 23, 59, 58, tzinfo=UTC)
 
@@ -319,6 +322,13 @@ class CsvProfileConfig(BaseModel):
         """Whether the dates carry a time of day."""
         directives = self.date_format.replace("%%", "")
         return any(directive in directives for directive in _TIME_DIRECTIVES)
+
+    @property
+    def time_unit(self) -> TimeUnit:
+        """What the dates give the time to: seconds when the format reads them."""
+        if not self.has_time:
+            return "day"
+        return "second" if "%S" in self.date_format.replace("%%", "") else "minute"
 
 
 class OfxProfileConfig(BaseModel):

@@ -511,7 +511,9 @@ review page warns you first. A later import that needs an adjustment usually mea
 period is missing: discard it and import the gap first. Hybrid accounts take no adjustment,
 because their snapshots anchor the balance.
 
-**Everything the file says is stored.** Each row keeps its date and value date, payee and memo,
+**Everything the file says is stored.** Each row keeps its date and value date, the time of day
+when the file gives one and what it gives it to (`time_unit`: `day` when the file gives only a
+date, so the row sits at that day's midnight, else `minute` or `second`), payee and memo,
 cheque number, the bank's type code, counterparty name, sort code, account number and payment
 reference, and further fields where a statement prints them (payment kind, bank reference,
 purpose code, remittance text, counterparty bank, the last digits of a masked counterparty

@@ -8,7 +8,7 @@ from decimal import Decimal, localcontext
 from functools import wraps
 
 from lararium.modules.finance.errors import FinanceValidationError
-from lararium.modules.finance.importing.profiles import AmountFormat
+from lararium.modules.finance.importing.profiles import AmountFormat, TimeUnit
 from lararium.modules.finance.money import require_amount
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -134,7 +134,8 @@ class StatementRate:
 @dataclass(frozen=True)
 class ParsedRow:
     """One transaction. quantity is in ledger sign (inflow positive); the account's balance
-    changes by quantity - fee. occurred_at is aware when the file gives a time, else None."""
+    changes by quantity - fee. occurred_at is aware when the file gives a time, else None;
+    time_unit says what the file gave it to, "day" exactly when it gave no time."""
 
     position: int
     booking_date: date
@@ -172,6 +173,11 @@ class ParsedRow:
     original_amount: Decimal | None = None
     fx_rate: Decimal | None = None
     fx_reference_rate: Decimal | None = None
+    time_unit: TimeUnit = "day"
+
+    def __post_init__(self) -> None:
+        if (self.occurred_at is None) != (self.time_unit == "day"):
+            raise ValueError(f"a row at {self.occurred_at} can't have time unit {self.time_unit}")
 
 
 @dataclass(frozen=True)

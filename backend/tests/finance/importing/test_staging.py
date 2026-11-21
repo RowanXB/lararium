@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import threading
 import time
@@ -9,7 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
@@ -934,6 +935,73 @@ async def test_typed_fields_stored(
     )
     (row,) = [row for row in await _rows(session, batch) if row.kind == "statement"]
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
+
+
+async def test_rows_keep_what_their_file_gave_the_time_to(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """Owner, 2026-11-21: a row's time_unit tells a time its file gave (to the minute or
+    the second) from a date-only row's midnight; 0024 gives rows imported before the same
+    unit staging gives them now."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    header = "Date,Description,Amount\n"
+    seconds = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M:%S")
+    minutes = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    days = await _csv_profile(run, columns=columns)
+    ofx = await _profile(run, format="ofx")
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    lemfi_account = (await make_account(name="Example LemFi", balance_mode="transactions")).id
+    received = LemfiRow("03 May, 2027", ("Received from A Example",), paid_in="9.00")
+    files: dict[str, tuple[ImportProfileRecord, str | bytes, UUID | None]] = {
+        "second": (seconds, header + "10/11/2026 00:00:00,A,1.00\n", None),
+        "minute": (minutes, header + "11/11/2026 00:00,B,1.00\n", None),
+        "day": (days, header + "12/11/2026,C,1.00\n", None),
+        "ofx second": (
+            ofx,
+            _ofx([("20261113090000", "1.00", "X")], start="20261113", end="20261113"),
+            None,
+        ),
+        "ofx day": (ofx, _ofx([("20261114", "1.00", "Y")], start="20261114", end="20261114"), None),
+        "lemfi minute": (lemfi, lemfi_pdf(LemfiStatement([[received]])), lemfi_account),
+        # A balance gives the file an opening adjustment, which has only its day.
+        "balances": (await _csv_profile(run), BALANCE_HEADER + "20/11/2026,D,1.00,51.00\n", None),
+    }
+    units: dict[str, list[tuple[str, str | None]]] = {}
+    for name, (profile, content, account_id) in files.items():
+        default = None if account_id is not None else "gbp"
+        batch = await stage(profile, content, account_id=account_id, default=default)
+        units[name] = [(row.kind, row.time_unit) for row in await _rows(session, batch)]
+        await commit(batch.id)
+    assert units == {
+        "second": [("statement", "second")],
+        "minute": [("statement", "minute")],
+        "day": [("statement", "day")],
+        "ofx second": [("statement", "second")],
+        "ofx day": [("statement", "day")],
+        "lemfi minute": [("statement", "minute")],
+        "balances": [("opening_adjustment", "day"), ("statement", "day")],
+    }
+
+    r = models.ImportRow
+    units_by_id = select(r.id, r.time_unit)
+    staged = {row_id: unit for row_id, unit in await session.execute(units_by_id)}
+    migration = _migration("0024_finance_import_row_time_unit")
+    # As 0024 finds them, rows have no unit; "day" stands in for none (the CHECK allows no
+    # NULL beside a time), and only the backfill gives the others back.
+    forgotten = "UPDATE finance.import_rows SET time_unit = 'day' WHERE occurred_at IS NOT NULL"
+    await session.execute(text(forgotten))
+    await session.execute(text(migration.BACKFILL))
+    session.expire_all()
+    assert {row_id: unit for row_id, unit in await session.execute(units_by_id)} == staged
+
+
+def _migration(name: str) -> Any:
+    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:

@@ -27,7 +27,7 @@ from lararium.modules.finance.accounts import (
     TaxWrapper,
 )
 from lararium.modules.finance.identifiers import IdentifierKind
-from lararium.modules.finance.importing.profiles import ProfileConfig
+from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
@@ -361,6 +361,8 @@ class ImportRowOut(_Out):
     status: RowStatus
     booking_date: date | None
     occurred_at: AwareDatetime | None
+    # What the file gave occurred_at to; "day": only a date, so it is that day's midnight.
+    time_unit: TimeUnit | None
     value_date: date | None
     description: str
     payee: str | None
