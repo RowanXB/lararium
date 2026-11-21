@@ -34,7 +34,7 @@ M5 connects Interactive Brokers through the Flex Web Service. The connection run
 
 1. **One connection per Flex token.** Every account the Flex statement lists, open or closed, syncs daily into a broker account of its own.
 2. **Positions and per-currency cash come from IBKR's records** (approach A, §4): trades, currency conversions, cash transactions, corporate actions and position transfers. After every sync they are checked against IBKR's reported positions and cash, and a difference alerts the owner.
-3. **Every field of the sections the ledger uses is stored as a typed field**, or in its better structured home. The owner's rule from 2026-11-15 applies; the exceptions are values that can be derived and values that have a better home.
+3. **Every field the API returns is stored as a typed field**, or in its better structured home. The owner's rule from 2026-11-15 applies, as amended on 2026-11-21: a value that can be derived is stored too; the one exception is a value with a better home.
    - The owner's query ticks every section, field and option, personal fields included (owner, 2026-11-18); the whole statement is kept as a document.
    - A section outside the table in the plan that has rows, or a field outside it that has a value, is flagged to the owner, and typed when real data first shows it. This is M2's bar: real files, not hypothetical fields.
 4. **Daily prices and FX rates come from IBKR**, so holdings are valued on every past day of the history, not only today.
