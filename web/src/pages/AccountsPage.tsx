@@ -295,7 +295,11 @@ function IdentifierList({ account }: { account: AccountOut }) {
       <ul className="space-y-2">
         {identifiers.data?.map((identifier) => (
           <li key={identifier.id} className="flex flex-wrap items-center gap-3 text-sm">
-            <span>{`${formatSortCode(identifier.sort_code)} · ${identifier.account_number}`}</span>
+            <span>
+              {identifier.sort_code && identifier.account_number
+                ? `${formatSortCode(identifier.sort_code)} · ${identifier.account_number}`
+                : identifier.value}
+            </span>
             <Button
               variant="outline"
               size="sm"

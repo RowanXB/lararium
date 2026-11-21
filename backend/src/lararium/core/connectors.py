@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.core.commands import CommandContext
 from lararium.core.connections import ConnectionRecord
+from lararium.core.documents import DocumentStore
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import Notifier
 from lararium.core.secrets import Secret
@@ -49,6 +50,8 @@ class SyncContext:
     # Fetch all history: only for the sync that runs right after the owner approves a new
     # authorisation, the one time the provider serves it (see run_await_approval).
     full_backfill: bool = False
+    # Where documents are kept, for connectors that store what they fetch.
+    documents: DocumentStore | None = None
 
 
 class Connector(Protocol):

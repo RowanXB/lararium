@@ -27,7 +27,8 @@ from lararium.core.connections import (
     transition_status,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
-from lararium.core.errors import CredentialRejectedError
+from lararium.core.documents import LocalDocumentStore
+from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Connection
 from lararium.core.notify import Notifier, notifier_from_settings
@@ -118,6 +119,7 @@ async def run_sync(
                     session_factory=session_factory,
                     webhook=_webhook_target(settings),
                     full_backfill=backfill,
+                    documents=LocalDocumentStore(settings.document_dir),
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
@@ -130,8 +132,8 @@ async def run_sync(
         # command_context has rolled the failed sync back; record the failure on its own.
         rejected = isinstance(exc, CredentialRejectedError)
         error = _describe(exc)[:MAX_ERROR_LENGTH]
-        # The description only (a Monzo error's status and code, else the type), never the
-        # exception's text, which may quote a request.
+        # The description only (a message written to be shown, a Monzo error's status and
+        # code, else the type), never other exceptions' text, which may quote a request.
         logger.warning("sync of connection %s failed: %s", connection_id, error)
         backfill_failed = backfill and not rejected
         async with command_context(session, actor, "connection.sync_failed", args) as ctx:
@@ -218,9 +220,10 @@ def _describe(exc: Exception) -> str:
     """What last_error (and the owner's notification) says about a failed sync.
 
     Raw exception text can quote anything, an upstream response included, so only messages
-    written to be shown are: a rejection's, and a MonzoApiError's (its status and code).
+    written to be shown are: a rejection's, a DisplayableError's, and a MonzoApiError's (its
+    status and code).
     """
-    if isinstance(exc, CredentialRejectedError):
+    if isinstance(exc, CredentialRejectedError | DisplayableError):
         return str(exc)
     if isinstance(exc, MonzoApiError):
         return f"{type(exc).__name__}: {exc}"

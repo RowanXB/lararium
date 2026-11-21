@@ -14,6 +14,7 @@ from lararium.modules.finance.importing.parsed import (
     Counterparty,
     ParsedRow,
     ParsedStatement,
+    SkippedRow,
     StatementAccount,
     StatementRate,
 )
@@ -27,15 +28,37 @@ from .synthetic_pdfs import (
     HsbcStatement,
     LloydsRow,
     LloydsStatement,
+    RevolutCurrentStatement,
+    RevolutRow,
+    RevolutSavingsRow,
+    RevolutSavingsStatement,
+    TemboRow,
+    TemboStatement,
     boc_pdf,
     encrypted_pdf,
     hsbc_pdf,
     lloyds_pdf,
+    revolut_current_pdf,
+    revolut_savings_pdf,
     scanned_pdf,
+    tembo_pdf,
 )
 
 LONDON = ZoneInfo("Europe/London")
-type Layout = Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]
+type Layout = Literal[
+    "hsbc_uk_statement",
+    "lloyds_statement",
+    "boc_uk_statement",
+    "revolut_current_statement",
+    "revolut_savings_statement",
+    "tembo_statement",
+]
+LAYOUTS: list[Layout] = [
+    "hsbc_uk_statement",
+    "lloyds_statement",
+    "boc_uk_statement",
+    "tembo_statement",
+]
 
 
 def _parse(content: bytes, layout: Layout) -> ParsedStatement:
@@ -58,6 +81,10 @@ def _lloyds(statement: LloydsStatement) -> ParsedStatement:
 
 def _boc(statement: BocStatement) -> ParsedStatement:
     return _parse(boc_pdf(statement), "boc_uk_statement")
+
+
+def _tembo(statement: TemboStatement) -> ParsedStatement:
+    return _parse(tembo_pdf(statement), "tembo_statement")
 
 
 THREE_ROWS = [
@@ -561,6 +588,198 @@ def test_boc_several_currencies_refused() -> None:
         _parse(content, "boc_uk_statement")
 
 
+# Tembo ---------------------------------------------------------------------------------
+
+TEMBO_ROWS = [
+    TemboRow("03/05/2027", "Deposit", "£50.00"),
+    TemboRow("10/05/2027", "Withdrawal", "£5.50"),
+    TemboRow("31/05/2027", "Interest", "£0.12"),
+    TemboRow("31/05/2027", "Interest Adjustment", "-£0.02"),
+]
+
+
+def test_tembo_rows_and_summary() -> None:
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS]))
+    rows = _rows(statement)
+    assert [(r.booking_date, r.bank_type, r.quantity, r.balance) for r in rows] == [
+        (date(2027, 5, 3), "Deposit", Decimal("50.00"), Decimal("50.00")),
+        (date(2027, 5, 10), "Withdrawal", Decimal("-5.50"), Decimal("44.50")),
+        (date(2027, 5, 31), "Interest", Decimal("0.12"), Decimal("44.62")),
+        (date(2027, 5, 31), "Interest Adjustment", Decimal("-0.02"), Decimal("44.60")),
+    ]
+    assert [r.description for r in rows] == [r.bank_type for r in rows]
+    assert {r.currency for r in rows} == {"GBP"}
+    assert rows[1].raw == {
+        "Date": "10/05/2027",
+        "Transaction type": "Withdrawal",
+        "Amount": "£5.50",
+        "Balance": "£44.50",
+    }
+    assert statement.period == (date(2027, 5, 3), date(2027, 5, 31))
+    # Made on demand, it may stop partway through its last day.
+    assert not statement.period_complete
+    assert statement.account == StatementAccount(
+        account_reference="ACC-EX01AB-CD23EF",
+        account_type="Regular Saver",
+        addressee="Alex Example",
+        address="FLAT 1 Example House 2 Example Road, Exampletown, EX1 2MP",
+    )
+    assert statement.currency == "GBP"
+    # The Plan value: undated, as the last day may not be listed in full.
+    assert (statement.closing_balance, statement.closing_balance_date) == (Decimal("44.60"), None)
+    # Tembo prints no opening balance and no totals: nothing is stored for them.
+    assert (statement.opening_balance, statement.money_in, statement.money_out) == (
+        None,
+        None,
+        None,
+    )
+    assert (statement.payments_in, statement.payments_out) == (None, None)
+    assert (statement.available_balance, statement.available_balance_date) == (
+        Decimal("44.60"),
+        date(2027, 6, 1),
+    )
+    assert statement.document_date == date(2027, 6, 1)
+    assert statement.account_opened_on == date(2027, 2, 3)
+
+
+def test_tembo_available_to_withdraw_is_its_own_field() -> None:
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS], available="£40.00"))
+    assert statement.available_balance == Decimal("40.00")
+    assert statement.closing_balance == Decimal("44.60")
+
+
+def test_tembo_multipage_and_terms_page() -> None:
+    more = [
+        TemboRow("12/05/2027", "Transfer In", "£1,000.00"),
+        TemboRow("20/05/2027", "Transfer Out", "£200.00"),
+    ]
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS[:2], more, TEMBO_ROWS[2:]]))
+    rows = _rows(statement)
+    assert [r.quantity for r in rows] == [
+        Decimal("50.00"),
+        Decimal("-5.50"),
+        Decimal("1000.00"),
+        Decimal("-200.00"),
+        Decimal("0.12"),
+        Decimal("-0.02"),
+    ]
+    assert [r.position for r in rows] == list(range(6))
+    assert statement.closing_balance == Decimal("844.60")
+
+
+def test_tembo_newest_first_is_read_oldest_first() -> None:
+    oldest_first = _rows(_tembo(TemboStatement(pages=[TEMBO_ROWS[:2], TEMBO_ROWS[2:3]])))
+    newest_first = _rows(
+        _tembo(TemboStatement(pages=[TEMBO_ROWS[:2], TEMBO_ROWS[2:3]], newest_first=True))
+    )
+    assert newest_first == oldest_first
+
+
+def test_tembo_rows_out_of_date_order_refused() -> None:
+    rows = [TEMBO_ROWS[1], TEMBO_ROWS[0], TEMBO_ROWS[2]]
+    with pytest.raises(FileFormatError, match="aren't in date order"):
+        _tembo(TemboStatement(pages=[rows]))
+
+
+def test_tembo_plan_value_must_equal_the_rows() -> None:
+    with pytest.raises(
+        FileFormatError,
+        match=re.escape("its rows give 44.60, but its closing balance is 45.00"),
+    ):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], plan_value="£45.00"))
+
+
+def test_tembo_unknown_transaction_type_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Bonus", "£5.00")]
+    with pytest.raises(FileFormatError, match="transaction type the statement terms don't list"):
+        _tembo(TemboStatement(pages=[rows]))
+
+
+def test_tembo_money_in_printed_negative_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "-£5.00", balance="£5.00")]
+    with pytest.raises(FileFormatError, match="is a Deposit printed as money out"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+def test_tembo_withdrawal_printed_negative_is_money_out() -> None:
+    rows = [TEMBO_ROWS[0], TemboRow("10/05/2027", "Withdrawal", "-£5.50")]
+    assert _rows(_tembo(TemboStatement(pages=[rows])))[1].quantity == Decimal("-5.50")
+
+
+def test_tembo_amount_without_pounds_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "5.00", balance="£5.00")]
+    with pytest.raises(FileFormatError, match="isn't in pounds"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+def test_tembo_row_without_an_amount_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "", balance="£0.00")]
+    with pytest.raises(FileFormatError, match="has 0 amounts, not one"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£0.00"))
+
+
+def test_tembo_row_with_two_amounts_refused() -> None:
+    extra = [(0, 381.0, 391.7, "£1.00")]
+    with pytest.raises(FileFormatError, match="has 2 amounts, not one"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_no_printed_balance_refused() -> None:
+    rows = [TemboRow("03/05/2027", "Deposit", "£5.00", balance="")]
+    with pytest.raises(FileFormatError, match="no opening balance and no row balance"):
+        _tembo(TemboStatement(pages=[rows], plan_value="£5.00"))
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("01/05/2027", "31/05/2027"), ("03/05/2027", "01/06/2027"), ("04/05/2027", "31/05/2027")],
+)
+def test_tembo_period_must_run_from_the_first_row_to_the_last(start: str, end: str) -> None:
+    """Review: with the first row unread, the opening taken from the next printed balance
+    hid it, and the whole period was taken as listed."""
+    with pytest.raises(FileFormatError, match="doesn't run from its first row's date"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], start=start, end=end))
+
+
+def test_tembo_missing_page_refused() -> None:
+    """Review: a page with +£20 and -£20 left out of the file kept every check passing."""
+    pair = [
+        TemboRow("12/05/2027", "Transfer In", "£20.00"),
+        TemboRow("13/05/2027", "Transfer Out", "£20.00"),
+    ]
+    pages = [TEMBO_ROWS[:2], pair, TEMBO_ROWS[2:]]
+    assert len(_rows(_tembo(TemboStatement(pages=pages)))) == 6
+    with pytest.raises(FileFormatError, match="may be missing a page"):
+        _tembo(TemboStatement(pages=pages, omit_page=2))
+    # Its table unreadable, its page number not: no row of it can be read.
+    with pytest.raises(FileFormatError, match="page 2 has no transaction table"):
+        _tembo(TemboStatement(pages=pages, unreadable_page=2))
+    # Review: its header readable, its rows not.
+    with pytest.raises(FileFormatError, match="page 2's transaction table has no row"):
+        _tembo(TemboStatement(pages=pages, unreadable_rows_page=2))
+    # The last page, the terms, left out: the count no longer matches.
+    with pytest.raises(FileFormatError, match="page 1 of 3 doesn't print that page number"):
+        _tembo(TemboStatement(pages=pages, omit_page=4))
+
+
+def test_tembo_stray_word_in_the_table_refused() -> None:
+    extra = [(0, 560.0, 425.4, "12.00")]
+    with pytest.raises(FileFormatError, match="words outside any column on page 1"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_dated_line_on_a_page_without_the_table_refused() -> None:
+    # On the terms page: a row there would be read by nothing.
+    extra = [(1, 62.8, 300.0, "04/05/2027"), (1, 191.1, 300.0, "Deposit")]
+    with pytest.raises(FileFormatError, match="words outside any column on page 2"):
+        _tembo(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
+
+
+def test_tembo_wrong_bank_refused() -> None:
+    with pytest.raises(FileFormatError, match="not a Tembo statement"):
+        _parse(lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS)), "tembo_statement")
+
+
 # Every layout --------------------------------------------------------------------------
 
 
@@ -669,7 +888,7 @@ def test_layout_refuses_when_summary_differs() -> None:
         _parse(content, "hsbc_uk_statement")
 
 
-@pytest.mark.parametrize("layout", ["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"])
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
     if layout == "hsbc_uk_statement":
         rows = list(THREE_ROWS)
@@ -683,6 +902,9 @@ def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
             LloydsRow("21 Jun 27", ("A EXAMPLE",), "FPO", money_out="7.25", balance="76.67"),
         ]
         content = lloyds_pdf(LloydsStatement(rows=rows))
+    elif layout == "tembo_statement":
+        wrong = TemboRow("20/05/2027", "Withdrawal", "£10.00", balance="£45.00")
+        content = tembo_pdf(TemboStatement(pages=[[TEMBO_ROWS[0], wrong]]))
     else:
         wrong = BocRow(
             "24/05/27", "24/05/27", ("///Transfer A EXAMPLE",), paid_in="1.00", balance="2.00"
@@ -693,7 +915,7 @@ def test_layout_refuses_when_printed_balance_differs(layout: Layout) -> None:
         _parse(content, layout)
 
 
-@pytest.mark.parametrize("layout", ["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"])
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_layout_refuses_a_row_with_two_balances(layout: Layout) -> None:
     # A second word in the balance column of one row must not replace the first unchecked.
     if layout == "hsbc_uk_statement":
@@ -701,6 +923,9 @@ def test_layout_refuses_a_row_with_two_balances(layout: Layout) -> None:
         content = hsbc_pdf(HsbcStatement(pages=[THREE_ROWS], extra=extra))
     elif layout == "lloyds_statement":
         content = lloyds_pdf(LloydsStatement(rows=LLOYDS_ROWS, extra=[(0, 520.0, 352.0, "12.00")]))
+    elif layout == "tembo_statement":
+        extra = [(0, 500.0, 391.7, "£1.00")]
+        content = tembo_pdf(TemboStatement(pages=[TEMBO_ROWS], extra=extra))
     else:
         extra = [(1, 540.0, 193.5, "12.00")]
         content = boc_pdf(BocStatement(pages=[[LOCAL_OUT]], extra=extra))
@@ -771,7 +996,7 @@ def test_mailing_block_passes_over_the_other_column() -> None:
     from lararium.modules.finance.importing.pdf.words import Word
 
     def line(top: str, x0: str, text: str) -> list[Word]:
-        return [Word(text, D(x0), D(x0) + 50, D(top), 0)]
+        return [Word(text, D(x0), D(x0) + 50, D(top), 0, D(8))]
 
     lines = [
         line("155", "60.8", "Mr A Example"),
@@ -784,3 +1009,335 @@ def test_mailing_block_passes_over_the_other_column() -> None:
         "Mr A Example",
         "1 Example Street, Exampletown, EX1 2MP",
     )
+
+
+# Revolut --------------------------------------------------------------------------------
+
+REVOLUT_ROWS = [
+    RevolutRow(
+        "Oct 2, 2027",
+        "Payment from A EXAMPLE",
+        paid_in="£1,250.00",
+        balance="£1,350.00",
+        details=("Reference: Rent share", "From: A EXAMPLE, 87654321"),
+    ),
+    RevolutRow(
+        "Oct 3, 2027",
+        "Example Cafe",
+        paid_out="£4.20",
+        balance="£1,345.80",
+        details=("To: Example Cafe, Exampletown, GBR", "Card: 123456******1234"),
+    ),
+    RevolutRow(
+        "Oct 4, 2027",
+        "Example Software",
+        paid_out="£15.40",
+        balance="£1,330.40",
+        details=("To: Example Software, Example City, CA", "Card: 123456******1234"),
+        rate=("Revolut Rate £1.00 = $1.30 (ECB rate* £1.00 = $1.31)", "$20.00"),
+    ),
+    RevolutRow("Oct 5, 2027", "To GBP Example account", paid_out="£30.40", balance="£1,300.00"),
+]
+REVOLUT_SUMMARY = {
+    "opening": "£100.00",
+    "money_out": "£50.00",
+    "money_in": "£1,250.00",
+    "closing": "£1,300.00",
+}
+
+
+def _revolut(**changes: object) -> ParsedStatement:
+    statement = RevolutCurrentStatement(pages=[REVOLUT_ROWS], **REVOLUT_SUMMARY)  # pyright: ignore[reportArgumentType]
+    return _parse(
+        revolut_current_pdf(replace(statement, **changes)),  # pyright: ignore[reportArgumentType]
+        "revolut_current_statement",
+    )
+
+
+def test_revolut_current_rows_and_summary() -> None:
+    statement = _revolut()
+
+    rows = _rows(statement)
+    assert [(row.booking_date, row.description, row.quantity, row.balance) for row in rows] == [
+        (date(2027, 10, 2), "Payment from A EXAMPLE", Decimal("1250.00"), Decimal("1350.00")),
+        (date(2027, 10, 3), "Example Cafe", Decimal("-4.20"), Decimal("1345.80")),
+        (date(2027, 10, 4), "Example Software", Decimal("-15.40"), Decimal("1330.40")),
+        (date(2027, 10, 5), "To GBP Example account", Decimal("-30.40"), Decimal("1300.00")),
+    ]
+    assert all(row.bank_type is None and row.currency == "GBP" for row in rows)
+    assert statement.period == (date(2027, 10, 1), date(2027, 10, 31))
+    assert (statement.opening_balance, statement.closing_balance) == (
+        Decimal("100.00"),
+        Decimal("1300.00"),
+    )
+    assert (statement.money_in, statement.money_out) == (Decimal("1250.00"), Decimal("50.00"))
+    assert statement.currency == "GBP"
+    assert statement.document_date == date(2027, 11, 2)
+    assert statement.account == StatementAccount(
+        sort_code="040075",
+        account_number="12345678",
+        iban="GB33REVO00996912345678",
+        bic="REVOGB21",
+        account_type="Account (Current Account)",
+        addressee="A EXAMPLE",
+        address="1 Example Street, Flat 2, Exampletown, EX1 2MP",
+    )
+
+
+def test_revolut_current_payment_details() -> None:
+    transfer, card, foreign, own = _rows(_revolut())
+
+    assert transfer.counterparty == Counterparty(
+        name="A EXAMPLE", account_number="87654321", reference="Rent share"
+    )
+    assert transfer.card_number is None
+    assert transfer.raw["From"] == "A EXAMPLE, 87654321"
+    # A card payment's other side is the merchant as printed, location and all.
+    assert card.counterparty == Counterparty(name="Example Cafe, Exampletown, GBR")
+    assert card.card_number == "123456******1234"
+    assert (
+        foreign.original_currency,
+        foreign.original_amount,
+        foreign.fx_rate,
+        foreign.fx_reference_rate,
+    ) == ("USD", Decimal("-20.00"), Decimal("1.30"), Decimal("1.31"))
+    assert own.counterparty is None and own.original_currency is None
+
+
+def test_revolut_current_pending_and_reverted_rows_are_skipped() -> None:
+    pending = RevolutRow(
+        "Oct 30, 2027",
+        "Example Shop",
+        paid_out="£9.99",
+        details=("To: Example Shop, Exampletown", "Card: 123456******1234"),
+    )
+    reverted = RevolutRow("Oct 6, 2027", "Example Fares", paid_out="£2.80")
+
+    statement = _revolut(pending=[pending], reverted=[reverted])
+
+    skipped = [row for row in statement.rows if isinstance(row, SkippedRow)]
+    assert [(row.position, row.reason, row.raw["Description"]) for row in skipped] == [
+        (4, "pending: not in the statement's balance", "Example Shop"),
+        (5, "reverted: not in the statement's balance", "Example Fares"),
+    ]
+    assert len(statement.rows) == 6
+
+
+def test_revolut_current_continues_over_pages() -> None:
+    statement = _revolut(pages=[REVOLUT_ROWS[:2], REVOLUT_ROWS[2:]])
+
+    assert [row.description for row in _rows(statement)][2:] == [
+        "Example Software",
+        "To GBP Example account",
+    ]
+
+
+def test_revolut_current_negative_balance() -> None:
+    rows = [
+        RevolutRow("Oct 2, 2027", "Example Fares", paid_out="£102.50", balance="-£2.50"),
+        RevolutRow("Oct 3, 2027", "From GBP Example account", paid_in="£2.50", balance="£0.00"),
+    ]
+    statement = _revolut(pages=[rows], money_out="£102.50", money_in="£2.50", closing="£0.00")
+
+    assert [row.balance for row in _rows(statement)] == [Decimal("-2.50"), Decimal("0.00")]
+
+
+def test_revolut_current_refuses_money_in_two_currencies() -> None:
+    with pytest.raises(FileFormatError, match=r"more than one currency \(USD, GBP\)"):
+        _revolut(other=("USD", "$", ("$5.00", "$0.00", "$0.00", "$5.00")))
+
+
+def test_revolut_current_refuses_a_total_unlike_its_product() -> None:
+    with pytest.raises(FileFormatError, match="total differs from its product"):
+        _revolut(total=("£100.00", "£50.00", "£1,250.00", "£1,301.00"))
+
+
+def test_revolut_current_refuses_an_unknown_detail_line() -> None:
+    with pytest.raises(FileFormatError, match="words outside any column on page 2"):
+        _revolut(extra=[(1, 124.76, 589.0, "Note: unexpected")])
+
+
+def test_revolut_current_refuses_a_rate_not_per_one_pound() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(
+        rows[2], rate=("Revolut Rate £2.00 = $2.60 (ECB rate* £1.00 = $1.31)", "$20.00")
+    )
+
+    with pytest.raises(FileFormatError, match="rate is not quoted per one GBP"):
+        _revolut(pages=[rows])
+
+
+def test_revolut_current_refuses_rates_in_two_currencies() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(
+        rows[2], rate=("Revolut Rate £1.00 = $1.30 (ECB rate* £1.00 = $1.31)", "€20.00")
+    )
+
+    with pytest.raises(FileFormatError, match="disagree on the currency"):
+        _revolut(pages=[rows])
+
+
+def test_revolut_current_refuses_an_unknown_currency_symbol() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(
+        rows[2], rate=("Revolut Rate £1.00 = ¤1.30 (ECB rate* £1.00 = ¤1.31)", "¤20.00")
+    )
+
+    with pytest.raises(FileFormatError, match="in a currency this layout doesn't know"):
+        _revolut(pages=[rows])
+
+
+SAVINGS_ROWS = [
+    RevolutSavingsRow("Oct 1, 2027", "Deposit", paid_in="£1,000.00", balance="£1,500.00"),
+    RevolutSavingsRow("Oct 1, 2027", "Gross Interest", paid_in="£0.12", balance="£1,500.12"),
+    RevolutSavingsRow("Oct 2, 2027", "Withdrawal", paid_out="£200.00", balance="£1,300.12"),
+    RevolutSavingsRow("Oct 2, 2027", "Gross Interest", paid_in="£0.10", balance="£1,300.22"),
+]
+SAVINGS_TOTALS = {
+    "Opening Balance": "£500.00",
+    "Total Deposit": "£1,000.00",
+    "Total Withdrawal": "£200.00",
+    "Total Interest Paid": "£0.22",
+    "Closing Balance": "£1,300.22",
+}
+
+
+def _savings(pages: list[list[RevolutSavingsRow]] | None = None, **totals: str) -> ParsedStatement:
+    statement = RevolutSavingsStatement(
+        pages=pages or [SAVINGS_ROWS], totals=SAVINGS_TOTALS | totals
+    )
+    return _parse(revolut_savings_pdf(statement), "revolut_savings_statement")
+
+
+def test_revolut_savings_rows_and_summary() -> None:
+    statement = _savings()
+
+    rows = _rows(statement)
+    assert [(row.booking_date, row.bank_type, row.quantity, row.balance) for row in rows] == [
+        (date(2027, 10, 1), "Deposit", Decimal("1000.00"), Decimal("1500.00")),
+        (date(2027, 10, 1), "Gross Interest", Decimal("0.12"), Decimal("1500.12")),
+        (date(2027, 10, 2), "Withdrawal", Decimal("-200.00"), Decimal("1300.12")),
+        (date(2027, 10, 2), "Gross Interest", Decimal("0.10"), Decimal("1300.22")),
+    ]
+    assert rows[0].description == "Deposit"
+    assert statement.period == (date(2027, 10, 1), date(2027, 10, 31))
+    assert (statement.money_in, statement.money_out) == (Decimal("1000.22"), Decimal("200.00"))
+    assert (statement.opening_balance, statement.closing_balance) == (
+        Decimal("500.00"),
+        Decimal("1300.22"),
+    )
+    assert statement.currency == "GBP"
+    assert statement.document_date == date(2027, 11, 2)
+    assert statement.account == StatementAccount(
+        sort_code="040075",
+        account_number="12345678",
+        account_type="Example account - Instant Access - Example Bank",
+        addressee="A EXAMPLE",
+        address="1 Example Street, Exampletown, EX1 2MP, United Kingdom",
+    )
+
+
+def test_revolut_savings_continues_over_pages() -> None:
+    statement = _savings([SAVINGS_ROWS[:3], SAVINGS_ROWS[3:]])
+
+    assert len(_rows(statement)) == 4
+
+
+def test_revolut_savings_checks_each_kind_total() -> None:
+    # Money in still adds up; the interest and deposit totals don't.
+    with pytest.raises(
+        FileFormatError,
+        match=re.escape(
+            "the statement's Total Deposit is 1000.10 but its Deposit rows add up to 1000.00"
+        ),
+    ):
+        _savings(**{"Total Deposit": "£1,000.10", "Total Interest Paid": "£0.12"})
+
+
+def test_revolut_savings_refuses_an_unknown_kind() -> None:
+    rows = [
+        *SAVINGS_ROWS,
+        RevolutSavingsRow("Oct 3, 2027", "Fee", paid_out="£1.00", balance="£1,299.22"),
+    ]
+
+    with pytest.raises(FileFormatError, match="'Fee', which the summary doesn't total"):
+        _savings([rows])
+
+
+def test_revolut_savings_refuses_a_kind_in_the_wrong_column() -> None:
+    rows = list(SAVINGS_ROWS)
+    rows[1] = RevolutSavingsRow(
+        "Oct 1, 2027", "Gross Interest", paid_out="£0.12", balance="£1,500.12"
+    )
+
+    with pytest.raises(FileFormatError, match="Gross Interest is not in the Money in column"):
+        _savings([rows])
+
+
+@pytest.mark.parametrize("layout", ["revolut_current_statement", "revolut_savings_statement"])
+def test_revolut_refuses_when_printed_balance_differs(layout: Layout) -> None:
+    if layout == "revolut_current_statement":
+        rows = list(REVOLUT_ROWS)
+        rows[1] = replace(rows[1], balance="£1,345.08")
+        content = revolut_current_pdf(
+            RevolutCurrentStatement(pages=[rows], **REVOLUT_SUMMARY)  # pyright: ignore[reportArgumentType]
+        )
+    else:
+        rows = list(SAVINGS_ROWS)
+        rows[1] = replace(rows[1], balance="£1,500.21")
+        content = revolut_savings_pdf(RevolutSavingsStatement(pages=[rows], totals=SAVINGS_TOTALS))
+
+    with pytest.raises(FileFormatError, match="the balance printed on page"):
+        _parse(content, layout)
+
+
+def test_revolut_wrong_layout_refused() -> None:
+    savings = revolut_savings_pdf(
+        RevolutSavingsStatement(pages=[SAVINGS_ROWS], totals=SAVINGS_TOTALS)
+    )
+    with pytest.raises(FileFormatError, match="not a Revolut current account statement"):
+        _parse(savings, "revolut_current_statement")
+    with pytest.raises(FileFormatError, match="not a Revolut savings statement"):
+        _parse(
+            revolut_current_pdf(RevolutCurrentStatement(pages=[REVOLUT_ROWS])),
+            "revolut_savings_statement",
+        )
+
+
+def test_revolut_statement_made_on_its_last_day_has_an_undated_closing() -> None:
+    # Made partway through 31 Oct: later payments that day would move the closing.
+    statement = _revolut(generated="Oct 31, 2027")
+
+    assert statement.closing_balance == Decimal("1300.00")
+    assert statement.closing_balance_date is None
+    assert _revolut().closing_balance_date == date(2027, 10, 31)
+
+
+def test_skipped_rows_count_towards_the_row_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lararium.modules.finance.importing import parsed
+
+    monkeypatch.setattr(parsed, "MAX_IMPORT_ROWS", len(REVOLUT_ROWS))
+    pending = RevolutRow("Oct 30, 2027", "Example Shop", paid_out="£9.99")
+
+    with pytest.raises(FileFormatError, match="more than 4 rows"):
+        _revolut(pending=[pending])
+
+
+def test_revolut_current_whole_amounts_in_a_currency_without_pence() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(
+        rows[2], rate=("Revolut Rate £1.00 = ¥190.50 (ECB rate* £1.00 = ¥191)", "¥3,000")
+    )
+
+    foreign = _rows(_revolut(pages=[rows]))[2]
+
+    assert (foreign.original_currency, foreign.original_amount) == ("JPY", Decimal("-3000"))
+    assert (foreign.fx_rate, foreign.fx_reference_rate) == (Decimal("190.50"), Decimal("191"))
+
+
+def test_revolut_current_refuses_a_whole_amount_in_a_currency_with_cents() -> None:
+    rows = list(REVOLUT_ROWS)
+    rows[2] = replace(rows[2], rate=("Revolut Rate £1.00 = $1.30 (ECB rate* £1.00 = $1.31)", "$20"))
+
+    with pytest.raises(FileFormatError, match="original amount is not an amount"):
+        _revolut(pages=[rows])

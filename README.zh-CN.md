@@ -91,7 +91,7 @@ tailscale serve --bg 8080
 
 `make up` 会构建镜像并启动 PostgreSQL（`db`），以 `lararium_owner` 身份执行一次迁移
 （`migrate`），然后以 `lararium_backend` 身份启动 API（`api`）、后台 worker（`worker`：连接同步和
-定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，上传的账单文件保留在 `lararium_documents` 卷中。
+定时任务），以及提供 SPA 并转发 `/api/*` 的 Caddy（`web`）。`make down` 停止整套服务；数据保留在 `lararium_pgdata` 卷中，账单文件（上传的，或从 IBKR 获取的）保留在 `lararium_documents` 卷中。
 
 在 tailnet 里的任意设备上打开 `https://<主机名>.<你的tailnet>.ts.net`。
 
@@ -165,7 +165,8 @@ Monzo 是一个连接器：`worker` 服务每 30 分钟（以及点击「立即�
 
 会同步的内容：你的账户（联名账户是单独的账户）、作为所属账户子账户的每个 pot、交易（被拒绝的会
 跳过；待处理的交易会在结算或被撤销时更新）以及余额快照。刷卡付款会匹配到商户；pot 转账变成账户
-与 pot 之间的转账。
+与 pot 之间的转账。已删除的 pot（包括连接之前就已删除的）会作为已关闭的账户保留，钱放在里面的那段
+时间仍计入净值。
 
 账本里会出现两个系统账户：
 
@@ -284,6 +285,14 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 - **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额不同的候选没有这个按钮）：这两条记录是
   同一笔转账。你的选择优先于其他任何候选。
 
+**没有写明对方账户的记录。** 两条记录都没有写明对方账户时（比如银行流水只印着你的名字和一个
+参考号），不会自动生成转账。先在手动账户上手动录入另一侧，再通过 API 把这两条记录配对：
+`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录（另一个账户、
+金额相反且相等、日期最近的在前），`POST /api/v1/finance/transactions/{id}/pair`，请求体
+`{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。手动录入的那一侧必须是恰好两条分录的交易（该账户和 Unassigned），
+否则配对会被拒绝。点 Unpair 即可撤销；撤销后，两条没有写明对方账户的记录不再有转账，要恢复只能
+再通过同一个接口把它们重新配对（另一条记录仍会出现在候选列表里）。
+
 ### In transit 计入净资产
 
 **In transit**（在途）是一个资产类的系统账户，所以计入净资产。转账的转出一侧记到它上面，转入一侧
@@ -298,6 +307,71 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 和周三任何时刻的 Monzo 付款配上；7 天后算逾期）在设置 `finance.transfers` 里；目前还没有
 页面可以修改它们。每一项都是 1 到 3650 之间的整天数，前后两个窗口加起来必须短于 7 天，这样每周
 一次的转账不会和下一周的配上。
+
+## 连接 Interactive Brokers
+
+Interactive Brokers（IBKR）是一个连接器：`worker` 通过 IBKR 的 Flex Web Service 同步它，
+该服务返回你事先定义好的一份 Flex query 报表。它只读取数据。拉取到的报表会作为文档保存在
+`documents` 卷中，`worker` 和 `api` 一样挂载这个卷；升级后运行 `make up`，worker 才会挂上它。
+
+### 1. 创建 Activity Flex Query
+
+在 Client Portal 打开 Performance & Reports，再进入 Flex Queries，创建一个 **Activity Flex
+Query**：
+
+- 选择**所有账户**（只选一个账户的 query 会漏掉其他账户）。
+- 格式选 **XML**，日期格式 `yyyyMMdd`，时间格式 `HH:mm:ss TimeZone`，分隔符 `;`。
+- 把 **Include Currency Rates**、**Include Audit Trail Fields**、**Include Offsetting
+  Trade/Cancel Pairs** 和 **Breakout by Day** 都设为 Yes。
+- **勾选每一个 section，以及每个字段和选项。** Lararium 会把 IBKR 发来的每个字段都按类型存下来。
+  个人信息字段（姓名、地址、邮箱、出生日期、受益人、客户经理）是可选的：勾选后同样会存储，但绝不
+  出现在日志、警告或通知里。
+- 时间段无关紧要：Lararium 会自己发送日期。
+
+保存后记下 **query ID**。
+
+### 2. 创建 token
+
+在 Flex Web Service Configuration 中启用该服务并生成 token。有效期最长一年。IP 限制是可选的；
+家里是动态 IP 时请留空。**记下到期日**：IBKR 没有查询到期日的 API，所以由你告诉 Lararium，
+它会在到期前 14 天提醒你。生成新 token 会让旧 token 失效。
+
+### 3. 添加连接
+
+在 Connections 页面选择 **Add Interactive Brokers**，填写显示名称、token、到期日和 query ID。
+每个 IBKR 连接都会显示 token 到期日（14 天内高亮），并有 **Update token**（填新 token 和到期日；
+query ID 留空表示沿用当前的）和 **Upload a Flex statement**（见下文）。
+
+worker 每天伦敦时间 06:00 之后同步，点击 **Sync now** 时也会同步。首次同步最多拉取一年，再往前
+拉取到账户开立为止（以 IBKR 提供的为限）；**Sync now** 遵循同样的规则。每个 IBKR 账户在
+Lararium 中对应一个账户，税务账户类型（ISA 或 GIA）按 IBKR 的账户类型自动设置。
+
+### 与 Monzo 之间的转账
+
+在 IBKR 账户上登记 IBKR 的收款银行账户（Monzo 显示的 sort code 和账号），做法见
+[登记标识](#登记标识)，这样 Monzo 的付款就能与 IBKR 的入金配对。如果 IBKR 从另一个账户付款给你，
+它会出现在 Suggestions 里。你自己的 IBKR 账户之间的转账会自动配对。
+
+### 对账警告
+
+每次同步或上传后，Lararium 会按每个账户 IBKR 最近一次报告的那一天，把自己的记录与 IBKR 报告的
+持仓和现金对比。
+
+- **“IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT”** 表示 Lararium 的记录
+  与 IBKR 报告的数字对不上：可能是某种记录类型还没处理，或是 IBKR 做了更正。Lararium 绝不会
+  悄悄自动修正。某次同步里更早一天的差异只会发通知。
+- **同步失败** 时，连接上会显示原因，比如需要在 Flex query 里勾选的某个字段。
+- **“IBKR flagged: …”** 指出了 Lararium 还没有给类型的某个 section 或字段。
+
+### 已关闭的账户
+
+Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请手动获取它的报表：
+
+1. 在 Client Portal 打开账户选择器的筛选，选 Account Status，再选 Closed，并选中所有账户。
+2. 运行 Flex query：Run，格式选 XML，时间段覆盖该已关闭账户的存续期。IBKR 可能在后台生成
+   （Batch Flex Queries）；生成后下载。
+3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
+   上传这个 XML（最大 64 MiB）。请在最近一次同步之后再运行导出：旧文件里某行若已被 IBKR 更正，上传会把更正覆盖回去。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
@@ -347,7 +421,7 @@ SQL
 
 连接需要重新授权、或同步持续失败时，Lararium 可以给你发消息。在飞书群里添加一个自定义机器人，
 开启签名校验，把 webhook 地址和签名密钥分别填进 `infra/.env` 的 `LARARIUM_FEISHU_WEBHOOK_URL`
-和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker）。两者都不设置就不发通知。消息里
+和 `LARARIUM_FEISHU_SECRET`（`make up` 会把它们传给 worker 和 api）。两者都不设置就不发通知。消息里
 不会出现任何凭据。
 
 ## 导入账单
@@ -377,11 +451,14 @@ SQL
 提醒你。后来的导入还需要调整，通常说明缺了某一期账单：丢弃它，先导入缺的那期。`hybrid` 账户不加
 调整，因为它的快照已经锚定了余额。
 
-**文件里的每个字段都会保存。** 每一行保存日期和起息日、收款方和备注、支票号、银行的交易类型代码、
+**文件里的每个字段都会保存。** 每一行保存日期和起息日、文件给出的时间及其精度（`time_unit`：文件只给日期时为
+`day`，这一行记在那天的零点；否则为 `minute` 或 `second`）、收款方和备注、支票号、银行的交易类型代码、
 对方的名称、sort code、账号和付款参考，以及账单上印出时的更多字段（付款类型、银行参考号、用途代码、
-汇款附言、对方银行），各占一列，另外还保存整行原始数据。每份账单保存账单期间、期初和期末余额、
-收入和支出合计、笔数、账单编号和日期、印出的账户信息（类型、名称、sort code、账号、IBAN、BIC、
-客户号、分行）、约定透支额度以及利率表。文件写明的账户必须与之前导入到同一个账本账户的账户一致，
+汇款附言、对方银行、被遮住的对方账号的末几位；Revolut 还有付款的发起时间、所用的卡，以及外币付款的
+原币金额、银行汇率和 ECB 汇率），各占一列，另外还保存整行原始数据。每份账单保存
+账单期间、期初和期末余额、收入和支出合计、单独汇总时的已付利息、笔数、账单编号和日期、印出的账户
+信息（类型、名称、sort code、账号、IBAN、BIC、客户号、分行、开户银行）、约定透支额度以及利率
+（印出时还有利率适用的日期和付息频率）。文件写明的账户必须与之前导入到同一个账本账户的账户一致，
 否则上传会被拒绝（提示信息只显示账号的最后四位）。
 
 **导入与转账。** 提交账单时，账单写明的 sort code 和账号会登记到这个账户（与“登记标识”相同），
@@ -410,9 +487,32 @@ SQL
 | Lloyds | CSV | 是 |
 | Lloyds | PDF 账单、QIF | |
 | BOC UK | PDF 账单 | 是（唯一格式） |
+| Tembo | PDF 账单 | 是（唯一格式） |
+| LemFi | PDF 账单（GBP 账户和储蓄账户） | 是 |
+| LemFi | CSV（GBP 账户和储蓄账户） | |
+| Revolut Current | PDF 账单 | 是 |
+| Revolut Current | CSV | |
+| Revolut Savings | PDF 账单 | 是 |
+| Revolut Savings | CSV | |
+
+LemFi 的 PDF 包含其 CSV 的全部内容（相同的行，以及每行的时间和付款详情），还多出：账单期间、期初和
+期末余额、收入和支出合计、储蓄账户的利息、账户的 IBAN、sort code 和开户银行，以及储蓄利率。没有任何
+交易的期间的文件（LemFi 会为空月份导出这样的文件）会作为空文件被拒绝：没有可导入的内容。
+
+Revolut 的两个账户导出格式不同，所以各有自己的条目。活期账户的 CSV 比 PDF 多的只有交易类型、发起和
+完成时间以及手续费；PDF 多出账户信息（sort code、账号、IBAN、BIC）、余额汇总，以及每笔付款的参考、
+对方、所用的卡和外币付款的原币金额与汇率。储蓄账户的 PDF 包含 CSV 的全部行，另有账户信息、产品名和
+每类交易的合计。
 
 PDF 账单由为该银行编写的版式读取，它会自我校验：汇总（期初和期末余额、收入和支出、笔数）必须等于
-各行，每个印出的余额都必须能由金额推出，每一行都必须恰好有一个金额、一个落在账单期间内的日期和一个交易类型代码，表格里的每个词都必须属于某一行。对不上的账单会被整体拒绝，
+各行，每个印出的余额都必须能由金额推出，每一行都必须恰好有一个金额、一个落在账单期间内的日期和一个交易类型代码（银行印出类型代码时；LemFi
+不印），表格里的每个词都必须属于某一行。Revolut 活期账户的账单不印交易类型代码：刷卡付款靠所用的卡来识别；
+汇总不计入的待处理（pending）和已撤销（reverted）付款作为跳过的行保留。一份 Revolut 账单只能有一个
+币种有金额，两个币种都有的会被拒绝。在账单期间最后一天当天或之前生成的账单（Revolut 账单的期间截止到
+你下载的那天时就是这样），和导出文件一样只部分列出那一天，它的期末余额是生成那一刻的余额，保存时不带日期；要完整
+列出，Revolut 账单请截止到已经过完的一天。Tembo 不印期初余额和收支合计：它的 Plan value 必须等于各行最后的余额，每笔金额的方向由交易类型决定，页码和期间（第一行到最后一行）不能有遗漏。Tembo 账单是按需生成的，所以和导出文件一样，只有首末两天之间的日子算作完整列出。LemFi 的收入和支出合计可能各比各行之和少一便士（LemFi 把它们
+向下截到便士）；利息和期末余额仍必须由各行精确推出。LemFi 账单还必须为所有页编号（"Page n of N"），
+缺页的账单会被拒绝。对不上的账单会被整体拒绝，
 并写明哪项校验失败，而不是带着错误的数字导入。同一个账户可以用不同格式导入重叠的日期，例如过去用
 PDF 账单、最近几周用 OFX 导出，先后顺序不限：落在之前导入已覆盖日期上的行，会与那次导入的行核对。
 
@@ -429,16 +529,27 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   `latin-1`）、`delimiter`（`,`）、`skip_rows`（表头前的行数，0–50）、`header`（无表头行的文件
   按顺序给出的列名）、`skip_footer_rows`（0–20）和 `overdraft_footer_label`（写有约定透支额度的
   页脚行的第一格）、`include_only`（`{"列名": ["值", ...]}`：其他值的行会被跳过，例如待入账的
-  卡付款）、`row_order`（`oldest_first` 或 `newest_first`）、`sign`（见下）和 `amount_format`
-  （`decimal_separator`，`.` 或 `,`；`thousands_separator`，默认无，或 `,` `.` 空格 `'`）。
+  卡付款）、`row_order`（`oldest_first` 或 `newest_first`）、`sign`（见下）、`amount_format`
+  （`decimal_separator`，`.` 或 `,`；`thousands_separator`，默认无，或 `,` `.` 空格 `'`）和
+  `currency`（文件只写一次而不逐行写币种时，每一行的币种，例如 LemFi 的 `Money in (GBP)`；否则用上传时
+  选的币种，或映射的 `currency` 列）。
+  重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、
   `fee`（在金额之外另收的费用）、`type`、`value_date`、`payee`、`memo`、`check_number`、
   `counterparty_name`、`counterparty_sort_code`、`counterparty_account_number`、`reference`
-  （付款参考），以及账单自身账户的 `account_sort_code` 和 `account_number`。
+  （付款参考）、`started_at`（付款的发起时间，按 `date_format` 解析，这时它必须带时间；`date` 是
+  完成时间），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
+  例如 Revolut 的 `Product`；每一行都必须相同）。
+- **`extract`** 从一列里读出多个类型化字段：`[{"column": "Details", "patterns": ["<正则>", ...]}]`。
+  第一个完整匹配非空单元格的正则，用其命名分组填写同名字段（`payee`、`memo`、`check_number`、
+  `counterparty_name`、`counterparty_sort_code`、`counterparty_account_number`、
+  `counterparty_account_ending`、`counterparty_bank`、`reference`）；没有任何正则匹配的单元格会让
+  该行成为错误行。一个字段只能有一个来源：映射的列或某一个 extract。
 - **`ofx`**：`sign`。
 - **`qif`**：`date_format`、`encoding`、`amount_format`（默认以 `,` 作千位分隔符）和 `sign`。
-- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement` 或 `boc_uk_statement`。
+- **`pdf`**：`layout`：`hsbc_uk_statement`、`lloyds_statement`、`boc_uk_statement`、
+  `revolut_current_statement`、`revolut_savings_statement`、`tembo_statement` 或 `lemfi_statement`。
 
 **正负号。** Profile 用 **inflow**（流入：账户余额增加）和 **outflow**（流出）来表述。只有一个
 `amount` 列时，`sign` 说明它的方向：`inflow_positive`（默认）或 `outflow_positive`；有 `inflow`
@@ -446,9 +557,14 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 是流入，让余额回到零附近。所以把消费列成正数的信用卡导出需要 `"sign": "outflow_positive"`。
 
 **重复识别。** 当同一账户里一条已提交的行有相同的键时，这一行就是重复的：有外部 ID（OFX 的
-`FITID`，或映射的 `external_id` 列）时用它；否则用日期、金额、币种、描述和滚动余额；再否则用不含
-余额的这些字段，加上同一文件里排在它前面的完全相同行的数量。这样同一天两笔真实的相同消费都会导入，
-文件再次导入时两笔都算重复。不同格式的文件键不相同，所以在之前导入已覆盖的日期上，改为按日期和金额
+`FITID`，或映射的 `external_id` 列）时用它；否则用日期、金额、币种、描述和滚动余额（只有这些都相同的几行，
+在文件给出时间时再加上时间：一天里两次转入又转出，余额可能相同）；再否则用不含余额的这些字段。后两种还会
+加上同一文件里排在它前面的完全相同行的数量，这样同一天两笔真实的相同消费都会导入，文件再次导入时两笔都算
+重复；带余额的行只在不含时间的文件里这样计数（文件给出时间时，连时间都相同的行是错误）。滚动余额也可能重复：
+同一天余额回到同一个数（同一笔转账转入两次，中间有一笔付款）。这种计数在不同文件之间是一致的：银行的文件不会从
+一天的中途开始，只可能在一天的中途结束（当天导出的文件）。每份文件都从那天的第一行列起，所以第 n 个这样的行在
+每份文件里都是同一行。
+不同格式的文件键不相同，所以在之前导入已覆盖的日期上，改为按日期和金额
 与那次导入的行配对：配上的是重复行，其余的是错误行。如果文件缺少之前导入在这些日期上的某一行，
 上传会被拒绝；若新文件是对的，先回滚之前那次导入。
 
@@ -460,8 +576,9 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 ### 用真实账单验证
 
 测试用的是合成文件。要确认你自己的账单仍能正确导入（例如改了导入代码之后），把每家银行的文件
-各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）或 `BOC` 开头，每个文件夹一个账户，都放在
-同一个目录下，然后运行：
+各放进一个文件夹，文件夹名以 `HSBC`、`Lloy`（Lloyds）、`BOC`、`Revolut`、`Tembo` 或 `LemF`（LemFi）开头，
+每个文件夹一个账户（LemFi 的 GBP 账户和储蓄账户各一个；Revolut 可以叫 `Revolut current` 和
+`Revolut savings`：文件本身会说明文件夹里是哪个账户），都放在同一个目录下，然后运行：
 
 ```bash
 make real-check REAL_ROOT="$HOME/Downloads"
@@ -503,7 +620,7 @@ make backup   # 或：infra/backup/backup.sh
 
 它会写出 `$BACKUP_DIR/lararium-<UTC 时间戳>.dump`（`pg_dump` 自定义格式；`BACKUP_DIR` 为相对
 路径时相对于仓库根目录），并以同一时间戳写出 `documents-<UTC 时间戳>.tar`：经由 `api` 容器读出的
-`lararium_documents` 卷里上传的账单文件。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
+`lararium_documents` 卷里的账单文件（上传的，或从 IBKR 获取的）。整套服务必须在运行：没有 `api` 容器时备份会失败，而不是留下
 一个缺少文档的转储。如果 `infra/.env` 里设置了 `RESTIC_REPOSITORY`，随后还会用
 `RESTIC_PASSWORD` 执行 `restic backup "$BACKUP_DIR"`；主机上需要装有 `restic`。
 如需每晚执行，可添加一条 cron，例如 `0 3 * * * cd /path/to/lararium && make backup`。

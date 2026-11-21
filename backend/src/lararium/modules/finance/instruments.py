@@ -6,6 +6,7 @@ from uuid import UUID
 
 from psycopg.errors import UniqueViolation
 from sqlalchemy import ColumnElement, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -217,6 +218,46 @@ async def create_instrument(
     record = await get_instrument(session, instrument.id)
     data = _event_data(record)
     ctx.emit("finance.instrument.created", record.id, data)
+    ctx.record_change(f"instrument:{record.id}", data)
+    return record
+
+
+async def add_identifiers(
+    ctx: CommandContext, instrument_id: UUID, identifiers: Sequence[InstrumentIdentifier]
+) -> InstrumentRecord:
+    """Add the identifiers of schemes the instrument has none of yet.
+
+    For a source that learns more about an instrument it already knows (an ISIN-matched
+    listing gets the source's own id). An identifier of a scheme the instrument has stays as
+    it is, and one already on another instrument is skipped, so the call never fails over a
+    value the registry holds elsewhere. Currencies keep their ISO 4217 code and no other
+    instrument gets one, so that scheme is refused.
+    """
+    if any(i.scheme == "iso4217" for i in identifiers):
+        raise FinanceValidationError("an ISO 4217 code can't be added to an instrument")
+    current = await get_instrument(ctx.session, instrument_id)
+    have = {i.scheme for i in current.identifiers}
+    added = False
+    for identifier in identifiers:
+        if identifier.scheme in have:
+            continue
+        value = normalize_identifier(identifier.scheme, identifier.value)
+        # A conditional insert, so a value another instrument holds is skipped, not an error.
+        i = models.InstrumentIdentifier
+        inserted = await ctx.session.scalar(
+            pg_insert(i)
+            .values(instrument_id=instrument_id, scheme=identifier.scheme, value=value)
+            .on_conflict_do_nothing()
+            .returning(i.value)
+        )
+        if inserted is not None:
+            have.add(identifier.scheme)
+            added = True
+    if not added:
+        return current
+    record = await get_instrument(ctx.session, instrument_id)
+    data = _event_data(record)
+    ctx.emit("finance.instrument.updated", record.id, data)
     ctx.record_change(f"instrument:{record.id}", data)
     return record
 

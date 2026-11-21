@@ -10,7 +10,7 @@
 
 When money moves between two of the owner's own accounts at different institutions, both balances must change, and net worth must neither drop nor count the money twice, at any point, including while the money is on its way, except while a transfer needs review (Known caveats, §5.8). Today every synced Monzo transfer posts against the system account "Unassigned": Monzo's balance is right, but the other account never changes.
 
-M4 builds the matching **rules and interfaces** once, as a generic engine in the finance module. Monzo sync is the first caller; M2 imports (CSV, OFX, QIF, midata and PDF) and later connectors (IBKR in M5, Binance in M6, wallets in M7) call the same engine.
+M4 builds the matching **rules and interfaces** once, as a generic engine in the finance module. Monzo sync is the first caller; M2 imports (CSV, OFX, QIF, midata and PDF) and later connectors (IBKR in M5, eToro and Trading 212 in M6, Binance in M7, wallets in M8) call the same engine.
 
 ### What the owner's data shows (checked read-only on 2026-11-15; no values are recorded here)
 
@@ -37,12 +37,12 @@ M4 builds the matching **rules and interfaces** once, as a generic engine in the
 ### Non-goals (in this milestone)
 
 - Statement import itself (M2), and PDF parsing (M2).
-- IBKR, Binance, wallet and broker connectors (M5 to M8). M4's connected-receiver path is exercised with two synthetic Monzo connections.
+- IBKR, broker, Binance and wallet connectors (M5 to M9). M4's connected-receiver path is exercised with two synthetic Monzo connections.
 - Pairing by on-chain transaction hash (M7) and identifier kinds that only those milestones need (IBAN, wallet address, xpub, card digits).
 - Automatic FX or fee postings for transfers whose two sides differ in currency or amount. M4 detects them and asks the owner (§5.7); automatic handling comes with the first connector that produces them.
 - A transaction list page. The transfers page shows one row per transfer.
 - Reconciliation alerts comparing manual snapshots with the ledger (M9).
-- Moving an account from manual to connected (M5 decides what happens to its earlier inferred placeholders).
+- Moving an account from manual to connected (still open: M5 does not need it, as the owner has no manual IBKR account, 2026-11-18).
 
 ### Anti-goals (failure even if everything else works)
 
@@ -99,7 +99,7 @@ The same holds for the sender side: if B's record is seen first and A's side is 
 - **In transit**: a new system account (key `in_transit`), `ledger_type = 'asset'`, `subtype = 'in_transit'`, `balance_mode = 'transactions'`, one account for all instruments. Being an asset, it counts in net worth. `get_or_create_system_account` gains the key and creates it with these attributes (the existing keys stay equity). An account is a system account when a `finance.system_account.*` setting holds its id; account records carry that as `system` (the API's `AccountOut.system`, which the web reads instead of guessing from the subtype, which owners may also pick). The owner can't close, rename or snapshot a system account (422): closing In transit would drop the transfers it holds from net worth.
 - **Manual receiving accounts** should be `hybrid` with an opening snapshot, so a placeholder moves the balance from the snapshot on, and placeholders dated before the latest snapshot are already contained in it (no double count). A manual hybrid account's history starts at its first snapshot in each instrument, as a connected account's starts at its first record: a transfer whose own record is at or before that snapshot's `as_of` (valuation's own cut-off, `occurred_at <= as_of`) is already inside it, so it is `before_history`, settled against Opening balances, with no placeholder (`queries.manual_predates`). Otherwise valuation, which sums a hybrid account's postings from zero on days before its first snapshot, would value the account at minus those transfers on every earlier day. The rule is per instrument (a GBP snapshot settles no USD transfer). A `transactions`-mode manual account ignores its snapshots. With statement imports (M2, added when M2 was wired in, 2026-11-17), its own records are known up to the last day its committed imports list in full in the instrument: each such day is a statement's, listing the real rows, or lies before one, inside its opening or gap adjustment. So a transfer whose window (the days its own side may be booked on) ends by that day is `before_history` the same way, settled against Opening balances, and the account's balance stays the statements'. Only a side that may fall after it, not imported yet, gets a placeholder. Importing further statements or rolling one back moves the line, and heal reopens or settles accordingly. Without imports such an account's history is all its own records, so it gets placeholders. Recording a snapshot heals at once, and an earlier snapshot moves the transfers it no longer contains back to `inferred`. A `transactions`-mode manual account without imports is correct only if its whole history is entered. M4 does not change valuation and leaves the mode to the owner; the README says to create manual accounts as `hybrid`.
 - **A `snapshots`-mode account cannot carry identifiers.** Valuation ignores its postings, so a placeholder there would change nothing and net worth would dip until the next snapshot. Adding an identifier to one is refused (422) with a message saying to switch it to `hybrid`, which values it exactly as before (the latest snapshot) plus whatever is posted after it. The registry UI offers the switch. (Builder-check call.)
-- **No difference postings in M4.** All of the owner's own accounts deal in GBP and none takes a fee on arrival (owner, 2026-11-15), so a transfer's two sides are always the same instrument and amount. A pair that differs is a case that needs review the owner can only reject or unpair; difference postings (FX, fees) come with the first connector that produces them (M5).
+- **No difference postings in M4.** All of the owner's own accounts deal in GBP and none takes a fee on arrival (owner, 2026-11-15), so a transfer's two sides are always the same instrument and amount. A pair that differs is a case that needs review the owner can only reject or unpair; difference postings (FX, fees) come with the first connector that produces them (M6: IBKR's transfers are same-currency, 2026-11-18).
 
 ### 5.3 The registry (`finance.account_identifiers`)
 
@@ -185,7 +185,7 @@ Stored in `finance.transfer_decisions`, keyed by the stable reference of the tra
 
 - `reject` (this is not a transfer): applies to the whole transfer, and is stored for every own record in it, so neither leg re-opens a transfer through the registry on the next sync. Each reject also names its rejected transfer (`transfer_id`, deleted with it), which matching never dissolves. Each own record's contra goes back to Unassigned, the transfer is `rejected` and its placeholder (or `before_history` settlement) deleted. A record rolled back (`unlink_transaction`) leaves the rejected transfer, which stays even with no record left, decision and all; imported again under the same reference, the record goes back into it (matching, and heal for any it missed). Withdrawing it (`unreject`, "Undo" in the UI) deletes every decision naming it and the rejected transfer, and matches its records again;
 - `unpair` (these two records are not the same transfer, but each still is one): stored as "never pair X with Y"; the transfer is split and each record goes back through matching on its own. Each record's transfer then lists the other as a candidate (reason `unpaired`), so a mistaken unpair can be undone with `pair`;
-- `pair` (link this record with that one): resolves a case that needs review with several candidates, or undoes an unpair (its "never pair" decisions are withdrawn); allowed only when both records have the same instrument and amount (§5.2). It is the strongest tier of evidence (§5.7), so it outranks any other candidate. If another pair decision still leaves it ambiguous, it is refused and nothing is stored;
+- `pair` (link this record with that one): resolves a case that needs review with several candidates, or undoes an unpair (its "never pair" decisions are withdrawn); allowed only when both records have the same instrument and amount (§5.2). It is the strongest tier of evidence (§5.7), so it outranks any other candidate. If another pair decision still leaves it ambiguous, it is refused and nothing is stored. The same decision now has a second entry point, `POST /transactions/{id}/pair`, which needs no open transfer (owner pairs two own records; design `2026-11-21-owner-pair-records-design.md`);
 
 (Builder-check call: the parent spec's "reject a match" covers both a rejected transfer and a wrong pairing, so both exist.)
 
@@ -229,9 +229,10 @@ A periodic job (every 30 minutes, after healing) sends one notification per tran
 ## 7. Left for later milestones
 
 - **M2**: posts imported rows through `transfer_contra`, calls the matcher after commit and `unlink_transaction` on rollback, shows `preview_match` (the own record a row would pair with) in staging, and gives each row a stable reference for decisions. M2 should reuse the system account "Unassigned" rather than its own "Unassigned (imports)".
-- **M5**: IBKR deposits and withdrawals carry no Monzo details, so they match by amount and date (§5.7); FX and fee postings for the first transfers whose two sides differ; what happens to an account's earlier placeholders when it gets a connection.
-- **M7**: transaction-hash matching.
-- **M9**: comparing manual snapshots with inferred balances.
+- **M5**: IBKR deposits and withdrawals carry no Monzo details, so they match by amount and date (§5.7). (Changed 2026-11-18: FX and fee postings moved to M6, and what happens to an account's earlier placeholders when it gets a connection stays open, as the owner has no manual IBKR account; see `2026-11-18-ibkr-flex-design.md`.)
+- **M6**: FX and fee postings for the first transfers whose two sides differ (eToro).
+- **M8**: transaction-hash matching.
+- **M10**: comparing manual snapshots with inferred balances.
 
 ## 8. Left to the builder
 

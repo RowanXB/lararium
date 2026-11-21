@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from lararium.modules.finance.errors import FileFormatError
+from lararium.modules.finance.errors import EmptyStatementError, FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.csv_parser import parse_csv
 from lararium.modules.finance.importing.parsed import (
@@ -148,7 +148,8 @@ def test_missing_column_is_file_error() -> None:
 
 
 def test_empty_file_is_file_error() -> None:
-    with pytest.raises(FileFormatError, match="no rows"):
+    # A header and no rows: an export of a period without transactions, nothing to import.
+    with pytest.raises(EmptyStatementError, match="lists no transactions"):
         _parse(b"Date,Description,Amount\n\n,,\n")
     with pytest.raises(FileFormatError, match="no rows"):
         _parse(b"")
@@ -347,6 +348,33 @@ def test_missing_footer_refuses_rather_than_drops_a_row() -> None:
         _parse(no_footer, **MIDATA_CONFIG, **label)
 
 
+def test_one_row_without_its_footer_is_not_an_empty_statement() -> None:
+    """Review finding: with one row and no footer, the row was cut off as the footer and the
+    file then read as empty, which real-check counts rather than fails."""
+    one_row = b"Date,Type,Merchant/Description,Debit/Credit,Balance\n" + (
+        "2026-11-03,DD,EXAMPLE ENERGY,-£40.00,£960.00\n".encode()
+    )
+    with pytest.raises(FileFormatError, match="reads as a transaction") as raised:
+        _parse(one_row, **MIDATA_CONFIG)
+    assert not isinstance(raised.value, EmptyStatementError)
+    only_footer = MIDATA.split(b"\n")[0] + b"\n" + MIDATA.split(b"\n\n")[1]
+    with pytest.raises(EmptyStatementError):
+        _parse(only_footer, **MIDATA_CONFIG)
+
+
+def test_footer_check_ignores_extracts() -> None:
+    """Review finding: a last row whose Details no extract matches was taken for a footer
+    and dropped, as the footer check read any failure as "not a transaction"."""
+    content = (
+        b"Date,Description,Details,Amount\n"
+        b"10/11/2026,Rent,FLAT 1,-500.00\n"
+        b"11/11/2026,Coffee,odd,-3.50\n"
+    )
+    extract = [{"column": "Details", "patterns": [r"FLAT (?P<reference>[0-9]+)"]}]
+    with pytest.raises(FileFormatError, match="reads as a transaction"):
+        _parse(content, extract=extract, skip_footer_rows=1)
+
+
 def test_padded_midata_footer_keeps_its_amount() -> None:
     """Review finding: a spreadsheet re-save pads every line with commas, and the footer's
     amount was then read from an empty last cell."""
@@ -463,6 +491,35 @@ def test_typed_fields_from_columns() -> None:
     assert statement.account is None
 
 
+def test_typed_fields_extracted_from_a_column() -> None:
+    """The first pattern that matches a non-empty cell fills its groups' fields; a cell no
+    pattern matches is a row error; an empty cell fills nothing."""
+    content = (
+        b"Date,Description,Details,Amount\n"
+        b'10/11/2026,Rent,"Example Bank, 12-34-56 12345678, FLAT 1",-500.00\n'
+        b"10/11/2026,Refund,Via EXAMPLE BANK *1234,3.50\n"
+        b"10/11/2026,Coffee,,-3.50\n"
+        b"10/11/2026,Odd,Somewhere,-1.00\n"
+    )
+    out = (
+        r"(?P<counterparty_bank>[^,]+), (?P<counterparty_sort_code>[0-9-]+) "
+        r"(?P<counterparty_account_number>[0-9]+), (?P<reference>.+)"
+    )
+    received = r"Via (?P<counterparty_bank>.+) \*(?P<counterparty_account_ending>[0-9]+)"
+    rent, refund, coffee, odd = _parse(
+        content, extract=[{"column": "Details", "patterns": [out, received]}]
+    ).rows
+    assert isinstance(rent, ParsedRow) and isinstance(refund, ParsedRow)
+    assert rent.counterparty == Counterparty(
+        bank="Example Bank", sort_code="123456", account_number="12345678", reference="FLAT 1"
+    )
+    assert refund.counterparty == Counterparty(bank="EXAMPLE BANK", account_ending="1234")
+    assert isinstance(coffee, ParsedRow) and coffee.counterparty is None
+    assert isinstance(odd, RowError)
+    assert odd.message == "Details matches none of the profile's patterns for it"
+    assert odd.raw["Details"] == "Somewhere"
+
+
 def test_counterparty_normalisation() -> None:
     assert Counterparty(sort_code="12 34 56").sort_code == "123456"
     assert Counterparty(account_number="1234-5678").account_number == "12345678"
@@ -503,6 +560,43 @@ def test_statement_account_from_columns() -> None:
     other = b"03/11/2026,DEB,'12-34-56,87654321,EXAMPLE SHOP,1.00,,194.50\n"
     with pytest.raises(FileFormatError, match="one account per file"):
         _parse(header + rows + other, **config)
+
+
+_STARTED = {
+    "columns": {
+        "date": "Completed Date",
+        "started_at": "Started Date",
+        "description": ["Description"],
+        "amount": "Amount",
+        "account_type": "Product",
+    },
+    "date_format": "%Y-%m-%d %H:%M:%S",
+}
+_STARTED_HEADER = b"Product,Started Date,Completed Date,Description,Amount\n"
+
+
+def test_started_at_is_aware_in_the_profile_zone() -> None:
+    content = _STARTED_HEADER + (
+        b"Current,2026-07-01 23:30:00,2026-07-02 09:15:00,Shop,-1.00\n"
+        b"Current,,2026-07-03 10:00:00,Pay,5.00\n"
+    )
+    first, second = _rows(_parse(content, **_STARTED))
+    assert first.started_at == datetime(2026, 7, 1, 23, 30, tzinfo=LONDON)
+    assert first.occurred_at == datetime(2026, 7, 2, 9, 15, tzinfo=LONDON)
+    assert first.booking_date == date(2026, 7, 2)
+    assert second.started_at is None
+
+
+def test_account_type_column_is_the_statement_product() -> None:
+    rows = (
+        b"Current,2026-07-01 08:00:00,2026-07-01 08:00:00,Shop,-1.00\n"
+        b"Current,2026-07-02 08:00:00,2026-07-02 08:00:00,Pay,5.00\n"
+    )
+    statement = _parse(_STARTED_HEADER + rows, **_STARTED)
+    assert statement.account == StatementAccount(account_type="Current")
+    other = b"Savings,2026-07-03 08:00:00,2026-07-03 08:00:00,Move,1.00\n"
+    with pytest.raises(FileFormatError, match="one account per file"):
+        _parse(_STARTED_HEADER + rows + other, **_STARTED)
 
 
 def test_statement_account_normalises_iban() -> None:
@@ -633,3 +727,48 @@ def test_large_amounts_keep_precision_through_signs() -> None:
     columns = {"date": "Date", "description": ["Description"], "inflow": "In", "outflow": "Out"}
     rows = _rows(_parse(two, columns=columns))
     assert rows[0].quantity == Decimal("-1234567890123456789012345678.90")
+
+
+def test_a_line_repeating_the_header_is_no_row() -> None:
+    # Revolut's savings export ends with its header again, after a blank line.
+    content = SIMPLE + b"\nDate,Description,Amount\n"
+    assert len(_rows(_parse(content))) == 2
+
+
+def test_revolut_exports_through_the_catalog() -> None:
+    from lararium.modules.finance.importing.catalog import CATALOG
+
+    configs = {(e.institution, e.label): e.config for e in CATALOG}
+    current = configs[("Revolut Current", "CSV")]
+    savings = configs[("Revolut Savings", "CSV")]
+    assert isinstance(current, CsvProfileConfig) and isinstance(savings, CsvProfileConfig)
+    current_file = (
+        b"Type,Product,Started Date,Completed Date,Description,Amount,Fee,Currency,State,Balance\n"
+        b"Card Payment,Current,2027-10-02 09:15:00,2027-10-03 10:00:00,Example Cafe,-4.20,0.00,"
+        b"GBP,COMPLETED,95.80\n"
+        b"Card Payment,Current,2027-10-04 12:00:00,,Example Shop,-9.99,0.00,GBP,PENDING,\n"
+    )
+    statement = parse_csv(current_file, current, LONDON)
+    row, skipped = statement.rows
+    assert isinstance(row, ParsedRow) and isinstance(skipped, SkippedRow)
+    assert row.occurred_at == datetime(2027, 10, 3, 10, 0, tzinfo=LONDON)
+    assert row.started_at == datetime(2027, 10, 2, 9, 15, tzinfo=LONDON)
+    assert (row.bank_type, row.quantity, row.balance, row.currency) == (
+        "Card Payment",
+        Decimal("-4.20"),
+        Decimal("95.80"),
+        "GBP",
+    )
+    assert skipped.reason == "State is PENDING"
+    assert statement.account == StatementAccount(account_type="Current")
+    savings_file = (
+        "Date,Description,Money out,Money in,Balance\n"
+        '"Oct 1, 2027",Deposit,,"£1,000.00","£1,500.00"\n'
+        '"Oct 2, 2027",Withdrawal,£200.00,,"£1,300.00"\n'
+        "\nDate,Description,Money out,Money in,Balance\n"
+    ).encode()
+    rows = _rows(parse_csv(savings_file, savings, LONDON))
+    assert [(r.booking_date, r.bank_type, r.quantity) for r in rows] == [
+        (date(2027, 10, 1), "Deposit", Decimal("1000.00")),
+        (date(2027, 10, 2), "Withdrawal", Decimal("-200.00")),
+    ]

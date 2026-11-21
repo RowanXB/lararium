@@ -281,6 +281,7 @@ class ImportStatement(Base):
     closing_balance_date: Mapped[date | None]
     money_in: Mapped[Decimal | None] = mapped_column(Numeric)
     money_out: Mapped[Decimal | None] = mapped_column(Numeric)
+    interest: Mapped[Decimal | None] = mapped_column(Numeric)
     payments_in: Mapped[int | None]
     payments_out: Mapped[int | None]
     statement_reference: Mapped[str | None] = mapped_column(Text)
@@ -294,12 +295,15 @@ class ImportStatement(Base):
     customer_number: Mapped[str | None] = mapped_column(Text)
     clearing_account_number: Mapped[str | None] = mapped_column(Text)
     branch: Mapped[str | None] = mapped_column(Text)
+    bank: Mapped[str | None] = mapped_column(Text)
     addressee: Mapped[str | None] = mapped_column(Text)
     address: Mapped[str | None] = mapped_column(Text)
     overdraft_limit: Mapped[Decimal | None] = mapped_column(Numeric)
     overdraft_limit_date: Mapped[date | None]
     available_balance: Mapped[Decimal | None] = mapped_column(Numeric)
     available_balance_date: Mapped[date | None]
+    account_reference: Mapped[str | None] = mapped_column(Text)
+    account_opened_on: Mapped[date | None]
 
 
 class ImportStatementRate(Base):
@@ -316,6 +320,9 @@ class ImportStatementRate(Base):
     band_to: Mapped[Decimal | None] = mapped_column(Numeric)
     rate: Mapped[Decimal | None] = mapped_column(Numeric)
     ear: Mapped[Decimal | None] = mapped_column(Numeric)
+    valid_from: Mapped[date | None]
+    valid_to: Mapped[date | None]
+    frequency: Mapped[str | None] = mapped_column(Text)
 
 
 class ImportRow(Base):
@@ -332,6 +339,7 @@ class ImportRow(Base):
     status: Mapped[str] = mapped_column(Text)
     booking_date: Mapped[date | None]
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    time_unit: Mapped[str | None] = mapped_column(Text)
     occurred_tz: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, server_default=text("''"))
     quantity: Mapped[Decimal | None] = mapped_column(Numeric)
@@ -348,6 +356,7 @@ class ImportRow(Base):
     counterparty_sort_code: Mapped[str | None] = mapped_column(Text)
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
     counterparty_bank: Mapped[str | None] = mapped_column(Text)
+    counterparty_account_ending: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     payment_kind: Mapped[str | None] = mapped_column(Text)
     bank_reference: Mapped[str | None] = mapped_column(Text)
@@ -355,6 +364,11 @@ class ImportRow(Base):
     remittance_info: Mapped[str | None] = mapped_column(Text)
     original_currency: Mapped[str | None] = mapped_column(Text)
     exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    card_number: Mapped[str | None] = mapped_column(Text)
+    original_amount: Mapped[Decimal | None] = mapped_column(Numeric)
+    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric)
+    fx_reference_rate: Mapped[Decimal | None] = mapped_column(Numeric)
     dedupe_key: Mapped[str | None] = mapped_column(Text)
     duplicate_of: Mapped[UUID | None] = mapped_column(ForeignKey("finance.import_rows.id"))
     error: Mapped[str | None] = mapped_column(Text)

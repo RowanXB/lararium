@@ -384,6 +384,20 @@
         "title": "Body_stage_import",
         "type": "object"
       },
+      "Body_upload_ibkr_statement": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_ibkr_statement",
+        "type": "object"
+      },
       "CandidateOut": {
         "properties": {
           "account_id": {
@@ -576,6 +590,17 @@
             ],
             "title": "Account Sort Code"
           },
+          "account_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Type"
+          },
           "amount": {
             "anyOf": [
               {
@@ -742,6 +767,17 @@
             ],
             "title": "Reference"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "type": {
             "anyOf": [
               {
@@ -772,6 +808,31 @@
         "title": "CsvColumns",
         "type": "object"
       },
+      "CsvExtract": {
+        "additionalProperties": false,
+        "description": "Typed fields read out of one column: the first pattern that matches a non-empty cell\nin full fills the fields its named groups name (those that match); a cell no pattern\nmatches makes the row an error.",
+        "properties": {
+          "column": {
+            "title": "Column",
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "$ref": "#/components/schemas/Pattern"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Patterns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "column",
+          "patterns"
+        ],
+        "title": "CsvExtract",
+        "type": "object"
+      },
       "CsvProfileConfig": {
         "additionalProperties": false,
         "properties": {
@@ -788,6 +849,18 @@
           "columns": {
             "$ref": "#/components/schemas/CsvColumns"
           },
+          "currency": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{3}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
           "date_format": {
             "$ref": "#/components/schemas/DateFormat"
           },
@@ -798,6 +871,14 @@
           "encoding": {
             "$ref": "#/components/schemas/Encoding",
             "default": "utf-8-sig"
+          },
+          "extract": {
+            "items": {
+              "$ref": "#/components/schemas/CsvExtract"
+            },
+            "maxItems": 10,
+            "title": "Extract",
+            "type": "array"
           },
           "format": {
             "const": "csv",
@@ -1086,6 +1167,90 @@
         "title": "HoldingOut",
         "type": "object"
       },
+      "IbkrConnectionCreate": {
+        "properties": {
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "query_id": {
+            "pattern": "^[0-9]{1,12}$",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          },
+          "token_expires_on": {
+            "format": "date",
+            "title": "Token Expires On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "token_expires_on",
+          "display_name",
+          "query_id"
+        ],
+        "title": "IbkrConnectionCreate",
+        "type": "object"
+      },
+      "IbkrConnectionUpdate": {
+        "properties": {
+          "query_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{1,12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "token": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          },
+          "token_expires_on": {
+            "format": "date",
+            "title": "Token Expires On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "token_expires_on"
+        ],
+        "title": "IbkrConnectionUpdate",
+        "type": "object"
+      },
+      "IbkrUploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "IbkrUploadOut",
+        "type": "object"
+      },
       "IdentifierCreate": {
         "properties": {
           "kind": {
@@ -1120,8 +1285,15 @@
             "title": "Account Id"
           },
           "account_number": {
-            "title": "Account Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
           },
           "created_at": {
             "format": "date-time",
@@ -1150,13 +1322,23 @@
             "type": "string"
           },
           "kind": {
-            "const": "uk_bank_account",
+            "enum": [
+              "uk_bank_account",
+              "ibkr_account"
+            ],
             "title": "Kind",
             "type": "string"
           },
           "sort_code": {
-            "title": "Sort Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
           },
           "value": {
             "title": "Value",
@@ -1542,6 +1724,17 @@
             ],
             "title": "Booking Date"
           },
+          "card_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Card Number"
+          },
           "check_number": {
             "anyOf": [
               {
@@ -1552,6 +1745,17 @@
               }
             ],
             "title": "Check Number"
+          },
+          "counterparty_account_ending": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Account Ending"
           },
           "counterparty_account_number": {
             "anyOf": [
@@ -1652,6 +1856,30 @@
             "title": "Fee",
             "type": "string"
           },
+          "fx_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Rate"
+          },
+          "fx_reference_rate": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Reference Rate"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1721,6 +1949,18 @@
               }
             ],
             "title": "Occurred At"
+          },
+          "original_amount": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Amount"
           },
           "original_currency": {
             "anyOf": [
@@ -1811,6 +2051,18 @@
             ],
             "title": "Remittance Info"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "status": {
             "enum": [
               "new",
@@ -1822,6 +2074,16 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "time_unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimeUnit"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transaction_id": {
             "anyOf": [
@@ -1855,6 +2117,7 @@
           "status",
           "booking_date",
           "occurred_at",
+          "time_unit",
           "value_date",
           "description",
           "payee",
@@ -1864,6 +2127,7 @@
           "counterparty_sort_code",
           "counterparty_account_number",
           "counterparty_bank",
+          "counterparty_account_ending",
           "payment_reference",
           "payment_kind",
           "bank_reference",
@@ -1871,6 +2135,11 @@
           "remittance_info",
           "original_currency",
           "exchange_rate",
+          "started_at",
+          "card_number",
+          "original_amount",
+          "fx_rate",
+          "fx_reference_rate",
           "quantity",
           "fee",
           "instrument_id",
@@ -1911,6 +2180,29 @@
               }
             ],
             "title": "Account Number"
+          },
+          "account_opened_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Opened On"
+          },
+          "account_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Reference"
           },
           "account_type": {
             "anyOf": [
@@ -1968,6 +2260,17 @@
               }
             ],
             "title": "Available Balance Date"
+          },
+          "bank": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank"
           },
           "bic": {
             "anyOf": [
@@ -2070,6 +2373,18 @@
               }
             ],
             "title": "Iban"
+          },
+          "interest": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interest"
           },
           "money_in": {
             "anyOf": [
@@ -2216,6 +2531,7 @@
           "closing_balance_date",
           "money_in",
           "money_out",
+          "interest",
           "payments_in",
           "payments_out",
           "statement_reference",
@@ -2229,12 +2545,15 @@
           "customer_number",
           "clearing_account_number",
           "branch",
+          "bank",
           "addressee",
           "address",
           "overdraft_limit",
           "overdraft_limit_date",
           "available_balance",
           "available_balance_date",
+          "account_reference",
+          "account_opened_on",
           "rates"
         ],
         "title": "ImportStatementOut",
@@ -2278,6 +2597,17 @@
             ],
             "title": "Ear"
           },
+          "frequency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency"
+          },
           "kind": {
             "title": "Kind",
             "type": "string"
@@ -2293,6 +2623,30 @@
               }
             ],
             "title": "Rate"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
           }
         },
         "required": [
@@ -2300,7 +2654,10 @@
           "band_from",
           "band_to",
           "rate",
-          "ear"
+          "ear",
+          "valid_from",
+          "valid_to",
+          "frequency"
         ],
         "title": "ImportStatementRateOut",
         "type": "object"
@@ -2565,6 +2922,60 @@
         "title": "OfxProfileConfig",
         "type": "object"
       },
+      "PairCandidateOut": {
+        "description": "A record the owner could pair with another as one transfer.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "booking_date": {
+            "format": "date",
+            "title": "Booking Date",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "account_name",
+          "quantity",
+          "occurred_at",
+          "booking_date",
+          "description"
+        ],
+        "title": "PairCandidateOut",
+        "type": "object"
+      },
+      "Pattern": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
+      },
       "PdfProfileConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2580,7 +2991,11 @@
             "enum": [
               "hsbc_uk_statement",
               "lloyds_statement",
-              "boc_uk_statement"
+              "boc_uk_statement",
+              "revolut_current_statement",
+              "revolut_savings_statement",
+              "tembo_statement",
+              "lemfi_statement"
             ],
             "title": "Layout",
             "type": "string"
@@ -3062,6 +3477,14 @@
         "title": "SyncQueuedOut",
         "type": "object"
       },
+      "TimeUnit": {
+        "enum": [
+          "day",
+          "minute",
+          "second"
+        ],
+        "type": "string"
+      },
       "TimezoneName": {
         "type": "string"
       },
@@ -3450,6 +3873,47 @@
         ]
       }
     },
+    "/api/v1/connections/ibkr": {
+      "post": {
+        "operationId": "create_ibkr_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IbkrConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Ibkr Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/oauth/monzo/callback": {
       "get": {
         "description": "Where Monzo sends the browser back: exchange the code, then wait for approval.",
@@ -3592,6 +4056,114 @@
           }
         },
         "summary": "Disable Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/ibkr": {
+      "put": {
+        "description": "Replace the token, its expiry and the query id (a new token after the old one expired).",
+        "operationId": "update_ibkr_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IbkrConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Ibkr Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/ibkr-statement": {
+      "post": {
+        "description": "Ingest a Flex statement the owner downloaded: the closed ISA, which the Flex Web\nService can't fetch. It goes through the same ingest and normalise as a fetched one.",
+        "operationId": "upload_ibkr_statement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_ibkr_statement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IbkrUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Ibkr Statement",
         "tags": [
           "connections"
         ]
@@ -4873,6 +5445,108 @@
           }
         },
         "summary": "Post Transaction",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transactions/{transaction_id}/pair": {
+      "post": {
+        "description": "The owner says two own records are one transfer, whether or not either is in one.\nUndone by unpairing the resulting transfer.",
+        "operationId": "pair_transactions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferPair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Transactions",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transactions/{transaction_id}/pair-candidates": {
+      "get": {
+        "description": "The own records the record could be paired with as one transfer: on another account,\nof the opposite and equal amount, nearest booking date first.",
+        "operationId": "list_transaction_pair_candidates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PairCandidateOut"
+                  },
+                  "title": "Response List Transaction Pair Candidates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Transaction Pair Candidates",
         "tags": [
           "finance"
         ]

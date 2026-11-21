@@ -97,7 +97,8 @@ tailscale serve --bg 8080
 `lararium_owner` (`migrate`), then starts the API as `lararium_backend` (`api`), the
 background worker (`worker`: connection syncs and periodic jobs) and Caddy
 serving the SPA and forwarding `/api/*` (`web`). `make down` stops the stack; the data stays in the
-`lararium_pgdata` volume, and uploaded statement files in `lararium_documents`.
+`lararium_pgdata` volume, and statement files (uploaded, or fetched from IBKR) in
+`lararium_documents`.
 
 Open `https://<host>.<your-tailnet>.ts.net` from any device in your tailnet.
 
@@ -180,7 +181,8 @@ webhook) into the ledger. It only reads.
 What syncs: your accounts (a joint account is a separate account), each pot as a child account
 of its account, transactions (declined ones are skipped; pending ones are updated when they
 settle or are reversed), and balance snapshots. Card payments are matched to merchants; pot
-moves become transfers between the account and the pot.
+moves become transfers between the account and the pot. A deleted pot is closed, even one
+deleted before you connected, so money that sat in it still counts towards net worth.
 
 Two system accounts appear in the ledger:
 
@@ -322,6 +324,17 @@ What the buttons do (each decision is kept across re-syncs):
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.
 
+**Records that name no account.** When neither record names the other's account (a bank row that
+prints only your name and a reference, say), no transfer opens by itself. Enter the other side
+by hand on a manual account, then pair the two records through the API:
+`GET /api/v1/finance/transactions/{id}/pair-candidates` lists the records that could be its
+other side (another account, the opposite and equal amount, nearest date first), and
+`POST /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` pairs them
+as one matched transfer. The hand-entered side must be a transaction of exactly two postings,
+the account and Unassigned; otherwise pairing is refused. Unpair undoes it; after that, two records that name no
+account have no transfer left, so the way back is pairing them again through this same endpoint
+(the other record stays listed as a candidate).
+
 ### In transit in net worth
 
 **In transit** is a system account of the asset type, so it counts in net worth. A transfer's
@@ -341,6 +354,82 @@ dated Friday pairs with a Monzo payment any time on Wednesday; overdue after 7 d
 `finance.transfers` setting; no page changes them yet. Each is a whole number of days from 1 to
 3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
 with the next week's.
+
+## Connecting Interactive Brokers
+
+Interactive Brokers (IBKR) is a connector: the `worker` syncs it through IBKR's Flex Web
+Service, which returns a statement you define once as a Flex query. It only reads. Fetched
+statements are kept as documents in the `documents` volume, which the `worker` mounts like
+the `api`; after upgrading, run `make up` so the worker gets it.
+
+### 1. Create the Activity Flex Query
+
+In Client Portal open Performance & Reports, then Flex Queries, and create an **Activity Flex
+Query**:
+
+- Select **all accounts** (a query for one account misses the others).
+- Format **XML**, date format `yyyyMMdd`, time format `HH:mm:ss TimeZone`, separator `;`.
+- Set **Include Currency Rates**, **Include Audit Trail Fields**, **Include Offsetting
+  Trade/Cancel Pairs** and **Breakout by Day** to Yes.
+- Tick **every section, with every field and option**. Lararium stores every field IBKR
+  sends, typed. The personal fields (name, addresses, email, date of birth, beneficiaries,
+  account representative) are optional: if you tick them they are stored too, and are never
+  shown in logs, warnings or notifications.
+- The period doesn't matter: Lararium sends its own dates.
+
+Save it and note the **query ID**.
+
+### 2. Create the token
+
+Under Flex Web Service Configuration, enable the service and generate a token. Choose a
+validity of up to one year. An IP restriction is optional; leave it blank on a dynamic home
+IP. **Note the expiry date**: IBKR has no API for it, so you give it to Lararium, which
+reminds you 14 days before. Generating a new token invalidates the old one.
+
+### 3. Add the connection
+
+On Connections choose **Add Interactive Brokers** and enter a display name, the token, its
+expiry date and the query ID. Each IBKR connection shows its token expiry date (highlighted
+within 14 days) and has **Update token** (enter the new token and expiry date; leave the query
+ID empty to keep the current one) and **Upload a Flex statement** (below).
+
+The worker syncs daily after 06:00 Europe/London, and on **Sync now**. The first sync
+fetches up to a year, then earlier years back to the account's opening, as far as IBKR
+serves them; **Sync now** follows the same rule. Each IBKR account becomes an account in
+Lararium, with its tax wrapper (ISA or GIA) set from IBKR's account type.
+
+### Transfers with Monzo
+
+Register IBKR's receiving bank account (sort code and account number, as Monzo shows it) on
+the IBKR account, as in [Registering identifiers](#registering-identifiers), so Monzo
+payments pair with IBKR deposits. If IBKR pays you from a different account it shows in
+Suggestions. Transfers between your IBKR accounts pair automatically.
+
+### Reconciliation warnings
+
+After each sync or upload Lararium compares its records with IBKR's own report of positions
+and cash, for each account on the latest day IBKR reported them.
+
+- **"IBKR ···1234 SYMBOL differs from IBKR's report on DATE by AMOUNT"** means Lararium's
+  records don't add up to what IBKR reports: a record type not handled yet, or a correction
+  by IBKR. Lararium never corrects it silently. A difference on an earlier day of a sync is
+  sent as a notification only.
+- **A failed sync** shows its reason on the connection, such as a field to select in the
+  Flex query.
+- **"IBKR flagged: …"** names a section or field Lararium doesn't type yet.
+
+### Closed accounts
+
+The Flex Web Service can't select a closed account (a closed ISA, say). Fetch its statement
+by hand:
+
+1. In Client Portal, open the account selector's filter, choose Account Status, then Closed,
+   and select every account.
+2. Run the Flex query: Run, format XML, with a period covering the closed account's life. IBKR
+   may generate it in the background (Batch Flex Queries); download it when ready.
+3. Once the connection's first sync has finished, choose **Upload a Flex statement** on the
+   IBKR connection on Connections and upload the XML (up to 64 MiB). Run it after the latest
+   sync: an older file's copy of a row IBKR has since corrected would undo the correction.
 
 ## Webhooks through Cloudflare Tunnel
 
@@ -395,7 +484,7 @@ SQL
 Lararium can message you when a connection needs re-authorising or a sync keeps failing. In
 a Feishu group add a custom bot, turn on signature verification, and copy the webhook URL and
 the signing secret into `LARARIUM_FEISHU_WEBHOOK_URL` and `LARARIUM_FEISHU_SECRET` (both in
-`infra/.env`; `make up` passes them to the worker). With neither set there are no notifications.
+`infra/.env`; `make up` passes them to the worker and the api). With neither set there are no notifications.
 Messages never contain credentials.
 
 ## Importing statements
@@ -434,14 +523,19 @@ review page warns you first. A later import that needs an adjustment usually mea
 period is missing: discard it and import the gap first. Hybrid accounts take no adjustment,
 because their snapshots anchor the balance.
 
-**Everything the file says is stored.** Each row keeps its date and value date, payee and memo,
+**Everything the file says is stored.** Each row keeps its date and value date, the time of day
+when the file gives one and what it gives it to (`time_unit`: `day` when the file gives only a
+date, so the row sits at that day's midnight, else `minute` or `second`), payee and memo,
 cheque number, the bank's type code, counterparty name, sort code, account number and payment
 reference, and further fields where a statement prints them (payment kind, bank reference,
-purpose code, remittance text, counterparty bank), each in its own column, plus the whole source
-row. Each statement keeps its period, opening and closing balance, money in and out, payment
+purpose code, remittance text, counterparty bank, the last digits of a masked counterparty
+account; for Revolut, when a payment was started, the card it was made with, and for a payment
+in another currency its amount there and the bank's and the ECB's rates), each in its own
+column, plus the whole source row. Each statement keeps its period,
+opening and closing balance, money in and out, interest paid when it totals that apart, payment
 counts, reference number and date, the account as printed (type, name, sort code, account
-number, IBAN, BIC, customer number, branch), the arranged overdraft limit and its interest rate
-table. The account a file names must agree with the earlier imports into the same ledger
+number, IBAN, BIC, customer number, branch, the bank holding it), the arranged overdraft limit
+and its interest rates (with the days a rate applies on and how often it pays, when printed). The account a file names must agree with the earlier imports into the same ledger
 account, or the upload is refused (the message shows only the last four digits).
 
 **Imports and transfers.** Committing a statement registers the sort code and account number it
@@ -476,11 +570,44 @@ for each bank use the recommended one, which carries the most information.
 | Lloyds | CSV | yes |
 | Lloyds | PDF statement, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
+| Tembo | PDF statement | yes (the only format) |
+| LemFi | PDF statement (GBP account and savings) | yes |
+| LemFi | CSV (GBP account and savings) | |
+| Revolut Current | PDF statement | yes |
+| Revolut Current | CSV | |
+| Revolut Savings | PDF statement | yes |
+| Revolut Savings | CSV | |
+
+LemFi's PDF carries everything its CSV does (the same rows, with each row's time and its
+payment details) and more: the statement period, opening and closing balance, money in and out,
+the savings account's interest, the account's IBAN, sort code and bank, and the savings rate.
+A file of a period without transactions (LemFi exports one for an empty month) is refused as
+empty: there is nothing to import.
+
+Revolut's two accounts export differently, so each has its own entries. The current account's
+CSV has only the payment's type, its start and completion times and its fee over the PDF; the
+PDF adds the account (sort code, account number, IBAN, BIC), the balance summary, and each
+payment's reference, other side, card and, for another currency, its amount there and the rates.
+The savings PDF has the CSV's rows plus the account, the product and a total for each kind of row.
 
 A PDF statement is read by a layout written for that bank, which checks itself: the summary
 (opening and closing balance, money in and out, payment counts) must equal the rows, every
 printed balance must follow from the amounts, every row must have exactly one amount, a date
-inside the statement period and a type code, and every word in the table must belong to a row.
+inside the statement period and a type code (where the bank prints them; LemFi doesn't), and
+every word in the table must belong to a row. Revolut's current account prints no type codes:
+its card payments are told by their card. Its pending and reverted payments, which the summary
+leaves out, are kept as skipped rows. Only one currency of a Revolut statement may show any
+money; a statement with two is refused. A statement made on or before the last day of its
+period (Revolut's, when the period runs to the day you download it) lists that day only in
+part, as an export does, and its closing balance, taken when it was made, is kept with no date;
+end a Revolut statement on a day that is over to have it all. Tembo prints no opening balance
+and no totals: there its Plan value must equal the rows' last balance, its transaction type
+gives each amount's direction, and its page numbers and period (first to last row) must leave
+nothing out. A Tembo statement is made on demand, so like an export it lists in full only the
+days between its first and last. LemFi's money in and out totals may each be a penny below their
+rows' sum (LemFi cuts them down to the penny); interest and the closing balance must still
+follow from the rows exactly. A LemFi statement must also number all its pages ("Page n of
+N"), so one missing a page is refused.
 A statement that doesn't add up is refused as a whole, naming the failed check, rather than
 imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
@@ -503,17 +630,30 @@ by amount and date (below).
   `skip_footer_rows` (0–20) and `overdraft_footer_label` (the first cell of the footer line
   with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
   another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
-  `newest_first`), `sign` (below) and `amount_format` (`decimal_separator`, `.` or `,`;
-  `thousands_separator`, none by default, or `,` `.` space `'`).
+  `newest_first`), `sign` (below), `amount_format` (`decimal_separator`, `.` or `,`;
+  `thousands_separator`, none by default, or `,` `.` space `'`) and `currency` (every row's
+  currency, for a file that states it once rather than per row, such as LemFi's `Money in
+  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column). A line that
+  repeats the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
   `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
-  `counterparty_account_number`, `reference` (the payment reference), and the statement's own
-  `account_sort_code` and `account_number`.
+  `counterparty_account_number`, `reference` (the payment reference), `started_at` (when the
+  payment was started, in `date_format`, which must then have a time; `date` is when it
+  completed), and the statement's own `account_sort_code`, `account_number` and `account_type`
+  (its product, e.g. Revolut's `Product`; every row must give the same).
+- **`extract`** reads typed fields out of a column that holds several:
+  `[{"column": "Details", "patterns": ["<regex>", ...]}]`. The first pattern that matches a
+  non-empty cell in full fills the fields its named groups name (`payee`, `memo`,
+  `check_number`, `counterparty_name`, `counterparty_sort_code`, `counterparty_account_number`,
+  `counterparty_account_ending`, `counterparty_bank`, `reference`); a cell no pattern matches
+  makes the row an error. A field comes from one place: a mapped column or one extract.
 - **`ofx`**: `sign`.
 - **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
-- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement` or `boc_uk_statement`.
+- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement`,
+  `revolut_current_statement`, `revolut_savings_statement`, `tembo_statement` or
+  `lemfi_statement`.
 
 **Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
 one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
@@ -524,9 +664,17 @@ purchases as positive numbers needs `"sign": "outflow_positive"`.
 
 **Duplicates.** A row is a duplicate when a committed row of the same account has the same key:
 its external ID (an OFX `FITID`, or a mapped `external_id` column) when it has one; otherwise its
-date, amount, currency, description and running balance; otherwise those without the balance
-plus how many identical rows come before it in the same file, so two real identical purchases on
-one day are both imported, and both are duplicates when the file comes again. Files in different
+date, amount, currency, description and running balance (with the time of day, when the file
+gives one, only for rows whose other fields are all alike: money in and back out twice a day can
+leave the same balance); otherwise those without the balance. Either of the last two also counts
+how many identical rows come before it in the same file, so two real identical purchases on one
+day are both imported, and both are duplicates when the file comes again; rows with a balance
+are counted so only in a file without times of day (with times, rows alike to their time are an
+error). The running balance can repeat when it comes back to the same figure on the same day
+(the same transfer in twice, with a payment between). The count matches across files because a
+bank's file never starts partway through a day, though it can end partway through one (an
+export taken during the day): each file lists a day's rows from its first, so the nth such row
+is the same row in every file. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
 import's rows by date and amount instead: the matched ones are duplicates and any other is an
 error. A file that lacks a row the earlier import has on those days is refused at upload; if
@@ -541,8 +689,10 @@ pick GBP at upload, and import into a manual `transactions` account to try the f
 
 The tests use synthetic files. To check that your own statements still import correctly, for
 example after changing the import code, put each bank's files in a folder of its own, named
-starting `HSBC`, `Lloy` (Lloyds) or `BOC`, one account per folder, all under one directory, and
-run:
+starting `HSBC`, `Lloy` (Lloyds), `BOC`, `Revolut`, `Tembo` or `LemF` (LemFi), one account
+per folder (LemFi's GBP and savings accounts each get one; for Revolut, say `Revolut current`
+and `Revolut savings`: the files tell which account a folder holds), all under one directory,
+and run:
 
 ```bash
 make real-check REAL_ROOT="$HOME/Downloads"
@@ -587,9 +737,9 @@ make backup   # or: infra/backup/backup.sh
 
 This writes `$BACKUP_DIR/lararium-<UTC timestamp>.dump` (`pg_dump` custom format; a relative
 `BACKUP_DIR` is relative to the repository root) and, with the same timestamp,
-`documents-<UTC timestamp>.tar`: the uploaded statement files from the `lararium_documents`
-volume, read through the `api` container. The stack must be running: without the `api`
-container the backup fails rather than leave a dump without its documents. If
+`documents-<UTC timestamp>.tar`: the statement files (uploaded, or fetched from IBKR) from the
+`lararium_documents` volume, read through the `api` container. The stack must be running:
+without the `api` container the backup fails rather than leave a dump without its documents. If
 `RESTIC_REPOSITORY` is set in `infra/.env`, it then runs `restic backup "$BACKUP_DIR"`, using
 `RESTIC_PASSWORD`; the `restic` binary must be installed on the host. To run it nightly, add a
 cron entry such as `0 3 * * * cd /path/to/lararium && make backup`.

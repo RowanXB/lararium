@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from lararium.modules.finance.errors import FileFormatError
+from lararium.modules.finance.errors import EmptyStatementError, FileFormatError
 from lararium.modules.finance.importing import parsed
 from lararium.modules.finance.importing.parsed import (
     Counterparty,
@@ -74,21 +74,24 @@ def _read_rows(content: bytes, config: CsvProfileConfig) -> tuple[list[str], _Li
             raise FileFormatError("no rows")
         header = lines.pop(0)
     lines = [_trimmed(line) for line in lines]
+    # A line repeating the header is no row (Revolut's savings export ends with one).
+    names = [name.strip() for name in _trimmed(header)]
+    lines = [line for line in lines if [cell.strip() for cell in line] != names]
     footer: _Lines = []
     if config.skip_footer_rows:
         footer = lines[-config.skip_footer_rows :]
         lines = lines[: -config.skip_footer_rows]
-    missing = [
-        name for name in [*config.columns.names(), *config.include_only] if name not in header
-    ]
+    missing = [name for name in config.read_columns() if name not in header]
     if missing:
         raise FileFormatError(f"columns not in the file's header: {', '.join(missing)}")
-    used = dict.fromkeys([*config.columns.names(), *config.include_only])
+    used = dict.fromkeys(config.read_columns())
     repeated = [name for name in used if header.count(name) > 1]
     if repeated:
         raise FileFormatError(f"columns named more than once in the header: {', '.join(repeated)}")
-    if not lines:
-        raise FileFormatError("no rows")
+    # Lines that are all footer go to _check_footer first: a row in a file without the footer
+    # isn't an empty statement.
+    if not lines and not footer:
+        raise EmptyStatementError()
     if len(lines) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
     return header, lines, footer
@@ -168,13 +171,43 @@ def _value_date(raw: dict[str, str], config: CsvProfileConfig, local_tz: ZoneInf
     return None if text is None else _datetime(text, config, local_tz).date()
 
 
-def _counterparty(raw: dict[str, str], config: CsvProfileConfig) -> Counterparty | None:
+def _started_at(
+    raw: dict[str, str], config: CsvProfileConfig, local_tz: ZoneInfo
+) -> datetime | None:
+    text = _optional(raw, config.columns.started_at)
+    return None if text is None else _datetime(text, config, local_tz)
+
+
+def _extracted(raw: dict[str, str], config: CsvProfileConfig) -> dict[str, str]:
+    """The fields the profile's extracts read out of the row's non-empty cells."""
+    values: dict[str, str] = {}
+    for extract in config.extract:
+        cell = raw[extract.column].strip()
+        if cell:
+            values |= parsed.extract_fields(extract.patterns, cell, extract.column)
+    return values
+
+
+def _field(
+    raw: dict[str, str], column: str | None, extracted: dict[str, str], name: str
+) -> str | None:
+    """A typed field from its mapped column, else from an extract (never both: profiles)."""
+    return _optional(raw, column) or extracted.get(name)
+
+
+def _counterparty(
+    raw: dict[str, str], config: CsvProfileConfig, extracted: dict[str, str]
+) -> Counterparty | None:
     columns = config.columns
     counterparty = Counterparty(
-        name=_optional(raw, columns.counterparty_name),
-        sort_code=_optional(raw, columns.counterparty_sort_code),
-        account_number=_optional(raw, columns.counterparty_account_number),
-        reference=_optional(raw, columns.reference),
+        name=_field(raw, columns.counterparty_name, extracted, "counterparty_name"),
+        sort_code=_field(raw, columns.counterparty_sort_code, extracted, "counterparty_sort_code"),
+        account_number=_field(
+            raw, columns.counterparty_account_number, extracted, "counterparty_account_number"
+        ),
+        reference=_field(raw, columns.reference, extracted, "reference"),
+        bank=extracted.get("counterparty_bank"),
+        account_ending=extracted.get("counterparty_account_ending"),
     )
     return None if counterparty == Counterparty() else counterparty
 
@@ -183,6 +216,7 @@ def _account(raw: dict[str, str], config: CsvProfileConfig) -> StatementAccount 
     account = StatementAccount(
         sort_code=_optional(raw, config.columns.account_sort_code),
         account_number=_optional(raw, config.columns.account_number),
+        account_type=_optional(raw, config.columns.account_type),
     )
     return None if account == StatementAccount() else account
 
@@ -193,23 +227,26 @@ def _row(
     """Raises ValueError with a message for the row's error."""
     columns = config.columns
     when = _datetime(raw[columns.date], config, local_tz)
+    extracted = _extracted(raw, config)
     row = ParsedRow(
         position=position,
         booking_date=when.date(),
         occurred_at=when if config.has_time else None,
+        time_unit=config.time_unit,
         description=clean_description([raw[column] for column in columns.description]),
         quantity=_quantity(raw, config),
         fee=_optional_amount(raw, columns.fee, config) or Decimal(0),
-        currency=_currency(raw, config),
+        currency=_currency(raw, config) or config.currency,
         balance=_optional_amount(raw, columns.balance, config),
         external_id=_optional(raw, columns.external_id),
         bank_type=_optional(raw, columns.type),
         raw=raw,
         value_date=_value_date(raw, config, local_tz),
-        payee=_optional(raw, columns.payee),
-        memo=_optional(raw, columns.memo),
-        check_number=_optional(raw, columns.check_number),
-        counterparty=_counterparty(raw, config),
+        payee=_field(raw, columns.payee, extracted, "payee"),
+        memo=_field(raw, columns.memo, extracted, "memo"),
+        check_number=_field(raw, columns.check_number, extracted, "check_number"),
+        counterparty=_counterparty(raw, config, extracted),
+        started_at=_started_at(raw, config, local_tz),
     )
     return row, _account(raw, config)
 
@@ -232,12 +269,14 @@ def _check_footer(
 ) -> None:
     """skip_footer_rows drops the last lines unread, so one that reads as a transaction
     means the file has no footer (an account without an overdraft line, say): refuse it
-    rather than lose that transaction."""
+    rather than lose that transaction. A transaction whose extract doesn't match is one
+    still, so extracts are left out here."""
+    plain = config.model_copy(update={"extract": []})
     for line in footer:
         if len(line) > len(header):
             continue
         try:
-            _row(0, _raw(header, line, used), config, local_tz)
+            _row(0, _raw(header, line, used), plain, local_tz)
         except ValueError:
             continue
         raise FileFormatError(
@@ -275,8 +314,10 @@ def _overdraft(
 def parse_csv(content: bytes, config: CsvProfileConfig, local_tz: ZoneInfo) -> ParsedStatement:
     """local_tz: the profile's timezone when set; the caller resolves it."""
     header, lines, footer = _read_rows(content, config)
-    used = [*config.columns.names(), *config.include_only]
+    used = config.read_columns()
     _check_footer(header, footer, used, config, local_tz)
+    if not lines:
+        raise EmptyStatementError()
     overdraft_limit, overdraft_limit_date = _overdraft(footer, config, local_tz)
     rows: list[ParsedRow | RowError | SkippedRow] = []
     accounts: set[StatementAccount] = set()

@@ -185,6 +185,16 @@ export type BodyStageImport = {
 };
 
 /**
+ * Body_upload_ibkr_statement
+ */
+export type BodyUploadIbkrStatement = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * CandidateOut
  */
 export type CandidateOut = {
@@ -285,6 +295,10 @@ export type CsvColumns = {
      */
     account_sort_code?: string | null;
     /**
+     * Account Type
+     */
+    account_type?: string | null;
+    /**
      * Amount
      */
     amount?: string | null;
@@ -349,6 +363,10 @@ export type CsvColumns = {
      */
     reference?: string | null;
     /**
+     * Started At
+     */
+    started_at?: string | null;
+    /**
      * Type
      */
     type?: string | null;
@@ -359,15 +377,41 @@ export type CsvColumns = {
 };
 
 /**
+ * CsvExtract
+ *
+ * Typed fields read out of one column: the first pattern that matches a non-empty cell
+ * in full fills the fields its named groups name (those that match); a cell no pattern
+ * matches makes the row an error.
+ */
+export type CsvExtract = {
+    /**
+     * Column
+     */
+    column: string;
+    /**
+     * Patterns
+     */
+    patterns: Array<Pattern>;
+};
+
+/**
  * CsvProfileConfig
  */
 export type CsvProfileConfig = {
     amount_format?: AmountFormat;
     card_types?: CardTypes;
     columns: CsvColumns;
+    /**
+     * Currency
+     */
+    currency?: string | null;
     date_format: DateFormat;
     delimiter?: Delimiter;
     encoding?: Encoding;
+    /**
+     * Extract
+     */
+    extract?: Array<CsvExtract>;
     /**
      * Format
      */
@@ -516,6 +560,48 @@ export type HoldingOut = {
 };
 
 /**
+ * IbkrConnectionCreate
+ */
+export type IbkrConnectionCreate = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Query Id
+     */
+    query_id: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrConnectionUpdate
+ */
+export type IbkrConnectionUpdate = {
+    /**
+     * Query Id
+     */
+    query_id?: string | null;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrUploadOut
+ */
+export type IbkrUploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
+
+/**
  * IdentifierCreate
  */
 export type IdentifierCreate = {
@@ -540,7 +626,7 @@ export type IdentifierOut = {
     /**
      * Account Number
      */
-    account_number: string;
+    account_number: string | null;
     /**
      * Created At
      */
@@ -560,11 +646,11 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account';
+    kind: 'uk_bank_account' | 'ibkr_account';
     /**
      * Sort Code
      */
-    sort_code: string;
+    sort_code: string | null;
     /**
      * Value
      */
@@ -767,9 +853,17 @@ export type ImportRowOut = {
      */
     booking_date: string | null;
     /**
+     * Card Number
+     */
+    card_number: string | null;
+    /**
      * Check Number
      */
     check_number: string | null;
+    /**
+     * Counterparty Account Ending
+     */
+    counterparty_account_ending: string | null;
     /**
      * Counterparty Account Number
      */
@@ -811,6 +905,14 @@ export type ImportRowOut = {
      */
     fee: string;
     /**
+     * Fx Rate
+     */
+    fx_rate: string | null;
+    /**
+     * Fx Reference Rate
+     */
+    fx_reference_rate: string | null;
+    /**
      * Id
      */
     id: string;
@@ -838,6 +940,10 @@ export type ImportRowOut = {
      * Occurred At
      */
     occurred_at: string | null;
+    /**
+     * Original Amount
+     */
+    original_amount: string | null;
     /**
      * Original Currency
      */
@@ -877,9 +983,14 @@ export type ImportRowOut = {
      */
     remittance_info: string | null;
     /**
+     * Started At
+     */
+    started_at: string | null;
+    /**
      * Status
      */
     status: 'new' | 'duplicate' | 'skipped' | 'error' | 'committed' | 'rolled_back';
+    time_unit: TimeUnit | null;
     /**
      * Transaction Id
      */
@@ -905,6 +1016,14 @@ export type ImportStatementOut = {
      */
     account_number: string | null;
     /**
+     * Account Opened On
+     */
+    account_opened_on: string | null;
+    /**
+     * Account Reference
+     */
+    account_reference: string | null;
+    /**
      * Account Type
      */
     account_type: string | null;
@@ -924,6 +1043,10 @@ export type ImportStatementOut = {
      * Available Balance Date
      */
     available_balance_date: string | null;
+    /**
+     * Bank
+     */
+    bank: string | null;
     /**
      * Bic
      */
@@ -960,6 +1083,10 @@ export type ImportStatementOut = {
      * Iban
      */
     iban: string | null;
+    /**
+     * Interest
+     */
+    interest: string | null;
     /**
      * Money In
      */
@@ -1027,6 +1154,10 @@ export type ImportStatementRateOut = {
      */
     ear: string | null;
     /**
+     * Frequency
+     */
+    frequency: string | null;
+    /**
      * Kind
      */
     kind: string;
@@ -1034,6 +1165,14 @@ export type ImportStatementRateOut = {
      * Rate
      */
     rate: string | null;
+    /**
+     * Valid From
+     */
+    valid_from: string | null;
+    /**
+     * Valid To
+     */
+    valid_to: string | null;
 };
 
 /**
@@ -1174,6 +1313,44 @@ export type OfxProfileConfig = {
 };
 
 /**
+ * PairCandidateOut
+ *
+ * A record the owner could pair with another as one transfer.
+ */
+export type PairCandidateOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Account Name
+     */
+    account_name: string;
+    /**
+     * Booking Date
+     */
+    booking_date: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Occurred At
+     */
+    occurred_at: string;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
+};
+
+export type Pattern = string;
+
+/**
  * PdfProfileConfig
  */
 export type PdfProfileConfig = {
@@ -1185,7 +1362,7 @@ export type PdfProfileConfig = {
     /**
      * Layout
      */
-    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement';
+    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'revolut_current_statement' | 'revolut_savings_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
 
@@ -1447,6 +1624,8 @@ export type SyncQueuedOut = {
     queued: boolean;
 };
 
+export type TimeUnit = 'day' | 'minute' | 'second';
+
 export type TimezoneName = string;
 
 /**
@@ -1621,6 +1800,46 @@ export type ValidationError = {
 };
 
 /**
+ * IbkrConnectionCreate
+ */
+export type IbkrConnectionCreateWritable = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Query Id
+     */
+    query_id: string;
+    /**
+     * Token
+     */
+    token: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
+ * IbkrConnectionUpdate
+ */
+export type IbkrConnectionUpdateWritable = {
+    /**
+     * Query Id
+     */
+    query_id?: string | null;
+    /**
+     * Token
+     */
+    token: string;
+    /**
+     * Token Expires On
+     */
+    token_expires_on: string;
+};
+
+/**
  * MonzoConnectionCreate
  */
 export type MonzoConnectionCreateWritable = {
@@ -1680,6 +1899,31 @@ export type CreateMonzoConnectionResponses = {
 };
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
+
+export type CreateIbkrConnectionData = {
+    body: IbkrConnectionCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/ibkr';
+};
+
+export type CreateIbkrConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateIbkrConnectionError = CreateIbkrConnectionErrors[keyof CreateIbkrConnectionErrors];
+
+export type CreateIbkrConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateIbkrConnectionResponse = CreateIbkrConnectionResponses[keyof CreateIbkrConnectionResponses];
 
 export type MonzoOauthCallbackData = {
     body?: never;
@@ -1765,6 +2009,66 @@ export type DisableConnectionResponses = {
 };
 
 export type DisableConnectionResponse = DisableConnectionResponses[keyof DisableConnectionResponses];
+
+export type UpdateIbkrConnectionData = {
+    body: IbkrConnectionUpdateWritable;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/ibkr';
+};
+
+export type UpdateIbkrConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateIbkrConnectionError = UpdateIbkrConnectionErrors[keyof UpdateIbkrConnectionErrors];
+
+export type UpdateIbkrConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateIbkrConnectionResponse = UpdateIbkrConnectionResponses[keyof UpdateIbkrConnectionResponses];
+
+export type UploadIbkrStatementData = {
+    body: BodyUploadIbkrStatement;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/ibkr-statement';
+};
+
+export type UploadIbkrStatementErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadIbkrStatementError = UploadIbkrStatementErrors[keyof UploadIbkrStatementErrors];
+
+export type UploadIbkrStatementResponses = {
+    /**
+     * Successful Response
+     */
+    202: IbkrUploadOut;
+};
+
+export type UploadIbkrStatementResponse = UploadIbkrStatementResponses[keyof UploadIbkrStatementResponses];
 
 export type SyncConnectionNowData = {
     body?: never;
@@ -2579,6 +2883,68 @@ export type PostTransactionResponses = {
 };
 
 export type PostTransactionResponse = PostTransactionResponses[keyof PostTransactionResponses];
+
+export type PairTransactionsData = {
+    body: TransferPair;
+    path: {
+        /**
+         * Transaction Id
+         */
+        transaction_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transactions/{transaction_id}/pair';
+};
+
+export type PairTransactionsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PairTransactionsError = PairTransactionsErrors[keyof PairTransactionsErrors];
+
+export type PairTransactionsResponses = {
+    /**
+     * Successful Response
+     */
+    200: TransferOut;
+};
+
+export type PairTransactionsResponse = PairTransactionsResponses[keyof PairTransactionsResponses];
+
+export type ListTransactionPairCandidatesData = {
+    body?: never;
+    path: {
+        /**
+         * Transaction Id
+         */
+        transaction_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transactions/{transaction_id}/pair-candidates';
+};
+
+export type ListTransactionPairCandidatesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListTransactionPairCandidatesError = ListTransactionPairCandidatesErrors[keyof ListTransactionPairCandidatesErrors];
+
+export type ListTransactionPairCandidatesResponses = {
+    /**
+     * Response List Transaction Pair Candidates
+     *
+     * Successful Response
+     */
+    200: Array<PairCandidateOut>;
+};
+
+export type ListTransactionPairCandidatesResponse = ListTransactionPairCandidatesResponses[keyof ListTransactionPairCandidatesResponses];
 
 export type VoidTransactionData = {
     body?: never;

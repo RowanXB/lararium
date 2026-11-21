@@ -191,6 +191,13 @@ async def _change_status(
     return record
 
 
+async def lock_connection(ctx: CommandContext, connection_id: UUID) -> ConnectionRecord:
+    """The connection as it is now, its row locked until the command ends: what is checked
+    then can't change before the command writes."""
+    await _locked_status(ctx, connection_id)
+    return await get_connection(ctx.session, connection_id)
+
+
 async def set_status(
     ctx: CommandContext,
     connection_id: UUID,
@@ -264,6 +271,13 @@ async def set_warnings(
     ctx: CommandContext, connection_id: UUID, warnings: list[str]
 ) -> ConnectionRecord:
     return await _update(ctx, connection_id, warnings=warnings)
+
+
+async def set_credential_expiry(
+    ctx: CommandContext, connection_id: UUID, expires_at: datetime | None
+) -> ConnectionRecord:
+    """When the connection's credential stops working (a reminder is due before it)."""
+    return await _update(ctx, connection_id, credential_expires_at=expires_at)
 
 
 async def update_config(
