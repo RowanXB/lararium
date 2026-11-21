@@ -235,6 +235,51 @@ async def create_account(
     return record
 
 
+async def set_main_account(
+    ctx: CommandContext, account_id: UUID, main_account_id: UUID | None
+) -> AccountRecord:
+    """Make a manual account a sub-account of another (None: of none).
+
+    A bank transfer of the sub-account that names no bank account then names its main
+    account, which pairs it with the main account's side. A connected account's main account
+    is its connector's to set. One level only: the main account has none of its own, and a
+    main account can't itself be given one.
+    """
+    session = ctx.session
+    record = await get_account(session, account_id)
+    require_owner_account(record, "given a main account")
+    if record.source_kind == "connection":
+        raise FinanceValidationError(f"{record.name} is connected; its connector sets it")
+    if main_account_id is not None and record.parent_account_id != main_account_id:
+        main = await get_account(session, main_account_id)
+        if main.id == account_id:
+            raise FinanceValidationError("an account can't be its own main account")
+        if main.system:
+            raise FinanceValidationError(f"{main.name} belongs to the ledger, not to you")
+        if main.status == "closed":
+            raise FinanceValidationError(f"{main.name} is closed")
+        if main.parent_account_id is not None:
+            raise FinanceValidationError(f"{main.name} has a main account of its own")
+        if await session.scalar(
+            select(exists().where(models.Account.parent_account_id == account_id))
+        ):
+            raise FinanceValidationError(f"{record.name} is already the main account of another")
+    # Conditional update, so an unchanged value writes and publishes nothing.
+    changed = await session.scalar(
+        update(models.Account)
+        .where(
+            models.Account.id == account_id,
+            models.Account.parent_account_id.is_distinct_from(main_account_id),
+        )
+        .values(parent_account_id=main_account_id)
+        .returning(models.Account.id)
+    )
+    record = await get_account(session, account_id)
+    if changed is not None:
+        _publish(ctx, "finance.account.updated", record)
+    return record
+
+
 async def rename_account(ctx: CommandContext, account_id: UUID, name: str) -> AccountRecord:
     require_owner_account(await get_account(ctx.session, account_id), "renamed")
     updated = await ctx.session.scalar(

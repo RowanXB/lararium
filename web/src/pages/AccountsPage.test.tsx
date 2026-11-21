@@ -10,6 +10,7 @@ import {
   recordSnapshot,
   removeAccountIdentifier,
   setAccountBalanceMode,
+  setMainAccount,
 } from "../api";
 import { AccountsPage } from "./AccountsPage";
 
@@ -87,6 +88,7 @@ vi.mock("../api", () => ({
   addAccountIdentifier: vi.fn(async () => ({ data: {} })),
   removeAccountIdentifier: vi.fn(async () => ({ data: {} })),
   setAccountBalanceMode: vi.fn(async () => ({ data: {} })),
+  setMainAccount: vi.fn(async () => ({ data: {} })),
 }));
 
 beforeEach(() => {
@@ -235,4 +237,25 @@ it("offers no identifiers on In transit", async () => {
   // The ledger's own account is listed, but can't have identifiers.
   expect(screen.getAllByText("In transit").length).toBeGreaterThan(0);
   expect(screen.queryByRole("group", { name: "Identifiers of In transit" })).toBeNull();
+});
+
+it("sets a manual account's main account", async () => {
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AccountsPage />
+    </QueryClientProvider>,
+  );
+  const group = within(await screen.findByRole("group", { name: "Main account of Credit card" }));
+  await user.click(group.getByRole("combobox", { name: "Main account" }));
+  // The account itself isn't offered as its own main account.
+  expect(screen.queryByRole("option", { name: "Credit card" })).toBeNull();
+  await user.click(await screen.findByRole("option", { name: "Ledger account" }));
+  expect(setMainAccount).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { account_id: "0190a0b0-0000-7000-8000-000000000001" },
+      body: { main_account_id: "0190a0b0-0000-7000-8000-000000000002" },
+    }),
+  );
+  await vi.waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
 });

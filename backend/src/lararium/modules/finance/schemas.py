@@ -432,6 +432,10 @@ class BalanceModeUpdate(BaseModel):
     balance_mode: BalanceMode
 
 
+class MainAccountUpdate(BaseModel):
+    main_account_id: UUID | None
+
+
 class TransferOut(BaseModel):
     """A transfer as matching left it. Its id changes when matching reopens it, so a client
     finds it again by its own records' ids."""

@@ -1276,6 +1276,16 @@ export type InstrumentUpdate = {
 };
 
 /**
+ * MainAccountUpdate
+ */
+export type MainAccountUpdate = {
+    /**
+     * Main Account Id
+     */
+    main_account_id: string | null;
+};
+
+/**
  * MonzoConnectionCreate
  */
 export type MonzoConnectionCreate = {
@@ -2300,6 +2310,36 @@ export type RemoveAccountIdentifierResponses = {
 };
 
 export type RemoveAccountIdentifierResponse = RemoveAccountIdentifierResponses[keyof RemoveAccountIdentifierResponses];
+
+export type SetMainAccountData = {
+    body: MainAccountUpdate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/main-account';
+};
+
+export type SetMainAccountErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetMainAccountError = SetMainAccountErrors[keyof SetMainAccountErrors];
+
+export type SetMainAccountResponses = {
+    /**
+     * Successful Response
+     */
+    200: AccountOut;
+};
+
+export type SetMainAccountResponse = SetMainAccountResponses[keyof SetMainAccountResponses];
 
 export type RecordSnapshotData = {
     body: SnapshotCreate;

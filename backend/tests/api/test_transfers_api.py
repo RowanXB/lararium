@@ -1,6 +1,6 @@
 """The transfers and identifiers API (/api/v1/finance/transfers, .../identifiers)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,10 +20,12 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     TransactionRecord,
+    post_transaction,
     upsert_connector_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import transfer_contra
+from tests.finance.transfers.conftest import record_import_rows
 
 FINANCE = "/api/v1/finance"
 WHEN = datetime(2026, 11, 2, 12, tzinfo=UTC)
@@ -644,3 +646,86 @@ async def test_lists_an_ibkr_account_identifier_and_refuses_to_register_one(clie
         json={"kind": "ibkr_account", "value": "U0000002"},
     )
     assert refused.status_code == 422
+
+
+async def _statement_row(session, run, account_id: str, quantity: str) -> None:
+    """A bank transfer naming nobody, posted as a statement import would and recorded as a
+    row of a committed import listing its day in full."""
+    gbp = await get_currency(session, "GBP")
+    own = UUID(account_id)
+    contra = await transfer_contra(
+        session, source=None, own_account_id=own, counterparty_identifier_id=None, other_postings=0
+    )
+    amount = Decimal(quantity)
+    row = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime.combine(WHEN.date(), time(), UTC),
+            description="Faster payment",
+            origin="manual",
+            postings=[PostingInput(own, gbp.id, amount), PostingInput(contra, gbp.id, -amount)],
+            counterparty=CounterpartyFields(identifier_id=None, bank_transfer=True),
+        ),
+    )
+    complete = (WHEN.date() - timedelta(days=1), WHEN.date() + timedelta(days=60))
+    await record_import_rows(session, run, own, [row.id], complete)
+
+
+async def _set_main(client, account_id: str, main_account_id: str | None) -> Any:
+    return await client.post(
+        f"{FINANCE}/accounts/{account_id}/main-account", json={"main_account_id": main_account_id}
+    )
+
+
+async def _main_and_savings(client, session, run) -> tuple[str, str]:
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    await _statement_row(session, run, main_id, "-100")
+    await _statement_row(session, run, savings_id, "100")
+    return main_id, savings_id
+
+
+async def test_setting_a_main_account_pairs_its_history(client, session, run) -> None:
+    main_id, savings_id = await _main_and_savings(client, session, run)
+    assert await _transfers(client) == []
+    response = await _set_main(client, savings_id, main_id)
+    assert (response.status_code, response.json()["parent_account_id"]) == (200, main_id)
+    [transfer] = await _transfers(client)
+    assert (transfer["from_account_id"], transfer["to_account_id"]) == (main_id, savings_id)
+
+
+async def test_clearing_the_main_account_unpairs_its_history(client, session, run) -> None:
+    main_id, savings_id = await _main_and_savings(client, session, run)
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+    assert len(await _transfers(client)) == 1
+    response = await _set_main(client, savings_id, None)
+    assert (response.status_code, response.json()["parent_account_id"]) == (200, None)
+    assert await _transfers(client) == []
+
+
+async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None:
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    other_id = await _manual(client, "Other", "transactions")
+    _, connected = await _connected(run, "Connected")
+    closed_id = await _manual(client, "Closed", "transactions")
+    closed = await client.post(
+        f"{FINANCE}/accounts/{closed_id}/close", json={"closed_on": "2026-11-01"}
+    )
+    assert closed.status_code == 200, closed.text
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+
+    assert (await _set_main(client, str(connected.id), main_id)).status_code == 422
+    assert (await _set_main(client, other_id, other_id)).status_code == 422
+    assert (await _set_main(client, other_id, closed_id)).status_code == 422
+    # savings has a main account of its own; main is already another's main.
+    assert (await _set_main(client, other_id, savings_id)).status_code == 422
+    assert (await _set_main(client, main_id, other_id)).status_code == 422
+    assert (await _set_main(client, other_id, str(uuid4()))).status_code == 404
+    # A system account takes none, and can't be one.
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    assert (await _set_main(client, str(unassigned), main_id)).status_code == 422
+    assert (await _set_main(client, other_id, str(unassigned))).status_code == 422
+    # Nothing changed.
+    [account] = [a for a in (await client.get(f"{FINANCE}/accounts")).json() if a["id"] == other_id]
+    assert account["parent_account_id"] is None

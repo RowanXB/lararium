@@ -280,6 +280,16 @@ transfer, by amount and date, but only if its source marks it as a bank transfer
 of the same amount never pairs. Transfers are in GBP; Lararium posts no exchange or fee
 differences.
 
+### Giving a savings account its main account
+
+A savings account that has no bank account of its own to register (a Monzo pot, say) can be
+given a **main account**: on the Accounts page, pick one in its **Main account** select (a
+manual account only; a connected account's connector sets it). The main account is an open
+account of yours that has no main account itself, and isn't already some account's main account.
+A bank transfer of the savings account that names no bank account then names its main account,
+so it pairs with the main account's side by amount and date, and Lararium goes through the
+whole history at once. Choose **None** to undo it; the history is matched anew.
+
 ### The Transfers page
 
 Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".

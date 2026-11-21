@@ -28,6 +28,7 @@ from lararium.modules.finance.schemas import (
     CandidateOut,
     IdentifierCreate,
     IdentifierOut,
+    MainAccountUpdate,
     SuggestionOut,
     TransferOut,
     TransferPair,
@@ -137,6 +138,17 @@ async def set_account_balance_mode(
     args = _args(body.model_dump(mode="json"), account_id=account_id)
     async with healing_command(session, actor, "set_account_balance_mode", args) as ctx:
         record = await accounts.set_balance_mode(ctx, account_id, body.balance_mode)
+    return AccountOut.model_validate(record)
+
+
+@router.post("/accounts/{account_id}/main-account", name="set_main_account")
+async def set_main_account(
+    account_id: UUID, body: MainAccountUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Give a manual account a main account, or clear it; its transfers are matched anew."""
+    args = _args(body.model_dump(mode="json"), account_id=account_id)
+    async with healing_command(session, actor, "set_main_account", args) as ctx:
+        record = await accounts.set_main_account(ctx, account_id, body.main_account_id)
     return AccountOut.model_validate(record)
 
 
