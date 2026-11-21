@@ -160,6 +160,18 @@ class ParsedRow:
     # between the row's currency and the statement's.
     original_currency: str | None = None
     exchange_rate: Decimal | None = None
+    # When the payment was started, aware, if the file says (Revolut's Started Date);
+    # occurred_at is then when it completed.
+    started_at: datetime | None = None
+    # The card a payment was made with, masked as printed ("123456******1234"). A row
+    # paid by card is never a bank transfer.
+    card_number: str | None = None
+    # A card payment in another currency (Revolut): the amount in original_currency, in
+    # ledger sign as quantity, and the rates as printed, in units of original_currency per
+    # one unit of the row's currency: the bank's own rate and its reference rate (the ECB's).
+    original_amount: Decimal | None = None
+    fx_rate: Decimal | None = None
+    fx_reference_rate: Decimal | None = None
 
 
 @dataclass(frozen=True)

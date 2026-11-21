@@ -2,9 +2,10 @@
 REAL_ROOT=<dir>` (README, "Verifying against your real statements"). Skipped unless
 LARARIUM_REAL_ROOT is set, so `make check` and CI never run it.
 
-<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Tembo or LemF
+<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Revolut, Tembo or LemF
 (LemFi's GBP and savings accounts each get their own), each with one account's files in
-any of the catalog's formats. In two orders (statements first, exports first) every file
+any of the catalog's formats. A Revolut folder's files say which account they are for (current
+or savings). In two orders (statements first, exports first) every file
 must commit with no error row, every statement's closing balance must hold on its own
 date (an undated one, such as Tembo's Plan value, on its last row's day), and rolling
 everything back, newest first, must be allowed and leave a zero balance. A file of a
@@ -34,6 +35,7 @@ from lararium.modules.finance.errors import EmptyStatementError
 from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.commit import commit_batch, rollback_batch
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
+from lararium.modules.finance.importing.pdf.words import visible_lines
 from lararium.modules.finance.importing.profiles import create_profile
 from lararium.modules.finance.importing.staging import (
     _parse,  # pyright: ignore[reportPrivateUsage]
@@ -45,11 +47,41 @@ from lararium.modules.finance.instruments import InstrumentRecord
 from .staging_helpers import MakeAccount, Run, _rows
 
 ROOT = os.environ.get("LARARIUM_REAL_ROOT")
+REVOLUT = "Revolut"
 pytestmark = pytest.mark.skipif(not ROOT, reason="set LARARIUM_REAL_ROOT (make real-check)")
 
-# A bank folder's name starts with one of these (compared case-insensitively).
-BANKS = {"hsbc": "HSBC UK", "lloy": "Lloyds", "boc": "BOC UK", "tembo": "Tembo", "lemf": "LemFi"}
+# A bank folder's name starts with one of these (compared case-insensitively); a Revolut
+# folder's institution is told by its files.
+BANKS = {
+    "hsbc": "HSBC UK",
+    "lloy": "Lloyds",
+    "boc": "BOC UK",
+    "revolut": REVOLUT,
+    "tembo": "Tembo",
+    "lemf": "LemFi",
+}
 PDF = "PDF statement"
+
+
+def _revolut_account(path: Path) -> str:
+    """Revolut Savings for the savings exports, Revolut Current for any other file."""
+    content = path.read_bytes()
+    if path.suffix.lower() == ".pdf":
+        lines = visible_lines(content, x_tolerance=Decimal("1.5"))
+        savings = any(
+            " ".join(word.text for word in line) == "Savings Statement" for line in lines[:3]
+        )
+    else:
+        savings = content.lstrip(b"\xef\xbb\xbf").startswith(b"Date,Description,Money out")
+    return "Revolut Savings" if savings else "Revolut Current"
+
+
+def _institution(folder: Path, institution: str) -> str:
+    if institution != REVOLUT:
+        return institution
+    found = {_revolut_account(path) for path in folder.iterdir() if path.is_file()}
+    assert len(found) == 1, f"{folder.name}: holds files of {len(found)} Revolut accounts"
+    return found.pop()
 
 
 def _label(institution: str, path: Path) -> str | None:
@@ -73,7 +105,7 @@ def _mask(message: str, names: list[str]) -> str:
 
 def _banks(root: Path) -> list[tuple[Path, str]]:
     found = [
-        (folder, institution)
+        (folder, _institution(folder, institution))
         for folder in sorted(root.iterdir())
         if folder.is_dir()
         for prefix, institution in BANKS.items()

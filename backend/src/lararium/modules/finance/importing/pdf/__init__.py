@@ -18,7 +18,7 @@ from lararium.modules.finance.importing.parsed import (
     RowError,
     SkippedRow,
 )
-from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lemfi, lloyds, tembo
+from lararium.modules.finance.importing.pdf import boc_uk, hsbc_uk, lemfi, lloyds, revolut, tembo
 from lararium.modules.finance.importing.pdf.layout import LayoutResult, LayoutRow
 from lararium.modules.finance.importing.pdf.words import Word, visible_lines
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
@@ -33,6 +33,8 @@ _LAYOUTS: dict[str, _Layout] = {
     "hsbc_uk_statement": (hsbc_uk.X_TOLERANCE, hsbc_uk.parse),
     "lloyds_statement": (lloyds.X_TOLERANCE, lloyds.parse),
     "boc_uk_statement": (boc_uk.X_TOLERANCE, boc_uk.parse),
+    "revolut_current_statement": (revolut.X_TOLERANCE, revolut.parse_current),
+    "revolut_savings_statement": (revolut.X_TOLERANCE, revolut.parse_savings),
     "lemfi_statement": (lemfi.X_TOLERANCE, lemfi.parse),
     "tembo_statement": (tembo.X_TOLERANCE, tembo.parse),
 }
@@ -147,18 +149,24 @@ def parse_pdf(content: bytes, config: PdfProfileConfig, local_tz: ZoneInfo) -> P
     """local_tz places the times of day a statement prints, if any."""
     x_tolerance, layout = _LAYOUTS[config.layout]
     result = layout(visible_lines(content, x_tolerance=x_tolerance))
-    if len(result.rows) > parsed.MAX_IMPORT_ROWS:
+    if len(result.rows) + len(result.skipped) > parsed.MAX_IMPORT_ROWS:
         raise FileFormatError(f"the file has more than {parsed.MAX_IMPORT_ROWS} rows")
     # The checks first: a statement without rows is empty only if its summary says so.
     check(result)
     if not result.rows:
         raise EmptyStatementError()
     rows: list[ParsedRow | RowError | SkippedRow] = [_row(r, local_tz) for r in result.rows]
+    rows += result.skipped
+    # Only a statement that lists its last day in full closes at that day's end. One made on
+    # or before its period's last day (Revolut's) closes with the balance when it was made,
+    # which is no day's closing: later payments that day move it.
+    made = result.document_date
+    lists_last_day = result.period_complete and (made is None or made > result.period[1])
+    closed = result.period[1] if lists_last_day else None
     return ParsedStatement(
         rows=rows,
         closing_balance=result.closing_balance,
-        # Only a statement that lists its last day in full closes at that day's end.
-        closing_balance_date=result.period[1] if result.period_complete else None,
+        closing_balance_date=closed,
         period=result.period,
         period_complete=result.period_complete,
         opening_balance=result.opening_balance,

@@ -109,6 +109,11 @@ class ImportRowRecord:
     remittance_info: str | None
     original_currency: str | None
     exchange_rate: Decimal | None
+    started_at: datetime | None
+    card_number: str | None
+    original_amount: Decimal | None
+    fx_rate: Decimal | None
+    fx_reference_rate: Decimal | None
     error: str | None
     note: str | None
     raw: dict[str, str]
@@ -213,13 +218,20 @@ def _same_row(row: ParsedRow, currency: str, timed: bool = False) -> tuple[str, 
 def dedupe_key(
     account_id: UUID, row: ParsedRow, currency: str, occurrence: int, timed: bool = False
 ) -> str:
-    """Decision 5: by external id, else by running balance, else by occurrence in the file."""
+    """Decision 5: by external id, else by running balance, else by occurrence in the file.
+    For a row keyed by its balance, occurrence counts the file's earlier rows alike in every
+    field the key takes. A balance can come back to the same figure on the same day (the same
+    transfer in twice, a payment between): in a file without times of day such a repeat is a
+    row of its own and takes its occurrence (owner ruling, 2026-11-19), while the first keeps
+    the key it always had."""
     account = str(account_id)
     if row.external_id is not None:
         return _hash("ext", account, row.external_id)
     common = _same_row(row, currency, timed)
     if row.balance is not None:
-        return _hash("bal", account, *common, _plain(row.balance))
+        if occurrence == 0:
+            return _hash("bal", account, *common, _plain(row.balance))
+        return _hash("bal", account, *common, _plain(row.balance), str(occurrence))
     return _hash("seq", account, *common, str(occurrence))
 
 
@@ -1369,7 +1381,8 @@ def _classify(statement: ParsedStatement) -> list[_Row]:
 
 async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]) -> None:
     """Zero rows are skipped; the rest get a key (Decision 5). A key that repeats within the
-    file is an error; a key a committed row has is a duplicate."""
+    file (an external id, or a row alike to its time of day) is an error; a key a committed
+    row has is a duplicate."""
     keyed: list[tuple[_Row, ParsedRow, str]] = []
     for row in rows:
         parsed = row.parsed
@@ -1386,16 +1399,23 @@ async def _deduplicate(session: AsyncSession, account_id: UUID, rows: list[_Row]
             return None
         return (*_same_row(parsed, currency), _plain(parsed.balance))
 
-    # A balance can come back (a debit, its refund, the same debit): only the time of day,
-    # when the file gives one, tells such rows apart. It goes into their keys alone, so every
-    # key a committed row can have stays as it was (such a file was refused before).
+    # A balance can come back (a debit, its refund, the same debit). The time of day, when
+    # the file gives one, tells such rows apart; it goes into their keys alone, so every key a
+    # committed row can have stays as it was (such a file was refused before), and rows alike
+    # to their time stay an error. Without times, each repeat takes its occurrence in the file
+    # (owner ruling, 2026-11-19).
     balances = Counter(balance_key(parsed, currency) for _, parsed, currency in keyed)
     occurrences: Counter[tuple[str, ...]] = Counter()
+    repeats: Counter[tuple[str, ...]] = Counter()
     for row, parsed, currency in keyed:
         bal = balance_key(parsed, currency)
         timed = bal is not None and balances[bal] > 1
         same = _same_row(parsed, currency)
-        row.dedupe_key = dedupe_key(account_id, parsed, currency, occurrences[same], timed)
+        occurrence = occurrences[same]
+        if bal is not None:
+            occurrence = 0 if parsed.occurred_at is not None else repeats[bal]
+            repeats[bal] += 1
+        row.dedupe_key = dedupe_key(account_id, parsed, currency, occurrence, timed)
         occurrences[same] += 1
     await _mark_duplicates(session, account_id, [row for row in rows if row.dedupe_key])
 
@@ -1783,6 +1803,11 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "remittance_info": parsed.remittance_info,
         "original_currency": parsed.original_currency,
         "exchange_rate": parsed.exchange_rate,
+        "started_at": parsed.started_at,
+        "card_number": parsed.card_number,
+        "original_amount": parsed.original_amount,
+        "fx_rate": parsed.fx_rate,
+        "fx_reference_rate": parsed.fx_reference_rate,
     }
 
 
@@ -1834,9 +1859,12 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
     together (OFX rows may fall outside DTSTART..DTEND), and the days it lists in full.
 
     A statement whose source vouches for its period (a closed, self-checked PDF statement)
-    lists all of it. An export may be taken partway through a day, so it lists in full only
-    the days strictly between its first and last; and one whose include_only filter left
-    rows out (a pending payment, say, that later appears completed) lists no day in full.
+    lists all of it, up to the day before it was made: one made on or before its period's
+    last day (Revolut's, which end on the day they are generated) was made partway through
+    that day, so lists neither it nor later days in full. An export may be taken partway
+    through a day, so it lists in full only the days strictly between its first and last;
+    and one whose include_only filter left rows out (a pending payment, say, that later
+    appears completed) lists no day in full.
     """
     days = [
         row.parsed.booking_date
@@ -1852,7 +1880,11 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
         return _Coverage((None, None), (None, None))
     first, last = min(days), max(days)
     if statement.period_complete:
-        return _Coverage((first, last), (first, last))
+        made = statement.document_date
+        end = last if made is None or made > last else made - timedelta(days=1)
+        if end < first:
+            return _Coverage((first, last), (None, None))
+        return _Coverage((first, last), (first, end))
     filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
     start, end = first + timedelta(days=1), last - timedelta(days=1)
     if filtered or start > end:

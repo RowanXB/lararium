@@ -378,6 +378,11 @@ class ImportRowOut(_Out):
     remittance_info: str | None
     original_currency: str | None
     exchange_rate: DecimalStr | None
+    started_at: AwareDatetime | None
+    card_number: str | None
+    original_amount: DecimalStr | None
+    fx_rate: DecimalStr | None
+    fx_reference_rate: DecimalStr | None
     quantity: DecimalStr | None
     fee: DecimalStr  # 0 when the file states none
     instrument_id: UUID | None

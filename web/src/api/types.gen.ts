@@ -295,6 +295,10 @@ export type CsvColumns = {
      */
     account_sort_code?: string | null;
     /**
+     * Account Type
+     */
+    account_type?: string | null;
+    /**
      * Amount
      */
     amount?: string | null;
@@ -358,6 +362,10 @@ export type CsvColumns = {
      * Reference
      */
     reference?: string | null;
+    /**
+     * Started At
+     */
+    started_at?: string | null;
     /**
      * Type
      */
@@ -845,6 +853,10 @@ export type ImportRowOut = {
      */
     booking_date: string | null;
     /**
+     * Card Number
+     */
+    card_number: string | null;
+    /**
      * Check Number
      */
     check_number: string | null;
@@ -893,6 +905,14 @@ export type ImportRowOut = {
      */
     fee: string;
     /**
+     * Fx Rate
+     */
+    fx_rate: string | null;
+    /**
+     * Fx Reference Rate
+     */
+    fx_reference_rate: string | null;
+    /**
      * Id
      */
     id: string;
@@ -920,6 +940,10 @@ export type ImportRowOut = {
      * Occurred At
      */
     occurred_at: string | null;
+    /**
+     * Original Amount
+     */
+    original_amount: string | null;
     /**
      * Original Currency
      */
@@ -958,6 +982,10 @@ export type ImportRowOut = {
      * Remittance Info
      */
     remittance_info: string | null;
+    /**
+     * Started At
+     */
+    started_at: string | null;
     /**
      * Status
      */
@@ -1297,7 +1325,7 @@ export type PdfProfileConfig = {
     /**
      * Layout
      */
-    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'tembo_statement' | 'lemfi_statement';
+    layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'revolut_current_statement' | 'revolut_savings_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
 

@@ -36,6 +36,10 @@ _GROUPED = AmountFormat(thousands_separator=",")
 # Card (Visa, contactless), cash machine and cheque codes, which are no bank transfers.
 _HSBC_CARD_TYPES = [")))", "VIS", "ATM", "CHQ"]
 _LLOYDS_CARD_TYPES = ["DEB", "CPT", "CHQ"]
+_REVOLUT_CARD_TYPES = ["Card Payment", "Card Refund"]
+# Revolut pays savings interest itself, never from another bank account.
+_REVOLUT_INTEREST = ["Gross Interest"]
+_REVOLUT_AMOUNTS = AmountFormat(thousands_separator=",")
 
 CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
@@ -111,6 +115,64 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "PDF statement",
         PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
         recommended=True,
+    ),
+    # Two accounts with different exports, so two entries: each account's PDF statement
+    # carries the most (the account, its summary, and for the current account each payment's
+    # other side, reference, card and exchange rates).
+    CatalogEntry(
+        "Revolut Current",
+        "PDF statement",
+        PdfProfileConfig(format="pdf", layout="revolut_current_statement"),
+        recommended=True,
+    ),
+    CatalogEntry(
+        "Revolut Current",
+        "CSV",
+        CsvProfileConfig(
+            format="csv",
+            columns=CsvColumns(
+                date="Completed Date",
+                started_at="Started Date",
+                type="Type",
+                description=["Description"],
+                amount="Amount",
+                fee="Fee",
+                currency="Currency",
+                balance="Balance",
+                account_type="Product",
+            ),
+            date_format="%Y-%m-%d %H:%M:%S",
+            # Pending and reverted payments have not moved the balance.
+            include_only={"State": ["COMPLETED"]},
+            card_types=_REVOLUT_CARD_TYPES,
+        ),
+    ),
+    CatalogEntry(
+        "Revolut Savings",
+        "PDF statement",
+        PdfProfileConfig(
+            format="pdf", layout="revolut_savings_statement", card_types=_REVOLUT_INTEREST
+        ),
+        recommended=True,
+    ),
+    CatalogEntry(
+        "Revolut Savings",
+        "CSV",
+        CsvProfileConfig(
+            format="csv",
+            columns=CsvColumns(
+                date="Date",
+                # The description is the row's kind: Deposit, Withdrawal or Gross Interest.
+                type="Description",
+                description=["Description"],
+                inflow="Money in",
+                outflow="Money out",
+                balance="Balance",
+            ),
+            date_format="%b %d, %Y",
+            amount_format=_REVOLUT_AMOUNTS,
+            card_types=_REVOLUT_INTEREST,
+        ),
     ),
     CatalogEntry(
         "Tembo",

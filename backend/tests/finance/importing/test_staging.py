@@ -22,7 +22,7 @@ from lararium.modules.finance.errors import (
     NotACurrencyError,
 )
 from lararium.modules.finance.importing import staging
-from lararium.modules.finance.importing.parsed import ParsedRow
+from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
     ImportProfileRecord,
@@ -193,11 +193,17 @@ async def test_external_id_duplicate_within_file(
     assert rows[1].error == "the file lists transaction id EXB1 twice"
     assert batch.counts["error"] == 1
 
-    # A repeated running-balance row is just as much an error.
-    repeated = BALANCE_HEADER + "02/11/2026,Shop,-10.00,90.00\n02/11/2026,Shop,-10.00,90.00\n"
-    rows = await _rows(session, await stage(await _csv_profile(run), repeated))
-    assert _statuses(rows) == ["new", "error"]
-    assert rows[1].error is not None and "twice" in rows[1].error
+    # A repeated running-balance row is a row of its own (owner ruling 2026-11-19): the
+    # balance can come back to the same figure on the same day.
+    repeated = (
+        BALANCE_HEADER + "02/11/2026,In,10.00,100.00\n02/11/2026,Shop,-10.00,90.00\n"
+        "02/11/2026,In,10.00,100.00\n"
+    )
+    staged = await stage(await _csv_profile(run), repeated)
+    rows = [row for row in await _rows(session, staged) if row.kind == "statement"]
+    assert _statuses(rows) == ["new", "new", "new"]
+    # Ordered by position, the opening adjustment (position -1) first.
+    assert len(set((await _dedupe_keys(session, staged))[-3:])) == 3
 
 
 # Which accounts and currencies -------------------------------------------------------
@@ -734,6 +740,65 @@ MIDATA = (
 )
 
 
+async def test_payment_start_card_and_foreign_amount_stored(
+    session: AsyncSession, run: Run, stage: Stage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revolut's typed fields: a CSV's start time, a PDF's card and foreign amount."""
+    london = ZoneInfo("Europe/London")
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Completed Date",
+            "started_at": "Started Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "account_type": "Product",
+        },
+        date_format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/London",
+    )
+    content = (
+        "Product,Started Date,Completed Date,Description,Amount\n"
+        "Current,2026-07-01 23:30:00,2026-07-02 09:15:00,Shop,-1.00\n"
+    )
+    batch = await stage(profile, content)
+    (row,) = await _rows(session, batch)
+    assert row.started_at == datetime(2026, 7, 1, 23, 30, tzinfo=london)
+    assert row.occurred_at == datetime(2026, 7, 2, 9, 15, tzinfo=london)
+    assert (row.card_number, row.original_amount, row.fx_rate) == (None, None, None)
+    assert batch.statement is not None and batch.statement.account_type == "Current"
+
+    paid = ParsedRow(
+        position=0,
+        booking_date=date(2026, 7, 3),
+        occurred_at=None,
+        description="Example Shop",
+        quantity=Decimal("-75.00"),
+        fee=Decimal(0),
+        currency=None,
+        balance=None,
+        external_id=None,
+        bank_type=None,
+        raw={"Description": "Example Shop"},
+        card_number="123456******1234",
+        original_currency="USD",
+        original_amount=Decimal("-100.00"),
+        fx_rate=Decimal("1.33"),
+        fx_reference_rate=Decimal("1.34"),
+    )
+
+    def parse(*_: object) -> tuple[ParsedStatement, str]:
+        return ParsedStatement(rows=[paid]), "test"
+
+    monkeypatch.setattr(staging, "_parse_alone", parse)
+    batch = await stage(profile, b"ignored", filename="other.csv")
+    (row,) = await _rows(session, batch)
+    assert row.card_number == "123456******1234"
+    assert (row.original_currency, row.original_amount) == ("USD", Decimal("-100.00"))
+    assert (row.fx_rate, row.fx_reference_rate) == (Decimal("1.33"), Decimal("1.34"))
+    assert row.started_at is None
+
+
 async def test_typed_fields_stored(
     session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
 ) -> None:
@@ -1001,6 +1066,31 @@ async def test_filtered_export_lists_no_day_in_full(
         )
     ).one()
     assert tuple(covered) == (date(2026, 11, 1), date(2026, 11, 5), None, None)
+
+
+@pytest.mark.parametrize(
+    ("made", "complete"),
+    [
+        (None, (date(2026, 10, 1), date(2026, 11, 12))),
+        (date(2026, 11, 13), (date(2026, 10, 1), date(2026, 11, 12))),
+        # Made on its last day (Revolut): that day may get more rows later.
+        (date(2026, 11, 12), (date(2026, 10, 1), date(2026, 11, 11))),
+        (date(2026, 11, 1), (date(2026, 10, 1), date(2026, 10, 31))),
+        (date(2026, 10, 1), (None, None)),
+    ],
+)
+def test_statement_lists_in_full_only_the_days_before_it_was_made(
+    made: date | None, complete: tuple[date | None, date | None]
+) -> None:
+    statement = ParsedStatement(
+        rows=[],
+        period=(date(2026, 10, 1), date(2026, 11, 12)),
+        period_complete=True,
+        document_date=made,
+    )
+    coverage = staging._covered(statement, [])  # pyright: ignore[reportPrivateUsage]
+    assert coverage.covered == (date(2026, 10, 1), date(2026, 11, 12))
+    assert coverage.complete == complete
 
 
 async def test_duplicate_that_breaks_the_balance_chain_is_an_error(
