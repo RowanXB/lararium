@@ -99,12 +99,16 @@ Both are derived when records are read, from what is already stored: the import 
 
 **Which import rows count.** Every import row that is this transaction: the committed row that posted it, and every row marked a duplicate of that row (`duplicate_of`), in any file and any format. M4's anti-goal of results that depend on arrival order requires it. If the Revolut CSV, which prints no account details, is imported before the Revolut PDF, the account number only the PDF's duplicate row prints must still count. When the rows disagree (two different account numbers, say), that item names nobody. Today `commit._counterparty` reads only the committed row; the derived lookup replaces that for these items.
 
-Everything that asks which own account a record names reads it from this one definition:
+Everything that asks which own account a posted record names reads it from this one definition:
 
-- `transfer_contra` (rule 3, M4 §5.6);
 - the pair relation;
-- heal's "identified but not linked";
-- `preview_match`.
+- heal (`own.c.holder` in its arms);
+- the matcher's lookup of an identified record's counterpart (`engine._registry_counterpart`).
+
+Two readers keep what they read today (plan-time call, 2026-11-21):
+
+- `transfer_contra`. Its callers are connector syncs, which none of the new evidence touches (it comes only from import rows and manual sub-accounts), and import commit. Commit runs matching right after posting, and matching re-points the contra (M4 §5.6).
+- `preview_match`. Staging doesn't call it yet; it keeps reading full identifiers until the staging preview is built.
 
 A record identified through items 2 or 3 behaves exactly like one identified today. If its counterpart is on a manual account and missing, it gets a placeholder after the account's last imported day, or `before_history` within the days the imports list in full (M4 §5.2, §5.8).
 
@@ -151,7 +155,7 @@ On the Transfers page, a weak pair offers Reject, with Undo, and not Unpair (des
 - **What the layout reports.** The Tembo layout reports that a statement lists the account from its opening date (`account_opened_on`) to its valuation date (`document_date`). Coverage is then:
   - covered: from opening to valuation date;
   - listed in full: from opening to the day before the valuation date. The valuation day is only partly listed, like the day a Revolut statement is made.
-- **What stays the same.** The printed "Transactions: first – last" period stays stored as printed. The closing balance (the Plan value) stays undated.
+- **The statement's period** becomes opening to valuation date (plan-time call, 2026-11-21). The printed "Transactions: first – last" period equals the first and last rows' dates, which the layout checks, so it can be derived and nothing is lost. The closing balance (the Plan value) stays undated.
 - **A statement without an opening or valuation date** keeps today's rule (only the days between its first and last row in full). Both real statements print both dates.
 - **Nothing exists before an account opens** (designer's call). When a committed statement lists an account in full from the opening date it prints, M4's gate (`pairs.Known.holds_from`) treats the account as known before that date too: it had no rows then. Without this, a transfer sent on the opening day would have a window starting the day before, the gate would refuse the one-sided pair, and the deposit would stay income. The real Monzo → Tembo transfer of 11 November is exactly that case. Decision 16's coverage (duplicates and covered days) still starts at the opening date.
 - **Existing Tembo batches** get the new coverage on deploy, from their `import_statements` row (a migration).
