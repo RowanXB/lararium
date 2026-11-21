@@ -657,10 +657,10 @@ how many identical rows come before it in the same file, so two real identical p
 day are both imported, and both are duplicates when the file comes again; rows with a balance
 are counted so only in a file without times of day (with times, rows alike to their time are an
 error). The running balance can repeat when it comes back to the same figure on the same day
-(the same transfer in twice, with a payment between). Should two overlapping exports without
-times cut that day at different points, a row can be taken for the other export's identical
-row; the second export's balances then disagree with the ledger, and it is refused, so nothing
-is lost silently. Files in different
+(the same transfer in twice, with a payment between). The count matches across files because a
+bank's file never starts partway through a day, though it can end partway through one (an
+export taken during the day): each file lists a day's rows from its first, so the nth such row
+is the same row in every file. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
 import's rows by date and amount instead: the matched ones are duplicates and any other is an
 error. A file that lacks a row the earlier import has on those days is refused at upload; if

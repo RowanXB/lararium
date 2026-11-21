@@ -37,6 +37,8 @@ _GROUPED = AmountFormat(thousands_separator=",")
 _HSBC_CARD_TYPES = [")))", "VIS", "ATM", "CHQ"]
 _LLOYDS_CARD_TYPES = ["DEB", "CPT", "CHQ"]
 _REVOLUT_CARD_TYPES = ["Card Payment", "Card Refund"]
+# Revolut pays savings interest itself, never from another bank account.
+_REVOLUT_INTEREST = ["Gross Interest"]
 _REVOLUT_AMOUNTS = AmountFormat(thousands_separator=",")
 
 CATALOG: tuple[CatalogEntry, ...] = (
@@ -148,7 +150,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         "Revolut Savings",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="revolut_savings_statement"),
+        PdfProfileConfig(
+            format="pdf", layout="revolut_savings_statement", card_types=_REVOLUT_INTEREST
+        ),
         recommended=True,
     ),
     CatalogEntry(
@@ -167,6 +171,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             ),
             date_format="%b %d, %Y",
             amount_format=_REVOLUT_AMOUNTS,
+            card_types=_REVOLUT_INTEREST,
         ),
     ),
     CatalogEntry(

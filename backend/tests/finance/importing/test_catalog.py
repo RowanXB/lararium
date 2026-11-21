@@ -124,6 +124,15 @@ def test_revolut_savings_csv() -> None:
     assert config.date_format == "%b %d, %Y"
 
 
+def test_revolut_savings_interest_is_no_bank_transfer() -> None:
+    """Review: Revolut pays savings interest itself, so an own transfer of the same amount
+    must never be matched with it; deposits and withdrawals stay transfers."""
+    for entry in (e for e in CATALOG if e.institution == "Revolut Savings"):
+        assert not is_bank_transfer(entry.config.card_types, "Gross Interest", None)
+        for kind in ("Deposit", "Withdrawal"):
+            assert is_bank_transfer(entry.config.card_types, kind, None)
+
+
 def test_tembo_interest_is_no_bank_transfer() -> None:
     """Review: Tembo pays interest itself; only deposits and withdrawals move money between
     bank accounts."""
