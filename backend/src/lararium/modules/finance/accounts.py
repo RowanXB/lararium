@@ -193,6 +193,29 @@ def require_owner_account(record: AccountRecord, action: str) -> None:
         )
 
 
+async def _require_main_account(
+    session: AsyncSession, main_account_id: UUID, account: AccountRecord | None = None
+) -> None:
+    """Refuse a main account a manual account can't have, whether it is being created
+    (`account` None) or given one: one level only, as pots have. The main account must be
+    an open account of the owner's, not the account itself, with no main account of its
+    own; and the account mustn't be another's main account already. AccountNotFoundError
+    for an unknown main account."""
+    main = await get_account(session, main_account_id)
+    if account is not None and main.id == account.id:
+        raise FinanceValidationError("an account can't be its own main account")
+    if main.system:
+        raise FinanceValidationError(f"{main.name} belongs to the ledger, not to you")
+    if main.status == "closed":
+        raise FinanceValidationError(f"{main.name} is closed")
+    if main.parent_account_id is not None:
+        raise FinanceValidationError(f"{main.name} has a main account of its own")
+    if account is not None and await session.scalar(
+        select(exists().where(models.Account.parent_account_id == account.id))
+    ):
+        raise FinanceValidationError(f"{account.name} is already the main account of another")
+
+
 async def create_account(
     ctx: CommandContext,
     *,
@@ -206,11 +229,16 @@ async def create_account(
     opened_on: date | None = None,
     source_connection_id: UUID | None = None,
 ) -> AccountRecord:
+    """A manual account's parent_account_id is its main account (set_main_account's rules);
+    a connected account's is its connector's to give (a Monzo pot's main account)."""
     session = ctx.session
-    if parent_account_id is not None and not await session.scalar(
-        select(exists().where(models.Account.id == parent_account_id))
-    ):
-        raise AccountNotFoundError(str(parent_account_id))
+    if parent_account_id is not None:
+        if source_connection_id is None:
+            await _require_main_account(session, parent_account_id)
+        elif not await session.scalar(
+            select(exists().where(models.Account.id == parent_account_id))
+        ):
+            raise AccountNotFoundError(str(parent_account_id))
     account_id = (
         await session.execute(
             insert(models.Account)
@@ -242,8 +270,7 @@ async def set_main_account(
 
     A bank transfer of the sub-account that names no bank account then names its main
     account, which pairs it with the main account's side. A connected account's main account
-    is its connector's to set. One level only: the main account has none of its own, and a
-    main account can't itself be given one.
+    is its connector's to set. One level only (_require_main_account).
     """
     session = ctx.session
     record = await get_account(session, account_id)
@@ -251,19 +278,7 @@ async def set_main_account(
     if record.source_kind == "connection":
         raise FinanceValidationError(f"{record.name} is connected; its connector sets it")
     if main_account_id is not None and record.parent_account_id != main_account_id:
-        main = await get_account(session, main_account_id)
-        if main.id == account_id:
-            raise FinanceValidationError("an account can't be its own main account")
-        if main.system:
-            raise FinanceValidationError(f"{main.name} belongs to the ledger, not to you")
-        if main.status == "closed":
-            raise FinanceValidationError(f"{main.name} is closed")
-        if main.parent_account_id is not None:
-            raise FinanceValidationError(f"{main.name} has a main account of its own")
-        if await session.scalar(
-            select(exists().where(models.Account.parent_account_id == account_id))
-        ):
-            raise FinanceValidationError(f"{record.name} is already the main account of another")
+        await _require_main_account(session, main_account_id, record)
     # Conditional update, so an unchanged value writes and publishes nothing.
     changed = await session.scalar(
         update(models.Account)

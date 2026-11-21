@@ -737,6 +737,42 @@ async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None
     assert account["parent_account_id"] is None
 
 
+async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, run) -> None:
+    """A manual account created with a main account takes it under the rules setting one
+    does: else a sub-account's bank transfer would name, say, a system account."""
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+    closed_id = await _manual(client, "Closed", "transactions")
+    closed = await client.post(
+        f"{FINANCE}/accounts/{closed_id}/close", json={"closed_on": "2026-11-01"}
+    )
+    assert closed.status_code == 200, closed.text
+    unassigned = await run(get_or_create_system_account, "unassigned")
+
+    async def create(main_account_id: str) -> Any:
+        body = {
+            "name": "New savings",
+            "ledger_type": "asset",
+            "subtype": "bank",
+            "balance_mode": "transactions",
+            "parent_account_id": main_account_id,
+        }
+        return await client.post(f"{FINANCE}/accounts", json=body)
+
+    before = (await client.get(f"{FINANCE}/accounts")).json()
+    # A system account, a closed one, and one with a main account of its own.
+    for refused in (str(unassigned), closed_id, savings_id):
+        response = await create(refused)
+        assert response.status_code == 422, refused
+        assert response.json()["detail"]["error"] == "invalid_input"
+    assert (await create(str(uuid4()))).status_code == 404
+    assert (await client.get(f"{FINANCE}/accounts")).json() == before
+
+    created = await create(main_id)
+    assert (created.status_code, created.json()["parent_account_id"]) == (201, main_id)
+
+
 async def test_a_pair_made_by_sort_code_alone_is_weak_and_only_rejected(
     client, session, run
 ) -> None:
