@@ -134,6 +134,8 @@ A new tier 4, below one-sided. Two records `r` and `c` are weak candidates when 
 
 The existing rule then decides as it does for every tier. A record's candidates are those in its strongest tier, kept only where that tier is the candidate's strongest too. So a weak pair links only when neither record has a stronger candidate and each is the other's only one, or under the twins rule.
 
+When the other side does name the account the sort code row is on, it isn't a weak case at all. Say a Revolut row prints the account number of the BOC account the BOC row is on: the Revolut row is identified (§5.1, item 2), and the two pair one-sided (tier 3), with the BOC row as the bank transfer that names nobody. This is how the 9 BOC → Revolut transfers pair. The weak tier is only for pairs where neither side names the other's account.
+
 A record with only weak evidence is not identified:
 
 - it never opens a transfer;
