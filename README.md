@@ -285,7 +285,9 @@ differences.
 A savings account that has no bank account of its own to register (a Monzo pot, say) can be
 given a **main account**: on the Accounts page, pick one in its **Main account** select (a
 manual account only; a connected account's connector sets it). The main account is an open
-account of yours that has no main account itself, and isn't already some account's main account.
+account of yours (not the account itself, and not one the ledger keeps) that has no main account
+of its own; one main account can have several savings accounts, and an account that is already
+some account's main account can't be given a main account itself.
 A bank transfer of the savings account that names no bank account then names its main account,
 so it pairs with the main account's side by amount and date, and Lararium goes through the
 whole history at once. Choose **None** to undo it; the history is matched anew.
