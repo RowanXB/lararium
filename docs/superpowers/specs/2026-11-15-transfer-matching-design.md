@@ -111,7 +111,7 @@ The same holds for the sender side: if B's record is seen first and A's side is 
 - Registering an identifier assigns the row to an account (creating it if no source has named it yet); removing one unassigns it (the row stays, as transactions reference it).
 - A row that resolves to the transaction's own account is not a transfer.
 - **Connectors register their own accounts.** Monzo's `/accounts` response carries each account's sort code and account number, so the Monzo normalizer assigns them to its accounts (actor `connector`, audited) on every sync, never taking a row the owner assigned elsewhere. A row the owner dismissed is assigned all the same: a connector's own account is a fact, so the dismissal was a mistake. (Builder-check call.)
-- The registry keeps full identifiers only, but a record can also name an own account without one, through an account number alone or a sub-account's main account, and weakly through a sort code alone: `2026-11-21-transfer-evidence-design.md` §5.1 to §5.3.
+- The registry keeps full identifiers only, but a record can also name an own account without one, through an account number alone or a sub-account's main account (`2026-11-21-transfer-evidence-design.md` §5.1, §5.2); and a record pairs weakly through a sort code alone, which never identifies it (§5.3).
 
 ### 5.4 Counterparty fields on transactions
 
@@ -210,7 +210,7 @@ A periodic job (every 30 minutes, after healing) sends one notification per tran
   - **Needs attention**: needing review and overdue `awaiting` transfers, each with its candidates (Pair on those of the same amount) and Reject;
   - **In transit**: `awaiting` transfers with days in transit;
   - **Suggestions**: unregistered counterparty accounts, with register or dismiss; the register picker offers only accounts that can carry identifiers, and one line names the `snapshots`-mode accounts left out and says to switch them to `hybrid`;
-  - **Recent**: the other transfers, one row each ("Monzo → Bank A · 100.00 GBP · inferred"), collapsed by default: Unpair on a matched one, Undo on a rejected one, Reject on the rest.
+  - **Recent**: the other transfers, one row each ("Monzo → Bank A · 100.00 GBP · inferred"), collapsed by default: Unpair on a matched one (a pair made by a sort code alone offers Reject instead, `2026-11-21-transfer-evidence-design.md` §5.3), Undo on a rejected one, Reject on the rest.
 - **Registry**: an identifiers section on each asset or liability account (on the Accounts page), add and remove; a `snapshots`-mode account offers the switch to `hybrid` instead.
 
 ## 6. Edge cases (parent spec §8.7) and how this covers them

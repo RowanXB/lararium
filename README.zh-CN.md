@@ -250,7 +250,7 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 
 ### 给储蓄账户设置主账户
 
-如果一个储蓄账户本身没有可登记的银行账户（比如 Monzo 的 pot），可以给它设一个**主账户**：在
+如果一个储蓄账户本身没有可登记的银行账户（比如你从账单导入的 Revolut 或 LemFi 储蓄账户），可以给它设一个**主账户**：在
 Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户；连接账户的主账户由它的连接设置）。
 主账户必须是你自己的、未关闭的账户（不能是账户自己，也不能是账本自己维护的账户），且本身没有主账户；
 一个主账户可以有多个储蓄账户，而已经是别的账户的主账户的账户，自己不能再设主账户。此后，这个储蓄账户里没有
@@ -534,9 +534,11 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   按顺序给出的列名）、`skip_footer_rows`（0–20）和 `overdraft_footer_label`（写有约定透支额度的
   页脚行的第一格）、`include_only`（`{"列名": ["值", ...]}`：其他值的行会被跳过，例如待入账的
   卡付款）、`row_order`（`oldest_first` 或 `newest_first`）、`sign`（见下）、`amount_format`
-  （`decimal_separator`，`.` 或 `,`；`thousands_separator`，默认无，或 `,` `.` 空格 `'`）和
+  （`decimal_separator`，`.` 或 `,`；`thousands_separator`，默认无，或 `,` `.` 空格 `'`）、
   `currency`（文件只写一次而不逐行写币种时，每一行的币种，例如 LemFi 的 `Money in (GBP)`；否则用上传时
-  选的币种，或映射的 `currency` 列）。
+  选的币种，或映射的 `currency` 列）和 `interest_descriptions`（支付利息的行的描述，用于不印交易类型
+  代码的银行，例如 LemFi 的 `Savings Interest Payout`：和刷卡付款一样，这样的行永远不会仅凭金额和日期
+  被当作一笔转账的另一侧）。
   重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、

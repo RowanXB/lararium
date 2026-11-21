@@ -285,12 +285,13 @@ differences.
 
 ### Giving a savings account its main account
 
-A savings account that has no bank account of its own to register (a Monzo pot, say) can be
-given a **main account**: on the Accounts page, pick one in its **Main account** select (a
-manual account only; a connected account's connector sets it). The main account is an open
-account of yours (not the account itself, and not one the ledger keeps) that has no main account
-of its own; one main account can have several savings accounts, and an account that is already
-some account's main account can't be given a main account itself.
+A savings account that has no bank account of its own to register (a Revolut or LemFi
+savings account whose statements you import, say) can be given a **main account**: on the
+Accounts page, pick one in its **Main account** select (a manual account only; a connected
+account's connector sets it). The main account is an open account of yours (not the account
+itself, and not one the ledger keeps) that has no main account of its own; one main account
+can have several savings accounts, and an account that is already some account's main
+account can't be given a main account itself.
 A bank transfer of the savings account that names no bank account then names its main account,
 so it pairs with the main account's side by amount and date, and Lararium goes through the
 whole history at once. Choose **None** to undo it; the history is matched anew.
@@ -637,10 +638,13 @@ by amount and date (below).
   with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
   another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
   `newest_first`), `sign` (below), `amount_format` (`decimal_separator`, `.` or `,`;
-  `thousands_separator`, none by default, or `,` `.` space `'`) and `currency` (every row's
+  `thousands_separator`, none by default, or `,` `.` space `'`), `currency` (every row's
   currency, for a file that states it once rather than per row, such as LemFi's `Money in
-  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column). A line that
-  repeats the header is not a row.
+  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column) and
+  `interest_descriptions` (the descriptions of rows that pay interest, for a bank that prints
+  no type codes, such as LemFi's `Savings Interest Payout`: like a card payment, such a row
+  is never taken as the other side of a transfer by amount and date). A line that repeats
+  the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
