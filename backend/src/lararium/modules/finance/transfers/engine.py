@@ -170,7 +170,7 @@ async def _set_contra(ctx: CommandContext, record: OwnRecord, account_id: UUID) 
     return False
 
 
-async def _registry_counterpart(session: AsyncSession, record: OwnRecord) -> UUID | None:
+def _registry_counterpart(record: OwnRecord) -> UUID | None:
     """The other own account the record names (contra.eligible_records' holder)."""
     return None if record.holder == record.account_id else record.holder
 
@@ -499,7 +499,7 @@ async def _match_one(
     if partner is not None:
         more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved)
         return others + more, linked
-    counterpart_id = await _registry_counterpart(session, record)
+    counterpart_id = _registry_counterpart(record)
     if counterpart_id is None:
         # 5. Not a transfer, or not one yet: a candidate's own transfer carries the review.
         await _set_contra(ctx, record, system.unassigned)

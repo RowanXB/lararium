@@ -154,7 +154,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
     the one its counterparty bank account is registered to, else the one registered under
-    the account number its import rows print alone), names_account (it names a bank
+    the account number its import rows print alone, else the main account of a manual
+    sub-account for a bank transfer naming no bank account), names_account (it names a bank
     account, or its import rows print part of one), bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
@@ -249,13 +250,32 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .having(func.count(distinct(n.account_id)) == 1)
         .scalar_subquery()
     )
+    # The record's own account, looked up per record too, not joined, for the same reason.
+    a = aliased(models.Account, name="own_account")
+    own_account = (
+        select(a.source_kind, a.parent_account_id).where(a.id == legs.c.account_id).lateral("own")
+    )
+    names_nothing = and_(
+        t.counterparty_identifier_id.is_(None),
+        func.coalesce(func.cardinality(evidence.c.numbers), 0) == 0,
+        ~func.coalesce(evidence.c.partial, false()),
+    )
     holder = case(
         (
             t.counterparty_identifier_id.is_not(None),
-            # A lookup per record too, not a join, for the same reason.
             select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
         ),
         (func.cardinality(evidence.c.numbers) == 1, number_holder),
+        # A savings sub-account moves money only to and from its main account.
+        (
+            and_(
+                names_nothing,
+                t.bank_transfer,
+                own_account.c.source_kind == "manual",
+                own_account.c.parent_account_id.is_not(None),
+            ),
+            own_account.c.parent_account_id,
+        ),
         else_=None,
     )
     source_kind, source_ref_ = source_columns(t)
@@ -280,6 +300,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         )
         .join(legs, true())
         .join(evidence, true())
+        .join(own_account, true())
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )

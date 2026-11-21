@@ -7,10 +7,21 @@ from datetime import timedelta
 
 import pytest
 
+from lararium.core.connections import create_connection
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.transfers import list_transfers, unassign_identifier_and_rematch
 
-from .conftest import A_IDENTIFIER, C_IDENTIFIER, DAY, RowDetails, contra_account, placeholders
+from .conftest import (
+    A_IDENTIFIER,
+    C_IDENTIFIER,
+    DAY,
+    WHEN,
+    Connected,
+    RowDetails,
+    contra_account,
+    placeholders,
+)
 
 X_ID = A_IDENTIFIER  # "445566:11112222"
 Y_ID = C_IDENTIFIER  # "778899:33334444"
@@ -43,9 +54,10 @@ async def test_an_account_number_alone_names_the_registered_account(
 async def test_an_account_number_two_own_accounts_share_names_nobody(
     session, imported_bank, statement_row, heal
 ) -> None:
-    await imported_bank("X", identifier=X_ID)
+    x = await imported_bank("X", identifier=X_ID)
     await imported_bank("Z", identifier=f"990011:{X_NUMBER}")
     y = await imported_bank("Y", identifier=Y_ID)
+    await statement_row(x, "-100", complete=FULL)
     await statement_row(y, "100", details=RowDetails(account_number=X_NUMBER))
     await heal()
 
@@ -170,3 +182,91 @@ async def test_a_row_naming_an_account_by_number_pairs_even_if_not_a_bank_transf
     t = await _only_transfer(session)
     assert (t.from_account_id, t.to_account_id, t.status) == (x.id, y.id, "matched")
     assert await placeholders(session) == []
+
+
+async def test_a_sub_accounts_deposit_pairs_with_its_main_accounts_payment(
+    session, imported_bank, statement_row, heal
+) -> None:
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    sent = await statement_row(m, "-100", complete=FULL)
+    received = await statement_row(s, "100")
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "matched")
+    assert {t.out_transaction_id, t.in_transaction_id} == {sent, received}
+
+
+async def test_a_sub_accounts_row_after_the_main_accounts_last_import_gets_a_placeholder(
+    session, imported_bank, statement_row, heal
+) -> None:
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    await statement_row(m, "-5", complete=(DAY - timedelta(days=60), DAY))
+    day = DAY + timedelta(days=3)
+    await statement_row(s, "100", day=day, complete=(DAY, day))
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "inferred")
+    assert len(await placeholders(session)) == 1
+
+
+async def test_a_sub_accounts_row_inside_the_main_accounts_full_days_settles(
+    session, imported_bank, statement_row, heal
+) -> None:
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    await statement_row(m, "-5", complete=FULL)
+    await statement_row(s, "100")
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "before_history")
+    assert await placeholders(session) == []
+
+
+async def test_a_sub_account_row_naming_an_account_ignores_the_main(
+    session, imported_bank, statement_row, heal
+) -> None:
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    await statement_row(m, "-100", complete=FULL)
+    await statement_row(s, "100", details=RowDetails(account_number="50000001"))
+    await heal()
+
+    assert await list_transfers(session) == []
+
+
+async def test_interest_on_a_sub_account_is_no_transfer(
+    session, imported_bank, statement_row, heal
+) -> None:
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    await statement_row(m, "-100", complete=FULL)
+    await statement_row(s, "100", bank_transfer=False)
+    await heal()
+
+    assert await list_transfers(session) == []
+
+
+async def test_a_connected_account_with_a_parent_is_unaffected(
+    session, run, imported_bank, statement_row, connector_tx, heal
+) -> None:
+    m = await imported_bank("M")
+    connection = await run(create_connection, connector="monzo", display_name="S", config={})
+    s = await run(
+        create_account,
+        name="S",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+        parent_account_id=m.id,
+        source_connection_id=connection.id,
+    )
+    await statement_row(m, "-100", complete=FULL)
+    await connector_tx(Connected(connection.id, s), "100", occurred_at=WHEN)
+    await heal()
+
+    assert await list_transfers(session) == []
