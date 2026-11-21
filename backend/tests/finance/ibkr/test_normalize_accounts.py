@@ -393,17 +393,28 @@ async def test_every_routed_attribute_has_a_column(session) -> None:
         "PositionLot": "ibkr_position_lots",
         "CashReportCurrency": "ibkr_cash_reports",
         "EquitySummaryByReportDateInBase": "ibkr_nav",
+        "ChangeInNAV": "ibkr_change_in_nav",
+        "StatementOfFundsLine": "ibkr_statement_of_funds",
+        "MTMPerformanceSummaryUnderlying": "ibkr_mtm_performance",
+        "PriorPeriodPosition": "ibkr_prior_period_positions",
     }
-    # What the ledger or a caller's reference holds, or is derivable, rather than a column.
+    # What the ledger or a caller's reference holds, rather than a column.
     elsewhere = {
         "accountId", "currency", "model", "acctAlias", "reportDate", "dateTime", "quantity",
-        "tradePrice", "proceeds", "taxes", "ibCommission", "ibCommissionCurrency", "tradeMoney",
-        "netCash", "netCashInBase", "amount", "description", "position", "positionValue",
-        "positionValueInBase", "date", "settleDate", "settleDateTarget", "cashTransfer",
+        "tradePrice", "proceeds", "taxes", "ibCommission", "ibCommissionCurrency", "amount",
+        "description", "position", "date", "settleDate", "settleDateTarget", "cashTransfer",
         "transactionID", "total", "originatingTransactionID", "dateOpened", "dateClosed",
-        "priorMtmPnl", "price", "actionDescription", "levelOfDetail", "fromDate", "toDate",
-        "assetCategory", "conid",
+        "actionDescription", "levelOfDetail", "fromDate", "toDate", "assetCategory", "conid",
     } | INSTRUMENT_FIELDS  # fmt: skip
+    # Sections with no ledger row: all but what ibkr_accounts (alias, model) and the account
+    # and currency references hold is a column, and for a prior period position its security.
+    report = {"accountId", "acctAlias", "model", "currency"}
+    exempt = {
+        "ChangeInNAV": report,
+        "StatementOfFundsLine": report,
+        "MTMPerformanceSummaryUnderlying": report,
+        "PriorPeriodPosition": report | INSTRUMENT_FIELDS,
+    }
     rows = await session.execute(
         text(
             "select table_name, column_name from information_schema.columns"
@@ -414,7 +425,7 @@ async def test_every_routed_attribute_has_a_column(session) -> None:
     missing = [
         f"{section}.{attribute}"
         for section, table in tables_by_section.items()
-        for attribute in sorted(SECTIONS[section].known - elsewhere)
+        for attribute in sorted(SECTIONS[section].known - exempt.get(section, elsewhere))
         if (table, column_name(table, attribute)) not in columns
     ]
     assert missing == []
