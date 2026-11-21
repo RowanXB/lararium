@@ -12,8 +12,12 @@ The type gives a row's direction; an Interest Adjustment goes either way, as pri
 The printed period runs from the first row's date to the last's, not to the Valuation date
 (two statements valued a week apart print the same one): a row missing at either end shows
 as a period that doesn't match, and a missing page as a gap in the "n / N" every page
-prints. The statement is made on demand and may stop partway through its last day, so it
-lists in full only the days between its first and last.
+prints.
+
+The owner confirmed (2026-11-21) that every statement lists everything from the account's
+opening to the day it is made, so with both dates printed the stored period runs from the
+Account open date to the Valuation date and is complete. The statement is made partway
+through its Valuation date, which `staging._covered` leaves out of the days listed in full.
 """
 
 import re
@@ -309,6 +313,7 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
     available = summary.get(_AVAILABLE)
     valuation = summary.get(_VALUATION)
     opened = summary.get(_OPENED)
+    opened_on = None if opened is None else _date(opened, "the account open date")
     valued_on = None if valuation is None else _date(valuation, "the valuation date")
     addressee, address = _mailing(above)
     try:
@@ -357,9 +362,12 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             "the statement's period doesn't run from its first row's date to its last's: "
             "a row may be missing"
         )
+    stored_period, full_history = period, False
+    if opened_on is not None and valued_on is not None:
+        stored_period, full_history = (opened_on, valued_on), True
     return LayoutResult(
         rows=rows,
-        period=period,
+        period=stored_period,
         opening_balance=None,
         money_in=None,
         money_out=None,
@@ -373,6 +381,6 @@ def parse(lines: list[list[Word]]) -> LayoutResult:
             None if available is None else _pounds(available, "the amount available to withdraw")
         ),
         available_balance_date=valued_on if available is not None else None,
-        account_opened_on=None if opened is None else _date(opened, "the account open date"),
-        period_complete=False,
+        account_opened_on=opened_on,
+        period_complete=full_history,
     )

@@ -609,8 +609,8 @@ part, as an export does, and its closing balance, taken when it was made, is kep
 end a Revolut statement on a day that is over to have it all. Tembo prints no opening balance
 and no totals: there its Plan value must equal the rows' last balance, its transaction type
 gives each amount's direction, and its page numbers and period (first to last row) must leave
-nothing out. A Tembo statement is made on demand, so like an export it lists in full only the
-days between its first and last. LemFi's money in and out totals may each be a penny below their
+nothing out. A Tembo statement lists everything from the account's opening to the day it is made, so it
+lists in full every day from its Account open date to the day before its Valuation date. LemFi's money in and out totals may each be a penny below their
 rows' sum (LemFi cuts them down to the penny); interest and the closing balance must still
 follow from the rows exactly. A LemFi statement must also number all its pages ("Page n of
 N"), so one missing a page is refused.

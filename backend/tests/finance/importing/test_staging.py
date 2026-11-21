@@ -938,6 +938,89 @@ async def test_typed_fields_stored(
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
 
 
+async def _tembo_batch(run: Run, stage: Stage, account_id: UUID) -> UUID:
+    tembo = await _profile(run, format="pdf", layout="tembo_statement")
+    rows = [
+        TemboRow("03/05/2027", "Deposit", "£50.00"),
+        TemboRow("10/05/2027", "Interest", "£1.00"),
+    ]
+    batch = await stage(tembo, tembo_pdf(TemboStatement([rows])), account_id=account_id)
+    return batch.id
+
+
+async def _tembo_state(session: AsyncSession, batch_id: UUID) -> tuple[Any, ...]:
+    b, s = models.ImportBatch, models.ImportStatement
+    session.expire_all()
+    found = await session.execute(
+        select(
+            b.covered_from,
+            b.covered_to,
+            b.complete_from,
+            b.complete_to,
+            s.period_from,
+            s.period_to,
+        )
+        .outerjoin(s, s.batch_id == b.id)
+        .where(b.id == batch_id)
+    )
+    return tuple(found.one())
+
+
+async def test_a_tembo_statement_lists_in_full_from_opening_to_the_day_before_valuation(
+    session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
+) -> None:
+    """Owner, 2026-11-21: a Tembo statement lists everything from the account's opening;
+    valued on 1 Jun, it lists through 31 May."""
+    account = await make_account(name="Example Tembo", balance_mode="transactions")
+    state = await _tembo_state(session, await _tembo_batch(run, stage, account.id))
+    assert state == (
+        date(2027, 2, 3),
+        date(2027, 6, 1),
+        date(2027, 2, 3),
+        date(2027, 5, 31),
+        date(2027, 2, 3),
+        date(2027, 6, 1),
+    )
+
+
+async def test_0026_gives_tembo_batches_imported_before_their_full_history(
+    session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
+) -> None:
+    """0026 gives a Tembo batch committed when only the days between its first and last row
+    counted what staging gives now; another bank's batch is left as it was."""
+    account = await make_account(name="Example Tembo", balance_mode="transactions")
+    batch_id = await _tembo_batch(run, stage, account.id)
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    other = await stage(
+        await _csv_profile(run, columns=columns), HEADER + "10/11/2026,Coffee,-3.50\n"
+    )
+    now = await _tembo_state(session, batch_id)
+    other_now = await _tembo_state(session, other.id)
+
+    # As 0026 finds it: the rows' span, 3 to 10 May, and the days strictly between.
+    await session.execute(
+        text(
+            "UPDATE finance.import_batches SET covered_from = '2027-05-03', "
+            "covered_to = '2027-05-10', complete_from = '2027-05-04', "
+            "complete_to = '2027-05-09' WHERE id = :b"
+        ),
+        {"b": batch_id},
+    )
+    await session.execute(
+        text(
+            "UPDATE finance.import_statements SET period_from = '2027-05-03', "
+            "period_to = '2027-05-10' WHERE batch_id = :b"
+        ),
+        {"b": batch_id},
+    )
+    assert await _tembo_state(session, batch_id) != now
+    migration = _migration("0026_finance_tembo_full_history")
+    await session.execute(text(migration.PERIOD))
+    await session.execute(text(migration.COVERAGE))
+    assert await _tembo_state(session, batch_id) == now
+    assert await _tembo_state(session, other.id) == other_now
+
+
 async def test_rows_keep_what_their_file_gave_the_time_to(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
 ) -> None:

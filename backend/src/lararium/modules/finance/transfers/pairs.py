@@ -144,10 +144,15 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
         await session.scalars(select(a.id).where(a.source_connection_id.is_(None)))
     )
     first_full_day: dict[tuple[UUID, UUID], date] = {}
-    # A batch speaks only for the instruments it has live rows in (M2's Decision 16).
-    for account_id, instrument_id, first in await session.execute(
-        select(b.account_id, r.instrument_id, func.min(b.complete_from))
+    # A batch speaks only for the instruments it has live rows in (M2's Decision 16). One
+    # that lists in full from its account's opening speaks for all time before it too:
+    # nothing exists before an account opens.
+    s = models.ImportStatement
+    from_opening = func.bool_or(b.complete_from == s.account_opened_on)
+    for account_id, instrument_id, first, opened in await session.execute(
+        select(b.account_id, r.instrument_id, func.min(b.complete_from), from_opening)
         .join(r, r.batch_id == b.id)
+        .outerjoin(s, s.batch_id == b.id)
         .where(
             b.status == "committed",
             b.complete_from.is_not(None),
@@ -157,7 +162,7 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
         .group_by(b.account_id, r.instrument_id)
     ):
         assert instrument_id is not None and first is not None
-        first_full_day[(account_id, instrument_id)] = first
+        first_full_day[(account_id, instrument_id)] = date.min if opened else first
     for account_id, instrument_id, first in listing:
         key = (account_id, instrument_id)
         first_full_day[key] = min(first, first_full_day.get(key, first))

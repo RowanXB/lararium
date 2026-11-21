@@ -292,7 +292,7 @@ async def test_tembo_account_reference_checked(
     june = [TemboRow("03/06/2027", "Deposit", "£50.00")]
 
     def pdf(rows: list[TemboRow], account_no: str) -> bytes:
-        return tembo_pdf(TemboStatement(pages=[rows], account_no=account_no))
+        return tembo_pdf(TemboStatement(pages=[rows], account_no=account_no, opened=None))
 
     first = await stage(profile, pdf(may, "ACC-EX01AB-001234"), account_id=account, default=None)
     # Staged before the first commits: only commit's recheck can see the other account.
@@ -304,11 +304,11 @@ async def test_tembo_account_reference_checked(
         await stage(profile, pdf(june, "ACC-EX01AB-005678"), account_id=account, default=None)
 
 
-async def test_tembo_lists_only_the_days_between_its_first_and_last_in_full(
+async def test_tembo_lists_everything_from_opening_to_the_day_before_valuation_in_full(
     session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
 ) -> None:
-    """Review: a statement is made on demand, and one made on its last row's day took that
-    day as listed in full, so a later row that day in the next statement was an error."""
+    """Owner, 2026-11-21: a statement lists everything from the account's opening; made on
+    1 Jun it lists through 31 May, whatever days its rows fall on."""
     account = (await make_account(name="Example Tembo", balance_mode="transactions")).id
     profile = await _profile(run, format="pdf", layout="tembo_statement")
     rows = [
@@ -321,8 +321,8 @@ async def test_tembo_lists_only_the_days_between_its_first_and_last_in_full(
     )
     stored = await session.get(models.ImportBatch, batch.id)
     assert stored is not None
-    assert (stored.complete_from, stored.complete_to) == (date(2027, 5, 4), date(2027, 5, 30))
-    # Its Plan value is no end-of-day balance of a day it may not list in full.
+    assert (stored.complete_from, stored.complete_to) == (date(2027, 2, 3), date(2027, 5, 31))
+    # Its Plan value is no end-of-day balance: the day it was made isn't listed in full.
     assert batch.statement is not None
     assert batch.statement.closing_balance == Decimal("65.00")
     assert batch.statement.closing_balance_date is None
