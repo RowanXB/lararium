@@ -491,17 +491,17 @@ async def test_pair_records_refusals_store_nothing(
     stored = await _decisions(session)
 
     refusals = [
-        (out_record.id, out_record.id),  # the same record twice
-        (out_record.id, other_on_a.id),  # one account
-        (out_record.id, wrong_amount.id),  # -100 against +90
-        (out_record.id, in_usd.id),  # GBP against USD
-        (out_record.id, voided.id),
-        (out_record.id, with_fee.id),
-        (in_record.id, rejected.id),
-        (rejected.id, out_record.id),
+        (out_record.id, out_record.id, "itself"),
+        (out_record.id, other_on_a.id, "same account"),
+        (out_record.id, wrong_amount.id, "opposite and equal"),  # -100 against +90
+        (out_record.id, in_usd.id, "different instruments"),  # GBP against USD
+        (out_record.id, voided.id, "cannot be a transfer's leg"),
+        (out_record.id, with_fee.id, "cannot be a transfer's leg"),
+        (out_record.id, rejected.id, "undo the rejection"),  # -100 against the rejected +100
+        (rejected.id, out_record.id, "undo the rejection"),
     ]
-    for first, second in refusals:
-        with pytest.raises(FinanceValidationError):
+    for first, second, message in refusals:
+        with pytest.raises(FinanceValidationError, match=message):
             await run(pair_records, first, second)
     assert await _decisions(session) == stored
 
