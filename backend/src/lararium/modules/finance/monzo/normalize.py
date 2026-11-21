@@ -92,7 +92,7 @@ from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-4"
+NORMALIZER_VERSION = "monzo-norm-5"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
 # makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
@@ -580,6 +580,8 @@ class _Normalizer:
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
         # Each deleted pot's account, with the day to close it on.
         self._deleted_pots: list[tuple[UUID, date]] = []
+        # Each pot's name, from this sync's pots: Monzo describes a pot move by the pot's id.
+        self.pot_names: dict[str, str] = {}
         # Fields seen in a shape not mapped yet (structured-fields Decision 10), by their name.
         self.unmapped: set[str] = set()
 
@@ -788,6 +790,10 @@ class _Normalizer:
         """Map a pot to its account, a deleted one too, even one deleted before the
         connection saw it: what Monzo says about it is stored, and its moves post to it."""
         pot_id: str = pot["id"]
+        # Whether or not it has an account: the moves of a pot deleted before the connection
+        # existed are described by its name too.
+        if pot.get("name"):
+            self.pot_names[pot_id] = str(pot["name"])
         account_id = self.mapped(pot_id)
         details = await self._pot_details(pot)
         if account_id is None:
@@ -907,7 +913,7 @@ class _Normalizer:
                 booking_date=local_date(created, self.tz),
                 value_date=local_date(_parse(settled), self.tz) if settled else None,
                 status="booked" if settled else "pending",
-                description=_description(tx),
+                description=self.description(tx),
                 counterparty_entity_id=counterparty,
                 origin="connector",
                 connection_id=self.connection_id,
@@ -1150,12 +1156,19 @@ class _Normalizer:
                 occurred_at=_parse(tx["created"]),
                 quantity=to_quantity(tx["amount"], currency.decimals),
                 instrument_id=currency.id,
-                description=_description(tx),
+                description=self.description(tx),
                 counterparty_entity_id=counterparty,
                 place_entity_id=place,
                 decline_reason=reason,
             ),
         )
+
+    def description(self, tx: dict[str, Any]) -> str:
+        """Monzo describes a pot move by the pot's id: show the pot's name. Pots are read
+        before any transaction, the replay's included, so a NORMALIZER_VERSION bump renames
+        the moves posted before."""
+        description = _description(tx)
+        return self.pot_names.get(description, description)
 
     def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
         if outcome == "created":

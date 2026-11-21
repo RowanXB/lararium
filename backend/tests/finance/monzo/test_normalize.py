@@ -155,7 +155,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-4"
+    assert NORMALIZER_VERSION == "monzo-norm-5"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
@@ -441,6 +441,96 @@ async def test_pot_move_pairs_directly(session, run) -> None:
         )
     )
     assert unassigned_postings == 0
+    # Monzo describes a pot move by the pot's id; the ledger shows the pot's name.
+    assert tx.description == "Savings"
+
+
+async def _descriptions(session) -> dict[str, str]:
+    rows = await session.execute(text("select external_id, description from finance.transactions"))
+    return {external_id: description for external_id, description in rows.all()}
+
+
+async def _posted_before_pot_names(session, run, connection: ConnectionRecord) -> None:
+    """As monzo-norm-4 left it: every pot move described by the pot's id."""
+    await session.execute(text("update finance.transactions set description = 'pot_TEST1'"))
+    await run(update_config, connection.id, {NORMALIZER_VERSION_KEY: "monzo-norm-4"})
+
+
+async def _updated_events(session) -> int:
+    return await session.scalar(
+        text("select count(*) from core.events where type = 'finance.transaction.updated'")
+    )
+
+
+async def test_existing_pot_moves_get_the_pot_name(session, run) -> None:
+    # Rows posted before pot names were used still say the pot's id. The version bump
+    # replays them, though they are outside the next sync's window: each is updated once.
+    connection = await _connection(run)
+    moves = [
+        make_transaction(
+            id="tx_TEST0001",
+            amount=-5000,
+            description="pot_TEST1",
+            metadata={"pot_id": "pot_TEST1"},
+        ),
+        make_transaction(
+            id="tx_TEST0002",
+            amount=-1000,
+            description="pot_TEST1",
+            metadata={"pot_id": "pot_TEST1"},
+        ),
+    ]
+    await _normalize(session, connection, transactions=moves, pots=[make_pot()])
+    await _posted_before_pot_names(session, run, connection)
+    events_before = await _updated_events(session)
+
+    replayed = await _normalize(session, connection, pots=[make_pot()])
+
+    assert replayed.updated == 2
+    assert await _descriptions(session) == {"tx_TEST0001": "Savings", "tx_TEST0002": "Savings"}
+    assert await _updated_events(session) - events_before == 2
+
+
+async def test_moves_of_a_pot_deleted_before_connecting_get_its_name(session, run) -> None:
+    # A pot deleted before the connection existed has no account, so its moves stay
+    # unassigned; they still show the pot's name.
+    connection = await _connection(run)
+    move = make_transaction(amount=-5000, description="pot_TEST1", metadata={"pot_id": "pot_TEST1"})
+
+    await _normalize(session, connection, transactions=[move], pots=[make_pot(deleted=True)])
+
+    assert await _descriptions(session) == {"tx_TEST0001": "Savings"}
+
+
+async def test_an_unrenamed_move_in_the_window_changes_once(session, run) -> None:
+    # The first sync after the fix: a move still described by the pot's id is fetched again
+    # and also settles. It is updated once, and the audit records the id it had.
+    connection = await _connection(run)
+    pending = make_transaction(
+        amount=-5000, description="pot_TEST1", metadata={"pot_id": "pot_TEST1"}, settled=""
+    )
+    await _normalize(session, connection, transactions=[pending], pots=[make_pot()])
+    await _posted_before_pot_names(session, run, connection)
+    tx_id = await session.scalar(text("select id from finance.transactions"))
+    events_before = await _updated_events(session)
+
+    settled = pending | {"settled": "2026-03-02T06:00:00.000Z"}
+    await _normalize(session, connection, transactions=[settled], pots=[make_pot()])
+
+    # The replay skips it, as this sync's page holds it: only the page's upsert writes it.
+    assert await _updated_events(session) - events_before == 1
+    change = await session.scalar(
+        text(
+            "select changes -> ('transaction:' || cast(:id as text)) from core.audit_log"
+            " where changes ? ('transaction:' || cast(:id as text))"
+            " order by occurred_at desc, id desc limit 1"
+        ),
+        {"id": tx_id},
+    )
+    assert (change["before"]["description"], change["after"]["description"]) == (
+        "pot_TEST1",
+        "Savings",
+    )
 
 
 async def _warnings(session, connection: ConnectionRecord) -> list[str]:
@@ -2035,7 +2125,7 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
     ]
     assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
     config = (await get_connection(session, connection.id)).config
-    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-4"
+    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-5"
 
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:
