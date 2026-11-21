@@ -6,8 +6,8 @@ deposits, ...) also split by segment, e.g. endingCashCom and endingCashSec; each
 numeric column named in snake_case, like the amounts 0019 made. Rows stored before it are filled
 by the replay that NORMALIZER_VERSION ibkr-norm-3 sets off.
 
-Revision ID: 0022
-Revises: 0021
+Revision ID: 0025
+Revises: 0024
 Create Date: 2026-11-20
 """
 
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0022"
-down_revision: str | None = "0021"
+revision: str = "0025"
+down_revision: str | None = "0024"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
