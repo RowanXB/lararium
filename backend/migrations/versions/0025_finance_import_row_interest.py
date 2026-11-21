@@ -4,7 +4,8 @@ transfers and could be paired with a transfer of the same amount.
 
 Rows imported before are marked by LemFi's fixed text for a payout, which no other catalog
 bank prints, and their transactions are no bank transfers. The downgrade keeps those
-corrected values: they were wrong.
+corrected values: they were wrong. Stored LemFi CSV profiles get the interest
+descriptions their catalog entry now has, and a new version.
 
 Revision ID: 0025
 Revises: 0024
@@ -35,7 +36,22 @@ FROM finance.import_rows AS r
 WHERE r.transaction_id = t.id AND r.interest AND t.bank_transfer
 """
 
-UPGRADE = [ADD_COLUMN, BACKFILL_INTEREST, NO_TRANSFER]
+# Profiles created from the catalog's LemFi CSV entry store its config as it was then, without
+# the interest descriptions; they are found by LemFi's own headers and date format.
+PROFILES = """
+UPDATE finance.import_profiles
+SET config = config || '{"interest_descriptions": ["Savings Interest Payout"]}'::jsonb,
+    version = version + 1,
+    updated_at = now()
+WHERE format = 'csv'
+  AND config -> 'columns' ->> 'inflow' = 'Money in (GBP)'
+  AND config -> 'columns' ->> 'outflow' = 'Money out (GBP)'
+  AND config -> 'columns' ->> 'balance' = 'Balance (GBP)'
+  AND config ->> 'date_format' = '%d %b, %Y %H:%M'
+  AND coalesce(jsonb_array_length(config -> 'interest_descriptions'), 0) = 0
+"""
+
+UPGRADE = [ADD_COLUMN, BACKFILL_INTEREST, NO_TRANSFER, PROFILES]
 
 DOWNGRADE = ["ALTER TABLE finance.import_rows DROP COLUMN interest"]
 

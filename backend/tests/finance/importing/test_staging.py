@@ -23,6 +23,7 @@ from lararium.modules.finance.errors import (
     NotACurrencyError,
 )
 from lararium.modules.finance.importing import staging
+from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
@@ -1046,6 +1047,35 @@ async def test_0025_marks_lemfi_interest_imported_before(
         ("Savings Interest Payout", True, False),
         ("Savings Funding", False, True),
     ]
+
+
+async def test_0025_gives_a_stored_lemfi_csv_profile_its_interest(
+    session: AsyncSession, run: Run
+) -> None:
+    """A profile created from the LemFi CSV catalog entry before rows knew interest stores
+    no interest descriptions: 0025 adds them, as an update, and leaves other profiles."""
+    [entry] = [e for e in CATALOG if (e.institution, e.label) == ("LemFi", "CSV")]
+    stored = entry.config.model_dump(mode="json", exclude={"interest_descriptions"})
+    lemfi = await _profile(run, **stored)
+    other = await _csv_profile(run)
+    p = models.ImportProfile
+    state = select(p.id, p.config, p.version).where(p.id.in_([lemfi.id, other.id]))
+
+    async def read() -> dict[UUID, tuple[Any, int]]:
+        session.expire_all()
+        return {i: (c, v) for i, c, v in await session.execute(state)}
+
+    # Profiles created now store the default; as 0025 finds one, it has none.
+    await session.execute(
+        text("UPDATE finance.import_profiles SET config = config - 'interest_descriptions'")
+    )
+    before = await read()
+    await session.execute(text(_migration("0025_finance_import_row_interest").PROFILES))
+    after = await read()
+    config, version = after[lemfi.id]
+    assert config["interest_descriptions"] == ["Savings Interest Payout"]
+    assert version == before[lemfi.id][1] + 1
+    assert after[other.id] == before[other.id]
 
 
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
