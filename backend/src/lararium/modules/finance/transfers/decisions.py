@@ -10,14 +10,14 @@ back into it, and its Undo withdraws exactly that rejection's decisions."""
 
 from uuid import UUID
 
-from sqlalchemy import and_, delete, or_, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import delete_derived_transaction
-from lararium.modules.finance.transfers.contra import source_ref
+from lararium.modules.finance.transfers.contra import OwnLeg, is_rejected, own_leg, source_ref
 from lararium.modules.finance.transfers.engine import (
     decision_change_key,
     forget_decisions,
@@ -31,6 +31,7 @@ from lararium.modules.finance.transfers.queries import (
     TransferRecord,
     candidates,
     get_transfer,
+    in_matched_transfer,
     load_transfers,
 )
 
@@ -166,6 +167,34 @@ async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
     await heal_transfers(ctx)
 
 
+async def _store_pair(ctx: CommandContext, present: UUID, chosen: UUID) -> TransferRecord:
+    """Store the owner's pair decision for the two records (withdrawing any never_pair
+    between them), match, and return the matched transfer. When it still can't link them,
+    raise, which rolls the decision back."""
+    session = ctx.session
+    present_ref, chosen_ref = await source_ref(session, present), await source_ref(session, chosen)
+    await forget_decisions(ctx, "never_pair", present_ref, chosen_ref)
+    await _store(ctx, "pair", present_ref, chosen_ref)
+    await match_transaction(ctx, present)
+    await heal_transfers(ctx)
+    tr = models.Transfer
+    paired = await load_transfers(
+        session,
+        tr.status == "matched",
+        or_(
+            and_(tr.out_transaction_id == present, tr.in_transaction_id == chosen),
+            and_(tr.out_transaction_id == chosen, tr.in_transaction_id == present),
+        ),
+    )
+    if not paired:
+        # Raising rolls the decisions back with the rest of the command.
+        raise FinanceValidationError(
+            f"pairing with transaction {chosen} did not take effect: another pair"
+            " decision leaves it ambiguous"
+        )
+    return paired[0]
+
+
 async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> TransferRecord:
     """The owner says the open transfer's missing side is this record: one of its
     candidates of the same amount, or one the owner unpaired from it (whose never_pair
@@ -187,27 +216,39 @@ async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> 
             f"transaction {transaction_id} is not a candidate of the same amount for this transfer"
         )
     [present] = _records(transfer)
-    present_ref, chosen_ref = (
-        await source_ref(session, present),
-        await source_ref(session, transaction_id),
-    )
-    await forget_decisions(ctx, "never_pair", present_ref, chosen_ref)
-    await _store(ctx, "pair", present_ref, chosen_ref)
-    await match_transaction(ctx, present)
-    await heal_transfers(ctx)
-    tr = models.Transfer
-    paired = await load_transfers(
-        session,
-        tr.status == "matched",
-        or_(
-            and_(tr.out_transaction_id == present, tr.in_transaction_id == transaction_id),
-            and_(tr.out_transaction_id == transaction_id, tr.in_transaction_id == present),
-        ),
-    )
-    if not paired:
-        # Raising rolls the decisions back with the rest of the command.
-        raise FinanceValidationError(
-            f"pairing with transaction {transaction_id} did not take effect: another pair"
-            " decision leaves it ambiguous"
-        )
-    return paired[0]
+    return await _store_pair(ctx, present, transaction_id)
+
+
+async def pair_records(ctx: CommandContext, transaction_id: UUID, other_id: UUID) -> TransferRecord:
+    """The owner says these two records are one transfer, whether or not either is in
+    one: own records on different accounts, in one instrument, of opposite and equal
+    amounts. Neither may be a leg of a matched transfer (unpair it first) nor rejected
+    (undo the rejection first: a pair never silently overrides one). Otherwise as pair."""
+    await lock_transfers(ctx)
+    session = ctx.session
+    if transaction_id == other_id:
+        raise FinanceValidationError("a record cannot be paired with itself")
+    legs: list[OwnLeg] = []
+    for record_id in (transaction_id, other_id):
+        await source_ref(session, record_id)  # unknown ids raise here
+        leg = await own_leg(session, record_id)
+        if leg is None:
+            raise FinanceValidationError(f"transaction {record_id} cannot be a transfer's leg")
+        legs.append(leg)
+    first, second = legs
+    if first.account_id == second.account_id:
+        raise FinanceValidationError("the two records are on the same account")
+    if first.instrument_id != second.instrument_id:
+        raise FinanceValidationError("the two records are in different instruments")
+    if first.quantity != -second.quantity:
+        raise FinanceValidationError("the two records are not of opposite and equal amounts")
+    for record_id in (transaction_id, other_id):
+        if await session.scalar(select(in_matched_transfer(record_id))):
+            raise FinanceValidationError(
+                f"transaction {record_id} is a leg of a matched transfer: unpair it first"
+            )
+        if await is_rejected(session, await source_ref(session, record_id)):
+            raise FinanceValidationError(
+                f"transaction {record_id} was rejected as a transfer: undo the rejection first"
+            )
+    return await _store_pair(ctx, transaction_id, other_id)

@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import (
     CTE,
     ColumnElement,
+    Date,
     ScalarSelect,
     Select,
     SQLColumnExpression,
@@ -33,7 +34,10 @@ from sqlalchemy.orm import aliased
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
-from lararium.modules.finance.errors import TransferNotFoundError
+from lararium.modules.finance.errors import (
+    FinanceValidationError,
+    TransferNotFoundError,
+)
 from lararium.modules.finance.identifiers import uk_bank_account_parts
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import system_account_ids
@@ -43,7 +47,9 @@ from lararium.modules.finance.transfers.contra import (
     SourceRef,
     eligible_records,
     is_rejected,
+    load_own_record,
     names_source,
+    source_ref,
 )
 from lararium.modules.finance.transfers.pairs import pair_relation
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
@@ -394,6 +400,87 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
         .order_by(e.c.transaction_id)
     )
     return list(found)
+
+
+PAIR_CANDIDATES_LIMIT = 20
+
+
+def in_matched_transfer(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
+    """Whether the transaction is a leg of a matched transfer."""
+    tr = models.Transfer
+    return exists().where(
+        tr.status == "matched",
+        or_(tr.out_transaction_id == transaction_id, tr.in_transaction_id == transaction_id),
+    )
+
+
+@dataclass(frozen=True)
+class PairCandidateRecord:
+    """An own record the owner could pair with another as one transfer."""
+
+    transaction_id: UUID
+    account_id: UUID
+    quantity: Decimal  # signed, as posted on account_id
+    occurred_at: datetime
+    booking_date: date
+    description: str
+
+
+async def pair_candidates(
+    session: AsyncSession, transaction_id: UUID, limit: int = PAIR_CANDIDATES_LIMIT
+) -> list[PairCandidateRecord]:
+    """The own records the owner could pair this one with (pair_records): on another
+    account, in the same instrument, of the opposite and equal amount, and not a leg of a
+    matched transfer nor rejected. One the owner unpaired from this record (a never_pair
+    decision) is still listed: pair_records withdraws that decision, which is the way back
+    from a mistaken unpair. Nearest booking date first (then the earlier occurred_at); no
+    window applies, as for any pair decision. Refuses a record that can't be a transfer's leg."""
+    await source_ref(session, transaction_id)  # an unknown id raises here
+    system = await system_account_ids(session)
+    subject = await load_own_record(session, system, transaction_id)
+    if subject is None:
+        raise FinanceValidationError(f"transaction {transaction_id} cannot be a transfer's leg")
+    e = eligible_records(system)
+    t, d = models.Transaction, models.TransferDecision
+    rejected = exists().where(
+        d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
+    )
+    rows = await session.execute(
+        select(
+            e.c.transaction_id,
+            e.c.account_id,
+            e.c.quantity,
+            e.c.occurred_at,
+            e.c.booking_date,
+            t.description,
+        )
+        .join(t, t.id == e.c.transaction_id)
+        .where(
+            e.c.transaction_id != transaction_id,
+            e.c.account_id != subject.account_id,
+            e.c.instrument_id == subject.instrument_id,
+            e.c.quantity == -subject.quantity,
+            ~in_matched_transfer(e.c.transaction_id),
+            ~rejected,
+        )
+        .order_by(
+            func.abs(e.c.booking_date - sql_cast(subject.booking_date, Date)),
+            e.c.occurred_at,
+            e.c.transaction_id,
+        )
+        .limit(limit)
+    )
+    return [
+        PairCandidateRecord(
+            transaction_id=row.transaction_id,
+            account_id=row.account_id,
+            quantity=row.quantity,
+            occurred_at=row.occurred_at,
+            booking_date=row.booking_date,
+            description=row.description,
+        )
+        for row in rows
+    ]
 
 
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:

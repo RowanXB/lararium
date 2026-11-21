@@ -5,14 +5,26 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
-from lararium.modules.finance.errors import FinanceValidationError, TransferNotFoundError
+from lararium.modules.finance.errors import (
+    FinanceValidationError,
+    TransactionNotFoundError,
+    TransferNotFoundError,
+)
 from lararium.modules.finance.identifiers import get_or_create_identifier
+from lararium.modules.finance.ledger import (
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+    void_transaction,
+)
 from lararium.modules.finance.transfers import (
     candidates,
     decisions,
     get_transfer,
     list_transfers,
     pair,
+    pair_candidates,
+    pair_records,
     reject,
     source_ref,
     unpair,
@@ -29,6 +41,8 @@ from .conftest import (
     in_transit_balance,
     placeholders,
 )
+
+OTHER_AT = WHEN + timedelta(hours=2)
 
 
 @pytest.fixture
@@ -326,3 +340,259 @@ async def test_pair_refuses_non_candidate(session, run, ids, two_candidates, con
             await run(pair, transfer.id, transaction_id)
     [unchanged] = await list_transfers(session)
     assert (unchanged.status, unchanged.review_reason) == ("awaiting", "several_candidates")
+
+
+@pytest.fixture
+def manual_tx(run, gbp, ids):
+    """A hand-entered record on a manual account, against Unassigned."""
+
+    async def _post(
+        account,
+        quantity: str,
+        *,
+        occurred_at=OTHER_AT,
+        instrument=None,
+        contra=None,
+        description="Hand entered",
+    ):
+        amount = Decimal(quantity)
+        instrument_id = (instrument or gbp).id
+        return await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=occurred_at,
+                description=description,
+                origin="manual",
+                postings=[
+                    PostingInput(account.id, instrument_id, amount),
+                    PostingInput(contra or ids.unassigned, instrument_id, -amount),
+                ],
+            ),
+        )
+
+    return _post
+
+
+@pytest.fixture
+def rejected_record(session, run, connected_bank, manual_bank, connector_tx, heal):
+    """A connector record the owner rejected as a transfer: it named a registered account,
+    so it opened a transfer, which the owner rejected. Once per test."""
+
+    async def _make(quantity: str):
+        bank = await connected_bank("R")
+        await manual_bank("Registered")
+        identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+        record = await connector_tx(
+            bank, quantity, external_id="rejected_1", identifier_id=identifier
+        )
+        await heal()
+        [transfer] = [
+            t
+            for t in await list_transfers(session)
+            if record.id in (t.out_transaction_id, t.in_transaction_id)
+        ]
+        await run(reject, transfer.id)
+        return record
+
+    return _make
+
+
+@pytest.fixture
+async def unnamed_pair(connected_bank, manual_bank, connector_tx, manual_tx, heal):
+    """A connector record of -100 on A naming nobody, and a hand-entered +100 on manual B."""
+    a = await connected_bank("A")
+    b = await manual_bank("B", identifier=None, snapshot=None)
+    out_record = await connector_tx(a, "-100", external_id="out_1", bank_transfer=False)
+    in_record = await manual_tx(b, "100")
+    await heal()
+    return a, b, out_record, in_record
+
+
+async def test_pair_records_links_two_records_that_name_nobody(
+    session, run, ids, unnamed_pair, heal
+) -> None:
+    a, b, out_record, in_record = unnamed_pair
+    assert await list_transfers(session) == []
+
+    transfer = await run(pair_records, out_record.id, in_record.id)
+
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
+    assert await contra_account(session, out_record.id, a.account.id) == ids.in_transit
+    assert await contra_account(session, in_record.id, b.id) == ids.in_transit
+    assert await heal() == 0
+    assert await _decisions(session) == [
+        ("pair", "connection", f"{a.connection_id}:out_1", "transaction", str(in_record.id))
+    ]
+    await assert_consistent(session)
+
+
+async def test_pair_records_replaces_a_waiting_placeholder(
+    session, run, ids, connected_bank, manual_bank, connector_tx, manual_tx, heal
+) -> None:
+    a = await connected_bank("A")
+    b = await manual_bank("B")
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    out_record = await connector_tx(a, "-100", identifier_id=identifier)
+    await heal()
+    [waiting] = await list_transfers(session)
+    assert waiting.status == "inferred"
+    in_record = await manual_tx(b, "100")
+    await heal()
+
+    transfer = await run(pair_records, in_record.id, out_record.id)
+
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
+    assert await placeholders(session) == []
+    assert (await balances_on(session))[b.id] == Decimal("1000") + Decimal("100")
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_pair_records_refusals_store_nothing(
+    session,
+    run,
+    gbp,
+    usd,
+    ids,
+    manual_bank,
+    manual_tx,
+    unnamed_pair,
+    rejected_record,
+) -> None:
+    a, _b, out_record, in_record = unnamed_pair
+    c = await manual_bank("C", identifier=None, snapshot=None)
+    other_on_a = await manual_tx(a.account, "100")
+    wrong_amount = await manual_tx(c, "90")
+    in_usd = await manual_tx(c, "100", instrument=usd)
+    voided = await manual_tx(c, "100")
+    await run(void_transaction, voided.id)
+    with_fee = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=OTHER_AT,
+            description="With fee",
+            origin="manual",
+            postings=[
+                PostingInput(c.id, gbp.id, Decimal("98")),
+                PostingInput(ids.unassigned, gbp.id, Decimal("-100")),
+                PostingInput(ids.unassigned, gbp.id, Decimal("2")),
+            ],
+        ),
+    )
+    rejected = await rejected_record("100")
+    stored = await _decisions(session)
+
+    refusals = [
+        (out_record.id, out_record.id),  # the same record twice
+        (out_record.id, other_on_a.id),  # one account
+        (out_record.id, wrong_amount.id),  # -100 against +90
+        (out_record.id, in_usd.id),  # GBP against USD
+        (out_record.id, voided.id),
+        (out_record.id, with_fee.id),
+        (in_record.id, rejected.id),
+        (rejected.id, out_record.id),
+    ]
+    for first, second in refusals:
+        with pytest.raises(FinanceValidationError):
+            await run(pair_records, first, second)
+    assert await _decisions(session) == stored
+
+    # A leg of a matched transfer: unpair it first.
+    transfer = await run(pair_records, out_record.id, in_record.id)
+    other_in = await manual_tx(c, "100")
+    with pytest.raises(FinanceValidationError, match="unpair"):
+        await run(pair_records, out_record.id, other_in.id)
+    with pytest.raises(FinanceValidationError, match="unpair"):
+        await run(pair_records, other_in.id, out_record.id)
+    with pytest.raises(TransactionNotFoundError):
+        await run(pair_records, out_record.id, uuid4())
+    assert transfer.status == "matched"
+    assert len(await _decisions(session)) == len(stored) + 1
+
+
+async def test_pair_records_after_unpair(session, run, ids, unnamed_pair, heal) -> None:
+    a, b, out_record, in_record = unnamed_pair
+    transfer = await run(pair_records, out_record.id, in_record.id)
+
+    await run(unpair, transfer.id)
+
+    assert await list_transfers(session) == []
+    assert await contra_account(session, out_record.id, a.account.id) == ids.unassigned
+    assert await contra_account(session, in_record.id, b.id) == ids.unassigned
+    assert sorted(kind for kind, *_ in await _decisions(session)) == ["never_pair", "never_pair"]
+    assert [c.transaction_id for c in await pair_candidates(session, out_record.id)] == [
+        in_record.id
+    ]
+
+    again = await run(pair_records, out_record.id, in_record.id)
+
+    assert again.status == "matched"
+    assert [kind for kind, *_ in await _decisions(session)] == ["pair"]
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_pair_candidates_order_and_exclusions(
+    session, run, connected_bank, manual_bank, connector_tx, manual_tx, rejected_record, heal
+) -> None:
+    a = await connected_bank("A")
+    out_record = await connector_tx(
+        a, "-100", external_id="out_1", occurred_at=WHEN, bank_transfer=False
+    )
+    day = out_record.booking_date
+    m1 = await manual_bank("M1", identifier=None, snapshot=None)
+    m2 = await manual_bank("M2", identifier=None, snapshot=None)
+
+    def at(days: int, hours: int = 0):
+        return WHEN + timedelta(days=days, hours=hours)
+
+    plus3 = await manual_tx(m1, "100", occurred_at=at(3))
+    minus1_late = await manual_tx(m2, "100", occurred_at=at(-1, 1))
+    plus1 = await manual_tx(m1, "100", occurred_at=at(1))
+    minus1 = await manual_tx(m2, "100", occurred_at=at(-1))
+    # Excluded ones.
+    await manual_tx(a.account, "100")  # the same account
+    await manual_tx(m1, "90")
+    voided = await manual_tx(m1, "100")
+    await run(void_transaction, voided.id)
+    matched_leg = await manual_tx(m1, "100", occurred_at=at(0, 1))
+    matched_out = await manual_tx(m2, "-100", occurred_at=at(0, 1))
+    await rejected_record("100")
+    await heal()
+    await run(pair_records, matched_out.id, matched_leg.id)
+
+    found = await pair_candidates(session, out_record.id)
+
+    assert [c.transaction_id for c in found] == [
+        minus1.id,
+        minus1_late.id,
+        plus1.id,
+        plus3.id,
+    ]
+    first = found[0]
+    assert (first.account_id, first.quantity, first.description) == (
+        m2.id,
+        Decimal("100"),
+        "Hand entered",
+    )
+    assert (first.occurred_at, first.booking_date) == (at(-1), day - timedelta(days=1))
+
+    # Many eligible ones: the nearest 20.
+    for n in range(25):
+        await manual_tx(m2, "100", occurred_at=at(10 + n))
+    capped = await pair_candidates(session, out_record.id)
+    assert len(capped) == 20
+    assert [c.transaction_id for c in capped[:4]] == [minus1.id, minus1_late.id, plus1.id, plus3.id]
+
+    with pytest.raises(FinanceValidationError):
+        await pair_candidates(session, voided.id)
+    with pytest.raises(TransactionNotFoundError):
+        await pair_candidates(session, uuid4())
