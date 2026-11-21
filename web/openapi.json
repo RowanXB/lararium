@@ -2922,6 +2922,55 @@
         "title": "OfxProfileConfig",
         "type": "object"
       },
+      "PairCandidateOut": {
+        "description": "A record the owner could pair with another as one transfer.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "booking_date": {
+            "format": "date",
+            "title": "Booking Date",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "account_name",
+          "quantity",
+          "occurred_at",
+          "booking_date",
+          "description"
+        ],
+        "title": "PairCandidateOut",
+        "type": "object"
+      },
       "Pattern": {
         "maxLength": 500,
         "minLength": 1,
@@ -5396,6 +5445,108 @@
           }
         },
         "summary": "Post Transaction",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transactions/{transaction_id}/pair": {
+      "post": {
+        "description": "The owner says two own records are one transfer, whether or not either is in one.\nUndone by unpairing the resulting transfer.",
+        "operationId": "pair_transactions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferPair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Transactions",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transactions/{transaction_id}/pair-candidates": {
+      "get": {
+        "description": "The own records the record could be paired with as one transfer: on another account,\nof the opposite and equal amount, nearest booking date first.",
+        "operationId": "list_transaction_pair_candidates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PairCandidateOut"
+                  },
+                  "title": "Response List Transaction Pair Candidates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Transaction Pair Candidates",
         "tags": [
           "finance"
         ]

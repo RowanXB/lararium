@@ -430,6 +430,27 @@ async def test_pair_records_links_two_records_that_name_nobody(
     await assert_consistent(session)
 
 
+async def test_pair_records_pairs_a_manual_record_with_an_imported_row(
+    session, run, ids, manual_bank, manual_tx, record_import, heal
+) -> None:
+    a = await manual_bank("A", identifier=None, snapshot=None)
+    b = await manual_bank("B", identifier=None, snapshot=None)
+    imported = await manual_tx(a, "-100", description="Statement row")
+    by_hand = await manual_tx(b, "100")
+    await record_import(a.id, [imported.id])
+
+    transfer = await run(pair_records, imported.id, by_hand.id)
+
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        imported.id,
+        by_hand.id,
+    )
+    assert await contra_account(session, imported.id, a.id) == ids.in_transit
+    assert await contra_account(session, by_hand.id, b.id) == ids.in_transit
+    await assert_consistent(session)
+
+
 async def test_pair_records_replaces_a_waiting_placeholder(
     session, run, ids, connected_bank, manual_bank, connector_tx, manual_tx, heal
 ) -> None:

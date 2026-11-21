@@ -70,6 +70,7 @@ async def _connector_tx(
     occurred_at: datetime = WHEN,
     identifier_id: UUID | None = None,
     name: str = "Test Owner",
+    bank_transfer: bool = True,
 ) -> TransactionRecord:
     """Post a connector transaction as a normalizer would (contra from transfer_contra)."""
     connection_id, account = bank
@@ -96,7 +97,7 @@ async def _connector_tx(
                 PostingInput(contra, gbp.id, -amount),
             ],
             counterparty=CounterpartyFields(
-                identifier_id=identifier_id, name=name, bank_transfer=True
+                identifier_id=identifier_id, name=name, bank_transfer=bank_transfer
             ),
         ),
     )
@@ -353,6 +354,92 @@ async def test_unpair_is_undone_by_pair(client, session, run) -> None:
         str(in_record.id),
     )
     assert await _transfers(client) == [body]
+
+
+async def _hand_post(client, session, run, account_id: str, quantity: str) -> str:
+    gbp = await get_currency(session, "GBP")
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    response = await client.post(
+        f"{FINANCE}/transactions",
+        json={
+            "occurred_at": (WHEN + timedelta(hours=1)).isoformat(),
+            "description": "By hand",
+            "postings": [
+                {"account_id": account_id, "instrument_id": str(gbp.id), "quantity": quantity},
+                {
+                    "account_id": str(unassigned),
+                    "instrument_id": str(gbp.id),
+                    "quantity": str(-Decimal(quantity)),
+                },
+            ],
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+async def test_pair_two_records_through_the_api(client, session, run) -> None:
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out = await _connector_tx(session, run, a, "-100", bank_transfer=False)
+    out_id = str(out.id)
+    in_id = await _hand_post(client, session, run, b_id, "100")
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["account_name"], x["quantity"]) for x in found] == [
+        (in_id, "B", "100")
+    ]
+
+    response = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": in_id}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["status"], body["out_transaction_id"], body["in_transaction_id"]) == (
+        "matched",
+        out_id,
+        in_id,
+    )
+    assert await _transfers(client) == [body]
+
+    assert (await client.post(f"{FINANCE}/transfers/{body['id']}/unpair")).status_code == 204
+    assert await _transfers(client) == []
+    again = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": in_id}
+    )
+    assert again.status_code == 200
+    assert again.json()["status"] == "matched"
+
+
+async def test_pair_transactions_refusals(client, session, run) -> None:
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out_id = str((await _connector_tx(session, run, a, "-100", bank_transfer=False)).id)
+    short_id = await _hand_post(client, session, run, b_id, "90")
+    unknown = str(uuid4())
+
+    same = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": out_id}
+    )
+    assert same.status_code == 422
+    assert same.json()["detail"]["error"] == "invalid_input"
+
+    differs = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": short_id}
+    )
+    assert differs.status_code == 422
+    assert differs.json()["detail"]["error"] == "invalid_input"
+
+    for call in (
+        client.get(f"{FINANCE}/transactions/{unknown}/pair-candidates"),
+        client.post(f"{FINANCE}/transactions/{unknown}/pair", json={"transaction_id": out_id}),
+        client.post(f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": unknown}),
+    ):
+        response = await call
+        assert response.status_code == 404
+        assert response.json()["detail"]["error"] == "transaction_not_found"
+    assert await _transfers(client) == []
 
 
 async def test_pair_refuses_a_non_candidate(client, session, run, inferred) -> None:

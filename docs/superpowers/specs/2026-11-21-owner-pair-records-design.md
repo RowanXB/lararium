@@ -42,7 +42,7 @@ M4 already has this decision: an owner `pair` decision is its strongest tier (`p
 
 ### Endpoints (owner only, in `transfers_api.py`)
 
-- `GET /transactions/{transaction_id}/pair-candidates`. Returns the records it could be paired with: own records on another account, in the same instrument, with the opposite and equal amount, that aren't voided, aren't legs of a matched transfer, and aren't kept apart from it by a `never_pair` decision. Nearest booking date first, at most 20. No window applies, as for a decided pair.
+- `GET /transactions/{transaction_id}/pair-candidates`. Returns the records it could be paired with: own records on another account, in the same instrument, with the opposite and equal amount, that aren't voided, aren't legs of a matched transfer, and aren't rejected. Records kept apart from it by a `never_pair` decision are listed: pairing withdraws that decision, which is how Unpair is undone. Nearest booking date first, at most 20. No window applies, as for a decided pair.
 - `POST /transactions/{transaction_id}/pair` with `{"transaction_id": <other>}`. It runs these checks, each a 422 on failure:
   - Both records are eligible own records (`contra.eligible_records`: not void, not derived, exactly two postings, the contra on Unassigned or In transit).
   - The records are on different accounts, in the same instrument, with opposite and equal amounts.

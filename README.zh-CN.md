@@ -284,6 +284,12 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 - **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额不同的候选没有这个按钮）：这两条记录是
   同一笔转账。你的选择优先于其他任何候选。
 
+**没有写明对方账户的记录。** 两条记录都没有写明对方账户时（比如银行流水只印着你的名字和一个
+参考号），不会自动生成转账。先在手动账户上手动录入另一侧，再通过 API 把这两条记录配对：
+`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录（另一个账户、
+金额相反且相等、日期最近的在前），`POST /api/v1/finance/transactions/{id}/pair`，请求体
+`{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。点 Unpair 即可撤销。
+
 ### In transit 计入净资产
 
 **In transit**（在途）是一个资产类的系统账户，所以计入净资产。转账的转出一侧记到它上面，转入一侧
