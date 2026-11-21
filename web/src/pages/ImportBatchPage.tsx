@@ -24,7 +24,13 @@ import {
 } from "../components/ui/table";
 import { errorMessage } from "../lib/errors";
 import { formatMoney, isZeroDecimal } from "../lib/format";
-import { BATCH_STATUS_LABELS, countsSummary, isoCode, ROW_STATUS_LABELS } from "../lib/imports";
+import {
+  BATCH_STATUS_LABELS,
+  countsSummary,
+  formatRowTime,
+  isoCode,
+  ROW_STATUS_LABELS,
+} from "../lib/imports";
 import { cn } from "../lib/utils";
 
 const OPENING_LABEL = "Opening balance adjustment";
@@ -50,6 +56,10 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
   ]
     .filter(Boolean)
     .join(", ");
+  // Only a time the file gave, to its unit: a date-only row's occurred_at is its day's
+  // midnight. Its start time (Revolut) is read with the same date format.
+  const unit = row.time_unit === "minute" || row.time_unit === "second" ? row.time_unit : null;
+  const time = (value: string | null) => (unit && value ? formatRowTime(value, unit) : null);
   const details: [string, string | null][] = [
     // Charged on top of the amount: the balance moves by amount minus fee (Decision 11).
     // A zero fee is no fee: every row has one, as the file states none (Decision 11).
@@ -64,9 +74,8 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     ["Bank reference", row.bank_reference],
     ["Purpose code", row.purpose_code],
     ["Remittance", row.remittance_info],
-    // Only a time the file gave: a date-only row's occurred_at is its day's midnight.
-    ["Time", row.time_unit === "minute" || row.time_unit === "second" ? row.occurred_at : null],
-    ["Started", row.started_at],
+    ["Time", time(row.occurred_at)],
+    ["Started", time(row.started_at)],
     ["Card", row.card_number],
     [
       "Converted from",
