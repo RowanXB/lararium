@@ -180,8 +180,9 @@ async def _load_records(
     decisions: _Decisions,
     excluding: Collection[UUID],
 ) -> list[Pairable]:
-    """The own records that can pair at all: those a bank transfer or naming a bank
-    account (the registry's), and those the owner paired. A card payment is neither."""
+    """The own records that can pair at all: those a bank transfer, naming a bank
+    account or naming an own account by its number (the registry's), and those the owner
+    paired. A card payment is none of these."""
     e = eligible_records(system)
     t = models.Transaction
     decided = {source for pair in decisions.paired for source in pair}
@@ -190,7 +191,11 @@ async def _load_records(
         if decided
         else None
     )
-    can_pair = [e.c.bank_transfer, e.c.counterparty_identifier_id.is_not(None)]
+    can_pair = [
+        e.c.bank_transfer,
+        e.c.counterparty_identifier_id.is_not(None),
+        e.c.holder.is_not(None),
+    ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
     query = select(

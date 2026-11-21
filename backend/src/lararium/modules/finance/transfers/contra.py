@@ -196,6 +196,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     # record (import_rows_transaction, import_rows_duplicate_of).
     c, r = (aliased(models.ImportRow, name=n) for n in ("committed_row", "printed_row"))
     batch = aliased(models.ImportBatch, name="printed_batch")
+    # The column holds digits only (a CHECK), so the replace below only guards.
     only_number = and_(
         r.counterparty_account_number.is_not(None), r.counterparty_sort_code.is_(None)
     )

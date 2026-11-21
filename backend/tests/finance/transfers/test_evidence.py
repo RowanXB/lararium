@@ -10,7 +10,7 @@ import pytest
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.transfers import list_transfers, unassign_identifier_and_rematch
 
-from .conftest import A_IDENTIFIER, C_IDENTIFIER, DAY, RowDetails, contra_account
+from .conftest import A_IDENTIFIER, C_IDENTIFIER, DAY, RowDetails, contra_account, placeholders
 
 X_ID = A_IDENTIFIER  # "445566:11112222"
 Y_ID = C_IDENTIFIER  # "778899:33334444"
@@ -156,3 +156,17 @@ async def test_registering_the_account_later_pairs_history_and_removing_it_rever
     assert await list_transfers(session) == []
     assert await contra_account(session, sent, x.id) == ids.unassigned
     assert await contra_account(session, received, y.id) == ids.unassigned
+
+
+async def test_a_row_naming_an_account_by_number_pairs_even_if_not_a_bank_transfer(
+    session, imported_bank, statement_row, heal
+) -> None:
+    x = await imported_bank("X", identifier=X_ID)
+    y = await imported_bank("Y", identifier=Y_ID)
+    await statement_row(x, "-100", complete=FULL)
+    await statement_row(y, "100", bank_transfer=False, details=RowDetails(account_number=X_NUMBER))
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (x.id, y.id, "matched")
+    assert await placeholders(session) == []
