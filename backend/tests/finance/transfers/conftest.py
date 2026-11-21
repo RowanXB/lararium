@@ -1,9 +1,9 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -27,6 +27,7 @@ from lararium.modules.finance.ledger import (
     TransactionRecord,
     TransactionStatus,
     find_unbalanced_transactions,
+    post_transaction,
     upsert_connector_transaction,
 )
 from lararium.modules.finance.snapshots import record_snapshot
@@ -280,20 +281,23 @@ type RecordImport = Callable[..., Awaitable[None]]
 IMPORTED = (WHEN.date() - timedelta(days=1), WHEN.date() + timedelta(days=60))
 
 
-async def record_import_rows(
+@dataclass(frozen=True)
+class RowDetails:
+    """What an import row's file prints of its counterparty's bank account."""
+
+    sort_code: str | None = None
+    account_number: str | None = None
+    account_ending: str | None = None
+
+
+async def _insert_batch(
     session: AsyncSession,
     run: Run,
     account_id: UUID,
-    transaction_ids: list[UUID],
-    complete: tuple[date, date] = IMPORTED,
-    *,
-    keys: list[str] | None = None,
-) -> None:
-    """Record posted transactions as the rows of a committed statement import (M2) of their
-    account, listing `complete` in full. Matching takes a counterpart found by amount and
-    date only on days imports list in full (design §5.8), so a row posted as an import
-    is recorded as one. `keys`: the rows' dedupe keys, which a row imported again keeps
-    (its reference, source kind "import"); by default one per transaction."""
+    complete: tuple[date, date],
+    status: Literal["committed", "rolled_back"] = "committed",
+) -> UUID:
+    """A batch of the account's with the given status, listing `complete` in full."""
     config = QifProfileConfig(format="qif", date_format="%d/%m/%Y")
     profile = await run(create_profile, name=f"Statements {uuid4()}", config=config)
     document = await run(
@@ -303,7 +307,8 @@ async def record_import_rows(
         media_type="application/qif",
         source="finance.import",
     )
-    b, r, t, p = models.ImportBatch, models.ImportRow, models.Transaction, models.Posting
+    b = models.ImportBatch
+    committed = status == "committed"
     batch_id = await session.scalar(
         insert(b)
         .values(
@@ -314,8 +319,9 @@ async def record_import_rows(
             parser_version="test",
             document_id=document.id,
             filename="statement.qif",
-            status="committed",
+            status=status,
             committed_at=func.clock_timestamp(),
+            rolled_back_at=None if committed else func.clock_timestamp(),
             covered_from=complete[0],
             covered_to=complete[1],
             complete_from=complete[0],
@@ -324,9 +330,35 @@ async def record_import_rows(
         )
         .returning(b.id)
     )
+    assert batch_id is not None
+    return batch_id
+
+
+async def record_import_rows(
+    session: AsyncSession,
+    run: Run,
+    account_id: UUID,
+    transaction_ids: list[UUID],
+    complete: tuple[date, date] = IMPORTED,
+    *,
+    keys: list[str] | None = None,
+    details: Sequence[RowDetails] | None = None,
+) -> None:
+    """Record posted transactions as the rows of a committed statement import (M2) of their
+    account, listing `complete` in full. Matching takes a counterpart found by amount and
+    date only on days imports list in full (design §5.8), so a row posted as an import
+    is recorded as one. `keys`: the rows' dedupe keys, which a row imported again keeps
+    (its reference, source kind "import"); by default one per transaction. `details`: what
+    each row prints of its counterparty's bank account; by default nothing."""
+    r, t, p = models.ImportRow, models.Transaction, models.Posting
+    batch_id = await _insert_batch(session, run, account_id, complete)
     if keys is None:
         keys = [f"test:{t}" for t in transaction_ids]
-    for position, (transaction_id, key) in enumerate(zip(transaction_ids, keys, strict=True)):
+    if details is None:
+        details = [RowDetails()] * len(transaction_ids)
+    for position, (transaction_id, key, printed) in enumerate(
+        zip(transaction_ids, keys, details, strict=True)
+    ):
         posted = (
             await session.execute(
                 select(t.booking_date, t.occurred_at, t.description, p.instrument_id, p.quantity)
@@ -347,6 +379,9 @@ async def record_import_rows(
                 description=posted.description,
                 quantity=posted.quantity,
                 instrument_id=posted.instrument_id,
+                counterparty_sort_code=printed.sort_code,
+                counterparty_account_number=printed.account_number,
+                counterparty_account_ending=printed.account_ending,
                 dedupe_key=key,
                 raw={},
                 transaction_id=transaction_id,
@@ -358,3 +393,139 @@ async def record_import_rows(
 def record_import(session: AsyncSession, run: Run) -> RecordImport:
     """record_import_rows in this test's session."""
     return partial(record_import_rows, session, run)
+
+
+type ImportedBank = Callable[..., Awaitable[AccountRecord]]
+
+
+@pytest.fixture
+def imported_bank(run: Run) -> ImportedBank:
+    """A manual bank account valued from its transactions (so, as an import's account is),
+    optionally a sub-account of `main` and registered under `identifier`."""
+
+    async def _make(
+        name: str, *, identifier: str | None = None, main: AccountRecord | None = None
+    ) -> AccountRecord:
+        account = await run(
+            create_account,
+            name=name,
+            ledger_type="asset",
+            subtype="bank",
+            balance_mode="transactions",
+            parent_account_id=None if main is None else main.id,
+        )
+        if identifier is not None:
+            await run(assign_identifier, account.id, "uk_bank_account", identifier)
+        return account
+
+    return _make
+
+
+type StatementRow = Callable[..., Awaitable[UUID]]
+
+
+@pytest.fixture
+def statement_row(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    ids: SystemIds,  # transfer_contra needs the system accounts
+    record_import: RecordImport,
+) -> StatementRow:
+    """Post a row as an M2 import would, naming nobody (its contra from transfer_contra),
+    and record it as a committed import row printing `details`. `identifier_id`: the bank
+    account the posted transaction names, which a row naming one does."""
+
+    async def _post(
+        account: AccountRecord,
+        quantity: str,
+        *,
+        day: date = DAY,
+        details: RowDetails | None = None,
+        identifier_id: UUID | None = None,
+        bank_transfer: bool = True,
+        complete: tuple[date, date] = IMPORTED,
+    ) -> UUID:
+        contra = await transfer_contra(
+            session,
+            source=None,
+            own_account_id=account.id,
+            counterparty_identifier_id=identifier_id,
+            other_postings=0,
+        )
+        amount = Decimal(quantity)
+        row = await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=datetime.combine(day, time(), UTC),
+                description="Faster payment",
+                origin="manual",
+                postings=[
+                    PostingInput(account.id, gbp.id, amount),
+                    PostingInput(contra, gbp.id, -amount),
+                ],
+                counterparty=CounterpartyFields(
+                    identifier_id=identifier_id, bank_transfer=bank_transfer
+                ),
+            ),
+        )
+        await record_import(account.id, [row.id], complete, details=[details or RowDetails()])
+        return row.id
+
+    return _post
+
+
+type DuplicateRow = Callable[..., Awaitable[None]]
+
+
+@pytest.fixture
+def duplicate_row(session: AsyncSession, run: Run) -> DuplicateRow:
+    """A later batch's row that duplicates the transaction's committed import row, printing
+    `details`: the batch is committed, or rolled back."""
+
+    async def _add(
+        transaction_id: UUID,
+        details: RowDetails,
+        *,
+        batch_status: Literal["committed", "rolled_back"] = "committed",
+    ) -> None:
+        r = models.ImportRow
+        original = (
+            await session.execute(
+                select(
+                    r.id,
+                    r.account_id,
+                    r.booking_date,
+                    r.occurred_at,
+                    r.time_unit,
+                    r.description,
+                    r.quantity,
+                    r.instrument_id,
+                    r.dedupe_key,
+                ).where(r.transaction_id == transaction_id)
+            )
+        ).one()
+        batch_id = await _insert_batch(session, run, original.account_id, IMPORTED, batch_status)
+        await session.execute(
+            insert(r).values(
+                batch_id=batch_id,
+                account_id=original.account_id,
+                position=0,
+                kind="statement",
+                status="duplicate",
+                booking_date=original.booking_date,
+                occurred_at=original.occurred_at,
+                time_unit=original.time_unit,
+                description=original.description,
+                quantity=original.quantity,
+                instrument_id=original.instrument_id,
+                counterparty_sort_code=details.sort_code,
+                counterparty_account_number=details.account_number,
+                counterparty_account_ending=details.account_ending,
+                dedupe_key=original.dedupe_key,
+                duplicate_of=original.id,
+                raw={},
+            )
+        )
+
+    return _add

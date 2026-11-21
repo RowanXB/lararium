@@ -171,11 +171,8 @@ async def _set_contra(ctx: CommandContext, record: OwnRecord, account_id: UUID) 
 
 
 async def _registry_counterpart(session: AsyncSession, record: OwnRecord) -> UUID | None:
-    """The other own account the record's counterparty bank account is registered to."""
-    if record.counterparty_identifier_id is None:
-        return None
-    holder = await identifier_account(session, record.counterparty_identifier_id)
-    return None if holder == record.account_id else holder
+    """The other own account the record names (contra.eligible_records' holder)."""
+    return None if record.holder == record.account_id else record.holder
 
 
 def _accounts(record: OwnRecord, counterpart_id: UUID) -> tuple[UUID, UUID]:

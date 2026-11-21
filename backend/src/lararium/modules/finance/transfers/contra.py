@@ -25,6 +25,7 @@ from sqlalchemy import (
     and_,
     case,
     cast,
+    distinct,
     exists,
     false,
     func,
@@ -151,8 +152,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     In transit and the other on an account that is not a system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
-    contra_account_id, counterparty_identifier_id, holder (the account that bank account is
-    registered to), bank_transfer, source_kind, source_ref.
+    contra_account_id, counterparty_identifier_id, holder (the own account the record names:
+    the one its counterparty bank account is registered to, else the one registered under
+    the account number its import rows print alone), names_account (it names a bank
+    account, or its import rows print part of one), bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -187,6 +190,73 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         )
         .lateral("legs")
     )
+    # What the transaction's import rows print of their counterparty's bank account: its
+    # committed row, and the rows of committed batches that duplicate it (a later file
+    # printing what the first did not). Another lateral aggregate, one index lookup per
+    # record (import_rows_transaction, import_rows_duplicate_of).
+    c, r = (aliased(models.ImportRow, name=n) for n in ("committed_row", "printed_row"))
+    batch = aliased(models.ImportBatch, name="printed_batch")
+    only_number = and_(
+        r.counterparty_account_number.is_not(None), r.counterparty_sort_code.is_(None)
+    )
+    only_sort_code = and_(
+        r.counterparty_sort_code.is_not(None), r.counterparty_account_number.is_(None)
+    )
+    evidence = (
+        select(
+            type_coerce(
+                func.array_agg(
+                    distinct(func.regexp_replace(r.counterparty_account_number, r"\D", "", "g"))
+                ).filter(only_number),
+                ARRAY(String()),
+            ).label("numbers"),
+            type_coerce(
+                func.array_agg(
+                    distinct(func.regexp_replace(r.counterparty_sort_code, r"\D", "", "g"))
+                ).filter(only_sort_code),
+                ARRAY(String()),
+            ).label("sort_codes"),
+            func.bool_or(
+                or_(
+                    r.counterparty_sort_code.is_not(None),
+                    r.counterparty_account_number.is_not(None),
+                    r.counterparty_account_ending.is_not(None),
+                )
+            ).label("partial"),
+        )
+        .select_from(c)
+        .join(r, or_(r.id == c.id, r.duplicate_of == c.id))
+        .join(batch, batch.id == r.batch_id)
+        .where(
+            c.transaction_id == t.id,
+            c.status == "committed",
+            c.kind == "statement",
+            r.kind == "statement",
+            batch.status == "committed",
+        )
+        .lateral("evidence")
+    )
+    # The one own account registered under an account number alone.
+    n = aliased(models.AccountIdentifier, name="number_identifier")
+    number_holder = (
+        select(type_coerce(func.array_agg(distinct(n.account_id)), ARRAY(Uuid()))[1])
+        .where(
+            n.kind == "uk_bank_account",
+            n.account_id.is_not(None),
+            func.split_part(n.value, ":", 2) == evidence.c.numbers[1],
+        )
+        .having(func.count(distinct(n.account_id)) == 1)
+        .scalar_subquery()
+    )
+    holder = case(
+        (
+            t.counterparty_identifier_id.is_not(None),
+            # A lookup per record too, not a join, for the same reason.
+            select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
+        ),
+        (func.cardinality(evidence.c.numbers) == 1, number_holder),
+        else_=None,
+    )
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
@@ -198,16 +268,17 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             legs.c.quantity,
             legs.c.contra_account_id,
             t.counterparty_identifier_id,
-            # A lookup per record too, not a join, for the same reason.
-            select(i.account_id)
-            .where(i.id == t.counterparty_identifier_id)
-            .scalar_subquery()
-            .label("holder"),
+            holder.label("holder"),
+            or_(
+                t.counterparty_identifier_id.is_not(None),
+                func.coalesce(evidence.c.partial, false()),
+            ).label("names_account"),
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
         .join(legs, true())
+        .join(evidence, true())
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )
@@ -229,6 +300,7 @@ _OWN_RECORDS = Table(
     Column("contra_account_id", Uuid, nullable=False),
     Column("counterparty_identifier_id", Uuid),
     Column("holder", Uuid),
+    Column("names_account", Boolean, nullable=False),
     Column("bank_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
@@ -304,6 +376,7 @@ class OwnRecord:
     counterparty_identifier_id: UUID | None
     bank_transfer: bool
     source: tuple[str, str]
+    holder: UUID | None = None  # the own account it names (see eligible_records)
 
     @property
     def role(self) -> Literal["out", "in"]:
@@ -347,6 +420,7 @@ async def load_own_record(
         counterparty_identifier_id=row.counterparty_identifier_id,
         bank_transfer=row.bank_transfer,
         source=(row.source_kind, row.source_ref),
+        holder=row.holder,
     )
 
 

@@ -237,7 +237,8 @@ When money moves between two of your own accounts, Lararium changes both balance
 worth neither dips nor counts the money twice, even while it is on its way. It recognises a
 transfer by the other side's sort code and account number (names vary too much to be used), so
 it needs to know which bank accounts are yours. The examples use a Monzo connection and a
-manual account called "Bank A".
+manual account called "Bank A". An imported row that prints only the other side's account number
+(no sort code) identifies it too, when exactly one of your registered accounts has that number.
 
 ### Manual accounts: hybrid, with an opening snapshot
 
