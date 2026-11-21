@@ -1,7 +1,9 @@
 """The formats each supported bank exports, with a ready profile config (Decision 14).
 
-The UI offers these as "Add profile from catalog". For each institution the most
-information-complete format is the recommended one.
+The UI offers these as "Add profile from catalog". For each institution the recommended
+formats are the ones to import: a single format when it carries everything the others do,
+else every format that carries something none of the others does (importing several keeps
+each one's typed fields: the later file's rows are stored as duplicates, with their fields).
 """
 
 from dataclasses import dataclass
@@ -67,8 +69,11 @@ CATALOG: tuple[CatalogEntry, ...] = (
             amount_format=_GROUPED,
             card_types=_HSBC_CARD_TYPES,
         ),
+        # The arranged overdraft limit, which no other HSBC format prints.
+        recommended=True,
     ),
-    CatalogEntry("HSBC UK", "OFX", OfxProfileConfig(format="ofx")),
+    # The bank's own transaction ids (FITID), payee and memo apart, and the available balance.
+    CatalogEntry("HSBC UK", "OFX", OfxProfileConfig(format="ofx"), recommended=True),
     CatalogEntry(
         "HSBC UK",
         "CSV (transaction list)",
@@ -102,12 +107,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
             amount_format=_GROUPED,
             card_types=_LLOYDS_CARD_TYPES,
         ),
-        recommended=True,
     ),
+    # Every CSV field on each row, plus the statement summary and the account's details.
     CatalogEntry(
         "Lloyds",
         "PDF statement",
         PdfProfileConfig(format="pdf", layout="lloyds_statement", card_types=_LLOYDS_CARD_TYPES),
+        recommended=True,
     ),
     CatalogEntry("Lloyds", "QIF", QifProfileConfig(format="qif", date_format=_UK_DATE)),
     CatalogEntry(
@@ -116,9 +122,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
         recommended=True,
     ),
-    # Two accounts with different exports, so two entries: each account's PDF statement
-    # carries the most (the account, its summary, and for the current account each payment's
-    # other side, reference, card and exchange rates).
+    # Two accounts with different exports, so two entries. The savings PDF carries everything
+    # its CSV does; the current account's two formats each carry something the other lacks:
+    # the PDF the account, its summary and each payment's other side, reference, card and
+    # exchange rates, the CSV each payment's time, start date, type and fee.
     CatalogEntry(
         "Revolut Current",
         "PDF statement",
@@ -146,6 +153,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             include_only={"State": ["COMPLETED"]},
             card_types=_REVOLUT_CARD_TYPES,
         ),
+        recommended=True,
     ),
     CatalogEntry(
         "Revolut Savings",

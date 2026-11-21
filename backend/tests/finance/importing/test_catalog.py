@@ -20,7 +20,7 @@ def test_every_config_validates() -> None:
         assert config.format == entry.format
 
 
-def test_one_recommended_format_per_institution() -> None:
+def test_every_institution_has_a_recommended_format() -> None:
     recommended = Counter(entry.institution for entry in CATALOG if entry.recommended)
     institutions = {entry.institution for entry in CATALOG}
     assert institutions == {
@@ -32,7 +32,7 @@ def test_one_recommended_format_per_institution() -> None:
         "Tembo",
         "LemFi",
     }
-    assert recommended == Counter(dict.fromkeys(institutions, 1))
+    assert set(recommended) == institutions
 
 
 def test_decision_14_formats() -> None:
@@ -49,15 +49,19 @@ def test_decision_14_formats() -> None:
         "Tembo": ["pdf"],
         "LemFi": ["csv", "pdf"],
     }
-    recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
+    # One format when it carries everything the others do, else each that adds something.
+    recommended = {(e.institution, e.label) for e in CATALOG if e.recommended}
     assert recommended == {
-        ("HSBC UK", "pdf"),
-        ("Lloyds", "csv"),
-        ("BOC UK", "pdf"),
-        ("Revolut Current", "pdf"),
-        ("Revolut Savings", "pdf"),
-        ("Tembo", "pdf"),
-        ("LemFi", "pdf"),
+        ("HSBC UK", "PDF statement"),
+        ("HSBC UK", "OFX"),
+        ("HSBC UK", "midata CSV"),
+        ("Lloyds", "PDF statement"),
+        ("BOC UK", "PDF statement"),
+        ("Revolut Current", "PDF statement"),
+        ("Revolut Current", "CSV"),
+        ("Revolut Savings", "PDF statement"),
+        ("Tembo", "PDF statement"),
+        ("LemFi", "PDF statement"),
     }
 
 
