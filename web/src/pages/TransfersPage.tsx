@@ -255,13 +255,15 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
 
 function RecentItem({ transfer }: { transfer: TransferOut }) {
   const path = { transfer_id: transfer.id };
+  // A pair made by sort code alone is only rejected (the API refuses to unpair it): unpaired,
+  // neither record would be a transfer of its own to pair the other again from.
+  const unpairs = transfer.status === "matched" && !transfer.weak;
   const action = useWrite(async () => {
-    if (transfer.status === "matched") return unpairTransfer({ path, throwOnError: true });
+    if (unpairs) return unpairTransfer({ path, throwOnError: true });
     if (transfer.status === "rejected") return unrejectTransfer({ path, throwOnError: true });
     return rejectTransfer({ path, throwOnError: true });
   });
-  const label =
-    transfer.status === "matched" ? "Unpair" : transfer.status === "rejected" ? "Undo" : "Reject";
+  const label = unpairs ? "Unpair" : transfer.status === "rejected" ? "Undo" : "Reject";
   const busy = useBusy();
 
   return (

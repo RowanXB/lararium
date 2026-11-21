@@ -3707,6 +3707,11 @@
           "to_account_name": {
             "title": "To Account Name",
             "type": "string"
+          },
+          "weak": {
+            "default": false,
+            "title": "Weak",
+            "type": "boolean"
           }
         },
         "required": [

@@ -25,7 +25,7 @@ from lararium.modules.finance.ledger import (
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import transfer_contra
-from tests.finance.transfers.conftest import record_import_rows
+from tests.finance.transfers.conftest import RowDetails, record_import_rows
 
 FINANCE = "/api/v1/finance"
 WHEN = datetime(2026, 11, 2, 12, tzinfo=UTC)
@@ -648,9 +648,12 @@ async def test_lists_an_ibkr_account_identifier_and_refuses_to_register_one(clie
     assert refused.status_code == 422
 
 
-async def _statement_row(session, run, account_id: str, quantity: str) -> None:
+async def _statement_row(
+    session, run, account_id: str, quantity: str, *, details: RowDetails | None = None
+) -> None:
     """A bank transfer naming nobody, posted as a statement import would and recorded as a
-    row of a committed import listing its day in full."""
+    row of a committed import listing its day in full, which prints `details` of its
+    counterparty's bank account (nothing by default)."""
     gbp = await get_currency(session, "GBP")
     own = UUID(account_id)
     contra = await transfer_contra(
@@ -669,7 +672,8 @@ async def _statement_row(session, run, account_id: str, quantity: str) -> None:
     )
     # Listed in full from before the counterpart's window starts, so a pair is found.
     complete = (WHEN.date() - timedelta(days=6), WHEN.date() + timedelta(days=6))
-    await record_import_rows(session, run, own, [row.id], complete)
+    printed = None if details is None else [details]
+    await record_import_rows(session, run, own, [row.id], complete, details=printed)
 
 
 async def _set_main(client, account_id: str, main_account_id: str | None) -> Any:
@@ -731,3 +735,27 @@ async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None
     # Nothing changed.
     [account] = [a for a in (await client.get(f"{FINANCE}/accounts")).json() if a["id"] == other_id]
     assert account["parent_account_id"] is None
+
+
+async def test_a_pair_made_by_sort_code_alone_is_weak_and_only_rejected(
+    client, session, run
+) -> None:
+    x_id = await _manual(client, "X", "transactions")
+    h_id = await _manual(client, "H", "transactions")
+    await _statement_row(session, run, x_id, "-100", details=RowDetails(sort_code="404040"))
+    await _statement_row(session, run, h_id, "100")
+    assert (await _register(client, h_id, "404040:55556666")).status_code == 201
+    [transfer] = await _transfers(client)
+    assert (transfer["status"], transfer["weak"]) == ("matched", True)
+
+    refused = await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")
+
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail == {
+        "error": "invalid_input",
+        "message": "a pair made by sort code alone can only be rejected",
+    }
+    rejected = await client.post(f"{FINANCE}/transfers/{transfer['id']}/reject")
+    assert rejected.status_code == 200
+    assert (rejected.json()["status"], rejected.json()["weak"]) == ("rejected", False)

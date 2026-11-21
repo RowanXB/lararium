@@ -22,6 +22,7 @@ from sqlalchemy import (
     func,
     or_,
     select,
+    tuple_,
     union,
     update,
 )
@@ -165,6 +166,56 @@ async def list_transfers(
     if statuses is None:
         return await load_transfers(session)
     return await load_transfers(session, models.Transfer.status.in_(list(statuses)))
+
+
+async def weak_transfers(
+    session: AsyncSession, transfers: Collection[TransferRecord]
+) -> frozenset[UUID]:
+    """The ids of those of the transfers that a sort code alone paired (pairs.WEAK): matched,
+    neither own record naming another own account (eligible_records' holder), and no pair
+    decision linking them. Read from their records, not from the pair relation, since the
+    Transfers page asks on every load."""
+    legs = {
+        t.id: (t.out_transaction_id, t.in_transaction_id)
+        for t in transfers
+        if t.status == "matched"
+        and t.out_transaction_id is not None
+        and t.in_transaction_id is not None
+    }
+    if not legs:
+        return frozenset()
+    e = eligible_records(await system_account_ids(session))
+    rows = await session.execute(
+        select(
+            e.c.transaction_id, e.c.account_id, e.c.holder, e.c.source_kind, e.c.source_ref
+        ).where(e.c.transaction_id.in_([leg for pair in legs.values() for leg in pair]))
+    )
+    naming_nobody: dict[UUID, SourceRef] = {
+        row.transaction_id: (row.source_kind, row.source_ref)
+        for row in rows
+        if row.holder is None or row.holder == row.account_id
+    }
+    unnamed = {
+        transfer_id: (naming_nobody[sent], naming_nobody[received])
+        for transfer_id, (sent, received) in legs.items()
+        if sent in naming_nobody and received in naming_nobody
+    }
+    if not unnamed:
+        return frozenset()
+    d = models.TransferDecision
+    sources = [source for pair in unnamed.values() for source in pair]
+    # Stored once, from the record whose transfer it completed: either leg can be its subject.
+    decided = {
+        frozenset({(row.subject_kind, row.subject_ref), (row.other_kind, row.other_ref)})
+        for row in await session.execute(
+            select(d.subject_kind, d.subject_ref, d.other_kind, d.other_ref).where(
+                d.kind == "pair", tuple_(d.subject_kind, d.subject_ref).in_(sources)
+            )
+        )
+    }
+    return frozenset(
+        transfer_id for transfer_id, pair in unnamed.items() if frozenset(pair) not in decided
+    )
 
 
 def counterpart_window(

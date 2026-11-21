@@ -155,8 +155,11 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
     the one its counterparty bank account is registered to, else the one registered under
     the account number its import rows print alone, else the main account of a manual
-    sub-account for a bank transfer naming no bank account), names_account (it names a bank
-    account, or its import rows print part of one), bank_transfer, source_kind, source_ref.
+    sub-account for a bank transfer naming no bank account), weak_holder (apart from holder:
+    for a record naming no bank account in full and no account number, the one own account
+    registered under the sort code its import rows print alone), names_account (it names a
+    bank account, or its import rows print part of one), bank_transfer, source_kind,
+    source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -238,18 +241,23 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         )
         .lateral("evidence")
     )
-    # The one own account registered under an account number alone.
-    n = aliased(models.AccountIdentifier, name="number_identifier")
-    number_holder = (
-        select(type_coerce(func.array_agg(distinct(n.account_id)), ARRAY(Uuid()))[1])
-        .where(
-            n.kind == "uk_bank_account",
-            n.account_id.is_not(None),
-            func.split_part(n.value, ":", 2) == evidence.c.numbers[1],
+
+    def registered_alone(part: int, printed: ColumnElement[str]) -> ColumnElement[UUID]:
+        """The one own account registered under a UK bank account whose part (1, its sort
+        code; 2, its account number) is the printed one; NULL when none is, or several."""
+        n = aliased(models.AccountIdentifier, name=f"part_{part}_identifier")
+        return (
+            select(type_coerce(func.array_agg(distinct(n.account_id)), ARRAY(Uuid()))[1])
+            .where(
+                n.kind == "uk_bank_account",
+                n.account_id.is_not(None),
+                func.split_part(n.value, ":", part) == printed,
+            )
+            .having(func.count(distinct(n.account_id)) == 1)
+            .scalar_subquery()
         )
-        .having(func.count(distinct(n.account_id)) == 1)
-        .scalar_subquery()
-    )
+
+    number_holder = registered_alone(2, evidence.c.numbers[1])
     # The record's own account, looked up per record too, not joined, for the same reason.
     a = aliased(models.Account, name="own_account")
     own_account = (
@@ -278,6 +286,19 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         ),
         else_=None,
     )
+    # Weak evidence, apart from holder, which only pairs.weak_tier reads: the import rows
+    # print the counterparty's sort code alone, and one own account has it.
+    weak_holder = case(
+        (
+            and_(
+                t.counterparty_identifier_id.is_(None),
+                func.coalesce(func.cardinality(evidence.c.numbers), 0) == 0,
+                func.cardinality(evidence.c.sort_codes) == 1,
+            ),
+            registered_alone(1, evidence.c.sort_codes[1]),
+        ),
+        else_=None,
+    )
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
@@ -290,6 +311,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             legs.c.contra_account_id,
             t.counterparty_identifier_id,
             holder.label("holder"),
+            weak_holder.label("weak_holder"),
             or_(
                 t.counterparty_identifier_id.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
@@ -322,6 +344,7 @@ _OWN_RECORDS = Table(
     Column("contra_account_id", Uuid, nullable=False),
     Column("counterparty_identifier_id", Uuid),
     Column("holder", Uuid),
+    Column("weak_holder", Uuid),
     Column("names_account", Boolean, nullable=False),
     Column("bank_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),

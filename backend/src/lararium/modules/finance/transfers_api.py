@@ -168,6 +168,7 @@ async def _transfers_out(
     now = datetime.now(UTC)
     timezone = await get_timezone(session)
     today = now.astimezone(timezone).date()
+    weak = await transfers.weak_transfers(session, found)
     return [
         TransferOut(
             id=record.id,
@@ -191,6 +192,7 @@ async def _transfers_out(
             out_transaction_id=record.out_transaction_id,
             in_transaction_id=record.in_transaction_id,
             placeholder_transaction_id=record.placeholder_transaction_id,
+            weak=record.id in weak,
         )
         for record in found
     ]

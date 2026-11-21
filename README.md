@@ -239,6 +239,9 @@ transfer by the other side's sort code and account number (names vary too much t
 it needs to know which bank accounts are yours. The examples use a Monzo connection and a
 manual account called "Bank A". An imported row that prints only the other side's account number
 (no sort code) identifies it too, when exactly one of your registered accounts has that number.
+A row that prints only a sort code is weaker evidence: it pairs only with a row on the one
+registered account with that sort code, when that row names no bank account and each is the
+other's only candidate, and it never makes a transfer on its own.
 
 ### Manual accounts: hybrid, with an opening snapshot
 
@@ -331,7 +334,9 @@ What the buttons do (each decision is kept across re-syncs):
 - **Unpair** (on a matched transfer): these two records are not the same transfer, though each
   may still be one. They are never paired again automatically, and each is matched on its own.
   If that was a mistake, each one's transfer lists the other as an *Unpaired* candidate; Pair it
-  to undo.
+  to undo. A pair made by a sort code alone has **Reject** instead (**Undo** restores it): neither
+  of its records is a transfer without the other, so once unpaired, neither would offer the other
+  to pair again.
 - **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.

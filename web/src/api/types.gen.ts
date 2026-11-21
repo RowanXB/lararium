@@ -1741,6 +1741,10 @@ export type TransferOut = {
      * To Account Name
      */
     to_account_name: string;
+    /**
+     * Weak
+     */
+    weak?: boolean;
 };
 
 /**
