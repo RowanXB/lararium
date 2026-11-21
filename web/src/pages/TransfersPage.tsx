@@ -255,8 +255,9 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
 
 function RecentItem({ transfer }: { transfer: TransferOut }) {
   const path = { transfer_id: transfer.id };
-  // A pair made by sort code alone is only rejected (the API refuses to unpair it): unpaired,
-  // neither record would be a transfer of its own to pair the other again from.
+  // This page offers only Reject on a pair a sort code alone made: unpaired, neither record
+  // would be a transfer of its own to pair the other again from here (the API's Unpair takes
+  // it, and pairing the records through the API is its way back).
   const unpairs = transfer.status === "matched" && !transfer.weak;
   const action = useWrite(async () => {
     if (unpairs) return unpairTransfer({ path, throwOnError: true });
