@@ -61,18 +61,32 @@ _ACCOUNT_INFORMATION = _f(
     syepEnrollmentStatus taxLotMatchingMethod tradingPermissions"""
 )
 
-_CASH_REPORT = _f(
-    """accountId accountTransfers acctAlias advisorFees billPay billableCommissions
-    billableSalesTax bondInterest brokerFees brokerInterest carbonCredits cashSettlingMtm
-    cfdCharges clientFees commissionCreditsRedemption commissions currency debitCardActivity
-    depositWithdrawals deposits dividends donations endingCash endingSettledCash
-    excessFundSweep feesReceivables fromDate fxTranslationGainLoss insuredDepositInterest
-    internalTransfers ipoSubscription levelOfDetail linkingAdjustments model netTradesPurchases
-    netTradesSales other otherFees otherIncome paxosTransfers paymentInLieu realizedForexVm
-    realizedVm referralFee salesTax slbEndingCashCollateral slbNetCash
-    slbNetSecuritiesLentActivity slbNetSettledCash slbStartingCashCollateral startingCash
-    taxReceivables toDate transactionTax withdrawals withholding871m withholdingCollectedTax
-    withholdingTax"""
+_CASH_AMOUNTS = _f(
+    """accountTransfers advisorFees billPay billableCommissions billableSalesTax bondInterest
+    brokerFees brokerInterest carbonCredits cashSettlingMtm cfdCharges clientFees
+    commissionCreditsRedemption commissions debitCardActivity depositWithdrawals deposits
+    dividends donations endingCash endingSettledCash excessFundSweep feesReceivables
+    fxTranslationGainLoss insuredDepositInterest internalTransfers ipoSubscription
+    linkingAdjustments netTradesPurchases netTradesSales other otherFees otherIncome
+    paxosTransfers paymentInLieu realizedForexVm realizedVm referralFee salesTax
+    slbEndingCashCollateral slbNetCash slbNetSecuritiesLentActivity slbNetSettledCash
+    slbStartingCashCollateral startingCash taxReceivables transactionTax withdrawals
+    withholding871m withholdingCollectedTax withholdingTax"""
+)
+# The flows (not the balances, FX translation, linking adjustments or other) also come as month
+# and year to date totals, e.g. depositsMTD, depositsYTD: a week's statement gave them, a year's
+# did not.
+_CASH_PERIOD_AMOUNTS = _CASH_AMOUNTS - _f(
+    """startingCash endingCash endingSettledCash fxTranslationGainLoss linkingAdjustments other
+    slbEndingCashCollateral slbNetCash slbNetSecuritiesLentActivity slbNetSettledCash
+    slbStartingCashCollateral"""
+)
+# Each cash amount also comes split by segment: commodities (Com) and securities (Sec).
+_CASH_REPORT = (
+    _f("accountId acctAlias currency fromDate levelOfDetail model toDate")
+    | _CASH_AMOUNTS
+    | {f"{amount}{segment}" for amount in _CASH_AMOUNTS for segment in ("Com", "Sec")}
+    | {f"{amount}{period}" for amount in _CASH_PERIOD_AMOUNTS for period in ("MTD", "YTD")}
 )
 
 _NAV_AMOUNTS = _f(
