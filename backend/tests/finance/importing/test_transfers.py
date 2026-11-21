@@ -655,16 +655,22 @@ async def test_registering_tembo_after_its_import_counts_its_deposit_once(
     make_account: MakeAccount,
     connected: tuple[UUID, AccountRecord],
 ) -> None:
-    """The 2026-11-21 production case: a Tembo statement imported first, its identifier
-    registered after. The deposit on the statement's first row day pairs with the other
-    side instead of getting a placeholder beside it, so the balance is the statement's."""
+    """The 2026-11-21 production case, in its order: A's payment synced, naming Tembo's bank
+    account before it was registered; the Tembo statement imported; then the registration,
+    which matches history again. The deposit on the statement's first row day pairs with
+    the payment instead of getting a placeholder beside it, so the balance is the
+    statement's."""
     tembo = await make_account(name="Example Tembo", balance_mode="transactions")
+    for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
+        await run(get_or_create_system_account, key)
+    await _pay(session, run, gbp, connected, on=date(2027, 5, 3))
     rows = [TemboRow("03/05/2027", "Deposit", "£100.00")]
     content = tembo_pdf(TemboStatement([rows], opened="03/02/2027", valued="01/06/2027"))
     await commit((await stage(await _tembo_profile(run), content, account_id=tembo.id)).id)
+    assert await list_transfers(session) == []  # the bank account it names is nobody's yet
 
     await run(assign_identifier, tembo.id, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}")
-    await _pay(session, run, gbp, connected, on=date(2027, 5, 3))
+    await run(heal_transfers)
     assert await _status(session) == "matched"
     assert await _balance_after(session, tembo.id, date(2027, 6, 1)) == Decimal("100")
     assert await find_transfer_violations(session) == []
