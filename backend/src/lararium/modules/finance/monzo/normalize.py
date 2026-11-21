@@ -563,7 +563,6 @@ class _Normalizer:
         self.session_factory = ctx.session_factory
         self.connection_id = ctx.connection.id
         self.tz = tz
-        self.observed_at = datetime.now(UTC)
         stored_map = config.get(ACCOUNT_MAP_KEY)
         self.account_map: dict[str, JSONValue] = (
             dict(stored_map) if isinstance(stored_map, dict) else {}
@@ -579,7 +578,8 @@ class _Normalizer:
         self._places: dict[str, UUID] = {}
         # Recorded by finish(), once this sync's transactions are posted.
         self._snapshots: list[tuple[UUID, int, str, datetime]] = []
-        self._deleted_pots: list[UUID] = []
+        # Each deleted pot's account, with the day to close it on.
+        self._deleted_pots: list[tuple[UUID, date]] = []
         # Fields seen in a shape not mapped yet (structured-fields Decision 10), by their name.
         self.unmapped: set[str] = set()
 
@@ -729,9 +729,9 @@ class _Normalizer:
         """
         for snapshot in self._snapshots:
             await self._record_snapshot(*snapshot)
-        for account_id in self._deleted_pots:
+        for account_id, closed_on in self._deleted_pots:
             if (await get_account(self.session, account_id)).status == "open":
-                await close_account(self.command, account_id, local_date(self.observed_at, self.tz))
+                await close_account(self.command, account_id, closed_on)
 
     async def _record_snapshot(
         self, account_id: UUID, minor_units: int, currency_code: str, as_of: datetime
@@ -809,11 +809,12 @@ class _Normalizer:
         await set_source_details(self.command, account_id, details)
         as_of = fetched_at
         if pot.get("deleted"):
-            self._deleted_pots.append(account_id)
             # Its balance holds from its deletion, Monzo's last change to it, so the interest
-            # it earned (which no move shows) doesn't leave it short until this sync.
+            # it earned (which no move shows) doesn't leave it short until this sync; and it
+            # closes on that day.
             if (deleted_at := _readable_time(pot.get("updated"))) is not None:
                 as_of = min(deleted_at, fetched_at)
+            self._deleted_pots.append((account_id, local_date(as_of, self.tz)))
         self.snapshot(account_id, pot["balance"], pot["currency"], as_of)
 
     async def _pot_details(self, pot: dict[str, Any]) -> SourceDetails:

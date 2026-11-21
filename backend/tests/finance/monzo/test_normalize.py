@@ -22,6 +22,8 @@ from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity, RawRecord
 from lararium.core.raw_records import _content_hash, store_raw_record
+from lararium.core.settings_store import get_timezone
+from lararium.core.timeutil import local_date
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
@@ -242,7 +244,22 @@ async def test_deleted_pot_is_closed(session, run) -> None:
     await _normalize(session, connection, pots=[make_pot(balance=0, deleted=True)])
 
     pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
-    assert pot.status == "closed"
+    # Closed on the day Monzo deleted it (its last change), not on the day a sync saw it.
+    assert (pot.status, pot.closed_on) == ("closed", date(2026, 3, 1))
+
+
+async def test_deleted_pot_with_an_unreadable_update_is_closed_on_the_sync_day(
+    session, run
+) -> None:
+    connection = await _connection(run)
+
+    await _normalize(
+        session, connection, pots=[make_pot(balance=0, deleted=True, updated="not a time")]
+    )
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    today = local_date(datetime.now(UTC), await get_timezone(session))
+    assert (pot.status, pot.closed_on) == ("closed", today)
 
 
 async def test_pot_deleted_before_the_connection_keeps_its_moves(session, run) -> None:
@@ -294,7 +311,9 @@ async def test_pot_deleted_before_the_connection_keeps_its_moves(session, run) -
         (main, Decimal("101.00"), ""),
         (pot, Decimal("-101.00"), ""),
     ]
-    assert (await get_account(session, pot)).status == "closed"
+    closed = await get_account(session, pot)
+    deleted_on = local_date(emptied + timedelta(seconds=1), await get_timezone(session))
+    assert (closed.status, closed.closed_on) == ("closed", deleted_on)
 
     async def pot_balance(day: date) -> Decimal:
         rows = await balances_asof(session, day)
