@@ -116,7 +116,7 @@ function ProfileForm({
   );
 }
 
-// Each institution's formats, the recommended one first.
+// Each institution's formats, the recommended ones first.
 function byInstitution(entries: ImportCatalogEntryOut[]): [string, ImportCatalogEntryOut[]][] {
   const groups = new Map<string, ImportCatalogEntryOut[]>();
   for (const entry of entries) {

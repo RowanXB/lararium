@@ -477,31 +477,39 @@ SQL
 
 ### 格式
 
-在 Import profiles 页面，**Add from catalog** 会为下表每种银行格式创建一个现成的 profile；每家
-银行请用推荐的格式，它包含的信息最多。
+在 Import profiles 页面，**Add from catalog** 会为下表每种银行格式创建一个现成的 profile。每家
+银行请导入所有标为推荐的格式：某种格式包含了该银行其他格式的全部信息时，只推荐这一种；否则，凡是含有
+其他格式都没有的信息的格式都推荐。同一期间导入多种格式时，每笔交易只记一次：后导入文件的行作为重复
+保留，各自的字段都存下来，账本里的交易则取先提交的那个文件的信息。
 
 | 银行 | 格式 | 推荐 |
 |---|---|---|
 | HSBC UK | PDF 账单 | 是 |
-| HSBC UK | midata CSV、OFX、CSV（交易列表，无表头行）、QIF | |
-| Lloyds | CSV | 是 |
-| Lloyds | PDF 账单、QIF | |
+| HSBC UK | OFX | 是（银行自己的交易编号、分开的 payee 和 memo、可用余额） |
+| HSBC UK | midata CSV | 是（约定透支额度） |
+| HSBC UK | CSV（交易列表，无表头行）、QIF | |
+| Lloyds | PDF 账单 | 是 |
+| Lloyds | CSV、QIF | |
 | BOC UK | PDF 账单 | 是（唯一格式） |
 | Tembo | PDF 账单 | 是（唯一格式） |
 | LemFi | PDF 账单（GBP 账户和储蓄账户） | 是 |
 | LemFi | CSV（GBP 账户和储蓄账户） | |
 | Revolut Current | PDF 账单 | 是 |
-| Revolut Current | CSV | |
+| Revolut Current | CSV | 是 |
 | Revolut Savings | PDF 账单 | 是 |
 | Revolut Savings | CSV | |
+
+HSBC 的 PDF 有每行的交易类型代码、完整描述和当日最终余额，以及账单汇总和账户信息；OFX 补上 PDF 没印的
+内容（见上表），midata CSV 补上透支额度。无表头的交易列表 CSV 和 QIF 没有其他格式所没有的信息。Lloyds 的
+PDF 每行都有其 CSV 的全部字段（交易类型代码、余额、本账户的 sort code 和账号），另有账单汇总、产品名和地址。
 
 LemFi 的 PDF 包含其 CSV 的全部内容（相同的行，以及每行的时间和付款详情），还多出：账单期间、期初和
 期末余额、收入和支出合计、储蓄账户的利息、账户的 IBAN、sort code 和开户银行，以及储蓄利率。没有任何
 交易的期间的文件（LemFi 会为空月份导出这样的文件）会作为空文件被拒绝：没有可导入的内容。
 
-Revolut 的两个账户导出格式不同，所以各有自己的条目。活期账户的 CSV 比 PDF 多的只有交易类型、发起和
-完成时间以及手续费；PDF 多出账户信息（sort code、账号、IBAN、BIC）、余额汇总，以及每笔付款的参考、
-对方、所用的卡和外币付款的原币金额与汇率。储蓄账户的 PDF 包含 CSV 的全部行，另有账户信息、产品名和
+Revolut 的两个账户导出格式不同，所以各有自己的条目。活期账户的 CSV 有 PDF 没印的交易类型、发起和
+完成时间以及手续费；PDF 有 CSV 没有的账户信息（sort code、账号、IBAN、BIC）、余额汇总，以及每笔付款的
+参考、对方、所用的卡和外币付款的原币金额与汇率，所以两种都要导入。储蓄账户的 PDF 包含 CSV 的全部行，另有账户信息、产品名和
 每类交易的合计。
 
 PDF 账单由为该银行编写的版式读取，它会自我校验：汇总（期初和期末余额、收入和支出、笔数）必须等于

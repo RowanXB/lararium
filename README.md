@@ -560,23 +560,35 @@ names it (the next import naming it registers it again).
 
 ### Formats
 
-Under Import profiles, **Add from catalog** creates a ready profile for each bank format below;
-for each bank use the recommended one, which carries the most information.
+Under Import profiles, **Add from catalog** creates a ready profile for each bank format below.
+For each bank, import every recommended format: one when it carries everything the bank's other
+formats do, else each one that carries something none of the others does. Importing several
+formats of the same period counts each transaction once: the later file's rows are kept as
+duplicates, with their own fields, while the ledger's transaction takes its details from the
+file committed first.
 
 | Bank | Format | Recommended |
 |---|---|---|
 | HSBC UK | PDF statement | yes |
-| HSBC UK | midata CSV, OFX, CSV (transaction list, no header row), QIF | |
-| Lloyds | CSV | yes |
-| Lloyds | PDF statement, QIF | |
+| HSBC UK | OFX | yes (the bank's transaction ids, payee and memo apart, the available balance) |
+| HSBC UK | midata CSV | yes (the arranged overdraft limit) |
+| HSBC UK | CSV (transaction list, no header row), QIF | |
+| Lloyds | PDF statement | yes |
+| Lloyds | CSV, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
 | Tembo | PDF statement | yes (the only format) |
 | LemFi | PDF statement (GBP account and savings) | yes |
 | LemFi | CSV (GBP account and savings) | |
 | Revolut Current | PDF statement | yes |
-| Revolut Current | CSV | |
+| Revolut Current | CSV | yes |
 | Revolut Savings | PDF statement | yes |
 | Revolut Savings | CSV | |
+
+HSBC's PDF has each row's type code, full description and day-end balance, and the statement
+summary and account; its OFX adds what the PDF doesn't print (above), and its midata CSV the
+overdraft limit. The plain transaction CSV and the QIF carry nothing the others don't. Lloyds'
+PDF has every field of its CSV on each row (type code, balance, the account's sort code and
+number) plus the statement summary, the product and the address.
 
 LemFi's PDF carries everything its CSV does (the same rows, with each row's time and its
 payment details) and more: the statement period, opening and closing balance, money in and out,
@@ -585,9 +597,10 @@ A file of a period without transactions (LemFi exports one for an empty month) i
 empty: there is nothing to import.
 
 Revolut's two accounts export differently, so each has its own entries. The current account's
-CSV has only the payment's type, its start and completion times and its fee over the PDF; the
-PDF adds the account (sort code, account number, IBAN, BIC), the balance summary, and each
-payment's reference, other side, card and, for another currency, its amount there and the rates.
+CSV has the payment's type, its start and completion times and its fee, which the PDF doesn't
+print; the PDF has the account (sort code, account number, IBAN, BIC), the balance summary, and
+each payment's reference, other side, card and, for another currency, its amount there and the
+rates, which the CSV doesn't. So import both.
 The savings PDF has the CSV's rows plus the account, the product and a total for each kind of row.
 
 A PDF statement is read by a layout written for that bank, which checks itself: the summary
