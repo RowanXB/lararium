@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from xml.etree import ElementTree
 
-from lararium.modules.finance.ibkr.fields import SECTIONS
+from lararium.modules.finance.ibkr.fields import SECTIONS, SINGLE_ROW_SECTIONS
 
 # Container element of each row element; a section not listed gets "<Section>s".
 CONTAINERS: Mapping[str, str] = {
@@ -19,6 +19,7 @@ CONTAINERS: Mapping[str, str] = {
     "Transfer": "Transfers",
     "EquitySummaryByReportDateInBase": "EquitySummaryInBase",
     "StatementOfFundsLine": "StmtFunds",
+    "MTMPerformanceSummaryUnderlying": "MTMPerformanceSummaryInBase",
     "Order": "Trades",
     "Lot": "Trades",
     "WashSale": "Trades",
@@ -116,13 +117,23 @@ def _defaults(section: str, account: AccountSpec, end: date) -> dict[str, str]:
             "levelOfDetail": "TRANSFER",
         },
         "EquitySummaryByReportDateInBase": {"total": "1000"},
+        "ChangeInNAV": {"fromDate": _ymd(end), "toDate": _ymd(end), "endingValue": "1000"},
+        "StatementOfFundsLine": {
+            "levelOfDetail": "Currency",
+            "activityDescription": "Starting Balance",
+            "date": _ymd(end),
+            "balance": "100",
+        },
+        "MTMPerformanceSummaryUnderlying": {"description": "Total", "total": "0"},
     }
     merged = {**base, **extra.get(section, {})}
     if section == "ConversionRate":
         for name in ("accountId", "currency"):
             merged.pop(name)
-    if section == "CashReportCurrency":
+    if section in ("CashReportCurrency", "ChangeInNAV"):
         merged.pop("reportDate")
+    if section == "MTMPerformanceSummaryUnderlying":
+        merged.pop("currency")
     return merged
 
 
@@ -180,6 +191,11 @@ def build_statement(
                 if spec.account_id != account.account_id or spec.section == "AccountInformation":
                     continue
                 if spec.day is not None and by_day and spec.day != start:
+                    continue
+                if spec.section in SINGLE_ROW_SECTIONS:
+                    # The section element is the row (Change in NAV, one per statement).
+                    defaults = _defaults(spec.section, account, spec.day or period[1])
+                    _element(statement, spec.section, {**defaults, **spec.attributes})
                     continue
                 name = spec.container or CONTAINERS.get(spec.section, f"{spec.section}s")
                 if name not in containers:

@@ -13,7 +13,6 @@ from xml.parsers import expat
 
 from lararium.core.errors import DisplayableError
 from lararium.modules.finance.ibkr.fields import (
-    DERIVABLE_SECTIONS,
     EXECUTION_LEVEL,
     ROUTED_SECTIONS,
     SECTIONS,
@@ -153,8 +152,6 @@ def _statement_rows(
     found: list[Row] = []
     for container in statement:
         sections.add((account, container.tag))
-        if container.tag in DERIVABLE_SECTIONS:
-            continue
         if container.tag in SINGLE_ROW_SECTIONS:
             if container.attrib:
                 row = _row(container.tag, container, account, period, flagged)

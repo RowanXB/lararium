@@ -77,12 +77,27 @@ def test_unknown_section_with_rows_flagged() -> None:
     assert all(r.section != "Mystery" for r in statement.rows)
 
 
-def test_derivable_section_skipped_silently() -> None:
+def test_derivable_sections_are_read_and_unknown_ones_flagged() -> None:
+    # Every field the API returns is stored, derivable or not: these sections are read, and
+    # one that has never had rows is flagged once it has some, like any unknown section.
     statement = parse_statement(
-        build(RowSpec("StatementOfFundsLine", A1, amount="1"), accounts=ACCOUNTS[:1])
+        build(
+            RowSpec("StatementOfFundsLine", A1, amount="1"),
+            RowSpec("ChangeInNAV", A1, twr="0.5"),
+            RowSpec("MTMPerformanceSummaryUnderlying", A1),
+            RowSpec(
+                "FIFOPerformanceSummaryUnderlying", A1, container="FIFOPerformanceSummaryInBase"
+            ),
+            accounts=ACCOUNTS[:1],
+        )
     )
-    assert statement.flagged == frozenset()
-    assert {r.section for r in statement.rows} == {"AccountInformation"}
+    assert statement.flagged == {"FIFOPerformanceSummaryUnderlying"}
+    assert {r.section for r in statement.rows} == {
+        "AccountInformation",
+        "StatementOfFundsLine",
+        "ChangeInNAV",
+        "MTMPerformanceSummaryUnderlying",
+    }
 
 
 def test_summary_rows_skipped() -> None:

@@ -190,7 +190,7 @@ What that query returns (audit, 2026-11-18):
 **How the parser treats fields:**
 - **A required field is missing.** The sync fails, naming the section and field ("select it in the Flex query"). This is fail-closed: a missing id or date cannot be guessed.
 - **A section the ledger uses** (the plan's table). Every field the audit showed is typed. An attribute not in the table that has a value is flagged as a connection warning naming the section and field, never the value, and stays in the stored document.
-- **Sections the plan lists as derivable or empty** (Statement of Funds, MTM Performance Summary, Change in NAV and the like). They are not typed. They are flagged only if a section never seen with rows starts having them.
+- **Every field the API returns is typed, derivable or not** (owner, 2026-11-21). Change in NAV, the Statement of Funds (both levels) and the MTM Performance Summary by underlying have tables of their own. A section never seen with rows (Change in Position Values, the FIFO and MTD/YTD Performance Summaries, and the like) is flagged once it has some, like any unknown section.
 
 ### 5.3 Fetching
 
@@ -344,7 +344,7 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 - conversion rates go to `finance.fx_rates`, with source `ibkr`;
 - reported positions and ending cash go to `finance.balance_snapshots`, of kind `reported`.
 
-**A field derivable from stored data is not stored again:** `netCash`, `tradeMoney`, `positionValue` and `priorMtmPnl`.
+**A field derivable from stored data is stored too** (owner, 2026-11-21: every field the API returns has a column): `tradeMoney`, `netCash` and `netCashInBase` in `ibkr_trades`, `positionValue` and `positionValueInBase` in `ibkr_positions` and `ibkr_position_lots`, and a prior period position's `priorMtmPnl` in `ibkr_prior_period_positions`.
 
 **Everything else has a column in an IBKR table**, keyed by the ledger row it describes:
 
@@ -361,6 +361,10 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 | `finance.ibkr_trade_details` | account, level of detail, row | the order, closed-lot and wash-sale levels of Trades (executions are the ledger rows) |
 | `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation, each also as its commodities and securities parts, and each flow also as its month and year to date totals |
 | `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency, each also as its long and short parts |
+| `finance.ibkr_change_in_nav` | account, period | starting and ending value, MTM, realised, change in unrealised, deposits and withdrawals, dividends, interest, fees, commissions, taxes, FX translation, accrual changes, TWR, and the other changes, in base currency |
+| `finance.ibkr_statement_of_funds` | account, statement period, line | each line at both levels (base currency and each currency): date, report and settle dates, activity code and description, amount, debit, credit, balance, the trade's quantity, price, gross, commission and tax, its ids, and the security it names |
+| `finance.ibkr_mtm_performance` | account, statement period, row | each underlying's (and the total's) previous and closing quantity and price, transaction MTM, prior open MTM, commissions, other, total, with and without accruals |
+| `finance.ibkr_prior_period_positions` | account, security, date | price, prior MTM P/L, FX rate to base, level of detail, report date |
 
 These are IBKR's own tables. **Generic broker tables (a builder-check call):** whether eToro's or Trading 212's fields are shared enough for those tables is M6's call, made against those APIs once they are verified. Designing them now would be guesswork.
 

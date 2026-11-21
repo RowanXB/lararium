@@ -1,7 +1,8 @@
 """The Flex query's sections and fields: the single source for the parser and the normalizer.
 
 Names are IBKR's XML attribute names. Populated sections (Account Information, Cash Report,
-Cash Transactions, Conversion Rates, Transfers, NAV) use the spellings of a real statement.
+Cash Transactions, Conversion Rates, Transfers, NAV, Change in NAV, Statement of Funds, MTM
+Performance Summary) use the spellings of a real statement.
 Open Positions, Prior Period Positions, Trades and Corporate Actions had no real rows when this
 was written; their spellings come from IBKR's field reference, so a wrong one surfaces as a
 missing-required error or a flag on the first real row, never as silent loss.
@@ -41,12 +42,6 @@ PERSONAL_FIELDS = _f(
     street2ResidentialAddress cityResidentialAddress stateResidentialAddress
     countryResidentialAddress postalCodeResidentialAddress primaryEmail dateOfBirth
     beneficiaryDesignations accountRepName accountRepPhone masterName accountName"""
-)
-
-# Sections (container elements) whose content is derivable from what is stored; skipped silently.
-DERIVABLE_SECTIONS = _f(
-    """StmtFunds MTMPerformanceSummaryInBase ChangeInNAV ChangeInPositionValues
-    FIFOPerformanceSummaryInBase MTDYTDPerformanceSummary"""
 )
 
 _COMMON = _f("accountId acctAlias model currency fxRateToBase")
@@ -105,6 +100,42 @@ _EQUITY_SUMMARY = (
     _f("accountId acctAlias currency model reportDate")
     | _NAV_AMOUNTS
     | {f"{amount}{side}" for amount in _NAV_AMOUNTS for side in ("Long", "Short")}
+)
+
+# Every field the API returns is stored, derivable or not (owner, 2026-11-21): the Change in
+# NAV, the Statement of Funds and the MTM Performance Summary too.
+_CHANGE_IN_NAV = _f(
+    """accountId acctAlias currency fromDate model toDate advisorFees assetTransfers billPay
+    billableSalesTax brokerFees carbonCredits changeInBrokerFeeAccruals
+    changeInCGTWithholdingAccruals changeInDividendAccruals changeInIncentiveCouponAccruals
+    changeInInterestAccruals changeInLiteSurchargeAccruals changeInUnrealized clientFees
+    commissionCreditsRedemption commissionReceivables commissions commissionsAtPaxos
+    corporateActionProceeds costAdjustments debitCardActivity depositsWithdrawals dividends
+    donations endingValue excessFundSweep feesReceivables forexCommissions fxTranslation
+    grantActivity interest internalCashTransfers linkingAdjustments mtm mtmAtPaxos netFxTrading
+    other otherFees otherIncome paxosTransfers realized referralFee salesTax softDollars
+    startingValue taxReceivables transactionTax transferredPnlAdjustments twr withholding871m
+    withholdingTax withholdingTaxCollected"""
+)
+
+_STATEMENT_OF_FUNDS_LINE = (
+    _COMMON
+    | INSTRUMENT_FIELDS
+    | _f(
+        """levelOfDetail date reportDate settleDate activityCode activityDescription amount
+        balance credit debit tradeCommission tradeGross tradePrice tradeQuantity tradeTax
+        buySell tradeCode transactionID tradeID orderID actionID relatedTradeID
+        relatedTransactionID origTransactionID"""
+    )
+)
+
+_MTM_PERFORMANCE = (
+    _f("accountId acctAlias model")
+    | INSTRUMENT_FIELDS
+    | _f(
+        """reportDate code prevCloseQuantity prevClosePrice closeQuantity closePrice
+        transactionMtm priorOpenMtm commissions other otherWithAccruals total totalWithAccruals"""
+    )
 )
 
 _CONVERSION_RATE = _f("fromCurrency rate reportDate toCurrency")
@@ -238,10 +269,22 @@ SECTIONS: Mapping[str, SectionSpec] = {
     "EquitySummaryByReportDateInBase": _spec(
         "ibkr.equity_summary", "accountId currency reportDate total", _EQUITY_SUMMARY, None
     ),
+    "ChangeInNAV": _spec(
+        "ibkr.change_in_nav", "accountId currency fromDate toDate", _CHANGE_IN_NAV, None
+    ),
+    "StatementOfFundsLine": _spec(
+        "ibkr.statement_of_funds",
+        "accountId currency levelOfDetail activityDescription",
+        _STATEMENT_OF_FUNDS_LINE,
+        None,
+    ),
+    "MTMPerformanceSummaryUnderlying": _spec(
+        "ibkr.mtm_performance", "accountId description", _MTM_PERFORMANCE, None
+    ),
 }
 
 # Sections whose single row is the section element itself, its fields being its attributes.
-SINGLE_ROW_SECTIONS = frozenset({"AccountInformation"})
+SINGLE_ROW_SECTIONS = frozenset({"AccountInformation", "ChangeInNAV"})
 
 # Record types that no element is named after: the parser routes rows to them by container.
 ROUTED_SECTIONS = frozenset({"TradeDetail", "PositionLot"})

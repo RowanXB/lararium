@@ -158,6 +158,37 @@ def lot_key(attributes: Mapping[str, str]) -> str:
     return attributes.get("originatingTransactionID", "").strip() or _content_key(attributes)
 
 
+def _fields_key(attributes: Mapping[str, str], names: tuple[str, ...]) -> str:
+    # Named fields only: a query that adds fields later must not make the same row a new one.
+    return _content_key({name: attributes.get(name, "").strip() for name in names})
+
+
+def statement_of_funds_key(attributes: Mapping[str, str]) -> str:
+    """The key of a Statement of Funds line within its statement: what the line is (its
+    level, currency, dates, activity and transaction), not its amounts."""
+    return _fields_key(
+        attributes,
+        (
+            "levelOfDetail",
+            "currency",
+            "date",
+            "reportDate",
+            "activityCode",
+            "activityDescription",
+            "transactionID",
+            "tradeID",
+        ),
+    )
+
+
+def mtm_performance_key(attributes: Mapping[str, str]) -> str:
+    """The key of an MTM Performance Summary row within its statement: the underlying it is
+    for (or the total it is), not its amounts."""
+    return _fields_key(
+        attributes, ("assetCategory", "conid", "symbol", "description", "reportDate")
+    )
+
+
 def _quote(name: str) -> str:
     if _IDENTIFIER.fullmatch(name) is None:
         raise ValueError(f"not a column name: {name!r}")
@@ -252,3 +283,26 @@ async def upsert_cash_reports(ctx: CommandContext, key: Fields, values: Fields) 
 
 async def upsert_nav(ctx: CommandContext, key: Fields, values: Fields) -> bool:
     return await _upsert(ctx, "ibkr_nav", ("account_id", "report_date"), key, values)
+
+
+async def upsert_change_in_nav(ctx: CommandContext, key: Fields, values: Fields) -> bool:
+    return await _upsert(
+        ctx, "ibkr_change_in_nav", ("account_id", "from_date", "to_date"), key, values
+    )
+
+
+_PERIOD_ROW = ("account_id", "from_date", "to_date", "row_key")
+
+
+async def upsert_statement_of_funds(ctx: CommandContext, key: Fields, values: Fields) -> bool:
+    return await _upsert(ctx, "ibkr_statement_of_funds", _PERIOD_ROW, key, values)
+
+
+async def upsert_mtm_performance(ctx: CommandContext, key: Fields, values: Fields) -> bool:
+    return await _upsert(ctx, "ibkr_mtm_performance", _PERIOD_ROW, key, values)
+
+
+async def upsert_prior_period_positions(ctx: CommandContext, key: Fields, values: Fields) -> bool:
+    return await _upsert(
+        ctx, "ibkr_prior_period_positions", ("account_id", "instrument_id", "date"), key, values
+    )
