@@ -260,7 +260,39 @@ it("sets a manual account's main account", async () => {
   await vi.waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
 });
 
-it("offers no snapshots-only account as a main account", async () => {
+it("offers as main accounts only assets and liabilities whose postings count", async () => {
+  const base = {
+    institution_entity_id: null,
+    owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+    tax_wrapper: "none",
+    parent_account_id: null,
+    source_kind: "manual",
+    source_connection_id: null,
+    status: "open",
+    opened_on: null,
+    closed_on: null,
+    system: false,
+  };
+  const current = {
+    ...base,
+    id: "0190a0b0-0000-7000-8000-000000000005",
+    name: "Current account",
+    ledger_type: "asset",
+    subtype: "bank",
+    balance_mode: "hybrid",
+  };
+  const rent = {
+    ...base,
+    id: "0190a0b0-0000-7000-8000-000000000006",
+    name: "Rent",
+    ledger_type: "expense",
+    subtype: "other",
+    balance_mode: "transactions",
+  };
+  const { data } = await listAccounts();
+  vi.mocked(listAccounts).mockResolvedValueOnce({
+    data: [...(data ?? []), current, rent],
+  } as never);
   const user = userEvent.setup();
   render(
     <QueryClientProvider client={new QueryClient()}>
@@ -271,7 +303,9 @@ it("offers no snapshots-only account as a main account", async () => {
     await screen.findByRole("group", { name: "Main account of Ledger account" }),
   );
   await user.click(group.getByRole("combobox", { name: "Main account" }));
-  // Credit card is snapshots-only: valuation ignores its postings, so the API refuses it.
-  expect(await screen.findByRole("option", { name: "None" })).toBeTruthy();
+  expect(await screen.findByRole("option", { name: "Current account" })).toBeTruthy();
+  // Valuation ignores a snapshots-only account's postings (Credit card), and an expense
+  // account (Rent) is none of the owner's money: the API refuses both.
   expect(screen.queryByRole("option", { name: "Credit card" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "Rent" })).toBeNull();
 });
