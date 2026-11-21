@@ -412,6 +412,23 @@ async def test_pair_two_records_through_the_api(client, session, run) -> None:
     assert again.json()["status"] == "matched"
 
 
+async def test_pair_transactions_audit_row_names_both_records(client, session, run) -> None:
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out = await _connector_tx(session, run, a, "-100", bank_transfer=False)
+    in_id = await _hand_post(client, session, run, b_id, "100")
+
+    response = await client.post(
+        f"{FINANCE}/transactions/{out.id}/pair", json={"transaction_id": in_id}
+    )
+
+    assert response.status_code == 200
+    args = await session.scalar(
+        text("select args from core.audit_log where command = 'pair_transactions'")
+    )
+    assert args == {"transaction_id": str(out.id), "other_transaction_id": in_id}
+
+
 async def test_pair_transactions_refusals(client, session, run) -> None:
     a = await _connected(run, "A")
     b_id = await _manual(client, "B")

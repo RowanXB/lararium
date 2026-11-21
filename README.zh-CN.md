@@ -288,7 +288,9 @@ Snapshots 账户忽略分录，所以不能登记标识；它的 Identifiers 区
 参考号），不会自动生成转账。先在手动账户上手动录入另一侧，再通过 API 把这两条记录配对：
 `GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录（另一个账户、
 金额相反且相等、日期最近的在前），`POST /api/v1/finance/transactions/{id}/pair`，请求体
-`{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。点 Unpair 即可撤销。
+`{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。手动录入的那一侧必须是恰好两条分录的交易（该账户和 Unassigned），
+否则配对会被拒绝。点 Unpair 即可撤销；撤销后，两条没有写明对方账户的记录不再有转账，要恢复只能
+再通过同一个接口把它们重新配对（另一条记录仍会出现在候选列表里）。
 
 ### In transit 计入净资产
 

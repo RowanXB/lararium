@@ -294,7 +294,11 @@ async def pair_transactions(
 ) -> TransferOut:
     """The owner says two own records are one transfer, whether or not either is in one.
     Undone by unpairing the resulting transfer."""
-    args = _args(body.model_dump(mode="json"), transaction_id=transaction_id)
+    # _args merges the body over the path, so its own transaction_id would hide the path's.
+    args: dict[str, JSONValue] = {
+        "transaction_id": str(transaction_id),
+        "other_transaction_id": str(body.transaction_id),
+    }
     async with healing_command(session, actor, "pair_transactions", args) as ctx:
         record = await transfers.pair_records(ctx, transaction_id, body.transaction_id)
     [out] = await _transfers_out(session, [record])

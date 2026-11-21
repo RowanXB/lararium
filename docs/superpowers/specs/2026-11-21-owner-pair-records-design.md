@@ -74,7 +74,7 @@ Synthetic tests:
 - A manual record pairs with an imported row.
 - Each refusal above returns 422 and stores nothing.
 - Unpair separates them. The candidates endpoint then still lists the other record, and pairing it again works.
-- The candidates endpoint orders by date distance, excludes matched legs and `never_pair` partners, and caps the list at 20.
+- The candidates endpoint orders by date distance, excludes matched legs and rejected records, lists `never_pair` partners, and caps the list at 20.
 
 Then `make check` on docker-test.
 
