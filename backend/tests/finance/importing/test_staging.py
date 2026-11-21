@@ -987,9 +987,16 @@ async def test_0026_gives_tembo_batches_imported_before_their_full_history(
     session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
 ) -> None:
     """0026 gives a Tembo batch committed when only the days between its first and last row
-    counted what staging gives now; another bank's batch is left as it was."""
-    account = await make_account(name="Example Tembo", balance_mode="transactions")
-    batch_id = await _tembo_batch(run, stage, account.id)
+    counted what staging gives now. It leaves another bank's batch as it was, and a Tembo
+    batch whose printed dates don't hold its rows, which staging would now refuse: one
+    with a row before its Account open date, and one valued before it opened (its period
+    would run backwards)."""
+    tembo = [
+        await make_account(name=f"Example Tembo {n}", balance_mode="transactions") for n in range(3)
+    ]
+    batch_id, row_before_opening, valued_before_opening = [
+        await _tembo_batch(run, stage, account.id) for account in tembo
+    ]
     columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
     other = await stage(
         await _csv_profile(run, columns=columns), HEADER + "10/11/2026,Coffee,-3.50\n"
@@ -997,28 +1004,38 @@ async def test_0026_gives_tembo_batches_imported_before_their_full_history(
     now = await _tembo_state(session, batch_id)
     other_now = await _tembo_state(session, other.id)
 
-    # As 0026 finds it: the rows' span, 3 to 10 May, and the days strictly between.
-    await session.execute(
-        text(
-            "UPDATE finance.import_batches SET covered_from = '2027-05-03', "
-            "covered_to = '2027-05-10', complete_from = '2027-05-04', "
-            "complete_to = '2027-05-09' WHERE id = :b"
-        ),
-        {"b": batch_id},
-    )
-    await session.execute(
-        text(
-            "UPDATE finance.import_statements SET period_from = '2027-05-03', "
-            "period_to = '2027-05-10' WHERE batch_id = :b"
-        ),
-        {"b": batch_id},
-    )
+    # As 0026 finds them: the rows' span, 3 to 10 May, and the days strictly between.
+    for found in (batch_id, row_before_opening, valued_before_opening):
+        await session.execute(
+            text(
+                "UPDATE finance.import_batches SET covered_from = '2027-05-03', "
+                "covered_to = '2027-05-10', complete_from = '2027-05-04', "
+                "complete_to = '2027-05-09' WHERE id = :b"
+            ),
+            {"b": found},
+        )
+        await session.execute(
+            text(
+                "UPDATE finance.import_statements SET period_from = '2027-05-03', "
+                "period_to = '2027-05-10' WHERE batch_id = :b"
+            ),
+            {"b": found},
+        )
+    # Valued on 1 Jun: opened on 5 May, after the row of 3 May; or on 2 Jun.
+    opened = {row_before_opening: date(2027, 5, 5), valued_before_opening: date(2027, 6, 2)}
+    for found, day in opened.items():
+        await session.execute(
+            text("UPDATE finance.import_statements SET account_opened_on = :o WHERE batch_id = :b"),
+            {"o": day, "b": found},
+        )
+    left = {b: await _tembo_state(session, b) for b in (row_before_opening, valued_before_opening)}
     assert await _tembo_state(session, batch_id) != now
     migration = _migration("0026_finance_tembo_full_history")
     await session.execute(text(migration.PERIOD))
     await session.execute(text(migration.COVERAGE))
     assert await _tembo_state(session, batch_id) == now
     assert await _tembo_state(session, other.id) == other_now
+    assert {b: await _tembo_state(session, b) for b in left} == left
 
 
 async def test_rows_keep_what_their_file_gave_the_time_to(
