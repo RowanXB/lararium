@@ -511,14 +511,19 @@ review page warns you first. A later import that needs an adjustment usually mea
 period is missing: discard it and import the gap first. Hybrid accounts take no adjustment,
 because their snapshots anchor the balance.
 
-**Everything the file says is stored.** Each row keeps its date and value date, payee and memo,
+**Everything the file says is stored.** Each row keeps its date and value date, the time of day
+when the file gives one and what it gives it to (`time_unit`: `day` when the file gives only a
+date, so the row sits at that day's midnight, else `minute` or `second`), payee and memo,
 cheque number, the bank's type code, counterparty name, sort code, account number and payment
 reference, and further fields where a statement prints them (payment kind, bank reference,
-purpose code, remittance text, counterparty bank), each in its own column, plus the whole source
-row. Each statement keeps its period, opening and closing balance, money in and out, payment
+purpose code, remittance text, counterparty bank, the last digits of a masked counterparty
+account; for Revolut, when a payment was started, the card it was made with, and for a payment
+in another currency its amount there and the bank's and the ECB's rates), each in its own
+column, plus the whole source row. Each statement keeps its period,
+opening and closing balance, money in and out, interest paid when it totals that apart, payment
 counts, reference number and date, the account as printed (type, name, sort code, account
-number, IBAN, BIC, customer number, branch), the arranged overdraft limit and its interest rate
-table. The account a file names must agree with the earlier imports into the same ledger
+number, IBAN, BIC, customer number, branch, the bank holding it), the arranged overdraft limit
+and its interest rates (with the days a rate applies on and how often it pays, when printed). The account a file names must agree with the earlier imports into the same ledger
 account, or the upload is refused (the message shows only the last four digits).
 
 **Imports and transfers.** Committing a statement registers the sort code and account number it
@@ -554,16 +559,45 @@ for each bank use the recommended one, which carries the most information.
 | Lloyds | PDF statement, QIF | |
 | BOC UK | PDF statement | yes (the only format) |
 | Tembo | PDF statement | yes (the only format) |
+| LemFi | PDF statement (GBP account and savings) | yes |
+| LemFi | CSV (GBP account and savings) | |
+| Revolut Current | PDF statement | yes |
+| Revolut Current | CSV | |
+| Revolut Savings | PDF statement | yes |
+| Revolut Savings | CSV | |
+
+LemFi's PDF carries everything its CSV does (the same rows, with each row's time and its
+payment details) and more: the statement period, opening and closing balance, money in and out,
+the savings account's interest, the account's IBAN, sort code and bank, and the savings rate.
+A file of a period without transactions (LemFi exports one for an empty month) is refused as
+empty: there is nothing to import.
+
+Revolut's two accounts export differently, so each has its own entries. The current account's
+CSV has only the payment's type, its start and completion times and its fee over the PDF; the
+PDF adds the account (sort code, account number, IBAN, BIC), the balance summary, and each
+payment's reference, other side, card and, for another currency, its amount there and the rates.
+The savings PDF has the CSV's rows plus the account, the product and a total for each kind of row.
 
 A PDF statement is read by a layout written for that bank, which checks itself: the summary
 (opening and closing balance, money in and out, payment counts) must equal the rows, every
 printed balance must follow from the amounts, every row must have exactly one amount, a date
-inside the statement period and a type code, and every word in the table must belong to a row.
-Tembo prints no opening balance and no totals: there its Plan value must equal the rows' last
-balance, its transaction type gives each amount's direction, and its page numbers and period
-(first to last row) must leave nothing out. A Tembo statement is made on demand, so like an
-export it lists in full only the days between its first and last. A statement that doesn't add
-up is refused as a whole, naming the failed check, rather than imported with wrong numbers. You can import different formats of the same account over
+inside the statement period and a type code (where the bank prints them; LemFi doesn't), and
+every word in the table must belong to a row. Revolut's current account prints no type codes:
+its card payments are told by their card. Its pending and reverted payments, which the summary
+leaves out, are kept as skipped rows. Only one currency of a Revolut statement may show any
+money; a statement with two is refused. A statement made on or before the last day of its
+period (Revolut's, when the period runs to the day you download it) lists that day only in
+part, as an export does, and its closing balance, taken when it was made, is kept with no date;
+end a Revolut statement on a day that is over to have it all. Tembo prints no opening balance
+and no totals: there its Plan value must equal the rows' last balance, its transaction type
+gives each amount's direction, and its page numbers and period (first to last row) must leave
+nothing out. A Tembo statement is made on demand, so like an export it lists in full only the
+days between its first and last. LemFi's money in and out totals may each be a penny below their
+rows' sum (LemFi cuts them down to the penny); interest and the closing balance must still
+follow from the rows exactly. A LemFi statement must also number all its pages ("Page n of
+N"), so one missing a page is refused.
+A statement that doesn't add up is refused as a whole, naming the failed check, rather than
+imported with wrong numbers. You can import different formats of the same account over
 overlapping days, for example PDF statements for the past and the OFX export for the weeks
 since, in either order: rows on days an earlier import already covers are matched against it.
 
@@ -584,18 +618,30 @@ by amount and date (below).
   `skip_footer_rows` (0–20) and `overdraft_footer_label` (the first cell of the footer line
   with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
   another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
-  `newest_first`), `sign` (below) and `amount_format` (`decimal_separator`, `.` or `,`;
-  `thousands_separator`, none by default, or `,` `.` space `'`).
+  `newest_first`), `sign` (below), `amount_format` (`decimal_separator`, `.` or `,`;
+  `thousands_separator`, none by default, or `,` `.` space `'`) and `currency` (every row's
+  currency, for a file that states it once rather than per row, such as LemFi's `Money in
+  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column). A line that
+  repeats the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
   `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
-  `counterparty_account_number`, `reference` (the payment reference), and the statement's own
-  `account_sort_code` and `account_number`.
+  `counterparty_account_number`, `reference` (the payment reference), `started_at` (when the
+  payment was started, in `date_format`, which must then have a time; `date` is when it
+  completed), and the statement's own `account_sort_code`, `account_number` and `account_type`
+  (its product, e.g. Revolut's `Product`; every row must give the same).
+- **`extract`** reads typed fields out of a column that holds several:
+  `[{"column": "Details", "patterns": ["<regex>", ...]}]`. The first pattern that matches a
+  non-empty cell in full fills the fields its named groups name (`payee`, `memo`,
+  `check_number`, `counterparty_name`, `counterparty_sort_code`, `counterparty_account_number`,
+  `counterparty_account_ending`, `counterparty_bank`, `reference`); a cell no pattern matches
+  makes the row an error. A field comes from one place: a mapped column or one extract.
 - **`ofx`**: `sign`.
 - **`qif`**: `date_format`, `encoding`, `amount_format` (`,` thousands by default) and `sign`.
-- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement` or
-  `tembo_statement`.
+- **`pdf`**: `layout`: `hsbc_uk_statement`, `lloyds_statement`, `boc_uk_statement`,
+  `revolut_current_statement`, `revolut_savings_statement`, `tembo_statement` or
+  `lemfi_statement`.
 
 **Signs.** Profiles speak of **inflow** (the account's balance goes up) and **outflow**. With
 one `amount` column, `sign` says which way it points: `inflow_positive` (the default) or
@@ -606,9 +652,17 @@ purchases as positive numbers needs `"sign": "outflow_positive"`.
 
 **Duplicates.** A row is a duplicate when a committed row of the same account has the same key:
 its external ID (an OFX `FITID`, or a mapped `external_id` column) when it has one; otherwise its
-date, amount, currency, description and running balance; otherwise those without the balance
-plus how many identical rows come before it in the same file, so two real identical purchases on
-one day are both imported, and both are duplicates when the file comes again. Files in different
+date, amount, currency, description and running balance (with the time of day, when the file
+gives one, only for rows whose other fields are all alike: money in and back out twice a day can
+leave the same balance); otherwise those without the balance. Either of the last two also counts
+how many identical rows come before it in the same file, so two real identical purchases on one
+day are both imported, and both are duplicates when the file comes again; rows with a balance
+are counted so only in a file without times of day (with times, rows alike to their time are an
+error). The running balance can repeat when it comes back to the same figure on the same day
+(the same transfer in twice, with a payment between). The count matches across files because a
+bank's file never starts partway through a day, though it can end partway through one (an
+export taken during the day): each file lists a day's rows from its first, so the nth such row
+is the same row in every file. Files in different
 formats don't share keys, so on days an earlier import already covers, rows are matched to that
 import's rows by date and amount instead: the matched ones are duplicates and any other is an
 error. A file that lacks a row the earlier import has on those days is refused at upload; if
@@ -623,8 +677,10 @@ pick GBP at upload, and import into a manual `transactions` account to try the f
 
 The tests use synthetic files. To check that your own statements still import correctly, for
 example after changing the import code, put each bank's files in a folder of its own, named
-starting `HSBC`, `Lloy` (Lloyds), `BOC` or `Tembo`, one account per folder, all under one directory, and
-run:
+starting `HSBC`, `Lloy` (Lloyds), `BOC`, `Revolut`, `Tembo` or `LemF` (LemFi), one account
+per folder (LemFi's GBP and savings accounts each get one; for Revolut, say `Revolut current`
+and `Revolut savings`: the files tell which account a folder holds), all under one directory,
+and run:
 
 ```bash
 make real-check REAL_ROOT="$HOME/Downloads"

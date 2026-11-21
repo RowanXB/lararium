@@ -732,7 +732,445 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
     return pdf.finish()
 
 
+# LemFi ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LemfiRow:
+    date: str  # "30 May, 2027"
+    description: tuple[str, ...]  # its lines, as wrapped
+    details: tuple[str, ...] = ()  # printed smaller, under the description
+    paid_out: str | None = None
+    paid_in: str | None = None
+    time: str | None = "13:28"
+    balance: str | None = None  # None: the running balance
+
+
+@dataclass
+class LemfiStatement:
+    pages: list[list[LemfiRow]]
+    savings: bool = False
+    opening: str = "0.00"
+    period: str = "01 May, 2027 - 31 May, 2027"
+    # Overrides of the summary's figures, by label ("Money in": "12.34").
+    summary: dict[str, str] = field(default_factory=dict[str, str])
+    iban: str = "GB99EXAM40123412345678"
+    sort_code: str = "401234"
+    bank: str = "Example Bank"
+    rate: str = (
+        "4.10% AER (4.02% Gross, paid monthly) from 02 May 2027 to 29 October 2027. Interest "
+        "statements are provided monthly and yearly."
+    )
+    # The last row of each page but the last prints its time and further lines on the next.
+    carry_over: bool = False
+    # The page count the footers print, when not the real one (a statement missing a page).
+    printed_pages: int | None = None
+    # A page (from 1) whose table header doesn't print as the layout knows it.
+    unreadable_header_page: int | None = None
+    extra: list[Extra] = field(default_factory=list[Extra])
+
+
+_LEMFI_FONT, _LEMFI_BOLD = "Helvetica", "Helvetica-Bold"
+_LEMFI_OUT, _LEMFI_IN, _LEMFI_BALANCE = 357.0, 460.0, 563.0
+
+
+def _lemfi_title(pdf: _Pdf, statement: LemfiStatement) -> None:
+    title = "Savings statement" if statement.savings else "GBP Statement"
+    pdf.text(563.0, 37.0, title, size=20, font=_LEMFI_BOLD, right=True)
+    pdf.text(563.0, 62.4, "Generated on 19 Jun, 2027", size=10, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_header(pdf: _Pdf, top: float) -> None:
+    pdf.text(32.0, top, "DATE", size=10, font=_LEMFI_BOLD)
+    pdf.text(102.0, top, "DESCRIPTION", size=10, font=_LEMFI_BOLD)
+    for x, label, right in (
+        (269.8, "MONEY OUT", _LEMFI_OUT),
+        (383.4, "MONEY IN", _LEMFI_IN),
+        (480.0, "BALANCE", _LEMFI_BALANCE),
+    ):
+        pdf.text(x, top, label, size=10, font=_LEMFI_BOLD)
+        pdf.text(right, top + 0.7, "(GBP)", size=9, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_footer(pdf: _Pdf, number: int, total: int) -> None:
+    pdf.text(32.0, 798.4, "© 2027 LemFi. All rights reserved.", size=10, font=_LEMFI_FONT)
+    pdf.text(563.0, 798.3, f"Page {number} of {total}", size=10, font=_LEMFI_FONT, right=True)
+
+
+def _lemfi_lines(row: LemfiRow) -> list[tuple[float, str, float]]:
+    """A row's lines below its first: (offset from the row's top, text, size)."""
+    lines = [(16.0 * n, line, 10.0) for n, line in enumerate(row.description[1:], start=1)]
+    below = 16.0 * len(row.description) - 1.3
+    lines += [(below + 12.6 * n, line, 9.0) for n, line in enumerate(row.details)]
+    return lines
+
+
+def _wrapped(value: str, width: int) -> list[str]:
+    lines: list[str] = []
+    for word in value.split():
+        if lines and len(lines[-1]) + len(word) < width:
+            lines[-1] += f" {word}"
+        else:
+            lines.append(word)
+    return lines
+
+
+def lemfi_pdf(statement: LemfiStatement) -> bytes:
+    pdf = _Pdf(595.28, 841.88)
+    rows = [row for page in statement.pages for row in page]
+    opening = _plain(statement.opening)
+    interest = [_plain(r.paid_in) for r in rows if r.paid_in and "Interest" in r.description[0]]
+    paid_in = [_plain(r.paid_in) for r in rows if r.paid_in and "Interest" not in r.description[0]]
+    paid_out = [_plain(row.paid_out) for row in rows if row.paid_out]
+    total_in, total_out = sum(paid_in, Decimal(0)), sum(paid_out, Decimal(0))
+    closing = opening + total_in + sum(interest, Decimal(0)) - total_out
+    labels = {
+        "Opening balance": _money(opening),
+        "Money out": _money(total_out),
+        "Money in": _money(total_in),
+    }
+    if statement.savings:
+        labels["Interest accrued"] = _money(sum(interest, Decimal(0)))
+    labels |= {"Closing balance": _money(closing)} | statement.summary
+    info_pages = 1 if statement.savings else 0
+    total = statement.printed_pages or len(statement.pages) + info_pages
+
+    _lemfi_title(pdf, statement)
+    pdf.text(32.0, 123.8, "A Example", size=16, font=_LEMFI_BOLD)
+    for n, line in enumerate(("1 Example Street,Exampletown,", "Exampleshire", "EX1 2MP")):
+        pdf.text(32.0, 151.3 + 15.6 * n, line, size=12, font=_LEMFI_FONT)
+    if not statement.savings:
+        for top, label, value in (
+            (122.6, ("Account", "number"), statement.iban),
+            (157.8, ("Bank", "name"), statement.bank),
+            (193.0, ("Sort code",), statement.sort_code),
+        ):
+            for n, part in enumerate(label):
+                pdf.text(331.2, top + 15.6 * n, part, size=12, font=_LEMFI_BOLD)
+            pdf.text(400.5, top, value, size=12, font=_LEMFI_FONT)
+    pdf.text(32.0, 239.0, f"Statement period {statement.period}", size=16, font=_LEMFI_BOLD)
+    step = 530.8 / len(labels)
+    for n, (label, value) in enumerate(labels.items()):
+        x = 32.0 + step * n
+        pdf.text(x, 295.5, label, size=12, font=_LEMFI_FONT)
+        # A long figure wraps below its currency.
+        if len(value) >= 9:
+            pdf.text(x, 315.9, "GBP", size=14, font=_LEMFI_BOLD)
+            pdf.text(x, 334.0, value, size=14, font=_LEMFI_BOLD)
+        else:
+            pdf.text(x, 315.9, f"GBP {value}", size=14, font=_LEMFI_BOLD)
+    pdf.text(32.0, 389.9, "Your transactions", size=14, font=_LEMFI_BOLD)
+    _lemfi_header(pdf, 435.1)
+
+    running = opening
+    top = 470.0
+    carried: list[tuple[float, str, float]] = []
+    for number, page_rows in enumerate(statement.pages, start=1):
+        if number > 1:
+            pdf.next_page()
+            _lemfi_title(pdf, statement)
+            if number != statement.unreadable_header_page:
+                _lemfi_header(pdf, 120.0)
+            top = 155.0
+            for offset, line, size in carried:
+                pdf.text(32.0 if size == 0 else 102.0, top + offset, line, size=size or 10)
+            top += (carried[-1][0] + 34.0) if carried else 0
+            carried = []
+        for n, row in enumerate(page_rows):
+            pdf.text(32.0, top, row.date, size=10, font=_LEMFI_FONT)
+            pdf.text(102.0, top, row.description[0], size=10, font=_LEMFI_FONT)
+            for amount, x in ((row.paid_out, _LEMFI_OUT), (row.paid_in, _LEMFI_IN)):
+                if amount is not None:
+                    pdf.text(x, top, amount, size=10, font=_LEMFI_FONT, right=True)
+            running += _plain(row.paid_in or "0") - _plain(row.paid_out or "0")
+            balance = row.balance or _money(running)
+            pdf.text(_LEMFI_BALANCE, top, balance, size=10, font=_LEMFI_FONT, right=True)
+            below = _lemfi_lines(row)
+            # size 0 marks the time, printed in the date column.
+            if row.time is not None:
+                below = [(16.0, row.time, 0.0), *below]
+            last = n == len(page_rows) - 1 and number < len(statement.pages)
+            if statement.carry_over and last:
+                carried = [(offset - below[0][0], line, size) for offset, line, size in below]
+                below = []
+            for offset, line, size in below:
+                pdf.text(32.0 if size == 0 else 102.0, top + offset, line, size=size or 10)
+            top += max([offset for offset, _, _ in below], default=0.0) + 34.0
+        if number == len(statement.pages):
+            pdf.text(
+                32.0,
+                top + 10,
+                "LemFi is a trading name of Example Payments Limited.",
+                size=10,
+                font=_LEMFI_FONT,
+            )
+        _lemfi_footer(pdf, number, total)
+        pdf.extras(statement.extra)
+    if statement.savings:
+        pdf.next_page()
+        _lemfi_title(pdf, statement)
+        pdf.text(32.0, 120.0, "Account information", size=14, font=_LEMFI_BOLD)
+        pdf.text(40.0, 150.0, "Name of account", size=10, font=_LEMFI_FONT)
+        pdf.text(230.0, 150.0, "Example Instant Saver", size=10, font=_LEMFI_FONT)
+        pdf.text(40.0, 180.0, "Interest rate", size=10, font=_LEMFI_FONT)
+        lines = _wrapped(statement.rate, 60)
+        for n, line in enumerate(lines):
+            pdf.text(230.0, 180.0 + 15.0 * n, line, size=10, font=_LEMFI_FONT)
+        top = 180.0 + 15.0 * len(lines) + 15.0
+        pdf.text(40.0, top, "Additional information", size=10, font=_LEMFI_FONT)
+        pdf.text(230.0, top, "See the example FAQs.", size=10, font=_LEMFI_FONT)
+        _lemfi_footer(pdf, total, total)
+    return pdf.finish()
+
+
 # Other files ---------------------------------------------------------------------------
+
+
+# Revolut --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RevolutRow:
+    date: str  # "Oct 2, 2027"
+    description: str
+    paid_out: str | None = None  # as printed, "£12.50"
+    paid_in: str | None = None
+    balance: str | None = None  # printed on completed rows only
+    details: tuple[str, ...] = ()  # "Reference: …", "To: …", "Card: …"
+    # A payment in another currency: the rate line's text and the amount in that currency.
+    rate: tuple[str, str] | None = None
+
+
+@dataclass
+class RevolutCurrentStatement:
+    pages: list[list[RevolutRow]]  # the completed rows, by page
+    opening: str = "£100.00"
+    money_out: str = "£0.00"
+    money_in: str = "£0.00"
+    closing: str = "£100.00"
+    total: tuple[str, str, str, str] | None = None  # None: the product's row repeated
+    period: tuple[str, str] = ("October 1, 2027", "October 31, 2027")
+    generated: str = "Nov 2, 2027"
+    pending: list[RevolutRow] = field(default_factory=list[RevolutRow])
+    reverted: list[RevolutRow] = field(default_factory=list[RevolutRow])
+    # Another currency's section before it: (code, symbol, its summary's four amounts).
+    other: tuple[str, str, tuple[str, str, str, str]] | None = (
+        "USD",
+        "$",
+        ("$0.00", "$0.00", "$0.00", "$0.00"),
+    )
+    extra: list[Extra] = field(default_factory=list[Extra])
+
+
+_REVOLUT_FONT = "Helvetica"
+
+
+def _rv(pdf: _Pdf, x: float, top: float, value: str, *, right: bool = False) -> None:
+    pdf.text(x, top, value, size=8, font=_REVOLUT_FONT, right=right)
+
+
+def _revolut_letterhead(pdf: _Pdf, title: str, generated: str, *, top: float = 69.58) -> None:
+    pdf.text(555.6, top, title, size=12, font=_REVOLUT_FONT, right=True)
+    _rv(pdf, 553.5, top + 22.4, f"Generated on {generated}", right=True)
+    _rv(pdf, 555.6, top + 34.8, "Revolut Bank UK Ltd", right=True)
+
+
+def _revolut_footer(pdf: _Pdf, number: int, total: int) -> None:
+    _rv(pdf, 85.43, 741.23, "Report lost or stolen card")
+    _rv(pdf, 188.25, 741.23, "Your deposit is eligible for protection under the FSCS.")
+    _rv(pdf, 555.58, 790.05, f"Page {number} of {total}", right=True)
+
+
+def _revolut_summary(
+    pdf: _Pdf, amounts: tuple[str, str, str, str], total: tuple[str, str, str, str]
+) -> None:
+    pdf.text(39.67, 264.76, "Balance summary", size=11, font=_REVOLUT_FONT)
+    _rv(pdf, 526.05, 293.78, "Closing")
+    for x, label in ((42.67, "Product"), (252.98, "Opening balance"), (335.06, "Money out")):
+        _rv(pdf, x, 299.97, label)
+    _rv(pdf, 417.11, 299.97, "Money in")
+    _rv(pdf, 526.76, 306.15, "balance")
+    for top, label, values in (
+        (325.28, "Account (Current Account)", amounts),
+        (344.03, "Total", total),
+    ):
+        _rv(pdf, 42.67, top, label)
+        for x, value in zip((252.98, 335.06, 417.11), values[:3], strict=True):
+            _rv(pdf, x, top, value)
+        _rv(pdf, 555.58, top, values[3], right=True)
+    _rv(
+        pdf,
+        39.67,
+        363.2,
+        "The balance on your statement might differ from the balance in your app.",
+    )
+
+
+def _revolut_mailing(pdf: _Pdf, details: list[tuple[str, str]]) -> None:
+    _rv(pdf, 39.67, 144.02, "A EXAMPLE")
+    for n, line in enumerate(("1 Example Street", "Flat 2", "Exampletown", "EX1 2MP")):
+        _rv(pdf, 39.67, 170.03 + 12.37 * n, line)
+    for n, (label, value) in enumerate(details):
+        _rv(pdf, 352.99, 170.03 + 12.37 * n, label)
+        _rv(pdf, 419.48, 170.03 + 12.37 * n, value)
+
+
+def _revolut_rows(pdf: _Pdf, rows: list[RevolutRow], top: float, *, balance: bool) -> float:
+    for row in rows:
+        _rv(pdf, 42.67, top, row.date)
+        _rv(pdf, 124.76, top, row.description)
+        if row.paid_out is not None:
+            _rv(pdf, 335.06, top, row.paid_out)
+        if row.paid_in is not None:
+            _rv(pdf, 417.15, top, row.paid_in)
+        if balance and row.balance is not None:
+            _rv(pdf, 555.58, top, row.balance, right=True)
+        line = top + 10.16
+        if row.rate is not None:
+            _rv(pdf, 124.76, line, row.rate[0])
+            _rv(pdf, 335.06 if row.paid_out is not None else 417.15, line, row.rate[1])
+            line += 5.25
+        for detail in row.details:
+            _rv(pdf, 124.76, line, detail)
+            line += 5.25
+        top = max(top + 18.75, line + 8.6)
+    return top
+
+
+def _revolut_table(pdf: _Pdf, top: float, *, start: str) -> None:
+    _rv(pdf, 42.67, top, start)
+    _rv(pdf, 124.76, top, "Description")
+    _rv(pdf, 335.06, top, "Money out")
+    _rv(pdf, 417.15, top, "Money in")
+    if start == "Date":
+        _rv(pdf, 555.59, top, "Balance", right=True)
+
+
+def revolut_current_pdf(statement: RevolutCurrentStatement) -> bytes:
+    pdf = _Pdf(595, 842)
+    total_pages = len(statement.pages) + (1 if statement.reverted else 0)
+    total_pages += 1 if statement.other else 0
+    number = 1
+    if statement.other is not None:
+        code, symbol, amounts = statement.other
+        del symbol
+        _revolut_letterhead(pdf, f"{code} Statement", statement.generated)
+        _revolut_mailing(pdf, [("IBAN", "GB33REVO00996912345678"), ("BIC", "REVOGB21")])
+        _revolut_summary(pdf, amounts, amounts)
+        _revolut_footer(pdf, number, total_pages)
+        pdf.next_page()
+        number += 1
+    amounts = (statement.opening, statement.money_out, statement.money_in, statement.closing)
+    start, end = statement.period
+    for index, rows in enumerate(statement.pages):
+        _revolut_letterhead(pdf, "GBP Statement", statement.generated)
+        if index == 0:
+            _revolut_mailing(
+                pdf,
+                [
+                    ("Sort Code", "040075"),
+                    ("Account Number", "12345678"),
+                    ("IBAN", "GB33REVO00996912345678"),
+                    ("BIC", "REVOGB21"),
+                ],
+            )
+            _revolut_summary(pdf, amounts, statement.total or amounts)
+            top = 405.4
+            if statement.pending:
+                pdf.text(39.67, top, f"Pending from {start} to {end}", size=11)
+                _revolut_table(pdf, top + 29, start="Start date")
+                top = _revolut_rows(pdf, statement.pending, top + 48, balance=False) + 12
+            pdf.text(39.67, top, f"Account transactions from {start} to {end}", size=11)
+            _revolut_table(pdf, top + 29, start="Date")
+            _revolut_rows(pdf, rows, top + 48, balance=True)
+        else:
+            _revolut_table(pdf, 142.28, start="Date")
+            _revolut_rows(pdf, rows, 161.22, balance=True)
+        pdf.extras(statement.extra)
+        _revolut_footer(pdf, number, total_pages)
+        pdf.next_page()
+        number += 1
+    if statement.reverted:
+        _revolut_letterhead(pdf, "GBP Statement", statement.generated)
+        pdf.text(39.67, 144.02, f"Reverted from {start} to {end}", size=11)
+        _revolut_table(pdf, 173.03, start="Start date")
+        _revolut_rows(pdf, statement.reverted, 192.15, balance=False)
+        _revolut_footer(pdf, number, total_pages)
+    return pdf.finish()
+
+
+@dataclass(frozen=True)
+class RevolutSavingsRow:
+    date: str
+    kind: str  # Deposit, Withdrawal or Gross Interest
+    paid_out: str | None = None
+    paid_in: str | None = None
+    balance: str | None = None
+
+
+@dataclass
+class RevolutSavingsStatement:
+    pages: list[list[RevolutSavingsRow]]
+    totals: dict[str, str]  # "Opening Balance", "Total Deposit", … as printed
+    period: str = "Oct 1, 2027 \u2013 Oct 31, 2027"
+    generated: str = "Nov 2, 2027"
+    product: str = "Example account - Instant Access - Example Bank"
+    extra: list[Extra] = field(default_factory=list[Extra])
+
+
+_SAVINGS_TOTALS = (
+    "Opening Balance",
+    "Total Deposit",
+    "Total Withdrawal",
+    "Total Interest Paid",
+    "Closing Balance",
+)
+
+
+def revolut_savings_pdf(statement: RevolutSavingsStatement) -> bytes:
+    pdf = _Pdf(595, 842)
+    for index, rows in enumerate(statement.pages):
+        pdf.text(555.6, 65.92, "Savings Statement", size=16, font=_REVOLUT_FONT, right=True)
+        _rv(pdf, 553.32, 100.66, f"Generated on {statement.generated}", right=True)
+        _rv(pdf, 555.58, 112.62, f"Period: {statement.period}", right=True)
+        top = 144.42
+        if index == 0:
+            for n, line in enumerate(
+                ("A EXAMPLE", "1 Example Street", "Exampletown", "EX1 2MP", "United Kingdom")
+            ):
+                _rv(pdf, 39.67, 138.79 + 15 * n, line)
+            _rv(pdf, 39.67, 235.66, "Account number: 12345678")
+            _rv(pdf, 39.67, 250.62, "Sort Code: 040075")
+            pdf.text(44.17, 292.8, "Balance summary", size=11, font=_REVOLUT_FONT)
+            for n, label in enumerate(_SAVINGS_TOTALS):
+                _rv(pdf, 45.3, 321.34 + 21.71 * n, label)
+                _rv(pdf, 248.89, 321.34 + 21.71 * n, statement.totals[label])
+            _rv(pdf, 44.17, 444.8, statement.product)
+            top = 474.46
+        _rv(pdf, 45.3, top, "Date")
+        _rv(pdf, 154.54, top, "Description")
+        _rv(pdf, 270.34, top, "Money out")
+        _rv(pdf, 450.06, top, "Money in", right=True)
+        _rv(pdf, 549.97, top, "Balance", right=True)
+        top += 23.58
+        for row in rows:
+            _rv(pdf, 45.3, top, row.date)
+            _rv(pdf, 154.54, top, row.kind)
+            if row.paid_out is not None:
+                _rv(pdf, 270.34, top, row.paid_out)
+            if row.paid_in is not None:
+                _rv(pdf, 450.05, top, row.paid_in, right=True)
+            if row.balance is not None:
+                _rv(pdf, 549.94, top, row.balance, right=True)
+            top += 21.71
+        _rv(pdf, 77.18, 737.82, "Report lost or stolen card")
+        _rv(pdf, 188.4, 729.98, "Your deposit is eligible for protection under the FSCS.")
+        _rv(pdf, 555.59, 801.87, f"Page {index + 1} of {len(statement.pages) + 1}", right=True)
+        pdf.extras(statement.extra)
+        pdf.next_page()
+    _rv(pdf, 39.67, 147.67, "Interest")
+    _rv(pdf, 39.67, 182.37, "Your interest is variable as set out in our terms.")
+    return pdf.finish()
 
 
 def scanned_pdf() -> bytes:

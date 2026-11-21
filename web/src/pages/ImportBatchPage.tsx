@@ -24,7 +24,13 @@ import {
 } from "../components/ui/table";
 import { errorMessage } from "../lib/errors";
 import { formatMoney, isZeroDecimal } from "../lib/format";
-import { BATCH_STATUS_LABELS, countsSummary, isoCode, ROW_STATUS_LABELS } from "../lib/imports";
+import {
+  BATCH_STATUS_LABELS,
+  countsSummary,
+  formatRowTime,
+  isoCode,
+  ROW_STATUS_LABELS,
+} from "../lib/imports";
 import { cn } from "../lib/utils";
 
 const OPENING_LABEL = "Opening balance adjustment";
@@ -45,10 +51,15 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     row.counterparty_name,
     row.counterparty_sort_code,
     row.counterparty_account_number,
+    row.counterparty_account_ending && `account ending ${row.counterparty_account_ending}`,
     row.counterparty_bank,
   ]
     .filter(Boolean)
     .join(", ");
+  // Only a time the file gave, to its unit: a date-only row's occurred_at is its day's
+  // midnight. Its start time (Revolut) is read with the same date format.
+  const unit = row.time_unit === "minute" || row.time_unit === "second" ? row.time_unit : null;
+  const time = (value: string | null) => (unit && value ? formatRowTime(value, unit) : null);
   const details: [string, string | null][] = [
     // Charged on top of the amount: the balance moves by amount minus fee (Decision 11).
     // A zero fee is no fee: every row has one, as the file states none (Decision 11).
@@ -63,8 +74,19 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     ["Bank reference", row.bank_reference],
     ["Purpose code", row.purpose_code],
     ["Remittance", row.remittance_info],
-    ["Converted from", row.original_currency],
+    ["Time", time(row.occurred_at)],
+    ["Started", time(row.started_at)],
+    ["Card", row.card_number],
+    [
+      "Converted from",
+      row.original_amount === null
+        ? row.original_currency
+        : money(row.original_amount, row.original_currency),
+    ],
     ["Exchange rate", row.exchange_rate],
+    // Units of the original currency per one of the row's, as the bank prints them.
+    ["Bank rate", row.fx_rate],
+    ["Reference rate", row.fx_reference_rate],
     ["Type", row.bank_type],
   ];
   return details.flatMap(([label, value]) => (value ? [`${label}: ${value}`] : []));
@@ -84,6 +106,7 @@ function StatementSummary({ statement }: { statement: ImportStatementOut }) {
     ["Closing balance", statement.closing_balance],
     ["Money in", statement.money_in],
     ["Money out", statement.money_out],
+    ["Interest", statement.interest],
   ];
   for (const [label, value] of amounts) {
     if (value !== null) items.push([label, money(value, statement.currency)]);

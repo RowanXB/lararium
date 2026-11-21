@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import threading
 import time
@@ -9,7 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
@@ -22,7 +23,7 @@ from lararium.modules.finance.errors import (
     NotACurrencyError,
 )
 from lararium.modules.finance.importing import staging
-from lararium.modules.finance.importing.parsed import ParsedRow
+from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
     ImportProfileRecord,
@@ -62,10 +63,13 @@ from .synthetic_pdfs import (
     BocRow,
     BocStatement,
     HsbcStatement,
+    LemfiRow,
+    LemfiStatement,
     TemboRow,
     TemboStatement,
     boc_pdf,
     hsbc_pdf,
+    lemfi_pdf,
     tembo_pdf,
 )
 
@@ -190,11 +194,17 @@ async def test_external_id_duplicate_within_file(
     assert rows[1].error == "the file lists transaction id EXB1 twice"
     assert batch.counts["error"] == 1
 
-    # A repeated running-balance row is just as much an error.
-    repeated = BALANCE_HEADER + "02/11/2026,Shop,-10.00,90.00\n02/11/2026,Shop,-10.00,90.00\n"
-    rows = await _rows(session, await stage(await _csv_profile(run), repeated))
-    assert _statuses(rows) == ["new", "error"]
-    assert rows[1].error is not None and "twice" in rows[1].error
+    # A repeated running-balance row is a row of its own (owner ruling 2026-11-19): the
+    # balance can come back to the same figure on the same day.
+    repeated = (
+        BALANCE_HEADER + "02/11/2026,In,10.00,100.00\n02/11/2026,Shop,-10.00,90.00\n"
+        "02/11/2026,In,10.00,100.00\n"
+    )
+    staged = await stage(await _csv_profile(run), repeated)
+    rows = [row for row in await _rows(session, staged) if row.kind == "statement"]
+    assert _statuses(rows) == ["new", "new", "new"]
+    # Ordered by position, the opening adjustment (position -1) first.
+    assert len(set((await _dedupe_keys(session, staged))[-3:])) == 3
 
 
 # Which accounts and currencies -------------------------------------------------------
@@ -731,6 +741,65 @@ MIDATA = (
 )
 
 
+async def test_payment_start_card_and_foreign_amount_stored(
+    session: AsyncSession, run: Run, stage: Stage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revolut's typed fields: a CSV's start time, a PDF's card and foreign amount."""
+    london = ZoneInfo("Europe/London")
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Completed Date",
+            "started_at": "Started Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "account_type": "Product",
+        },
+        date_format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/London",
+    )
+    content = (
+        "Product,Started Date,Completed Date,Description,Amount\n"
+        "Current,2026-07-01 23:30:00,2026-07-02 09:15:00,Shop,-1.00\n"
+    )
+    batch = await stage(profile, content)
+    (row,) = await _rows(session, batch)
+    assert row.started_at == datetime(2026, 7, 1, 23, 30, tzinfo=london)
+    assert row.occurred_at == datetime(2026, 7, 2, 9, 15, tzinfo=london)
+    assert (row.card_number, row.original_amount, row.fx_rate) == (None, None, None)
+    assert batch.statement is not None and batch.statement.account_type == "Current"
+
+    paid = ParsedRow(
+        position=0,
+        booking_date=date(2026, 7, 3),
+        occurred_at=None,
+        description="Example Shop",
+        quantity=Decimal("-75.00"),
+        fee=Decimal(0),
+        currency=None,
+        balance=None,
+        external_id=None,
+        bank_type=None,
+        raw={"Description": "Example Shop"},
+        card_number="123456******1234",
+        original_currency="USD",
+        original_amount=Decimal("-100.00"),
+        fx_rate=Decimal("1.33"),
+        fx_reference_rate=Decimal("1.34"),
+    )
+
+    def parse(*_: object) -> tuple[ParsedStatement, str]:
+        return ParsedStatement(rows=[paid]), "test"
+
+    monkeypatch.setattr(staging, "_parse_alone", parse)
+    batch = await stage(profile, b"ignored", filename="other.csv")
+    (row,) = await _rows(session, batch)
+    assert row.card_number == "123456******1234"
+    assert (row.original_currency, row.original_amount) == ("USD", Decimal("-100.00"))
+    assert (row.fx_rate, row.fx_reference_rate) == (Decimal("1.33"), Decimal("1.34"))
+    assert row.started_at is None
+
+
 async def test_typed_fields_stored(
     session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
 ) -> None:
@@ -812,6 +881,38 @@ async def test_typed_fields_stored(
     assert batch.statement.overdraft_limit_date == date(2026, 11, 1)
     assert "error" not in _statuses(await _rows(session, batch))
 
+    # LemFi: the bank holding the account, a masked counterparty account; the savings
+    # statement's interest and its rate's validity.
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    received = LemfiRow(
+        "03 May, 2027", ("Received from A Example",), ("Via EXAMPLE BANK *1234",), paid_in="9.00"
+    )
+    content = lemfi_pdf(LemfiStatement([[received]]))
+    batch = await stage(lemfi, content, account_id=await fresh("Example LemFi"), default=None)
+    (row,) = await _rows(session, batch)
+    assert (row.counterparty_bank, row.counterparty_account_ending) == ("EXAMPLE BANK", "1234")
+    assert row.counterparty_account_number is None
+    assert row.occurred_at == datetime(2027, 5, 3, 12, 28, tzinfo=UTC)  # 13:28 in London
+    assert batch.statement is not None
+    assert (batch.statement.bank, batch.statement.iban) == (
+        "Example Bank",
+        "GB99EXAM40123412345678",
+    )
+    assert batch.statement.interest is None
+    payout = LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12")
+    content = lemfi_pdf(LemfiStatement([[payout]], savings=True, opening="100.00"))
+    parsed = parse_pdf(
+        content, PdfProfileConfig(format="pdf", layout="lemfi_statement"), ZoneInfo("UTC")
+    )
+    batch = await stage(lemfi, content, account_id=await fresh("Example saver"), default=None)
+    assert batch.statement is not None
+    assert batch.statement.interest == Decimal("80.12")
+    assert batch.statement.money_in == Decimal("0.00")
+    assert parsed.rates and batch.statement.rates == parsed.rates
+    assert batch.statement.rates[0].valid_to == date(2027, 10, 29)
+    assert batch.statement.rates[0].frequency == "monthly"
+    assert batch.statement.account_name == "Example Instant Saver"
+
     # Tembo: an account identifier that isn't a number, the open date, the available
     # balance; no opening balance or totals.
     tembo = await _profile(run, format="pdf", layout="tembo_statement")
@@ -834,6 +935,128 @@ async def test_typed_fields_stored(
     )
     (row,) = [row for row in await _rows(session, batch) if row.kind == "statement"]
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
+
+
+async def test_rows_keep_what_their_file_gave_the_time_to(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """Owner, 2026-11-21: a row's time_unit tells a time its file gave (to the minute or
+    the second) from a date-only row's midnight; 0024 gives rows imported before the same
+    unit staging gives them now."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    header = "Date,Description,Amount\n"
+    seconds = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M:%S")
+    minutes = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    days = await _csv_profile(run, columns=columns)
+    ofx = await _profile(run, format="ofx")
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    lemfi_account = (await make_account(name="Example LemFi", balance_mode="transactions")).id
+    received = LemfiRow("03 May, 2027", ("Received from A Example",), paid_in="9.00")
+    files: dict[str, tuple[ImportProfileRecord, str | bytes, UUID | None]] = {
+        "second": (seconds, header + "10/11/2026 00:00:00,A,1.00\n", None),
+        "minute": (minutes, header + "11/11/2026 00:00,B,1.00\n", None),
+        "day": (days, header + "12/11/2026,C,1.00\n", None),
+        "ofx second": (
+            ofx,
+            _ofx([("20261113090000", "1.00", "X")], start="20261113", end="20261113"),
+            None,
+        ),
+        "ofx day": (ofx, _ofx([("20261114", "1.00", "Y")], start="20261114", end="20261114"), None),
+        "lemfi minute": (lemfi, lemfi_pdf(LemfiStatement([[received]])), lemfi_account),
+        # A balance gives the file an opening adjustment, which has only its day.
+        "balances": (await _csv_profile(run), BALANCE_HEADER + "20/11/2026,D,1.00,51.00\n", None),
+    }
+    units: dict[str, list[tuple[str, str | None]]] = {}
+    for name, (profile, content, account_id) in files.items():
+        default = None if account_id is not None else "gbp"
+        batch = await stage(profile, content, account_id=account_id, default=default)
+        units[name] = [(row.kind, row.time_unit) for row in await _rows(session, batch)]
+        await commit(batch.id)
+    assert units == {
+        "second": [("statement", "second")],
+        "minute": [("statement", "minute")],
+        "day": [("statement", "day")],
+        "ofx second": [("statement", "second")],
+        "ofx day": [("statement", "day")],
+        "lemfi minute": [("statement", "minute")],
+        "balances": [("opening_adjustment", "day"), ("statement", "day")],
+    }
+
+    r = models.ImportRow
+    units_by_id = select(r.id, r.time_unit)
+    staged = {row_id: unit for row_id, unit in await session.execute(units_by_id)}
+    migration = _migration("0024_finance_import_row_time_unit")
+    # As 0024 finds them, rows have no unit; "day" stands in for none (the CHECK allows no
+    # NULL beside a time), and only the backfill gives the others back.
+    forgotten = "UPDATE finance.import_rows SET time_unit = 'day' WHERE occurred_at IS NOT NULL"
+    await session.execute(text(forgotten))
+    await session.execute(text(migration.BACKFILL))
+    session.expire_all()
+    assert {row_id: unit for row_id, unit in await session.execute(units_by_id)} == staged
+
+
+def _migration(name: str) -> Any:
+    path = Path(__file__).parents[3] / "migrations" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:
+    """Money in and straight back out twice a day leaves the same amount, description and
+    balance: the time of day the file gives keeps the rows apart, in the file and again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    text = (
+        "Date,Description,Amount,Balance\n"
+        "10/11/2026 09:00,Top up,5.00,5.00\n"
+        "10/11/2026 09:01,Sent on,-5.00,0.00\n"
+        "10/11/2026 17:00,Top up,5.00,5.00\n"
+        "10/11/2026 17:01,Sent on,-5.00,0.00\n"
+    )
+    batch = await stage(profile, text)
+    assert batch.counts["new"] == 4 and batch.counts["error"] == 0
+    await commit(batch.id)
+    again = await stage(profile, text)
+    assert again.counts["duplicate"] == 4
+    same_minute = text.replace("17:00", "09:00").replace("17:01", "09:01")
+    repeated = await stage(profile, same_minute)
+    assert repeated.counts["error"] == 2
+
+
+async def test_a_row_with_an_id_never_times_another_rows_key(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row keyed by its id counted as a repeat of a row without one, so that
+    row took the time into its key, missed its committed self, and was committed again."""
+    profile = await _csv_profile(
+        run,
+        columns={
+            "date": "Date",
+            "description": ["Description"],
+            "amount": "Amount",
+            "balance": "Balance",
+            "external_id": "Id",
+        },
+        date_format="%d/%m/%Y %H:%M",
+    )
+    header = "Date,Description,Amount,Balance,Id\n"
+    evening = "10/11/2026 17:00,Top up,5.00,5.00,\n"
+    first = await stage(profile, header + evening)
+    await commit(first.id)
+    morning = "10/11/2026 09:00,Top up,5.00,5.00,X\n10/11/2026 09:01,Sent on,-5.00,0.00,\n"
+    full = await stage(profile, header + morning + evening)
+    assert _statuses(await _rows(session, full)) == ["new", "new", "duplicate"]
 
 
 async def test_statement_account_mismatch_refused(
@@ -913,6 +1136,31 @@ async def test_filtered_export_lists_no_day_in_full(
     assert tuple(covered) == (date(2026, 11, 1), date(2026, 11, 5), None, None)
 
 
+@pytest.mark.parametrize(
+    ("made", "complete"),
+    [
+        (None, (date(2026, 10, 1), date(2026, 11, 12))),
+        (date(2026, 11, 13), (date(2026, 10, 1), date(2026, 11, 12))),
+        # Made on its last day (Revolut): that day may get more rows later.
+        (date(2026, 11, 12), (date(2026, 10, 1), date(2026, 11, 11))),
+        (date(2026, 11, 1), (date(2026, 10, 1), date(2026, 10, 31))),
+        (date(2026, 10, 1), (None, None)),
+    ],
+)
+def test_statement_lists_in_full_only_the_days_before_it_was_made(
+    made: date | None, complete: tuple[date | None, date | None]
+) -> None:
+    statement = ParsedStatement(
+        rows=[],
+        period=(date(2026, 10, 1), date(2026, 11, 12)),
+        period_complete=True,
+        document_date=made,
+    )
+    coverage = staging._covered(statement, [])  # pyright: ignore[reportPrivateUsage]
+    assert coverage.covered == (date(2026, 10, 1), date(2026, 11, 12))
+    assert coverage.complete == complete
+
+
 async def test_duplicate_that_breaks_the_balance_chain_is_an_error(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit
 ) -> None:
@@ -988,3 +1236,20 @@ async def test_only_assets_and_liabilities_take_imports(
     )
     with pytest.raises(ImportNotAllowedError, match="equity"):
         await stage(csv_profile, HEADER + "10/11/2026,Coffee,-3.50\n", account_id=equity.id)
+
+
+async def test_a_time_leaves_the_key_of_a_row_nothing_else_is_like(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review finding: a row's time went into its key, so a row committed before 0022 kept
+    another key; imported again, it was paired by date and amount alone, with another row."""
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    header = "Date,Description,Amount\n"
+    dated = await _csv_profile(run, columns=columns)
+    timed = await _csv_profile(run, columns=columns, date_format="%d/%m/%Y %H:%M")
+    old = await stage(dated, header + "10/11/2026,A,10.00\n10/11/2026,B,10.00\n")
+    await commit(old.id)
+    b = (await _rows(session, old))[1]
+    again = await stage(timed, header + "10/11/2026 09:00,B,10.00\n")
+    [row] = await _rows(session, again)
+    assert (row.status, row.duplicate_of) == ("duplicate", b.id)

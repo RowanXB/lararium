@@ -27,7 +27,7 @@ from lararium.modules.finance.accounts import (
     TaxWrapper,
 )
 from lararium.modules.finance.identifiers import IdentifierKind
-from lararium.modules.finance.importing.profiles import ProfileConfig
+from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
@@ -296,6 +296,9 @@ class ImportStatementRateOut(_Out):
     band_to: DecimalStr | None
     rate: DecimalStr | None
     ear: DecimalStr | None
+    valid_from: date | None
+    valid_to: date | None
+    frequency: str | None
 
 
 class ImportStatementOut(_Out):
@@ -309,6 +312,7 @@ class ImportStatementOut(_Out):
     closing_balance_date: date | None
     money_in: DecimalStr | None
     money_out: DecimalStr | None
+    interest: DecimalStr | None
     payments_in: int | None
     payments_out: int | None
     statement_reference: str | None
@@ -322,6 +326,7 @@ class ImportStatementOut(_Out):
     customer_number: str | None
     clearing_account_number: str | None
     branch: str | None
+    bank: str | None
     addressee: str | None
     address: str | None
     overdraft_limit: DecimalStr | None
@@ -356,6 +361,8 @@ class ImportRowOut(_Out):
     status: RowStatus
     booking_date: date | None
     occurred_at: AwareDatetime | None
+    # What the file gave occurred_at to; "day": only a date, so it is that day's midnight.
+    time_unit: TimeUnit | None
     value_date: date | None
     description: str
     payee: str | None
@@ -365,6 +372,7 @@ class ImportRowOut(_Out):
     counterparty_sort_code: str | None
     counterparty_account_number: str | None
     counterparty_bank: str | None
+    counterparty_account_ending: str | None
     payment_reference: str | None
     payment_kind: str | None
     bank_reference: str | None
@@ -372,6 +380,11 @@ class ImportRowOut(_Out):
     remittance_info: str | None
     original_currency: str | None
     exchange_rate: DecimalStr | None
+    started_at: AwareDatetime | None
+    card_number: str | None
+    original_amount: DecimalStr | None
+    fx_rate: DecimalStr | None
+    fx_reference_rate: DecimalStr | None
     quantity: DecimalStr | None
     fee: DecimalStr  # 0 when the file states none
     instrument_id: UUID | None

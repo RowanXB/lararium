@@ -38,12 +38,16 @@ import {
 const FROM_FILE = "file";
 
 // Rows without a currency of their own take the one chosen at upload. OFX files and PDF
-// statements state one, and so do CSVs that map a currency column, so the choice can be
-// left to the file (a row still without one becomes an error the review page shows).
+// statements state one, and so do CSVs that map a currency column or whose profile sets
+// the one the file states once, so the choice can be left to the file (a row still without
+// one becomes an error the review page shows).
 function fileStatesCurrency(profile: ImportProfileOut | undefined): boolean {
   if (profile === undefined) return false;
   if (profile.config.format === "ofx" || profile.config.format === "pdf") return true;
-  return profile.config.format === "csv" && Boolean(profile.config.columns.currency);
+  return (
+    profile.config.format === "csv" &&
+    Boolean(profile.config.columns.currency || profile.config.currency)
+  );
 }
 
 function UploadForm() {

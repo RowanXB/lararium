@@ -55,3 +55,17 @@ export function isoCode(instrument: InstrumentOut): string {
 export function formatTimestamp(value: string, locale = "en-GB"): string {
   return new Date(value).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
 }
+
+// A time a file gave a row, to the unit the file gave it to, in the viewer's zone, which is
+// named: the file's day can be another day in UTC.
+export function formatRowTime(value: string, unit: "minute" | "second", locale = "en-GB"): string {
+  return new Date(value).toLocaleString(locale, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(unit === "second" ? { second: "2-digit" } : {}),
+    timeZoneName: "short",
+  });
+}

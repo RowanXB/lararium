@@ -139,6 +139,15 @@ class FileFormatError(FinanceError):
     """
 
 
+class EmptyStatementError(FileFormatError):
+    """The file is a statement or export of a period with no transactions: there is nothing
+    to import. A batch speaks for the days it covers only in the currencies it has rows in
+    (Decision 16), so an empty one would vouch for nothing."""
+
+    def __init__(self) -> None:
+        super().__init__("the file lists no transactions: there is nothing to import")
+
+
 class TransferNotFoundError(FinanceError):
     """No transfer has the given id."""
 
