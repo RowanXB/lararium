@@ -380,7 +380,8 @@ function MainAccountSelect({ account, accounts }: { account: AccountOut; account
       await refreshAfterTransferWrite(queryClient);
     },
   });
-  // The API takes one level only: an open account of the owner's that has no main account.
+  // The API takes one level only: an open account of the owner's that has no main account,
+  // and, as for identifiers, an asset or liability whose postings count (not snapshots-only).
   const options = accounts
     .filter(
       (other) =>
@@ -388,7 +389,9 @@ function MainAccountSelect({ account, accounts }: { account: AccountOut; account
         (other.id !== account.id &&
           !other.system &&
           other.status === "open" &&
-          other.parent_account_id === null),
+          other.parent_account_id === null &&
+          (other.ledger_type === "asset" || other.ledger_type === "liability") &&
+          other.balance_mode !== "snapshots"),
     )
     .map((other) => ({ value: other.id, label: other.name }));
   return (

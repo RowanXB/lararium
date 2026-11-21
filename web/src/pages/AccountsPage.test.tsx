@@ -259,3 +259,19 @@ it("sets a manual account's main account", async () => {
   );
   await vi.waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
 });
+
+it("offers no snapshots-only account as a main account", async () => {
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AccountsPage />
+    </QueryClientProvider>,
+  );
+  const group = within(
+    await screen.findByRole("group", { name: "Main account of Ledger account" }),
+  );
+  await user.click(group.getByRole("combobox", { name: "Main account" }));
+  // Credit card is snapshots-only: valuation ignores its postings, so the API refuses it.
+  expect(await screen.findByRole("option", { name: "None" })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "Credit card" })).toBeNull();
+});

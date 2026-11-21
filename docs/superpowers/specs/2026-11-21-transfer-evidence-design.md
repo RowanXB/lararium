@@ -118,7 +118,8 @@ A record identified through items 2 or 3 behaves exactly like one identified tod
 - **Allowed values.** The main account must be:
   - an open own account that isn't a system account;
   - not the account itself;
-  - an account without a main account of its own (one level, as pots have).
+  - an account without a main account of its own (one level, as pots have);
+  - an account an identifier could be on: an asset or liability that isn't snapshots-only. Valuation ignores a snapshots-only account's postings, so a transfer naming it would dip net worth (PR #31 review, 2026-11-21).
 
   A connected account's main account stays the connector's to set.
 - **Effect.** Setting or clearing it runs as a healing command, so history pairs again at once.

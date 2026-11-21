@@ -813,6 +813,22 @@ async def test_clearing_the_main_account_unpairs_its_history(client, session, ru
     assert await _transfers(client) == []
 
 
+async def _accounts_no_record_can_name(client) -> tuple[str, str]:
+    """A snapshots-only account, whose postings valuation ignores, and an expense account,
+    none of the owner's money: a transfer naming either would move net worth, so neither can
+    have identifiers or be a main account."""
+    snapshots_id = await _manual(client, "Pension", "snapshots")
+    body = {
+        "name": "Rent",
+        "ledger_type": "expense",
+        "subtype": "other",
+        "balance_mode": "transactions",
+    }
+    response = await client.post(f"{FINANCE}/accounts", json=body)
+    assert response.status_code == 201, response.text
+    return snapshots_id, response.json()["id"]
+
+
 async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None:
     main_id = await _manual(client, "Main", "transactions")
     savings_id = await _manual(client, "Savings", "transactions")
@@ -823,11 +839,14 @@ async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None
         f"{FINANCE}/accounts/{closed_id}/close", json={"closed_on": "2026-11-01"}
     )
     assert closed.status_code == 200, closed.text
+    snapshots_id, expense_id = await _accounts_no_record_can_name(client)
     assert (await _set_main(client, savings_id, main_id)).status_code == 200
 
     assert (await _set_main(client, str(connected.id), main_id)).status_code == 422
     assert (await _set_main(client, other_id, other_id)).status_code == 422
     assert (await _set_main(client, other_id, closed_id)).status_code == 422
+    assert (await _set_main(client, other_id, snapshots_id)).status_code == 422
+    assert (await _set_main(client, other_id, expense_id)).status_code == 422
     # savings has a main account of its own; main is already another's main.
     assert (await _set_main(client, other_id, savings_id)).status_code == 422
     assert (await _set_main(client, main_id, other_id)).status_code == 422
@@ -839,6 +858,9 @@ async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None
     # Nothing changed.
     [account] = [a for a in (await client.get(f"{FINANCE}/accounts")).json() if a["id"] == other_id]
     assert account["parent_account_id"] is None
+    # A hybrid account counts its postings too, so it can be one.
+    hybrid_id = await _manual(client, "Hybrid", "hybrid")
+    assert (await _set_main(client, other_id, hybrid_id)).status_code == 200
 
 
 async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, run) -> None:
@@ -853,6 +875,7 @@ async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, 
     )
     assert closed.status_code == 200, closed.text
     unassigned = await run(get_or_create_system_account, "unassigned")
+    snapshots_id, expense_id = await _accounts_no_record_can_name(client)
 
     async def create(main_account_id: str) -> Any:
         body = {
@@ -865,8 +888,9 @@ async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, 
         return await client.post(f"{FINANCE}/accounts", json=body)
 
     before = (await client.get(f"{FINANCE}/accounts")).json()
-    # A system account, a closed one, and one with a main account of its own.
-    for refused in (str(unassigned), closed_id, savings_id):
+    # A system account, a closed one, one with a main account of its own, a snapshots-only
+    # one and an expense account.
+    for refused in (str(unassigned), closed_id, savings_id, snapshots_id, expense_id):
         response = await create(refused)
         assert response.status_code == 422, refused
         assert response.json()["detail"]["error"] == "invalid_input"

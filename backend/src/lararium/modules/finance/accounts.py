@@ -199,13 +199,23 @@ async def _require_main_account(
     """Refuse a main account a manual account can't have, whether it is being created
     (`account` None) or given one: one level only, as pots have. The main account must be
     an open account of the owner's, not the account itself, with no main account of its
-    own; and the account mustn't be another's main account already. AccountNotFoundError
-    for an unknown main account."""
+    own; and the account mustn't be another's main account already. A sub-account's bank
+    transfers name it, so it must also be an account an identifier could be on
+    (identifiers._require_can_carry_identifiers): an asset or liability whose postings
+    count. AccountNotFoundError for an unknown main account."""
     main = await get_account(session, main_account_id)
     if account is not None and main.id == account.id:
         raise FinanceValidationError("an account can't be its own main account")
     if main.system:
         raise FinanceValidationError(f"{main.name} belongs to the ledger, not to you")
+    if main.ledger_type not in ("asset", "liability"):
+        raise FinanceValidationError(f"{main.name} isn't an asset or liability account")
+    if main.balance_mode == "snapshots":
+        # Valuation ignores a snapshots account's postings, so the placeholder a transfer
+        # naming it may post wouldn't count, and the transfer would dip net worth.
+        raise FinanceValidationError(
+            f"switch {main.name} to hybrid first: a snapshots-only account ignores postings"
+        )
     if main.status == "closed":
         raise FinanceValidationError(f"{main.name} is closed")
     if main.parent_account_id is not None:

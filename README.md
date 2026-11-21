@@ -290,9 +290,10 @@ A savings account that has no bank account of its own to register (a Revolut or 
 savings account whose statements you import, say) can be given a **main account**: on the
 Accounts page, pick one in its **Main account** select (a manual account only; a connected
 account's connector sets it). The main account is an open account of yours (not the account
-itself, and not one the ledger keeps) that has no main account of its own; one main account
-can have several savings accounts, and an account that is already some account's main
-account can't be given a main account itself.
+itself, and not one the ledger keeps) that has no main account of its own. As for an account
+with identifiers, it must be an asset or liability that isn't snapshots-only, so that its
+side of a transfer counts. One main account can have several savings accounts, and an
+account that is already some account's main account can't be given a main account itself.
 A bank transfer of the savings account that names no bank account then names its main account,
 so it pairs with the main account's side by amount and date, and Lararium goes through the
 whole history at once. Choose **None** to undo it; the history is matched anew.
