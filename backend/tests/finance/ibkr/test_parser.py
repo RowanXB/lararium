@@ -77,18 +77,59 @@ def test_unknown_section_with_rows_flagged() -> None:
     assert all(r.section != "Mystery" for r in statement.rows)
 
 
-def test_derivable_section_skipped_silently() -> None:
+def test_derivable_sections_are_read_and_unknown_ones_flagged() -> None:
+    # Every field the API returns is stored, derivable or not: these sections are read, and
+    # one that has never had rows is flagged once it has some, like any unknown section.
     statement = parse_statement(
-        build(RowSpec("StatementOfFundsLine", A1, amount="1"), accounts=ACCOUNTS[:1])
+        build(
+            RowSpec("StatementOfFundsLine", A1, amount="1"),
+            RowSpec("ChangeInNAV", A1, twr="0.5"),
+            RowSpec("MTMPerformanceSummaryUnderlying", A1),
+            RowSpec(
+                "FIFOPerformanceSummaryUnderlying", A1, container="FIFOPerformanceSummaryInBase"
+            ),
+            accounts=ACCOUNTS[:1],
+        )
     )
-    assert statement.flagged == frozenset()
-    assert {r.section for r in statement.rows} == {"AccountInformation"}
+    assert statement.flagged == {"FIFOPerformanceSummaryUnderlying"}
+    assert {r.section for r in statement.rows} == {
+        "AccountInformation",
+        "StatementOfFundsLine",
+        "ChangeInNAV",
+        "MTMPerformanceSummaryUnderlying",
+    }
+
+
+def test_a_period_row_repeated_unchanged_stays_one_per_day() -> None:
+    # The owner's MTM Total row is the same on every quiet day: it holds for each day's
+    # statement, not for a period spanning them, so it is not merged.
+    statement = parse_statement(
+        build(
+            RowSpec("MTMPerformanceSummaryUnderlying", A1, reportDate="", total="0"),
+            RowSpec("CashTransaction", A1),
+            accounts=ACCOUNTS[:1],
+            by_day=True,
+        )
+    )
+    mtm = [r for r in statement.rows if r.section == "MTMPerformanceSummaryUnderlying"]
+    assert sorted((r.period_from, r.period_to) for r in mtm) == [
+        (date(2026, 3, d), date(2026, 3, d)) for d in (2, 3, 4)
+    ]
+    # Other rows repeated unchanged are still one row.
+    assert len([r for r in statement.rows if r.section == "CashTransaction"]) == 1
 
 
 def test_summary_rows_skipped() -> None:
     body = build(
         RowSpec("CashTransaction", A1, levelOfDetail="SUMMARY", transactionID=None),
-        RowSpec("CashReportCurrency", A1, levelOfDetail="BaseCurrency", currency="BASE_SUMMARY"),
+        RowSpec(
+            "CashReportCurrency",
+            A1,
+            levelOfDetail="BaseCurrency",
+            currency="BASE_SUMMARY",
+            startingCash="0",
+            endingCash="0",
+        ),
         accounts=ACCOUNTS[:1],
     )
     statement = parse_statement(body)
@@ -277,6 +318,21 @@ def test_unknown_level_flagged_and_skipped(section: str) -> None:
     statement = parse_statement(body)
     assert statement.flagged == {f"{section}.levelOfDetail"}
     assert all(r.section != section for r in statement.rows)
+
+
+def test_cash_held_without_currency_rows_needs_the_currency_breakout() -> None:
+    base = {"levelOfDetail": "BaseCurrency", "currency": "BASE_SUMMARY"}
+    held = build(RowSpec("CashReportCurrency", A1, **base, endingCash="100"), accounts=ACCOUNTS[:1])
+    with pytest.raises(FlexDataError, match="Currency Breakout"):
+        parse_statement(held)
+    # No cash at all, or the currency rows there: nothing is missing.
+    empty = RowSpec("CashReportCurrency", A1, **base, startingCash="0", endingCash="0")
+    parse_statement(build(empty, accounts=ACCOUNTS[:1]))
+    both = [
+        RowSpec("CashReportCurrency", A1, **base, endingCash="100"),
+        RowSpec("CashReportCurrency", A1, endingCash="100"),
+    ]
+    parse_statement(build(*both, accounts=ACCOUNTS[:1]))
 
 
 def _only(statement, section: str):

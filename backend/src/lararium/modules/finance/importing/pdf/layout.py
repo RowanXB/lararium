@@ -1,12 +1,13 @@
 """What a PDF layout reads from a statement, and the helpers the layouts share."""
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
 from lararium.modules.finance.errors import FileFormatError
 from lararium.modules.finance.importing.parsed import (
     ParsedRow,
+    SkippedRow,
     StatementAccount,
     StatementRate,
     parse_amount,
@@ -20,13 +21,18 @@ _AMOUNTS = AmountFormat(thousands_separator=",")
 @dataclass(frozen=True)
 class LayoutRow:
     """A row as the statement prints it. row.quantity is paid in minus paid out; amounts
-    counts the amounts printed in the paid in and paid out columns, which must be one."""
+    counts the amounts printed in the paid in and paid out columns, which must be one.
+    time_of_day is the time it prints to the minute, if any (parse_pdf places it in the
+    profile's time zone);
+    interest marks a row that pays interest, which the summary totals apart from money in."""
 
     row: ParsedRow
     page: int
     paid_in: Decimal | None
     paid_out: Decimal | None
     amounts: int
+    time_of_day: time | None = None
+    interest: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,13 +48,22 @@ class PrintedBalance:
 class LayoutResult:
     rows: list[LayoutRow]
     period: tuple[date, date]
-    opening_balance: Decimal
-    money_in: Decimal
-    money_out: Decimal
+    # None when the statement doesn't print it (Tembo prints neither an opening balance
+    # nor totals): the checks then take the opening from the first printed balance.
+    opening_balance: Decimal | None
+    money_in: Decimal | None
+    money_out: Decimal | None
     closing_balance: Decimal
     balances: list[PrintedBalance]
     # Words inside the transaction table that belong to no row field.
     unplaced: list[Word]
+    # Whether the bank prints a type code on every row (LemFi prints none).
+    type_codes: bool = True
+    # The interest paid in the period, when the summary totals it apart from money in.
+    interest: Decimal | None = None
+    # The summary's totals may be the rows' sum cut down to the penny below, not rounded
+    # (LemFi's: a long statement's money in and out can each be a penny short).
+    truncated_totals: bool = False
     payments_in: int | None = None
     payments_out: int | None = None
     account: StatementAccount | None = None
@@ -56,6 +71,19 @@ class LayoutResult:
     statement_reference: str | None = None
     document_date: date | None = None
     rates: list[StatementRate] = field(default_factory=list[StatementRate])
+    available_balance: Decimal | None = None
+    available_balance_date: date | None = None
+    account_opened_on: date | None = None
+    # Whether the statement lists every transaction of its whole period (Decision 16). False:
+    # like an export, only the days between its first and last (Tembo's is made on demand
+    # and may stop partway through its last day).
+    period_complete: bool = True
+    # Rows the statement lists apart from its transactions and leaves out of its summary
+    # (Revolut's pending payments), numbered after the rows.
+    skipped: list[SkippedRow] = field(default_factory=list[SkippedRow])
+    # Whether the statement prints a type code on every row; a layout without them (Revolut's
+    # current account) marks card payments by their card number instead.
+    type_codes: bool = True
 
 
 def text(words: list[Word]) -> str:

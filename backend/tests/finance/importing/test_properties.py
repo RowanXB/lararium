@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance.accounts import AccountRecord
-from lararium.modules.finance.errors import ImportBatchStateError, ImportHasErrorsError
+from lararium.modules.finance.errors import ImportBatchStateError
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from lararium.modules.finance.importing.staging import ImportBatchRecord
 from lararium.modules.finance.ledger import find_unbalanced_transactions
@@ -87,17 +87,10 @@ async def test_overlapping_exports_preserve_the_ledger(
     async with isolated_example(session):
         csv_profile = await _csv_profile(run)
         csv = BALANCE_HEADER + "".join(csv_rows)
-        # A debit, its reversal and the same debit can have identical printed fields.
-        # Decision 5 refuses a repeated balance key instead of guessing its identity.
+        # A debit, its reversal and the same debit can have identical printed fields: each
+        # is a row of its own, by its occurrence in the file (owner ruling 2026-11-19).
         if len(csv_rows) != len(set(csv_rows)):
-            event("ambiguous balance key")
-            batch = await stage(csv_profile, csv)
-            errors = [row.error for row in await _rows(session, batch) if row.status == "error"]
-            assert any(message and "the file lists this row twice" in message for message in errors)
-            with pytest.raises(ImportHasErrorsError):
-                await commit(batch.id)
-            assert await _balance_after(session, account.id, end) == 0
-            return
+            event("repeated balance key")
         if export_format == "ofx":
             export_profile = await _profile(run, format="ofx")
             content = _ofx(

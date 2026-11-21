@@ -34,7 +34,7 @@ M5 connects Interactive Brokers through the Flex Web Service. The connection run
 
 1. **One connection per Flex token.** Every account the Flex statement lists, open or closed, syncs daily into a broker account of its own.
 2. **Positions and per-currency cash come from IBKR's records** (approach A, §4): trades, currency conversions, cash transactions, corporate actions and position transfers. After every sync they are checked against IBKR's reported positions and cash, and a difference alerts the owner.
-3. **Every field of the sections the ledger uses is stored as a typed field**, or in its better structured home. The owner's rule from 2026-11-15 applies; the exceptions are values that can be derived and values that have a better home.
+3. **Every field the API returns is stored as a typed field**, or in its better structured home. The owner's rule from 2026-11-15 applies, as amended on 2026-11-21: a value that can be derived is stored too; the one exception is a value with a better home.
    - The owner's query ticks every section, field and option, personal fields included (owner, 2026-11-18); the whole statement is kept as a document.
    - A section outside the table in the plan that has rows, or a field outside it that has a value, is flagged to the owner, and typed when real data first shows it. This is M2's bar: real files, not hypothetical fields.
 4. **Daily prices and FX rates come from IBKR**, so holdings are valued on every past day of the history, not only today.
@@ -177,7 +177,7 @@ Everything in the earlier plans' global constraints applies:
 
 The owner's query (created 2026-11-18, and described in the README) is:
 - an Activity Flex Query in XML, with every account selected;
-- **every section, with every field and every option ticked**: summary and lot positions; executions, orders, closed lots and the other trade levels; Cash Report with the currency breakout and base summary; and so on;
+- **every section, with every field and every option that adds data ticked** (options that drop data, "Exclude …" and "Totals Only", stay off; so does Corporate Actions' Summary, as corporate action rows are not told apart by level and a summary row would read as another action; where two options exclude each other, the finer one): summary and lot positions; executions, orders, closed lots and the other trade levels; Cash Report with the currency breakout and base summary; and so on. A Cash Report whose base summary holds cash without a single currency row fails the sync, naming Currency Breakout: without it every currency would read as 0;
 - date format `yyyyMMdd`, time format `HH:mm:ss TimeZone`, separator `;`;
 - Include Currency Rates, Audit Trail Fields, Offsetting Trade/Cancel Pairs and Breakout by Day all set to Yes.
 
@@ -190,7 +190,7 @@ What that query returns (audit, 2026-11-18):
 **How the parser treats fields:**
 - **A required field is missing.** The sync fails, naming the section and field ("select it in the Flex query"). This is fail-closed: a missing id or date cannot be guessed.
 - **A section the ledger uses** (the plan's table). Every field the audit showed is typed. An attribute not in the table that has a value is flagged as a connection warning naming the section and field, never the value, and stays in the stored document.
-- **Sections the plan lists as derivable or empty** (Statement of Funds, MTM Performance Summary, Change in NAV and the like). They are not typed. They are flagged only if a section never seen with rows starts having them.
+- **Every field the API returns is typed, derivable or not** (owner, 2026-11-21). Change in NAV, the Statement of Funds (both levels) and the MTM Performance Summary by underlying have tables of their own. A section never seen with rows (Change in Position Values, the FIFO and MTD/YTD Performance Summaries, and the like) is flagged once it has some, like any unknown section.
 
 ### 5.3 Fetching
 
@@ -344,7 +344,7 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 - conversion rates go to `finance.fx_rates`, with source `ibkr`;
 - reported positions and ending cash go to `finance.balance_snapshots`, of kind `reported`.
 
-**A field derivable from stored data is not stored again:** `netCash`, `tradeMoney`, `positionValue` and `priorMtmPnl`.
+**A field derivable from stored data is stored too** (owner, 2026-11-21: every field the API returns has a column): `tradeMoney`, `netCash` and `netCashInBase` in `ibkr_trades`, `positionValue` and `positionValueInBase` in `ibkr_positions` and `ibkr_position_lots`, and a prior period position's `priorMtmPnl` in `ibkr_prior_period_positions`.
 
 **Everything else has a column in an IBKR table**, keyed by the ledger row it describes:
 
@@ -359,8 +359,12 @@ An ISA ↔ GIA transfer is then identified on both sides and matched by M4's eng
 | `finance.ibkr_positions` | reported snapshot | mark price, cost basis price and money, open price, unrealised P/L, percent of NAV, side, FX rate to base |
 | `finance.ibkr_position_lots` | reported snapshot, lot | each lot's open date and time, cost basis, originating order and transaction |
 | `finance.ibkr_trade_details` | account, level of detail, row | the order, closed-lot and wash-sale levels of Trades (executions are the ledger rows) |
-| `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation |
-| `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency |
+| `finance.ibkr_cash_reports` | account, currency, period | every Cash Report figure: starting and ending cash, ending settled cash, deposits, withdrawals, commissions, dividends, interest, fees, taxes, net trades, FX translation, each also as its commodities and securities parts, and each flow also as its month and year to date totals |
+| `finance.ibkr_nav` | account, report date | cash, stock, interest accruals, dividend accruals, total, and the other components, in base currency, each also as its long and short parts |
+| `finance.ibkr_change_in_nav` | account, period | starting and ending value, MTM, realised, change in unrealised, deposits and withdrawals, dividends, interest, fees, commissions, taxes, FX translation, accrual changes, TWR, and the other changes, in base currency |
+| `finance.ibkr_statement_of_funds` | account, statement period, line | each line at both levels (base currency and each currency): date, report and settle dates, activity code and description, amount, debit, credit, balance, the trade's quantity, price, gross, commission and tax, its ids, and the security it names |
+| `finance.ibkr_mtm_performance` | account, statement period, row | each underlying's (and the total's) previous and closing quantity and price, transaction MTM, prior open MTM, commissions, other, total, with and without accruals |
+| `finance.ibkr_prior_period_positions` | account, security, date | price, prior MTM P/L, FX rate to base, level of detail, report date |
 
 These are IBKR's own tables. **Generic broker tables (a builder-check call):** whether eToro's or Trading 212's fields are shared enough for those tables is M6's call, made against those APIs once they are verified. Designing them now would be guesswork.
 
@@ -406,6 +410,8 @@ Through the existing notifier, never with the token, URLs or values beyond what 
 - 3 failed syncs in a row, and the recovery afterwards (M3's rule). The connection's `last_error`, and so this message, says what failed: for a statement that does not match the query, the section and field (§5.2); for IBKR's errors, the code;
 - a reconciliation difference, once per new warning text (§5.11);
 - flagged sections, fields or asset categories, once per new set.
+
+A run tells everything new in one message: the new flags share one line, each new difference has its own.
 
 ### 5.14 API and UI
 

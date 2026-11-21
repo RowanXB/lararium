@@ -41,6 +41,7 @@ PR #11 reads its new typed fields through `_Reader`. The fields the normalizer r
    - A pot's `created`: the account's `opened_on` is left empty.
    - A pot's `balance`, or a `currency` it cannot read or has no instrument for: no snapshot this sync, and the goal amount keeps its stored value. A balance the ledger cannot store warns the same way.
    - `updated`: the statement falls back to `created`, as when it is absent.
+   - A deleted pot's `updated`: it closes, and its balance holds, from the sync's fetch time instead (the deleted-pot rule of PR #27).
 4. **Core fields fail loudly** (`MonzoFieldError`, which names the path, never the value). These are the fields without which the sync cannot post what it must:
    - a transaction's `id` and `amount`, and its `currency` and `created` where it is posted or recorded as declined (a reversed one, amount 0, needs neither);
    - an account's `id` and `created`: the sync's full backfill starts from `created` (`sync.py`), and an account with nothing else posted dates its opening by it;

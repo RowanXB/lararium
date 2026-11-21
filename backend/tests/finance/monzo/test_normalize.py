@@ -22,6 +22,8 @@ from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Entity, RawRecord
 from lararium.core.raw_records import _content_hash, store_raw_record
+from lararium.core.settings_store import get_timezone
+from lararium.core.timeutil import local_date
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
@@ -160,7 +162,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-3"
+    assert NORMALIZER_VERSION == "monzo-norm-4"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
@@ -249,7 +251,103 @@ async def test_deleted_pot_is_closed(session, run) -> None:
     await _normalize(session, connection, pots=[make_pot(balance=0, deleted=True)])
 
     pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
-    assert pot.status == "closed"
+    # Closed on the day Monzo deleted it (its last change), not on the day a sync saw it.
+    assert (pot.status, pot.closed_on) == ("closed", date(2026, 3, 1))
+
+
+async def test_deleted_pot_with_an_unreadable_update_is_closed_on_the_sync_day(
+    session, run
+) -> None:
+    connection = await _connection(run)
+
+    await _normalize(
+        session, connection, pots=[make_pot(balance=0, deleted=True, updated="not a time")]
+    )
+
+    pot = await get_account(session, (await _account_map(session, connection))["pot_TEST1"])
+    today = local_date(datetime.now(UTC), await get_timezone(session))
+    assert (pot.status, pot.closed_on) == ("closed", today)
+    # Read through the reader: a stated time it cannot read warns, and never fails the sync.
+    assert await _warnings(session, connection) == [UNMAPPED.format("pot.updated")]
+
+
+async def test_pot_deleted_before_the_connection_keeps_its_moves(session, run) -> None:
+    connection = await _connection(run)
+    now = datetime.now(UTC)
+    emptied = now - timedelta(days=3)
+    moves = [
+        make_transaction(
+            id="tx_TEST0001",
+            amount=-10000,
+            created=_iso(now - timedelta(days=10)),
+            description="pot_GONE",
+            metadata={"pot_id": "pot_GONE"},
+        ),
+        # Out with the interest it earned, which no move shows.
+        make_transaction(
+            id="tx_TEST0002",
+            amount=10100,
+            created=_iso(emptied),
+            description="pot_GONE",
+            metadata={"pot_id": "pot_GONE"},
+        ),
+    ]
+    pots = [
+        make_pot(
+            id="pot_GONE",
+            balance=0,
+            deleted=True,
+            created=_iso(now - timedelta(days=20)),
+            # Monzo's last change to a deleted pot: its deletion, just after it was emptied.
+            updated=_iso(emptied + timedelta(seconds=1)),
+        ),
+        make_pot(id="pot_EMPTY", balance=0, deleted=True),
+    ]
+
+    await _normalize(session, connection, transactions=moves, pots=pots)
+
+    account_map = await _account_map(session, connection)
+    # Nothing ever moved, but what Monzo says about it is still stored.
+    empty = await get_account(session, account_map["pot_EMPTY"])
+    assert (empty.name, empty.status) == ("Savings", "closed")
+    main, pot = account_map[ACCOUNT_ID], account_map["pot_GONE"]
+    first, second = await _transactions(session)
+    assert await _postings(session, first.id) == [
+        (main, Decimal("-100.00"), ""),
+        (pot, Decimal("100.00"), ""),
+    ]
+    assert await _postings(session, second.id) == [
+        (main, Decimal("101.00"), ""),
+        (pot, Decimal("-101.00"), ""),
+    ]
+    closed = await get_account(session, pot)
+    deleted_on = local_date(emptied + timedelta(seconds=1), await get_timezone(session))
+    assert (closed.status, closed.closed_on) == ("closed", deleted_on)
+
+    async def pot_balance(day: date) -> Decimal:
+        rows = await balances_asof(session, day)
+        return sum((r.quantity for r in rows if r.account_id == pot), Decimal(0))
+
+    assert await pot_balance(now.date() - timedelta(days=5)) == Decimal("100.00")
+    # Empty from its deletion on, not short by the interest until this sync.
+    assert await pot_balance(now.date() - timedelta(days=2)) == Decimal("0.00")
+
+
+async def test_replay_moves_a_deleted_pots_history_onto_its_account(session, run) -> None:
+    connection = await _connection(run)
+    move = make_transaction(amount=-5000, description="pot_GONE", metadata={"pot_id": "pot_GONE"})
+    # As monzo-norm-3 left it: a move to a pot deleted before the connection, on Unassigned.
+    await _normalize(session, connection, transactions=[move])
+    await run(update_config, connection.id, {NORMALIZER_VERSION_KEY: "monzo-norm-3"})
+
+    await _normalize(session, connection, pots=[make_pot(id="pot_GONE", balance=0, deleted=True)])
+
+    (tx,) = await _transactions(session)
+    account_map = await _account_map(session, connection)
+    assert await _postings(session, tx.id) == [
+        (account_map[ACCOUNT_ID], Decimal("-50.00"), ""),
+        (account_map["pot_GONE"], Decimal("50.00"), ""),
+    ]
 
 
 async def test_card_payment_posts_against_unassigned(session, run) -> None:
@@ -2231,7 +2329,7 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
     ]
     assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
     config = (await get_connection(session, connection.id)).config
-    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-3"
+    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-4"
 
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:

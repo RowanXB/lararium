@@ -10,9 +10,10 @@ from uuid import UUID
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.commands import CommandContext
 from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
@@ -196,6 +197,36 @@ async def test_a_card_row_is_no_transfers_other_side(
     await commit((await stage(profile, _lines(DECEMBER.format(type="VIS")))).id)
     # A card refund of 100 is not the transfer. December lists the days M's side may be
     # booked on in full, so M's balance is the statement's and the transfer is settled.
+    assert await _status(session) == "before_history"
+    assert await _balance_after(session, account.id, END) == Decimal("596")
+
+
+async def _set_card_number(ctx: CommandContext, batch_id: UUID, description: str) -> None:
+    r = models.ImportRow
+    await ctx.session.execute(
+        update(r)
+        .where(r.batch_id == batch_id, r.description == description)
+        .values(card_number="123456******1234")
+    )
+
+
+async def test_a_row_paid_by_card_is_no_transfers_other_side(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    profile: ImportProfileRecord,
+    account: AccountRecord,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """A statement that prints no type code (Revolut's PDF) marks a card payment by its card
+    number: such a row is no bank transfer, whatever its type."""
+    await commit((await stage(profile, _lines(NOVEMBER))).id)
+    await _pay(session, run, gbp, connected)
+    december = await stage(profile, _lines(DECEMBER.format(type="CR")))
+    await run(_set_card_number, december.id, "From A")
+    await commit(december.id)
     assert await _status(session) == "before_history"
     assert await _balance_after(session, account.id, END) == Decimal("596")
 

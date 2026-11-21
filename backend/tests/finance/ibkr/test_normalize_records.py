@@ -673,7 +673,16 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             position="4",
             costBasisPrice="101.5",
         ),
-        RowSpec("CashReportCurrency", "U0000001", startingCash="150", endingCash="200"),
+        RowSpec(
+            "CashReportCurrency",
+            "U0000001",
+            startingCash="150",
+            endingCash="200",
+            endingCashCom="0",
+            endingCashSec="200",
+            depositsMTD="50",
+            withholding871mYTD="-1",
+        ),
         RowSpec(
             "CashReportCurrency", "U0000001", currency="USD", startingCash="0", endingCash="-5"
         ),
@@ -685,7 +694,13 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
             endingCash="196",
         ),
         RowSpec(
-            "EquitySummaryByReportDateInBase", "U0000001", total="1000", cash="200", stock="800"
+            "EquitySummaryByReportDateInBase",
+            "U0000001",
+            total="1000",
+            cash="200",
+            stock="800",
+            stockLong="800",
+            stockShort="0",
         ),
     ]
     await _sync(session, connection, tmp_path, rows)
@@ -725,19 +740,28 @@ async def test_reported_snapshots_and_typed_reports(session, run, tmp_path) -> N
     assert lots[0][0].startswith("sha256:") and lots[0][1:] == (Decimal("4"), Decimal("101.5"))
     reports = await session.execute(
         text(
-            "select i.symbol, c.from_date, c.to_date, c.starting_cash, c.ending_cash"
+            "select i.symbol, c.from_date, c.to_date, c.starting_cash, c.ending_cash,"
+            " c.ending_cash_com, c.ending_cash_sec, c.deposits_mtd, c.withholding871m_ytd"
             " from finance.ibkr_cash_reports c"
             " join finance.instruments i on i.id = c.currency_instrument_id order by i.symbol"
         )
     )
     assert [tuple(r) for r in reports] == [
-        ("GBP", DAY, DAY, Decimal("150"), Decimal("200")),
-        ("USD", DAY, DAY, Decimal("0"), Decimal("-5")),
-    ]
+        ("GBP", DAY, DAY, Decimal("150"), Decimal("200"), Decimal("0"), Decimal("200"),
+         Decimal("50"), Decimal("-1")),
+        ("USD", DAY, DAY, Decimal("0"), Decimal("-5"), None, None, None, None),
+    ]  # fmt: skip
     nav = (
-        await session.execute(text("select report_date, total, cash, stock from finance.ibkr_nav"))
+        await session.execute(
+            text(
+                "select report_date, total, cash, stock, stock_long, stock_short"
+                " from finance.ibkr_nav"
+            )
+        )
     ).one()
-    assert tuple(nav) == (DAY, Decimal("1000"), Decimal("200"), Decimal("800"))
+    assert tuple(nav) == (
+        DAY, Decimal("1000"), Decimal("200"), Decimal("800"), Decimal("800"), Decimal("0")
+    )  # fmt: skip
     # The mark price is the day's price as well.
     assert await session.scalar(
         text("select price from finance.prices where source = 'ibkr'")
@@ -778,6 +802,159 @@ async def test_trade_details_stored(session, run, tmp_path) -> None:
     details = [tuple(r) for r in details]
     assert details[0] == ("CLOSED_LOT", "9000010", Decimal("-4"), "ETFA")
     assert details[1][0] == "ORDER" and details[1][1].startswith("sha256:")
+
+
+async def test_every_field_the_api_returns_is_stored(session, run, tmp_path) -> None:
+    # Derivable or not (owner, 2026-11-21): the Change in NAV, the Statement of Funds, the
+    # MTM Performance Summary, Prior Period Positions and a trade's or position's values.
+    connection = await _connection(run)
+    rows = [
+        RowSpec(
+            "ChangeInNAV",
+            "U0000001",
+            startingValue="900",
+            endingValue="1000",
+            depositsWithdrawals="100",
+            changeInCGTWithholdingAccruals="0",
+            twr="0.5",
+        ),
+        RowSpec("StatementOfFundsLine", "U0000001", balance="100"),
+        RowSpec("StatementOfFundsLine", "U0000001", levelOfDetail="BaseCurrency", balance="100"),
+        RowSpec(
+            "StatementOfFundsLine",
+            "U0000001",
+            activityCode="DEP",
+            activityDescription="Electronic Fund Transfer",
+            transactionID="8000002",
+            amount="50",
+            credit="50",
+            balance="150",
+        ),
+        RowSpec(
+            "MTMPerformanceSummaryUnderlying",
+            "U0000001",
+            assetCategory="CASH",
+            conid="2001",
+            symbol="GBP",
+            description="GBP",
+            prevCloseQuantity="100",
+            closeQuantity="150",
+            total="0",
+        ),
+        RowSpec("MTMPerformanceSummaryUnderlying", "U0000001", reportDate="", total="2"),
+        RowSpec(
+            "PriorPeriodPosition",
+            "U0000001",
+            **ETFA,
+            priorMtmPnl="4",
+            fxRateToBase="0.8",
+            levelOfDetail="SUMMARY",
+        ),
+        RowSpec(
+            "Trade",
+            "U0000001",
+            **ETFA,
+            tradeMoney="1000",
+            netCash="-1001",
+            netCashInBase="-800.8",
+        ),
+        RowSpec(
+            "OpenPosition", "U0000001", **ETFA, positionValue="1000", positionValueInBase="800"
+        ),
+    ]
+    await _sync(session, connection, tmp_path, rows)
+    nav = (
+        await session.execute(
+            text(
+                "select n.from_date, n.to_date, i.symbol, n.starting_value, n.ending_value,"
+                " n.deposits_withdrawals, n.change_in_cgt_withholding_accruals, n.twr"
+                " from finance.ibkr_change_in_nav n"
+                " join finance.instruments i on i.id = n.currency_instrument_id"
+            )
+        )
+    ).one()
+    assert tuple(nav) == (
+        DAY, DAY, "GBP", Decimal("900"), Decimal("1000"), Decimal("100"), Decimal("0"),
+        Decimal("0.5"),
+    )  # fmt: skip
+    funds = await session.execute(
+        text(
+            "select f.from_date, f.level_of_detail, f.activity_code, f.activity_description,"
+            " f.transaction_id, f.date, f.amount, f.credit, f.balance, i.symbol"
+            " from finance.ibkr_statement_of_funds f"
+            " join finance.instruments i on i.id = f.currency_instrument_id"
+            " order by f.level_of_detail, f.balance"
+        )
+    )
+    assert [tuple(r) for r in funds] == [
+        (DAY, "BaseCurrency", None, "Starting Balance", None, DAY, None, None, Decimal("100"),
+         "GBP"),
+        (DAY, "Currency", None, "Starting Balance", None, DAY, None, None, Decimal("100"), "GBP"),
+        (DAY, "Currency", "DEP", "Electronic Fund Transfer", "8000002", DAY, Decimal("50"),
+         Decimal("50"), Decimal("150"), "GBP"),
+    ]  # fmt: skip
+    mtm = await session.execute(
+        text(
+            "select asset_category, conid, symbol, description, report_date,"
+            " prev_close_quantity, close_quantity, total"
+            " from finance.ibkr_mtm_performance order by description"
+        )
+    )
+    assert [tuple(r) for r in mtm] == [
+        ("CASH", "2001", "GBP", "GBP", DAY, Decimal("100"), Decimal("150"), Decimal("0")),
+        (None, None, None, "Total", None, None, None, Decimal("2")),
+    ]
+    prior = (
+        await session.execute(
+            text(
+                "select p.date, p.price, p.prior_mtm_pnl, p.fx_rate_to_base, p.level_of_detail,"
+                " p.report_date, i.symbol, c.symbol from finance.ibkr_prior_period_positions p"
+                " join finance.instruments i on i.id = p.instrument_id"
+                " join finance.instruments c on c.id = p.currency_instrument_id"
+            )
+        )
+    ).one()
+    assert tuple(prior) == (
+        DAY, Decimal("99"), Decimal("4"), Decimal("0.8"), "SUMMARY", DAY, "ETFA", "USD"
+    )  # fmt: skip
+    trade = (
+        await session.execute(
+            text("select trade_money, net_cash, net_cash_in_base from finance.ibkr_trades")
+        )
+    ).one()
+    assert tuple(trade) == (Decimal("1000"), Decimal("-1001"), Decimal("-800.8"))
+    position = (
+        await session.execute(
+            text("select position_value, position_value_in_base from finance.ibkr_positions")
+        )
+    ).one()
+    assert tuple(position) == (Decimal("1000"), Decimal("800"))
+    # The same statement again writes nothing new: each row has one key.
+    counts = "select (select count(*) from finance.ibkr_statement_of_funds), (select count(*)"
+    counts += (
+        " from finance.ibkr_mtm_performance), (select count(*) from finance.ibkr_change_in_nav)"
+    )
+    before = tuple((await session.execute(text(counts))).one())
+    await _sync(session, connection, tmp_path, rows)
+    assert tuple((await session.execute(text(counts))).one()) == before == (3, 2, 1)
+
+
+async def test_overlapping_daily_windows_keep_one_period_row_per_day(
+    session, run, tmp_path
+) -> None:
+    # Two syncs whose windows overlap, as the daily fetch's do: the Total row of each day is
+    # stored once, for that day.
+    connection = await _connection(run)
+    rows = [RowSpec("MTMPerformanceSummaryUnderlying", "U0000001", reportDate="", total="0")]
+    first = (DAY, DAY + timedelta(days=2))
+    second = (DAY + timedelta(days=1), DAY + timedelta(days=3))
+    for period in (first, second):
+        await _sync(session, connection, tmp_path, rows, period=period, by_day=True)
+    stored = await session.execute(
+        text("select from_date, to_date from finance.ibkr_mtm_performance order by from_date")
+    )
+    days = [DAY + timedelta(days=n) for n in range(4)]
+    assert [tuple(r) for r in stored] == [(day, day) for day in days]
 
 
 async def test_opening_only_for_older_account(session, run, tmp_path) -> None:
@@ -1093,7 +1270,7 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     rows = [RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001")]
     await _sync(session, connection, tmp_path, rows)
     stored = await get_connection(session, connection.id)
-    assert stored.config["normalizer_version"] == NORMALIZER_VERSION
+    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-4"
     # An older version that did not fill ibkr_trades: the next run, with nothing new,
     # replays every raw record of the connection and fills it in.
     await session.execute(text("delete from finance.ibkr_trades"))

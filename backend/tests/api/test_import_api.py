@@ -229,6 +229,23 @@ async def test_empty_upload_is_422(client) -> None:
     assert response.json()["detail"]["error"] == "file_format"
 
 
+async def test_header_only_csv_is_422_empty_statement(client) -> None:
+    account_id = await _account(client)
+    config = {
+        "format": "csv",
+        "columns": {"date": "Date", "description": ["Description"], "amount": "Amount"},
+        "date_format": "%d/%m/%Y",
+    }
+    profile_id = await _profile(client, "Example Bank CSV", config)
+    response = await _upload(client, account_id, profile_id, b"Date,Description,Amount\n", "e.csv")
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error": "empty_statement",
+        "message": "the file lists no transactions: there is nothing to import",
+    }
+    assert (await client.get(f"{API}/imports")).json() == []
+
+
 async def test_unreadable_file_is_422(client) -> None:
     account_id = await _account(client)
     profile_id = await _profile(client, "Example Bank QIF", QIF_CONFIG)

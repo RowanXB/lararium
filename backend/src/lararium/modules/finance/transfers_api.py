@@ -28,6 +28,7 @@ from lararium.modules.finance.schemas import (
     CandidateOut,
     IdentifierCreate,
     IdentifierOut,
+    PairCandidateOut,
     SuggestionOut,
     TransferOut,
     TransferPair,
@@ -259,6 +260,47 @@ async def pair_transfer(
     args = _args(body.model_dump(mode="json"), transfer_id=transfer_id)
     async with healing_command(session, actor, "pair_transfer", args) as ctx:
         record = await transfers.pair(ctx, transfer_id, body.transaction_id)
+    [out] = await _transfers_out(session, [record])
+    return out
+
+
+@router.get(
+    "/transactions/{transaction_id}/pair-candidates", name="list_transaction_pair_candidates"
+)
+async def list_transaction_pair_candidates(
+    transaction_id: UUID, session: SessionDep
+) -> list[PairCandidateOut]:
+    """The own records the record could be paired with as one transfer: on another account,
+    of the opposite and equal amount, nearest booking date first."""
+    found = await transfers.pair_candidates(session, transaction_id)
+    names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    return [
+        PairCandidateOut(
+            transaction_id=c.transaction_id,
+            account_id=c.account_id,
+            account_name=names[c.account_id],
+            quantity=c.quantity,
+            occurred_at=c.occurred_at,
+            booking_date=c.booking_date,
+            description=c.description,
+        )
+        for c in found
+    ]
+
+
+@router.post("/transactions/{transaction_id}/pair", name="pair_transactions")
+async def pair_transactions(
+    transaction_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
+) -> TransferOut:
+    """The owner says two own records are one transfer, whether or not either is in one.
+    Undone by unpairing the resulting transfer."""
+    # _args merges the body over the path, so its own transaction_id would hide the path's.
+    args: dict[str, JSONValue] = {
+        "transaction_id": str(transaction_id),
+        "other_transaction_id": str(body.transaction_id),
+    }
+    async with healing_command(session, actor, "pair_transactions", args) as ctx:
+        record = await transfers.pair_records(ctx, transaction_id, body.transaction_id)
     [out] = await _transfers_out(session, [record])
     return out
 

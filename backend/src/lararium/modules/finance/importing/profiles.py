@@ -3,10 +3,11 @@
 A profile's config is validated here, before it is stored; parsers trust it.
 """
 
+import re
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,9 @@ _NAME_INDEX = "import_profiles_name_unique"
 # The csv module quotes with '"' and splits records on line breaks.
 _FORBIDDEN_DELIMITERS = frozenset({'"', "\n", "\r"})
 _TIME_DIRECTIVES = ("%H", "%I", "%M", "%S", "%p")
+# What a row's file gave its time to: only a date ("day": the row is at the day's midnight),
+# or a time to the minute or to the second.
+type TimeUnit = Literal["day", "minute", "second"]
 # Formatted with a date format and parsed back: the format must keep day, month and year.
 _PROBE = datetime(2026, 12, 31, 23, 59, 58, tzinfo=UTC)
 
@@ -104,8 +108,11 @@ type CardTypes = Annotated[
 ]
 
 
-def is_bank_transfer(card_types: list[str], bank_type: str | None) -> bool:
-    """Whether a row with this type code is a payment between bank accounts."""
+def is_bank_transfer(card_types: list[str], bank_type: str | None, card_number: str | None) -> bool:
+    """Whether a row with this type code, paid with this card if any, is a payment between
+    bank accounts."""
+    if card_number is not None:
+        return False
     return bank_type is None or bank_type.strip() not in card_types
 
 
@@ -145,9 +152,14 @@ class CsvColumns(BaseModel):
     counterparty_sort_code: str | None = None
     counterparty_account_number: str | None = None
     reference: str | None = None  # the payment's reference, part of the counterparty
-    # The statement's own account; every row must name the same one.
+    # When the payment was started (Revolut's Started Date), in date_format, which must
+    # then carry a time; date is when it completed.
+    started_at: str | None = None
+    # The statement's own account; every row must name the same one. account_type is its
+    # product line (Revolut's Product).
     account_sort_code: str | None = None
     account_number: str | None = None
+    account_type: str | None = None
 
     @model_validator(mode="after")
     def _amount_xor_inflow_outflow(self) -> Self:
@@ -177,10 +189,57 @@ class CsvColumns(BaseModel):
             self.counterparty_sort_code,
             self.counterparty_account_number,
             self.reference,
+            self.started_at,
             self.account_sort_code,
             self.account_number,
+            self.account_type,
         ]
         return [self.date, *self.description, *(name for name in optional if name is not None)]
+
+
+# The typed fields a CSV extract may fill: CsvColumns' names for them, and the
+# counterparty's bank.
+type ExtractField = Literal[
+    "payee",
+    "memo",
+    "check_number",
+    "counterparty_name",
+    "counterparty_sort_code",
+    "counterparty_account_number",
+    "counterparty_account_ending",
+    "counterparty_bank",
+    "reference",
+]
+_EXTRACT_FIELDS: frozenset[str] = frozenset(get_args(ExtractField.__value__))
+
+
+def _check_pattern(pattern: str) -> str:
+    try:
+        compiled = re.compile(pattern)
+    except re.error as error:
+        raise ValueError(f"not a regular expression: {error}") from None
+    names = set(compiled.groupindex)
+    unknown = sorted(names - _EXTRACT_FIELDS)
+    if unknown:
+        raise ValueError(f"the pattern names fields it can't fill: {', '.join(unknown)}")
+    return pattern
+
+
+type Pattern = Annotated[str, Field(min_length=1, max_length=500), AfterValidator(_check_pattern)]
+
+
+class CsvExtract(BaseModel):
+    """Typed fields read out of one column: the first pattern that matches a non-empty cell
+    in full fills the fields its named groups name (those that match); a cell no pattern
+    matches makes the row an error."""
+
+    model_config = _CONFIG
+
+    column: str
+    patterns: list[Pattern] = Field(min_length=1, max_length=10)
+
+    def fields(self) -> set[str]:
+        return {name for pattern in self.patterns for name in re.compile(pattern).groupindex}
 
 
 class CsvProfileConfig(BaseModel):
@@ -205,6 +264,35 @@ class CsvProfileConfig(BaseModel):
     sign: Sign = "inflow_positive"
     amount_format: AmountFormat = AmountFormat()
     card_types: CardTypes = Field(default_factory=list[str])
+    extract: list[CsvExtract] = Field(default_factory=list[CsvExtract], max_length=10)
+    # The currency of every row, for a file that states it once, not per row (LemFi's
+    # column labels, "Money in (GBP)"): rather than the one picked at upload.
+    currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")] | None = None
+
+    def read_columns(self) -> list[str]:
+        """Every column the profile reads: mapped, filtered on or extracted from."""
+        return [
+            *self.columns.names(),
+            *self.include_only,
+            *(extract.column for extract in self.extract),
+        ]
+
+    @model_validator(mode="after")
+    def _one_currency_source(self) -> Self:
+        if self.currency is not None and self.columns.currency is not None:
+            raise ValueError("set currency or map a currency column, not both")
+        return self
+
+    @model_validator(mode="after")
+    def _extracts_fill_unmapped_fields(self) -> Self:
+        mapped = {name for name in _EXTRACT_FIELDS if getattr(self.columns, name, None) is not None}
+        filled: set[str] = set()
+        for extract in self.extract:
+            twice = sorted(extract.fields() & (mapped | filled))
+            if twice:
+                raise ValueError(f"fields filled twice: {', '.join(twice)}")
+            filled |= extract.fields()
+        return self
 
     @model_validator(mode="after")
     def _label_needs_footer(self) -> Self:
@@ -218,11 +306,15 @@ class CsvProfileConfig(BaseModel):
     def _columns_in_header(self) -> Self:
         if self.header is None:
             return self
-        missing = [
-            name for name in [*self.columns.names(), *self.include_only] if name not in self.header
-        ]
+        missing = [name for name in self.read_columns() if name not in self.header]
         if missing:
             raise ValueError(f"columns not in the header: {', '.join(missing)}")
+        return self
+
+    @model_validator(mode="after")
+    def _started_needs_time(self) -> Self:
+        if self.columns.started_at is not None and not self.has_time:
+            raise ValueError("started_at is a time: give date_format a time of day")
         return self
 
     @property
@@ -230,6 +322,13 @@ class CsvProfileConfig(BaseModel):
         """Whether the dates carry a time of day."""
         directives = self.date_format.replace("%%", "")
         return any(directive in directives for directive in _TIME_DIRECTIVES)
+
+    @property
+    def time_unit(self) -> TimeUnit:
+        """What the dates give the time to: seconds when the format reads them."""
+        if not self.has_time:
+            return "day"
+        return "second" if "%S" in self.date_format.replace("%%", "") else "minute"
 
 
 class OfxProfileConfig(BaseModel):
@@ -259,7 +358,15 @@ class PdfProfileConfig(BaseModel):
     model_config = _CONFIG
 
     format: Literal["pdf"]
-    layout: Literal["hsbc_uk_statement", "lloyds_statement", "boc_uk_statement"]
+    layout: Literal[
+        "hsbc_uk_statement",
+        "lloyds_statement",
+        "boc_uk_statement",
+        "revolut_current_statement",
+        "revolut_savings_statement",
+        "tembo_statement",
+        "lemfi_statement",
+    ]
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])
 
