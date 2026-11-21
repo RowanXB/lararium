@@ -7,7 +7,13 @@ from lararium.modules.finance.transfers.contra import (
     source_ref,
     transfer_contra,
 )
-from lararium.modules.finance.transfers.decisions import pair, reject, unpair, unreject
+from lararium.modules.finance.transfers.decisions import (
+    pair,
+    pair_records,
+    reject,
+    unpair,
+    unreject,
+)
 from lararium.modules.finance.transfers.engine import (
     heal_transfers,
     lock_transfers,
@@ -18,6 +24,7 @@ from lararium.modules.finance.transfers.engine import (
 )
 from lararium.modules.finance.transfers.queries import (
     CandidateRecord,
+    PairCandidateRecord,
     ReviewReason,
     SuggestionRecord,
     TransferRecord,
@@ -29,6 +36,7 @@ from lararium.modules.finance.transfers.queries import (
     is_overdue,
     list_transfers,
     mark_notified,
+    pair_candidates,
     suggestions,
     weak_transfers,
 )
@@ -37,6 +45,7 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 __all__ = [
     "CandidateRecord",
     "OwnLeg",
+    "PairCandidateRecord",
     "ReviewReason",
     "SuggestionRecord",
     "TransferRecord",
@@ -55,6 +64,8 @@ __all__ = [
     "match_transaction",
     "own_leg",
     "pair",
+    "pair_candidates",
+    "pair_records",
     "preview_match",
     "reject",
     "source_ref",

@@ -472,6 +472,18 @@ class CandidateOut(BaseModel):
     reason: Literal["exact", "amount_differs", "unpaired"]
 
 
+class PairCandidateOut(BaseModel):
+    """A record the owner could pair with another as one transfer."""
+
+    transaction_id: UUID
+    account_id: UUID
+    account_name: str
+    quantity: DecimalStr  # signed, as posted on the account
+    occurred_at: AwareDatetime
+    booking_date: date
+    description: str
+
+
 class TransferPair(BaseModel):
     # One of the transfer's candidates of the same amount, or one unpaired from it.
     transaction_id: UUID

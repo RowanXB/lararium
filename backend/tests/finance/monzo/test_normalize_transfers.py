@@ -223,7 +223,7 @@ async def count_events(session: AsyncSession, event_type: str) -> int:
 
 
 def test_normalizer_version() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-3"
+    assert NORMALIZER_VERSION == "monzo-norm-4"
 
 
 async def test_faster_payment_to_registered_account(session, run) -> None:

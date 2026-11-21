@@ -54,8 +54,12 @@ from lararium.modules.finance.instruments import get_currency
 
 logger = logging.getLogger(__name__)
 
-# 2: the NAV long/short parts have columns; a replay fills them in for rows stored before.
-NORMALIZER_VERSION = "ibkr-norm-2"
+# 2: the NAV long/short parts have columns; 3: so do the Cash Report's segment parts and its
+# month and year to date totals; 4: every field the API returns has one (Change in NAV,
+# Statement of Funds, MTM Performance, Prior Period Positions, the derivable trade and position
+# values). Each bump replays the stored rows into the new columns; rows of a section that was
+# not stored before (the three that were skipped as derivable until 4) come only with a fetch.
+NORMALIZER_VERSION = "ibkr-norm-4"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
 ACCOUNT_MAP_KEY = "account_map"
@@ -80,6 +84,9 @@ _CONVERSION_RATE = _type("ConversionRate")
 _CORPORATE_ACTION = _type("CorporateAction")
 _TRANSFER = _type("Transfer")
 _NAV = _type("EquitySummaryByReportDateInBase")
+_CHANGE_IN_NAV = _type("ChangeInNAV")
+_STATEMENT_OF_FUNDS = _type("StatementOfFundsLine")
+_MTM_PERFORMANCE = _type("MTMPerformanceSummaryUnderlying")
 # The record types whose rows may name a security, in the order their instruments are made.
 _WITH_INSTRUMENTS = (
     _OPEN_POSITION,
@@ -169,6 +176,13 @@ def _key(item: Item) -> tuple[str, ...]:
         return kind, text("reportDate"), text("fromCurrency"), text("toCurrency")
     if kind == _NAV:
         return kind, item.account, text("reportDate")
+    if kind == _CHANGE_IN_NAV:
+        return kind, item.account, text("fromDate"), text("toDate")
+    period = item.account, item.period_from.isoformat(), item.period_to.isoformat()
+    if kind == _STATEMENT_OF_FUNDS:
+        return kind, *period, tables.statement_of_funds_key(item.attributes)
+    if kind == _MTM_PERFORMANCE:
+        return kind, *period, tables.mtm_performance_key(item.attributes)
     if kind == _TRADE_DETAIL:
         return kind, item.account, text("levelOfDetail"), tables.trade_detail_key(item.attributes)
     return kind, str(item.record_id)
@@ -362,6 +376,10 @@ async def _normalize(
     await reports.prices(run, by_type[_PRIOR_POSITION], positions)
     await reports.cash_reports(run, by_type[_CASH_REPORT])
     await reports.nav(run, by_type[_NAV])
+    await reports.change_in_nav(run, by_type[_CHANGE_IN_NAV])
+    await reports.statement_of_funds(run, by_type[_STATEMENT_OF_FUNDS])
+    await reports.mtm_performance(run, by_type[_MTM_PERFORMANCE])
+    await reports.prior_positions(run, by_type[_PRIOR_POSITION])
     await reports.trade_details(run, by_type[_TRADE_DETAIL])
 
     for item in sorted(by_type[_TRADE], key=records.order):

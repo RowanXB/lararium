@@ -124,6 +124,73 @@ async def nav(run: Run, items: Iterable[Item]) -> None:
         await tables.upsert_nav(run.command, key, values)
 
 
+async def change_in_nav(run: Run, items: Iterable[Item]) -> None:
+    for item in items:
+        currency = await run.currency(item.text("currency"))
+        values = await tables.typed_values(
+            run.session, "ibkr_change_in_nav", item.section, item.attributes
+        )
+        key = {
+            "account_id": run.account_id(item),
+            "from_date": values.pop("from_date"),
+            "to_date": values.pop("to_date"),
+        }
+        await tables.upsert_change_in_nav(
+            run.command, key, values | {"currency_instrument_id": currency.id}
+        )
+
+
+def _period_key(run: Run, item: Item, row_key: str) -> dict[str, object]:
+    return {
+        "account_id": run.account_id(item),
+        "from_date": item.period_from,
+        "to_date": item.period_to,
+        "row_key": row_key,
+    }
+
+
+async def statement_of_funds(run: Run, items: Iterable[Item]) -> None:
+    """Every line, at both levels (the base currency's and each currency's)."""
+    for item in items:
+        currency = await run.currency(item.text("currency"))
+        values = await tables.typed_values(
+            run.session, "ibkr_statement_of_funds", item.section, item.attributes
+        )
+        key = _period_key(run, item, tables.statement_of_funds_key(item.attributes))
+        await tables.upsert_statement_of_funds(
+            run.command, key, values | {"currency_instrument_id": currency.id}
+        )
+
+
+async def mtm_performance(run: Run, items: Iterable[Item]) -> None:
+    for item in items:
+        values = await tables.typed_values(
+            run.session, "ibkr_mtm_performance", item.section, item.attributes
+        )
+        key = _period_key(run, item, tables.mtm_performance_key(item.attributes))
+        await tables.upsert_mtm_performance(run.command, key, values)
+
+
+async def prior_positions(run: Run, items: Iterable[Item]) -> None:
+    """Each prior period position of a known security (its price is a price as well)."""
+    for item in items:
+        instrument_id = await run.instrument(item)
+        if instrument_id is None:
+            continue
+        currency = await run.currency(item.text("currency"))
+        values = await tables.typed_values(
+            run.session, "ibkr_prior_period_positions", item.section, item.attributes
+        )
+        key = {
+            "account_id": run.account_id(item),
+            "instrument_id": instrument_id,
+            "date": values.pop("date"),
+        }
+        await tables.upsert_prior_period_positions(
+            run.command, key, values | {"currency_instrument_id": currency.id}
+        )
+
+
 async def trade_details(run: Run, items: Iterable[Item]) -> None:
     """Every level of Trades but executions: orders, closed lots, wash sales, summaries."""
     for item in items:

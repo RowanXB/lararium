@@ -181,7 +181,8 @@ webhook) into the ledger. It only reads.
 What syncs: your accounts (a joint account is a separate account), each pot as a child account
 of its account, transactions (declined ones are skipped; pending ones are updated when they
 settle or are reversed), and balance snapshots. Card payments are matched to merchants; pot
-moves become transfers between the account and the pot.
+moves become transfers between the account and the pot. A deleted pot is closed, even one
+deleted before you connected, so money that sat in it still counts towards net worth.
 
 Two system accounts appear in the ledger:
 
@@ -341,6 +342,17 @@ What the buttons do (each decision is kept across re-syncs):
 - **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.
+
+**Records that name no account.** When neither record names the other's account (a bank row that
+prints only your name and a reference, say), no transfer opens by itself. Enter the other side
+by hand on a manual account, then pair the two records through the API:
+`GET /api/v1/finance/transactions/{id}/pair-candidates` lists the records that could be its
+other side (another account, the opposite and equal amount, nearest date first), and
+`POST /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` pairs them
+as one matched transfer. The hand-entered side must be a transaction of exactly two postings,
+the account and Unassigned; otherwise pairing is refused. Unpair undoes it; after that, two records that name no
+account have no transfer left, so the way back is pairing them again through this same endpoint
+(the other record stays listed as a candidate).
 
 ### In transit in net worth
 

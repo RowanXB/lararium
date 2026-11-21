@@ -1330,6 +1330,42 @@ export type OfxProfileConfig = {
     timezone?: TimezoneName | null;
 };
 
+/**
+ * PairCandidateOut
+ *
+ * A record the owner could pair with another as one transfer.
+ */
+export type PairCandidateOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Account Name
+     */
+    account_name: string;
+    /**
+     * Booking Date
+     */
+    booking_date: string;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Occurred At
+     */
+    occurred_at: string;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
+};
+
 export type Pattern = string;
 
 /**
@@ -2899,6 +2935,68 @@ export type PostTransactionResponses = {
 };
 
 export type PostTransactionResponse = PostTransactionResponses[keyof PostTransactionResponses];
+
+export type PairTransactionsData = {
+    body: TransferPair;
+    path: {
+        /**
+         * Transaction Id
+         */
+        transaction_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transactions/{transaction_id}/pair';
+};
+
+export type PairTransactionsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PairTransactionsError = PairTransactionsErrors[keyof PairTransactionsErrors];
+
+export type PairTransactionsResponses = {
+    /**
+     * Successful Response
+     */
+    200: TransferOut;
+};
+
+export type PairTransactionsResponse = PairTransactionsResponses[keyof PairTransactionsResponses];
+
+export type ListTransactionPairCandidatesData = {
+    body?: never;
+    path: {
+        /**
+         * Transaction Id
+         */
+        transaction_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/transactions/{transaction_id}/pair-candidates';
+};
+
+export type ListTransactionPairCandidatesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListTransactionPairCandidatesError = ListTransactionPairCandidatesErrors[keyof ListTransactionPairCandidatesErrors];
+
+export type ListTransactionPairCandidatesResponses = {
+    /**
+     * Response List Transaction Pair Candidates
+     *
+     * Successful Response
+     */
+    200: Array<PairCandidateOut>;
+};
+
+export type ListTransactionPairCandidatesResponse = ListTransactionPairCandidatesResponses[keyof ListTransactionPairCandidatesResponses];
 
 export type VoidTransactionData = {
     body?: never;
