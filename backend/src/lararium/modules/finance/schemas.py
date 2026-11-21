@@ -458,7 +458,7 @@ class TransferOut(BaseModel):
     out_transaction_id: UUID | None
     in_transaction_id: UUID | None
     placeholder_transaction_id: UUID | None
-    # A matched pair a sort code alone made: it can be rejected, not unpaired.
+    # A matched pair a sort code alone made: the Transfers page offers Reject, not Unpair.
     weak: bool = False
 
 

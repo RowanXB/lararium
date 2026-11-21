@@ -33,7 +33,6 @@ from lararium.modules.finance.transfers.queries import (
     get_transfer,
     load_transfers,
     require_pairable,
-    weak_transfers,
 )
 
 
@@ -153,16 +152,15 @@ async def unreject(ctx: CommandContext, transfer_id: UUID) -> None:
 async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
     """The owner says the matched transfer's two records are not one transfer, though each
     may still be one: never pair them (both ways round), and match each again. A pair a sort
-    code alone made (weak_transfers) is refused, before anything is stored: weak evidence
-    makes no transfer of its own, so neither record would keep one listing the other as
-    Unpaired, and there would be no way back. Reject, with its Undo, is the way."""
+    code alone made (weak_transfers) is unpaired too, though weak evidence makes no transfer
+    of its own: both records then leave the Transfers page, which offers Reject on such a
+    pair for that reason, and pair_records pairs either with its right counterpart, or the
+    two again."""
     await lock_transfers(ctx)
     session = ctx.session
     transfer = await get_transfer(session, transfer_id)
     if transfer.status != "matched" or len(_records(transfer)) != 2:
         raise FinanceValidationError("only a matched transfer of two own records can be unpaired")
-    if transfer.id in await weak_transfers(session, [transfer]):
-        raise FinanceValidationError("a pair made by sort code alone can only be rejected")
     sent, received = _records(transfer)
     sent_ref, received_ref = await source_ref(session, sent), await source_ref(session, received)
     await forget_decisions(ctx, "pair", sent_ref, received_ref)

@@ -151,6 +151,8 @@ A linked weak pair is a `matched` transfer like any other, with both contras on 
 
 On the Transfers page, a weak pair offers Reject, with Undo, and not Unpair (designer's call). Weak evidence alone never makes a transfer, so a wrong weak pair means neither record is one. Unpair keeps each record's own transfer, and here there is none to keep: after it, both records would leave the page with no way back, because `pair` and the candidate lists need an open transfer. Reject stores the decision for both records, and its rejected transfer stays under Recent with Undo.
 
+Since PR #29 (merged into this work on 2026-11-21), `pair_records` pairs records that have no transfer, through the API. So the API's Unpair takes a weak pair too: both records leave the page, and either can be paired with its right counterpart, or the two again. Reject would mark both records as no transfer, which `pair_records` refuses, so without this a weak pair with one wrong side could never be put right (PR #31 review). The page keeps Reject only.
+
 ### 5.4 Tembo's coverage
 
 - **What the layout reports.** The Tembo layout reports that a statement lists the account from its opening date (`account_opened_on`) to its valuation date (`document_date`). Coverage is then:

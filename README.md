@@ -339,7 +339,10 @@ What the buttons do (each decision is kept across re-syncs):
   If that was a mistake, each one's transfer lists the other as an *Unpaired* candidate; Pair it
   to undo. A pair made by a sort code alone has **Reject** instead (**Undo** restores it): neither
   of its records is a transfer without the other, so once unpaired, neither would offer the other
-  to pair again.
+  to pair again. When only the pairing is wrong (one of its records belongs with another), unpair
+  it through the API instead (`POST /api/v1/finance/transfers/{id}/unpair`) and pair that record
+  with the right one, as *Records that name no account* below describes: Reject would mark both
+  records as no transfer, and a rejected record can't be paired.
 - **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.

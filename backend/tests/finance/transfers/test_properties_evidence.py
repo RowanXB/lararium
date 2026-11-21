@@ -24,7 +24,7 @@ A run (`Example`): the rows arrive in a drawn order, each an import of its own (
 account's imports list every scenario day in full) or a sync of the connected account's
 record, each followed by heal, as an import's commit or a sync runs it. Then the owner acts
 once (`Scenario.action`), on a transfer picked by its rows' keys: rejects it, or unpairs a
-matched one a sort code alone didn't make. A later file then duplicates one of the rows (the
+matched one, one a sort code alone made too. A later file then duplicates one of the rows (the
 acted-on transfer's, when it has one), and the connected account's records are synced again.
 Rows' import references are their keys, so a run's twins pair alike (pairs._twins).
 
@@ -78,7 +78,6 @@ from lararium.modules.finance.transfers import (
     load_transfer_settings,
     reject,
     unpair,
-    weak_transfers,
 )
 from lararium.modules.finance.transfers.contra import eligible_records
 from lararium.modules.finance.transfers.pairs import WEAK, pair_relation
@@ -664,12 +663,7 @@ class Example:
         if self.scenario.action == "reject":
             targets = [t for t in transfers if t.status != "rejected"]
         else:
-            weak = await weak_transfers(self.session, transfers)
-            targets = [
-                t
-                for t in transfers
-                if t.status == "matched" and len(_own(t)) == 2 and t.id not in weak
-            ]
+            targets = [t for t in transfers if t.status == "matched" and len(_own(t)) == 2]
         if not targets:
             self.exercised.add(f"owner: no transfer to {self.scenario.action}")
             return None

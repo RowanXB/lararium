@@ -12,7 +12,6 @@ import pytest
 
 from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import create_account
-from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.ledger import CounterpartyFields
 from lararium.modules.finance.transfers import (
@@ -421,7 +420,28 @@ async def test_a_named_counterpart_outranks_a_sort_code(
     assert await weak_transfers(session, transfers) == set()
 
 
-async def test_unpairing_a_sort_code_pair_is_refused_and_reject_undo_restores_it(
+async def test_unpairing_a_sort_code_pair_leaves_both_records_apart_on_unassigned(
+    session, run, ids, imported_bank, statement_row, heal
+) -> None:
+    """Weak evidence makes no transfer of its own, so after Unpair neither record is in one,
+    and never_pair keeps the two apart through later heals (pair_records can pair either)."""
+    x = await imported_bank("X")
+    h = await imported_bank("H", identifier=H_ID)
+    sent = await statement_row(x, "-100", details=H_SORT_CODE)
+    received = await statement_row(h, "100")
+    await heal()
+    t = await _only_transfer(session)
+
+    await run(unpair, t.id)
+    await heal()
+
+    assert await list_transfers(session) == []
+    assert await contra_account(session, sent, x.id) == ids.unassigned
+    assert await contra_account(session, received, h.id) == ids.unassigned
+    await assert_consistent(session)
+
+
+async def test_rejecting_a_sort_code_pair_and_undoing_it_restores_it(
     session, run, ids, imported_bank, statement_row, heal
 ) -> None:
     x = await imported_bank("X")
@@ -430,10 +450,6 @@ async def test_unpairing_a_sort_code_pair_is_refused_and_reject_undo_restores_it
     received = await statement_row(h, "100")
     await heal()
     t = await _only_transfer(session)
-
-    with pytest.raises(FinanceValidationError, match="sort code alone can only be rejected"):
-        await run(unpair, t.id)
-    assert await list_transfers(session) == [t]
 
     await run(reject, t.id)
     assert [r.status for r in await list_transfers(session)] == ["rejected"]

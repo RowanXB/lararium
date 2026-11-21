@@ -754,10 +754,10 @@ async def test_lists_an_ibkr_account_identifier_and_refuses_to_register_one(clie
 
 async def _statement_row(
     session, run, account_id: str, quantity: str, *, details: RowDetails | None = None
-) -> None:
+) -> UUID:
     """A bank transfer naming nobody, posted as a statement import would and recorded as a
     row of a committed import listing its day in full, which prints `details` of its
-    counterparty's bank account (nothing by default)."""
+    counterparty's bank account (nothing by default). Its transaction's id."""
     gbp = await get_currency(session, "GBP")
     own = UUID(account_id)
     contra = await transfer_contra(
@@ -778,6 +778,7 @@ async def _statement_row(
     complete = (WHEN.date() - timedelta(days=6), WHEN.date() + timedelta(days=6))
     printed = None if details is None else [details]
     await record_import_rows(session, run, own, [row.id], complete, details=printed)
+    return row.id
 
 
 async def _set_main(client, account_id: str, main_account_id: str | None) -> Any:
@@ -901,25 +902,77 @@ async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, 
     assert (created.status_code, created.json()["parent_account_id"]) == (201, main_id)
 
 
-async def test_a_pair_made_by_sort_code_alone_is_weak_and_only_rejected(
-    client, session, run
-) -> None:
+async def _weak_pair(client, session, run) -> tuple[dict[str, Any], UUID, UUID, str]:
+    """X's payment prints only H's sort code, and H's receipt names nobody: they pair weakly.
+    The pair, X's and H's records, and H's id."""
     x_id = await _manual(client, "X", "transactions")
     h_id = await _manual(client, "H", "transactions")
-    await _statement_row(session, run, x_id, "-100", details=RowDetails(sort_code="404040"))
-    await _statement_row(session, run, h_id, "100")
+    sent = await _statement_row(session, run, x_id, "-100", details=RowDetails(sort_code="404040"))
+    received = await _statement_row(session, run, h_id, "100")
     assert (await _register(client, h_id, "404040:55556666")).status_code == 201
     [transfer] = await _transfers(client)
     assert (transfer["status"], transfer["weak"]) == ("matched", True)
+    return transfer, sent, received, h_id
 
-    refused = await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")
 
-    assert refused.status_code == 422
-    detail = refused.json()["detail"]
-    assert detail == {
-        "error": "invalid_input",
-        "message": "a pair made by sort code alone can only be rejected",
-    }
+async def _pair_records(client, transaction_id: UUID, other_id: UUID) -> Any:
+    return await client.post(
+        f"{FINANCE}/transactions/{transaction_id}/pair", json={"transaction_id": str(other_id)}
+    )
+
+
+async def test_a_pair_made_by_sort_code_alone_is_weak_and_can_be_rejected(
+    client, session, run
+) -> None:
+    transfer, _, _, _ = await _weak_pair(client, session, run)
     rejected = await client.post(f"{FINANCE}/transfers/{transfer['id']}/reject")
     assert rejected.status_code == 200
     assert (rejected.json()["status"], rejected.json()["weak"]) == ("rejected", False)
+    undone = await client.post(f"{FINANCE}/transfers/{transfer['id']}/unreject")
+    assert undone.status_code == 204
+    [again] = await _transfers(client)
+    assert (again["status"], again["weak"]) == ("matched", True)
+
+
+async def test_unpairing_a_weak_pair_frees_its_records_for_their_right_counterparts(
+    client, session, run
+) -> None:
+    """The sort code was wrong evidence: H's receipt came from D, whose payment names
+    nobody. Reject would mark the receipt as no transfer, which pair_records refuses; Unpair
+    keeps both records free, so the receipt pairs with D's payment."""
+    transfer, sent, received, h_id = await _weak_pair(client, session, run)
+    d_id = await _manual(client, "D", "transactions")
+    d_sent = await _statement_row(session, run, d_id, "-100")
+    assert await _transfers(client) == [transfer]
+    first = await _pair_records(client, received, d_sent)
+    assert first.status_code == 422
+    assert "unpair it first" in first.json()["detail"]["message"]
+
+    assert (await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")).status_code == 204
+    # Neither record is a transfer on its own: no transfer, placeholder or review is left.
+    assert await _transfers(client) == []
+    assert await _placeholders(session) == []
+
+    paired = await _pair_records(client, received, d_sent)
+    assert paired.status_code == 200, paired.text
+    body = paired.json()
+    assert (body["status"], body["from_account_id"], body["to_account_id"]) == (
+        "matched",
+        d_id,
+        h_id,
+    )
+    assert (body["out_transaction_id"], body["in_transaction_id"]) == (str(d_sent), str(received))
+    # X's payment stays apart from the receipt and opens nothing of its own.
+    assert [t["id"] for t in await _transfers(client)] == [body["id"]]
+    assert str(sent) not in {body["out_transaction_id"], body["in_transaction_id"]}
+
+
+async def test_unpairing_a_weak_pair_is_undone_by_pairing_its_records(client, session, run) -> None:
+    transfer, sent, received, _ = await _weak_pair(client, session, run)
+    assert (await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")).status_code == 204
+    assert await _transfers(client) == []
+
+    paired = await _pair_records(client, received, sent)
+    assert paired.status_code == 200, paired.text
+    # Paired by the owner now, it is no longer a pair a sort code alone made.
+    assert (paired.json()["status"], paired.json()["weak"]) == ("matched", False)
