@@ -414,6 +414,20 @@ def in_matched_transfer(transaction_id: SQLColumnExpression[UUID] | UUID) -> Col
     )
 
 
+async def require_pairable(session: AsyncSession, transaction_id: UUID) -> None:
+    """Refuse a record the owner can't pair now: a leg of a matched transfer (unpair it
+    first) or a rejected one (undo the rejection first: a pair never silently overrides
+    one). pair_records and pair_candidates both ask this, so a listed choice can be paired."""
+    if await session.scalar(select(in_matched_transfer(transaction_id))):
+        raise FinanceValidationError(
+            f"transaction {transaction_id} is a leg of a matched transfer: unpair it first"
+        )
+    if await is_rejected(session, await source_ref(session, transaction_id)):
+        raise FinanceValidationError(
+            f"transaction {transaction_id} was rejected as a transfer: undo the rejection first"
+        )
+
+
 @dataclass(frozen=True)
 class PairCandidateRecord:
     """An own record the owner could pair with another as one transfer."""
@@ -434,12 +448,14 @@ async def pair_candidates(
     matched transfer nor rejected. One the owner unpaired from this record (a never_pair
     decision) is still listed: pair_records withdraws that decision, which is the way back
     from a mistaken unpair. Nearest booking date first (then the earlier occurred_at); no
-    window applies, as for any pair decision. Refuses a record that can't be a transfer's leg."""
+    window applies, as for any pair decision. Refuses a record that can't be a transfer's leg,
+    and one pair_records would refuse (require_pairable)."""
     await source_ref(session, transaction_id)  # an unknown id raises here
     system = await system_account_ids(session)
     subject = await load_own_record(session, system, transaction_id)
     if subject is None:
         raise FinanceValidationError(f"transaction {transaction_id} cannot be a transfer's leg")
+    await require_pairable(session, transaction_id)
     e = eligible_records(system)
     t, d = models.Transaction, models.TransferDecision
     rejected = exists().where(

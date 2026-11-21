@@ -10,14 +10,14 @@ back into it, and its Undo withdraws exactly that rejection's decisions."""
 
 from uuid import UUID
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, or_, update
 from sqlalchemy.dialects.postgresql import insert
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import delete_derived_transaction
-from lararium.modules.finance.transfers.contra import OwnLeg, is_rejected, own_leg, source_ref
+from lararium.modules.finance.transfers.contra import OwnLeg, own_leg, source_ref
 from lararium.modules.finance.transfers.engine import (
     decision_change_key,
     forget_decisions,
@@ -31,8 +31,8 @@ from lararium.modules.finance.transfers.queries import (
     TransferRecord,
     candidates,
     get_transfer,
-    in_matched_transfer,
     load_transfers,
+    require_pairable,
 )
 
 
@@ -243,12 +243,5 @@ async def pair_records(ctx: CommandContext, transaction_id: UUID, other_id: UUID
     if first.quantity != -second.quantity:
         raise FinanceValidationError("the two records are not of opposite and equal amounts")
     for record_id in (transaction_id, other_id):
-        if await session.scalar(select(in_matched_transfer(record_id))):
-            raise FinanceValidationError(
-                f"transaction {record_id} is a leg of a matched transfer: unpair it first"
-            )
-        if await is_rejected(session, await source_ref(session, record_id)):
-            raise FinanceValidationError(
-                f"transaction {record_id} was rejected as a transfer: undo the rejection first"
-            )
+        await require_pairable(session, record_id)
     return await _store_pair(ctx, transaction_id, other_id)

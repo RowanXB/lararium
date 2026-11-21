@@ -586,7 +586,7 @@ async def test_pair_candidates_order_and_exclusions(
     await run(void_transaction, voided.id)
     matched_leg = await manual_tx(m1, "100", occurred_at=at(0, 1))
     matched_out = await manual_tx(m2, "-100", occurred_at=at(0, 1))
-    await rejected_record("100")
+    rejected = await rejected_record("100")
     await heal()
     await run(pair_records, matched_out.id, matched_leg.id)
 
@@ -613,7 +613,13 @@ async def test_pair_candidates_order_and_exclusions(
     assert len(capped) == 20
     assert [c.transaction_id for c in capped[:4]] == [minus1.id, minus1_late.id, plus1.id, plus3.id]
 
-    with pytest.raises(FinanceValidationError):
+    with pytest.raises(FinanceValidationError, match="cannot be a transfer's leg"):
         await pair_candidates(session, voided.id)
     with pytest.raises(TransactionNotFoundError):
         await pair_candidates(session, uuid4())
+    # A record that pair_records would refuse gets no list of choices it can't use, but the
+    # same reason.
+    with pytest.raises(FinanceValidationError, match="unpair it first"):
+        await pair_candidates(session, matched_leg.id)
+    with pytest.raises(FinanceValidationError, match="undo the rejection first"):
+        await pair_candidates(session, rejected.id)
