@@ -667,7 +667,8 @@ async def _statement_row(session, run, account_id: str, quantity: str) -> None:
             counterparty=CounterpartyFields(identifier_id=None, bank_transfer=True),
         ),
     )
-    complete = (WHEN.date() - timedelta(days=1), WHEN.date() + timedelta(days=60))
+    # Listed in full from before the counterpart's window starts, so a pair is found.
+    complete = (WHEN.date() - timedelta(days=6), WHEN.date() + timedelta(days=6))
     await record_import_rows(session, run, own, [row.id], complete)
 
 
@@ -692,6 +693,7 @@ async def test_setting_a_main_account_pairs_its_history(client, session, run) ->
     assert (response.status_code, response.json()["parent_account_id"]) == (200, main_id)
     [transfer] = await _transfers(client)
     assert (transfer["from_account_id"], transfer["to_account_id"]) == (main_id, savings_id)
+    assert transfer["status"] == "matched"
 
 
 async def test_clearing_the_main_account_unpairs_its_history(client, session, run) -> None:
