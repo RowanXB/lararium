@@ -434,7 +434,8 @@ def statement_row(
 ) -> StatementRow:
     """Post a row as an M2 import would, naming nobody (its contra from transfer_contra),
     and record it as a committed import row printing `details`. `identifier_id`: the bank
-    account the posted transaction names, which a row naming one does."""
+    account the posted transaction names, which a row naming one does. `key`: the row's
+    dedupe key (record_import_rows), its reference; by default one from the transaction."""
 
     async def _post(
         account: AccountRecord,
@@ -445,6 +446,7 @@ def statement_row(
         identifier_id: UUID | None = None,
         bank_transfer: bool = True,
         complete: tuple[date, date] = IMPORTED,
+        key: str | None = None,
     ) -> UUID:
         contra = await transfer_contra(
             session,
@@ -469,7 +471,13 @@ def statement_row(
                 ),
             ),
         )
-        await record_import(account.id, [row.id], complete, details=[details or RowDetails()])
+        await record_import(
+            account.id,
+            [row.id],
+            complete,
+            keys=None if key is None else [key],
+            details=[details or RowDetails()],
+        )
         return row.id
 
     return _post
