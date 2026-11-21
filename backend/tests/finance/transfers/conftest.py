@@ -290,7 +290,7 @@ class RowDetails:
     account_ending: str | None = None
 
 
-async def _insert_batch(
+async def insert_batch(
     session: AsyncSession,
     run: Run,
     account_id: UUID,
@@ -351,7 +351,7 @@ async def record_import_rows(
     (its reference, source kind "import"); by default one per transaction. `details`: what
     each row prints of its counterparty's bank account; by default nothing."""
     r, t, p = models.ImportRow, models.Transaction, models.Posting
-    batch_id = await _insert_batch(session, run, account_id, complete)
+    batch_id = await insert_batch(session, run, account_id, complete)
     if keys is None:
         keys = [f"test:{t}" for t in transaction_ids]
     if details is None:
@@ -505,7 +505,7 @@ def duplicate_row(session: AsyncSession, run: Run) -> DuplicateRow:
                 ).where(r.transaction_id == transaction_id)
             )
         ).one()
-        batch_id = await _insert_batch(session, run, original.account_id, IMPORTED, batch_status)
+        batch_id = await insert_batch(session, run, original.account_id, IMPORTED, batch_status)
         await session.execute(
             insert(r).values(
                 batch_id=batch_id,

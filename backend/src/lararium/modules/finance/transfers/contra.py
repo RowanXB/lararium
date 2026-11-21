@@ -23,6 +23,7 @@ from sqlalchemy import (
     Table,
     Uuid,
     and_,
+    any_,
     case,
     cast,
     distinct,
@@ -196,10 +197,36 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     )
     # What the transaction's import rows print of their counterparty's bank account: its
     # committed row, and the rows of committed batches that duplicate it (a later file
-    # printing what the first did not). Another lateral aggregate, one index lookup per
-    # record (import_rows_transaction, import_rows_duplicate_of).
-    c, r = (aliased(models.ImportRow, name=n) for n in ("committed_row", "printed_row"))
+    # printing what the first did not). Another lateral aggregate, its rows found as
+    # queries._in_ids finds them: their ids gathered first, by index (its rows by
+    # import_rows_transaction, their duplicates by import_rows_duplicate_of), then each row
+    # by its primary key and its batch by its own. Joined instead, rows and batches leave
+    # the plan to the planner's estimates, and with wrong ones (statistics taken while a
+    # bulk insert was uncommitted) it read every row of a batch for each record.
+    c, d, r = (
+        aliased(models.ImportRow, name=n) for n in ("own_row", "duplicate_row", "printed_row")
+    )
     batch = aliased(models.ImportBatch, name="printed_batch")
+    # By transaction alone, so the planner has one index to take (with the status too, it
+    # may AND in an index of every committed row). A transaction that isn't void has no
+    # other rows than its committed ones: a rollback voids its rows' transactions. Each is
+    # correlated with the transaction explicitly: nested in the lateral, it would otherwise
+    # look for it in the lateral alone, and gather every transaction's rows.
+    own_rows = cast(
+        select(func.array_agg(c.id))
+        .where(c.transaction_id == t.id)
+        .correlate_except(c)
+        .scalar_subquery(),
+        ARRAY(Uuid()),
+    )
+    duplicates = cast(
+        select(func.array_agg(d.id))
+        .where(d.duplicate_of.is_not(None), d.duplicate_of == any_(own_rows))
+        .correlate_except(d)
+        .scalar_subquery(),
+        ARRAY(Uuid()),
+    )
+    batch_status = select(batch.status).where(batch.id == r.batch_id).scalar_subquery()
     # The column holds digits only (a CHECK), so the replace below only guards.
     only_number = and_(
         r.counterparty_account_number.is_not(None), r.counterparty_sort_code.is_(None)
@@ -229,15 +256,11 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 )
             ).label("partial"),
         )
-        .select_from(c)
-        .join(r, or_(r.id == c.id, r.duplicate_of == c.id))
-        .join(batch, batch.id == r.batch_id)
         .where(
-            c.transaction_id == t.id,
-            c.status == "committed",
-            c.kind == "statement",
+            r.id == any_(func.array_cat(own_rows, duplicates)),
             r.kind == "statement",
-            batch.status == "committed",
+            r.status.in_(("committed", "duplicate")),
+            batch_status == "committed",
         )
         .lateral("evidence")
     )
