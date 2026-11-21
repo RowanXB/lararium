@@ -181,7 +181,8 @@ webhook) into the ledger. It only reads.
 What syncs: your accounts (a joint account is a separate account), each pot as a child account
 of its account, transactions (declined ones are skipped; pending ones are updated when they
 settle or are reversed), and balance snapshots. Card payments are matched to merchants; pot
-moves become transfers between the account and the pot.
+moves become transfers between the account and the pot. A deleted pot is closed, even one
+deleted before you connected, so money that sat in it still counts towards net worth.
 
 Two system accounts appear in the ledger:
 
