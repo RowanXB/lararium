@@ -5,7 +5,8 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
 
 - each Monzo account is a transactions-mode bank account; each pot a hybrid-mode child of it
   (ruling R14), valued by its moves before its first snapshot and by the pot balance fetched
-  on each sync afterwards; a deleted pot is closed;
+  on each sync afterwards; a deleted pot, even one deleted before the connection saw it, is
+  closed, its balance holding from its deletion;
 - each non-declined transaction is one ledger transaction keyed by its Monzo id, posted
   against the pot's account for a pot move, and otherwise against "In transit" when it is a
   transfer between the owner's accounts and "Unassigned" when not (transfer_contra; the
@@ -91,7 +92,7 @@ from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-3"
+NORMALIZER_VERSION = "monzo-norm-4"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
 # makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
@@ -784,10 +785,10 @@ class _Normalizer:
         )
 
     async def pot(self, pot: dict[str, Any], parent_monzo_id: str, fetched_at: datetime) -> None:
+        """Map a pot to its account, a deleted one too, even one deleted before the
+        connection saw it: what Monzo says about it is stored, and its moves post to it."""
         pot_id: str = pot["id"]
         account_id = self.mapped(pot_id)
-        if account_id is None and pot.get("deleted"):
-            return  # gone before we ever saw it
         details = await self._pot_details(pot)
         if account_id is None:
             created = await create_account(
@@ -806,9 +807,14 @@ class _Normalizer:
             self.account_map[pot_id] = str(account_id)
         # On every sync, as for an account.
         await set_source_details(self.command, account_id, details)
-        self.snapshot(account_id, pot["balance"], pot["currency"], fetched_at)
+        as_of = fetched_at
         if pot.get("deleted"):
             self._deleted_pots.append(account_id)
+            # Its balance holds from its deletion, Monzo's last change to it, so the interest
+            # it earned (which no move shows) doesn't leave it short until this sync.
+            if (deleted_at := _readable_time(pot.get("updated"))) is not None:
+                as_of = min(deleted_at, fetched_at)
+        self.snapshot(account_id, pot["balance"], pot["currency"], as_of)
 
     async def _pot_details(self, pot: dict[str, Any]) -> SourceDetails:
         read = _Reader(pot, "pot", self.unmapped)
@@ -886,8 +892,7 @@ class _Normalizer:
         pot_id = _pot_id(tx)
         fields = await self.counterparty_fields(tx, read)
         fees = self._fees(tx, currency)
-        # A pot that was deleted before the connection existed has no account; its moves are
-        # posted like any other payment.
+        # A move to a pot Monzo didn't list is posted like any other payment.
         other = (self.mapped(pot_id) if pot_id is not None else None) or (
             # Its fee postings are the postings it has besides its own and the contra.
             await self.contra(external_id, own_account_id, fields, other_postings=len(fees))
