@@ -12,8 +12,8 @@ opened on or before its valuation date, with no row before the one or after the 
 Staging now refuses any other, so it is left as it was imported rather than given a period
 its rows fall outside, or one that runs backwards.
 
-Revision ID: 0026
-Revises: 0025
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-11-21
 """
 
@@ -21,8 +21,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0026"
-down_revision: str | None = "0025"
+revision: str = "0029"
+down_revision: str | None = "0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

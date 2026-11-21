@@ -7,8 +7,8 @@ bank prints, and their transactions are no bank transfers. The downgrade keeps t
 corrected values: they were wrong. Stored LemFi CSV profiles get the interest
 descriptions their catalog entry now has, and a new version.
 
-Revision ID: 0025
-Revises: 0024
+Revision ID: 0028
+Revises: 0027
 Create Date: 2026-11-21
 """
 
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0025"
-down_revision: str | None = "0024"
+revision: str = "0028"
+down_revision: str | None = "0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
