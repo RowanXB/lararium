@@ -17,6 +17,7 @@ from lararium.modules.finance.ibkr.fields import (
     ROUTED_SECTIONS,
     SECTIONS,
     SINGLE_ROW_SECTIONS,
+    STATEMENT_PERIOD_SECTIONS,
     TRADE_DETAIL_TAGS,
 )
 
@@ -223,6 +224,11 @@ def parse_statement(body: bytes) -> Statement:
                     row.attributes.get("fromCurrency"),
                     row.attributes.get("toCurrency"),
                 )
+            elif row.section in STATEMENT_PERIOD_SECTIONS:
+                # A Total row repeats unchanged on quiet days: merged, it would hold for a
+                # period no statement had, and overlapping windows would store it twice.
+                attributes = tuple(sorted(row.attributes.items()))
+                key = (row.section, row.account, row.period_from, row.period_to, attributes)
             else:
                 key = (row.section, row.account, tuple(sorted(row.attributes.items())))
             held = merged.get(key)

@@ -100,6 +100,25 @@ def test_derivable_sections_are_read_and_unknown_ones_flagged() -> None:
     }
 
 
+def test_a_period_row_repeated_unchanged_stays_one_per_day() -> None:
+    # The owner's MTM Total row is the same on every quiet day: it holds for each day's
+    # statement, not for a period spanning them, so it is not merged.
+    statement = parse_statement(
+        build(
+            RowSpec("MTMPerformanceSummaryUnderlying", A1, reportDate="", total="0"),
+            RowSpec("CashTransaction", A1),
+            accounts=ACCOUNTS[:1],
+            by_day=True,
+        )
+    )
+    mtm = [r for r in statement.rows if r.section == "MTMPerformanceSummaryUnderlying"]
+    assert sorted((r.period_from, r.period_to) for r in mtm) == [
+        (date(2026, 3, d), date(2026, 3, d)) for d in (2, 3, 4)
+    ]
+    # Other rows repeated unchanged are still one row.
+    assert len([r for r in statement.rows if r.section == "CashTransaction"]) == 1
+
+
 def test_summary_rows_skipped() -> None:
     body = build(
         RowSpec("CashTransaction", A1, levelOfDetail="SUMMARY", transactionID=None),

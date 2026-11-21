@@ -939,6 +939,24 @@ async def test_every_field_the_api_returns_is_stored(session, run, tmp_path) -> 
     assert tuple((await session.execute(text(counts))).one()) == before == (3, 2, 1)
 
 
+async def test_overlapping_daily_windows_keep_one_period_row_per_day(
+    session, run, tmp_path
+) -> None:
+    # Two syncs whose windows overlap, as the daily fetch's do: the Total row of each day is
+    # stored once, for that day.
+    connection = await _connection(run)
+    rows = [RowSpec("MTMPerformanceSummaryUnderlying", "U0000001", reportDate="", total="0")]
+    first = (DAY, DAY + timedelta(days=2))
+    second = (DAY + timedelta(days=1), DAY + timedelta(days=3))
+    for period in (first, second):
+        await _sync(session, connection, tmp_path, rows, period=period, by_day=True)
+    stored = await session.execute(
+        text("select from_date, to_date from finance.ibkr_mtm_performance order by from_date")
+    )
+    days = [DAY + timedelta(days=n) for n in range(4)]
+    assert [tuple(r) for r in stored] == [(day, day) for day in days]
+
+
 async def test_opening_only_for_older_account(session, run, tmp_path) -> None:
     days = [DAY + timedelta(days=n) for n in range(3)]
     young = AccountSpec("U0000002", date_opened=days[0])

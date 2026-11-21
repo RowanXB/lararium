@@ -113,8 +113,8 @@ async def typed_values(
 ) -> dict[str, object]:
     """The row's attributes that have a column in the table, as the column's type.
 
-    An empty value is NULL. Attributes without a column (the keys, what the ledger holds,
-    what is derivable) and columns of type uuid (the caller's references) are left out.
+    An empty value is NULL. Attributes without a column (the keys, what the ledger holds)
+    and columns of type uuid (the caller's references) are left out.
     """
     types = await _types(session, table)
     values: dict[str, object] = {}

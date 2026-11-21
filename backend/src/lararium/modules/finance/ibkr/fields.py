@@ -283,6 +283,10 @@ SECTIONS: Mapping[str, SectionSpec] = {
     ),
 }
 
+# Rows that hold for their statement's period only (a balance, a period's total): one per
+# statement, never merged with the same row of another day's statement.
+STATEMENT_PERIOD_SECTIONS = frozenset({"StatementOfFundsLine", "MTMPerformanceSummaryUnderlying"})
+
 # Sections whose single row is the section element itself, its fields being its attributes.
 SINGLE_ROW_SECTIONS = frozenset({"AccountInformation", "ChangeInNAV"})
 

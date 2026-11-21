@@ -57,7 +57,8 @@ logger = logging.getLogger(__name__)
 # 2: the NAV long/short parts have columns; 3: so do the Cash Report's segment parts and its
 # month and year to date totals; 4: every field the API returns has one (Change in NAV,
 # Statement of Funds, MTM Performance, Prior Period Positions, the derivable trade and position
-# values). Each bump replays the stored rows into the new columns.
+# values). Each bump replays the stored rows into the new columns; rows of a section that was
+# not stored before (the three that were skipped as derivable until 4) come only with a fetch.
 NORMALIZER_VERSION = "ibkr-norm-4"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
