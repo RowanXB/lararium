@@ -26,11 +26,13 @@ from lararium.modules.finance.transfers.settings import TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
 # owner paired them; each names the other's account; only one names the other's account
-# (the other is a bank transfer naming nobody).
-type Tier = Literal[1, 2, 3]
+# (the other is a bank transfer naming nobody); only one prints the sort code of the other's
+# account, and nothing else of it (the other names no bank account at all).
+type Tier = Literal[1, 2, 3, 4]
 DECIDED: Tier = 1
 MUTUAL: Tier = 2
 ONE_SIDED: Tier = 3
+WEAK: Tier = 4
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class Pairable:
     booking_date: date  # the window is counted in these
     holder: UUID | None  # the account its counterparty bank account is registered to
     bank_transfer: bool
+    weak_holder: UUID | None = None  # the account its sort code alone names (weak_tier)
+    names_account: bool = False  # it names a bank account, or prints part of one
 
     @property
     def sends(self) -> bool:
@@ -85,6 +89,27 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     return MUTUAL if r.identified and c.identified else ONE_SIDED
 
 
+def _names_weakly(w: Pairable, other: Pairable) -> bool:
+    """Whether w's sort code alone names the other's account, and the other names no bank
+    account at all: a payment to someone else's account at that bank can't pair with an
+    unrelated receipt there that names its sender's account (transfer evidence design
+    §5.3)."""
+    return w.weak_holder == other.account_id and not other.names_account
+
+
+def weak_tier(r: Pairable, c: Pairable) -> Tier | None:
+    """The tier a sort code alone gives two records as registry_tier takes them, or None
+    when it doesn't pair them: they must be on different accounts, neither identified, both
+    bank transfers, and one's sort code alone naming the other's account, which names no
+    bank account at all. Weak evidence never identifies a record, so it pairs only records
+    that are both there. Decisions are not considered."""
+    if c.account_id == r.account_id or r.identified or c.identified:
+        return None
+    if not (r.bank_transfer and c.bank_transfer):
+        return None
+    return WEAK if _names_weakly(r, c) or _names_weakly(c, r) else None
+
+
 @dataclass(frozen=True)
 class Known:
     """What the ledger knows of manual accounts' own rows (design §5.8, "An unrelated row
@@ -119,10 +144,15 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
         await session.scalars(select(a.id).where(a.source_connection_id.is_(None)))
     )
     first_full_day: dict[tuple[UUID, UUID], date] = {}
-    # A batch speaks only for the instruments it has live rows in (M2's Decision 16).
-    for account_id, instrument_id, first in await session.execute(
-        select(b.account_id, r.instrument_id, func.min(b.complete_from))
+    # A batch speaks only for the instruments it has live rows in (M2's Decision 16). One
+    # that lists in full from its account's opening speaks for all time before it too:
+    # nothing exists before an account opens.
+    s = models.ImportStatement
+    from_opening = func.bool_or(b.complete_from == s.account_opened_on)
+    for account_id, instrument_id, first, opened in await session.execute(
+        select(b.account_id, r.instrument_id, func.min(b.complete_from), from_opening)
         .join(r, r.batch_id == b.id)
+        .outerjoin(s, s.batch_id == b.id)
         .where(
             b.status == "committed",
             b.complete_from.is_not(None),
@@ -132,7 +162,7 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
         .group_by(b.account_id, r.instrument_id)
     ):
         assert instrument_id is not None and first is not None
-        first_full_day[(account_id, instrument_id)] = first
+        first_full_day[(account_id, instrument_id)] = date.min if opened else first
     for account_id, instrument_id, first in listing:
         key = (account_id, instrument_id)
         first_full_day[key] = min(first, first_full_day.get(key, first))
@@ -180,8 +210,9 @@ async def _load_records(
     decisions: _Decisions,
     excluding: Collection[UUID],
 ) -> list[Pairable]:
-    """The own records that can pair at all: those a bank transfer or naming a bank
-    account (the registry's), and those the owner paired. A card payment is neither."""
+    """The own records that can pair at all: those a bank transfer, naming a bank
+    account or naming an own account by its number (the registry's), and those the owner
+    paired. A card payment is none of these."""
     e = eligible_records(system)
     t = models.Transaction
     decided = {source for pair in decisions.paired for source in pair}
@@ -190,7 +221,11 @@ async def _load_records(
         if decided
         else None
     )
-    can_pair = [e.c.bank_transfer, e.c.counterparty_identifier_id.is_not(None)]
+    can_pair = [
+        e.c.bank_transfer,
+        e.c.counterparty_identifier_id.is_not(None),
+        e.c.holder.is_not(None),
+    ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
     query = select(
@@ -204,6 +239,8 @@ async def _load_records(
         e.c.booking_date,
         e.c.holder,
         e.c.bank_transfer,
+        e.c.weak_holder,
+        e.c.names_account,
     ).where(or_(*can_pair))
     if excluding:
         query = query.where(e.c.transaction_id.not_in(list(excluding)))
@@ -218,6 +255,8 @@ async def _load_records(
             booking_date=row.booking_date,
             holder=row.holder,
             bank_transfer=row.bank_transfer,
+            weak_holder=row.weak_holder,
+            names_account=row.names_account,
         )
         for row in await session.execute(query)
     ]
@@ -257,13 +296,22 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     return known.holds_from(other, counterpart_bounds(identified, settings)[0])
 
 
+def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
+    """The same gate for a weak pair (weak_tier), from the record whose sort code names the
+    other's account: its counterpart, found by amount and date, is taken only where the
+    ledger would hold the real one."""
+    w, other = (s, c) if _names_weakly(s, c) else (c, s)
+    return known.holds_from(other, counterpart_bounds(w, settings)[0])
+
+
 def _registry_edges(
     records: list[Pairable], settings: TransferSettings, decisions: _Decisions, known: Known
 ) -> tuple[_Edges, _Edges]:
     """(same amount, another amount) pairs the registry gives. Of the same amount, both
     tiers, a one-sided one only where the ledger would hold the real counterpart
-    (_one_sided_known); of another amount, only mutually identified ones (Ruling 8: a
-    payment naming nobody is no evidence of a differing transfer)."""
+    (_one_sided_known), and, where the registry gives none, a weak one under the same gate
+    (_weak_known); of another amount, only mutually identified ones (Ruling 8: a payment
+    naming nobody is no evidence of a differing transfer)."""
     same, differing = _Edges(), _Edges()
     # Same amount: a sender meets the receivers in its instrument of its amount.
     receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
@@ -284,9 +332,13 @@ def _registry_edges(
         timeline = by_amount.get((s.instrument_id, -s.quantity))
         for c in timeline.between(*window) if timeline else ():
             tier = registry_tier(s, c)
+            if tier is None:
+                tier = weak_tier(s, c)
             if tier is None or decisions.apart(s, c):
                 continue
             if tier == ONE_SIDED and not _one_sided_known(s, c, settings, known):
+                continue
+            if tier == WEAK and not _weak_known(s, c, settings, known):
                 continue
             same.add(s.id, c.id, tier)
         if not s.identified or s.holder is None:
@@ -408,7 +460,8 @@ async def pair_relation(
     instrument, of opposite sign; the receiving one is booked in the sending one's window; at
     least one is identified through the registry; each identified one names the other's
     account; each other one is a bank transfer; and neither is rejected nor decided never
-    to pair with the other. The owner pairs two records with a pair decision.
+    to pair with the other. Where the registry doesn't pair two records, a sort code alone
+    may, as the weakest tier (weak_tier). The owner pairs two records with a pair decision.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about

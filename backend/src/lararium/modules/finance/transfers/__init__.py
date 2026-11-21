@@ -38,6 +38,7 @@ from lararium.modules.finance.transfers.queries import (
     mark_notified,
     pair_candidates,
     suggestions,
+    weak_transfers,
 )
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
@@ -74,4 +75,5 @@ __all__ = [
     "unlink_transaction",
     "unpair",
     "unreject",
+    "weak_transfers",
 ]

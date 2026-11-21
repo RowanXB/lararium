@@ -17,7 +17,11 @@ from lararium.core.commands import CommandContext
 from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
-from lararium.modules.finance.identifiers import get_or_create_identifier, list_identifiers
+from lararium.modules.finance.identifiers import (
+    assign_identifier,
+    get_or_create_identifier,
+    list_identifiers,
+)
 from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from lararium.modules.finance.importing.staging import list_batch_rows
 from lararium.modules.finance.instruments import InstrumentRecord
@@ -40,14 +44,17 @@ from lararium.modules.finance.transfers import (
 
 from .staging_helpers import (
     Commit,
+    MakeAccount,
     Rollback,
     Run,
     Stage,
     _adjustments,
     _balance_after,
     _csv_profile,
+    _profile,
     isolated_example,
 )
+from .synthetic_pdfs import LemfiRow, LemfiStatement, TemboRow, TemboStatement, lemfi_pdf, tembo_pdf
 
 SORT_CODE, ACCOUNT_NUMBER = "401234", "12345678"
 HEADER = "Date,Type,Description,Amount,Balance,Sort Code,Account Number\n"
@@ -577,4 +584,93 @@ async def test_a_wrong_pick_at_the_end_is_flagged_by_the_next_statement(
     [transfer] = await list_transfers(session)
     assert (transfer.review_reason, transfer.in_transaction_id) == ("several_candidates", None)
     assert await _balance_after(session, account.id, END) == Decimal("698")
+    assert await find_transfer_violations(session) == []
+
+
+async def test_an_interest_payout_is_no_bank_transfer(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """LemFi prints no type codes, so only its own text tells a savings interest payout from
+    a deposit: the payout is no bank transfer, a deposit stays one."""
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    account = await make_account(name="Example LemFi saver", balance_mode="transactions")
+    rows = [
+        LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12"),
+        LemfiRow("10 May, 2027", ("Savings Funding",), paid_in="1,000.00"),
+    ]
+    content = lemfi_pdf(LemfiStatement([rows], savings=True, opening="100.00"))
+    batch = await stage(lemfi, content, account_id=account.id, default=None)
+    await commit(batch.id)
+    r, t = models.ImportRow, models.Transaction
+    found = await session.execute(
+        select(r.description, t.bank_transfer)
+        .join(t, t.id == r.transaction_id)
+        .where(r.batch_id == batch.id, r.kind == "statement")
+    )
+    assert {d: b for d, b in found} == {
+        "Savings Interest Payout": False,
+        "Savings Funding": True,
+    }
+
+
+async def _tembo_profile(run: Run) -> ImportProfileRecord:
+    return await _profile(
+        run, format="pdf", layout="tembo_statement", card_types=["Interest", "Interest Adjustment"]
+    )
+
+
+async def test_a_transfer_into_tembo_on_its_opening_day_pairs(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    make_account: MakeAccount,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """Nothing exists before an account opens, and a Tembo statement lists everything from
+    the opening: a transfer in on that day pairs, with no placeholder beside it."""
+    tembo = await make_account(name="Example Tembo", balance_mode="transactions")
+    await run(assign_identifier, tembo.id, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}")
+    opening = date(2027, 2, 3)
+    for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
+        await run(get_or_create_system_account, key)
+    await _pay(session, run, gbp, connected, on=opening)
+    assert await _status(session) == "inferred"
+
+    rows = [TemboRow("03/02/2027", "Deposit", "£100.00")]
+    content = tembo_pdf(TemboStatement([rows], opened="03/02/2027", valued="01/06/2027"))
+    await commit((await stage(await _tembo_profile(run), content, account_id=tembo.id)).id)
+    assert await _status(session) == "matched"
+    assert await _balance_after(session, tembo.id, date(2027, 6, 1)) == Decimal("100")
+    assert await find_transfer_violations(session) == []
+
+
+async def test_registering_tembo_after_its_import_counts_its_deposit_once(
+    session: AsyncSession,
+    run: Run,
+    gbp: InstrumentRecord,
+    stage: Stage,
+    commit: Commit,
+    make_account: MakeAccount,
+    connected: tuple[UUID, AccountRecord],
+) -> None:
+    """The 2026-11-21 production case, in its order: A's payment synced, naming Tembo's bank
+    account before it was registered; the Tembo statement imported; then the registration,
+    which matches history again. The deposit on the statement's first row day pairs with
+    the payment instead of getting a placeholder beside it, so the balance is the
+    statement's."""
+    tembo = await make_account(name="Example Tembo", balance_mode="transactions")
+    for key in ("unassigned", "in_transit"):  # as A's connector made them, syncing
+        await run(get_or_create_system_account, key)
+    await _pay(session, run, gbp, connected, on=date(2027, 5, 3))
+    rows = [TemboRow("03/05/2027", "Deposit", "£100.00")]
+    content = tembo_pdf(TemboStatement([rows], opened="03/02/2027", valued="01/06/2027"))
+    await commit((await stage(await _tembo_profile(run), content, account_id=tembo.id)).id)
+    assert await list_transfers(session) == []  # the bank account it names is nobody's yet
+
+    await run(assign_identifier, tembo.id, "uk_bank_account", f"{SORT_CODE}:{ACCOUNT_NUMBER}")
+    await run(heal_transfers)
+    assert await _status(session) == "matched"
+    assert await _balance_after(session, tembo.id, date(2027, 6, 1)) == Decimal("100")
     assert await find_transfer_violations(session) == []

@@ -44,7 +44,8 @@ async def test_lisa_wrapper_is_kept(make_account) -> None:
 
 
 async def test_pot_is_child_of_parent(make_account) -> None:
-    parent = await make_account(name="Monzo")
+    # A manual account's main account must count its postings (not snapshots-only).
+    parent = await make_account(name="Monzo", balance_mode="hybrid")
     pot = await make_account(name="Savings pot", subtype="savings_pot", parent_account_id=parent.id)
     assert pot.parent_account_id == parent.id
 

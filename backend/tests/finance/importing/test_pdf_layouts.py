@@ -615,9 +615,11 @@ def test_tembo_rows_and_summary() -> None:
         "Amount": "£5.50",
         "Balance": "£44.50",
     }
-    assert statement.period == (date(2027, 5, 3), date(2027, 5, 31))
-    # Made on demand, it may stop partway through its last day.
-    assert not statement.period_complete
+    # Everything from the account's opening to the day it is made.
+    assert (statement.period, statement.period_complete) == (
+        (date(2027, 2, 3), date(2027, 6, 1)),
+        True,
+    )
     assert statement.account == StatementAccount(
         account_reference="ACC-EX01AB-CD23EF",
         account_type="Regular Saver",
@@ -640,6 +642,29 @@ def test_tembo_rows_and_summary() -> None:
     )
     assert statement.document_date == date(2027, 6, 1)
     assert statement.account_opened_on == date(2027, 2, 3)
+
+
+def test_tembo_lists_everything_from_opening_to_valuation() -> None:
+    """Owner, 2026-11-21: a Tembo statement lists everything from the account's opening to
+    the day it is made, whatever days its rows fall on."""
+    rows = [TemboRow("03/02/2027", "Deposit", "£50.00")]
+    statement = _tembo(TemboStatement(pages=[rows], opened="03/02/2027", valued="01/06/2027"))
+    assert (statement.period, statement.period_complete) == (
+        (date(2027, 2, 3), date(2027, 6, 1)),
+        True,
+    )
+    assert statement.closing_balance_date is None
+
+
+@pytest.mark.parametrize(
+    ("opened", "valued"), [(None, "01/06/2027"), ("03/02/2027", None), (None, None)]
+)
+def test_tembo_without_an_opening_or_valuation_date_keeps_the_rows_span(
+    opened: str | None, valued: str | None
+) -> None:
+    statement = _tembo(TemboStatement(pages=[TEMBO_ROWS], opened=opened, valued=valued))
+    assert statement.period == (date(2027, 5, 3), date(2027, 5, 31))
+    assert statement.period_complete is False
 
 
 def test_tembo_available_to_withdraw_is_its_own_field() -> None:

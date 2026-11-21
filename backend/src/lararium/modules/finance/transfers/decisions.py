@@ -151,7 +151,11 @@ async def unreject(ctx: CommandContext, transfer_id: UUID) -> None:
 
 async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
     """The owner says the matched transfer's two records are not one transfer, though each
-    may still be one: never pair them (both ways round), and match each again."""
+    may still be one: never pair them (both ways round), and match each again. A pair a sort
+    code alone made (weak_transfers) is unpaired too, though weak evidence makes no transfer
+    of its own: both records then leave the Transfers page, which offers Reject on such a
+    pair for that reason, and pair_records pairs either with its right counterpart, or the
+    two again."""
     await lock_transfers(ctx)
     session = ctx.session
     transfer = await get_transfer(session, transfer_id)

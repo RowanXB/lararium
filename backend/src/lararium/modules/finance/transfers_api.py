@@ -28,6 +28,7 @@ from lararium.modules.finance.schemas import (
     CandidateOut,
     IdentifierCreate,
     IdentifierOut,
+    MainAccountUpdate,
     PairCandidateOut,
     SuggestionOut,
     TransferOut,
@@ -141,6 +142,17 @@ async def set_account_balance_mode(
     return AccountOut.model_validate(record)
 
 
+@router.post("/accounts/{account_id}/main-account", name="set_main_account")
+async def set_main_account(
+    account_id: UUID, body: MainAccountUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Give a manual account a main account, or clear it; its transfers are matched anew."""
+    args = _args(body.model_dump(mode="json"), account_id=account_id)
+    async with healing_command(session, actor, "set_main_account", args) as ctx:
+        record = await accounts.set_main_account(ctx, account_id, body.main_account_id)
+    return AccountOut.model_validate(record)
+
+
 # Transfers
 
 
@@ -157,6 +169,7 @@ async def _transfers_out(
     now = datetime.now(UTC)
     timezone = await get_timezone(session)
     today = now.astimezone(timezone).date()
+    weak = await transfers.weak_transfers(session, found)
     return [
         TransferOut(
             id=record.id,
@@ -180,6 +193,7 @@ async def _transfers_out(
             out_transaction_id=record.out_transaction_id,
             in_transaction_id=record.in_transaction_id,
             placeholder_transaction_id=record.placeholder_transaction_id,
+            weak=record.id in weak,
         )
         for record in found
     ]

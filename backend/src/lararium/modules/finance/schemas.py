@@ -363,6 +363,8 @@ class ImportRowOut(_Out):
     occurred_at: AwareDatetime | None
     # What the file gave occurred_at to; "day": only a date, so it is that day's midnight.
     time_unit: TimeUnit | None
+    # The row pays interest, so it is never a bank transfer.
+    interest: bool
     value_date: date | None
     description: str
     payee: str | None
@@ -430,6 +432,10 @@ class BalanceModeUpdate(BaseModel):
     balance_mode: BalanceMode
 
 
+class MainAccountUpdate(BaseModel):
+    main_account_id: UUID | None
+
+
 class TransferOut(BaseModel):
     """A transfer as matching left it. Its id changes when matching reopens it, so a client
     finds it again by its own records' ids."""
@@ -452,6 +458,8 @@ class TransferOut(BaseModel):
     out_transaction_id: UUID | None
     in_transaction_id: UUID | None
     placeholder_transaction_id: UUID | None
+    # A matched pair a sort code alone made: the Transfers page offers Reject, not Unpair.
+    weak: bool = False
 
 
 class CandidateOut(BaseModel):

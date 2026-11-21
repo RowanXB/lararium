@@ -426,6 +426,10 @@ export type CsvProfileConfig = {
     include_only?: {
         [key: string]: Array<string>;
     };
+    /**
+     * Interest Descriptions
+     */
+    interest_descriptions?: Array<string>;
     overdraft_footer_label?: FooterLabel | null;
     /**
      * Row Order
@@ -921,6 +925,10 @@ export type ImportRowOut = {
      */
     instrument_id: string | null;
     /**
+     * Interest
+     */
+    interest: boolean;
+    /**
      * Is Gap
      */
     is_gap: boolean | null;
@@ -1265,6 +1273,16 @@ export type InstrumentUpdate = {
      * Hidden
      */
     hidden: boolean;
+};
+
+/**
+ * MainAccountUpdate
+ */
+export type MainAccountUpdate = {
+    /**
+     * Main Account Id
+     */
+    main_account_id: string | null;
 };
 
 /**
@@ -1759,6 +1777,10 @@ export type TransferOut = {
      * To Account Name
      */
     to_account_name: string;
+    /**
+     * Weak
+     */
+    weak?: boolean;
 };
 
 /**
@@ -2328,6 +2350,36 @@ export type RemoveAccountIdentifierResponses = {
 };
 
 export type RemoveAccountIdentifierResponse = RemoveAccountIdentifierResponses[keyof RemoveAccountIdentifierResponses];
+
+export type SetMainAccountData = {
+    body: MainAccountUpdate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/main-account';
+};
+
+export type SetMainAccountErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetMainAccountError = SetMainAccountErrors[keyof SetMainAccountErrors];
+
+export type SetMainAccountResponses = {
+    /**
+     * Successful Response
+     */
+    200: AccountOut;
+};
+
+export type SetMainAccountResponse = SetMainAccountResponses[keyof SetMainAccountResponses];
 
 export type RecordSnapshotData = {
     body: SnapshotCreate;

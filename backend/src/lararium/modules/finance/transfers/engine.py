@@ -170,12 +170,9 @@ async def _set_contra(ctx: CommandContext, record: OwnRecord, account_id: UUID) 
     return False
 
 
-async def _registry_counterpart(session: AsyncSession, record: OwnRecord) -> UUID | None:
-    """The other own account the record's counterparty bank account is registered to."""
-    if record.counterparty_identifier_id is None:
-        return None
-    holder = await identifier_account(session, record.counterparty_identifier_id)
-    return None if holder == record.account_id else holder
+def _registry_counterpart(record: OwnRecord) -> UUID | None:
+    """The other own account the record names (contra.eligible_records' holder)."""
+    return None if record.holder == record.account_id else record.holder
 
 
 def _accounts(record: OwnRecord, counterpart_id: UUID) -> tuple[UUID, UUID]:
@@ -502,7 +499,7 @@ async def _match_one(
     if partner is not None:
         more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved)
         return others + more, linked
-    counterpart_id = await _registry_counterpart(session, record)
+    counterpart_id = _registry_counterpart(record)
     if counterpart_id is None:
         # 5. Not a transfer, or not one yet: a candidate's own transfer carries the review.
         await _set_contra(ctx, record, system.unassigned)
@@ -762,6 +759,8 @@ async def preview_match(
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
         holder=holder,
         bank_transfer=counterparty.bank_transfer,
+        # A row naming a bank account, someone else's too, is never a weak counterpart.
+        names_account=counterparty.identifier_id is not None,
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)

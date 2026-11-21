@@ -23,6 +23,7 @@ from lararium.modules.finance.errors import (
     NotACurrencyError,
 )
 from lararium.modules.finance.importing import staging
+from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
@@ -937,6 +938,106 @@ async def test_typed_fields_stored(
     assert (row.bank_type, row.quantity) == ("Deposit", Decimal("50.00"))
 
 
+async def _tembo_batch(run: Run, stage: Stage, account_id: UUID) -> UUID:
+    tembo = await _profile(run, format="pdf", layout="tembo_statement")
+    rows = [
+        TemboRow("03/05/2027", "Deposit", "£50.00"),
+        TemboRow("10/05/2027", "Interest", "£1.00"),
+    ]
+    batch = await stage(tembo, tembo_pdf(TemboStatement([rows])), account_id=account_id)
+    return batch.id
+
+
+async def _tembo_state(session: AsyncSession, batch_id: UUID) -> tuple[Any, ...]:
+    b, s = models.ImportBatch, models.ImportStatement
+    session.expire_all()
+    found = await session.execute(
+        select(
+            b.covered_from,
+            b.covered_to,
+            b.complete_from,
+            b.complete_to,
+            s.period_from,
+            s.period_to,
+        )
+        .outerjoin(s, s.batch_id == b.id)
+        .where(b.id == batch_id)
+    )
+    return tuple(found.one())
+
+
+async def test_a_tembo_statement_lists_in_full_from_opening_to_the_day_before_valuation(
+    session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
+) -> None:
+    """Owner, 2026-11-21: a Tembo statement lists everything from the account's opening;
+    valued on 1 Jun, it lists through 31 May."""
+    account = await make_account(name="Example Tembo", balance_mode="transactions")
+    state = await _tembo_state(session, await _tembo_batch(run, stage, account.id))
+    assert state == (
+        date(2027, 2, 3),
+        date(2027, 6, 1),
+        date(2027, 2, 3),
+        date(2027, 5, 31),
+        date(2027, 2, 3),
+        date(2027, 6, 1),
+    )
+
+
+async def test_0029_gives_tembo_batches_imported_before_their_full_history(
+    session: AsyncSession, run: Run, stage: Stage, make_account: MakeAccount
+) -> None:
+    """0029 gives a Tembo batch committed when only the days between its first and last row
+    counted what staging gives now. It leaves another bank's batch as it was, and a Tembo
+    batch whose printed dates don't hold its rows, which staging would now refuse: one
+    with a row before its Account open date, and one valued before it opened (its period
+    would run backwards)."""
+    tembo = [
+        await make_account(name=f"Example Tembo {n}", balance_mode="transactions") for n in range(3)
+    ]
+    batch_id, row_before_opening, valued_before_opening = [
+        await _tembo_batch(run, stage, account.id) for account in tembo
+    ]
+    columns = {"date": "Date", "description": ["Description"], "amount": "Amount"}
+    other = await stage(
+        await _csv_profile(run, columns=columns), HEADER + "10/11/2026,Coffee,-3.50\n"
+    )
+    now = await _tembo_state(session, batch_id)
+    other_now = await _tembo_state(session, other.id)
+
+    # As 0029 finds them: the rows' span, 3 to 10 May, and the days strictly between.
+    for found in (batch_id, row_before_opening, valued_before_opening):
+        await session.execute(
+            text(
+                "UPDATE finance.import_batches SET covered_from = '2027-05-03', "
+                "covered_to = '2027-05-10', complete_from = '2027-05-04', "
+                "complete_to = '2027-05-09' WHERE id = :b"
+            ),
+            {"b": found},
+        )
+        await session.execute(
+            text(
+                "UPDATE finance.import_statements SET period_from = '2027-05-03', "
+                "period_to = '2027-05-10' WHERE batch_id = :b"
+            ),
+            {"b": found},
+        )
+    # Valued on 1 Jun: opened on 5 May, after the row of 3 May; or on 2 Jun.
+    opened = {row_before_opening: date(2027, 5, 5), valued_before_opening: date(2027, 6, 2)}
+    for found, day in opened.items():
+        await session.execute(
+            text("UPDATE finance.import_statements SET account_opened_on = :o WHERE batch_id = :b"),
+            {"o": day, "b": found},
+        )
+    left = {b: await _tembo_state(session, b) for b in (row_before_opening, valued_before_opening)}
+    assert await _tembo_state(session, batch_id) != now
+    migration = _migration("0029_finance_tembo_full_history")
+    await session.execute(text(migration.PERIOD))
+    await session.execute(text(migration.COVERAGE))
+    assert await _tembo_state(session, batch_id) == now
+    assert await _tembo_state(session, other.id) == other_now
+    assert {b: await _tembo_state(session, b) for b in left} == left
+
+
 async def test_rows_keep_what_their_file_gave_the_time_to(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
 ) -> None:
@@ -1002,6 +1103,79 @@ def _migration(name: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+async def test_0028_marks_lemfi_interest_imported_before(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit, make_account: MakeAccount
+) -> None:
+    """0028 marks the interest payouts LemFi statements gave before rows knew they paid
+    interest, and takes them out of the bank transfers; no other row changes."""
+    lemfi = await _profile(run, format="pdf", layout="lemfi_statement")
+    account = await make_account(name="Example LemFi saver", balance_mode="transactions")
+    rows = [
+        LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12"),
+        LemfiRow("10 May, 2027", ("Savings Funding",), paid_in="1,000.00"),
+    ]
+    content = lemfi_pdf(LemfiStatement([rows], savings=True, opening="100.00"))
+    batch = await stage(lemfi, content, account_id=account.id, default=None)
+    await commit(batch.id)
+    r, t = models.ImportRow, models.Transaction
+    state = (
+        select(r.description, r.interest, t.bank_transfer)
+        .join(t, t.id == r.transaction_id)
+        .where(r.batch_id == batch.id, r.kind == "statement")
+        .order_by(r.position)
+    )
+    assert [tuple(x) for x in await session.execute(state)] == [
+        ("Savings Interest Payout", True, False),
+        ("Savings Funding", False, True),
+    ]
+    # As 0028 finds them: no row marked, every transaction a bank transfer.
+    await session.execute(text("UPDATE finance.import_rows SET interest = false"))
+    await session.execute(
+        text(
+            "UPDATE finance.transactions AS t SET bank_transfer = true "
+            "FROM finance.import_rows AS r WHERE r.transaction_id = t.id AND r.batch_id = :b"
+        ),
+        {"b": batch.id},
+    )
+    migration = _migration("0028_finance_import_row_interest")
+    await session.execute(text(migration.BACKFILL_INTEREST))
+    await session.execute(text(migration.NO_TRANSFER))
+    session.expire_all()
+    assert [tuple(x) for x in await session.execute(state)] == [
+        ("Savings Interest Payout", True, False),
+        ("Savings Funding", False, True),
+    ]
+
+
+async def test_0028_gives_a_stored_lemfi_csv_profile_its_interest(
+    session: AsyncSession, run: Run
+) -> None:
+    """A profile created from the LemFi CSV catalog entry before rows knew interest stores
+    no interest descriptions: 0028 adds them, as an update, and leaves other profiles."""
+    [entry] = [e for e in CATALOG if (e.institution, e.label) == ("LemFi", "CSV")]
+    stored = entry.config.model_dump(mode="json", exclude={"interest_descriptions"})
+    lemfi = await _profile(run, **stored)
+    other = await _csv_profile(run)
+    p = models.ImportProfile
+    state = select(p.id, p.config, p.version).where(p.id.in_([lemfi.id, other.id]))
+
+    async def read() -> dict[UUID, tuple[Any, int]]:
+        session.expire_all()
+        return {i: (c, v) for i, c, v in await session.execute(state)}
+
+    # Profiles created now store the default; as 0028 finds one, it has none.
+    await session.execute(
+        text("UPDATE finance.import_profiles SET config = config - 'interest_descriptions'")
+    )
+    before = await read()
+    await session.execute(text(_migration("0028_finance_import_row_interest").PROFILES))
+    after = await read()
+    config, version = after[lemfi.id]
+    assert config["interest_descriptions"] == ["Savings Interest Payout"]
+    assert version == before[lemfi.id][1] + 1
+    assert after[other.id] == before[other.id]
 
 
 async def test_rows_told_apart_by_their_time(run: Run, stage: Stage, commit: Commit) -> None:

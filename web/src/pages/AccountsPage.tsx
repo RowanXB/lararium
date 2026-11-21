@@ -14,6 +14,7 @@ import {
   recordSnapshot,
   removeAccountIdentifier,
   setAccountBalanceMode,
+  setMainAccount,
   type SnapshotCreate,
 } from "../api";
 import { LabelledSelect } from "../components/LabelledSelect";
@@ -361,6 +362,57 @@ function HybridSwitch({ account }: { account: AccountOut }) {
   );
 }
 
+// Select values can't be empty, so "no main account" is this.
+const NO_MAIN_ACCOUNT = "none";
+
+function MainAccountSelect({ account, accounts }: { account: AccountOut; accounts: AccountOut[] }) {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: async (mainAccountId: string) =>
+      setMainAccount({
+        path: { account_id: account.id },
+        body: { main_account_id: mainAccountId === NO_MAIN_ACCOUNT ? null : mainAccountId },
+        throwOnError: true,
+      }),
+    // Matching its transfers anew moves balances and transfers as well.
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      await refreshAfterTransferWrite(queryClient);
+    },
+  });
+  // The API takes one level only: an open account of the owner's that has no main account,
+  // and, as for identifiers, an asset or liability whose postings count (not snapshots-only).
+  const options = accounts
+    .filter(
+      (other) =>
+        other.id === account.parent_account_id ||
+        (other.id !== account.id &&
+          !other.system &&
+          other.status === "open" &&
+          other.parent_account_id === null &&
+          (other.ledger_type === "asset" || other.ledger_type === "liability") &&
+          other.balance_mode !== "snapshots"),
+    )
+    .map((other) => ({ value: other.id, label: other.name }));
+  return (
+    <div role="group" aria-label={`Main account of ${account.name}`} className="space-y-2">
+      <LabelledSelect
+        label="Main account"
+        value={account.parent_account_id ?? NO_MAIN_ACCOUNT}
+        options={[{ value: NO_MAIN_ACCOUNT, label: "None" }, ...options]}
+        onChange={(next) => mutation.mutate(next)}
+      />
+      <p className="text-sm text-muted-foreground">
+        A savings account's bank transfers that name no bank account are paired with its main
+        account.
+      </p>
+      {mutation.isError && (
+        <p className="text-sm text-destructive">{errorMessage(mutation.error)}</p>
+      )}
+    </div>
+  );
+}
+
 function Identifiers({ account }: { account: AccountOut }) {
   // Fetched only once opened, so the page doesn't make a request per account.
   const [open, setOpen] = useState(false);
@@ -448,6 +500,13 @@ export function AccountsPage() {
                 {/* The ledger's own accounts (In transit) can't have identifiers. */}
                 {(account.ledger_type === "asset" || account.ledger_type === "liability") &&
                   !account.system && <Identifiers account={account} />}
+                {/* A connector sets a connected account's main account; one that is already
+                    another's main account can't have one. */}
+                {!account.system &&
+                  account.source_kind === "manual" &&
+                  !accounts.data?.some((other) => other.parent_account_id === account.id) && (
+                    <MainAccountSelect account={account} accounts={accounts.data ?? []} />
+                  )}
               </li>
             ))}
           </ul>
