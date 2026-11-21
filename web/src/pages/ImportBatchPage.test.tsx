@@ -53,6 +53,7 @@ function row(position: number, overrides: Partial<ImportRowOut> = {}): ImportRow
     status: "new",
     booking_date: "2026-10-03",
     occurred_at: "2026-10-02T23:00:00Z",
+    time_unit: "day",
     value_date: null,
     description: "Example Coffee",
     payee: null,
@@ -352,6 +353,19 @@ it("shows a card payment's card and foreign amount in its details", async () => 
   expect(screen.getByText(/Converted from: -US\$100\.00/)).toBeInTheDocument();
   expect(screen.getByText(/Bank rate: 1\.33/)).toBeInTheDocument();
   expect(screen.getByText(/Reference rate: 1\.34/)).toBeInTheDocument();
+});
+
+it("shows a row's time only when its file gave one", async () => {
+  show(
+    batch({
+      rows: [
+        row(0, { occurred_at: "2026-10-03T09:30:15Z", time_unit: "second", payee: "Timed" }),
+        row(1, { payee: "Dated" }),
+      ],
+    }),
+  );
+  expect(await screen.findByText(/Time: 2026-10-03T09:30:15Z/)).toBeInTheDocument();
+  expect(screen.getByText(/Payee: Dated/).textContent).not.toMatch(/Time:/);
 });
 
 it("leaves a zero fee out of a row's details", async () => {

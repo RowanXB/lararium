@@ -64,6 +64,8 @@ function rowDetails(row: ImportRowOut, code: string | null): string[] {
     ["Bank reference", row.bank_reference],
     ["Purpose code", row.purpose_code],
     ["Remittance", row.remittance_info],
+    // Only a time the file gave: a date-only row's occurred_at is its day's midnight.
+    ["Time", row.time_unit === "minute" || row.time_unit === "second" ? row.occurred_at : null],
     ["Started", row.started_at],
     ["Card", row.card_number],
     [

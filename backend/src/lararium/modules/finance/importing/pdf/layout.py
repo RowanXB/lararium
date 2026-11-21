@@ -22,7 +22,8 @@ _AMOUNTS = AmountFormat(thousands_separator=",")
 class LayoutRow:
     """A row as the statement prints it. row.quantity is paid in minus paid out; amounts
     counts the amounts printed in the paid in and paid out columns, which must be one.
-    time_of_day is the time it prints, if any (parse_pdf places it in the profile's time zone);
+    time_of_day is the time it prints to the minute, if any (parse_pdf places it in the
+    profile's time zone);
     interest marks a row that pays interest, which the summary totals apart from money in."""
 
     row: ParsedRow

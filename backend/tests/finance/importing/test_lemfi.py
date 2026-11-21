@@ -105,6 +105,7 @@ def test_account_rows() -> None:
         datetime(2027, 5, 3, 9, 5, tzinfo=LONDON),
         datetime(2027, 5, 4, 23, 59, tzinfo=LONDON),
     ]
+    assert {row.time_unit for row in rows} == {"minute"}
     assert all(row.bank_type is None and row.currency == "GBP" for row in rows)
     assert [row.counterparty for row in rows] == [
         Counterparty(name="LemFi savings account"),

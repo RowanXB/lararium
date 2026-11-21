@@ -343,6 +343,7 @@ async def record_import_rows(
                 status="committed",
                 booking_date=posted.booking_date,
                 occurred_at=posted.occurred_at,
+                time_unit="day",  # a QIF gives dates only
                 description=posted.description,
                 quantity=posted.quantity,
                 instrument_id=posted.instrument_id,
