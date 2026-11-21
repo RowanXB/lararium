@@ -324,6 +324,17 @@ What the buttons do (each decision is kept across re-syncs):
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.
 
+**Records that name no account.** When neither record names the other's account (a bank row that
+prints only your name and a reference, say), no transfer opens by itself. Enter the other side
+by hand on a manual account, then pair the two records through the API:
+`GET /api/v1/finance/transactions/{id}/pair-candidates` lists the records that could be its
+other side (another account, the opposite and equal amount, nearest date first), and
+`POST /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` pairs them
+as one matched transfer. The hand-entered side must be a transaction of exactly two postings,
+the account and Unassigned; otherwise pairing is refused. Unpair undoes it; after that, two records that name no
+account have no transfer left, so the way back is pairing them again through this same endpoint
+(the other record stays listed as a candidate).
+
 ### In transit in net worth
 
 **In transit** is a system account of the asset type, so it counts in net worth. A transfer's
