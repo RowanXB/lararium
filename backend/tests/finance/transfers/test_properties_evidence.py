@@ -56,6 +56,7 @@ nothing after every heal:
 
 Settings and example counts are the "ci" and "deep" profiles' (tests/finance/conftest.py)."""
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -63,6 +64,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
+import pytest
 from hypothesis import event, given, note
 from hypothesis import strategies as st
 from sqlalchemy import or_, select
@@ -622,6 +624,15 @@ class Example:
             for r in self.scenario.missing
             if r.transfer is not None and by_index[r.transfer].evidence != "sender_prints_sort_code"
         ]
+        settings = await load_transfer_settings(self.session)
+        for missing in awaited:
+            [row] = [r for r in self.scenario.rows if r.transfer == missing.transfer]
+            if self._candidate_on_connected(row, settings):
+                # The row may pair with another of the connected account's records, and
+                # rightly so (§5.3: a number outranks a sort code), so nothing is on its
+                # way and net worth can't follow the truth until the record syncs (as E6).
+                self.exercised.add("E5 net worth skipped: an awaited row has a candidate")
+                return
         truth = sum((r.quantity for r in self.scenario.rows + tuple(awaited)), Decimal(0))
         if connected is not None:
             truth += HISTORY
@@ -821,3 +832,77 @@ async def test_new_evidence_is_order_independent_idempotent_and_never_anticipate
     event(f"late duplicate prints {scenario.late}")
     for label in sorted(exercised):
         event(label)
+
+
+@pytest.mark.parametrize("second_sender", ["B", MAIN])
+async def test_e5_waits_for_no_record_whose_row_pairs_with_another(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    duplicate_row: DuplicateRow,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+    monkeypatch: pytest.MonkeyPatch,
+    second_sender: str,
+) -> None:
+    """The case the drawn scenarios missed (PR #31 review): A pays M 50 printing M's
+    account number, and M's record of it never syncs; on the same day another payment of
+    50 reaches M printing only M's sort code, and M's record of that one syncs (naming
+    nobody, or A in full). A's row rightly pairs with that record (§5.3: a number outranks a
+    sort code), so nothing is on its way, and E5 mustn't count the missing record."""
+    # Outside @given, hypothesis.note refuses; the run notes what it does.
+    monkeypatch.setattr(sys.modules[__name__], "note", lambda _: None)
+    names = None if second_sender == "B" else MAIN
+    transfers = (
+        Transfer(0, MAIN, CONNECTED, Decimal(50), "sender_prints_number", "missing"),
+        Transfer(
+            1,
+            second_sender,
+            CONNECTED,
+            Decimal(50),
+            "sender_prints_sort_code",
+            "nobody" if names is None else "names",
+        ),
+    )
+    rows = (
+        Row("t0-out", MAIN, Decimal(-50), START, _number(CONNECTED), transfer=0, other=CONNECTED),
+        Row(
+            "t1-out",
+            second_sender,
+            Decimal(-50),
+            START,
+            _sort_code(CONNECTED),
+            transfer=1,
+            other=CONNECTED,
+        ),
+        Row("t1-in", CONNECTED, Decimal(50), START, names=names, transfer=1, other=second_sender),
+    )
+    missing = (Row("t0-in", CONNECTED, Decimal(50), START, transfer=0, other=MAIN),)
+    scenario = Scenario(
+        (MAIN, "B"),
+        True,
+        transfers,
+        rows,
+        missing,
+        action="reject",
+        selector=0,
+        late="nothing",
+        late_choice=0,
+    )
+    h = Harness(
+        session,
+        run,
+        ids,
+        imported_bank,
+        statement_row,
+        duplicate_row,
+        connected_bank,
+        connector_tx,
+        heal,
+    )
+    order: list[Item] = [("row", "t0-out"), ("row", "t1-out"), ("row", "t1-in")]
+    async with isolated_example(session):
+        await _run(h, scenario, order, every_heal_twice=True)
