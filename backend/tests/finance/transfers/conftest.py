@@ -489,13 +489,15 @@ type DuplicateRow = Callable[..., Awaitable[None]]
 @pytest.fixture
 def duplicate_row(session: AsyncSession, run: Run) -> DuplicateRow:
     """A later batch's row that duplicates the transaction's committed import row, printing
-    `details`: the batch is committed, or rolled back."""
+    `details`: the batch is committed, or rolled back. `key`: the row's own dedupe key, for
+    a row matched by its day and amount alone (Decision 16); by default the original's."""
 
     async def _add(
         transaction_id: UUID,
         details: RowDetails,
         *,
         batch_status: Literal["committed", "rolled_back"] = "committed",
+        key: str | None = None,
     ) -> None:
         r = models.ImportRow
         original = (
@@ -530,7 +532,7 @@ def duplicate_row(session: AsyncSession, run: Run) -> DuplicateRow:
                 counterparty_sort_code=details.sort_code,
                 counterparty_account_number=details.account_number,
                 counterparty_account_ending=details.account_ending,
-                dedupe_key=original.dedupe_key,
+                dedupe_key=original.dedupe_key if key is None else key,
                 duplicate_of=original.id,
                 raw={},
             )

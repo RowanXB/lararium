@@ -109,19 +109,60 @@ async def test_a_row_naming_its_own_accounts_number_is_no_transfer(
     assert await list_transfers(session) == []
 
 
+# A duplicate keyed as its original was matched by its key; one with a key of its own, by
+# its day and amount alone (a CSV and a PDF of the same account describe rows differently).
+@pytest.mark.parametrize("key", [None, "later file's own key"])
 async def test_the_account_number_on_a_duplicate_row_counts(
-    session, imported_bank, statement_row, duplicate_row, heal
+    key, session, imported_bank, statement_row, duplicate_row, heal
 ) -> None:
     x = await imported_bank("X", identifier=X_ID)
     y = await imported_bank("Y", identifier=Y_ID)
     sent = await statement_row(x, "-100", complete=FULL)
     received = await statement_row(y, "100", complete=FULL)
-    await duplicate_row(received, RowDetails(account_number=X_NUMBER))
+    await duplicate_row(received, RowDetails(account_number=X_NUMBER), key=key)
     await heal()
 
     t = await _only_transfer(session)
     assert (t.from_account_id, t.to_account_id, t.status) == (x.id, y.id, "matched")
     assert {t.out_transaction_id, t.in_transaction_id} == {sent, received}
+
+
+async def test_a_duplicate_matched_by_day_and_amount_among_alike_rows_gives_no_evidence(
+    session, imported_bank, statement_row, duplicate_row, heal
+) -> None:
+    # X pays a shop and its savings account S £100 each on one day. A later file of X's, its
+    # rows matched by day and amount in its own order (Decision 16), can mark the shop row's
+    # duplicate the row that prints S's account number: the shop payment mustn't pair.
+    x = await imported_bank("X", identifier=X_ID)
+    s = await imported_bank("S", identifier=Y_ID)
+    shop = await statement_row(x, "-100", bank_transfer=False, complete=FULL)
+    to_savings = await statement_row(x, "-100", complete=FULL)
+    await statement_row(s, "100", complete=FULL)
+    await duplicate_row(shop, RowDetails(account_number="33334444"), key="later row 1")
+    await duplicate_row(to_savings, RowDetails(), key="later row 2")
+    await heal()
+
+    assert await list_transfers(session) == []
+
+
+async def test_a_duplicate_matched_by_its_key_among_alike_rows_counts(
+    session, imported_bank, statement_row, duplicate_row, heal
+) -> None:
+    # As above, but the later file's row has the savings row's own key: it is that row.
+    x = await imported_bank("X", identifier=X_ID)
+    s = await imported_bank("S", identifier=Y_ID)
+    await statement_row(x, "-100", bank_transfer=False, complete=FULL)
+    to_savings = await statement_row(x, "-100", complete=FULL)
+    received = await statement_row(s, "100", complete=FULL)
+    await duplicate_row(to_savings, RowDetails(account_number="33334444"))
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.out_transaction_id, t.in_transaction_id, t.status) == (
+        to_savings,
+        received,
+        "matched",
+    )
 
 
 @pytest.mark.parametrize("printed_on", ["committed", "duplicate"])

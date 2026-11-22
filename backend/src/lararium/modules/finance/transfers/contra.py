@@ -227,6 +227,26 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         ARRAY(Uuid()),
     )
     batch_status = select(batch.status).where(batch.id == r.batch_id).scalar_subquery()
+    # A duplicate speaks for its original only when it is surely that row: matched by its
+    # key, or the one committed row of its account on that day with that instrument and
+    # amount. Otherwise it was matched by day and amount alone (Decision 16), in file order,
+    # and among alike rows it may be another's: a later file's savings transfer marked the
+    # duplicate of a shop payment the same day would make the payment a transfer. (A row
+    # of its own file alike to it is committed, or the duplicate of another such row.)
+    o, s = (aliased(models.ImportRow, name=n) for n in ("original_row", "alike_row"))
+    surely_its_original = or_(
+        r.status == "committed",
+        exists().where(o.id == r.duplicate_of, o.dedupe_key == r.dedupe_key),
+        ~exists().where(
+            s.account_id == r.account_id,
+            s.status == "committed",
+            s.booking_date == r.booking_date,
+            s.kind == "statement",
+            s.instrument_id == r.instrument_id,
+            s.quantity == r.quantity,
+            s.id != r.duplicate_of,
+        ),
+    )
     # The column holds digits only (a CHECK), so the replace below only guards.
     only_number = and_(
         r.counterparty_account_number.is_not(None), r.counterparty_sort_code.is_(None)
@@ -261,6 +281,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             r.kind == "statement",
             r.status.in_(("committed", "duplicate")),
             batch_status == "committed",
+            surely_its_original,
         )
         .lateral("evidence")
     )
