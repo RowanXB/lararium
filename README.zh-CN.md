@@ -463,8 +463,9 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- 钱包之间的划转和小额资产兑换（dust）
-- 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押
+- 钱包之间的划转、小额资产兑换（dust）和 Cloud Mining，以及 travel rule 的充值和提现历史
+- 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押、Dual Investment、Discount Buy
+  和 Soft Staking
 - 加密货币借贷，记为债务
 - 杠杆，全仓和逐仓
 - USD-M 和 COIN-M 合约

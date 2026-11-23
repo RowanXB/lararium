@@ -542,8 +542,10 @@ Binance holdings are valued in EUR from a daily price for each asset:
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Wallet-to-wallet transfers and dust conversion
-- The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking
+- Wallet-to-wallet transfers, dust conversion and Cloud Mining, and the travel-rule deposit and
+  withdrawal histories
+- The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking, Dual
+  Investment, Discount Buy and Soft Staking
 - Crypto loans, as debt
 - Margin, cross and isolated
 - USD-M and COIN-M futures
