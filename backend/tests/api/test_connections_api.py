@@ -496,6 +496,25 @@ async def test_sync_now_and_disable(api, session, queue) -> None:
     assert missing.json()["detail"]["error"] == "connection_not_found"
 
 
+async def test_sync_now_tells_the_sync_the_owner_asked(api, session, queue) -> None:
+    created = await _create(api)
+
+    synced = await api.post(f"/api/v1/connections/{created['id']}/sync", headers=OWNER)
+
+    assert synced.status_code == 202
+    connection = await get_connection(session, uuid.UUID(created["id"]))
+    assert connection.config["sync_requested"] is True
+    audited = (
+        await session.execute(
+            text(
+                "select actor_type, args from core.audit_log"
+                " where command = 'sync_connection_now' order by id desc limit 1"
+            )
+        )
+    ).one()
+    assert (audited.actor_type, audited.args) == ("user", {"connection_id": created["id"]})
+
+
 async def _authorising(api: httpx.AsyncClient) -> str:
     created = await _create(api)
     state = await _authorize(api, created["id"])

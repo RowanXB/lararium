@@ -41,6 +41,7 @@ from lararium.core.connections import (
     list_connections,
     load_credential,
     lock_connection,
+    request_sync,
     set_credential_expiry,
     set_status,
     store_credential,
@@ -360,8 +361,14 @@ def _done(error: str | None = None) -> RedirectResponse:
 @router.post(
     "/{connection_id}/sync", name="sync_connection_now", status_code=status.HTTP_202_ACCEPTED
 )
-async def sync_connection_now(connection_id: UUID, session: SessionDep) -> SyncQueuedOut:
-    await get_connection(session, connection_id)
+async def sync_connection_now(
+    connection_id: UUID, session: SessionDep, actor: ActorDep
+) -> SyncQueuedOut:
+    # The request is recorded before the job is queued, so whichever sync job runs next,
+    # this one or one already queued, sees it.
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "sync_connection_now", args) as ctx:
+        await request_sync(ctx, connection_id)
     return SyncQueuedOut(queued=await defer_sync(connection_id))
 
 

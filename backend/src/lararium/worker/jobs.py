@@ -20,11 +20,13 @@ from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     AUTHORISED_AT_KEY,
+    SYNC_REQUESTED_KEY,
     ConnectionStatus,
     get_connection,
     record_sync_failure,
     record_sync_success,
     transition_status,
+    update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
 from lararium.core.documents import LocalDocumentStore
@@ -104,6 +106,7 @@ async def run_sync(
     connector = registry.connector(connection.connector)
     actor = Actor("connector", connector.name)
     args = {"connection_id": str(connection_id), "connector": connector.name}
+    requested = connection.config.get(SYNC_REQUESTED_KEY) is True
 
     try:
         async with command_context(session, actor, "connection.sync", args) as ctx:
@@ -120,9 +123,12 @@ async def run_sync(
                     webhook=_webhook_target(settings),
                     full_backfill=backfill,
                     documents=LocalDocumentStore(settings.document_dir),
+                    requested=requested,
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
+            if requested:
+                await update_config(ctx, connection_id, remove=[SYNC_REQUESTED_KEY])
             from_ = ("authorising",) if backfill else ("failing",)
             moved = await transition_status(
                 ctx, connection_id, "healthy", only_from=from_, authorised_at=backfill_for

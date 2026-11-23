@@ -20,6 +20,7 @@ from lararium.core.commands import command_context
 from lararium.core.connections import (
     create_connection,
     get_connection,
+    request_sync,
     set_status,
     update_config,
 )
@@ -132,6 +133,33 @@ async def test_run_sync_success_records_cursor(session, run, fake, notifier) -> 
         )
     )
     assert audit == 1
+
+
+async def test_a_requested_sync_is_told_and_the_request_cleared(
+    session, run, fake, notifier
+) -> None:
+    connection = await _healthy_connection(run)
+    await run(request_sync, connection.id)
+
+    await _run_sync(session, connection, notifier)
+    assert fake.seen[-1].requested is True
+    assert "sync_requested" not in (await get_connection(session, connection.id)).config
+
+    # The next one, scheduled, is not a request.
+    await _run_sync(session, connection, notifier)
+    assert fake.seen[-1].requested is False
+
+
+async def test_a_failed_requested_sync_keeps_the_request(session, run, fake, notifier) -> None:
+    connection = await _healthy_connection(run)
+    await run(request_sync, connection.id)
+    fake.error = RuntimeError("upstream down")
+
+    await _run_sync(session, connection, notifier)
+
+    after = await get_connection(session, connection.id)
+    assert after.status == "failing"
+    assert after.config["sync_requested"] is True
 
 
 async def test_run_sync_passes_the_webhook_target(session, run, fake, notifier) -> None:

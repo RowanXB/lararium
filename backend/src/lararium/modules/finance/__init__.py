@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from lararium.modules import ModuleSpec
 from lararium.modules.finance import api, connections_api, transfers_api
+from lararium.modules.finance.binance.sync import BinanceConnector
 from lararium.modules.finance.ibkr.sync import IbkrConnector
 from lararium.modules.finance.monzo.sync import MonzoConnector
 
@@ -17,5 +18,9 @@ def _install(app: FastAPI) -> None:
 MODULE = ModuleSpec(
     name="finance",
     install=_install,
-    connectors={"monzo": MonzoConnector(), "ibkr": IbkrConnector()},
+    connectors={
+        "monzo": MonzoConnector(),
+        "ibkr": IbkrConnector(),
+        "binance": BinanceConnector(),
+    },
 )

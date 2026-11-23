@@ -300,6 +300,16 @@ async def update_config(
     return await _update(ctx, connection_id, config=config)
 
 
+# Set when the owner asks for a sync, removed by the next sync that succeeds: it survives a
+# failed one, and whichever queued job runs it sees the request.
+SYNC_REQUESTED_KEY = "sync_requested"
+
+
+async def request_sync(ctx: CommandContext, connection_id: UUID) -> None:
+    """Record that the owner asked for a sync of this connection."""
+    await update_config(ctx, connection_id, {SYNC_REQUESTED_KEY: True})
+
+
 OAUTH_STATE_KEY = "oauth_state"
 
 

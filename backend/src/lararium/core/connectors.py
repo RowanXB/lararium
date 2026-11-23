@@ -52,6 +52,9 @@ class SyncContext:
     full_backfill: bool = False
     # Where documents are kept, for connectors that store what they fetch.
     documents: DocumentStore | None = None
+    # The owner asked for this sync ("Sync now"): a connector that waits between syncs runs
+    # it anyway. Connectors that sync whenever they are run need not look.
+    requested: bool = False
 
 
 class Connector(Protocol):
