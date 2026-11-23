@@ -68,7 +68,7 @@ from lararium.modules.finance.binance.normalize import Run, normalize
 from lararium.modules.finance.binance.notices import tell
 from lararium.modules.finance.binance.opening import set_openings
 from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
-from lararium.modules.finance.binance.prices import update_prices
+from lararium.modules.finance.binance.prices import refresh_ids_quietly, update_prices
 from lararium.modules.finance.binance.reconcile import (
     Difference,
     Point,
@@ -350,6 +350,9 @@ class BinanceConnector:
         if uid is None or uid != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
         reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
+        # Before any asset is met: an instrument first needed can then be matched by its
+        # CoinGecko id (design 5.5). A failure is logged and the sync goes on.
+        await refresh_ids_quietly(ctx, clock=client.now_ms, sleep=self._sleep)
         for read in reads.values():
             await store_read(ctx, read)
         reference = await read_balances(client, [COIN_CONFIG_LABEL])

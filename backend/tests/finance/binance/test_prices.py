@@ -26,6 +26,7 @@ from lararium.modules.finance.binance.prices import (
     coingecko_prices,
     eur_path,
     price_assets,
+    refresh_coingecko_ids,
     update_prices,
 )
 from lararium.modules.finance.instruments import (
@@ -34,10 +35,10 @@ from lararium.modules.finance.instruments import (
     find_by_identifier,
     get_currency,
 )
-from lararium.modules.finance.pricing import record_fx_rate
+from lararium.modules.finance.pricing import record_fx_rate, record_price
 from lararium.modules.finance.valuation import holdings_asof
 
-from .fixtures import DAY_MS, NOW_MS, FakeBinance, build_row
+from .fixtures import DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import ingest, list_pairs, run_normalize
 from .syncing import (
     SETTINGS,
@@ -328,7 +329,8 @@ async def test_halted_pair_leaves_the_day_unpriced(session, run, fake, clock, gb
     async with _world(session, connection.id, fake, clock) as (ctx, client):
         report = await price_assets(ctx, client)
 
-    assert report == PriceReport(priced=2, unpriced=[])
+    # No price from any source on the latest closed day: named, though older days have one.
+    assert report == PriceReport(priced=2, unpriced=["AAA"])
     assert set(await _prices(session, "AAA")) == set(DAYS[:2])
     # Valuation on a day with no price uses the latest earlier one.
     [holding] = [h for h in await holdings_asof(session, LAST) if h.symbol == "AAA"]
@@ -415,10 +417,11 @@ async def test_later_runs_fetch_only_the_days_not_stored(session, run, fake, clo
         pairs=[("AAAEUR", "AAA", "EUR")],
         bars={"AAAEUR": {d: "2" for d in DAYS[:3]}},
     )
+    clock.ms -= 2 * DAY_MS  # the first run is on the 21st: its latest closed day is the 20th
     async with _world(session, connection.id, fake, clock) as (ctx, client):
         await price_assets(ctx, client)
     fake.add("klines", *[_bar(d, "4") for d in DAYS[3:]], when={"symbol": "AAAEUR"})
-    clock.ms += DAY_MS
+    clock.ms += 2 * DAY_MS
     fake.requests.clear()
 
     async with _world(session, connection.id, fake, clock) as (ctx, client):
@@ -485,8 +488,8 @@ async def test_asset_with_no_market_and_no_key_is_flagged_once(
     assert notices.FLAG_PREFIX + "no price for NOC" in after.warnings
     told = notices.message("Binance", after.config)
     assert told is not None and told.count("NOC") == 1
-    # No price, no amount, nothing but the code.
-    assert "5" not in told.replace("Binance", "")
+    # Nothing but the code: no price, no amount.
+    assert told == "Binance: Binance flagged: no price for NOC"
     [holding] = [h for h in await holdings_asof(session, LAST) if h.symbol == "NOC"]
     assert (holding.status, holding.value) == ("missing_price", None)
 
@@ -498,7 +501,7 @@ async def test_an_asset_with_a_price_is_not_flagged(session, run, fake, clock) -
         fake,
         holds={"AAA": FIRST},
         pairs=[("AAAEUR", "AAA", "EUR")],
-        bars={"AAAEUR": {DAYS[0]: "2"}},
+        bars={"AAAEUR": {DAYS[4]: "2"}},
     )
     async with _world(session, connection.id, fake, clock) as (ctx, client):
         report = await update_prices(ctx, client)
@@ -507,8 +510,6 @@ async def test_an_asset_with_a_price_is_not_flagged(session, run, fake, clock) -
 
 
 async def test_an_asset_priced_by_hand_is_not_flagged(session, run, fake, clock, eur) -> None:
-    from lararium.modules.finance.pricing import record_price
-
     connection = await _scenario(session, run, fake, holds={"NOC": FIRST})
     noc = await find_by_identifier(session, "binance_asset", "NOC")
     assert noc is not None
@@ -517,7 +518,7 @@ async def test_an_asset_priced_by_hand_is_not_flagged(session, run, fake, clock,
         instrument_id=noc.id,
         quote_instrument_id=eur.id,
         price=Decimal("3"),
-        as_of_date=FIRST,
+        as_of_date=LAST,
     )
     async with _world(session, connection.id, fake, clock) as (ctx, client):
         assert (await update_prices(ctx, client)).unpriced == []
@@ -546,6 +547,7 @@ class FakeGecko:
         self.requests: list[httpx.Request] = []
         self._clock = clock
         self.times: list[int] = []
+        self.failing = False
 
     def calls(self, path: str) -> list[httpx.Request]:
         return [r for r in self.requests if r.url.path == f"/api/v3/{path}"]
@@ -557,6 +559,8 @@ class FakeGecko:
         self.requests.append(request)
         if self._clock is not None:
             self.times.append(self._clock.ms)
+        if self.failing:
+            return httpx.Response(500, content=b"")
         params = dict(request.url.params)
         path = request.url.path.removeprefix("/api/v3/")
         if path == "exchanges/binance/tickers":
@@ -697,7 +701,8 @@ async def test_coingecko_id_never_guessed_by_symbol(session, run, fake, clock) -
     ids = await session.execute(
         text("select asset, coingecko_id from finance.binance_coingecko_ids")
     )
-    assert [tuple(r) for r in ids] == [("NOC", None)]
+    # The map lists what the tickers name; NOC is not in it, and no id is made from its symbol.
+    assert [tuple(r) for r in ids] == [("OTHER", "other-coin"), ("USDT", "tether")]
     assert await find_by_identifier(session, "coingecko", "noc") is None
     assert (await get_connection(session, connection.id)).config["flags"] == ["no price for NOC"]
 
@@ -708,7 +713,9 @@ async def test_two_ids_for_one_asset_are_not_chosen_between(session, run, fake, 
     async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, _):
         assert await coingecko_prices(ctx, ["NOC"], clock=clock, sleep=clock.sleep) == 0
 
-    value = await session.scalar(text("select coingecko_id from finance.binance_coingecko_ids"))
+    value = await session.scalar(
+        text("select coingecko_id from finance.binance_coingecko_ids where asset = 'NOC'")
+    )
     assert value is None
 
 
@@ -947,9 +954,12 @@ async def test_an_instrument_of_another_binance_asset_is_not_taken_by_id(session
     )
     await _stored_id(session, "NEWNOC", "noc-coin")
 
-    made = await run(instruments.asset, connection.id, "NEWNOC")
+    flags: list[str] = []
+    made = await run(instruments.asset, connection.id, "NEWNOC", flag=flags.append)
 
     assert made != other.id
+    # Both stay as they are, and the owner is told (by asset code only).
+    assert flags == ["NEWNOC may be the same coin as another instrument"]
 
 
 # The sync runs the step
@@ -987,3 +997,195 @@ async def test_a_sync_prices_through_coingecko_with_the_operators_key(
     assert set(DAYS[1:]) <= set(await _prices(session, "NOC", "coingecko"))
     assert KEY not in json.dumps(after.config) and KEY not in str(after.warnings)
     assert KEY not in (after.last_error or "")
+
+
+# Fix round 1: CoinGecko prices stay current, the id map is read first, and a clash is told.
+
+
+async def test_coingecko_keeps_pricing_the_days_after_the_first_sync(
+    session, run, fake, clock
+) -> None:
+    connection = await _scenario(session, run, fake, holds={"NOC": FIRST})
+    gecko = FakeGecko(
+        tickers=[("NOC", "noc-coin")],
+        charts={"noc-coin": _midnights([*DAYS, LAST + timedelta(days=1)], ["7"] * 5 + ["8"])},
+    )
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        await update_prices(ctx, client)
+    clock.ms += DAY_MS
+
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        report = await update_prices(ctx, client)
+
+    assert report == PriceReport(priced=1, unpriced=[])
+    prices = await _prices(session, "NOC", "coingecko")
+    assert prices[LAST + timedelta(days=1)] == Decimal("8") and len(prices) == 6
+
+
+async def test_coingecko_fills_the_days_after_a_halt_through_update_prices(
+    session, run, fake, clock
+) -> None:
+    connection = await _scenario(
+        session,
+        run,
+        fake,
+        holds={"AAA": FIRST},
+        pairs=[("AAAEUR", "AAA", "EUR")],
+        bars={"AAAEUR": {DAYS[0]: "2", DAYS[1]: "3"}},
+    )
+    gecko = FakeGecko(
+        tickers=[("AAA", "aaa-coin")], charts={"aaa-coin": _midnights(DAYS, ["9"] * 5)}
+    )
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        report = await update_prices(ctx, client)
+
+    assert report.unpriced == []
+    assert set(await _prices(session, "AAA")) == set(DAYS[:2])
+    assert set(await _prices(session, "AAA", "coingecko")) == set(DAYS[2:])
+
+
+async def test_a_flag_stays_when_the_asset_is_priced_later(session, run, fake, clock) -> None:
+    connection = await _scenario(session, run, fake, holds={"NOC": FIRST})
+    async with _world(session, connection.id, fake, clock) as (ctx, client):
+        assert (await update_prices(ctx, client)).unpriced == ["NOC"]
+    gecko = FakeGecko(
+        tickers=[("NOC", "noc-coin")], charts={"noc-coin": _midnights(DAYS, ["7"] * 5)}
+    )
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        assert (await update_prices(ctx, client)).unpriced == []
+
+    # One-time and kept: the flag is not raised again, nor taken back.
+    config = (await get_connection(session, connection.id)).config
+    assert config["flags"] == ["no price for NOC"]
+
+
+async def test_an_empty_start_of_a_late_listed_pair_is_asked_once(
+    session, run, fake, clock
+) -> None:
+    connection = await _scenario(
+        session,
+        run,
+        fake,
+        holds={"AAA": FIRST},
+        pairs=[("AAAEUR", "AAA", "EUR")],
+        bars={"AAAEUR": _all("2", DAYS[2:])},  # listed on the 20th
+    )
+    async with _world(session, connection.id, fake, clock) as (ctx, client):
+        await price_assets(ctx, client)
+    assert len(fake.calls("klines")) == 1
+    fake.add("klines", _bar(LAST + timedelta(days=1), "5"), when={"symbol": "AAAEUR"})
+    clock.ms += DAY_MS
+    fake.requests.clear()
+
+    async with _world(session, connection.id, fake, clock) as (ctx, client):
+        await price_assets(ctx, client)
+
+    [asked] = fake.calls("klines")  # not the 18th and 19th again
+    assert asked.params["startTime"] == str(_ms(LAST + timedelta(days=1)))
+
+
+async def test_the_id_map_is_read_when_empty_or_over_a_week_old(session, run, fake, clock) -> None:
+    connection = await binance_connection(run)
+    gecko = FakeGecko(tickers=[("ZZZ", "zzz-coin")])
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, _):
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.calls("exchanges/binance/tickers")) == 2  # a page, then the empty one
+        rows = await session.execute(
+            text("select asset, coingecko_id from finance.binance_coingecko_ids order by asset")
+        )
+        assert [tuple(r) for r in rows] == [("USDT", "tether"), ("ZZZ", "zzz-coin")]
+
+        clock.ms += 6 * DAY_MS
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.calls("exchanges/binance/tickers")) == 2
+
+        clock.ms += 2 * DAY_MS
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.calls("exchanges/binance/tickers")) == 4
+
+
+async def _manual_noc(run, symbol: str):
+    return await run(
+        create_instrument,
+        kind="crypto",
+        symbol=symbol,
+        name="Held by hand",
+        decimals=8,
+        quote_instrument_id=None,
+        identifiers=[InstrumentIdentifier("coingecko", "noc-coin")],
+    )
+
+
+def _noc_settings() -> Any:
+    return SETTINGS.model_copy(update={"coingecko_api_key": SecretStr(KEY)})
+
+
+async def test_the_first_sync_uses_the_instrument_of_the_coingecko_id(
+    session, run, fake, connector, clock
+) -> None:
+    old = await _manual_noc(run, "OLDNOC")
+    fake.add("deposits", _deposit(0, DAYS[1], "5", "NOC"))
+    gecko = FakeGecko(tickers=[("NOC", "noc-coin")])
+    connection = await binance_connection(run, config=later_config())
+
+    after = await run_binance_sync(
+        session, connection.id, _route(fake, gecko), settings=_noc_settings()
+    )
+
+    assert after.status == "healthy", after.last_error
+    tagged = await find_by_identifier(session, "binance_asset", "NOC")
+    assert tagged is not None and tagged.id == old.id
+    assert (
+        await session.scalar(text("select count(*) from finance.instruments where symbol = 'NOC'"))
+        == 0
+    )
+    assert "flags" not in after.config or not any("same coin" in f for f in after.config["flags"])
+
+
+async def test_a_clash_found_after_the_instrument_exists_is_flagged_once(
+    session, run, fake, connector, clock
+) -> None:
+    old = await _manual_noc(run, "OLDNOC")
+    fake.add("deposits", _deposit(0, DAYS[1], "5", "NOC"))
+    gecko = FakeGecko(tickers=[("NOC", "noc-coin")])
+    gecko.failing = True  # the id map cannot be read in the first sync
+    connection = await binance_connection(run, config=later_config())
+    flag = "NOC may be the same coin as another instrument"
+
+    first = await run_binance_sync(
+        session, connection.id, _route(fake, gecko), settings=_noc_settings()
+    )
+    assert first.status == "healthy", first.last_error
+    created = await find_by_identifier(session, "binance_asset", "NOC")
+    assert created is not None and created.id != old.id
+
+    gecko.failing = False
+    for _ in range(2):
+        clock.ms += 5 * HOUR_MS
+        after = await run_binance_sync(
+            session, connection.id, _route(fake, gecko), settings=_noc_settings()
+        )
+        assert after.status == "healthy", after.last_error
+
+    assert [f for f in after.config["flags"] if "same coin" in f] == [flag]
+    assert notices.FLAG_PREFIX + flag in after.warnings
+    # Nothing is merged: the coin's id stays with the instrument that had it.
+    owner = await find_by_identifier(session, "coingecko", "noc-coin")
+    assert owner is not None and owner.id == old.id
+    again = await find_by_identifier(session, "binance_asset", "NOC")
+    assert again is not None and again.id == created.id
+
+
+async def test_without_a_key_nothing_is_fetched_and_the_symbol_rule_holds(
+    session, run, fake, connector, clock
+) -> None:
+    same = await _manual_noc(run, "NOC")  # the one crypto instrument with the symbol
+    fake.add("deposits", _deposit(0, DAYS[1], "5", "NOC"))
+    connection = await binance_connection(run, config=later_config())
+
+    after = await run_binance_sync(session, connection.id, _route(fake, None))
+
+    assert after.status == "healthy", after.last_error
+    tagged = await find_by_identifier(session, "binance_asset", "NOC")
+    assert tagged is not None and tagged.id == same.id
+    assert await session.scalar(text("select count(*) from finance.binance_coingecko_ids")) == 0

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
+from lararium.modules.finance.binance.models import CoingeckoId
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     add_identifiers,
@@ -97,21 +98,22 @@ async def _same_symbol(session: AsyncSession, code: str) -> list[UUID]:
     return list(rows)
 
 
-async def _by_coingecko_id(session: AsyncSession, code: str) -> UUID | None:
-    """The crypto instrument that has the asset's CoinGecko id (a lookup of `prices` found it),
-    unless it already stands for another Binance asset."""
-    coin = await session.scalar(
-        text("select coingecko_id from finance.binance_coingecko_ids where asset = :a"),
-        {"a": code},
-    )
+def clash_flag(code: str) -> str:
+    return f"{code} may be the same coin as another instrument"
+
+
+async def _by_coingecko_id(session: AsyncSession, code: str) -> tuple[UUID | None, bool]:
+    """The crypto instrument that has the asset's CoinGecko id (the map of `prices` lists it),
+    and whether one was found but already stands for another Binance asset (not taken)."""
+    coin = await session.scalar(select(CoingeckoId.coingecko_id).where(CoingeckoId.asset == code))
     if coin is None:
-        return None
+        return None, False
     found = await find_by_identifier(session, "coingecko", coin)
     if found is None or found.kind != "crypto":
-        return None
+        return None, False
     if any(i.scheme == "binance_asset" for i in found.identifiers):
-        return None
-    return found.id
+        return None, True
+    return found.id, False
 
 
 async def asset(
@@ -137,7 +139,9 @@ async def asset(
     found = await find_by_identifier(session, "binance_asset", code)
     if found is not None:
         return found.id
-    by_id = await _by_coingecko_id(session, code)
+    by_id, clash = await _by_coingecko_id(session, code)
+    if clash and flag is not None:
+        flag(clash_flag(code))
     if by_id is not None:
         await add_identifiers(ctx, by_id, [identifier])
         return by_id
