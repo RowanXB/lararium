@@ -854,6 +854,11 @@ def test_connection_operation_ids() -> None:
         ("post", "/api/v1/connections/{connection_id}/disable"): "disable_connection",
         ("post", "/api/v1/connections/ibkr"): "create_ibkr_connection",
         ("put", "/api/v1/connections/{connection_id}/ibkr"): "update_ibkr_connection",
+        ("post", "/api/v1/connections/trading212"): "create_trading212_connection",
+        (
+            "put",
+            "/api/v1/connections/{connection_id}/trading212",
+        ): "update_trading212_connection",
         ("post", "/api/v1/connections/{connection_id}/ibkr-statement"): "upload_ibkr_statement",
     }
     schema = spec["components"]["schemas"]["MonzoConnectionCreate"]

@@ -110,7 +110,7 @@ def _never(item: Item) -> bool:
     return False
 
 
-def _account_id(summary: Item) -> str:
+def summary_account_id(summary: Item) -> str:
     value = summary.get("id")
     if (
         not isinstance(value, Decimal)
@@ -363,7 +363,7 @@ class Trading212Connector:
         # When the summary arrived: what it reports holds then (the reconciliation's and the
         # opening's cut-off), not at the transaction's start, before the request.
         arrived = datetime.now(UTC)
-        account_id = _account_id(summary)
+        account_id = summary_account_id(summary)
         known = cursor.get("account_id")
         if isinstance(known, str) and known != account_id:
             raise AccountMismatchError("this key belongs to another Trading 212 account")

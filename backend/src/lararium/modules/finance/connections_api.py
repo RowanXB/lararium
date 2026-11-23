@@ -9,7 +9,7 @@ import logging
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 import httpx
@@ -42,6 +42,7 @@ from lararium.core.connections import (
     load_credential,
     lock_connection,
     set_credential_expiry,
+    set_cursor,
     set_status,
     store_credential,
     store_oauth_state,
@@ -56,6 +57,7 @@ from lararium.core.errors import (
 )
 from lararium.core.json_types import JSONValue
 from lararium.core.notify import notifier_from_settings
+from lararium.core.secrets import Secret
 from lararium.deps import (
     ActorDep,
     DocumentStoreDep,
@@ -75,6 +77,18 @@ from lararium.modules.finance.ibkr.sync import (
 )
 from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
+from lararium.modules.finance.readonly_http import HttpAuthError, HttpError
+from lararium.modules.finance.trading212.client import Trading212Client
+from lararium.modules.finance.trading212.sync import (
+    KEY_PURPOSE as T212_KEY_PURPOSE,
+)
+from lararium.modules.finance.trading212.sync import (
+    SECRET_PURPOSE as T212_SECRET_PURPOSE,
+)
+from lararium.modules.finance.trading212.sync import (
+    Trading212SyncError,
+    summary_account_id,
+)
 from lararium.modules.finance.transfers_api import healing_command
 from lararium.worker.app import defer_await_approval, defer_sync
 
@@ -140,6 +154,16 @@ class IbkrConnectionUpdate(_IbkrToken):
 class IbkrConnectionCreate(_IbkrToken):
     display_name: str = Field(min_length=1, max_length=200)
     query_id: str = Field(pattern=QUERY_ID_PATTERN)
+
+
+class Trading212ConnectionUpdate(BaseModel):
+    api_key: SecretStr = Field(min_length=1, max_length=500)
+    api_secret: SecretStr = Field(min_length=1, max_length=500)
+
+
+class Trading212ConnectionIn(Trading212ConnectionUpdate):
+    display_name: str = Field(min_length=1, max_length=200)
+    account_kind: Literal["invest", "isa"]
 
 
 class IbkrUploadOut(BaseModel):
@@ -452,6 +476,124 @@ async def update_ibkr_connection(
         # A new expiry is reminded in its turn.
         changes = {} if body.query_id is None else {"query_id": body.query_id}
         await update_config(ctx, connection_id, changes, remove=[EXPIRY_NOTIFIED_KEY])
+        await transition_status(
+            ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
+        )
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
+    return _out(record, settings)
+
+
+def _unprocessable(error: str, message: str) -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_CONTENT, {"error": error, "message": message}
+    )
+
+
+async def _trading212_account_id(http: httpx.AsyncClient, body: Trading212ConnectionUpdate) -> str:
+    """The account the key belongs to, from one account/summary call. Every message is fixed
+    text: nothing the answer or the request holds can reach the owner or a log."""
+    client = Trading212Client(
+        http, Secret(body.api_key.get_secret_value()), Secret(body.api_secret.get_secret_value())
+    )
+    try:
+        return summary_account_id(await client.summary())
+    except HttpAuthError:
+        raise _unprocessable("key_rejected", "Trading 212 rejected this key") from None
+    except HttpError:
+        raise _unprocessable(
+            "key_not_checked",
+            "Trading 212 could not check this key: it needs the account permission,"
+            " and Trading 212 must be reachable. Try again.",
+        ) from None
+    except Trading212SyncError:
+        raise _unprocessable("no_account_id", "Trading 212's answer has no account id") from None
+
+
+@router.post(
+    "/trading212", name="create_trading212_connection", status_code=status.HTTP_201_CREATED
+)
+async def create_trading212_connection(
+    body: Trading212ConnectionIn,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+) -> ConnectionOut:
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    account_id = await _trading212_account_id(http, body)
+    args = body.model_dump(mode="json", exclude={"api_key", "api_secret"})
+    async with command_context(session, actor, "create_trading212_connection", args) as ctx:
+        taken = any(
+            isinstance(other.cursor, dict) and other.cursor.get("account_id") == account_id
+            for other in await list_connections(session)
+            if other.connector == "trading212"
+        )
+        if taken:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "error": "already_connected",
+                    "message": "this Trading 212 account is already connected",
+                },
+            )
+        created = await create_connection(
+            ctx,
+            connector="trading212",
+            display_name=body.display_name,
+            config={"account_kind": body.account_kind},
+        )
+        await store_credential(
+            ctx, master_key, created.id, T212_KEY_PURPOSE, body.api_key.get_secret_value(), None
+        )
+        await store_credential(
+            ctx,
+            master_key,
+            created.id,
+            T212_SECRET_PURPOSE,
+            body.api_secret.get_secret_value(),
+            None,
+        )
+        # Where the sync looks, so its account check works from the first run.
+        await set_cursor(ctx, created.id, {"account_id": account_id})
+        # There is no approval step: a key works as soon as it is created.
+        record = await set_status(ctx, created.id, "healthy")
+    # After the commit, so the job finds the connection.
+    await defer_sync(record.id)
+    return _out(record, settings)
+
+
+@router.put("/{connection_id}/trading212", name="update_trading212_connection")
+async def update_trading212_connection(
+    connection_id: UUID,
+    body: Trading212ConnectionUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> ConnectionOut:
+    """Replace the key and secret (new ones after the old were rejected). The sync checks
+    that they belong to the same account."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "update_trading212_connection", args) as ctx:
+        connection = await lock_connection(ctx, connection_id)
+        if connection.connector != "trading212":
+            raise _unprocessable("not_trading212", "this is not a Trading 212 connection")
+        if connection.status == "disabled":
+            raise _unprocessable("not_updatable", "a disabled connection can't be updated")
+        await store_credential(
+            ctx, master_key, connection_id, T212_KEY_PURPOSE, body.api_key.get_secret_value(), None
+        )
+        await store_credential(
+            ctx,
+            master_key,
+            connection_id,
+            T212_SECRET_PURPOSE,
+            body.api_secret.get_secret_value(),
+            None,
+        )
         await transition_status(
             ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
         )

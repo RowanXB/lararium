@@ -3523,6 +3523,74 @@
       "TimezoneName": {
         "type": "string"
       },
+      "Trading212ConnectionIn": {
+        "properties": {
+          "account_kind": {
+            "enum": [
+              "invest",
+              "isa"
+            ],
+            "title": "Account Kind",
+            "type": "string"
+          },
+          "api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Secret",
+            "type": "string",
+            "writeOnly": true
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_key",
+          "api_secret",
+          "display_name",
+          "account_kind"
+        ],
+        "title": "Trading212ConnectionIn",
+        "type": "object"
+      },
+      "Trading212ConnectionUpdate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Secret",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "api_key",
+          "api_secret"
+        ],
+        "title": "Trading212ConnectionUpdate",
+        "type": "object"
+      },
       "TransactionCreate": {
         "properties": {
           "booking_date": {
@@ -4015,6 +4083,47 @@
         ]
       }
     },
+    "/api/v1/connections/trading212": {
+      "post": {
+        "operationId": "create_trading212_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Trading212ConnectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Trading212 Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/{connection_id}/authorize": {
       "post": {
         "operationId": "authorize_connection",
@@ -4247,6 +4356,60 @@
           }
         },
         "summary": "Sync Connection Now",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/trading212": {
+      "put": {
+        "description": "Replace the key and secret (new ones after the old were rejected). The sync checks\nthat they belong to the same account.",
+        "operationId": "update_trading212_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Trading212ConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Trading212 Connection",
         "tags": [
           "connections"
         ]

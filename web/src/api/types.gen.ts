@@ -1647,6 +1647,34 @@ export type TimeUnit = 'day' | 'minute' | 'second';
 export type TimezoneName = string;
 
 /**
+ * Trading212ConnectionIn
+ */
+export type Trading212ConnectionIn = {
+    /**
+     * Account Kind
+     */
+    account_kind: 'invest' | 'isa';
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+/**
+ * Trading212ConnectionUpdate
+ */
+export type Trading212ConnectionUpdate = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret: string;
+};
+
+/**
  * TransactionCreate
  */
 export type TransactionCreate = {
@@ -1879,6 +1907,28 @@ export type MonzoConnectionCreateWritable = {
     display_name: string;
 };
 
+/**
+ * Trading212ConnectionIn
+ */
+export type Trading212ConnectionInWritable = {
+    /**
+     * Account Kind
+     */
+    account_kind: 'invest' | 'isa';
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret: string;
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
 export type ListConnectionsData = {
     body?: never;
     path?: never;
@@ -1971,6 +2021,31 @@ export type MonzoOauthCallbackErrors = {
 };
 
 export type MonzoOauthCallbackError = MonzoOauthCallbackErrors[keyof MonzoOauthCallbackErrors];
+
+export type CreateTrading212ConnectionData = {
+    body: Trading212ConnectionInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/trading212';
+};
+
+export type CreateTrading212ConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateTrading212ConnectionError = CreateTrading212ConnectionErrors[keyof CreateTrading212ConnectionErrors];
+
+export type CreateTrading212ConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateTrading212ConnectionResponse = CreateTrading212ConnectionResponses[keyof CreateTrading212ConnectionResponses];
 
 export type AuthorizeConnectionData = {
     body?: never;
@@ -2121,6 +2196,36 @@ export type SyncConnectionNowResponses = {
 };
 
 export type SyncConnectionNowResponse = SyncConnectionNowResponses[keyof SyncConnectionNowResponses];
+
+export type UpdateTrading212ConnectionData = {
+    body: Trading212ConnectionUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/trading212';
+};
+
+export type UpdateTrading212ConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateTrading212ConnectionError = UpdateTrading212ConnectionErrors[keyof UpdateTrading212ConnectionErrors];
+
+export type UpdateTrading212ConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateTrading212ConnectionResponse = UpdateTrading212ConnectionResponses[keyof UpdateTrading212ConnectionResponses];
 
 export type ListAccountsData = {
     body?: never;

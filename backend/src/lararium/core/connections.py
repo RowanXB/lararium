@@ -243,6 +243,14 @@ async def transition_status(
     return previous
 
 
+async def set_cursor(
+    ctx: CommandContext, connection_id: UUID, cursor: JSONValue
+) -> ConnectionRecord:
+    """Replace the cursor without recording a sync (a connector's first knowledge of its
+    account, written when the connection is made)."""
+    return await _update(ctx, connection_id, cursor=cursor)
+
+
 async def record_sync_success(
     ctx: CommandContext, connection_id: UUID, cursor: JSONValue
 ) -> ConnectionRecord:

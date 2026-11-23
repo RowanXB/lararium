@@ -7,8 +7,10 @@ import {
   authorizeConnection,
   createIbkrConnection,
   createMonzoConnection,
+  createTrading212Connection,
   listConnections,
   updateIbkrConnection,
+  updateTrading212Connection,
   uploadIbkrStatement,
 } from "../api";
 import { ConnectionsPage } from "./ConnectionsPage";
@@ -32,6 +34,8 @@ vi.mock("../api", () => ({
   createMonzoConnection: vi.fn(async () => ({ data: {} })),
   createIbkrConnection: vi.fn(async () => ({ data: {} })),
   updateIbkrConnection: vi.fn(async () => ({ data: {} })),
+  createTrading212Connection: vi.fn(async () => ({ data: {} })),
+  updateTrading212Connection: vi.fn(async () => ({ data: {} })),
   uploadIbkrStatement: vi.fn(async () => ({ data: { raw_records: 3 } })),
   authorizeConnection: vi.fn(async () => ({ data: { url: "https://auth.monzo.example/?x=1" } })),
   syncConnectionNow: vi.fn(async () => ({ data: {} })),
@@ -331,4 +335,89 @@ it("uploads a Flex statement", async () => {
     ),
   );
   expect(await screen.findByText("Uploaded statement.xml: 3 records ingested.")).toBeInTheDocument();
+});
+
+const TRADING212 = {
+  ...CONNECTION,
+  id: "0190a0b0-0000-7000-8000-0000000000f1",
+  connector: "trading212",
+  display_name: "Trading 212 ISA",
+  status: "needs_reauth",
+  redirect_uri: null,
+};
+
+it("adds a Trading 212 connection and clears the keys", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  renderPage(client);
+  const form = await screen.findByRole("form", { name: "Add Trading 212" });
+  expect(
+    within(form).getByText(
+      "Create an API key in the Trading 212 app under Settings → API (Beta), for this account only, with read permissions.",
+    ),
+  ).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("Display name"), "Trading 212 ISA");
+  await user.selectOptions(within(form).getByLabelText("Account type"), "isa");
+  const key = within(form).getByLabelText("API key");
+  const secret = within(form).getByLabelText("API secret");
+  expect(key).toHaveAttribute("type", "password");
+  expect(secret).toHaveAttribute("type", "password");
+  await user.type(key, "key-123");
+  await user.type(secret, "secret-456");
+  await user.click(within(form).getByRole("button", { name: "Add Trading 212" }));
+
+  expect(createTrading212Connection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: {
+        display_name: "Trading 212 ISA",
+        account_kind: "isa",
+        api_key: "key-123",
+        api_secret: "secret-456",
+      },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("API key")).toHaveValue(""));
+  expect(within(form).getByLabelText("API secret")).toHaveValue("");
+  expect(await within(form).findByText("Trading 212 connected")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("key-123");
+  await waitFor(() => {
+    const kept = JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables));
+    expect(kept).not.toContain("key-123");
+    expect(kept).not.toContain("secret-456");
+  });
+});
+
+it("shows why Trading 212 refused the key", async () => {
+  vi.mocked(createTrading212Connection).mockRejectedValueOnce({
+    detail: { error: "key_rejected", message: "Trading 212 rejected this key" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add Trading 212" });
+  await user.type(within(form).getByLabelText("Display name"), "T");
+  await user.type(within(form).getByLabelText("API key"), "k");
+  await user.type(within(form).getByLabelText("API secret"), "s");
+  await user.click(within(form).getByRole("button", { name: "Add Trading 212" }));
+  expect(await within(form).findByText("Trading 212 rejected this key")).toBeInTheDocument();
+});
+
+it("updates the keys of a Trading 212 connection", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [TRADING212] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update keys" });
+  await user.type(within(form).getByLabelText("API key"), " new-key ");
+  await user.type(within(form).getByLabelText("API secret"), "new-secret");
+  await user.click(within(form).getByRole("button", { name: "Update keys" }));
+
+  expect(updateTrading212Connection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: TRADING212.id },
+      body: { api_key: "new-key", api_secret: "new-secret" },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("API key")).toHaveValue(""));
+  expect(within(form).getByLabelText("API secret")).toHaveValue("");
+  expect(await within(form).findByText("Keys updated")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorise" })).not.toBeInTheDocument();
 });
