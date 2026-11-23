@@ -20,7 +20,9 @@ from sqlalchemy.orm import aliased
 
 from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
+from lararium.core.errors import SettingNotFoundError
 from lararium.core.json_types import JSONValue
+from lararium.core.settings_store import get_setting, set_setting
 from lararium.modules.finance import models
 from lararium.modules.finance.pricing import record_fx_rate
 
@@ -32,6 +34,11 @@ FRANKFURTER_URL = "https://api.frankfurter.dev/v1"
 # Frankfurter thins a long time series to weekly points, so a long range is asked for in
 # windows short enough to stay daily.
 CHUNK_DAYS = 90
+# The ECB's first reference-rate day: nothing earlier exists to fetch.
+FIRST_ECB_DAY = date(1999, 1, 4)
+# core.settings key: the last day a run fetched through, so a ledger whose every day is
+# covered by other sources (no `ecb` row ever stored) doesn't refetch its history each day.
+FETCHED_THROUGH_KEY = "finance.ecb.fetched_through"
 
 
 async def fetch_rates(
@@ -41,16 +48,30 @@ async def fetch_rates(
     response = await http.get(
         f"{FRANKFURTER_URL}/{start.isoformat()}..{end.isoformat()}", params={"base": BASE_CURRENCY}
     )
+    if response.status_code == 404:
+        # What Frankfurter answers for a range with no working day is not documented here;
+        # a 404 for the range we asked for is taken to mean there are no rates in it.
+        return {}
     response.raise_for_status()
     body: object = json.loads(response.text, parse_float=Decimal)
-    rates = cast(dict[str, object], body).get("rates") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        raise ValueError("the ECB response is not an object")
+    envelope = cast(dict[str, object], body)
+    if envelope.get("base") != BASE_CURRENCY:
+        raise ValueError("the ECB response is not in EUR")
+    if "amount" in envelope and envelope["amount"] != 1:
+        raise ValueError("the ECB response is not for an amount of 1")
+    rates = envelope.get("rates")
     if not isinstance(rates, dict):
         raise ValueError("the ECB response has no rates object")
     parsed: dict[date, dict[str, Decimal]] = {}
     for day, by_currency in cast(dict[str, object], rates).items():
         if not isinstance(by_currency, dict):
             raise ValueError("the ECB response has a malformed day")
-        parsed[date.fromisoformat(day)] = {
+        parsed_day = date.fromisoformat(day)
+        if not start <= parsed_day <= end:
+            raise ValueError("the ECB response has a day outside the range asked for")
+        parsed[parsed_day] = {
             code: _rate(value) for code, value in cast(dict[str, object], by_currency).items()
         }
     return parsed
@@ -158,33 +179,50 @@ async def drop_superseded(ctx: CommandContext) -> int:
             "as_of_date": row.as_of_date.isoformat(),
             "source": SOURCE,
         }
-        ctx.emit("finance.fx_rate.removed", row.id, data)
+        ctx.emit("finance.fx_rate.deleted", row.id, data)
         ctx.record_change(f"fx_rate_removed:{row.id}", data)
     return len(removed)
 
 
-async def _first_needed_date(session: AsyncSession) -> date | None:
-    """The day after the latest `ecb` rate, else the earliest booking date of any posting."""
+async def _first_needed_date(session: AsyncSession, today: date) -> date | None:
+    """The day after the last day fetched through (or the latest `ecb` rate up to today),
+    else the earliest booking date of any posting; never before the ECB's first day."""
     r = models.FxRate
-    latest = await session.scalar(select(func.max(r.as_of_date)).where(r.source == SOURCE))
-    if latest is not None:
-        return latest + timedelta(days=1)
-    return await session.scalar(
+    through = await session.scalar(
+        select(func.max(r.as_of_date)).where(r.source == SOURCE, r.as_of_date <= today)
+    )
+    try:
+        marker = await get_setting(session, FETCHED_THROUGH_KEY)
+    except SettingNotFoundError:
+        marker = None
+    if isinstance(marker, str):
+        fetched = date.fromisoformat(marker)
+        through = fetched if through is None else max(through, fetched)
+    if through is not None:
+        return max(through + timedelta(days=1), FIRST_ECB_DAY)
+    first = await session.scalar(
         select(func.min(models.Transaction.booking_date)).where(
             exists().where(models.Posting.transaction_id == models.Transaction.id)
         )
     )
+    return None if first is None else max(first, FIRST_ECB_DAY)
 
 
 async def run_fetch_ecb_rates(
     session_factory: async_sessionmaker[AsyncSession], http: httpx.AsyncClient, today: date
 ) -> int:
-    """Fetch the ECB's rates from the first day a ledger needs them to `today`, store the
-    ones that fill a gap and drop those another source has superseded; return how many rates
-    were written. A window that is stored stays so if a later one fails: the next run carries
-    on after it."""
+    """Drop the `ecb` rates another source has superseded, then fetch the ECB's rates from
+    the first day a ledger needs them to `today` and store the ones that fill a gap; return
+    how many rates were written. The dropping happens on every run, even one with nothing
+    to fetch or whose fetch fails. A window that is stored stays so if a later one fails:
+    the next run carries on after it."""
+    async with (
+        session_factory() as session,
+        command_context(session, ECB_ACTOR, "finance.drop_superseded_ecb_rates", {}) as ctx,
+    ):
+        await drop_superseded(ctx)
     async with session_factory() as session:
-        start = await _first_needed_date(session)
+        start = await _first_needed_date(session, today)
     if start is None:
         return 0
     written = 0
@@ -202,5 +240,6 @@ async def run_fetch_ecb_rates(
         ):
             written += await store_rates(ctx, rates)
             await drop_superseded(ctx)
+            await set_setting(ctx, FETCHED_THROUGH_KEY, end.isoformat())
         start = end + timedelta(days=1)
     return written

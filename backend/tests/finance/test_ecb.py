@@ -36,6 +36,13 @@ def frankfurter(rates: dict[str, dict[str, str]]) -> str:
     return '{"amount": 1, "base": "EUR", "rates": {' + body + "}}"
 
 
+def answer(request: httpx.Request) -> httpx.Response:
+    """A response with the one rate there is, on DAY, when the range asked for holds DAY."""
+    first, last = request.url.path.removeprefix("/v1/").split("..")
+    has_day = date.fromisoformat(first) <= DAY <= date.fromisoformat(last)
+    return httpx.Response(200, text=frankfurter({str(DAY): {"GBP": "0.87"}} if has_day else {}))
+
+
 def client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -107,8 +114,34 @@ async def test_a_failed_or_malformed_response_raises() -> None:
     async with client(lambda _: httpx.Response(500, text="no")) as http:
         with pytest.raises(httpx.HTTPStatusError):
             await fetch_rates(http, DAY, DAY)
-    async with client(lambda _: httpx.Response(200, text=json.dumps({"rates": []}))) as http:
+    async with client(
+        lambda _: httpx.Response(200, text=json.dumps({"base": "EUR", "rates": []}))
+    ) as http:
         with pytest.raises(ValueError, match="rates"):
+            await fetch_rates(http, DAY, DAY)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"base": "EUR", "rates": {"2026-11-11": {"GBP": 0.87}}}',  # after the range
+        '{"base": "EUR", "rates": {"2026-11-09": {"GBP": 0.87}}}',  # before the range
+        '{"base": "USD", "rates": {"2026-11-10": {"GBP": 0.87}}}',
+        '{"rates": {"2026-11-10": {"GBP": 0.87}}}',
+        '{"amount": 100, "base": "EUR", "rates": {"2026-11-10": {"GBP": 0.87}}}',
+    ],
+)
+async def test_a_response_that_is_not_what_was_asked_for_raises(body: str) -> None:
+    async with client(lambda _: httpx.Response(200, text=body)) as http:
+        with pytest.raises(ValueError):
+            await fetch_rates(http, DAY, DAY)
+
+
+async def test_a_404_means_no_rates_in_the_range() -> None:
+    async with client(lambda _: httpx.Response(404, text="not found")) as http:
+        assert await fetch_rates(http, DAY, DAY) == {}
+    async with client(lambda _: httpx.Response(403, text="no")) as http:
+        with pytest.raises(httpx.HTTPStatusError):
             await fetch_rates(http, DAY, DAY)
 
 
@@ -162,10 +195,12 @@ async def test_superseded_rate_is_dropped(session, run, gbp, eur, usd) -> None:
     ]
 
 
+@pytest.mark.parametrize("inverse", [False, True], ids=["direct", "inverse"])
 async def test_ecb_never_changes_an_ibkr_valuation(
-    session, run, make_account, gbp, eur, usd
+    session, run, make_account, gbp, eur, usd, inverse: bool
 ) -> None:
-    """Review Focus: an account valued through IBKR's rates is unchanged by ECB rates."""
+    """Review Focus: an account valued through IBKR's rates is unchanged by ECB rates,
+    whether IBKR stores them as X->GBP or as GBP->X."""
     days = [date(2026, 11, 1) + timedelta(days=n) for n in range(10)]
     broker = await make_account(name="Broker")
     for instrument, quantity in ((usd, "1000"), (eur, "500")):
@@ -177,8 +212,12 @@ async def test_ecb_never_changes_an_ibkr_valuation(
             as_of=at(2026, 10, 1),
         )
     for n, day in enumerate(days):
-        await ibkr_rate(run, usd, gbp, str(Decimal("0.7") + Decimal(n) / 100), day)
-        await ibkr_rate(run, eur, gbp, str(Decimal("0.85") + Decimal(n) / 100), day)
+        if inverse:
+            await ibkr_rate(run, gbp, usd, str(Decimal("1.4") + Decimal(n) / 100), day)
+            await ibkr_rate(run, gbp, eur, str(Decimal("1.15") + Decimal(n) / 100), day)
+        else:
+            await ibkr_rate(run, usd, gbp, str(Decimal("0.7") + Decimal(n) / 100), day)
+            await ibkr_rate(run, eur, gbp, str(Decimal("0.85") + Decimal(n) / 100), day)
     before = [await holdings_asof(session, day) for day in days]
     assert all(h.status == "ok" for holdings in before for h in holdings)
 
@@ -201,7 +240,7 @@ async def test_task_fetches_from_the_day_after_the_latest_rate(
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested.append(request.url.path)
-        return httpx.Response(200, text=frankfurter({"2026-11-10": {"GBP": "0.87"}}))
+        return answer(request)
 
     # Nothing to value yet and no rate: nothing to fetch.
     async with client(handler) as http:
@@ -265,3 +304,122 @@ async def test_reporting_currency_outside_the_ecb_is_missing_fx(
     await run(store_rates, {DAY: {"GBP": Decimal("0.87"), "USD": Decimal("1.1")}})
     [holding] = await holdings_asof(session, DAY)
     assert (holding.status, holding.value) == ("missing_fx", None)
+
+
+async def test_gap_filling_changes_a_day_where_ibkr_has_no_rate_for_the_pair(
+    session, run, make_account, gbp, eur, usd
+) -> None:
+    """Documented behaviour, intended: an ECB rate fills a gap, so a day where IBKR has no
+    rate for the valued pair (day 2) takes the ECB's cross rate instead of IBKR's older one,
+    while a day IBKR covers (day 1) is unchanged."""
+    broker = await make_account(name="Broker")
+    await run(
+        record_snapshot,
+        account_id=broker.id,
+        instrument_id=usd.id,
+        quantity=Decimal("100"),
+        as_of=at(2026, 10, 1),
+    )
+    day1, day2 = date(2026, 11, 1), date(2026, 11, 2)
+    await ibkr_rate(run, usd, gbp, "0.8", day1)
+    [day1_before] = await holdings_asof(session, day1)
+    [day2_before] = await holdings_asof(session, day2)
+    assert day2_before.fx_rate == Decimal("0.8")  # IBKR's day 1 rate carried forward
+
+    both = {"GBP": Decimal("0.9"), "USD": Decimal("1.2")}
+    await run(store_rates, {day1: both, day2: both})
+    [day1_after] = await holdings_asof(session, day1)
+    [day2_after] = await holdings_asof(session, day2)
+    assert day1_after == day1_before
+    assert day2_after.fx_rate is not None
+    assert abs(day2_after.fx_rate - Decimal("0.75")) < Decimal("1e-15")
+
+
+async def test_a_run_with_nothing_to_fetch_still_drops_superseded_rates(
+    session, run, make_account, gbp, eur
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return answer(request)
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 8))
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY)
+    assert [r.source for r in await rows(session)] == ["ecb"]
+
+    await ibkr_rate(run, gbp, eur, "1.15", DAY)
+    requested.clear()
+    async with client(handler) as http:
+        assert await run_fetch_ecb_rates(sessions, http, DAY) == 0
+    assert requested == []
+    assert [r.source for r in await rows(session)] == ["ibkr"]
+
+
+async def test_a_failed_fetch_still_drops_superseded_rates(
+    session, run, make_account, gbp, eur
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    await post_gbp(run, make_account, gbp, at(2026, 11, 8))
+    body = frankfurter({"2026-11-10": {"GBP": "0.87"}})
+    async with client(lambda _: httpx.Response(200, text=body)) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY)
+    await ibkr_rate(run, gbp, eur, "1.15", DAY)
+    async with client(lambda _: httpx.Response(500, text="down")) as http:
+        with pytest.raises(httpx.HTTPStatusError):
+            await run_fetch_ecb_rates(sessions, http, DAY + timedelta(days=1))
+    assert [r.source for r in await rows(session)] == ["ibkr"]
+
+
+async def test_the_start_is_clamped_to_the_first_ecb_day(session, run, make_account, gbp) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, text=frankfurter({}))
+
+    await post_gbp(run, make_account, gbp, at(1990, 1, 1))
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, date(1999, 2, 1))
+    assert requested == ["/v1/1999-01-04..1999-02-01"]
+
+
+async def test_a_stored_future_rate_does_not_move_the_start(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, text=frankfurter({}))
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 8))
+    await run(store_rates, {date(2027, 1, 1): {"GBP": Decimal("0.87")}})
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY)
+    assert requested == ["/v1/2026-11-08..2026-11-10"]
+
+
+async def test_days_covered_by_other_sources_are_not_refetched(
+    session, run, make_account, gbp, eur
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return answer(request)
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 10))
+    await ibkr_rate(run, gbp, eur, "1.15", DAY)  # every fetched day is covered: no ecb row
+    async with client(handler) as http:
+        assert await run_fetch_ecb_rates(sessions, http, DAY) == 0
+    assert await rows(session, "ecb") == []
+    requested.clear()
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY + timedelta(days=1))
+    assert requested == ["/v1/2026-11-11..2026-11-11"]
