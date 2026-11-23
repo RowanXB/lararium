@@ -9,12 +9,17 @@ Trading 212 renames tickers, and its history may keep returning the old one (des
 position's ticker is the current one: an instrument found by ISIN for a position takes it in
 place of the ticker it holds. A history row's ticker never replaces one, so an old ticker in
 the history cannot take the name back.
+
+An instrument Trading 212's metadata does not list (yet, or any more) is made with kind
+`other`, and flagged while it stays so (`unknown_types`); the metadata's type reclassifies it
+when it arrives (`reclassify`).
 """
 
 from collections.abc import Mapping
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
@@ -29,6 +34,7 @@ from lararium.modules.finance.instruments import (
     get_instrument,
     normalize_identifier,
     replace_identifier,
+    set_kind,
 )
 
 # Trading 212's instrument types the ledger holds (design §5.6); any other is not posted.
@@ -40,9 +46,9 @@ SCHEME = "trading212_ticker"
 
 def instrument_kind(trading212_type: str | None) -> InstrumentKind | None:
     """The kind of instrument a metadata type is; None for a type the ledger does not hold.
-    Without metadata (an instrument Trading 212 no longer lists) a share is assumed."""
+    Without metadata the type is unknown: `other`."""
     if trading212_type is None:
-        return "equity"
+        return "other"
     return KINDS.get(trading212_type)
 
 
@@ -114,4 +120,41 @@ async def listing(
         )
         return created.id
     await add_identifiers(ctx, found.id, identifiers)
+    if found.kind == "other" and kind != "other":
+        await set_kind(ctx, found.id, kind)
     return found.id
+
+
+async def reclassify(ctx: CommandContext, connection_id: UUID) -> None:
+    """Give each instrument made without a type the kind the connection's metadata now says
+    its ticker is."""
+    rows = await ctx.session.execute(
+        text(
+            "select i.id, m.type from finance.instruments i"
+            " join finance.instrument_identifiers ii"
+            " on ii.instrument_id = i.id and ii.scheme = 'trading212_ticker'"
+            " join finance.trading212_instruments m"
+            " on m.connection_id = :c and m.ticker = ii.value"
+            " where i.kind = 'other' and m.type = any(cast(:t as text[]))"
+        ),
+        {"c": connection_id, "t": sorted(KINDS)},
+    )
+    for row in rows.all():
+        await set_kind(ctx, row.id, KINDS[row.type])
+
+
+async def unknown_types(session: AsyncSession, account_id: UUID) -> list[str]:
+    """The tickers of the account's instruments (posted or reported on it) still without a
+    type."""
+    i, ii = models.Instrument, models.InstrumentIdentifier
+    p, s = models.Posting, models.BalanceSnapshot
+    used = exists().where(p.instrument_id == i.id, p.account_id == account_id) | exists().where(
+        s.instrument_id == i.id, s.account_id == account_id
+    )
+    tickers = await session.scalars(
+        select(ii.value)
+        .join(i, i.id == ii.instrument_id)
+        .where(ii.scheme == SCHEME, i.kind == "other", used)
+        .order_by(ii.value)
+    )
+    return list(tickers)

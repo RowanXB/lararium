@@ -16,7 +16,8 @@ the deprecated pies list gone) is flagged too: a connection warning, the owner t
 The normalizer's flags (fields, values and instrument types it does not know, a TRANSFER) are
 published the same way, as the part `fields`. A run normalizes only what it fetched, so they
 add to the ones before; a run that replays every record (a new normalizer version) has them
-all, and replaces them.
+all, and replaces them. The instruments still without a type are found in full by every run,
+as the part `instrument_types`.
 """
 
 import logging
@@ -55,6 +56,7 @@ KINDS: tuple[HistoryKind, ...] = ("orders", "dividends", "transactions")
 FLAGGED_PREFIX = "Trading 212 flagged: "
 # The part the normalizer's flags are published under.
 FIELDS = "fields"
+INSTRUMENT_TYPES = "instrument_types"
 _STOPPED = "history stopped early (404)"
 
 
@@ -325,7 +327,9 @@ class Trading212Connector:
         report = await normalize(ctx, list(dict.fromkeys(run.ids)))
         if report.replayed:
             run.checked.add(FIELDS)
+        run.checked.add(INSTRUMENT_TYPES)
         found = run.found | run.client.skipped | {(FIELDS, flag) for flag in report.flagged}
+        found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
         after |= await publish_flags(ctx, found, run.checked, cursor)
         return after
 

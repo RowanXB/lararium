@@ -299,6 +299,27 @@ async def replace_identifier(
     return record
 
 
+async def set_kind(
+    ctx: CommandContext, instrument_id: UUID, kind: InstrumentKind
+) -> InstrumentRecord:
+    """Reclassify a security a source first could not type (Trading 212's, before its
+    metadata arrives). A currency stays one and nothing becomes one: the ISO 4217 code is
+    what makes an instrument a currency."""
+    current = await get_instrument(ctx.session, instrument_id)
+    if kind == "fiat" or current.kind == "fiat":
+        raise FinanceValidationError("an instrument can't become or stop being a currency")
+    if current.kind == kind:
+        return current
+    await ctx.session.execute(
+        update(models.Instrument).where(models.Instrument.id == instrument_id).values(kind=kind)
+    )
+    record = await get_instrument(ctx.session, instrument_id)
+    data = _event_data(record)
+    ctx.emit("finance.instrument.updated", record.id, data)
+    ctx.record_change(f"instrument:{record.id}", data)
+    return record
+
+
 async def set_hidden(ctx: CommandContext, instrument_id: UUID, hidden: bool) -> InstrumentRecord:
     updated = await ctx.session.scalar(
         update(models.Instrument)

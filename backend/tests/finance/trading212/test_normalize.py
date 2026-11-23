@@ -1,25 +1,33 @@
 """The Trading 212 normalizer: raw records into the ledger (design §5.5-5.10)."""
 
+import hashlib
+import json
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from lararium.core import models as core_models
 from lararium.core.actors import Actor
-from lararium.core.commands import CommandContext
-from lararium.core.connections import ConnectionRecord, create_connection, get_connection
+from lararium.core.commands import CommandContext, command_context
+from lararium.core.connections import (
+    ConnectionRecord,
+    create_connection,
+    get_connection,
+    update_config,
+)
 from lararium.core.connectors import SyncContext
-from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.instruments import InstrumentIdentifier, create_instrument
 from lararium.modules.finance.ledger import find_unbalanced_transactions
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
-from lararium.modules.finance.trading212 import normalize as normalize_module
+from lararium.modules.finance.trading212 import state as state_module
 from lararium.modules.finance.trading212 import sync as t212_sync
 from lararium.modules.finance.trading212.client import Trading212Client
 from lararium.modules.finance.trading212.fields import ENDPOINTS
@@ -29,6 +37,7 @@ from lararium.modules.finance.trading212.normalize import (
     Trading212DataError,
     normalize,
 )
+from lararium.modules.finance.transfers import heal_transfers, list_transfers
 
 from .fixtures import (
     ISIN,
@@ -44,14 +53,16 @@ from .fixtures import (
     summary_json,
     transaction_item,
 )
-from .test_sync import FakeTrading212, _run_sync
+from .test_sync import FakeTrading212, _run_sync, _sync
 from .test_sync import _connection as _sync_connection
 
 CONNECTOR = Actor("connector", "trading212")
 # The sync's time: a day after the fills of the fixtures.
 NOW = datetime(2026, 3, 3, 12, 0, tzinfo=UTC)
 ACCOUNT = "Trading 212 Invest ···0001"
-SUMMARY = ("summary", summary_json())
+# No cash: a history these tests post needs no opening for it (records.openings).
+NO_CASH = {"availableToTrade": Decimal(0), "reservedForOrders": Decimal(0), "inPies": Decimal(0)}
+SUMMARY = ("summary", summary_json(cash=NO_CASH))
 META = ("instruments", instrument_json())
 GB_ISIN = isin("GB00ZZQAAAA")
 
@@ -84,18 +95,40 @@ class Ledger:
         self.notifier = Notifier()
         self.ctx: SyncContext | None = None
 
-    async def store(self, endpoint: str, item: dict[str, Any]) -> uuid.UUID:
-        command = CommandContext(self.session, CONNECTOR, uuid.uuid4())
-        return await store_raw_record(
-            command,
-            connection_id=self.connection.id,
-            record_type=ENDPOINTS[endpoint].record_type,
-            request={"endpoint": endpoint, "params": {}},
-            # As the sync stores it: the API's text, every number its exact Decimal text.
-            content=record_json(loads_decimal(dumps(item))),
-            connector_version="trading212-sync-1",
-            sync_id=uuid.uuid4(),
+    async def store(
+        self, endpoint: str, item: dict[str, Any], sync_id: uuid.UUID, fetched_at: datetime
+    ) -> uuid.UUID:
+        """As store_raw_record does, but fetched at the given time: a sync's time is the
+        database's clock, and a test sets its own."""
+        r = core_models.RawRecord
+        # As the sync stores it: the API's text, every number its exact Decimal text.
+        content = record_json(loads_decimal(dumps(item)))
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+        values = {
+            "connection_id": self.connection.id,
+            "record_type": ENDPOINTS[endpoint].record_type,
+            "content_hash": hashlib.sha256(canonical.encode()).hexdigest(),
+        }
+        inserted = await self.session.scalar(
+            insert(r)
+            .values(
+                **values,
+                sync_id=sync_id,
+                request={"endpoint": endpoint, "params": {}},
+                content=content,
+                connector_version="trading212-sync-1",
+                fetched_at=fetched_at,
+            )
+            .on_conflict_do_nothing(index_elements=[r.connection_id, r.record_type, r.content_hash])
+            .returning(r.id)
         )
+        if inserted is not None:
+            return inserted
+        return (
+            await self.session.execute(
+                select(r.id).where(*(getattr(r, k) == v for k, v in values.items()))
+            )
+        ).scalar_one()
 
     async def context(self) -> SyncContext:
         self.ctx = SyncContext(
@@ -109,13 +142,17 @@ class Ledger:
         )
         return self.ctx
 
-    async def ids(self, *entries: tuple[str, dict[str, Any]]) -> list[uuid.UUID]:
-        return [await self.store(endpoint, item) for endpoint, item in entries]
+    async def ids(
+        self, *entries: tuple[str, dict[str, Any]], now: datetime = NOW
+    ) -> list[uuid.UUID]:
+        """The entries stored as one sync fetched at `now`."""
+        sync_id = uuid.uuid4()
+        return [await self.store(endpoint, item, sync_id, now) for endpoint, item in entries]
 
     async def normalize(
         self, *entries: tuple[str, dict[str, Any]], now: datetime = NOW
     ) -> NormalizeReport:
-        ids = await self.ids(*entries)
+        ids = await self.ids(*entries, now=now)
         return await normalize(await self.context(), ids, now=now)
 
     def events(self) -> int:
@@ -445,7 +482,7 @@ async def test_unknown_fields_and_values_flagged(session, run) -> None:
     odd["order"]["newThing"] = "x"
     odd["fill"]["type"] = "NEW_FILL"
     report = await Ledger(session, connection).normalize(
-        ("summary", summary_json(cash={**summary_json()["cash"], "spendingPot": Decimal(1)})),
+        ("summary", summary_json(cash={**NO_CASH, "spendingPot": Decimal(1)})),
         META,
         ("orders", odd),
         ("transactions", transaction_item(kind="CASHBACK")),
@@ -595,7 +632,7 @@ async def test_renormalize_writes_nothing(session, run, monkeypatch) -> None:
     await ledger.normalize(*entries)
 
     written: list[str] = []
-    upsert = normalize_module.upsert_typed
+    upsert = state_module.upsert_typed
 
     async def spy(ctx, table, key, values) -> bool:
         wrote = await upsert(ctx, table, key, values)
@@ -603,7 +640,7 @@ async def test_renormalize_writes_nothing(session, run, monkeypatch) -> None:
             written.append(table)
         return wrote
 
-    monkeypatch.setattr(normalize_module, "upsert_typed", spy)
+    monkeypatch.setattr(state_module, "upsert_typed", spy)
     report = await ledger.normalize(*entries, now=NOW.replace(hour=13))
     assert (report.created, report.updated) == (0, 0)
     assert report.unchanged > 0
@@ -629,3 +666,228 @@ async def test_flags_are_published_through_the_sync(session, run, monkeypatch) -
     told = [m for m in notifier.messages if "TRANSFER" in m]
     assert len(told) == 1
     assert after.cursor["flags"]["fields"] == ["TRANSFER"]
+
+
+def _api(monkeypatch) -> FakeTrading212:
+    api = FakeTrading212()
+    monkeypatch.setattr(
+        t212_sync,
+        "Trading212Client",
+        partial(Trading212Client, sleep=api.sleep, clock=api.clock, wall_clock=api.clock),
+    )
+    return api
+
+
+_REPORT_TABLES = (
+    "trading212_accounts",
+    "trading212_positions",
+    "trading212_pending_orders",
+    "trading212_pies",
+    "trading212_pie_instruments",
+    "trading212_pie_instrument_issues",
+    "trading212_pie_instrument_shares",
+)
+
+
+async def _reports(session, connection) -> dict[str, list[Any]]:
+    """The connection's report rows and reported snapshots, without their ids."""
+    found: dict[str, list[Any]] = {}
+    for table in _REPORT_TABLES:
+        rows = await session.execute(
+            text(
+                f"select to_jsonb(t) - 'snapshot_id' as row, s.quantity, s.as_of"
+                f" from finance.{table} t"
+                + (
+                    " left join finance.balance_snapshots s on s.id = t.snapshot_id"
+                    if table in ("trading212_accounts", "trading212_positions")
+                    else " left join (select null::numeric as quantity,"
+                    " null::timestamptz as as_of) s on true"
+                )
+                + " where t.connection_id = :c"
+            ),
+            {"c": connection.id},
+        )
+        found[table] = sorted((str(sorted(r.row.items())), r.quantity, r.as_of) for r in rows)
+    snapshots = await session.execute(
+        text(
+            "select s.instrument_id, s.quantity, s.as_of, s.as_of_date"
+            " from finance.balance_snapshots s join finance.accounts a on a.id = s.account_id"
+            " where a.source_connection_id = :c and s.kind = 'reported'"
+            " order by s.instrument_id, s.as_of"
+        ),
+        {"c": connection.id},
+    )
+    found["snapshots"] = [tuple(r) for r in snapshots]
+    return found
+
+
+async def test_a_new_version_regenerates_every_report(session, run, monkeypatch) -> None:
+    api = _api(monkeypatch)
+    api.pending = [{"id": Decimal(55), "ticker": TICKER, "side": "BUY", "status": "NEW"}]
+    api.pie_detail = {
+        "instruments": [
+            {
+                "ticker": TICKER,
+                "ownedQuantity": Decimal("0.5"),
+                "issues": [{"name": "DELISTED", "severity": "IRREVERSIBLE"}],
+            }
+        ],
+        "settings": {"id": Decimal(9001), "name": "P", "instrumentShares": {TICKER: Decimal(1)}},
+    }
+    connection = await _sync_connection(run)
+    await _sync(session, connection, api)
+    before = await _reports(session, connection)
+    assert all(before.values()), before
+
+    for table in ("trading212_accounts", "trading212_positions", "trading212_pending_orders"):
+        await session.execute(
+            text(f"delete from finance.{table} where connection_id = :c"), {"c": connection.id}
+        )
+    await session.execute(
+        text("delete from finance.trading212_pies where connection_id = :c"), {"c": connection.id}
+    )
+    await session.execute(
+        text(
+            "delete from finance.balance_snapshots s using finance.accounts a"
+            " where a.id = s.account_id and a.source_connection_id = :c"
+        ),
+        {"c": connection.id},
+    )
+    await run(
+        lambda ctx: update_config(ctx, connection.id, {"normalizer_version": "trading212-norm-0"})
+    )
+    # The next sync fetches no pies (a day's), and its other reports are the same raw records:
+    # the replay rebuilds every day from what is stored.
+    await _sync(session, connection, api)
+    assert await _reports(session, connection) == before
+
+
+async def test_opening_when_the_history_is_short(session, run) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    # The first sync reports 250.75 and 3 shares; the history it reaches holds a dividend.
+    early = dividend_item(paidOn="2026-03-01T00:00:00Z")
+    await ledger.normalize(
+        ("summary", summary_json()), META, ("dividends", early), ("positions", position_json())
+    )
+    gbp = await _opening(session, "GBP")
+    shares = await _opening(session, "ZZQA")
+    assert (gbp.quantity, gbp.booking_date) == (Decimal("249.52"), date(2026, 2, 28))
+    assert (shares.quantity, shares.booking_date) == (Decimal(3), date(2026, 2, 28))
+    assert gbp.contra == "Opening balances"
+    assert (await get_connection(session, connection.id)).warnings == []
+
+    # The history reaches further back (a re-walk): what it explains leaves the opening.
+    deposit = transaction_item(amount="490.72")
+    await ledger.normalize(
+        ("transactions", deposit), ("orders", order_item()), now=NOW + timedelta(days=1)
+    )
+    assert await _opening(session, "GBP") is None
+    assert await _opening(session, "ZZQA") is None
+    assert await find_unbalanced_transactions(session) == []
+
+
+async def test_no_opening_with_the_full_history(session, run) -> None:
+    connection = await _connection(run)
+    await Ledger(session, connection).normalize(
+        ("summary", summary_json()),
+        META,
+        ("transactions", transaction_item(amount="491.95")),
+        ("orders", order_item()),
+        ("positions", position_json()),
+    )
+    count = await session.scalar(
+        text("select count(*) from finance.transactions where external_id like 'opening:%'")
+    )
+    assert count == 0
+
+
+async def _opening(session, symbol: str):
+    return (
+        await session.execute(
+            text(
+                "select p.quantity, t.booking_date, ca.name as contra"
+                " from finance.transactions t"
+                " join finance.postings p on p.transaction_id = t.id and p.position = 0"
+                " join finance.postings c on c.transaction_id = t.id and c.position = 1"
+                " join finance.accounts ca on ca.id = c.account_id"
+                " join finance.instruments i on i.id = p.instrument_id"
+                " where t.external_id like 'opening:10000001:%' and t.status <> 'void'"
+                " and i.symbol = :s"
+            ),
+            {"s": symbol},
+        )
+    ).one_or_none()
+
+
+async def test_a_transfer_names_the_sibling_account(session, run) -> None:
+    invest = Ledger(session, await _connection(run, "invest"))
+    isa = Ledger(session, await _connection(run, "isa"))
+    await invest.normalize(SUMMARY)
+    await isa.normalize(("summary", summary_json(account_id=20000002, cash=NO_CASH)))
+
+    later = NOW + timedelta(days=1)
+    moved = {"dateTime": "2026-03-04T09:15:00Z"}
+    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00", **moved)
+    into = transaction_item(reference="t-in", kind="TRANSFER", amount="100.00", **moved)
+    sent = await invest.normalize(SUMMARY, ("transactions", out), now=later)
+    received = await isa.normalize(
+        ("summary", summary_json(account_id=20000002, cash=NO_CASH)),
+        ("transactions", into),
+        now=later,
+    )
+    # The sign is still the owner's to check.
+    assert "TRANSFER" in sent.flagged and "TRANSFER" in received.flagged
+    named = await session.execute(
+        text(
+            "select t.external_id, i.value from finance.transactions t"
+            " join finance.account_identifiers i on i.id = t.counterparty_identifier_id"
+            " where t.external_id in ('transaction:t-out', 'transaction:t-in')"
+            " order by t.external_id"
+        )
+    )
+    assert [tuple(r) for r in named] == [
+        ("transaction:t-in", "10000001"),
+        ("transaction:t-out", "20000002"),
+    ]
+
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        await heal_transfers(ctx)
+    [transfer] = await list_transfers(session)
+    assert transfer.status == "matched"
+    in_transit = await session.scalar(
+        text(
+            "select coalesce(sum(p.quantity), 0) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " join finance.accounts a on a.id = p.account_id"
+            " where a.name = 'In transit' and t.status <> 'void'"
+        )
+    )
+    assert in_transit == 0
+
+
+async def test_a_transfer_without_a_sibling_names_nothing(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00")
+    report = await ledger.normalize(SUMMARY, ("transactions", out))
+    assert "TRANSFER" in report.flagged
+    posted = await _transaction(session, "transaction:t-out")
+    assert posted.counterparty_identifier_id is None
+
+
+async def test_an_instrument_without_metadata_is_flagged_until_typed(session, run) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    report = await ledger.normalize(SUMMARY, ("orders", order_item()))
+    # Posted, but not taken for a share.
+    assert (await _transaction(session, "order:700001")) is not None
+    kind = text("select kind from finance.instruments where symbol = 'ZZQA'")
+    assert await session.scalar(kind) == "other"
+    assert report.instrument_flags == {f"instrument type unknown {TICKER}"}
+
+    # The metadata arrives: the instrument takes its type, and the flag is gone.
+    report = await ledger.normalize(SUMMARY, META, now=NOW + timedelta(days=1))
+    assert await session.scalar(kind) == "equity"
+    assert report.instrument_flags == set()
