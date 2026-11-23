@@ -566,17 +566,19 @@ async def _reports(session, connection_id: UUID, wallet: str) -> list[datetime]:
     return list(found)
 
 
-async def _emptied_funding(session, run, fake: FakeBinance, clock: Clock):
-    """A connection whose Funding received 5 and sent 5 (records), then read empty. The first
-    sync makes the Funding account (its records are normalised after its reads), so the second
-    is the account's first report."""
+async def _emptied_funding(session, run, fake: FakeBinance, clock: Clock, *, first: bool = False):
+    """A connection whose Funding received 5 and sent 5 (records), and is read empty by a sync
+    whose own records make the Funding account (they are normalised after the read)."""
     fake.add("deposits", _to_funding(0, clock.ms - 3 * HOUR_MS, "5"))
     fake.add("withdrawals", _withdrawal(0, clock.ms - 2 * HOUR_MS, "5"))
-    connection = await binance_connection(run, config=later_config())
+    config = later_config()
+    if first:
+        del config["first_sync_done"]
+    connection = await binance_connection(run, config=config)
     after = await run_binance_sync(session, connection.id, fake.handler)
     assert after.status == "healthy", after.last_error
-    assert await _reports(session, connection.id, "Funding") == []
-    await _later(session, connection, fake, clock)
+    assert after.config["first_sync_done"] is True
+    # The clear empty read is the new account's first report.
     assert len(await _reports(session, connection.id, "Funding")) == 1
     assert await _as_of(session, connection.id, "Funding", "AAA") == []
     return connection
@@ -653,3 +655,45 @@ async def test_an_identical_sync_adds_one_report_time_per_account(
         symbol = {"Spot": "AAA", "Funding": "BBB", "Earn": "STB"}[wallet]
         assert await _as_of(session, connection.id, wallet, symbol) == reports
     assert await _differences(session, connection.id) == []
+
+
+async def test_a_first_sync_creating_an_account_from_records_reports_it(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    connection = await _emptied_funding(session, run, fake, clock, first=True)
+    # The records sum to 0 at the account's earliest report, which listed nothing.
+    assert await _openings_of(session, connection.id, "AAA") == []
+    fake.set_rows("funding-asset", [_funding("BBB", "3")])
+
+    await _later(session, connection, fake, clock)
+
+    first, second = await _reports(session, connection.id, "Funding")
+    [difference] = await _differences(session, connection.id)
+    assert (difference.wallet, difference.symbol) == ("Binance Funding", "BBB")
+    assert (difference.from_at, difference.to_at, difference.reported_change) == (first, second, 3)
+    assert await _openings_of(session, connection.id, "BBB") == []
+    assert await _openings_of(session, connection.id, "AAA") == []
+
+
+async def test_an_unclear_read_of_an_account_its_sync_creates_writes_no_report_time(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    connection = await binance_connection(run, config=later_config())
+
+    def busy(asked: int) -> None:
+        # A Funding deposit inside every Funding read, and none near the other reads.
+        fake.add("deposits", _to_funding(100 + asked, clock.ms, "1"))
+        clock.ms += 10_000
+
+    fake.when_asked("funding-asset", busy)
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    assert len(fake.calls("funding-asset")) == 4
+    assert await _as_of(session, connection.id, "Funding", "AAA") == []
+    funding = await session.scalar(
+        text("select count(*) from finance.accounts where source_connection_id = :c and name = :n"),
+        {"c": connection.id, "n": "Binance Funding"},
+    )
+    assert funding == 1
+    assert await _reports(session, connection.id, "Funding") == []

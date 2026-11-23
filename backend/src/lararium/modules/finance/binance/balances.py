@@ -557,6 +557,36 @@ async def report_balances(
     return written
 
 
+async def record_reads(
+    ctx: CommandContext,
+    connection: ConnectionRecord,
+    reads: Mapping[str, Read | None],
+    daily: Sequence[Row] = (),
+) -> None:
+    """A clear read is a report for its wallet whether or not the account existed when it was
+    read: for every wallet whose source read is clear and whose account exists now, its report
+    time (`record_report`), and the Spot account's for each daily snapshot of `daily`. Run after
+    the records made the accounts they name; writing one twice writes nothing."""
+    for wallet in _wallets(reads):
+        account = await _mapped_account(ctx, connection, wallet.key)
+        if account is not None:
+            await record_report(
+                ctx, connection, account, wallet.read.read_from, wallet.read.read_to
+            )
+    spot = await _mapped_account(ctx, connection, "spot") if daily else None
+    if spot is not None:
+        for at in _daily_times(daily):
+            await record_report(ctx, connection, spot, at, at)
+
+
+def _daily_times(rows: Sequence[Row]) -> list[datetime]:
+    return [
+        tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
+        for row in rows
+        if row.get("type") == _DAILY_SPOT
+    ]
+
+
 async def daily_rows(session: AsyncSession, connection_id: UUID) -> list[Row]:
     """The Spot daily snapshots the connection fetched (on its first sync)."""
     contents = await session.scalars(

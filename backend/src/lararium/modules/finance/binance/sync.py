@@ -28,6 +28,7 @@ from lararium.modules.finance.binance.balances import (
     daily_rows,
     millis,
     read_balances,
+    record_reads,
     report_balances,
     settle_reads,
     store_read,
@@ -330,10 +331,12 @@ class BinanceConnector:
         flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
         touched = set((await normalize(ctx, flags=flags)).touched)
+        await reports(ctx, settled, first=first)
         touched |= await opening(ctx)
         # The first sync asked every symbol from its first trade: a sweep finds nothing more.
         if not first and await sweep(ctx, client, info, await differences(ctx, touched)):
             touched |= (await normalize(ctx)).touched
+            await reports(ctx, settled, first=first)
             touched |= await opening(ctx)
         await reconciliation(ctx, touched)
         await prices(ctx, client)
@@ -368,6 +371,19 @@ async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str
     cursors = (await fresh_config(ctx)).get(CURSORS_KEY)
     known = cursors if isinstance(cursors, dict) else {}
     return [symbol for symbol in symbols if f"{TRADES_LABEL}:{symbol}" in known]
+
+
+async def reports(ctx: SyncContext, settled: Mapping[str, Read | None], *, first: bool) -> None:
+    """The report times of the accounts the records made after the reads (`record_reads`), in
+    a short transaction of its own; the first sync's daily snapshots too."""
+    connection = ctx.connection
+    args: dict[str, JSONValue] = {"connection_id": str(connection.id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.reports", args) as cmd,
+    ):
+        daily = await daily_rows(session, connection.id) if first else []
+        await record_reads(cmd, connection, settled, daily)
 
 
 async def _report(
