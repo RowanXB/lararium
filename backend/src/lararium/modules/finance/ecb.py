@@ -4,6 +4,9 @@ An ECB rate is written for a currency pair and day only when no other source has
 between the two currencies on that day, in either direction, and it is removed when one
 arrives. Valuation takes the latest rate of any source and breaks a same-day tie by write
 order, so an unconditional ECB rate could otherwise replace IBKR's.
+
+Known limits: a posting dated before the fetched-through marker is not back-filled, and
+the marker is not rewound if another source's rate is deleted later.
 """
 
 import json
@@ -184,6 +187,14 @@ async def drop_superseded(ctx: CommandContext) -> int:
     return len(removed)
 
 
+async def _marker(session: AsyncSession) -> date | None:
+    try:
+        marker = await get_setting(session, FETCHED_THROUGH_KEY)
+    except SettingNotFoundError:
+        return None
+    return date.fromisoformat(marker) if isinstance(marker, str) else None
+
+
 async def _first_needed_date(session: AsyncSession, today: date) -> date | None:
     """The day after the last day fetched through (or the latest `ecb` rate up to today),
     else the earliest booking date of any posting; never before the ECB's first day."""
@@ -191,12 +202,8 @@ async def _first_needed_date(session: AsyncSession, today: date) -> date | None:
     through = await session.scalar(
         select(func.max(r.as_of_date)).where(r.source == SOURCE, r.as_of_date <= today)
     )
-    try:
-        marker = await get_setting(session, FETCHED_THROUGH_KEY)
-    except SettingNotFoundError:
-        marker = None
-    if isinstance(marker, str):
-        fetched = date.fromisoformat(marker)
+    fetched = await _marker(session)
+    if fetched is not None:
         through = fetched if through is None else max(through, fetched)
     if through is not None:
         return max(through + timedelta(days=1), FIRST_ECB_DAY)
@@ -240,9 +247,15 @@ async def run_fetch_ecb_rates(
         ):
             written += await store_rates(ctx, rates)
             await drop_superseded(ctx)
-            # Never past yesterday: the ECB may not have published today's rate yet, and a
-            # rate that is stored is skipped by the next run anyway (it starts after it).
-            marked = min(end, today - timedelta(days=1))
-            await set_setting(ctx, FETCHED_THROUGH_KEY, marked.isoformat())
+            # The marker moves only over days the response returned rates for, and never
+            # past yesterday (today's rate may not be published yet), so a window that came
+            # back empty, by a quiet failure say, is asked for again. The cost, intended:
+            # after a weekend or holiday the next runs refetch the few days since the last
+            # published rate.
+            if rates:
+                marked = min(max(rates), today - timedelta(days=1))
+                current = await _marker(session)
+                if current is None or marked > current:
+                    await set_setting(ctx, FETCHED_THROUGH_KEY, marked.isoformat())
         start = end + timedelta(days=1)
     return written

@@ -446,3 +446,50 @@ async def test_a_rate_not_yet_published_today_is_fetched_the_next_day(
     async with client(handler) as http:
         assert await run_fetch_ecb_rates(sessions, http, DAY + timedelta(days=1)) == 1
     assert [r.as_of_date for r in await rows(session, "ecb")] == [DAY]
+
+
+async def test_an_empty_or_404_window_leaves_the_marker_and_the_start_unchanged(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    requested: list[str] = []
+    statuses = [404, 200, 404]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if statuses.pop(0) == 404:
+            return httpx.Response(404, text="not found")
+        return httpx.Response(200, text=frankfurter({}))
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 8))
+    for _ in range(3):
+        async with client(handler) as http:
+            assert await run_fetch_ecb_rates(sessions, http, DAY) == 0
+    assert requested == ["/v1/2026-11-08..2026-11-10"] * 3
+
+
+async def test_the_marker_stays_over_a_weekend_and_monday_is_stored(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    friday = date(2026, 11, 6)
+    monday = date(2026, 11, 9)
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        first, last = request.url.path.removeprefix("/v1/").split("..")
+        published = [d for d in (friday, monday) if first <= str(d) <= last]
+        return httpx.Response(200, text=frankfurter({str(d): {"GBP": "0.87"} for d in published}))
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 6))
+    for today in (friday, date(2026, 11, 7), date(2026, 11, 8), monday):
+        async with client(handler) as http:
+            await run_fetch_ecb_rates(sessions, http, today)
+    assert requested == [
+        "/v1/2026-11-06..2026-11-06",
+        "/v1/2026-11-07..2026-11-07",
+        "/v1/2026-11-07..2026-11-08",
+        "/v1/2026-11-07..2026-11-09",
+    ]
+    assert [r.as_of_date for r in await rows(session, "ecb")] == [friday, monday]
