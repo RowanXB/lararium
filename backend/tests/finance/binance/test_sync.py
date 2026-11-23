@@ -30,6 +30,7 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import CURSORS_KEY, record_type
+from lararium.modules.finance.binance.layout import TABLE_LABELS, layout
 from lararium.modules.finance.binance.sync import (
     BALANCE_LABELS,
     HARMLESS_TRUE,
@@ -442,6 +443,20 @@ async def _delete(engine, owner_url: str, connection_id: uuid.UUID) -> None:
             )
             await conn.execute(
                 text("delete from core.credentials where connection_id = :id"), params
+            )
+            # The typed tables (child rows go with their parent), and what the reports wrote.
+            roots = [t.name for label in TABLE_LABELS for t in layout(label) if t.parent is None]
+            for table in [*roots, "binance_assets_seen"]:
+                await conn.execute(
+                    text(f"delete from finance.{table} where connection_id = :id"), params
+                )
+            accounts = "select id from finance.accounts where source_connection_id = :id"
+            await conn.execute(
+                text(f"delete from finance.balance_snapshots where account_id in ({accounts})"),
+                params,
+            )
+            await conn.execute(
+                text("delete from finance.accounts where source_connection_id = :id"), params
             )
             await conn.execute(text("delete from core.events where subject_id = :id"), params)
             await conn.execute(text("delete from core.connections where id = :id"), params)

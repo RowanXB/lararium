@@ -267,6 +267,7 @@ class FakeBinance:
         self._secret = secret
         self._stored: dict[str, list[_Stored]] = {}
         self._failures: list[_Failure] = []
+        self._hooks: dict[str, Callable[[int], None]] = {}
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.
@@ -309,6 +310,17 @@ class FakeBinance:
     def clear_failures(self) -> None:
         self._failures.clear()
 
+    # What happens while it is asked.
+
+    def when_asked(self, label: str, callback: Callable[[int], None] | None) -> None:
+        """Run `callback(n)` each time `label` is asked, before it is answered; `n` counts the
+        earlier asks. A test moves money or the clock there, between a request and its answer.
+        None removes it."""
+        if callback is None:
+            self._hooks.pop(label, None)
+        else:
+            self._hooks[label] = callback
+
     # The HTTP side.
 
     def transport(self) -> httpx.MockTransport:
@@ -332,6 +344,8 @@ class FakeBinance:
         self.requests.append(Seen(endpoint.label, request.method, own))
         if refused is not None:
             return refused
+        if (hook := self._hooks.get(endpoint.label)) is not None:
+            hook(len(self.calls(endpoint.label)) - 1)
         failure = self._failure_for(endpoint, own)
         if failure is not None:
             return failure

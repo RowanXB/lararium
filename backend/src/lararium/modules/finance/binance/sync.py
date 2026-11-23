@@ -4,17 +4,25 @@ history walks into raw records (design §5.1 to §5.3).
 Nothing here logs or reports a row's values, the key, an address or a hash.
 """
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from typing import cast
 
+from lararium.core.commands import command_context
 from lararium.core.connections import load_credential, update_config
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
-from lararium.core.raw_records import store_raw_record
-from lararium.modules.finance.binance.catalogue import ENDPOINTS, paging_params
+from lararium.modules.finance.binance.balances import (
+    Read,
+    backfill_daily_snapshots,
+    daily_rows,
+    read_balances,
+    report_balances,
+    settle_reads,
+    store_read,
+    store_reports,
+)
 from lararium.modules.finance.binance.client import (
     BinanceClient,
     BinanceNotPresent,
@@ -27,13 +35,15 @@ from lararium.modules.finance.binance.client import (
     wall_clock,
 )
 from lararium.modules.finance.binance.fetch import (
+    BALANCE_LABELS,
+    CURSORS_KEY,
+    HISTORY_LABELS,
     NOT_PRESENT_KEY,
+    TRADES_LABEL,
     VERSION,
     absent,
     commit,
     fresh_config,
-    record_type,
-    to_json,
     trade_symbols,
     walk,
     walk_trades,
@@ -45,23 +55,12 @@ from lararium.modules.finance.binance.parse import ApiValue, parse
 HARMLESS_TRUE = frozenset({"enableReading", "ipRestrict"})
 DUE_AFTER = timedelta(hours=4)
 FIRST_SYNC_DONE_KEY = "first_sync_done"
-TRADES_LABEL = "my-trades"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-# The phases built so far: what a sync reads (kind account, balance or position) and walks.
-BALANCE_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind in ("account", "balance", "position")
-]
-# Trades are walked by symbol and trade id (walk_trades), not by window.
-HISTORY_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
-]
 GATE_LABEL = "api-restrictions"
 ACCOUNT_LABEL = "spot-account"
+COIN_CONFIG_LABEL = "coin-config"
+EXCHANGE_INFO_LABEL = "exchange-info"
 
 
 def _at(ms: int) -> datetime:
@@ -131,56 +130,6 @@ async def open_client(
     return BinanceClient(ctx.http, api_key, signer, clock=clock, sleep=sleep)
 
 
-@dataclass(frozen=True)
-class BalanceRead:
-    """One balance request (all its pages) and its bracket on Binance's clock: `read_from_ms`
-    just before it was sent, `read_to_ms` just after its answer (plan Decision 9)."""
-
-    label: str
-    read_from_ms: int
-    read_to_ms: int
-    pages: list[ApiValue]
-
-
-async def read_balance(client: BinanceClient, label: str) -> BalanceRead:
-    endpoint = ENDPOINTS[label]
-    read_from = client.now_ms()
-    pages: list[ApiValue] = []
-    if endpoint.paging == "page":
-        cursor_name, size_name, position = paging_params(endpoint)
-        while True:
-            body = await client.call(
-                endpoint, {cursor_name: position, size_name: endpoint.page_size}
-            )
-            pages.append(body)
-            if len(parse(label, body).rows) < endpoint.page_size:
-                break
-            position += 1
-    else:
-        body = await client.call(endpoint, {})
-        parse(label, body)
-        pages.append(body)
-    return BalanceRead(label, read_from, client.now_ms(), pages)
-
-
-async def store_read(ctx: SyncContext, read: BalanceRead) -> UUID:
-    """The read as one raw record. Its bracket is in the content too: two reads with the same
-    answer are two reads, each with its own cutoff."""
-    bracket: dict[str, JSONValue] = {
-        "read_from_ms": read.read_from_ms,
-        "read_to_ms": read.read_to_ms,
-    }
-    return await store_raw_record(
-        ctx.command,
-        connection_id=ctx.connection.id,
-        record_type=record_type(read.label),
-        request=bracket,
-        content={**bracket, "pages": [to_json(page) for page in read.pages]},
-        connector_version=VERSION,
-        sync_id=ctx.sync_id,
-    )
-
-
 # Hooks the later tasks fill in, in the order a sync runs them.
 
 
@@ -188,11 +137,6 @@ async def assets_seen(ctx: SyncContext) -> set[str]:
     """Every asset the connection has shown, in a balance or a record, as committed now."""
     async with ctx.session_factory() as session:
         return await seen(session, ctx.connection.id)
-
-
-async def settle_reads(ctx: SyncContext, client: BinanceClient, reads: list[BalanceRead]) -> None:
-    """Repeat the ambiguous balance reads and the forward walks, at most 3 rounds (Task 5,
-    plan Decision 9)."""
 
 
 async def normalize(ctx: SyncContext) -> None:
@@ -220,11 +164,11 @@ class BinanceConnector:
         self._clock = clock
         self._sleep = sleep
 
-    async def _gated_client(self, ctx: SyncContext) -> tuple[BinanceClient, BalanceRead]:
+    async def _gated_client(self, ctx: SyncContext) -> tuple[BinanceClient, Read]:
         client = await open_client(ctx, clock=self._clock, sleep=self._sleep)
         await client.sync_clock()
-        gate = await read_balance(client, GATE_LABEL)
-        problem = gate_problem(gate.pages[0])
+        gate = (await read_balances(client, [GATE_LABEL]))[GATE_LABEL]
+        problem = gate_problem(_api(gate.body))
         if problem is not None:
             raise CredentialRejectedError(f"this key can do more than read: {problem}")
         return client, gate
@@ -240,23 +184,28 @@ class BinanceConnector:
         if not due(connection.cursor, _at(now_ms), ctx.requested):
             return connection.cursor
         client, gate = await self._gated_client(ctx)
-        account = await read_balance(client, ACCOUNT_LABEL)
-        uid = parse(ACCOUNT_LABEL, account.pages[0]).body
+        account = (await read_balances(client, [ACCOUNT_LABEL]))[ACCOUNT_LABEL]
+        uid = parse(ACCOUNT_LABEL, _api(account.body)).body
         uid = uid.get("uid") if isinstance(uid, dict) else None
         if uid is None or str(uid) != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
-        reads = [gate, account, *await self._read_balances(ctx, client)]
-        for read in reads:
+        reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
+        for read in reads.values():
             await store_read(ctx, read)
+        reference = await read_balances(client, [COIN_CONFIG_LABEL])
 
         for label in HISTORY_LABELS:
             await walk(ctx, client, label)
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
-        info = await client.call(ENDPOINTS["exchange-info"], {})
+        reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
+        info = _api(reference[EXCHANGE_INFO_LABEL].body)
         symbols = trade_symbols(info, await assets_seen(ctx), everything=first)
         await walk_trades(ctx, client, TRADES_LABEL, symbols)
 
-        await settle_reads(ctx, client, reads)
+        settled = await settle_reads(ctx, client, reads, symbols=await _traded(ctx, symbols, first))
+        # Task 6 publishes these (Run.flag, publish_flags).
+        flags: list[str] = []
+        await _report(ctx, reference, settled, first=first, flag=flags.append)
         await normalize(ctx)
         await opening(ctx)
         await reconcile(ctx)
@@ -266,19 +215,61 @@ class BinanceConnector:
             await update_config(ctx.command, connection.id, {FIRST_SYNC_DONE_KEY: True})
         return {"fetched_at": now_ms}
 
-    async def _read_balances(self, ctx: SyncContext, client: BinanceClient) -> list[BalanceRead]:
+    async def _read_balances(self, ctx: SyncContext, client: BinanceClient) -> dict[str, Read]:
         config: Mapping[str, JSONValue] = await fresh_config(ctx)
         missing = config.get(NOT_PRESENT_KEY)
         missing = missing if isinstance(missing, dict) else {}
-        reads: list[BalanceRead] = []
+        reads: dict[str, Read] = {}
         for label in BALANCE_LABELS:
             if label in (GATE_LABEL, ACCOUNT_LABEL) or absent(config, label, client.now_ms()):
                 continue
             try:
-                reads.append(await read_balance(client, label))
+                reads |= await read_balances(client, [label])
             except BinanceNotPresent:
                 await commit(ctx, label, absent_since=client.now_ms())
                 continue
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
+
+
+def _api(body: JSONValue) -> ApiValue:
+    return cast(ApiValue, body)
+
+
+async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:
+    """The symbols whose trades a read made again is checked against: those of a later sync;
+    on the first sync (every listed symbol) only those with a trade, or each round would ask
+    them all again."""
+    if not first:
+        return symbols
+    cursors = (await fresh_config(ctx)).get(CURSORS_KEY)
+    known = cursors if isinstance(cursors, dict) else {}
+    return [symbol for symbol in symbols if f"{TRADES_LABEL}:{symbol}" in known]
+
+
+async def _report(
+    ctx: SyncContext,
+    reference: Mapping[str, Read],
+    settled: Mapping[str, Read | None],
+    *,
+    first: bool,
+    flag: Callable[[str], None],
+) -> None:
+    """The reports and snapshots, in a short transaction of its own: making a wallet's account
+    writes the connection's config, whose row must not stay locked while later steps walk.
+
+    The reference reports go first (`asset` reads `coin-config`), then the first sync's daily
+    snapshots, so that an asset they show and the wallet no longer holds gets its 0 now.
+    """
+    connection = ctx.connection
+    args: dict[str, JSONValue] = {"connection_id": str(connection.id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.report", args) as cmd,
+    ):
+        await store_reports(cmd, connection, reference)
+        if first:
+            rows = await daily_rows(session, connection.id)
+            await backfill_daily_snapshots(cmd, connection, rows, flag=flag)
+        await report_balances(cmd, connection, settled, flag=flag)

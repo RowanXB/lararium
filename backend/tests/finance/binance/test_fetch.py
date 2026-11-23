@@ -6,6 +6,7 @@ import itertools
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import text
 
 from lararium.core.connections import get_connection
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
@@ -207,6 +208,58 @@ async def test_walk_pages_until_short_page(
     else:
         assert len(calls) > 1
         assert all(s.params.get("limit") == str(endpoint.page_size) for s in calls)
+
+
+def _moment(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms // 1000, UTC).replace(microsecond=ms % 1000 * 1000)
+
+
+async def test_walk_stores_each_pages_response(session, run, fake, clock) -> None:
+    label = "earn-flexible-rewards"
+    fake.add(label, *_rows_at(label, 101, "time"))
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    await _walk(session, connection, fake, clock, label)
+
+    [call, *_] = fake.calls(label)
+    window = (_moment(int(call.params["startTime"])), _moment(int(call.params["endTime"])))
+    rows = (
+        await session.execute(
+            text(
+                "select window_from, window_to, page, total"
+                " from finance.binance_earn_flexible_rewards_responses"
+                " where connection_id = :c order by page"
+            ),
+            {"c": connection.id},
+        )
+    ).all()
+    assert [tuple(row) for row in rows] == [(*window, 0, 101), (*window, 1, 101)]
+
+
+async def test_a_split_window_stores_each_halfs_response(session, run, fake, clock) -> None:
+    label = "dividends"
+    fake.add(label, *_rows_at(label, 501, "divTime"))
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    await _walk(session, connection, fake, clock, label)
+
+    asked = {
+        (_moment(int(s.params["startTime"])), _moment(int(s.params["endTime"])))
+        for s in fake.calls(label)
+    }
+    stored = (
+        await session.execute(
+            text(
+                "select window_from, window_to, page from finance.binance_dividends_responses"
+                " where connection_id = :c"
+            ),
+            {"c": connection.id},
+        )
+    ).all()
+    assert {(row.window_from, row.window_to) for row in stored} == asked
+    assert {row.page for row in stored} == {0}
 
 
 async def test_trades_page_until_short_page(session, run, fake, clock) -> None:

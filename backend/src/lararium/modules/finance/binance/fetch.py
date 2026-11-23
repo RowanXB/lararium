@@ -16,6 +16,8 @@ import itertools
 import json
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
@@ -25,9 +27,11 @@ from lararium.core.connections import get_connection, lock_connection, update_co
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import ApiValue, Row, parse
+from lararium.modules.finance.binance.tables import store_response
 
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
@@ -45,6 +49,21 @@ LOOKBACK_MARGIN_MS = 60_000
 # Fetched on the first sync only: Binance serves the last 30 days of them.
 FIRST_SYNC_ONLY = frozenset({"snapshot"})
 RECORD_NAMES = {"my-trades": "spot_trade"}
+TRADES_LABEL = "my-trades"
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# The phases built so far: what a sync reads (kind account, balance or position) and walks.
+BALANCE_LABELS = [
+    e.label
+    for e in ENDPOINTS.values()
+    if e.phase == "A" and e.kind in ("account", "balance", "position")
+]
+# Trades are walked by symbol and trade id (walk_trades), not by window.
+HISTORY_LABELS = [
+    e.label
+    for e in ENDPOINTS.values()
+    if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
+]
 
 
 def record_type(label: str) -> str:
@@ -126,6 +145,19 @@ def absent(config: Mapping[str, JSONValue], key: str, now_ms: int) -> bool:
     return since is not None and now_ms - since < NOT_PRESENT_RETRY_MS
 
 
+@dataclass(frozen=True)
+class Page:
+    """One answer of a window: the window it asked (epoch ms, both inclusive), its 0-based
+    index within it, the body and its rows."""
+
+    label: str
+    start: int
+    end: int
+    index: int
+    body: ApiValue
+    rows: list[Row]
+
+
 async def commit(
     ctx: SyncContext,
     key: str,
@@ -136,10 +168,13 @@ async def commit(
     cursor: JSONValue = None,
     present: bool = False,
     absent_since: int | None = None,
+    responses: Sequence[Page] = (),
 ) -> list[UUID]:
     """Store raw records and the key's cursor in one short transaction of its own.
 
     `present` takes the key off `not_present`; `absent_since` puts it there from that time.
+    `responses` are the answers the records came in: what each says beside its records goes
+    to the label's response table, which raw records (rows only) do not keep.
     """
     connection_id = ctx.connection.id
     args: dict[str, JSONValue] = {"connection_id": str(connection_id), "key": key}
@@ -162,6 +197,12 @@ async def commit(
             for content in contents
             if record is not None
         ]
+        for page in responses:
+            if page.label in layout.TABLE_LABELS:
+                window = (_moment(page.start), _moment(page.end))
+                await store_response(
+                    cmd, connection_id, page.label, page.body, window=window, page=page.index
+                )
         values: dict[str, JSONValue] = {}
         if cursor is not None:
             cursors = _mapping(config.get(CURSORS_KEY))
@@ -194,10 +235,58 @@ def _contents(endpoint: Endpoint, rows: Sequence[Row]) -> list[JSONValue]:
     return contents
 
 
+def _moment(ms: int) -> datetime:
+    return _EPOCH + timedelta(milliseconds=ms)
+
+
 async def _ask(
     client: BinanceClient, endpoint: Endpoint, params: Mapping[str, str | int]
 ) -> list[Row]:
     return parse(endpoint.label, await client.call(endpoint, params)).rows
+
+
+async def window_pages(
+    client: BinanceClient,
+    endpoint: Endpoint,
+    fixed: Mapping[str, str],
+    start: int,
+    end: int,
+) -> list[Page]:
+    """Every answer of one window, through every page; an endpoint that cannot page and answers
+    a full page has its window split in two until each half fits (the full answer is kept as
+    an answer, its rows are not)."""
+    low, high = endpoint.time_params
+    params: dict[str, str | int] = {**fixed, low: start, high: end}
+    cursor_name, size_name, first = paging_params(endpoint)
+    size = endpoint.page_size
+    if size_name and size:
+        params[size_name] = size
+
+    async def ask(index: int, asked: Mapping[str, str | int]) -> Page:
+        body = await client.call(endpoint, asked)
+        return Page(endpoint.label, start, end, index, body, parse(endpoint.label, body).rows)
+
+    if endpoint.paging == "none":
+        answer = await ask(0, params)
+        if size and len(answer.rows) >= size and end > start:
+            middle = start + (end - start) // 2
+            full = Page(answer.label, start, end, 0, answer.body, [])
+            return [
+                full,
+                *await window_pages(client, endpoint, fixed, middle + 1, end),
+                *await window_pages(client, endpoint, fixed, start, middle),
+            ]
+        return [answer]
+    if endpoint.paging == "from_id":
+        raise ValueError(f"{endpoint.label} is walked by trade id, not by window")
+    pages: list[Page] = []
+    position = first
+    while True:
+        page = await ask(len(pages), {**params, cursor_name: position})
+        pages.append(page)
+        if len(page.rows) < size or not page.rows:
+            return pages
+        position += len(page.rows) if endpoint.paging == "offset" else 1
 
 
 async def window_rows(
@@ -207,32 +296,9 @@ async def window_rows(
     start: int,
     end: int,
 ) -> list[Row]:
-    """Every row of one window, through every page; an endpoint that cannot page and answers
-    a full page has its window split in two until each half fits."""
-    low, high = endpoint.time_params
-    params: dict[str, str | int] = {**fixed, low: start, high: end}
-    cursor_name, size_name, first = paging_params(endpoint)
-    size = endpoint.page_size
-    if size_name and size:
-        params[size_name] = size
-    if endpoint.paging == "none":
-        rows = await _ask(client, endpoint, params)
-        if size and len(rows) >= size and end > start:
-            middle = start + (end - start) // 2
-            return await window_rows(client, endpoint, fixed, middle + 1, end) + (
-                await window_rows(client, endpoint, fixed, start, middle)
-            )
-        return rows
-    if endpoint.paging == "from_id":
-        raise ValueError(f"{endpoint.label} is walked by trade id, not by window")
-    rows: list[Row] = []
-    position = first
-    while True:
-        page = await _ask(client, endpoint, {**params, cursor_name: position})
-        rows.extend(page)
-        if len(page) < size or not page:
-            return rows
-        position += len(page) if endpoint.paging == "offset" else 1
+    """Every row of one window, through every page (`window_pages`' rows)."""
+    pages = await window_pages(client, endpoint, fixed, start, end)
+    return [row for page in pages for row in page.rows]
 
 
 def _keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
@@ -286,7 +352,7 @@ async def _walk_key(
         return ids
     for index, (start, end) in enumerate(pieces):
         try:
-            rows = await window_rows(client, endpoint, fixed, start, end)
+            pages = await window_pages(client, endpoint, fixed, start, end)
         except BinanceNotPresent:
             if backfilling and not (newest and index == 0):
                 # History ends here; every newer window is stored (Decision 7).
@@ -311,9 +377,10 @@ async def _walk_key(
             key,
             record=record,
             request=request,
-            contents=_contents(endpoint, rows),
+            contents=_contents(endpoint, [row for page in pages for row in page.rows]),
             cursor=state,
             present=retrying,
+            responses=pages,
         )
         retrying = False
     return ids
