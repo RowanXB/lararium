@@ -14,14 +14,15 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
+from lararium.modules.finance import typed_tables
 from lararium.modules.finance.ibkr.parser import FlexDataError
+from lararium.modules.finance.typed_tables import Fields, TypedValueError, upsert_typed
 
 NEW_YORK = ZoneInfo("America/New_York")
 LONDON = ZoneInfo("Europe/London")
@@ -33,7 +34,6 @@ _STANDARD = frozenset({"EST", "GMT"})
 _MOMENT = re.compile(
     r"(\d{8}|\d{4}-\d{2}-\d{2})(?:[;, T]\s*(\d{6}|\d{2}:\d{2}:\d{2})(?:\s+([A-Za-z]+))?)?"
 )
-_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*")
 
 # Tables whose `transaction_id` is the ledger row's, IBKR's transactionID being a text column.
 _LEDGER_ROW_TABLES = frozenset(
@@ -52,10 +52,9 @@ def column_name(table: str, attribute: str) -> str:
 def parse_date(value: str, label: str) -> date:
     """A Flex date (`yyyyMMdd`, or ISO); a date-time keeps its date."""
     try:
-        return date.fromisoformat(value.split(";")[0].strip())
-    except ValueError:
-        # The field only: its value may be the owner's data.
-        raise FlexDataError(f"{label} is not a date") from None
+        return typed_tables.parse_date(value, label)
+    except TypedValueError as error:
+        raise FlexDataError(str(error)) from None
 
 
 def parse_moment(value: str, label: str) -> datetime:
@@ -80,32 +79,9 @@ def parse_moment(value: str, label: str) -> datetime:
 
 def parse_decimal(value: str, label: str) -> Decimal:
     try:
-        number = Decimal(value.strip())
-    except InvalidOperation:
-        raise FlexDataError(f"{label} is not a number") from None
-    if not number.is_finite():
-        raise FlexDataError(f"{label} is not a number")
-    return number
-
-
-_column_types: dict[str, dict[str, str]] = {}
-
-
-async def _types(session: AsyncSession, table: str) -> dict[str, str]:
-    """Column name to data type of a table, read once per process (the schema is fixed)."""
-    if table not in _column_types:
-        rows = await session.execute(
-            text(
-                "select column_name, data_type from information_schema.columns"
-                " where table_schema = 'finance' and table_name = :t"
-            ),
-            {"t": table},
-        )
-        found = {row.column_name: row.data_type for row in rows}
-        if not found:
-            raise ValueError(f"no table finance.{table}")
-        _column_types[table] = found
-    return _column_types[table]
+        return typed_tables.parse_decimal(value, label)
+    except TypedValueError as error:
+        raise FlexDataError(str(error)) from None
 
 
 async def typed_values(
@@ -116,7 +92,7 @@ async def typed_values(
     An empty value is NULL. Attributes without a column (the keys, what the ledger holds)
     and columns of type uuid (the caller's references) are left out.
     """
-    types = await _types(session, table)
+    types = await typed_tables.column_types(session, table)
     values: dict[str, object] = {}
     for attribute, raw in attributes.items():
         column = column_name(table, attribute)
@@ -189,46 +165,17 @@ def mtm_performance_key(attributes: Mapping[str, str]) -> str:
     )
 
 
-def _quote(name: str) -> str:
-    if _IDENTIFIER.fullmatch(name) is None:
-        raise ValueError(f"not a column name: {name!r}")
-    return f'"{name}"'
-
-
 async def _upsert(
     ctx: CommandContext,
     table: str,
     key_columns: tuple[str, ...],
-    key: Mapping[str, object],
-    values: Mapping[str, object],
+    key: Fields,
+    values: Fields,
 ) -> bool:
     """Insert the row, or update it when it differs; True when it wrote."""
     if set(key) != set(key_columns):
         raise ValueError(f"{table} is keyed by {', '.join(key_columns)}")
-    if overlap := key.keys() & values.keys():
-        raise ValueError(f"{', '.join(sorted(overlap))} is a key of {table}, not a value")
-    row = {**key, **values}
-    sql = (
-        f"insert into finance.{table} ({', '.join(_quote(name) for name in row)})"
-        f" values ({', '.join(f':p{n}' for n in range(len(row)))})"
-        f" on conflict ({', '.join(_quote(c) for c in key_columns)})"
-    )
-    if values:
-        assignments = [_quote(name) for name in values]
-        sql += (
-            f" do update set {', '.join(f'{a} = excluded.{a}' for a in assignments)}"
-            f" where ({', '.join(f'{table}.{a}' for a in assignments)})"
-            f" is distinct from ({', '.join(f'excluded.{a}' for a in assignments)})"
-        )
-    else:
-        sql += " do nothing"
-    written = await ctx.session.scalar(
-        text(sql + " returning 1"), {f"p{n}": value for n, value in enumerate(row.values())}
-    )
-    return written is not None
-
-
-type Fields = Mapping[str, object]
+    return await upsert_typed(ctx, table, key, values)
 
 
 async def upsert_accounts(ctx: CommandContext, key: Fields, values: Fields) -> bool:
