@@ -25,15 +25,24 @@ from lararium.core.connections import (
     update_config,
 )
 from lararium.deps import get_session, get_session_factory
+from lararium.modules import finance
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.binance.accounts import wallet_account
+from lararium.modules.finance.binance.sync import BinanceConnector
 from lararium.modules.finance.instruments import create_instrument
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.worker.app import procrastinate_app
 
-from ..finance.binance.fixtures import FakeBinance
-from ..finance.binance.syncing import API_KEY, API_SECRET, UID, binance_connection
+from ..finance.binance.fixtures import NOW_MS, FakeBinance
+from ..finance.binance.syncing import (
+    API_KEY,
+    API_SECRET,
+    UID,
+    Clock,
+    binance_connection,
+    run_binance_sync,
+)
 
 KEY = bytes(range(32))
 OWNER = {"Tailscale-User-Login": "me@example.com"}
@@ -339,6 +348,31 @@ async def test_update_restores_health(api, session, run, fake, queue) -> None:
     logged = await _logged(session)
     for value in ("ak-TEST-new-5555", OTHER_SECRET):
         assert value not in logged and value not in response.text
+
+
+async def test_the_sync_an_update_queues_runs_within_the_four_hours(
+    api, session, run, fake, queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(NOW_MS)
+    installed = BinanceConnector(clock=clock, sleep=clock.sleep)
+    monkeypatch.setitem(finance.MODULE.connectors, "binance", installed)  # pyright: ignore[reportArgumentType]
+    created = await _create(api)
+    # A sync has just succeeded: the next one is not due for four hours.
+    await session.execute(
+        text("update core.connections set cursor = cast(:c as jsonb) where id = :id"),
+        {"c": f'{{"fetched_at": {NOW_MS}}}', "id": created["id"]},
+    )
+    await run(set_status, created["id"], "needs_reauth", error="Binance rejected the key")
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance", json=BODY, headers=OWNER
+    )
+    assert response.status_code == 200, response.text
+    fake.requests.clear()
+
+    after = await run_binance_sync(session, created["id"], fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    assert "spot-account" in [seen.label for seen in fake.requests]
 
 
 async def test_update_can_switch_the_key_type(api, session, run) -> None:

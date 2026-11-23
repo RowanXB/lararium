@@ -781,6 +781,8 @@ async def update_binance_connection(
         )
         if moved is not None:
             await reset_failures(ctx, connection_id)
+        # As "Sync now" does: the queued sync runs although the last one is recent.
+        await request_sync(ctx, connection_id)
         record = await get_connection(session, connection_id)
     await defer_sync(connection_id)
     return await _out_with_state(session, record, settings)
