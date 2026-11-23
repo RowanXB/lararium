@@ -141,21 +141,40 @@ def close_row(balance: str = "1280.00") -> dict[str, str]:
     )
 
 
+def dividend_activity() -> dict[str, str]:
+    return activity_row(
+        "15/10/2026 12:00:00",
+        "Dividend",
+        "0.85",
+        details=f"{SYMBOL}/USD",
+        position_id=POSITION_1,
+        balance="760.85",
+        asset_type="Stocks",
+    )
+
+
 def trade_statement(
-    closed_units: str = "4", closed_profit: str = "20.00", close_change: str = "20.00"
+    closed_units: str = "4",
+    closed_profit: str = "20.00",
+    close_change: str = "20.00",
+    *,
+    dividend: bool = False,
 ) -> bytes:
     """A statement of one transfer in (with its fee) and one position opened and closed;
     `closed_units` and `closed_profit` what Closed Positions says of it, `close_change` the
-    close row's Realized Equity Change."""
+    close row's Realized Equity Change; with `dividend`, a dividend (its withholding tax in
+    the Dividends sheet) while the position was open."""
     return build_statement(
         summary(username=USERNAME),
         [
             transfer_in(),
             conversion_fee("01/10/2026 10:00:00"),
             open_row(),
+            *([dividend_activity()] if dividend else []),
             close_row() | {"Realized Equity Change": close_change},
         ],
         [closed_row() | {"Units / Contracts": closed_units, "Profit(USD)": closed_profit}],
+        [dividend_row()] if dividend else [],
         financial=[
             {
                 "Name": "Dividends",
@@ -802,7 +821,7 @@ async def test_partial_close_no_review(session, ledger) -> None:
 
 async def test_resolve_toward_statement_reposts_and_replays(session, run, ledger) -> None:
     await ledger.normalize(*BASE, *TRADES)
-    await ledger.upload(trade_statement(closed_units="5"))
+    await ledger.upload(trade_statement(closed_units="5", dividend=True))
     [review] = await list_reviews(session, ledger.connection.id)
     await run(lambda ctx: resolve_review(ctx, review.id, "statement"))
     # The next sync takes the statement's units.
@@ -817,6 +836,18 @@ async def test_resolve_toward_statement_reposts_and_replays(session, run, ledger
     links = await _review_links(session, ledger)
     assert links == [(f"open:{POSITION}", "units", "4", "5", "statement", f"open:{POSITION}")]
     assert fees != []
+    # The replay's comparison covers a dividend's typed row, linked to its posting.
+    assert [
+        tuple(r)
+        for r in await _rows(
+            session,
+            "select d.withholding_tax_amount_usd, t.external_id is not null as linked"
+            " from finance.etoro_dividends d"
+            " left join finance.transactions t on t.id = d.transaction_id"
+            " where d.connection_id = :c",
+            c=ledger.connection.id,
+        )
+    ] == [(Decimal("0.15"), True)]
     # Regeneration replays the owner's decision, the statement's typed rows, the leg fee, and
     # the review's link to its transaction.
     await _delete_derived(session, ledger.connection)
@@ -1111,6 +1142,71 @@ async def test_statement_names_the_currency_the_api_lacks(session, ledger, state
     account = await _account(session, TRADING)
     usd = (await get_currency(session, "USD")).id
     assert (await holdings(session, account, NOW + timedelta(days=2)))[usd] == Decimal("1280.00")
+
+
+async def test_open_and_close_naming_different_currencies_flagged(session, ledger) -> None:
+    await ledger.normalize(*NO_CURRENCY, *TRADES)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            open_row(),
+            close_row() | {"Details": f"{SYMBOL}/GBP"},
+        ],
+        [closed_row()],
+    )
+    report = await ledger.upload(body)
+    assert f"statement currencies disagree for {SYMBOL}" in report.flagged
+    assert not any("GBP" in flag or "USD" in flag for flag in report.flagged)
+    # The first stated (the open's) is kept.
+    [quote] = await _rows(
+        session,
+        "select q.symbol from finance.instruments i"
+        " join finance.instruments q on q.id = i.quote_instrument_id"
+        " join finance.instrument_identifiers ii on ii.instrument_id = i.id"
+        " where ii.scheme = 'etoro_id' and ii.value = :v",
+        v=str(INSTRUMENT_ID),
+    )
+    assert quote.symbol == "USD"
+
+
+async def test_two_positions_naming_different_currencies_flagged(session, ledger) -> None:
+    other = POSITION + 1
+    second = api_trade(
+        positionId=other,
+        orderId=other + 500,
+        openTimestamp="2026-10-03T14:30:05.000Z",
+        closeTimestamp="2026-10-21T15:01:44.000Z",
+    )
+    await ledger.normalize(
+        *NO_CURRENCY,
+        *TRADES,
+        ("trade_history", second),
+        ("order_lookup", lookup_body(other + 500, other)),
+    )
+
+    def position(cells: dict[str, str], at: str, currency: str) -> dict[str, str]:
+        return cells | {"Date": at, "Position ID": str(other), "Details": f"{SYMBOL}/{currency}"}
+
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            open_row(),
+            position(open_row(), "03/10/2026 14:30:05", "GBP"),
+            close_row(),
+            position(close_row(), "21/10/2026 15:01:44", "GBP"),
+        ],
+        [
+            closed_row(),
+            closed_row(str(other))
+            | {"Open Date": "03/10/2026 14:30:05", "Close Date": "21/10/2026 15:01:44"},
+        ],
+    )
+    report = await ledger.upload(body)
+    assert f"statement currencies disagree for {SYMBOL}" in report.flagged
+    found = await _ledger(session, ledger)
+    assert f"close:{POSITION}" in found and f"close:{other}" in found
 
 
 async def test_review_stays_open_when_a_source_stops_stating_its_field(session, ledger) -> None:

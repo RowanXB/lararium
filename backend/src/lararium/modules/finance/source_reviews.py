@@ -97,7 +97,9 @@ async def close_agreed(
 ) -> None:
     """Close the event's open items on these fields, which both sources now state and agree
     on: resolved `api` by AGREED, no decision recorded, no one told. The items are locked
-    first, as `open_review` locks them."""
+    first. Runs that could touch one event's items at once are kept apart by their caller
+    (eToro takes the connection's lock before it normalizes): row locks taken in different
+    orders by two runs could otherwise deadlock."""
     if not fields:
         return
     r = models.SourceReview

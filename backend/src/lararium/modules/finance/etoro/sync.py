@@ -35,8 +35,10 @@ two overlapping statements share is stored once.
 
 Flags (Decision 4) from the normalizer and from reading a statement are connection warnings,
 `eToro flagged: <reason>`, and the owner is told of each new one once (connector_flags, shared
-with Trading 212). The upload runs outside a sync, so flags are read as they stand when they
-are published, and the upload merges only the flag keys into the cursor, its row locked.
+with Trading 212). A sync (once it has fetched) and an upload each take the connection's lock
+before they normalize, so one connection is normalized by one run at a time. The upload runs
+outside a sync, so flags are read as they stand when they are published, and the upload
+merges only the flag keys into the cursor.
 """
 
 import asyncio
@@ -570,13 +572,15 @@ class EtoroConnector:
         cursor: Mapping[str, JSONValue] = before if isinstance(before, dict) else {}
         run = _Run(ctx, EtoroClient(ctx.http, api_key, user_key), cursor)
         after = await run.sync(datetime.now(UTC))
+        # Locked from here until the sync commits: an upload normalizes the same connection
+        # one at a time with it (each sees the other's committed rows; two at once could
+        # deadlock on its review items), and its flags published meanwhile are read here,
+        # never overwritten after.
+        await lock_connection(ctx.command, connection.id)
         report = await normalize(ctx, list(dict.fromkeys(run.ids)))
         checked = {FIELDS, IN_FULL} if report.replayed else {IN_FULL}
         found = {(FIELDS, flag) for flag in report.flagged}
         found |= {(IN_FULL, flag) for flag in report.flags_in_full}
-        # Locked until the sync commits its cursor: an upload's flags published meanwhile are
-        # read here, never overwritten after (the upload waits for the lock).
-        await lock_connection(ctx.command, connection.id)
         after |= await publish_flags(ctx, found, checked)
         return after
 
@@ -693,14 +697,15 @@ async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> Inge
             )
         )
     ids = list(dict.fromkeys(ids))
+    # Locked from here until the upload commits: a sync normalizes the same connection one at
+    # a time with it, and the flags read here are the ones replaced; only the flag keys are
+    # merged, so no other cursor key is overwritten.
+    await lock_connection(ctx.command, ctx.connection.id)
     report = await normalize(ctx, ids)
     found = {(STATEMENT, flag) for flag in statement.flagged}
     found |= {(FIELDS, flag) for flag in report.flagged}
     found |= {(IN_FULL, flag) for flag in report.flags_in_full}
     checked = {STATEMENT, IN_FULL} | ({FIELDS} if report.replayed else set[str]())
-    # The row stays locked until the upload commits, so the flags read here are the ones
-    # replaced; only the flag keys are merged, so no other cursor key is overwritten.
-    await lock_connection(ctx.command, ctx.connection.id)
     flags = await publish_flags(ctx, found, checked)
     await merge_cursor(ctx.command, ctx.connection.id, flags)
     return IngestResult(ids, statement.flagged)

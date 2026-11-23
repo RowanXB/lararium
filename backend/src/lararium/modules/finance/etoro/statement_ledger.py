@@ -99,6 +99,7 @@ NO_MONEY_ACCOUNT = "a statement transfer names no single eToro Money account"
 UNPLACED = "a statement position Lararium cannot place"
 ISIN_ELSEWHERE = "a statement ISIN another listing holds in another currency"
 NOT_MERGED = "instruments a statement shows to be one could not be merged"
+CURRENCIES_DISAGREE = "statement currencies disagree for"
 _TRANSFER = re.compile(r"Transfer: ([A-Z]{3}) > ([A-Z]{3})")
 _CONVERSION_FEES: Mapping[str, Literal["in", "out"]] = {
     "Deposit Conversion Fee": "in",
@@ -419,7 +420,7 @@ async def instrument(run: Run, position_id: str, trade: Trade) -> UUID | None:
         return found
     closed = trade.closed
     isin = _isin(closed) if closed is not None else None
-    details = _details(trade)
+    details = _details(run, trade)
     kind = _KINDS.get(closed.type.casefold()) if closed is not None else None
     if isin is None or details is None or kind is None:
         run.flag(UNPLACED)
@@ -428,24 +429,43 @@ async def instrument(run: Run, position_id: str, trade: Trade) -> UUID | None:
     return await statement_listing(run.command, isin, currency, symbol, kind)
 
 
-def _details(trade: Trade) -> tuple[str, str] | None:
-    """(symbol, asset currency) an open's or close's Details names ("<symbol>/<currency>")."""
-    for row in (trade.open, trade.close):
-        if row is not None and (found := _DETAILS.fullmatch(row.cell("Details"))):
-            return found.group(1), found.group(2)
-    return None
+def _stated(trade: Trade) -> list[tuple[str, str]]:
+    """(symbol, asset currency) each of the open's and close's Details names
+    ("<symbol>/<currency>")."""
+    return [
+        (found.group(1), found.group(2))
+        for row in (trade.open, trade.close)
+        if row is not None and (found := _DETAILS.fullmatch(row.cell("Details")))
+    ]
+
+
+def _details(
+    run: Run, trade: Trade, first: tuple[str, str] | None = None
+) -> tuple[str, str] | None:
+    """What the trade's Details name, the first stated (`first`, another position's of the
+    instrument, else its own) kept, and a currency differing from it flagged by symbol."""
+    for symbol, currency in _stated(trade):
+        if first is None:
+            first = (symbol, currency)
+        elif currency != first[1]:
+            run.flag(f"{CURRENCIES_DISAGREE} {first[0]}")
+    return first
 
 
 async def isins(run: Run, named: Sequence[tuple[str, Trade]]) -> None:
     """What the statement says of the API's instruments (position's eToro instrument id, its
     statement), before the run finds any: the asset currency its activity names, where the
     API has given none; and the ISIN Closed Positions brings, merging the instrument into
-    another that holds it in the same currency (design §5.6). An ISIN another listing holds
+    another that holds it in the same currency (design §5.6). Details naming two currencies
+    for one instrument (an open and its close, or two positions) keep the first, flagged by
+    symbol. An ISIN another listing holds
     in another currency, and a merge the registry refuses (both hold an eToro id, say), are
     flagged and left. After a merge the run forgets the instruments it found."""
     merged = False
+    stated: dict[str, tuple[str, str]] = {}
     for etoro_id, trade in named:
-        if (details := _details(trade)) is not None:
+        if (details := _details(run, trade, stated.get(etoro_id))) is not None:
+            stated[etoro_id] = details
             run.asset_currencies.setdefault(etoro_id, details[1])
         if trade.closed is None or (isin := _isin(trade.closed)) is None:
             continue

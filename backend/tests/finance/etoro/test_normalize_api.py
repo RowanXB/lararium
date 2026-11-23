@@ -838,7 +838,9 @@ async def _references(session, instrument_id: uuid.UUID) -> list[str]:
         " join pg_class c on c.oid = k.conrelid"
         " join pg_namespace n on n.oid = c.relnamespace and n.nspname = 'finance'"
         " join pg_attribute a on a.attrelid = c.oid and a.attnum = any(k.conkey)"
-        " where k.contype = 'f' and k.confrelid = 'finance.instruments'::regclass",
+        " where k.contype = 'f' and k.confrelid = 'finance.instruments'::regclass"
+        # The catalog's own order can change between two reads: compared lists need one.
+        " order by c.relname, a.attname",
     )
     found = []
     for row in columns:

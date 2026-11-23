@@ -954,6 +954,43 @@ async def test_statement_flags_published_once(session, run, api, tmp_path) -> No
     assert sync_notifier.messages == []
 
 
+async def test_normalization_runs_under_the_connection_lock(
+    session, run, api, tmp_path, monkeypatch
+) -> None:
+    # A sync and an upload of one connection normalize one at a time (N1): each takes the
+    # connection's lock before it normalizes, and publishes its flags under it.
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    events: list[str] = []
+    lock, publish, normalize = (
+        etoro_sync.lock_connection,
+        etoro_sync.publish_flags,
+        etoro_sync.normalize,
+    )
+
+    async def locking(ctx: Any, connection_id: uuid.UUID) -> Any:
+        events.append("lock")
+        return await lock(ctx, connection_id)
+
+    async def publishing(ctx: SyncContext, found: Any, checked: Any) -> dict[str, JSONValue]:
+        events.append("publish")
+        return await publish(ctx, found, checked)
+
+    async def normalizing(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        events.append("normalize")
+        return await normalize(ctx, raw_record_ids)
+
+    monkeypatch.setattr(etoro_sync, "lock_connection", locking)
+    monkeypatch.setattr(etoro_sync, "publish_flags", publishing)
+    monkeypatch.setattr(etoro_sync, "normalize", normalizing)
+    await _run_sync(session, connection, api)
+    assert events == ["lock", "normalize", "publish"]
+    events.clear()
+    await _ingest(session, connection, _statement(), tmp_path)
+    assert events == ["lock", "normalize", "publish"]
+
+
 async def test_an_upload_during_a_sync_keeps_its_flag(
     session, run, api, tmp_path, monkeypatch
 ) -> None:
@@ -977,6 +1014,13 @@ async def test_an_upload_during_a_sync_keeps_its_flag(
     lock, publish = etoro_sync.lock_connection, etoro_sync.publish_flags
 
     async def locking(ctx: Any, connection_id: uuid.UUID) -> Any:
+        # The owner uploads a statement while the sync fetches, after it read its cursor and
+        # before it takes the lock: the upload commits first.
+        if not events:
+            events.append("upload")
+            await _ingest(
+                session, connection, statement({**closed_row(), "Brand New Column": "7"}), tmp_path
+            )
         events.append("lock")
         return await lock(ctx, connection_id)
 
@@ -985,12 +1029,7 @@ async def test_an_upload_during_a_sync_keeps_its_flag(
         return await publish(ctx, found, checked)
 
     async def normalize(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
-        # The owner uploads a statement while the sync runs, after it read its cursor.
-        if not events:
-            events.append("upload")
-            await _ingest(
-                session, connection, statement({**closed_row(), "Brand New Column": "7"}), tmp_path
-            )
+        events.append("normalize")
         return NormalizeReport()
 
     monkeypatch.setattr(etoro_sync, "lock_connection", locking)
@@ -998,9 +1037,17 @@ async def test_an_upload_during_a_sync_keeps_its_flag(
     monkeypatch.setattr(etoro_sync, "normalize", normalize)
     flag = "eToro flagged: Closed Positions.Brand New Column"
     after = await _run_sync(session, connection, api)
-    # The sync locks the row before it reads the flags it publishes, and its cursor keeps the
-    # upload's flag rather than the one it began with.
-    assert events == ["upload", "lock", "publish", "lock", "publish"]
+    # Each locks the row before it normalizes and reads the flags it publishes, and the sync's
+    # cursor keeps the upload's flag rather than the one it began with.
+    assert events == [
+        "upload",
+        "lock",
+        "normalize",
+        "publish",
+        "lock",
+        "normalize",
+        "publish",
+    ]
     assert after.warnings == [flag]
     assert after.cursor["flags"] == {"statement": ["Closed Positions.Brand New Column"]}
     assert after.cursor["notified"] == ["Closed Positions.Brand New Column"]
