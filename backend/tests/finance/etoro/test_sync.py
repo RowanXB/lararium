@@ -35,6 +35,7 @@ from lararium.modules.finance.etoro.sync import (
     EtoroConnector,
     IngestResult,
     StatementRejected,
+    StatementTooEarly,
     ingest_statement,
 )
 from lararium.worker import jobs
@@ -405,10 +406,25 @@ async def test_write_scope_keeps_only_the_scopes_record(session, run, api) -> No
     with pytest.raises(ReadOnlyGateError, match="Create a key with Read permission"):
         await _sync(session, connection, api)
     assert api.paths() == [ME]
-    # The scopes the refused key held are kept, committed on their own; nothing else is.
+    # The scopes the refused key held are kept, committed on their own, and nothing else: not
+    # even the rest of its /me, which may be another user's.
     [record] = await _records(session, connection)
-    assert record.record_type == "etoro.me"
-    assert "etoro-public:money:transfer" in record.content["scopes"]
+    assert record.record_type == "etoro.refused_key"
+    assert record.content == {"scopes": [*READ_SCOPES, "etoro-public:money:transfer"]}
+
+
+async def test_a_failure_recording_the_refusal_does_not_hide_it(
+    session, run, api, monkeypatch
+) -> None:
+    async def broken(self: Any, scopes: list[str]) -> None:
+        raise RuntimeError("the side session failed")
+
+    monkeypatch.setattr(etoro_sync._Run, "keep_refused", broken)  # pyright: ignore[reportPrivateUsage]
+    api.me = me_json([*READ_SCOPES, "etoro-public:trade.real:write"])
+    connection = await _connection(run)
+    with pytest.raises(ReadOnlyGateError, match="Create a key with Read permission"):
+        await _sync(session, connection, api)
+    assert api.paths() == [ME]
 
 
 async def test_a_key_reporting_no_scopes_needs_reauth(session, run, api) -> None:
@@ -559,6 +575,19 @@ async def test_later_sync_asks_one_window_with_overlap(session, run, api) -> Non
     assert len(await _records(session, connection, "etoro.trade")) == 2
 
 
+async def test_a_long_outage_is_asked_from_the_latest_close(session, run, api) -> None:
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    latest = today() - timedelta(days=400)
+    cursor = (await get_connection(session, connection.id)).cursor
+    assert isinstance(cursor, dict)
+    await _set_cursor(session, connection, {**cursor, "trade_history_to": latest.isoformat()})
+    api.requests.clear()
+    await _sync(session, connection, api)
+    # No cap at a year: what closed during the outage is asked for.
+    assert api.windows() == [latest - timedelta(days=7)]
+
+
 async def test_balance_history_overlap_7_days(session, run, api) -> None:
     connection = await _connection(run)
     await _sync(session, connection, api)
@@ -683,11 +712,12 @@ async def test_statement_stored_as_document_and_rows(
     assert counts["etoro.statement.closed_position"] == 1
     assert counts["etoro.statement.account_activity"] == 1
     [closed] = [r for r in statement_rows if r.record_type == "etoro.statement.closed_position"]
-    assert set(closed.content) == {"cells", "key", "period"}
+    # The period is the upload's: a row two statements share is one record.
+    assert set(closed.content) == {"cells", "key"}
     assert closed.content["cells"]["ISIN"] == closed_row()["ISIN"]
     assert len(closed.content["key"]) == 32
     created = today() - timedelta(days=30)
-    assert closed.content["period"] == {
+    assert closed.request["period"] == {
         "from": datetime.combine(created, datetime.min.time(), UTC).isoformat(),
         "to": datetime.combine(
             today(), datetime.max.time().replace(microsecond=0), UTC
@@ -724,7 +754,8 @@ async def test_statement_other_currency_refused(session, run, api, tmp_path) -> 
 
 async def test_statement_before_the_first_sync_refused(session, run, api, tmp_path) -> None:
     connection = await _connection(run)
-    with pytest.raises(StatementRejected, match="first sync"):
+    # Its own type: the upload route answers it 409, not 422 (design §5.3).
+    with pytest.raises(StatementTooEarly, match="first sync"):
         await _ingest(session, connection, _statement(), tmp_path)
 
 
@@ -734,9 +765,12 @@ async def test_first_statement_must_cover_creation(session, run, api, tmp_path) 
     await _sync(session, connection, api)
     created = today() - timedelta(days=30)
     late = _statement(start=_statement_moment(created + timedelta(days=1), "00:00:00"))
-    with pytest.raises(StatementRejected, match="Date Created") as refused:
+    with pytest.raises(StatementRejected) as refused:
         await _ingest(session, connection, late, tmp_path)
-    assert created.strftime("%d/%m/%Y") not in str(refused.value)
+    # The date it must start by, the day only (R27).
+    assert str(refused.value) == (
+        f"The first eToro statement must start on or before {created.isoformat()}."
+    )
     assert not [r for r in await _records(session, connection) if "statement" in r.record_type]
     # Starting the moment the account was created is covering it.
     await _ingest(session, connection, _statement(start=_statement_moment(created)), tmp_path)
@@ -750,6 +784,105 @@ async def test_later_partial_statement_accepted(session, run, api, tmp_path) -> 
     later = _statement(start=_statement_moment(today() - timedelta(days=5), "00:00:00"))
     result = await _ingest(session, connection, later, tmp_path)
     assert result.raw_record_ids
+
+
+def _rows_of(rows: list[Any]) -> list[Any]:
+    """The table sheets' records: those a statement shares with another covering its rows."""
+    kinds = ("etoro.statement.account_activity", "etoro.statement.closed_position")
+    return [r for r in rows if r.record_type in kinds]
+
+
+async def test_the_same_statement_twice_adds_nothing(session, run, api, tmp_path) -> None:
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    body = _statement()
+    first = await _ingest(session, connection, body, tmp_path)
+    before = await _records(session, connection)
+    second = await _ingest(session, connection, body, tmp_path)
+    assert await _records(session, connection) == before
+    assert sorted(second.raw_record_ids) == sorted(first.raw_record_ids)
+
+
+async def test_an_overlapping_statement_adds_only_its_new_rows(session, run, api, tmp_path) -> None:
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    created = today() - timedelta(days=30)
+
+    def row(days: int, amount: str) -> dict[str, str]:
+        return activity_row(_statement_moment(created + timedelta(days=days)), "Deposit", amount)
+
+    def statement(end: date, activity: list[dict[str, str]]) -> bytes:
+        return build_statement(
+            summary(
+                start=_statement_moment(created, "00:00:00"),
+                end=_statement_moment(end, "23:59:59"),
+                created=_statement_moment(created),
+            ),
+            activity,
+            [closed_row()],
+        )
+
+    await _ingest(
+        session,
+        connection,
+        statement(today() - timedelta(days=10), [row(1, "10"), row(2, "20")]),
+        tmp_path,
+    )
+    first = _rows_of(await _records(session, connection))
+    assert len(first) == 3
+    await _ingest(
+        session,
+        connection,
+        statement(today(), [row(1, "10"), row(2, "20"), row(25, "30")]),
+        tmp_path,
+    )
+    second = _rows_of(await _records(session, connection))
+    # The two shared deposits and the closed position are the records already stored.
+    assert len(second) == 4
+    assert {r.id for r in first} <= {r.id for r in second}
+    [new] = [r for r in second if r.id not in {f.id for f in first}]
+    assert new.content["cells"]["Amount"] == "30"
+
+
+async def test_the_upload_merges_only_its_flags_into_the_cursor(
+    session, run, api, tmp_path, monkeypatch
+) -> None:
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    publish = etoro_sync.publish_flags
+
+    async def meanwhile(ctx: SyncContext, found: Any, checked: Any) -> dict[str, JSONValue]:
+        flags = await publish(ctx, found, checked)
+        # A sync writing its own cursor key between the upload's read and its write.
+        await session.execute(
+            text(
+                'update core.connections set cursor = cursor || \'{"daily_at": "later"}\''
+                " where id = :id"
+            ),
+            {"id": connection.id},
+        )
+        return flags
+
+    monkeypatch.setattr(etoro_sync, "publish_flags", meanwhile)
+    created = today() - timedelta(days=30)
+    body = build_statement(
+        summary(
+            start=_statement_moment(created, "00:00:00"),
+            end=_statement_moment(today(), "23:59:59"),
+            created=_statement_moment(created),
+        ),
+        [],
+        [{**closed_row(), "Brand New Column": "7"}],
+    )
+    await _ingest(session, connection, body, tmp_path)
+    cursor = (await get_connection(session, connection.id)).cursor
+    assert isinstance(cursor, dict)
+    assert cursor["daily_at"] == "later"
+    assert cursor["flags"] == {"statement": ["Closed Positions.Brand New Column"]}
+    assert cursor["gcid"] == "90000001"
 
 
 async def test_statement_flags_published_once(session, run, api, tmp_path) -> None:

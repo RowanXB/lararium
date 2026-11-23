@@ -20,17 +20,17 @@ all, and replaces them. The instruments still without a type are found in full b
 as the part `instrument_types`.
 """
 
-import logging
 from collections.abc import Collection, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from lararium.core.connections import get_connection, load_credential, set_warnings
+from lararium.core.connections import load_credential
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance import connector_flags
 from lararium.modules.finance.readonly_http import HttpForbiddenError, record_json
 from lararium.modules.finance.report_sightings import record_sighting
 from lararium.modules.finance.trading212.client import (
@@ -44,8 +44,6 @@ from lararium.modules.finance.trading212.client import (
 )
 from lararium.modules.finance.trading212.fields import ENDPOINTS
 from lararium.modules.finance.trading212.normalize import normalize
-
-logger = logging.getLogger(__name__)
 
 VERSION = "trading212-sync-1"
 KEY_PURPOSE = "api_key"
@@ -140,23 +138,10 @@ def _texts(cursor: Mapping[str, JSONValue], key: str) -> dict[str, str]:
     return {k: v for k, v in value.items() if isinstance(v, str)}
 
 
-def _flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
-    """The sync's flags the cursor keeps: part → reasons."""
-    value = cursor.get("flags")
-    if not isinstance(value, dict):
-        return {}
-    return {
-        part: [r for r in reasons if isinstance(r, str)]
-        for part, reasons in value.items()
-        if isinstance(reasons, list)
-    }
-
-
-def _own(warning: str, kept: Collection[str]) -> bool:
+def _own(reason: str, kept: Collection[str]) -> bool:
     """A flag the sync publishes: one the cursor keeps (the normalizer's among them), or one
     of the sync's shapes. Other `Trading 212 flagged:` warnings are left to their writer."""
-    reason = warning.removeprefix(FLAGGED_PREFIX)
-    return warning.startswith(FLAGGED_PREFIX) and (
+    return (
         reason in kept
         or reason.startswith("missing permission ")
         or reason == PIES_REMOVED
@@ -171,44 +156,18 @@ async def publish_flags(
     cursor: Mapping[str, JSONValue],
 ) -> dict[str, JSONValue]:
     """Replace the sync's own flags among the connection's warnings with this run's, keeping
-    every other warning, as it stands now (normalize, say, may have written some). `found`:
-    (part, reason) of this run; a part not `checked` this run (the pies, but on metadata days)
-    keeps the flags the cursor holds for it. The owner is told, in one message, of each flag not
-    yet told: a flag counts as told only once a send succeeds, so a failed one is retried next
-    sync; one whose cause is gone clears without a word. Returns the cursor's `flags` and
-    `notified`."""
-    before = _flags(cursor)
-    parts: dict[str, set[str]] = {}
-    for part, reason in found:
-        parts.setdefault(part, set()).add(reason)
-    for part, reasons in before.items():
-        if part not in checked:
-            parts.setdefault(part, set()).update(reasons)
-    reasons = sorted({reason for found_reasons in parts.values() for reason in found_reasons})
-    told_before = cursor.get("notified")
-    told = set(told_before) if isinstance(told_before, list) else set[JSONValue]()
-    notified = [reason for reason in reasons if reason in told]
-    new = [reason for reason in reasons if reason not in told]
-    connection = ctx.connection
-    if new:
-        try:
-            await ctx.notifier.send(f"{connection.display_name}: {FLAGGED_PREFIX}{', '.join(new)}")
-            notified = reasons
-        except Exception as error:
-            # The class only: the message could carry the notifier's webhook URL.
-            logger.warning("sending a Trading 212 notification failed (%s)", type(error).__name__)
-    kept = {reason for old in before.values() for reason in old}
-    previous = (await get_connection(ctx.command.session, connection.id)).warnings
-    warnings = [w for w in previous if not _own(w, kept)] + [FLAGGED_PREFIX + r for r in reasons]
-    if warnings != previous:
-        await set_warnings(ctx.command, connection.id, warnings)
-    return {
-        "flags": {
-            part: list[JSONValue](sorted(found_reasons))
-            for part, found_reasons in sorted(parts.items())
-        },
-        "notified": list[JSONValue](notified),
-    }
+    every other warning, as it stands now (normalize, say, may have written some); the shared
+    rules of connector_flags. A part not `checked` this run (the pies, but on metadata days)
+    keeps the flags the cursor holds for it. Returns the cursor's `flags` and `notified`."""
+    return await connector_flags.publish_flags(
+        ctx,
+        found,
+        checked,
+        cursor=cursor,
+        prefix=FLAGGED_PREFIX,
+        label="Trading 212",
+        own=_own,
+    )
 
 
 class _Run:

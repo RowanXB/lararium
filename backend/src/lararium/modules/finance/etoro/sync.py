@@ -3,9 +3,9 @@ statement, and store every item as a raw record; then normalise (normalize.py).
 
 Per sync (design §5.2), in order:
 1. `/me`, the read-only gate (design §5.1, Decision 13): a key holding any scope that is not
-   read-only is refused before anything else is asked. Its `/me` is kept, committed on its own,
-   so the scopes it held stay on record; nothing else is stored. A key whose user is not the
-   connection's is refused too.
+   read-only is refused before anything else is asked. Its scopes alone are kept (`/me`'s other
+   fields may be another user's), committed on their own; nothing else is stored. A key whose
+   user is not the connection's is refused too.
 2. The reports: balances, PnL, aggregate portfolio, instrument breakdown.
 3. eToro Money's transactions for each Cash account, newest first, until a page holds only what
    was seen (the newest id per account, `seen_cash`).
@@ -13,7 +13,8 @@ Per sync (design §5.2), in order:
    window: every trade closed since `minDate`), until the window starts on or before the
    account's opening (the earliest stored statement's Date Created), or, with no statement
    uploaded, until a window brings no `positionId` the walk had not seen. Later syncs ask one
-   window, from the latest stored close date (`trade_history_to`) less 7 days.
+   window, from the latest stored close date (`trade_history_to`) less 7 days, however long
+   ago that is.
 5. `orders:lookup` once for each order of an open position or a closed trade (`looked_up`).
 6. Balance history from the latest stored snapshot (`balance_history_to`) less 7 days; the
    first sync takes 365 days.
@@ -27,12 +28,15 @@ by the sync that saw it. Nothing here logs a value.
 
 A statement upload (design §5.3) is checked before anything is stored: its Username must be
 `/me`'s, its Currency the Trading account's, and the connection's first statement must start
-on or before the account's Date Created. Each refusal is a `StatementRejected` naming no value.
+on or before the account's Date Created. Each refusal is a `StatementRejected` naming no value
+but that date (R27); one before the first sync has finished is a `StatementTooEarly`. Each row
+is a raw record of its cells and key; the statement's period is the upload's request, so a row
+two overlapping statements share is stored once.
 
 Flags (Decision 4) from the normalizer and from reading a statement are connection warnings,
-`eToro flagged: <reason>`, and the owner is told of each new one once (`publish_flags`, an
-eToro copy of Trading 212's: it also serves the upload, which runs outside a sync, so it reads
-the flags as they stand when it publishes rather than as the sync found them).
+`eToro flagged: <reason>`, and the owner is told of each new one once (connector_flags, shared
+with Trading 212). The upload runs outside a sync, so flags are read as they stand when they
+are published, and the upload merges only the flag keys into the cursor, its row locked.
 """
 
 import asyncio
@@ -49,13 +53,15 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from lararium.core.commands import command_context
-from lararium.core.connections import get_connection, load_credential, set_cursor, set_warnings
+from lararium.core.connections import load_credential, lock_connection, merge_cursor
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.documents import store_document
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance import connector_flags
 from lararium.modules.finance.etoro.client import (
+    BALANCE_HISTORY_DAYS,
     TRADE_WINDOW_DAYS,
     EtoroClient,
     Item,
@@ -63,7 +69,13 @@ from lararium.modules.finance.etoro.client import (
     endpoint_path,
     write_scopes,
 )
-from lararium.modules.finance.etoro.fields import ACCOUNT_SUMMARY, ENDPOINTS, STATEMENT_SHEETS
+from lararium.modules.finance.etoro.fields import (
+    ACCOUNT_SUMMARY,
+    ENDPOINTS,
+    LABEL,
+    STATEMENT_SHEETS,
+    VALUE,
+)
 from lararium.modules.finance.etoro.normalize import normalize
 from lararium.modules.finance.etoro.statement import (
     EtoroStatement,
@@ -97,6 +109,9 @@ OVERLAP = timedelta(days=7)
 MAX_WINDOWS = 40
 # What eToro reports now, rather than records: each storing is sighted.
 REPORTS = frozenset({"me", "balances", "pnl", "aggregate", "breakdown", "balance_history"})
+# A refused key's scopes, without the rest of its `/me` (not an endpoint's record: the
+# normalizer has nothing to map in it).
+REFUSED_KEY = "etoro.refused_key"
 _GATE = "This eToro key can trade or move money. Create a key with Read permission."
 
 
@@ -111,6 +126,11 @@ class AccountMismatchError(EtoroSyncError, CredentialRejectedError):
 class StatementRejected(DisplayableError, ValueError):
     """The upload is not a statement of this connection's eToro Trading account, or cannot be
     read as one; the message names a sheet, a column or a rule, never a value (422)."""
+
+
+class StatementTooEarly(DisplayableError):
+    """A statement uploaded before the connection's first sync has finished (409, design
+    §5.3): its checks need the user and accounts that sync stores."""
 
 
 @dataclass(frozen=True)
@@ -200,65 +220,16 @@ def _due(cursor: Mapping[str, JSONValue], key: str, every: timedelta, now: datet
     return last.tzinfo is None or now - last >= every
 
 
-def _flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
-    """The flags the cursor keeps: part → reasons."""
-    value = cursor.get("flags")
-    if not isinstance(value, dict):
-        return {}
-    return {
-        part: [r for r in reasons if isinstance(r, str)]
-        for part, reasons in value.items()
-        if isinstance(reasons, list)
-    }
-
-
 async def publish_flags(
     ctx: SyncContext, found: Iterable[tuple[str, str]], checked: Collection[str]
 ) -> dict[str, JSONValue]:
-    """Replace this connector's flags among the connection's warnings with these, keeping every
-    other warning, as the connection stands now. `found`: (part, reason) of this run; a part
-    not `checked` keeps the flags the cursor holds for it (a sync keeps the statement's, an
-    upload the normalizer's when it did not replay). The owner is told, in one message, of each
-    flag not yet told: a flag counts as told only once a send succeeds, so a failed one is
-    retried next time; one whose cause is gone clears without a word. Returns the cursor's
-    `flags` and `notified`."""
-    connection = await get_connection(ctx.command.session, ctx.connection.id)
-    cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
-    before = _flags(cursor)
-    parts: dict[str, set[str]] = {}
-    for part, reason in found:
-        parts.setdefault(part, set()).add(reason)
-    for part, reasons in before.items():
-        if part not in checked:
-            parts.setdefault(part, set()).update(reasons)
-    reasons = sorted({reason for part_reasons in parts.values() for reason in part_reasons})
-    told_before = cursor.get("notified")
-    told = set(told_before) if isinstance(told_before, list) else set[JSONValue]()
-    notified = [reason for reason in reasons if reason in told]
-    new = [reason for reason in reasons if reason not in told]
-    if new:
-        try:
-            await ctx.notifier.send(f"{connection.display_name}: {FLAGGED_PREFIX}{', '.join(new)}")
-            notified = reasons
-        except Exception as error:
-            # The class only: the message could carry the notifier's webhook URL.
-            logger.warning("sending an eToro notification failed (%s)", type(error).__name__)
-    kept = {reason for old in before.values() for reason in old}
-    previous = connection.warnings
-    warnings = [
-        w
-        for w in previous
-        if not (w.startswith(FLAGGED_PREFIX) and w[len(FLAGGED_PREFIX) :] in kept)
-    ] + [FLAGGED_PREFIX + r for r in reasons]
-    if warnings != previous:
-        await set_warnings(ctx.command, connection.id, warnings)
-    return {
-        "flags": {
-            part: list[JSONValue](sorted(part_reasons))
-            for part, part_reasons in sorted(parts.items())
-        },
-        "notified": list[JSONValue](notified),
-    }
+    """Publish this run's flags (connector_flags), the cursor's as the connection stands now:
+    an upload runs outside any sync, so a sync must see what one published meanwhile. A part
+    not `checked` keeps its flags (a sync keeps the statement's, an upload the normalizer's
+    unless it replayed). Returns the cursor's `flags` and `notified`."""
+    return await connector_flags.publish_flags(
+        ctx, found, checked, cursor=None, prefix=FLAGGED_PREFIX, label="eToro"
+    )
 
 
 class _Seen:
@@ -318,9 +289,9 @@ class _Run:
             )
         return raw_record_id
 
-    async def keep_refused(self, me: Item) -> None:
-        """Store a refused key's `/me` in a command of its own, which the sync's failure does
-        not roll back: the scopes it held stay on record."""
+    async def keep_refused(self, scopes: list[str]) -> None:
+        """Record a refused key's scopes, and nothing else of its `/me` (the key may be another
+        user's), in a command of its own, which the sync's failure does not roll back."""
         ctx = self.ctx
         args: dict[str, JSONValue] = {"connection_id": str(ctx.connection.id)}
         async with (
@@ -330,9 +301,9 @@ class _Run:
             await store_raw_record(
                 cmd,
                 connection_id=ctx.connection.id,
-                record_type=ENDPOINTS["me"].record_type,
+                record_type=REFUSED_KEY,
                 request=_request(endpoint_path("me"), None),
-                content=record_json(me),
+                content={"scopes": list[JSONValue](scopes)},
                 connector_version=VERSION,
                 sync_id=ctx.sync_id,
             )
@@ -343,8 +314,13 @@ class _Run:
         arrived = datetime.now(UTC)
         scopes = me.get("scopes")
         # The client refuses a missing or empty list; the connector checks the scopes itself.
-        if not isinstance(scopes, list) or write_scopes(s for s in scopes if isinstance(s, str)):
-            await self.keep_refused(me)
+        named = [s for s in scopes if isinstance(s, str)] if isinstance(scopes, list) else []
+        if not isinstance(scopes, list) or write_scopes(named):
+            try:
+                await self.keep_refused(named)
+            except Exception as error:
+                # The refusal stands whatever happens to its record; the class only is logged.
+                logger.warning("recording a refused eToro key failed (%s)", type(error).__name__)
             raise ReadOnlyGateError(_GATE)
         gcid = _id_text(me.get("gcid"), "/me", "gcid")
         real_cid = _id_text(me.get("realCid"), "/me", "realCid")
@@ -404,11 +380,16 @@ class _Run:
         """The account's opening: the earliest Date Created of the statements stored."""
         values = await self.ctx.command.session.scalars(
             text(
-                "select content->'cells'->>'Value' from core.raw_records"
+                "select content->'cells'->>:value from core.raw_records"
                 " where connection_id = :c and record_type = :t"
-                " and btrim(content->'cells'->>'Label') = 'Date Created'"
+                " and btrim(content->'cells'->>:label) = 'Date Created'"
             ),
-            {"c": self.ctx.connection.id, "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type},
+            {
+                "c": self.ctx.connection.id,
+                "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type,
+                "label": LABEL,
+                "value": VALUE,
+            },
         )
         days = [
             read_moment(value.strip(), "Date Created", STATEMENT_ZONE).date()
@@ -423,7 +404,9 @@ class _Run:
         latest = _cursor_date(self.cursor, "trade_history_to")
         span = timedelta(days=TRADE_WINDOW_DAYS)
         if latest is not None:
-            rows = await self.window(max(latest - OVERLAP, today - span))
+            # From the latest close less the overlap, however long ago: a cap at a year would
+            # skip what closed during a long outage.
+            rows = await self.window(latest - OVERLAP)
             return _latest_close(rows, latest), rows
         opening = await self.opening()
         seen: set[str] = set()
@@ -466,7 +449,7 @@ class _Run:
         """Snapshots since the latest stored less 7 days (the first sync: 365 days); the
         latest snapshot date stored."""
         latest = _cursor_date(self.cursor, "balance_history_to")
-        oldest = today - timedelta(days=TRADE_WINDOW_DAYS)
+        oldest = today - timedelta(days=BALANCE_HISTORY_DAYS - 1)
         start = oldest if latest is None else min(max(latest - OVERLAP, oldest), today)
         body = await self.client.balance_history(start, today)
         params = {"fromDate": start.isoformat(), "toDate": today.isoformat()}
@@ -635,7 +618,7 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
     me = await _latest_report(ctx, ENDPOINTS["me"].record_type)
     balances = await _latest_report(ctx, ENDPOINTS["balances"].record_type)
     if me is None or balances is None:
-        raise StatementRejected("wait for the eToro connection's first sync to finish")
+        raise StatementTooEarly("wait for the eToro connection's first sync to finish")
     username = me.get("username")
     if not isinstance(username, str) or (
         statement.username.strip().casefold() != username.strip().casefold()
@@ -657,9 +640,11 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
         {"c": ctx.connection.id, "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type},
     )
     if not earlier and statement.period_from > statement.created:
-        # The first statement and the API together must cover the account's whole life.
+        # The first statement and the API together must cover the account's whole life. The
+        # date (Date Created, the day only) is shown to its owner alone (R27).
         raise StatementRejected(
-            "the first eToro statement must start on or before the account's Date Created"
+            "The first eToro statement must start on or before"
+            f" {statement.created.date().isoformat()}."
         )
 
 
@@ -677,14 +662,19 @@ async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> Inge
     document = await store_document(
         ctx.command, ctx.documents, body, filename=filename, media_type=XLSX, source=DOCUMENT_SOURCE
     )
-    request: dict[str, JSONValue] = {"upload": filename, "document_sha256": document.sha256}
+    # The period is the upload's, not the row's: a row two statements share is one record.
     period: dict[str, JSONValue] = {
         "from": statement.period_from.isoformat(),
         "to": statement.period_to.isoformat(),
     }
+    request: dict[str, JSONValue] = {
+        "upload": filename,
+        "document_sha256": document.sha256,
+        "period": period,
+    }
     ids: list[UUID] = []
     for row in statement.rows:
-        content: JSONValue = {"cells": dict(row.cells), "key": row.key, "period": period}
+        content: JSONValue = {"cells": dict(row.cells), "key": row.key}
         ids.append(
             await store_raw_record(
                 ctx.command,
@@ -701,8 +691,9 @@ async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> Inge
     found = {(STATEMENT, flag) for flag in statement.flagged}
     found |= {(FIELDS, flag) for flag in report.flagged}
     checked = {STATEMENT, FIELDS} if report.replayed else {STATEMENT}
+    # The row stays locked until the upload commits, so the flags read here are the ones
+    # replaced; only the flag keys are merged, so no other cursor key is overwritten.
+    await lock_connection(ctx.command, ctx.connection.id)
     flags = await publish_flags(ctx, found, checked)
-    current = (await get_connection(ctx.command.session, ctx.connection.id)).cursor
-    cursor: dict[str, JSONValue] = dict(current) if isinstance(current, dict) else {}
-    await set_cursor(ctx.command, ctx.connection.id, {**cursor, **flags})
+    await merge_cursor(ctx.command, ctx.connection.id, flags)
     return IngestResult(ids, statement.flagged)

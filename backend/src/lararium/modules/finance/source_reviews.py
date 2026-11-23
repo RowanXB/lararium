@@ -74,8 +74,15 @@ async def open_review(
             api_value=api_value,
             statement_value=statement_value,
         )
+        # A run opening the same item meanwhile has opened it: nothing new to tell.
+        .on_conflict_do_nothing(
+            index_elements=[r.connection_id, r.event_key, r.field],
+            index_where=r.resolved_at.is_(None),
+        )
         .returning(r.id)
     )
+    if review_id is None:
+        return False
     ctx.record_change(f"source_review:{review_id}", {"event_key": event_key, "field": field})
     return True
 

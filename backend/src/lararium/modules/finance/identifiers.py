@@ -36,9 +36,9 @@ _IBKR_ACCOUNT = re.compile(r"[A-Z]{1,3}[0-9]{3,12}")
 # Trading 212's account id is an int64, written without leading zeros.
 _TRADING212_ACCOUNT = re.compile(r"[1-9][0-9]{0,18}")
 # An eToro account id: a Cash (eToro Money) account's is a UUID, a Trading or MoneyFarm
-# account's digits (a string, kept as eToro writes it).
+# account's 7 or 8 digits (a string, kept as eToro writes it).
 _ETORO_ACCOUNT = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9]{1,19}"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9]{7,8}"
 )
 
 
@@ -60,7 +60,7 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     if kind == "etoro_account":
         account_id = value.strip().lower()
         if _ETORO_ACCOUNT.fullmatch(account_id) is None:
-            raise FinanceValidationError("an eToro account id is a UUID or up to 19 digits")
+            raise FinanceValidationError("an eToro account id is a UUID or 7 to 8 digits")
         return account_id
     if kind == "trading212_account":
         account_id = value.strip()

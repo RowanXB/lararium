@@ -3,6 +3,8 @@ typed column, the registry takes eToro's account ids, and the review, decision a
 tables hold their rules."""
 
 import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
@@ -27,6 +29,7 @@ from lararium.modules.finance.etoro.fields import (
     split,
 )
 from lararium.modules.finance.identifiers import normalize_identifier
+from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
 from lararium.modules.finance.typed_tables import column_name
 
 _DATA_TYPES = {
@@ -227,7 +230,16 @@ def test_normalize_etoro_account(spelling: str, stored: str) -> None:
 
 @pytest.mark.parametrize(
     "bad",
-    ["", "12a4", "1" * 20, "-5", "0f9e8d7c-1111-4222-8333", "0f9e8d7c11114222833394445555666"],
+    [
+        "",
+        "12a4",
+        "123456",
+        "123456789",
+        "1" * 20,
+        "-5",
+        "0f9e8d7c-1111-4222-8333",
+        "0f9e8d7c11114222833394445555666",
+    ],
 )
 def test_normalize_etoro_account_rejects_anything_else(bad: str) -> None:
     with pytest.raises(FinanceValidationError, match="eToro account id"):
@@ -235,7 +247,7 @@ def test_normalize_etoro_account_rejects_anything_else(bad: str) -> None:
 
 
 async def test_etoro_account_identifier_checked_by_database(session) -> None:
-    for value in ("abc", "1" * 20, "0F9E8D7C-1111-4222-8333-944455556666"):
+    for value in ("abc", "123456", "123456789", "0F9E8D7C-1111-4222-8333-944455556666"):
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(
@@ -300,3 +312,32 @@ async def test_leg_fee_is_not_negative(session, usd) -> None:
                 ),
                 {"i": usd.id},
             )
+
+
+async def test_leg_fee_references_its_transaction_and_instrument(
+    session, run, make_account, usd
+) -> None:
+    insert = text(
+        "insert into finance.transfer_leg_fees (transaction_id, instrument_id, amount)"
+        " values (:t, :i, 1)"
+    )
+    with pytest.raises(IntegrityError, match="transfer_leg_fees_transaction_id_fkey"):
+        async with session.begin_nested():
+            await session.execute(insert, {"t": uuid.uuid4(), "i": usd.id})
+    a, b = await make_account(name="A"), await make_account(name="B")
+    transaction = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 6, 1, 12, tzinfo=UTC),
+            description="leg",
+            postings=[
+                PostingInput(a.id, usd.id, Decimal("-5")),
+                PostingInput(b.id, usd.id, Decimal("5")),
+            ],
+        ),
+    )
+    transaction_id = transaction.id
+    with pytest.raises(IntegrityError, match="transfer_leg_fees_instrument_id_fkey"):
+        async with session.begin_nested():
+            await session.execute(insert, {"t": transaction_id, "i": uuid.uuid4()})
+    await session.execute(insert, {"t": transaction_id, "i": usd.id})

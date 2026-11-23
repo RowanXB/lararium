@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, bindparam, func, select, update
+from sqlalchemy import ColumnElement, Text, bindparam, case, func, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -248,6 +248,21 @@ async def set_cursor(
 ) -> ConnectionRecord:
     """Replace the cursor without recording a sync (a connector's first knowledge of its
     account, written when the connection is made)."""
+    return await _update(ctx, connection_id, cursor=cursor)
+
+
+async def merge_cursor(
+    ctx: CommandContext, connection_id: UUID, values: Mapping[str, JSONValue]
+) -> ConnectionRecord:
+    """Set the given top-level keys of the cursor, leaving every other key as it is. The merge
+    happens in the UPDATE itself, on the row as it is then, so a writer of a few keys (an
+    upload's flags) never undoes another's (a sync's history markers)."""
+    # A cursor that is not an object (none yet, or JSON null) starts empty.
+    cursor: Any = case(
+        (func.jsonb_typeof(Connection.cursor) == "object", Connection.cursor),
+        else_=bindparam(None, {}, type_=JSONB),
+    )
+    cursor = cursor.op("||", return_type=JSONB)(bindparam(None, dict(values), type_=JSONB))
     return await _update(ctx, connection_id, cursor=cursor)
 
 

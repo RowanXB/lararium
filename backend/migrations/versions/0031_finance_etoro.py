@@ -659,8 +659,8 @@ _SOURCES = [
 ]
 
 # An eToro account id: a Cash (eToro Money) account's is a UUID, stored in lower case; a
-# Trading or MoneyFarm account's is digits, as eToro writes it.
-_ETORO_ACCOUNT = "'^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9]{1,19})$'"
+# Trading or MoneyFarm account's is 7 or 8 digits, as eToro writes it.
+_ETORO_ACCOUNT = "'^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9]{7,8})$'"
 
 UPGRADE = [
     f"""

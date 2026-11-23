@@ -1,0 +1,91 @@
+"""A connector's flags (M6 Decision 4): what it stored but could not type or post, shown as
+connection warnings `<prefix><reason>`, the owner told of each new one once.
+
+The cursor keeps the flags per part (`flags`: part → reasons) and the reasons the owner was
+told (`notified`). A run decides the parts it checked; a part it did not check keeps the flags
+the cursor holds for it. A flag counts as told only once a send succeeds, so a failed send is
+retried next run; a flag whose cause is gone clears without a word.
+"""
+
+import logging
+from collections.abc import Callable, Collection, Iterable, Mapping
+
+from lararium.core.connections import get_connection, set_warnings
+from lararium.core.connectors import SyncContext
+from lararium.core.json_types import JSONValue
+
+logger = logging.getLogger(__name__)
+
+# Whether a warning's reason (the text after the prefix) is one this connector publishes, given
+# the reasons the cursor keeps: those are replaced, every other warning is left to its writer.
+type OwnReason = Callable[[str, Collection[str]], bool]
+
+
+def _kept_flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
+    value = cursor.get("flags")
+    if not isinstance(value, dict):
+        return {}
+    return {
+        part: [r for r in reasons if isinstance(r, str)]
+        for part, reasons in value.items()
+        if isinstance(reasons, list)
+    }
+
+
+def kept_reasons(reason: str, kept: Collection[str]) -> bool:
+    """The plain rule: a connector's own reasons are those its cursor keeps."""
+    return reason in kept
+
+
+async def publish_flags(
+    ctx: SyncContext,
+    found: Iterable[tuple[str, str]],
+    checked: Collection[str],
+    *,
+    cursor: Mapping[str, JSONValue] | None,
+    prefix: str,
+    label: str,
+    own: OwnReason = kept_reasons,
+) -> dict[str, JSONValue]:
+    """Replace the connector's flags among the connection's warnings with this run's, keeping
+    every other warning as the connection stands now. `found`: (part, reason) of this run;
+    `checked`: the parts it decided. `cursor`: the flags and notifications as the run began, or
+    None to read them as the connection stands now (a run that is not a sync, or one that must
+    see what an upload published meanwhile). `label` names the connector in a failed send's log
+    line. Returns the cursor's `flags` and `notified`."""
+    connection = await get_connection(ctx.command.session, ctx.connection.id)
+    if cursor is None:
+        cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
+    before = _kept_flags(cursor)
+    parts: dict[str, set[str]] = {}
+    for part, reason in found:
+        parts.setdefault(part, set()).add(reason)
+    for part, reasons in before.items():
+        if part not in checked:
+            parts.setdefault(part, set()).update(reasons)
+    reasons = sorted({reason for part_reasons in parts.values() for reason in part_reasons})
+    told_before = cursor.get("notified")
+    told = set(told_before) if isinstance(told_before, list) else set[JSONValue]()
+    notified = [reason for reason in reasons if reason in told]
+    new = [reason for reason in reasons if reason not in told]
+    if new:
+        try:
+            await ctx.notifier.send(f"{connection.display_name}: {prefix}{', '.join(new)}")
+            notified = reasons
+        except Exception as error:
+            # The class only: the message could carry the notifier's webhook URL.
+            logger.warning("sending a %s notification failed (%s)", label, type(error).__name__)
+    kept = {reason for old in before.values() for reason in old}
+    previous = connection.warnings
+    warnings = [
+        w for w in previous if not (w.startswith(prefix) and own(w.removeprefix(prefix), kept))
+    ] + [prefix + r for r in reasons]
+    if warnings != previous:
+        await set_warnings(ctx.command, connection.id, warnings)
+    return {
+        "flags": {
+            part: list[JSONValue](sorted(part_reasons))
+            for part, part_reasons in sorted(parts.items())
+        },
+        "notified": list[JSONValue](notified),
+    }
