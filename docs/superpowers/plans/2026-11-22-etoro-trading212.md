@@ -56,7 +56,12 @@ Choices the design leaves to the builder, made here so tasks don't have to:
 15. **Leg fee** (design §5.12): `finance.transfer_leg_fees(transaction_id PK → finance.transactions, instrument_id, amount numeric CHECK (amount >= 0))`, created in `00B` (Task 9) because Task 11 writes it before Task 14 reads it. Only connectors write it; the engine reads it.
 16. **Card merchants** (design §5.12): identifier kind `card_merchant`, value `^merch_[0-9A-Za-z]+$` (Monzo's merchant id), `account_id` NULL; holders in `finance.account_identifier_holders(identifier_id, account_id, PK both)`. `TransferSettings.card_deposit_window` = `timedelta(minutes=N)`, N from Task 0 (provisional 2).
 
-11a. **What Task 0 found**: filled in by Task 0. Until then the provisional values above stand, and Tasks 8–12 and 16 (which use the zone, the decimals, check 4's rule and N) do not start; Tasks 1–7, 14, 15 and 17 may.
+11a. **What Task 0 found** (partly, 2026-11-23; no values recorded):
+    - **Check 3 passes.** A second eToro statement whose period overlaps the first: all 20 Account Activity and Closed Positions rows have the same key (Decision 10) in both; none only in one. It also starts before Date Created.
+    - **Check 5: N.** Each Monzo card payment and its Trading 212 deposit are 0 seconds apart (CSV `Time (UTC)` and API `dateTime` agree to the second); the two deposits are 512 seconds apart. N = 2 minutes stands.
+    - **Check 7, Trading 212 CSV (deposits only so far).** Columns `Action`, `Time (UTC)`, `Notes`, `ID`, `Total`, `Currency (Total)`. `ID` equals the API's `reference` and the time equals the API's `dateTime`. `Notes` carries a "Transaction ID: …" the API does not return, so the API is not a superset of the CSV; trade rows' columns are unknown until the first trade.
+    - Checks 1, 2, 4, 6 and 8 remain.
+    The rest is filled in by Task 0. Until then the provisional values above stand, and Tasks 8–12 and 16 (which use the zone, the decimals, check 4's rule and N) do not start; Tasks 1–7, 14, 15 and 17 may.
 
 **Not in this plan:** screens beyond the three forms; Trading 212 bank-transfer deposits by payment reference; CFDs, leverage, copy trading, Options, Crypto wallet; FX rates into `finance.fx_rates`; Trading 212's CSV export unless Task 0 brings it in (then Task 7a is added by a plan amendment).
 
