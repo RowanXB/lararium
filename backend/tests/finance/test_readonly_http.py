@@ -1,5 +1,7 @@
 """The read-only HTTP client: GET only, own host only, no redirects, paced, no secrets in errors."""
 
+import asyncio
+import itertools
 from collections.abc import Callable
 from decimal import Decimal
 
@@ -7,6 +9,7 @@ import httpx
 import pytest
 
 from lararium import __version__
+from lararium.core.errors import CredentialRejectedError
 from lararium.modules.finance.readonly_http import (
     HttpAuthError,
     HttpError,
@@ -53,6 +56,7 @@ class Env:
             {"default": limit or RateLimit(100, 1)},
             sleep=self.sleep,
             clock=self.clock,
+            wall_clock=self.clock,
         )
 
 
@@ -69,6 +73,18 @@ def ok(body: str = "{}", **headers: str) -> httpx.Response:
         "v1/x",
         "",
         "/v1/x\\@evil.test",
+        "/v1/x?a=1",
+        "/v1/x#frag",
+        "/v1/%3Fa=1",
+        "/v1/%3fa=1",
+        "/v1/x%23y",
+        "/v1/x%23y".upper(),
+        "/v1/../x",
+        "/v1/./x",
+        "/v1/%2e%2e/x",
+        "/v1/%2E%2E/x",
+        "/v1/%2e/x",
+        "/..",
     ],
 )
 async def test_only_get_to_own_host(path: str) -> None:
@@ -145,8 +161,6 @@ async def test_429_gives_up_after_three_retries() -> None:
 
 
 async def test_401_is_auth_error() -> None:
-    from lararium.core.errors import CredentialRejectedError
-
     env = Env(httpx.Response(401))
     with pytest.raises(HttpAuthError) as caught:
         await env.client().get("/v1/x", pool="default")
@@ -257,3 +271,76 @@ async def test_transport_error_never_contains_url_query() -> None:
         await client.get("/v1/x", pool="default", params={"q": QUERY_VALUE})
     assert QUERY_VALUE not in repr(caught.value)
     assert QUERY_VALUE not in str(caught.value)
+
+
+async def test_path_escaping_the_base_path_is_refused() -> None:
+    env = Env(ok())
+    http = httpx.AsyncClient(transport=httpx.MockTransport(env.handler))
+    client = ReadOnlyClient(http, f"{BASE}/v2", dict, {"default": RateLimit(1, 1)})
+    for path in ("/../v1/x", "/%2e%2e/v1/x", "/a/../../v1/x"):
+        with pytest.raises(ReadOnlyViolation):
+            await client.get(path, pool="default")
+    assert env.requests == []
+    await client.get("/ok", pool="default")
+    assert str(env.requests[0][1].url) == f"{BASE}/v2/ok"
+
+
+async def test_429_wait_beyond_the_cap_raises_at_once() -> None:
+    env = Env(httpx.Response(429, headers={"Retry-After": "500"}), ok())
+    with pytest.raises(HttpRetryableError):
+        await env.client().get("/v1/x", pool="default")
+    assert env.sleeps == []
+    assert len(env.requests) == 1
+
+
+async def test_429_retry_after_http_date_falls_back() -> None:
+    env = Env(
+        httpx.Response(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+        ok(),
+    )
+    await env.client().get("/v1/x", pool="default")
+    assert env.sleeps == [1]
+
+
+@pytest.mark.parametrize("body", ['{"a": NaN}', "[Infinity]", "-Infinity"])
+async def test_nan_and_infinity_are_not_json(body: str) -> None:
+    with pytest.raises(ValueError, match="not a JSON number"):
+        loads_decimal(body)
+    env = Env(ok(body))
+    with pytest.raises(HttpError, match="not JSON"):
+        await env.client().get("/v1/x", pool="default")
+
+
+@pytest.mark.parametrize(
+    ("body", "scope"),
+    [
+        ("Scope( pies:read ) missing for API key", "pies:read"),
+        ("Scope( bad scope! ) missing for API key", None),
+        ("Scope( <script>x</script> ) missing for API key", None),
+        ("Scope( " + "a" * 101 + " ) missing for API key", None),
+    ],
+)
+async def test_403_message_is_fixed_text(body: str, scope: str | None) -> None:
+    env = Env(httpx.Response(403, text=body))
+    with pytest.raises(HttpForbiddenError) as caught:
+        await env.client().get("/v1/x", pool="default")
+    assert caught.value.scope == scope
+    assert str(caught.value) == "The API refused the request (403): the key lacks a permission"
+    assert "Scope" not in str(caught.value)
+    assert "script" not in repr(caught.value)
+
+
+async def test_403_cloudflare_message_is_fixed_text() -> None:
+    env = Env(httpx.Response(403, text="error code: 1010 <b>ray</b>"))
+    with pytest.raises(HttpForbiddenError) as caught:
+        await env.client().get("/v1/x", pool="default")
+    assert str(caught.value) == "The API's firewall refused this client (403)"
+    assert "ray" not in str(caught.value)
+
+
+async def test_concurrent_callers_respect_the_limit() -> None:
+    env = Env(ok())
+    client = env.client(RateLimit(1, 5))
+    await asyncio.gather(*(client.get("/a", pool="default") for _ in range(3)))
+    times = [t for t, _ in env.requests]
+    assert all(b - a >= 5 for a, b in itertools.pairwise(times))

@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import cast
 
 import httpx
 
@@ -34,9 +35,11 @@ MAX_WAIT = 120
 # A reset header of at least this is an epoch (seconds since 1970), not a number of seconds.
 _EPOCH_FROM = Decimal(10**9)
 _RESET_HEADERS = ("retry-after", "ratelimit-reset", "x-ratelimit-reset")
-_SCOPE = re.compile(r"Scope\(\s*([^)\s]+)\s*\)\s*missing", re.IGNORECASE)
+# The scope is kept only when it is a plain token: nothing else the server says is passed on.
+_SCOPE = re.compile(r"Scope\(\s*([A-Za-z0-9_:.\-]{1,100})\s*\)\s*missing", re.IGNORECASE)
+_OUTSIDE = "Refused a request outside the API's own host"
+_ENCODED_BAD = ("%3f", "%23")
 _CLOUDFLARE_1010 = "error code: 1010"
-_MAX_SCOPE = 100
 
 
 class HttpError(DisplayableError):
@@ -56,7 +59,11 @@ class HttpForbiddenError(HttpError):
     firewall refused the client's signature (`cloudflare_block`)."""
 
     def __init__(self, scope: str | None, *, cloudflare_block: bool = False) -> None:
-        super().__init__(f"The API refused the request (403), missing scope: {scope or 'unknown'}")
+        super().__init__(
+            "The API's firewall refused this client (403)"
+            if cloudflare_block
+            else "The API refused the request (403): the key lacks a permission"
+        )
         self.scope = scope
         self.cloudflare_block = cloudflare_block
 
@@ -81,13 +88,25 @@ class Response:
 
 
 def monotonic() -> Decimal:
-    """The clock in seconds, exact. Wall time, so a reset given as an epoch compares with it."""
+    """The monotonic clock in seconds, exact; pacing is measured on it."""
+    return Decimal(time.monotonic_ns()) / 1_000_000_000
+
+
+def wall_time() -> Decimal:
+    """Seconds since 1970, exact; only a reset header given as an epoch is compared with it."""
     return Decimal(time.time_ns()) / 1_000_000_000
 
 
 def loads_decimal(text: str) -> JSONValue:
     """Parse JSON with every number a Decimal, so no value passes through binary arithmetic."""
-    return json.loads(text, parse_float=Decimal, parse_int=Decimal)  # type: ignore[no-any-return]
+    return cast(
+        JSONValue,
+        json.loads(text, parse_float=Decimal, parse_int=Decimal, parse_constant=_refuse_constant),
+    )
+
+
+def _refuse_constant(name: str) -> object:
+    raise ValueError(f"{name} is not a JSON number")
 
 
 class ReadOnlyClient:
@@ -100,6 +119,7 @@ class ReadOnlyClient:
         *,
         sleep: Sleep = asyncio.sleep,
         clock: Clock = monotonic,
+        wall_clock: Clock = wall_time,
     ) -> None:
         self._http = http
         self._base = httpx.URL(base_url)
@@ -108,23 +128,39 @@ class ReadOnlyClient:
         self._limits = dict(limits)
         self._sleep = sleep
         self._clock = clock
+        self._wall_clock = wall_clock
         self._sent: dict[str, deque[Decimal]] = {pool: deque() for pool in limits}
+        self._locks = {pool: asyncio.Lock() for pool in limits}
 
     def _url(self, path: str) -> str:
-        """The request URL, or `ReadOnlyViolation` when it would not stay on the base host."""
-        if not path.startswith("/") or path.startswith("//") or "\\" in path:
-            raise ReadOnlyViolation("Refused a request outside the API's own host")
+        """The request URL, or `ReadOnlyViolation` when it would not stay on the base host and
+        path. A query goes through `params`, never the path."""
+        lowered = path.lower()
+        segments = [segment.replace("%2e", ".") for segment in lowered.split("/")[1:]]
+        if (
+            not path.startswith("/")
+            or path.startswith("//")
+            or "\\" in path
+            or "?" in path
+            or "#" in path
+            or any(code in lowered for code in _ENCODED_BAD)
+            or any(segment in {".", ".."} for segment in segments)
+        ):
+            raise ReadOnlyViolation(_OUTSIDE)
         url = f"{self._base_text}{path}"
         try:
             parsed = httpx.URL(url)
         except httpx.InvalidURL:
-            raise ReadOnlyViolation("Refused a request outside the API's own host") from None
-        if (parsed.scheme, parsed.host, parsed.port) != (
+            raise ReadOnlyViolation(_OUTSIDE) from None
+        base_path = self._base.path.rstrip("/")
+        same_origin = (parsed.scheme, parsed.host, parsed.port) == (
             self._base.scheme,
             self._base.host,
             self._base.port,
-        ):
-            raise ReadOnlyViolation("Refused a request outside the API's own host")
+        )
+        under_base = parsed.path == base_path or parsed.path.startswith(f"{base_path}/")
+        if not (same_origin and under_base):
+            raise ReadOnlyViolation(_OUTSIDE)
         return url
 
     async def _wait(self, seconds: Decimal) -> None:
@@ -132,19 +168,23 @@ class ReadOnlyClient:
             # Whole seconds, rounded up, so a wait is never short.
             await self._sleep(math.ceil(seconds))
 
-    async def _pace(self, pool: str) -> None:
-        """Wait until `pool`'s limit allows one more request, and count it."""
-        limit = self._limits[pool]
+    def _expire(self, pool: str, now: Decimal) -> deque[Decimal]:
+        """`pool`'s send times still inside its window at `now`."""
         sent = self._sent[pool]
-        now = self._clock()
-        while sent and now - sent[0] >= limit.per_seconds:
+        while sent and now - sent[0] >= self._limits[pool].per_seconds:
             sent.popleft()
-        if len(sent) >= limit.requests:
-            await self._wait(sent[0] + limit.per_seconds - now)
-            now = self._clock()
-            while sent and now - sent[0] >= limit.per_seconds:
-                sent.popleft()
-        sent.append(now)
+        return sent
+
+    async def _pace(self, pool: str) -> None:
+        """Wait until `pool`'s limit allows one more request, and count it. The lock makes
+        check, sleep and record one step, so concurrent callers can't both pass."""
+        limit = self._limits[pool]
+        async with self._locks[pool]:
+            sent = self._expire(pool, self._clock())
+            while len(sent) >= limit.requests:
+                await self._wait(sent[0] + limit.per_seconds - self._clock())
+                sent = self._expire(pool, self._clock())
+            sent.append(self._clock())
 
     def _reset_wait(self, response: httpx.Response) -> Decimal:
         """Seconds to wait before retrying a 429: the first reset header that parses."""
@@ -158,15 +198,13 @@ class ReadOnlyClient:
                 continue
             if not value.is_finite() or value < 0:
                 continue
-            return value - self._clock() if value >= _EPOCH_FROM else value
+            return value - self._wall_clock() if value >= _EPOCH_FROM else value
         return Decimal(1)
 
     async def get(
         self, path: str, *, pool: str, params: Mapping[str, str] | None = None
     ) -> Response:
         url = self._url(path)
-        if pool not in self._limits:
-            raise KeyError(pool)
         for attempt in range(MAX_RETRIES_429 + 1):
             await self._pace(pool)
             try:
@@ -196,7 +234,7 @@ class ReadOnlyClient:
         if status == 403:
             body = raw.text
             found = _SCOPE.search(body)
-            scope = found.group(1)[:_MAX_SCOPE] if found else None
+            scope = found.group(1) if found else None
             raise HttpForbiddenError(scope, cloudflare_block=_CLOUDFLARE_1010 in body)
         if 300 <= status < 400:
             raise HttpRetryableError(f"The API redirected the request ({status})")
