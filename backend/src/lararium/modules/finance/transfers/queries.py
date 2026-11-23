@@ -610,9 +610,15 @@ class SuggestionRecord:
     latest: date  # the latest booking date of those records
 
 
+# The identifier kinds the owner can register from Suggestions; another kind (IBKR's
+# `ibkr_account`) is never suggested.
+SUGGESTED_KINDS: tuple[IdentifierKind, ...] = ("uk_bank_account", "chain_address")
+
+
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
-    """Unregistered, undismissed identifiers that own records name, most named first,
-    then the most recently named."""
+    """Unregistered, undismissed identifiers of a kind the owner can register
+    (`SUGGESTED_KINDS`) that own records name, most named first, then the most recently
+    named."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
@@ -631,7 +637,7 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         )
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
-        .where(i.account_id.is_(None), i.dismissed_at.is_(None))
+        .where(i.kind.in_(SUGGESTED_KINDS), i.account_id.is_(None), i.dismissed_at.is_(None))
         .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )

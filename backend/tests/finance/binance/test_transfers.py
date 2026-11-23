@@ -15,6 +15,14 @@ from lararium.modules.finance.identifiers import (
     get_or_create_identifier,
     list_identifiers,
 )
+from lararium.modules.finance.instruments import get_currency
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+)
+from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
     heal_transfers,
@@ -113,6 +121,28 @@ async def test_withdrawal_to_an_unknown_address_appears_in_suggestions(session, 
     assert (suggestion.outgoing, suggestion.incoming) == (1, 0)
     assert suggestion.names == ("NET1 address",)  # the network, never the address
     assert await list_transfers(session) == []
+
+
+async def test_only_kinds_the_owner_can_register_are_suggested(session, run, make_account) -> None:
+    # IBKR names another IBKR account by `ibkr_account`, which Suggestions cannot register.
+    account = await make_account(name="Broker", balance_mode="transactions")
+    eur = await get_currency(session, "EUR")
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    other = await run(get_or_create_identifier, "ibkr_account", "U0000009")
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=at(BASE_TIME_MS),
+            description="to another IBKR account",
+            postings=[
+                PostingInput(account.id, eur.id, Decimal("-5")),
+                PostingInput(unassigned, eur.id, Decimal("5")),
+            ],
+            counterparty=CounterpartyFields(identifier_id=other),
+        ),
+    )
+
+    assert await suggestions(session) == []
 
 
 async def test_registering_later_re_evaluates_past_withdrawals(session, run) -> None:
