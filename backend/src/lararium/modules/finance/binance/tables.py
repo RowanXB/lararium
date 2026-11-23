@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
+from uuid import UUID
 
 from sqlalchemy import Table, delete, or_
 from sqlalchemy.dialects.postgresql import insert
@@ -102,16 +103,14 @@ def _reach(value: ApiValue, reads: tuple[str, ...]) -> ApiValue:
     return value
 
 
-def _values(
-    label: str, table: layout.Table, element: ApiValue, body: ApiValue
-) -> dict[str, object]:
-    """The table's field columns from one element (and, for what sits beside the records, the
-    whole body); a field the element lacks is None."""
+def _values(label: str, table: layout.Table, element: ApiValue) -> dict[str, object]:
+    """The table's field columns from one element (for a response table, the whole body); a
+    field the element lacks is None."""
     values: dict[str, object] = {}
     for column in table.columns:
         if column.path is None:
             continue
-        raw = _reach(body if column.envelope else element, column.reads)
+        raw = _reach(element, column.reads)
         if raw is None:
             values[column.name] = None
         elif column.sql.endswith("[]"):
@@ -123,16 +122,15 @@ def _values(
     return values
 
 
-def columns_for(label: str, row: Row, body: ApiValue = None) -> dict[str, object]:
+def columns_for(label: str, row: Row) -> dict[str, object]:
     """The root table's field columns for a record, by Decision 3.
 
-    `row` is the record (for a label whose answer is one record, the answer itself); `body` is
-    the whole answer, for the fields beside the records of a history label (`total`,
-    `moreData`). Keys and system columns (`connection_id`, `snapshot_at`, `read_to`,
-    `transaction_id`, `content_hash`) are the caller's, and a child table's columns are
-    written by `store`.
+    `row` is the record (for a label whose answer is one record, the answer itself). Keys and
+    system columns (`connection_id`, `snapshot_at`, `read_to`, `transaction_id`,
+    `content_hash`) are the caller's, a child table's columns are written by `store`, and what
+    the response says beside its records is `store_response`'s.
     """
-    return _values(label, layout.layout(label)[0], dict(row), body)
+    return _values(label, layout.layout(label)[0], dict(row))
 
 
 def content_hash(row: Row) -> str:
@@ -228,7 +226,6 @@ async def store(
     label: str,
     key: Mapping[str, object],
     row: Row,
-    body: ApiValue = None,
     system: Mapping[str, object] | None = None,
 ) -> bool:
     """Write a record and the child rows below it; True when anything changed.
@@ -241,7 +238,7 @@ async def store(
     """
     tables = layout.layout(label)
     root = tables[0]
-    values = columns_for(label, row, body)
+    values = columns_for(label, row)
     full = dict(key)
     for name in root.key:
         if name not in full:
@@ -250,6 +247,44 @@ async def store(
     values.update(system or {})
     changed = await upsert(ctx, model_of(root.name), full, values)
     return await _children(ctx, tables, root, full, dict(row), root.record) or changed
+
+
+async def store_response(
+    ctx: CommandContext,
+    connection_id: UUID,
+    label: str,
+    body: ApiValue,
+    *,
+    window: tuple[datetime, datetime] | None = None,
+    page: int = 0,
+    read: tuple[datetime, datetime] | None = None,
+) -> bool:
+    """Write what a response says beside its records (`total`, `moreData`, the echoed window):
+    it describes the request and the page, not a row, so it is not in the row tables.
+
+    A history label's response is keyed by the window the walk asked for (`window`: its start
+    and end) and the page's 0-based index within it; asking again updates it in place. A
+    request with no time bounds passes `window=None`, stored as the epoch twice. A report's is
+    keyed by the read (`read`: `read_from`, `read_to`, as for the report's rows). True when it
+    wrote; False when nothing changed or the label has no such fields.
+    """
+    tables = [t for t in layout.layout(label) if t.response]
+    if not tables:
+        return False
+    table = tables[0]
+    if not isinstance(body, dict):
+        raise _fail(label, "")
+    key: dict[str, object] = {"connection_id": connection_id}
+    system: dict[str, object] = {}
+    if "window_from" in table.key:
+        start, end = window or (_EPOCH, _EPOCH)
+        key |= {"window_from": start, "window_to": end, "page": page}
+    else:
+        if read is None:
+            raise ValueError(f"{label}'s response is keyed by the read: pass read=")
+        key["snapshot_at"] = read[0]
+        system["read_to"] = read[1]
+    return await upsert(ctx, model_of(table.name), key, {**_values(label, table, body), **system})
 
 
 async def _children(
@@ -269,7 +304,7 @@ async def _children(
         written: list[object] = []
         for position, item in _pairs(element, table.scope[len(parent.scope) :]):
             key = {**parent_key, own: position}
-            changed |= await upsert(ctx, model, key, _values(table.label, table, item, None))
+            changed |= await upsert(ctx, model, key, _values(table.label, table, item))
             written.append(position)
             changed |= await _children(ctx, tables, table, key, item, prune)
         if prune:

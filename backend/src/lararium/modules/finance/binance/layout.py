@@ -91,8 +91,6 @@ class Column:
     type: str | None = None
     # The object keys to follow from the scope's element to the value (none: the element is it).
     reads: tuple[str, ...] = ()
-    # Stored beside a body's array: read from the whole body, not from the row.
-    envelope: bool = False
     # The timestamptz twin of a `time_text` column.
     twin: bool = False
 
@@ -109,6 +107,8 @@ class Table:
     record: bool
     # The columns this table adds to its parent's key.
     own_key: tuple[str, ...] = ()
+    # The table of what a response says beside its records (`total`, `moreData`).
+    response: bool = False
 
     def column(self, name: str) -> Column:
         return next(c for c in self.columns if c.name == name)
@@ -217,7 +217,6 @@ def _field_columns(
                 path=field.path,
                 type=field.type,
                 reads=place.reads,
-                envelope=place.envelope,
             )
         )
         if field.type == "time_text":
@@ -230,7 +229,6 @@ def _field_columns(
                     path=field.path,
                     type=field.type,
                     reads=place.reads,
-                    envelope=place.envelope,
                     twin=True,
                 )
             )
@@ -257,7 +255,7 @@ def layout(label: str) -> tuple[Table, ...]:
 
     built: dict[tuple[str, ...], Table] = {}
     for scope in ordered:
-        mine = [p for p in places if p.scope == scope]
+        mine = [p for p in places if p.scope == scope and not p.envelope]
         if scope == root:
             table = _root_table(label, record, root, mine, objects, endpoint.id_fields)
         else:
@@ -271,7 +269,40 @@ def layout(label: str) -> tuple[Table, ...]:
         if len(table.name) > _MAX_NAME:
             raise ValueError(f"{table.name} is too long for a table name")
         built[scope] = table
-    return tuple(built[scope] for scope in ordered)
+    tables = [built[scope] for scope in ordered]
+    if envelope := [p for p in places if p.envelope]:
+        tables.append(_response_table(label, record, envelope, objects))
+    return tuple(tables)
+
+
+def _response_table(
+    label: str, record: bool, places: list[_Place], objects: dict[str, bool]
+) -> Table:
+    """What a response says beside its records, which describes the request and the page, not
+    a row: one row per request (a history label's window and page; a report's read)."""
+    head = [Column("connection_id", "uuid", False)]
+    if record:
+        head += [
+            Column("window_from", "timestamptz", False),
+            Column("window_to", "timestamptz", False),
+            Column("page", "integer", False),
+        ]
+    else:
+        head += [
+            Column("snapshot_at", "timestamptz", False),
+            Column("read_to", "timestamptz", False),
+        ]
+    key = tuple(c.name for c in head[: 4 if record else 2])
+    return Table(
+        name=f"{table_name(label)}_responses",
+        label=label,
+        scope=(),
+        parent=None,
+        key=key,
+        columns=tuple([*head, *_field_columns(places, objects, frozenset(), "")]),
+        record=False,
+        response=True,
+    )
 
 
 def _root_table(

@@ -144,7 +144,7 @@ async def _coin_config(run, connection_id, **overrides) -> None:
     parsed = parse("coin-config", build_response("coin-config", [row]))
     key = {"connection_id": connection_id, "snapshot_at": MOMENT}
     for record in records("coin-config", parsed):
-        await run(store, "coin-config", key, record, parsed.body, {"read_to": MOMENT})
+        await run(store, "coin-config", key, record, {"read_to": MOMENT})
 
 
 async def test_asset_creates_a_crypto_instrument(run, session) -> None:

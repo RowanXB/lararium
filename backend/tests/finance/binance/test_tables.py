@@ -1,6 +1,7 @@
 """The typed `finance.binance_*` tables: that every catalogue field has a column, that the
 models are the tables the migration made, and what `columns_for`, `upsert` and `store` write."""
 
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -20,6 +21,7 @@ from lararium.modules.finance.binance.tables import (
     content_hash,
     records,
     store,
+    store_response,
     upsert,
 )
 
@@ -63,6 +65,11 @@ def test_every_catalogue_field_has_a_column(label: str) -> None:
             continue
         table, column = layout.locate(label, field.path)
         assert column.name in columns[table.name], (label, field.path)
+        # A field beside the records is in the label's response table, never in a row's.
+        beside = not layout.tokens(field.path)[
+            : len(layout.root_scope(label))
+        ] == layout.root_scope(label)
+        assert table.response is beside, (label, field.path)
         if field.type == "time_text":
             assert f"{column.name}_at" in columns[table.name]
 
@@ -135,6 +142,12 @@ def test_keys() -> None:
     assert key("user-asset") == ("connection_id", "snapshot_at", "asset")
     assert key("spot-account") == ("connection_id", "snapshot_at")
     assert key("asset-detail") == ("connection_id", "snapshot_at", "asset")
+    responses = {
+        t.label: t for label in layout.TABLE_LABELS for t in layout.layout(label) if t.response
+    }
+    assert responses["dividends"].key == ("connection_id", "window_from", "window_to", "page")
+    assert responses["earn-flexible-position"].key == ("connection_id", "snapshot_at")
+    assert not any(c.name == "total" for c in layout.layout("dividends")[0].columns)
     balances = layout.layout("spot-account")[1]
     assert balances.key == ("connection_id", "snapshot_at", "balances_ordinal")
 
@@ -285,13 +298,11 @@ def test_columns_for_reads_nested_fields_and_arrays() -> None:
     assert status["data_planned_recover_time"] is None
 
 
-def test_columns_for_takes_the_envelope_from_the_body() -> None:
+def test_columns_for_leaves_the_envelope_out() -> None:
     body = build_response("dividends", [build_row("dividends")])
-    assert isinstance(body, dict)
     parsed = parse("dividends", body)
     (row,) = records("dividends", parsed)
-    assert columns_for("dividends", row, parsed.body)["total"] == 1
-    assert columns_for("dividends", row)["total"] is None
+    assert "total" not in columns_for("dividends", row)
 
 
 def test_columns_for_ignores_a_field_the_catalogue_does_not_list() -> None:
@@ -361,8 +372,8 @@ async def test_store_a_report_with_its_children_and_again(session, run) -> None:
     (record,) = records("spot-account", parsed)
     key = {"connection_id": connection, "snapshot_at": MOMENT}
     system = {"read_to": LATER}
-    assert await run(store, "spot-account", key, record, parsed.body, system) is True
-    assert await run(store, "spot-account", key, record, parsed.body, system) is False
+    assert await run(store, "spot-account", key, record, system) is True
+    assert await run(store, "spot-account", key, record, system) is False
     balances = await session.scalar(
         text("select count(*) from finance.binance_spot_account_balances")
     )
@@ -381,7 +392,7 @@ async def test_store_a_listing_with_arrays_and_grandchildren(session, run) -> No
     parsed = parse("exchange-info", build_response("exchange-info", [symbol]))
     (record,) = records("exchange-info", parsed)
     key = {"connection_id": connection, "snapshot_at": MOMENT}
-    await run(store, "exchange-info", key, record, parsed.body, {"read_to": LATER})
+    await run(store, "exchange-info", key, record, {"read_to": LATER})
     sets = (
         await session.execute(
             text(
@@ -414,7 +425,7 @@ async def test_store_a_map_keeps_the_asset_as_the_key(session, run) -> None:
     found = records("asset-detail", parsed)
     assert len(found) == 1
     key = {"connection_id": connection, "snapshot_at": MOMENT}
-    await run(store, "asset-detail", key, found[0], parsed.body, {"read_to": LATER})
+    await run(store, "asset-detail", key, found[0], {"read_to": LATER})
     assert await session.scalar(text("select asset from finance.binance_asset_detail")) == "AAA"
 
 
@@ -428,7 +439,7 @@ async def test_store_a_record_updates_it_in_place_and_prunes_children(session, r
             "balances": [{"asset": a, "free": "1", "locked": "0"} for a in balances],
             "totalAssetOfBtc": "1.5",
         }
-        return await run(store, "snapshot", key, row, None)
+        return await run(store, "snapshot", key, row)
 
     assert await snapshot("AAA", "BBB") is True
     assert await snapshot("AAA", "BBB") is False
@@ -446,7 +457,7 @@ async def test_a_record_with_no_id_is_keyed_by_hash_and_occurrence(session, run)
     digest = content_hash(row)
     for occurrence in (0, 1):
         key = {"connection_id": connection, "content_hash": digest, "occurrence": occurrence}
-        assert await run(store, "earn-flexible-rewards", key, row, None) is True
+        assert await run(store, "earn-flexible-rewards", key, row) is True
     assert (
         await session.scalar(text("select count(*) from finance.binance_earn_flexible_rewards"))
         == 2
@@ -458,10 +469,10 @@ async def test_a_record_is_keyed_by_the_connection_and_its_id(session, run) -> N
     second = await _connection(run)
     row = build_row("deposits")
     for connection in (first, second):
-        assert await run(store, "deposits", {"connection_id": connection}, row, None) is True
+        assert await run(store, "deposits", {"connection_id": connection}, row) is True
     assert await session.scalar(text("select count(*) from finance.binance_deposits")) == 2
     changed = {**row, "status": 1}
-    assert await run(store, "deposits", {"connection_id": first}, changed, None) is True
+    assert await run(store, "deposits", {"connection_id": first}, changed) is True
     assert await session.scalar(text("select count(*) from finance.binance_deposits")) == 2
     status = await session.scalar(
         text("select status from finance.binance_deposits where connection_id = :c"), {"c": first}
@@ -482,8 +493,112 @@ async def test_every_label_with_a_table_can_be_stored(session, run) -> None:
         if "content_hash" in layout.layout(label)[0].key:
             key |= {"content_hash": content_hash(parsed.rows[0]), "occurrence": 0}
         for row in records(label, parsed):
-            await run(store, label, key, row, parsed.body, system)
+            await run(store, label, key, row, system)
         count = await session.scalar(
             text(f"select count(*) from finance.{layout.table_name(label)}")
         )
         assert count == 1, label
+
+
+# What a response says beside its records is the response's, not the row's.
+
+
+def _dividends(total: int) -> tuple[dict, object]:
+    row = build_row("dividends")
+    body = build_response("dividends", [row])
+    assert isinstance(body, dict)
+    body["total"] = total
+    return row, body
+
+
+async def test_a_row_seen_in_another_response_is_unchanged(session, run) -> None:
+    connection = await _connection(run)
+    key = {"connection_id": connection}
+    row, first = _dividends(1)
+    assert await run(store, "dividends", key, row) is True
+    window = (MOMENT, LATER)
+    assert await run(store_response, connection, "dividends", first, window=window) is True
+    # The same row comes back under another window and a different total.
+    _, second = _dividends(40)
+    later = (LATER, LATER.replace(day=21))
+    assert await run(store, "dividends", key, row) is False
+    assert await run(store_response, connection, "dividends", second, window=later) is True
+    rows = (await session.execute(text("select * from finance.binance_dividends"))).all()
+    assert len(rows) == 1 and "total" not in rows[0]._mapping
+    totals = (
+        await session.scalars(
+            text("select total from finance.binance_dividends_responses order by window_from")
+        )
+    ).all()
+    assert totals == [1, 40]
+
+
+async def test_the_same_request_updates_its_response_in_place(session, run) -> None:
+    connection = await _connection(run)
+    window = (MOMENT, LATER)
+    _, body = _dividends(1)
+    assert await run(store_response, connection, "dividends", body, window=window) is True
+    assert await run(store_response, connection, "dividends", body, window=window) is False
+    _, changed = _dividends(2)
+    assert await run(store_response, connection, "dividends", changed, window=window) is True
+    assert await run(store_response, connection, "dividends", changed, window=window, page=1)
+    count = await session.scalar(text("select count(*) from finance.binance_dividends_responses"))
+    assert count == 2
+    first = await session.scalar(
+        text("select total from finance.binance_dividends_responses where page = 0")
+    )
+    assert first == 2
+
+
+async def test_a_history_response_types_every_envelope_field(session, run) -> None:
+    connection = await _connection(run)
+    body = build_response("convert", [build_row("convert")])
+    assert isinstance(body, dict)
+    await run(store_response, connection, "convert", body, window=(MOMENT, LATER))
+    row = (await session.execute(text("select * from finance.binance_convert_responses"))).one()
+    assert row.start_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
+    assert row.limit == body["limit"] and row.more_data is body["moreData"]
+    assert row.end_time is not None
+
+
+async def test_a_report_response_is_keyed_by_the_read(session, run) -> None:
+    connection = await _connection(run)
+    body = build_response("earn-flexible-position", [build_row("earn-flexible-position")])
+    with pytest.raises(ValueError, match="read"):
+        await run(store_response, connection, "earn-flexible-position", body)
+    read = (MOMENT, LATER)
+    assert await run(store_response, connection, "earn-flexible-position", body, read=read)
+    assert not await run(store_response, connection, "earn-flexible-position", body, read=read)
+    row = (
+        await session.execute(
+            text("select * from finance.binance_earn_flexible_position_responses")
+        )
+    ).one()
+    assert (row.snapshot_at, row.read_to, row.total) == (MOMENT, LATER, 1)
+
+
+async def test_a_label_without_envelope_fields_has_no_response(run) -> None:
+    connection = await _connection(run)
+    body = build_response("deposits", [build_row("deposits")])
+    assert await run(store_response, connection, "deposits", body) is False
+
+
+async def test_every_decimal_column_refuses_non_finite_numbers(session) -> None:
+    constraints = (
+        await session.scalars(
+            text(
+                "select pg_get_constraintdef(oid) from pg_constraint where contype = 'c'"
+                " and conrelid::regclass::text like 'finance.binance\\_%'"
+            )
+        )
+    ).all()
+    checks = " ".join(constraints)
+    models = [model_of(t.name) for label in layout.TABLE_LABELS for t in layout.layout(label)]
+    for model in models:
+        for column in _table(model).columns:
+            if _compile(column) in ("numeric", "numeric[]"):
+                found = [
+                    c for c in constraints if re.search(rf"\b{column.name}\b", c) and "NaN" in c
+                ]
+                assert found, (_table(model).name, column.name)
+    assert checks

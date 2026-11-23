@@ -4,9 +4,10 @@ kinds M7 adds.
 Every response field of the Phase A endpoints is a typed column of a `finance.binance_*` table
 (plan Decision 3, design 5.3): a record table per history label (keyed by Binance's own id and
 linked to its ledger transaction), a report table per balance, position, account or reference
-label (keyed by `snapshot_at`, with the `read_to` of the read), and a child table per array of
-objects or map. The CREATE TABLE statements were emitted once from the catalogue and are frozen
-here: this migration never imports it.
+label (keyed by `snapshot_at`, with the `read_to` of the read), a child table per array of
+objects or map, and a `_responses` table for what a response says beside its records (`total`,
+`moreData`: they describe the request and the page, not a row). The CREATE TABLE statements were
+emitted once from the catalogue and are frozen here: this migration never imports it.
 
 `binance_assets_seen` is the set of assets a connection has shown, which later syncs use to
 choose the trade symbols to ask for. The `binance_asset` instrument scheme and the
@@ -378,7 +379,6 @@ _TABLES = [
       "cumulative_total_rewards" numeric
         CHECK ("cumulative_total_rewards" NOT IN ('NaN', 'Infinity', '-Infinity')),
       "auto_subscribe" boolean,
-      "total" bigint,
       PRIMARY KEY ("connection_id", "snapshot_at", "product_id")
     )
     """,
@@ -398,11 +398,18 @@ _TABLES = [
     )
     """,
     """
+    CREATE TABLE finance.binance_earn_flexible_position_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "snapshot_at" timestamptz NOT NULL,
+      "read_to" timestamptz NOT NULL,
+      "total" bigint,
+      PRIMARY KEY ("connection_id", "snapshot_at")
+    )
+    """,
+    """
     CREATE TABLE finance.binance_snapshot (
       "connection_id" uuid NOT NULL REFERENCES core.connections (id),
       "transaction_id" uuid REFERENCES finance.transactions (id) ON DELETE SET NULL,
-      "code" bigint,
-      "msg" text,
       "type" text NOT NULL,
       "update_time" timestamptz NOT NULL,
       "data_total_asset_of_btc" numeric
@@ -501,6 +508,17 @@ _TABLES = [
         REFERENCES finance.binance_snapshot
           ("connection_id", "type", "update_time")
         ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE finance.binance_snapshot_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "code" bigint,
+      "msg" text,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
     )
     """,
     """
@@ -688,10 +706,6 @@ _TABLES = [
       "order_type" text,
       "side" text,
       "wallet_type" text,
-      "start_time" timestamptz,
-      "end_time" timestamptz,
-      "limit" bigint,
-      "more_data" boolean,
       PRIMARY KEY ("connection_id", "order_id")
     )
     """,
@@ -699,6 +713,19 @@ _TABLES = [
     CREATE INDEX binance_convert_transaction_idx
       ON finance.binance_convert (transaction_id)
       WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE finance.binance_convert_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "start_time" timestamptz,
+      "end_time" timestamptz,
+      "limit" bigint,
+      "more_data" boolean,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
+    )
     """,
     """
     CREATE TABLE finance.binance_dividends (
@@ -712,7 +739,6 @@ _TABLES = [
       "en_info" text,
       "tran_id" text,
       "direction" bigint,
-      "total" bigint,
       PRIMARY KEY ("connection_id", "id")
     )
     """,
@@ -720,6 +746,16 @@ _TABLES = [
     CREATE INDEX binance_dividends_transaction_idx
       ON finance.binance_dividends (transaction_id)
       WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE finance.binance_dividends_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "total" bigint,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
+    )
     """,
     """
     CREATE TABLE finance.binance_earn_flexible_subscriptions (
@@ -738,7 +774,6 @@ _TABLES = [
       "amt_from_funding" numeric
         CHECK ("amt_from_funding" NOT IN ('NaN', 'Infinity', '-Infinity')),
       "status" text,
-      "total" bigint,
       PRIMARY KEY ("connection_id", "purchase_id")
     )
     """,
@@ -746,6 +781,16 @@ _TABLES = [
     CREATE INDEX binance_earn_flexible_subscriptions_transaction_idx
       ON finance.binance_earn_flexible_subscriptions (transaction_id)
       WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE finance.binance_earn_flexible_subscriptions_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "total" bigint,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
+    )
     """,
     """
     CREATE TABLE finance.binance_earn_flexible_redemptions (
@@ -759,7 +804,6 @@ _TABLES = [
       "redeem_id" text NOT NULL,
       "dest_account" text,
       "status" text,
-      "total" bigint,
       PRIMARY KEY ("connection_id", "redeem_id")
     )
     """,
@@ -767,6 +811,16 @@ _TABLES = [
     CREATE INDEX binance_earn_flexible_redemptions_transaction_idx
       ON finance.binance_earn_flexible_redemptions (transaction_id)
       WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE finance.binance_earn_flexible_redemptions_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "total" bigint,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
+    )
     """,
     """
     CREATE TABLE finance.binance_earn_flexible_rewards (
@@ -780,7 +834,6 @@ _TABLES = [
       "product_id" text,
       "type" text,
       "time" timestamptz NOT NULL,
-      "total" bigint,
       "dividend_id" text,
       PRIMARY KEY ("connection_id", "content_hash", "occurrence")
     )
@@ -789,6 +842,16 @@ _TABLES = [
     CREATE INDEX binance_earn_flexible_rewards_transaction_idx
       ON finance.binance_earn_flexible_rewards (transaction_id)
       WHERE transaction_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE finance.binance_earn_flexible_rewards_responses (
+      "connection_id" uuid NOT NULL REFERENCES core.connections (id),
+      "window_from" timestamptz NOT NULL,
+      "window_to" timestamptz NOT NULL,
+      "page" integer NOT NULL,
+      "total" bigint,
+      PRIMARY KEY ("connection_id", "window_from", "window_to", "page")
+    )
     """,
     """
     CREATE TABLE finance.binance_my_trades (
@@ -865,21 +928,28 @@ UPGRADE = [
 _DROPPED = [
     "binance_assets_seen",
     "binance_my_trades",
+    "binance_earn_flexible_rewards_responses",
     "binance_earn_flexible_rewards",
+    "binance_earn_flexible_redemptions_responses",
     "binance_earn_flexible_redemptions",
+    "binance_earn_flexible_subscriptions_responses",
     "binance_earn_flexible_subscriptions",
+    "binance_dividends_responses",
     "binance_dividends",
+    "binance_convert_responses",
     "binance_convert",
     "binance_withdrawals",
     "binance_deposits",
     "binance_asset_detail",
     "binance_coin_config_network_list",
     "binance_coin_config",
+    "binance_snapshot_responses",
     "binance_snapshot_data_user_assets",
     "binance_snapshot_data_position",
     "binance_snapshot_data_balances",
     "binance_snapshot_data_assets",
     "binance_snapshot",
+    "binance_earn_flexible_position_responses",
     "binance_earn_flexible_position_tier_annual_percentage_rate",
     "binance_earn_flexible_position",
     "binance_earn_account",
