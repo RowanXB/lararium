@@ -353,7 +353,8 @@ async def test_a_run_with_nothing_to_fetch_still_drops_superseded_rates(
     await ibkr_rate(run, gbp, eur, "1.15", DAY)
     requested.clear()
     async with client(handler) as http:
-        assert await run_fetch_ecb_rates(sessions, http, DAY) == 0
+        # A run dated the day before: the marker (yesterday) leaves nothing to fetch.
+        assert await run_fetch_ecb_rates(sessions, http, DAY - timedelta(days=1)) == 0
     assert requested == []
     assert [r.source for r in await rows(session)] == ["ibkr"]
 
@@ -422,4 +423,26 @@ async def test_days_covered_by_other_sources_are_not_refetched(
     requested.clear()
     async with client(handler) as http:
         await run_fetch_ecb_rates(sessions, http, DAY + timedelta(days=1))
-    assert requested == ["/v1/2026-11-11..2026-11-11"]
+    # The marker stops at yesterday, so the next run starts at DAY, never before it.
+    assert requested == ["/v1/2026-11-10..2026-11-11"]
+
+
+async def test_a_rate_not_yet_published_today_is_fetched_the_next_day(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    published = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not published:
+            return httpx.Response(200, text=frankfurter({}))
+        return answer(request)
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 10))
+    async with client(handler) as http:
+        assert await run_fetch_ecb_rates(sessions, http, DAY) == 0  # not yet published
+    assert await rows(session, "ecb") == []
+    published = True
+    async with client(handler) as http:
+        assert await run_fetch_ecb_rates(sessions, http, DAY + timedelta(days=1)) == 1
+    assert [r.as_of_date for r in await rows(session, "ecb")] == [DAY]

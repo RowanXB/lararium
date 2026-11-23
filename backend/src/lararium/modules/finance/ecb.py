@@ -240,6 +240,9 @@ async def run_fetch_ecb_rates(
         ):
             written += await store_rates(ctx, rates)
             await drop_superseded(ctx)
-            await set_setting(ctx, FETCHED_THROUGH_KEY, end.isoformat())
+            # Never past yesterday: the ECB may not have published today's rate yet, and a
+            # rate that is stored is skipped by the next run anyway (it starts after it).
+            marked = min(end, today - timedelta(days=1))
+            await set_setting(ctx, FETCHED_THROUGH_KEY, marked.isoformat())
         start = end + timedelta(days=1)
     return written
