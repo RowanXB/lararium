@@ -4,11 +4,23 @@ they are published (design 5.13 and 5.14)."""
 import uuid
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import text
 
+from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import get_connection
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance.accounts import create_account
+from lararium.modules.finance.binance.parse import BinanceDataError
+from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
+from lararium.modules.finance.system_accounts import get_or_create_system_account
+from lararium.modules.finance.transfers import (
+    find_transfer_violations,
+    heal_transfers,
+    pair_records,
+)
+from lararium.modules.finance.transfers.queries import list_transfers
 
 from .fixtures import BASE_TIME_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import (
@@ -185,13 +197,80 @@ async def test_failed_withdrawal_is_refunded_not_voided(session, run) -> None:
         ("Unassigned", "AAA", Decimal("-2.1")),
     ]
     assert (await transaction(session, f"{key}:refund")).occurred_at == at(refunded_ms)
-    # Only the refund changed the ledger (the contra was already Unassigned).
-    assert {moment for _, _, moment in report.touched} == {at(refunded_ms)}
+    # The withdrawal (now marked as no transfer) and the refund changed the ledger.
+    assert {moment for _, _, moment in report.touched} == {at(BASE_TIME_MS), at(refunded_ms)}
     assert await holdings(session, connection.id) == {}
     [row] = await typed(session, "binance_withdrawals", connection.id)
     assert row.status == 5
     assert row.transaction_id == (await transaction(session, key)).id
     await assert_balanced_and_quiet(session, connection.id)
+
+
+async def test_a_paired_withdrawal_that_fails_is_no_transfer(session, run) -> None:
+    connection = await binance_connection(run)
+    processing = _withdrawal(4, completeTime=None)
+    await normalize_rows(session, connection.id, ("withdrawals", [processing]))
+    key = f"withdrawal:{processing['id']}"
+    sent = await transaction(session, key)
+    instrument_id = await session.scalar(
+        text("select instrument_id from finance.postings where transaction_id = :t limit 1"),
+        {"t": sent.id},
+    )
+    wallet = await run(
+        create_account,
+        name="Own wallet",
+        ledger_type="asset",
+        subtype="other",
+        balance_mode="hybrid",
+    )
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    received = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=at(BASE_TIME_MS + HOUR_MS),
+            description="Hand entered",
+            origin="manual",
+            postings=[
+                PostingInput(wallet.id, instrument_id, Decimal(2)),
+                PostingInput(unassigned, instrument_id, Decimal(-2)),
+            ],
+        ),
+    )
+    # The owner pairs the withdrawal with the wallet's deposit.
+    await run(pair_records, sent.id, received.id)
+    assert ("In transit", "AAA") in {(p[0], p[1]) for p in await postings(session, key)}
+
+    failed = _withdrawal(5, completeTime=_text_time(BASE_TIME_MS + 2 * HOUR_MS))
+    await normalize_rows(session, connection.id, ("withdrawals", [failed]))
+    await _heal(session)
+
+    matched = [
+        t
+        for t in await list_transfers(session)
+        if t.status == "matched" and sent.id in (t.out_transaction_id, t.in_transaction_id)
+    ]
+    assert matched == []
+    derived = await session.scalar(
+        text("select count(*) from finance.transactions where origin in ('inference', 'rule')")
+    )
+    assert derived == 0
+    assert plain(await postings(session, key)) == [
+        ("Binance Spot", "AAA", Decimal(-2)),
+        ("Unassigned", "AAA", Decimal(2)),
+    ]
+    assert len(await postings(session, f"{key}:refund")) == 3
+    found = await holdings(session, connection.id)
+    assert ("Binance Spot", "AAA") not in found  # out 2.1, back 2.1
+    assert await find_transfer_violations(session) == []
+    assert await _heal(session) == 0
+    await assert_balanced_and_quiet(session, connection.id)
+
+
+async def _heal(session) -> int:
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        return await heal_transfers(ctx)
 
 
 async def test_refund_with_no_time_is_dated_when_the_sync_read_the_balances(session, run) -> None:
@@ -206,6 +285,12 @@ async def test_refund_with_no_time_is_dated_when_the_sync_read_the_balances(sess
 
     refund = await transaction(session, f"withdrawal:{failed['id']}:refund")
     assert refund.occurred_at == at(read_ms)
+    # Regenerating finds the same reads, so the same time.
+    await run_normalize(session, connection.id, again=True)
+    assert (await transaction(session, f"withdrawal:{failed['id']}:refund")).occurred_at == at(
+        read_ms
+    )
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 async def _balance_read(session, connection_id, read_from_ms: int):
@@ -253,6 +338,7 @@ async def test_onchain_hash_is_typed(session, run) -> None:
     assert found["2001"] == ("Off-chain transfer 123", None, False)
     [withdrawn] = await typed(session, "binance_withdrawals", connection.id)
     assert (withdrawn.tx_hash, withdrawn.is_onchain) == ("cd" * 32, True)
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 async def test_unknown_status_is_typed_flagged_and_not_posted(session, run) -> None:
@@ -310,3 +396,31 @@ async def test_flags_are_stored_and_notified_once(
         {"c": connection.id},
     )
     assert count == 1
+
+
+@pytest.mark.parametrize("record_id", ["", "1:fee", "a:b:c"])
+async def test_an_id_that_could_share_a_key_fails_naming_the_field(
+    session, run, record_id: str
+) -> None:
+    connection = await binance_connection(run)
+
+    row = _withdrawal(6, id=record_id)
+
+    with pytest.raises(BinanceDataError) as caught:
+        await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    assert caught.value.field == "[].id"
+    if record_id:
+        assert record_id not in str(caught.value)
+
+
+async def test_a_field_name_only_a_plain_one_is_flagged_by_name(session, run) -> None:
+    connection = await binance_connection(run)
+    row = {**_deposit(1), "plain_Name.x1": "v", "odd name!": "v", "x" * 65: "v"}
+
+    report = await normalize_rows(session, connection.id, ("deposits", [row]))
+
+    assert report.new_flags == [
+        "deposits.<other field> (a field the catalogue does not list)",
+        "deposits.plain_Name.x1 (a field the catalogue does not list)",
+    ]

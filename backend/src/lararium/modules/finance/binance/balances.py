@@ -24,7 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.commands import CommandContext
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import ConnectionRecord, get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
@@ -142,21 +142,29 @@ async def read_balances(client: BinanceClient, labels: Sequence[str]) -> dict[st
 
 
 async def store_read(ctx: SyncContext, read: Read) -> UUID:
-    """The read as one raw record. Its bracket is in the content too: two reads with the same
-    answer are two reads, each with its own cutoff."""
+    """The read as one raw record, committed in a transaction of its own, as a window's
+    records are: it is what the sync saw, whatever fails later, and the normaliser dates a
+    refund Binance gives no time for by the sync's reads (`Run.report_time`). Its bracket is
+    in the content too: two reads with the same answer are two reads, each with its own
+    cutoff."""
     bracket: dict[str, JSONValue] = {
         "read_from_ms": millis(read.read_from),
         "read_to_ms": millis(read.read_to),
     }
-    return await store_raw_record(
-        ctx.command,
-        connection_id=ctx.connection.id,
-        record_type=record_type(read.label),
-        request=bracket,
-        content={**bracket, "body": read.body},
-        connector_version=VERSION,
-        sync_id=ctx.sync_id,
-    )
+    args: dict[str, JSONValue] = {"connection_id": str(ctx.connection.id), "label": read.label}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.read", args) as cmd,
+    ):
+        return await store_raw_record(
+            cmd,
+            connection_id=ctx.connection.id,
+            record_type=record_type(read.label),
+            request=bracket,
+            content={**bracket, "body": read.body},
+            connector_version=VERSION,
+            sync_id=ctx.sync_id,
+        )
 
 
 # When a movement falls into a read.

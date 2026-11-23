@@ -143,6 +143,7 @@ def connector_tx(
         bank_transfer: bool = True,
         status: TransactionStatus = "booked",
         description: str = "Transfer",
+        never_transfer: bool = False,
     ) -> TransactionRecord:
         contra = await transfer_contra(
             session,
@@ -150,6 +151,7 @@ def connector_tx(
             own_account_id=bank.account.id,
             counterparty_identifier_id=identifier_id,
             other_postings=0,
+            never_transfer=never_transfer,
         )
         amount = Decimal(quantity)
         record, _ = await run(
@@ -166,7 +168,10 @@ def connector_tx(
                     PostingInput(contra, gbp.id, -amount),
                 ],
                 counterparty=CounterpartyFields(
-                    identifier_id=identifier_id, name="Test Owner", bank_transfer=bank_transfer
+                    identifier_id=identifier_id,
+                    name="Test Owner",
+                    bank_transfer=bank_transfer,
+                    never_transfer=never_transfer,
                 ),
             ),
         )

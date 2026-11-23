@@ -120,6 +120,15 @@ async def test_trade_beyond_rounding_fails_naming_its_key(session, run) -> None:
     assert "12.34" not in message and "100" not in message.replace(str(row["id"]), "")
 
 
+async def test_a_price_with_a_positive_exponent_allows_no_more_rounding(session, run) -> None:
+    connection = await _connection(run)
+    # 1E+3 is exact to the unit: 1001 against 1000 is beyond rounding.
+    row = _trade(0, buyer=True, qty="1", price="1E+3", quote_qty="1001")
+
+    with pytest.raises(BinanceRecordError):
+        await normalize_rows(session, connection.id, ("my-trades", [row]))
+
+
 async def test_trade_of_an_unlisted_symbol_is_flagged(session, run) -> None:
     connection = await _connection(run)
     row = _trade(0, buyer=True, qty="1", price="1", quote_qty="1", symbol="CCCDDD")
@@ -240,4 +249,4 @@ async def test_regenerate_gives_the_same_ledger(session, run) -> None:
 
     assert report.records == 8
     assert await ledger(session, connection.id) == before
-    assert await find_unbalanced_transactions(session) == []
+    await assert_balanced_and_quiet(session, connection.id)

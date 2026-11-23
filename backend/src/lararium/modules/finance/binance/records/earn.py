@@ -7,6 +7,7 @@ Earn; one Binance paid out as an asset dividend is linked to it instead (rule 3,
 `normalize.link_payouts`), so its posting is removed there.
 """
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -114,21 +115,14 @@ async def linked(run: Run) -> bool:
     return found is not None
 
 
-async def flexible_reward(run: Run, row: Row) -> None:
-    """`+rewards` on Earn against Unassigned, of every type; a reward `link_payouts` has
-    linked to its dividend posts nothing."""
-    key = run.record.key
-    if await linked(run):
-        await remove(run, key)
-        await run.typed(transaction_id=None)
-        return
-    coin = text(row, "asset") or ""
+async def post_reward(
+    run: Run, key: str, coin: str, quantity: Decimal, occurred_at: datetime
+) -> UUID | None:
+    """`+rewards` on Earn against Unassigned."""
     instrument_id = await run.asset(coin)
-    quantity = amount(REWARDS, row, "rewards")
-    occurred_at = when(REWARDS, row, "time")
-    if instrument_id is None or quantity is None or occurred_at is None:
-        return
-    transaction_id = await post(
+    if instrument_id is None:
+        return None
+    return await post(
         run,
         key,
         occurred_at=occurred_at,
@@ -138,4 +132,18 @@ async def flexible_reward(run: Run, row: Row) -> None:
             PostingInput(run.unassigned, instrument_id, -quantity),
         ],
     )
+
+
+async def flexible_reward(run: Run, row: Row) -> None:
+    """A reward of any type; one `link_payouts` has linked to its dividend posts nothing."""
+    key = run.record.key
+    if await linked(run):
+        await remove(run, key)
+        await run.typed(transaction_id=None)
+        return
+    quantity = amount(REWARDS, row, "rewards")
+    occurred_at = when(REWARDS, row, "time")
+    if quantity is None or occurred_at is None:
+        return
+    transaction_id = await post_reward(run, key, text(row, "asset") or "", quantity, occurred_at)
     await run.typed(transaction_id=transaction_id)

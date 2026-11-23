@@ -111,6 +111,9 @@ class Transaction(Base):
     counterparty_name: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The source says this movement was not a transfer (a withdrawal that failed after it
+    # left the balance), so it is never a transfer's leg.
+    never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(

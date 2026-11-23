@@ -28,6 +28,7 @@ from lararium.core.connections import (
 from lararium.core.json_types import JSONValue
 from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
+from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import CURSORS_KEY, record_type
 from lararium.modules.finance.binance.layout import TABLE_LABELS, layout
@@ -400,6 +401,80 @@ async def test_first_sync_resumes(
         assert after.config[CURSORS_KEY][interrupted]["complete"] is True
         stored = await _count(sessions, connection_id, record_type(interrupted))
         assert stored == 1
+    finally:
+        if connection_id is not None:
+            await _delete(engine, owner_url, connection_id, system_before)
+        await engine.dispose()
+
+
+async def test_a_flag_is_told_after_a_sync_that_failed_later(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Committed for real: the normaliser's run commits on its own, the sync's rolls back.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id: uuid.UUID | None = None
+    system_before = await _system_accounts(owner_url)
+    at = NOW_MS - 2 * HOUR_MS
+    row = build_row("deposits", status=1, walletType=0, insertTime=at, completeTime=at, coin="AAA")
+    fake.add("deposits", {**row, "extraField": "secret-value-4242"})
+    flag = "deposits.extraField (a field the catalogue does not list)"
+    notifier = RecordingNotifier()
+    real_opening = sync_module.opening
+
+    async def broken(ctx) -> None:
+        raise RuntimeError("a later step failed")
+
+    async def sync() -> Any:
+        async with sessions() as session:
+            return await run_binance_sync(
+                session, connection_id, fake.handler, notifier=notifier, session_factory=sessions
+            )
+
+    try:
+        async with (
+            sessions() as setup,
+            command_context(setup, Actor("user", "dev"), "test.setup", {}) as ctx,
+        ):
+            connection = await create_connection(
+                ctx,
+                connector="binance",
+                display_name=f"Binance {uuid.uuid4()}",
+                config={"key_type": "hmac", "uid": UID, **later_config()},
+            )
+            connection_id = connection.id
+            await store_credential(ctx, KEY, connection_id, "api_key", API_KEY, None)
+            await store_credential(ctx, KEY, connection_id, "api_secret", API_SECRET, None)
+            await ctx.session.execute(
+                text("update core.connections set status = 'healthy' where id = :id"),
+                {"id": connection_id},
+            )
+        monkeypatch.setattr(sync_module, "opening", broken)
+
+        failed = await sync()
+
+        assert failed.status == "failing"
+        # The run that found the flag committed it as known; nothing was told yet.
+        assert failed.config["flags"] == [flag]
+        assert notifier.messages == []
+
+        monkeypatch.setattr(sync_module, "opening", real_opening)
+        clock.ms += 5 * HOUR_MS
+        told = await sync()
+        clock.ms += 5 * HOUR_MS
+        again = await sync()
+
+        assert told.status == again.status == "healthy", again.last_error
+        # Besides the worker's own "has recovered" message.
+        [message] = [m for m in notifier.messages if "flagged" in m]
+        assert flag in message and "secret-value" not in message
+        assert "pending_flags" not in again.config
     finally:
         if connection_id is not None:
             await _delete(engine, owner_url, connection_id, system_before)

@@ -173,11 +173,12 @@ class Run:
     async def report_time(self) -> datetime:
         """When the sync that first stored the current record read the balances (the start of
         its earliest read): a refund Binance gives no time for is dated there, at or before
-        every snapshot that sync cut. The sync's own reads may not be committed yet, so they
-        are read through its session."""
+        every snapshot that sync cut. Reads are committed as they are made (`store_read`), so
+        a run and `regenerate` find the same ones; a record no sync's read goes with (one
+        stored by hand) is dated when it was stored."""
         record = self.record.record
         r = core_models.RawRecord
-        first = await self.ctx.command.session.scalar(
+        first = await self.session.scalar(
             select(func.min(r.content["read_from_ms"].astext.cast(BigInteger))).where(
                 r.connection_id == self.connection.id,
                 r.sync_id == record.sync_id,
@@ -288,6 +289,7 @@ async def post(
     description: str,
     postings: Sequence[PostingInput],
     counterparty_identifier_id: UUID | None = None,
+    never_transfer: bool = False,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
     postings it creates, changes or removes; its id. A zero posting is left out (the ledger
@@ -315,7 +317,9 @@ async def post(
             origin="connector",
             connection_id=run.connection.id,
             external_id=key,
-            counterparty=CounterpartyFields(identifier_id=counterparty_identifier_id),
+            counterparty=CounterpartyFields(
+                identifier_id=counterparty_identifier_id, never_transfer=never_transfer
+            ),
         ),
     )
     _count(run, outcome)
@@ -375,7 +379,8 @@ async def rounding(
     allowed = tolerance(decimals)
     exponent = price.as_tuple().exponent
     assert isinstance(exponent, int)  # finite
-    allowed += quantity.copy_abs() * Decimal(1).scaleb(exponent) / 2
+    # A price written with a positive exponent (`1E+3`) is still exact to the unit.
+    allowed += quantity.copy_abs() * Decimal(1).scaleb(min(exponent, 0)) / 2
     for instrument_id, residual in compute_residuals(postings).items():
         own = (await get_instrument(run.session, instrument_id)).decimals
         if residual.copy_abs() <= tolerance(own):

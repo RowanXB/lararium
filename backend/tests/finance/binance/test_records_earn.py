@@ -9,6 +9,7 @@ import pytest
 from .fixtures import BASE_TIME_MS, HOUR_MS, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
+    at,
     holdings,
     ingest,
     keys,
@@ -218,3 +219,45 @@ async def test_reward_with_no_dividend_of_its_amount_stays_posted(session, run) 
 
     [row] = await typed(session, "binance_earn_flexible_rewards", connection.id)
     assert row.dividend_id is None and row.transaction_id is not None
+
+
+def _bonus(seq: int, hours: int) -> dict:
+    return _reward(seq, type="BONUS", rewards="0.7", time=BASE_TIME_MS + hours * HOUR_MS)
+
+
+def _dividend_at(hours: int) -> dict:
+    moment = BASE_TIME_MS + hours * HOUR_MS
+    return build_row("dividends", asset="AAA", amount="0.7", direction=1, divTime=moment)
+
+
+async def _links(session, connection_id) -> dict[str, str | None]:
+    return {
+        str(row.time): row.dividend_id
+        for row in await typed(session, "binance_earn_flexible_rewards", connection_id)
+    }
+
+
+# The dividend is at 3 h; the reward that comes second is older (-1 h, farther) or nearer (2 h).
+@pytest.mark.parametrize("second_hours", [-1, 2])
+async def test_links_do_not_depend_on_how_runs_split_the_records(
+    session, run, second_hours: int
+) -> None:
+    first, second, dividend = _bonus(0, 0), _bonus(1, second_hours), _dividend_at(3)
+    together = await binance_connection(run)
+    await normalize_rows(
+        session, together.id, (REWARDS, [first, second]), ("dividends", [dividend])
+    )
+    split = await binance_connection(run)
+    await normalize_rows(session, split.id, (REWARDS, [first]), ("dividends", [dividend]))
+    await normalize_rows(session, split.id, (REWARDS, [second]))
+
+    expected = await _links(session, together.id)
+    nearest = str(at(BASE_TIME_MS + max(0, second_hours) * HOUR_MS))
+    assert expected[nearest] == str(dividend["id"])
+    assert list(expected.values()).count(None) == 1
+    assert await _links(session, split.id) == expected
+    assert await ledger(session, split.id) == await ledger(session, together.id)
+    await run_normalize(session, split.id, again=True)
+    assert await _links(session, split.id) == expected
+    assert await ledger(session, split.id) == await ledger(session, together.id)
+    await assert_balanced_and_quiet(session, split.id)

@@ -1,4 +1,5 @@
-"""Migration 0030 goes down to 0029 and up again, taking what it added and leaving the rest."""
+"""Migration 0030 goes down to 0029 and up again, taking what it added and leaving the rest;
+migration 0031 (`never_transfer`) likewise down to 0030."""
 
 from pathlib import Path
 
@@ -39,5 +40,28 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
             command.upgrade(config, "head")
         with engine.begin() as connection:
             assert connection.execute(text(_TABLES)).scalar() == before
+    finally:
+        engine.dispose()
+
+
+_NEVER_TRANSFER = (
+    "select count(*) from information_schema.columns where table_schema = 'finance'"
+    " and table_name = 'transactions' and column_name = 'never_transfer'"
+)
+
+
+def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> None:
+    config = Config(str(BACKEND / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", owner_url)
+    engine = create_engine(owner_url)
+    try:
+        try:
+            command.downgrade(config, "0030")
+            with engine.begin() as connection:
+                assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 0
+        finally:
+            command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 1
     finally:
         engine.dispose()

@@ -72,13 +72,21 @@ async def _onchain(run: Run, row: Row) -> None:
     await run.typed(tx_hash=found, is_onchain=found is not None)
 
 
-async def _contra(run: Run, key: str, account_id: UUID, identifier_id: UUID | None) -> UUID:
+async def _contra(
+    run: Run,
+    key: str,
+    account_id: UUID,
+    identifier_id: UUID | None,
+    *,
+    never_transfer: bool = False,
+) -> UUID:
     return await transfer_contra(
         run.session,
         source=run.source(key),
         own_account_id=account_id,
         counterparty_identifier_id=identifier_id,
         other_postings=0,
+        never_transfer=never_transfer,
     )
 
 
@@ -128,8 +136,9 @@ async def withdrawal(run: Run, row: Row) -> None:
     fee = amount(WITHDRAWALS, row, "transactionFee") or Decimal(0)
     identifier_id = await counterparty_identifier(run, WITHDRAWALS, row)
     ended = status in _ENDED
-    # An ended withdrawal is no transfer leg any more: its contra is Unassigned.
-    contra = run.unassigned if ended else await _contra(run, key, account_id, identifier_id)
+    # An ended withdrawal was no transfer: marked so, its contra is Unassigned and the
+    # transfer engine dissolves a transfer it was a leg of.
+    contra = await _contra(run, key, account_id, identifier_id, never_transfer=ended)
     transaction_id = await post(
         run,
         key,
@@ -140,6 +149,7 @@ async def withdrawal(run: Run, row: Row) -> None:
             PostingInput(contra, instrument_id, quantity),
         ],
         counterparty_identifier_id=identifier_id,
+        never_transfer=ended,
     )
     await run.typed(transaction_id=transaction_id)
     await post(
