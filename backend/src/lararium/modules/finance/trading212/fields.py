@@ -13,6 +13,7 @@ of that array, when the array is there. Any other path with a value is flagged b
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from lararium.modules.finance.typed_tables import column_map
 
@@ -35,13 +36,14 @@ def _under(prefix: str, names: str) -> str:
     return " ".join(f"{prefix}{name}" for name in names.split())
 
 
+type Kind = Literal["numeric", "text", "timestamptz", "boolean"]
+
 _INSTRUMENT = "instrument.ticker instrument.name instrument.isin instrument.currency"
-_ORDER = f"""id createdAt ticker {_INSTRUMENT} type side status strategy quantity filledQuantity
-value filledValue limitPrice stopPrice timeInForce currency extendedHours initiatedFrom"""
-_FILL = """id filledAt price quantity tradingMethod type walletImpact.currency walletImpact.fxRate
-walletImpact.netValue walletImpact.realisedProfitLoss"""
-_TAXES = "fill.walletImpact.taxes[]"
+_ORDER_NUMERIC = "id quantity filledQuantity value filledValue limitPrice stopPrice"
+_ORDER_TEXT = f"""ticker {_INSTRUMENT} type side status strategy timeInForce currency
+initiatedFrom"""
 _RESULT = "priceAvgInvestedValue priceAvgResult priceAvgResultCoef priceAvgValue"
+_TAXES = "fill.walletImpact.taxes[]"
 _SCHEDULES = "workingSchedules[]"
 _TIME_EVENTS = "workingSchedules[].timeEvents[]"
 _PIE_INSTRUMENTS = "instruments[]"
@@ -51,119 +53,144 @@ _PIE_SHARES = "settings.instrumentShares{}"
 # A map's entry: (the key's field, the value's field).
 MAP_ENTRIES: Mapping[str, tuple[str, str]] = {_PIE_SHARES: ("ticker", "share")}
 
-ENDPOINTS: Mapping[str, EndpointSpec] = {
-    "summary": EndpointSpec(
+
+def _endpoint(
+    record_type: str,
+    table: str,
+    required: str,
+    *,
+    numeric: str = "",
+    text: str = "",
+    timestamptz: str = "",
+    boolean: str = "",
+    children: Mapping[str, str] | None = None,
+) -> tuple[EndpointSpec, dict[str, Kind]]:
+    """An endpoint's spec and each known path's kind; the known paths are those given a kind."""
+    declared: dict[Kind, str] = {
+        "numeric": numeric,
+        "text": text,
+        "timestamptz": timestamptz,
+        "boolean": boolean,
+    }
+    kinds: dict[str, Kind] = {}
+    for kind, paths in declared.items():
+        for path in paths.split():
+            if kinds.setdefault(path, kind) != kind:
+                raise ValueError(f"{record_type} declares {path} twice")
+    spec = EndpointSpec(record_type, table, _f(required), frozenset(kinds), children or {})
+    return spec, kinds
+
+
+_DECLARED: Mapping[str, tuple[EndpointSpec, dict[str, Kind]]] = {
+    "summary": _endpoint(
         "trading212.summary",
         "trading212_accounts",
-        _f("id currency cash.availableToTrade cash.reservedForOrders cash.inPies"),
-        _f(
-            """id currency totalValue cash.availableToTrade cash.reservedForOrders cash.inPies
-            investments.currentValue investments.totalCost investments.realizedProfitLoss
-            investments.unrealizedProfitLoss"""
-        ),
-        {},
+        "id currency cash.availableToTrade cash.reservedForOrders cash.inPies",
+        numeric="""id totalValue cash.availableToTrade cash.reservedForOrders cash.inPies
+        investments.currentValue investments.totalCost investments.realizedProfitLoss
+        investments.unrealizedProfitLoss""",
+        text="currency",
     ),
-    "positions": EndpointSpec(
+    "positions": _endpoint(
         "trading212.position",
         "trading212_positions",
-        _f("instrument.ticker instrument.isin instrument.currency quantity"),
-        _f(
-            f"""{_INSTRUMENT} quantity quantityAvailableForTrading quantityInPies
-            averagePricePaid currentPrice createdAt walletImpact.currency walletImpact.totalCost
-            walletImpact.currentValue walletImpact.unrealizedProfitLoss walletImpact.fxImpact"""
-        ),
-        {},
+        "instrument.ticker instrument.isin instrument.currency quantity",
+        numeric="""quantity quantityAvailableForTrading quantityInPies averagePricePaid
+        currentPrice walletImpact.totalCost walletImpact.currentValue
+        walletImpact.unrealizedProfitLoss walletImpact.fxImpact""",
+        text=f"{_INSTRUMENT} walletImpact.currency",
+        timestamptz="createdAt",
     ),
-    "pending_orders": EndpointSpec(
+    "pending_orders": _endpoint(
         "trading212.pending_order",
         "trading212_pending_orders",
-        _f("id ticker side status"),
-        _f(_ORDER),
-        {},
+        "id ticker side status",
+        numeric=_ORDER_NUMERIC,
+        text=_ORDER_TEXT,
+        timestamptz="createdAt",
+        boolean="extendedHours",
     ),
-    "orders": EndpointSpec(
+    "orders": _endpoint(
         "trading212.order",
         "trading212_orders",
-        _f(
-            f"""order.id order.side order.status order.instrument.ticker order.instrument.isin
-            order.instrument.currency {_under(f"{_TAXES}.", "name quantity currency")}"""
-        ),
-        _f(
-            f"""{_under("order.", _ORDER)} {_under("fill.", _FILL)}
-            {_under(f"{_TAXES}.", "name quantity currency chargedAt")}"""
-        ),
-        {_TAXES: "trading212_order_taxes"},
+        f"""order.id order.side order.status order.instrument.ticker order.instrument.isin
+        order.instrument.currency {_under(f"{_TAXES}.", "name quantity currency")}""",
+        numeric=f"""{_under("order.", _ORDER_NUMERIC)} fill.id fill.price fill.quantity
+        fill.walletImpact.fxRate fill.walletImpact.netValue fill.walletImpact.realisedProfitLoss
+        {_TAXES}.quantity""",
+        text=f"""{_under("order.", _ORDER_TEXT)} fill.tradingMethod fill.type
+        fill.walletImpact.currency {_under(f"{_TAXES}.", "name currency")}""",
+        timestamptz=f"order.createdAt fill.filledAt {_TAXES}.chargedAt",
+        boolean="order.extendedHours",
+        children={_TAXES: "trading212_order_taxes"},
     ),
-    "dividends": EndpointSpec(
+    "dividends": _endpoint(
         "trading212.dividend",
         "trading212_dividends",
-        _f(
-            """reference amount currency paidOn instrument.ticker instrument.isin
-            instrument.currency"""
-        ),
-        _f(
-            f"""ticker {_INSTRUMENT} type amount currency amountInEuro grossAmountPerShare
-            tickerCurrency quantity paidOn reference"""
-        ),
-        {},
+        "reference amount currency paidOn instrument.ticker instrument.isin instrument.currency",
+        numeric="amount amountInEuro grossAmountPerShare quantity",
+        text=f"reference ticker {_INSTRUMENT} type currency tickerCurrency",
+        timestamptz="paidOn",
     ),
-    "transactions": EndpointSpec(
+    "transactions": _endpoint(
         "trading212.transaction",
         "trading212_transactions",
-        _f("reference type amount currency dateTime"),
-        _f("reference type amount currency dateTime"),
-        {},
+        "reference type amount currency dateTime",
+        numeric="amount",
+        text="reference type currency",
+        timestamptz="dateTime",
     ),
-    "instruments": EndpointSpec(
+    "instruments": _endpoint(
         "trading212.instrument",
         "trading212_instruments",
-        _f("ticker type"),
-        _f(
-            """ticker name shortName isin currencyCode type maxOpenQuantity extendedHours
-            workingScheduleId addedOn"""
-        ),
-        {},
+        "ticker type",
+        numeric="maxOpenQuantity workingScheduleId",
+        text="ticker name shortName isin currencyCode type",
+        timestamptz="addedOn",
+        boolean="extendedHours",
     ),
-    "exchanges": EndpointSpec(
+    "exchanges": _endpoint(
         "trading212.exchange",
         "trading212_exchanges",
-        _f(f"id {_SCHEDULES}.id"),
-        _f(f"id name {_SCHEDULES}.id {_under(f'{_TIME_EVENTS}.', 'date type')}"),
-        {
+        f"id {_SCHEDULES}.id",
+        numeric=f"id {_SCHEDULES}.id",
+        text=f"name {_TIME_EVENTS}.type",
+        timestamptz=f"{_TIME_EVENTS}.date",
+        children={
             _SCHEDULES: "trading212_exchange_schedules",
             _TIME_EVENTS: "trading212_exchange_time_events",
         },
     ),
-    "pies": EndpointSpec(
+    "pies": _endpoint(
         "trading212.pie",
         "trading212_pies",
-        _f("id"),
-        _f(
-            f"""id cash progress status {_under("result.", _RESULT)}
-            {_under("dividendDetails.", "gained inCash reinvested")}"""
-        ),
-        {},
+        "id",
+        numeric=f"""id cash progress {_under("result.", _RESULT)}
+        {_under("dividendDetails.", "gained inCash reinvested")}""",
+        text="status",
     ),
     # One pie's detail; it fills the settings of the pies row the list made.
-    "pie": EndpointSpec(
+    "pie": _endpoint(
         "trading212.pie_detail",
         "trading212_pies",
-        _f(f"settings.id {_PIE_INSTRUMENTS}.ticker {_PIE_SHARES}.ticker {_PIE_SHARES}.share"),
-        _f(
-            f"""{_under(f"{_PIE_INSTRUMENTS}.", "ticker ownedQuantity currentShare expectedShare")}
-            {_under(f"{_PIE_INSTRUMENTS}.result.", _RESULT)}
-            {_under(f"{_PIE_ISSUES}.", "name severity")}
-            {_under("settings.", "id name icon goal creationDate endDate initialInvestment")}
-            {_under("settings.", "dividendCashAction publicUrl")}
-            {_PIE_SHARES}.ticker {_PIE_SHARES}.share"""
-        ),
-        {
+        f"settings.id {_PIE_INSTRUMENTS}.ticker {_PIE_SHARES}.ticker {_PIE_SHARES}.share",
+        numeric=f"""{_under(f"{_PIE_INSTRUMENTS}.", "ownedQuantity currentShare expectedShare")}
+        {_under(f"{_PIE_INSTRUMENTS}.result.", _RESULT)}
+        {_under("settings.", "id goal initialInvestment")} {_PIE_SHARES}.share""",
+        text=f"""{_PIE_INSTRUMENTS}.ticker {_under(f"{_PIE_ISSUES}.", "name severity")}
+        {_under("settings.", "name icon dividendCashAction publicUrl")} {_PIE_SHARES}.ticker""",
+        timestamptz=f"{_under('settings.', 'creationDate endDate')}",
+        children={
             _PIE_INSTRUMENTS: "trading212_pie_instruments",
             _PIE_ISSUES: "trading212_pie_instrument_issues",
             _PIE_SHARES: "trading212_pie_instrument_shares",
         },
     ),
 }
+
+ENDPOINTS: Mapping[str, EndpointSpec] = {name: spec for name, (spec, _) in _DECLARED.items()}
+# Endpoint → known path → the type of its column (Decision 3).
+KINDS: Mapping[str, Mapping[str, Kind]] = {name: kinds for name, (_, kinds) in _DECLARED.items()}
 
 # Stored typed, but never put in a log, warning or message. Trading 212 returns none.
 PERSONAL: frozenset[str] = frozenset()

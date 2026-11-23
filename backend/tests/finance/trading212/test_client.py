@@ -241,3 +241,17 @@ async def test_history_paced_to_its_limit() -> None:
     assert len(env.requests) == 22
     # 20 a minute: the 21st request waited for the first to leave the window.
     assert env.now >= Decimal(1060)
+
+
+@pytest.mark.parametrize("pie_id", [Decimal("9001.5"), Decimal("NaN"), True])
+async def test_pie_refuses_an_id_that_is_not_whole(pie_id: Any) -> None:
+    env = Env(ok({"instruments": [], "settings": {"id": 9001}}))
+    with pytest.raises(ValueError, match="whole number"):
+        await env.client().pie(pie_id)
+    assert env.requests == []
+
+
+async def test_pie_takes_the_lists_decimal_id() -> None:
+    env = Env(ok({"instruments": [], "settings": {"id": 9001}}))
+    await env.client().pie(Decimal("9001"))
+    assert env.requests[0].url.path == "/api/v0/equity/pies/9001"

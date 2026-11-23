@@ -70,7 +70,7 @@ def _prefixed(prefix: str, paths: str) -> str:
 
 
 _UPGRADE_TABLES = [
-    # account/summary, one row per sync day.
+    # account/summary, one row per sync day; linked to its cash reported snapshot.
     _table(
         "trading212_accounts",
         [
@@ -78,6 +78,8 @@ _UPGRADE_TABLES = [
             "as_of_date date NOT NULL",
             "account_id uuid NOT NULL REFERENCES finance.accounts (id)",
             "account_kind text NOT NULL CHECK (account_kind IN ('invest', 'isa'))",
+            # The reported snapshot of the account's cash this summary is the detail of.
+            "snapshot_id uuid UNIQUE REFERENCES finance.balance_snapshots (id) ON DELETE SET NULL",
             _RAW,
         ],
         _columns(
@@ -291,7 +293,7 @@ _UPGRADE_TABLES = [
         "trading212_pie_instrument_shares",
         [_CONNECTION, "pie_id numeric NOT NULL", "as_of_date date NOT NULL", _RAW],
         _columns("text", "ticker", "ticker"),
-        _columns("numeric", "share"),
+        _columns("numeric", "share", "share"),
         tail=[
             "PRIMARY KEY (connection_id, pie_id, as_of_date, ticker)",
             "FOREIGN KEY (connection_id, pie_id, as_of_date)"

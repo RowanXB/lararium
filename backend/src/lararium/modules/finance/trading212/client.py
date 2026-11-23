@@ -8,6 +8,7 @@ revealed. History endpoints are walked newest first by following `nextPagePath`.
 import asyncio
 import base64
 from collections.abc import Callable, Mapping
+from decimal import Decimal
 from typing import Literal, cast
 from urllib.parse import parse_qsl
 
@@ -172,7 +173,14 @@ class Trading212Client:
         found = await self._optional("pies")
         return None if found is None else _objects(found, "pies")
 
-    async def pie(self, pie_id: int) -> Item | None:
+    async def pie(self, pie_id: int | Decimal) -> Item | None:
+        """One pie's detail. `pie_id` is the list's `id`, a whole number (a Decimal as
+        parsed); any other value raises `ValueError` rather than asking for another pie."""
+        if isinstance(pie_id, bool) or (
+            isinstance(pie_id, Decimal)
+            and (not pie_id.is_finite() or pie_id != pie_id.to_integral_value())
+        ):
+            raise ValueError("a Trading 212 pie id is a whole number")
         found = await self._optional("pie", f"/{int(pie_id)}")
         return None if found is None else _object(found, "pies/{id}")
 

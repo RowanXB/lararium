@@ -17,24 +17,57 @@ from lararium.modules.finance.trading212.fields import (
     COLUMNS,
     ENDPOINTS,
     KEYS,
+    KINDS,
     MAP_ENTRIES,
+    OWN_COLUMNS,
     PERSONAL,
     split,
 )
 from lararium.modules.finance.typed_tables import column_name
 
+_DATA_TYPES = {
+    "numeric": "numeric",
+    "text": "text",
+    "timestamptz": "timestamp with time zone",
+    "boolean": "boolean",
+}
+# The ledger row each posted row links to: (table, column) -> the table it references.
+_LEDGER_LINKS = {
+    ("trading212_accounts", "snapshot_id"): "finance.balance_snapshots",
+    ("trading212_positions", "snapshot_id"): "finance.balance_snapshots",
+    ("trading212_orders", "transaction_id"): "finance.transactions",
+    ("trading212_dividends", "transaction_id"): "finance.transactions",
+    ("trading212_transactions", "transaction_id"): "finance.transactions",
+}
 
-async def _columns(session: AsyncSession) -> dict[str, dict[str, str]]:
+
+async def _catalog(session: AsyncSession) -> dict[str, dict[str, tuple[str, bool]]]:
+    """Table -> column -> (data type, nullable) of the trading212_* tables."""
     rows = await session.execute(
         text(
-            "select table_name, column_name, data_type from information_schema.columns"
+            "select table_name, column_name, data_type, is_nullable"
+            " from information_schema.columns"
             " where table_schema = 'finance' and table_name like 'trading212\\_%'"
         )
     )
-    found: dict[str, dict[str, str]] = {}
+    found: dict[str, dict[str, tuple[str, bool]]] = {}
     for row in rows:
-        found.setdefault(row.table_name, {})[row.column_name] = row.data_type
+        found.setdefault(row.table_name, {})[row.column_name] = (
+            row.data_type,
+            row.is_nullable == "YES",
+        )
     return found
+
+
+async def _columns(session: AsyncSession) -> dict[str, dict[str, str]]:
+    return {
+        table: {column: kind for column, (kind, _) in columns.items()}
+        for table, columns in (await _catalog(session)).items()
+    }
+
+
+def _writers(table: str) -> int:
+    return sum(table in tables for tables in COLUMNS.values())
 
 
 async def test_schema_has_every_known_field(session) -> None:
@@ -75,15 +108,82 @@ async def test_every_table_has_its_key_and_references(session) -> None:
     assert {r.tbl.removeprefix("finance."): tuple(r.cols) for r in keys} == KEYS
 
 
-async def test_column_types_follow_decision_3(session) -> None:
+async def test_column_types_match_declared_kinds(session) -> None:
     found = await _columns(session)
-    allowed = {"numeric", "text", "timestamp with time zone", "boolean"}
-    for endpoint in COLUMNS.values():
-        for table, paths in endpoint.items():
-            for path, column in paths.items():
-                assert found[table][column] in allowed, (table, path)
-                is_time = path.endswith(("At", "On", "Date", "dateTime", ".date"))
-                assert (found[table][column] == "timestamp with time zone") == is_time, path
+    wrong = [
+        f"{name}: {path} is {found[table][column]}, declared {KINDS[name][path]}"
+        for name, tables in COLUMNS.items()
+        for table, paths in tables.items()
+        for path, column in paths.items()
+        if found[table][column] != _DATA_TYPES[KINDS[name][path]]
+    ]
+    assert wrong == []
+
+
+def test_kinds_follow_decision_3() -> None:
+    for name, spec in ENDPOINTS.items():
+        assert set(KINDS[name]) == spec.known
+        for path, kind in KINDS[name].items():
+            is_time = path.endswith(("At", "On", "Date", "dateTime", ".date"))
+            assert (kind == "timestamptz") == is_time, path
+            assert kind != "boolean" or path.endswith("extendedHours"), path
+
+
+async def test_not_null_matches_required_for_single_writer_tables(session) -> None:
+    found = await _catalog(session)
+    wrong = [
+        f"{name}: {path} nullable={found[table][column][1]}"
+        for name, spec in ENDPOINTS.items()
+        for table, paths in COLUMNS[name].items()
+        if _writers(table) == 1
+        for path, column in paths.items()
+        if found[table][column][1] == (path in spec.required)
+    ]
+    assert wrong == []
+    # The pies row is made by the list and completed by a pie's detail: only the list's
+    # required id can be NOT NULL.
+    assert _writers("trading212_pies") == 2
+    assert not found["trading212_pies"]["id"][1]
+    assert found["trading212_pies"]["settings_id"][1]
+
+
+async def test_every_column_is_a_field_or_its_own(session) -> None:
+    found = await _columns(session)
+    fields: dict[str, set[str]] = {}
+    for tables in COLUMNS.values():
+        for table, paths in tables.items():
+            fields.setdefault(table, set()).update(paths.values())
+    stray = {
+        table: sorted(set(columns) - fields.get(table, set()) - OWN_COLUMNS)
+        for table, columns in found.items()
+    }
+    assert {table: extra for table, extra in stray.items() if extra} == {}
+
+
+async def test_posted_rows_link_their_ledger_row(session) -> None:
+    rows = await session.execute(
+        text(
+            "select c.conrelid::regclass::text as tbl, a.attname as col,"
+            " c.confrelid::regclass::text as target, c.confdeltype as on_delete"
+            " from pg_constraint c"
+            " join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]"
+            " where c.contype = 'f' and cardinality(c.conkey) = 1"
+            " and c.conrelid::regclass::text like 'finance.trading212\\_%'"
+        )
+    )
+    links = {(r.tbl.removeprefix("finance."), r.col): (r.target, r.on_delete) for r in rows}
+    for link, target in _LEDGER_LINKS.items():
+        # The typed row outlives its ledger row: deleting that only unlinks it.
+        assert links.get(link) == (target, "n"), link
+    unique = await session.execute(
+        text(
+            "select c.conrelid::regclass::text as tbl, a.attname as col from pg_constraint c"
+            " join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]"
+            " where c.contype = 'u' and cardinality(c.conkey) = 1"
+            " and c.conrelid::regclass::text like 'finance.trading212\\_%'"
+        )
+    )
+    assert set(_LEDGER_LINKS) <= {(r.tbl.removeprefix("finance."), r.col) for r in unique}
 
 
 def test_field_lists_are_consistent() -> None:
