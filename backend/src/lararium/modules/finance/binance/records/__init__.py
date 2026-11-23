@@ -30,6 +30,7 @@ from lararium.modules.finance.binance.fetch import BALANCE_LABELS, record_type
 from lararium.modules.finance.binance.instruments import asset
 from lararium.modules.finance.binance.models import model_of
 from lararium.modules.finance.binance.parse import ApiValue, Row
+from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -107,6 +108,7 @@ class Run:
     current: Current | None = None
     _accounts: dict[str, UUID] = field(default_factory=dict[str, UUID])
     _assets: dict[str, UUID | None] = field(default_factory=dict[str, UUID | None])
+    _addresses: dict[str, UUID] = field(default_factory=dict[str, UUID])
 
     @classmethod
     async def start(
@@ -152,6 +154,19 @@ class Run:
         if code not in self._assets:
             self._assets[code] = await asset(self.command, self.connection.id, code, flag=self.flag)
         return self._assets[code]
+
+    async def chain_address(self, address: str) -> UUID:
+        """The registry row of a normalised chain address, made unassigned if new. In a
+        transaction of its own: the row's lock must not be held until this run commits."""
+        if address not in self._addresses:
+            async with (
+                self.ctx.session_factory() as session,
+                command_context(session, self.command.actor, "finance.shared_row", {}) as cmd,
+            ):
+                self._addresses[address] = await get_or_create_identifier(
+                    cmd, "chain_address", address
+                )
+        return self._addresses[address]
 
     def source(self, key: str) -> tuple[str, str]:
         """The transaction's stable reference for the owner's transfer decisions."""

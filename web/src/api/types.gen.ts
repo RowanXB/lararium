@@ -650,7 +650,7 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'chain_address';
     /**
      * Sort Code
      */
@@ -1605,7 +1605,7 @@ export type SuggestionOut = {
     /**
      * Account Number
      */
-    account_number: string;
+    account_number: string | null;
     /**
      * Identifier Id
      */
@@ -1614,6 +1614,10 @@ export type SuggestionOut = {
      * Incoming
      */
     incoming: number;
+    /**
+     * Kind
+     */
+    kind: 'uk_bank_account' | 'ibkr_account' | 'chain_address';
     /**
      * Latest
      */
@@ -1629,7 +1633,11 @@ export type SuggestionOut = {
     /**
      * Sort Code
      */
-    sort_code: string;
+    sort_code: string | null;
+    /**
+     * Value
+     */
+    value: string;
 };
 
 /**

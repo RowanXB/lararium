@@ -7,6 +7,7 @@ import {
   addAccountIdentifier,
   listAccounts,
   listTransferCandidates,
+  listTransferSuggestions,
   listTransfers,
   pairTransfer,
   rejectTransfer,
@@ -77,6 +78,8 @@ const CANDIDATE = {
 
 const SUGGESTION = {
   identifier_id: "0190a0b0-0000-7000-8000-0000000000d1",
+  kind: "uk_bank_account",
+  value: "112233:12345678",
   sort_code: "112233",
   account_number: "12345678",
   names: ["Test Owner"],
@@ -313,6 +316,26 @@ it("registers a suggestion against an account", async () => {
       body: { kind: "uk_bank_account", value: "112233:12345678" },
     }),
   );
+});
+
+it("shows a chain-address suggestion by its value, without a register form", async () => {
+  const address = `0x${"1".repeat(40)}`;
+  vi.mocked(listTransferSuggestions).mockResolvedValueOnce({
+    data: [
+      {
+        ...SUGGESTION,
+        kind: "chain_address",
+        value: address,
+        sort_code: null,
+        account_number: null,
+      },
+    ],
+  } as never);
+  renderPage();
+  const suggestions = await section("Suggestions");
+  expect(await suggestions.findByText(address)).toBeInTheDocument();
+  expect(suggestions.queryByRole("button", { name: "Register" })).toBeNull();
+  expect(suggestions.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
 });
 
 it("shows no snapshots hint when every account can have identifiers", async () => {

@@ -1331,7 +1331,8 @@
           "kind": {
             "enum": [
               "uk_bank_account",
-              "ibkr_account"
+              "ibkr_account",
+              "chain_address"
             ],
             "title": "Kind",
             "type": "string"
@@ -3453,8 +3454,15 @@
       "SuggestionOut": {
         "properties": {
           "account_number": {
-            "title": "Account Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
           },
           "identifier_id": {
             "format": "uuid",
@@ -3464,6 +3472,15 @@
           "incoming": {
             "title": "Incoming",
             "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "uk_bank_account",
+              "ibkr_account",
+              "chain_address"
+            ],
+            "title": "Kind",
+            "type": "string"
           },
           "latest": {
             "format": "date",
@@ -3482,12 +3499,25 @@
             "type": "integer"
           },
           "sort_code": {
-            "title": "Sort Code",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
+          },
+          "value": {
+            "title": "Value",
             "type": "string"
           }
         },
         "required": [
           "identifier_id",
+          "kind",
+          "value",
           "sort_code",
           "account_number",
           "names",

@@ -29,10 +29,12 @@ from lararium.modules.finance.errors import (
 
 logger = logging.getLogger(__name__)
 
-IdentifierKind = Literal["uk_bank_account", "ibkr_account"]
+IdentifierKind = Literal["uk_bank_account", "ibkr_account", "chain_address"]
 
 _UK_BANK_ACCOUNT = re.compile(r"([0-9]{6})[:/]?([0-9]{8})")
 _IBKR_ACCOUNT = re.compile(r"[A-Z]{1,3}[0-9]{3,12}")
+# What the database CHECK allows; an address is as the chain writes it.
+_CHAIN_ADDRESS = re.compile(r"[A-Za-z0-9:_-]{20,128}")
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,17 @@ class IdentifierRecord:
 
 def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     """The stored form: `<6-digit sort code>:<8-digit account number>` for a UK bank account,
-    the upper-case account id for an IBKR account."""
+    the upper-case account id for an IBKR account, the address as written for a chain address
+    (lower-cased when it begins `0x`, as EVM addresses are case-insensitive)."""
+    if kind == "chain_address":
+        address = value.strip()
+        if address.lower().startswith("0x"):
+            address = address.lower()
+        if _CHAIN_ADDRESS.fullmatch(address) is None:
+            raise FinanceValidationError(
+                "a chain address is 20 to 128 letters, digits, colons, dashes or underscores"
+            )
+        return address
     if kind == "ibkr_account":
         account_id = value.strip().upper()
         if _IBKR_ACCOUNT.fullmatch(account_id) is None:

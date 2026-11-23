@@ -502,6 +502,8 @@ async def test_suggestions_group_and_dismiss(client, session, run) -> None:
     assert response.json() == [
         {
             "identifier_id": str(busy),
+            "kind": "uk_bank_account",
+            "value": B_IDENTIFIER,
             "sort_code": "112233",
             "account_number": "12345678",
             "names": ["T Owner", "Test Owner"],
@@ -511,6 +513,8 @@ async def test_suggestions_group_and_dismiss(client, session, run) -> None:
         },
         {
             "identifier_id": str(quiet),
+            "kind": "uk_bank_account",
+            "value": C_IDENTIFIER,
             "sort_code": "778899",
             "account_number": "33334444",
             "names": ["Test Owner"],

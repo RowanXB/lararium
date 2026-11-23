@@ -491,8 +491,10 @@ class TransferPair(BaseModel):
 
 class SuggestionOut(_Out):
     identifier_id: UUID
-    sort_code: str
-    account_number: str
+    kind: IdentifierKind
+    value: str  # as stored
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     names: list[str]
     outgoing: int
     incoming: int

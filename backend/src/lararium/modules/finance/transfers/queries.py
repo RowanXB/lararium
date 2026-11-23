@@ -39,7 +39,7 @@ from lararium.modules.finance.errors import (
     FinanceValidationError,
     TransferNotFoundError,
 )
-from lararium.modules.finance.identifiers import uk_bank_account_parts
+from lararium.modules.finance.identifiers import IdentifierKind, uk_bank_account_parts
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import (
@@ -596,12 +596,14 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
 
 @dataclass(frozen=True)
 class SuggestionRecord:
-    """A bank account transactions name that isn't registered to an own account nor
-    dismissed: maybe one of the owner's."""
+    """An identifier (a bank account, a chain address) transactions name that isn't
+    registered to an own account nor dismissed: maybe one of the owner's."""
 
     identifier_id: UUID
-    sort_code: str
-    account_number: str
+    kind: IdentifierKind
+    value: str  # as stored
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     names: tuple[str, ...]  # the distinct counterparty names it appeared under, sorted
     outgoing: int  # own records paying it
     incoming: int  # own records paid by it
@@ -609,7 +611,7 @@ class SuggestionRecord:
 
 
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
-    """Unregistered, undismissed bank accounts that own records name, most named first,
+    """Unregistered, undismissed identifiers that own records name, most named first,
     then the most recently named."""
     system = await system_account_ids(session)
     e = eligible_records(system)
@@ -620,6 +622,7 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
     rows = await session.execute(
         select(
             i.id,
+            i.kind,
             i.value,
             func.array_agg(t.counterparty_name.distinct()).label("names"),
             outgoing.label("outgoing"),
@@ -628,16 +631,19 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         )
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
-        .where(i.kind == "uk_bank_account", i.account_id.is_(None), i.dismissed_at.is_(None))
-        .group_by(i.id, i.value)
+        .where(i.account_id.is_(None), i.dismissed_at.is_(None))
+        .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )
     found: list[SuggestionRecord] = []
     for row in rows:
-        sort_code, account_number = uk_bank_account_parts(row.value)
+        bank = row.kind == "uk_bank_account"
+        sort_code, account_number = uk_bank_account_parts(row.value) if bank else (None, None)
         found.append(
             SuggestionRecord(
                 identifier_id=row.id,
+                kind=row.kind,
+                value=row.value,
                 sort_code=sort_code,
                 account_number=account_number,
                 names=tuple(sorted(name for name in row.names if name)),

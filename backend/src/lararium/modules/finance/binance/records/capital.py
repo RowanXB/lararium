@@ -7,8 +7,8 @@ A withdrawal cancelled, rejected or failed after it was posted is not voided, be
 balance really fell and rose again: it stops being a transfer leg (its contra moves to
 Unassigned) and a refund puts the amount and the fee back.
 
-The chain address on the other side is the counterparty identifier (Task 8:
-`counterparty_identifier`); until it is known the contra is Unassigned unless the owner pairs
+The chain address on the other side is the counterparty identifier
+(`counterparty_identifier`); until it is known the contra is Unassigned unless the owner pairs
 the leg.
 """
 
@@ -26,6 +26,8 @@ from lararium.modules.finance.binance.records import (
     text,
     when,
 )
+from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.identifiers import normalize_identifier
 from lararium.modules.finance.ledger import PostingInput
 from lararium.modules.finance.transfers import transfer_contra
 
@@ -54,8 +56,21 @@ def chain_hash(row: Row) -> str | None:
 
 async def counterparty_identifier(run: Run, label: str, row: Row) -> UUID | None:
     """The registry row of the chain address on the other side: a withdrawal's `address`, a
-    deposit's `sourceAddress`. None until Task 8 registers chain addresses."""
-    return None
+    deposit's `sourceAddress`. None for a movement inside Binance (it names another user),
+    for no address, and for one that is no chain address (flagged by field name, never
+    value). A deposit's own `address` is Binance's and is never registered."""
+    if integer(row, "transferType") != 0:
+        return None
+    name = "sourceAddress" if label == DEPOSITS else "address"
+    value = text(row, name)
+    if value is None:
+        return None
+    try:
+        address = normalize_identifier("chain_address", value)
+    except FinanceValidationError:
+        run.flag(f"{label}.{name} is not a chain address")
+        return None
+    return await run.chain_address(address)
 
 
 async def _wallet(run: Run, label: str, row: Row) -> UUID | None:
