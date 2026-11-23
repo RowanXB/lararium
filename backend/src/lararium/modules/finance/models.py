@@ -11,6 +11,7 @@ from lararium.core.models import UUIDV7, Base
 
 # The Binance tables are built from the catalogue (binance/layout.py); importing them here puts
 # them in the metadata with the rest of the finance schema.
+from lararium.modules.finance.binance.models import AccountReport as AccountReport
 from lararium.modules.finance.binance.models import AssetsSeen as AssetsSeen
 from lararium.modules.finance.binance.models import (
     ReconciliationDifference as ReconciliationDifference,

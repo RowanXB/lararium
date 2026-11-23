@@ -21,7 +21,7 @@ from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select, text
-from sqlalchemy.dialects.postgresql import distinct_on
+from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext, command_context
@@ -460,6 +460,25 @@ async def _snapshot(
     )
 
 
+async def record_report(
+    ctx: CommandContext,
+    connection: ConnectionRecord,
+    account_id: UUID,
+    as_of: datetime,
+    read_to: datetime,
+) -> None:
+    """That the account was reported at `as_of` (its read's `read_from`), whatever the read
+    listed: a wallet's report is complete, so an asset it does not list is 0 there, and an
+    empty report is a report too."""
+    if read_to < as_of:
+        raise ValueError("a report's read ends before it starts")
+    await ctx.session.execute(
+        insert(models.AccountReport)
+        .values(connection_id=connection.id, account_id=account_id, as_of=as_of, read_to=read_to)
+        .on_conflict_do_nothing()
+    )
+
+
 class _Assets:
     """Asset codes to instruments, each code resolved once."""
 
@@ -525,6 +544,7 @@ async def report_balances(
             account = await _mapped_account(ctx, connection, wallet.key)
         if account is None:
             continue
+        await record_report(ctx, connection, account, wallet.read.read_from, wallet.read.read_to)
         latest = await _latest(ctx.session, account)
         gone = {i: Decimal(0) for i, q in latest.items() if q != 0 and i not in quantities}
         for instrument, quantity in {**quantities, **gone}.items():
@@ -601,6 +621,7 @@ async def backfill_daily_snapshots(
             account = await wallet_account(ctx, connection, "spot")
         if account is None:
             continue
+        await record_report(ctx, connection, account, at, at)
         gone = {i: Decimal(0) for i in before if i not in quantities}
         for instrument, quantity in {**quantities, **gone}.items():
             if not await _reported_at(ctx.session, account, instrument, at, quantity):

@@ -375,6 +375,9 @@ async def test_flags_are_stored_and_notified_once(
 ) -> None:
     row = _deposit(1, insertTime=NOW_MS - 2 * HOUR_MS, completeTime=NOW_MS - 2 * HOUR_MS)
     fake.add("deposits", {**row, "extraField": "secret-value-4242"})
+    # Spot reports what the deposit brought (a report that left it out would make it an
+    # opening of its opposite).
+    fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="5", locked="0")])
     connection = await binance_connection(run, config=later_config())
     notifier = RecordingNotifier()
 

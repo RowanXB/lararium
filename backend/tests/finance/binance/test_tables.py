@@ -15,6 +15,7 @@ from lararium.core.connections import create_connection
 from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS
 from lararium.modules.finance.binance.models import (
+    AccountReport,
     AssetsSeen,
     ReconciliationDifference,
     model_of,
@@ -185,7 +186,7 @@ def _compile(column) -> str:
 
 async def test_models_are_the_migrated_tables(session) -> None:
     models = [model_of(t.name) for label in layout.TABLE_LABELS for t in layout.layout(label)]
-    models += [AssetsSeen, ReconciliationDifference]
+    models += [AccountReport, AssetsSeen, ReconciliationDifference]
     found = {
         row.relname
         for row in await session.execute(

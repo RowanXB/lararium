@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import MAX_PREC, Decimal, localcontext
 from uuid import UUID
 
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, select, text, union
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,15 +84,13 @@ class Difference:
 
 
 async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
-    """The times the account was reported at (each `as_of` of its `reported` snapshots),
-    oldest first."""
-    s = models.BalanceSnapshot
-    rows = await session.scalars(
-        select(s.as_of)
-        .where(s.account_id == account_id, s.kind == "reported")
-        .distinct()
-        .order_by(s.as_of)
-    )
+    """The times the account was reported at, oldest first: each recorded report
+    (`binance_account_reports`, an empty one included) and, so that nothing depends on which
+    was written first, each `as_of` of its `reported` snapshots."""
+    s, r = models.BalanceSnapshot, models.AccountReport
+    snapshots = select(s.as_of).where(s.account_id == account_id, s.kind == "reported")
+    reports = select(r.as_of).where(r.account_id == account_id)
+    rows = await session.scalars(union(snapshots, reports).order_by("as_of"))
     return list(rows)
 
 
@@ -236,13 +234,15 @@ async def check(
 
 
 async def newest_report(session: AsyncSession, connection_id: UUID) -> datetime | None:
-    """The newest report time of any of the connection's accounts."""
-    s = models.BalanceSnapshot
-    return await session.scalar(
-        select(func.max(s.as_of)).where(
-            s.kind == "reported", s.account_id.in_(_owned(connection_id))
-        )
+    """The newest report time of any of the connection's accounts (`report_times`' sources)."""
+    s, r = models.BalanceSnapshot, models.AccountReport
+    owned = _owned(connection_id)
+    snapshot = await session.scalar(
+        select(func.max(s.as_of)).where(s.kind == "reported", s.account_id.in_(owned))
     )
+    report = await session.scalar(select(func.max(r.as_of)).where(r.account_id.in_(owned)))
+    found = [at for at in (snapshot, report) if at is not None]
+    return max(found) if found else None
 
 
 def _owned(connection_id: UUID) -> Select[UUID]:

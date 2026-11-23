@@ -1,6 +1,6 @@
 """Migration 0030 goes down to 0029 and up again, taking what it added and leaving the rest;
 migration 0031 (`never_transfer`) likewise down to 0030, and 0032 (the reconciliation
-differences) down to 0031."""
+differences and the account report times) down to 0031."""
 
 from pathlib import Path
 
@@ -68,7 +68,10 @@ def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> 
         engine.dispose()
 
 
-_DIFFERENCES = "select to_regclass('finance.binance_reconciliation_differences') is not null"
+_DIFFERENCES = (
+    "select to_regclass('finance.binance_reconciliation_differences') is not null"
+    " and to_regclass('finance.binance_account_reports') is not null"
+)
 
 
 def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:

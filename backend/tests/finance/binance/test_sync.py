@@ -563,6 +563,10 @@ async def _delete(
                 params,
             )
             await conn.execute(
+                text("delete from finance.binance_account_reports where connection_id = :id"),
+                params,
+            )
+            await conn.execute(
                 text(
                     "delete from finance.binance_reconciliation_differences"
                     f" where account_id in ({accounts})"

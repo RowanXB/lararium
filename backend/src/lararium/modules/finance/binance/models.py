@@ -62,6 +62,20 @@ class AssetsSeen(Base):
     )
 
 
+class AccountReport(Base):
+    """A time a wallet account was reported at (a clear balance read's `read_from`, or a daily
+    snapshot's time), whether or not the report listed anything: an asset it does not list is
+    0 there."""
+
+    __tablename__ = "binance_account_reports"
+    __table_args__ = FINANCE_SCHEMA
+
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"))
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    read_to: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ReconciliationDifference(Base):
     """An interval between two consecutive reported snapshots of one account and instrument
     whose reported change the postings in between do not explain (plan Decision 11)."""

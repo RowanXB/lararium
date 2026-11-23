@@ -523,3 +523,133 @@ async def test_a_report_whose_sync_failed_later_is_checked(
         if connection_id is not None:
             await _delete(engine, owner_url, connection_id, system_before)
         await engine.dispose()
+
+
+# Each account's report times, an empty report included.
+
+
+def _funding(code: str, free: str) -> dict[str, ApiValue]:
+    return build_row(
+        "funding-asset", asset=code, free=free, locked="0", freeze="0", withdrawing="0"
+    )
+
+
+def _withdrawal(seq: int, at_ms: int, amount: str) -> dict[str, ApiValue]:
+    shown = datetime.fromtimestamp(at_ms // 1000, UTC).strftime("%Y-%m-%d %H:%M:%S")
+    return build_row(
+        "withdrawals",
+        seq,
+        coin="AAA",
+        amount=amount,
+        transactionFee="0",
+        walletType=1,
+        transferType=0,
+        status=6,
+        applyTime=shown,
+        completeTime=shown,
+    )
+
+
+def _to_funding(seq: int, at_ms: int, amount: str) -> dict[str, ApiValue]:
+    return {**_deposit(seq, at_ms, amount), "walletType": 1}
+
+
+async def _reports(session, connection_id: UUID, wallet: str) -> list[datetime]:
+    found = await session.scalars(
+        text(
+            "select r.as_of from finance.binance_account_reports r"
+            " join finance.accounts a on a.id = r.account_id"
+            " where r.connection_id = :c and a.name = :w order by r.as_of"
+        ),
+        {"c": connection_id, "w": f"Binance {wallet}"},
+    )
+    return list(found)
+
+
+async def _emptied_funding(session, run, fake: FakeBinance, clock: Clock):
+    """A connection whose Funding received 5 and sent 5 (records), then read empty. The first
+    sync makes the Funding account (its records are normalised after its reads), so the second
+    is the account's first report."""
+    fake.add("deposits", _to_funding(0, clock.ms - 3 * HOUR_MS, "5"))
+    fake.add("withdrawals", _withdrawal(0, clock.ms - 2 * HOUR_MS, "5"))
+    connection = await binance_connection(run, config=later_config())
+    after = await run_binance_sync(session, connection.id, fake.handler)
+    assert after.status == "healthy", after.last_error
+    assert await _reports(session, connection.id, "Funding") == []
+    await _later(session, connection, fake, clock)
+    assert len(await _reports(session, connection.id, "Funding")) == 1
+    assert await _as_of(session, connection.id, "Funding", "AAA") == []
+    return connection
+
+
+async def test_an_unrecorded_asset_after_an_empty_report_is_a_difference_not_an_opening(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    connection = await _emptied_funding(session, run, fake, clock)
+    fake.set_rows("funding-asset", [_funding("BBB", "3")])
+
+    await _later(session, connection, fake, clock)
+
+    first, second = await _reports(session, connection.id, "Funding")
+    [difference] = await _differences(session, connection.id)
+    assert (difference.wallet, difference.symbol) == ("Binance Funding", "BBB")
+    assert (difference.from_at, difference.to_at) == (first, second)
+    assert (difference.reported_change, difference.posted_sum) == (3, 0)
+    assert await _openings_of(session, connection.id, "BBB") == []
+    assert await _openings_of(session, connection.id, "AAA") == []
+
+
+async def test_records_between_two_empty_reports_are_a_difference(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    connection = await _emptied_funding(session, run, fake, clock)
+    fake.add("deposits", _to_funding(1, clock.ms + HOUR_MS, "2"))
+
+    await _later(session, connection, fake, clock)
+
+    first, second = await _reports(session, connection.id, "Funding")
+    [difference] = await _differences(session, connection.id)
+    assert (difference.wallet, difference.symbol) == ("Binance Funding", "AAA")
+    assert (difference.from_at, difference.to_at) == (first, second)
+    assert (difference.reported_change, difference.posted_sum) == (0, 2)
+
+
+async def test_an_unclear_read_writes_no_report_time(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    fake.set_rows("funding-asset", [_funding("BBB", "1")])
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+
+    def busy(asked: int) -> None:
+        # A deposit inside every Spot read, and none near the other reads.
+        fake.add("deposits", _deposit(100 + asked, clock.ms, "1"))
+        fake.set_rows("spot-account", _spot(("AAA", str(11 + asked))))
+        clock.ms += 10_000
+
+    fake.when_asked("spot-account", busy)
+    await _later(session, connection, fake, clock)
+
+    assert len(await _reports(session, connection.id, "Spot")) == 1
+    assert len(await _reports(session, connection.id, "Funding")) == 2
+    assert await _differences(session, connection.id) == []
+
+
+async def test_an_identical_sync_adds_one_report_time_per_account(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    fake.set_rows("funding-asset", [_funding("BBB", "1")])
+    fake.set_rows("wallet-balance", _earn(("STB", "4")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+
+    await _later(session, connection, fake, clock)
+
+    for wallet in ("Spot", "Funding", "Earn"):
+        reports = await _reports(session, connection.id, wallet)
+        assert len(reports) == 2, wallet
+        symbol = {"Spot": "AAA", "Funding": "BBB", "Earn": "STB"}[wallet]
+        assert await _as_of(session, connection.id, wallet, symbol) == reports
+    assert await _differences(session, connection.id) == []
