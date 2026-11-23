@@ -36,6 +36,12 @@ type Sleep = Callable[[int], Awaitable[None]]
 ALLOWED = frozenset((e.method, e.host, e.path) for e in ENDPOINTS.values())
 
 RECV_WINDOW = 10_000
+# Binance's code for a timestamp outside the window it accepts (more than a second ahead of
+# its clock, or older than recvWindow).
+CLOCK_REFUSED = -1021
+# A clock measure whose exchange took longer than this is taken again, at most this often.
+CLOCK_SLOW_MS = 500
+CLOCK_SAMPLES = 3
 KEY_REJECTED_CODES = frozenset({-2014, -2015, -1022})
 NOT_PRESENT = frozenset({-3003, -30105, -6021, -5026, -4047, 403004})
 # Parameters the client sets itself; a caller may not.
@@ -269,13 +275,25 @@ class BinanceClient:
         return self._clock() + self._offset
 
     async def sync_clock(self) -> None:
-        body, sent, received = await self._request(ENDPOINTS["time"], {})
-        server = body.get("serverTime") if isinstance(body, dict) else None
-        if not isinstance(server, int) or isinstance(server, bool):
-            raise BinanceError(200)
-        # The server read its clock about halfway through the round trip. Only the request
-        # that was answered counts: not the limiter's waits, nor a 429's.
-        self._offset = server - (sent + received) // 2
+        """Measure Binance's clock against the local one. The server read its clock somewhere
+        in the round trip, taken as halfway; only the exchange that was answered counts, not
+        the limiter's waits nor a 429's. A slow exchange (a new connection's handshake comes
+        before the server reads its clock) can put the reading most of a round trip off, and
+        Binance refuses a timestamp more than a second ahead of it (-1021): such a measure is
+        taken again, on the connection now open, and the quickest exchange is the one used."""
+        best: tuple[int, int] | None = None
+        for _ in range(CLOCK_SAMPLES):
+            body, sent, received = await self._request(ENDPOINTS["time"], {})
+            server = body.get("serverTime") if isinstance(body, dict) else None
+            if not isinstance(server, int) or isinstance(server, bool):
+                raise BinanceError(200)
+            took = received - sent
+            if best is None or took < best[0]:
+                best = (took, server - (sent + received) // 2)
+            if took <= CLOCK_SLOW_MS:
+                break
+        assert best is not None
+        self._offset = best[1]
 
     def _bucket(self, endpoint: Endpoint) -> str:
         if endpoint.limit in ("ip", "uid"):
@@ -317,6 +335,15 @@ class BinanceClient:
         self, endpoint: Endpoint, params: Mapping[str, str | int | bool]
     ) -> tuple[ApiValue, int, int]:
         try:
+            try:
+                return await self._exchange(endpoint, params)
+            except BinanceError as error:
+                # The timestamp was outside what Binance accepts: the clocks drifted apart
+                # since they were compared (a first sync runs for half an hour). Compare them
+                # again and ask once more.
+                if error.code != CLOCK_REFUSED or not endpoint.signed:
+                    raise
+            await self.sync_clock()
             return await self._exchange(endpoint, params)
         except BinanceError as error:
             # Which query failed is what tells a wrong request from an outage; a label is

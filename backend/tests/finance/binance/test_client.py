@@ -481,6 +481,46 @@ async def test_sync_clock_leaves_out_a_429s_wait() -> None:
     assert client.now_ms() == env.now + 2_000
 
 
+async def test_a_slow_clock_measure_is_taken_again_and_the_quickest_is_used() -> None:
+    """A new connection's handshake comes before the server reads its clock: halfway through
+    that exchange is seconds before the reading, and a timestamp built on it is ahead."""
+    env = Env()
+    took = iter([4_000, 40])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        env.requests.append(request)
+        spent = next(took)
+        # The server reads its clock (two seconds ahead of the local one) as the exchange ends.
+        env.now += spent
+        return ok(json.dumps({"serverTime": env.now + 2_000}))
+
+    env.handler = handler  # type: ignore[method-assign]
+    client = env.client()
+    await client.sync_clock()
+
+    assert len(env.requests) == 2
+    # Within the quick exchange's half, not the slow one's two seconds.
+    assert 0 <= client.now_ms() - (env.now + 2_000) <= 20
+
+
+async def test_a_refused_timestamp_is_measured_again_and_asked_once_more() -> None:
+    env = Env(
+        error(400, -1021),
+        ok(json.dumps({"serverTime": START_MS + 3_000})),
+        ok('{"v": 1}'),
+    )
+    client = env.client()
+    assert await client.call(SPOT) == {"v": 1}
+    assert [r.url.path for r in env.requests] == [SPOT.path, "/api/v3/time", SPOT.path]
+    # The second measure was taken 100 ms in (the limiter's spacing): 2.9 s ahead of local.
+    assert dict(parse_qsl(query_of(env.requests[2])))["timestamp"] == str(env.now + 2_900)
+
+    env = Env(error(400, -1021), ok(json.dumps({"serverTime": START_MS})), error(400, -1021))
+    with pytest.raises(BinanceError) as caught:
+        await env.client().call(SPOT)
+    assert caught.value.code == -1021 and len(env.requests) == 3
+
+
 async def test_sync_clock_leaves_out_the_limiters_wait() -> None:
     env = Env(ok(), ok(json.dumps({"serverTime": START_MS + 1_100})))
     client = env.client()
