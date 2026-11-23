@@ -1,0 +1,708 @@
+"""eToro sync and statement ingest: fetch the user's data, or read an uploaded account
+statement, and store every item as a raw record; then normalise (normalize.py).
+
+Per sync (design §5.2), in order:
+1. `/me`, the read-only gate (design §5.1, Decision 13): a key holding any scope that is not
+   read-only is refused before anything else is asked. Its `/me` is kept, committed on its own,
+   so the scopes it held stay on record; nothing else is stored. A key whose user is not the
+   connection's is refused too.
+2. The reports: balances, PnL, aggregate portfolio, instrument breakdown.
+3. eToro Money's transactions for each Cash account, newest first, until a page holds only what
+   was seen (the newest id per account, `seen_cash`).
+4. Trade history. The first sync walks back in windows whose `minDate` is 364 days apart (one
+   window: every trade closed since `minDate`), until the window starts on or before the
+   account's opening (the earliest stored statement's Date Created), or, with no statement
+   uploaded, until a window brings no `positionId` the walk had not seen. Later syncs ask one
+   window, from the latest stored close date (`trade_history_to`) less 7 days.
+5. `orders:lookup` once for each order of an open position or a closed trade (`looked_up`).
+6. Balance history from the latest stored snapshot (`balance_history_to`) less 7 days; the
+   first sync takes 365 days.
+7. Once a day (`daily_at`): closed-events, stockback, the market data of the instruments held
+   or traded, and daily candles of those held, from each one's first open (then from the last
+   day fetched, `candles_to`, less 7 days).
+
+Every item is stored as eToro sent it, its numbers as exact text; a report (`/me`, balances,
+PnL, aggregate, breakdown, balance history) is also sighted (report_sightings), so it is dated
+by the sync that saw it. Nothing here logs a value.
+
+A statement upload (design §5.3) is checked before anything is stored: its Username must be
+`/me`'s, its Currency the Trading account's, and the connection's first statement must start
+on or before the account's Date Created. Each refusal is a `StatementRejected` naming no value.
+
+Flags (Decision 4) from the normalizer and from reading a statement are connection warnings,
+`eToro flagged: <reason>`, and the owner is told of each new one once (`publish_flags`, an
+eToro copy of Trading 212's: it also serves the upload, which runs outside a sync, so it reads
+the flags as they stand when it publishes rather than as the sync found them).
+"""
+
+import asyncio
+import logging
+import threading
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from typing import cast
+from uuid import UUID
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import text
+
+from lararium.core.commands import command_context
+from lararium.core.connections import get_connection, load_credential, set_cursor, set_warnings
+from lararium.core.connectors import Capability, SyncContext
+from lararium.core.documents import store_document
+from lararium.core.errors import CredentialRejectedError, DisplayableError
+from lararium.core.json_types import JSONValue
+from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance.etoro.client import (
+    TRADE_WINDOW_DAYS,
+    EtoroClient,
+    Item,
+    ReadOnlyGateError,
+    endpoint_path,
+    write_scopes,
+)
+from lararium.modules.finance.etoro.fields import ACCOUNT_SUMMARY, ENDPOINTS, STATEMENT_SHEETS
+from lararium.modules.finance.etoro.normalize import normalize
+from lararium.modules.finance.etoro.statement import (
+    EtoroStatement,
+    StatementError,
+    parse_statement,
+    read_moment,
+)
+from lararium.modules.finance.readonly_http import JSONValue as ApiValue
+from lararium.modules.finance.readonly_http import record_json
+from lararium.modules.finance.report_sightings import record_sighting
+from lararium.modules.finance.typed_tables import TypedValueError, parse_date
+
+logger = logging.getLogger(__name__)
+
+VERSION = "etoro-sync-1"
+KEY_PURPOSE = "public_api_key"
+USER_KEY_PURPOSE = "user_key"
+DOCUMENT_SOURCE = "finance.etoro"
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Decision 11a: the statement's times are UTC.
+STATEMENT_ZONE = ZoneInfo("UTC")
+FLAGGED_PREFIX = "eToro flagged: "
+# The parts flags are published under: the normalizer's, and the latest statement's reading.
+FIELDS = "fields"
+STATEMENT = "statement"
+DAILY_EVERY = timedelta(hours=24)
+# Trade history, balance history and candles are asked again from this far before the latest
+# day stored, for rows eToro adds late.
+OVERLAP = timedelta(days=7)
+# A first walk back that has not ended after this many windows (40 years) is a fault.
+MAX_WINDOWS = 40
+# What eToro reports now, rather than records: each storing is sighted.
+REPORTS = frozenset({"me", "balances", "pnl", "aggregate", "breakdown", "balance_history"})
+_GATE = "This eToro key can trade or move money. Create a key with Read permission."
+
+
+class EtoroSyncError(DisplayableError):
+    """The sync cannot go on; the message names an endpoint and a field, never a value."""
+
+
+class AccountMismatchError(EtoroSyncError, CredentialRejectedError):
+    """The key's user is not the connection's: the owner has to enter the right keys."""
+
+
+class StatementRejected(DisplayableError, ValueError):
+    """The upload is not a statement of this connection's eToro Trading account, or cannot be
+    read as one; the message names a sheet, a column or a rule, never a value (422)."""
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    raw_record_ids: list[UUID]
+    # The reader's flags ("<sheet>.<column>", an unknown sheet, an unknown label).
+    flagged: frozenset[str]
+
+
+def _shape(endpoint: str, field: str) -> EtoroSyncError:
+    return EtoroSyncError(f"eToro's {endpoint} answer has an unexpected shape: {field}")
+
+
+def _id_text(value: ApiValue, endpoint: str, field: str) -> str:
+    """A positive whole id as text."""
+    if (
+        isinstance(value, Decimal)
+        and value.is_finite()
+        and value == value.to_integral_value()
+        and value > 0
+        and value.adjusted() < 19
+    ):
+        return str(int(value))
+    raise _shape(endpoint, field)
+
+
+def _optional_id(value: ApiValue, endpoint: str, field: str) -> str | None:
+    """An id that may be absent: none or 0 is no id."""
+    if value is None or (isinstance(value, Decimal) and value == 0):
+        return None
+    return _id_text(value, endpoint, field)
+
+
+def _objects(container: Mapping[str, ApiValue], key: str, endpoint: str) -> list[Item]:
+    """The objects of a list field; an absent or null one is none (the normalizer checks what
+    is required)."""
+    value = container.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise _shape(endpoint, key)
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _object(container: Mapping[str, ApiValue], key: str) -> Item:
+    value = container.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _day(value: ApiValue, endpoint: str, field: str) -> date:
+    if not isinstance(value, str):
+        raise _shape(endpoint, field)
+    try:
+        return parse_date(value, f"{endpoint} {field}", "T")
+    except TypedValueError:
+        raise _shape(endpoint, field) from None
+
+
+def _cursor_date(cursor: Mapping[str, JSONValue], key: str) -> date | None:
+    return _iso_date(cursor.get(key))
+
+
+def _iso_date(value: JSONValue) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _cursor_texts(cursor: Mapping[str, JSONValue], key: str) -> dict[str, str]:
+    value = cursor.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(v, str)}
+
+
+def _due(cursor: Mapping[str, JSONValue], key: str, every: timedelta, now: datetime) -> bool:
+    value = cursor.get(key)
+    if not isinstance(value, str):
+        return True
+    try:
+        last = datetime.fromisoformat(value)
+    except ValueError:
+        return True
+    return last.tzinfo is None or now - last >= every
+
+
+def _flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
+    """The flags the cursor keeps: part → reasons."""
+    value = cursor.get("flags")
+    if not isinstance(value, dict):
+        return {}
+    return {
+        part: [r for r in reasons if isinstance(r, str)]
+        for part, reasons in value.items()
+        if isinstance(reasons, list)
+    }
+
+
+async def publish_flags(
+    ctx: SyncContext, found: Iterable[tuple[str, str]], checked: Collection[str]
+) -> dict[str, JSONValue]:
+    """Replace this connector's flags among the connection's warnings with these, keeping every
+    other warning, as the connection stands now. `found`: (part, reason) of this run; a part
+    not `checked` keeps the flags the cursor holds for it (a sync keeps the statement's, an
+    upload the normalizer's when it did not replay). The owner is told, in one message, of each
+    flag not yet told: a flag counts as told only once a send succeeds, so a failed one is
+    retried next time; one whose cause is gone clears without a word. Returns the cursor's
+    `flags` and `notified`."""
+    connection = await get_connection(ctx.command.session, ctx.connection.id)
+    cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
+    before = _flags(cursor)
+    parts: dict[str, set[str]] = {}
+    for part, reason in found:
+        parts.setdefault(part, set()).add(reason)
+    for part, reasons in before.items():
+        if part not in checked:
+            parts.setdefault(part, set()).update(reasons)
+    reasons = sorted({reason for part_reasons in parts.values() for reason in part_reasons})
+    told_before = cursor.get("notified")
+    told = set(told_before) if isinstance(told_before, list) else set[JSONValue]()
+    notified = [reason for reason in reasons if reason in told]
+    new = [reason for reason in reasons if reason not in told]
+    if new:
+        try:
+            await ctx.notifier.send(f"{connection.display_name}: {FLAGGED_PREFIX}{', '.join(new)}")
+            notified = reasons
+        except Exception as error:
+            # The class only: the message could carry the notifier's webhook URL.
+            logger.warning("sending an eToro notification failed (%s)", type(error).__name__)
+    kept = {reason for old in before.values() for reason in old}
+    previous = connection.warnings
+    warnings = [
+        w
+        for w in previous
+        if not (w.startswith(FLAGGED_PREFIX) and w[len(FLAGGED_PREFIX) :] in kept)
+    ] + [FLAGGED_PREFIX + r for r in reasons]
+    if warnings != previous:
+        await set_warnings(ctx.command, connection.id, warnings)
+    return {
+        "flags": {
+            part: list[JSONValue](sorted(part_reasons))
+            for part, part_reasons in sorted(parts.items())
+        },
+        "notified": list[JSONValue](notified),
+    }
+
+
+class _Seen:
+    """`seen` for a walk newest first: the item the cursor remembers, and every one after it,
+    which is older. Without one (a first sync) nothing is seen."""
+
+    def __init__(self, marker: str | None) -> None:
+        self.marker = marker
+        self.reached = False
+
+    def __call__(self, item: Item) -> bool:
+        if not self.reached and self.marker is not None:
+            self.reached = item.get("id") == self.marker
+        return self.reached
+
+
+class _Run:
+    """One sync: the client, the cursor it began with, and the raw records it has stored."""
+
+    def __init__(
+        self, ctx: SyncContext, client: EtoroClient, cursor: Mapping[str, JSONValue]
+    ) -> None:
+        self.ctx = ctx
+        self.client = client
+        self.cursor = cursor
+        self.ids: list[UUID] = []
+
+    async def store(
+        self,
+        endpoint: str,
+        item: Item,
+        *,
+        path: str | None = None,
+        params: Mapping[str, str] | None = None,
+        seen_at: datetime | None = None,
+    ) -> UUID:
+        """Store the item; a report (`seen_at`: when its response arrived) is also sighted,
+        stored now or before (report_sightings)."""
+        raw_record_id = await store_raw_record(
+            self.ctx.command,
+            connection_id=self.ctx.connection.id,
+            record_type=ENDPOINTS[endpoint].record_type,
+            request=_request(path or endpoint_path(endpoint), params),
+            content=record_json(item),
+            connector_version=VERSION,
+            sync_id=self.ctx.sync_id,
+        )
+        self.ids.append(raw_record_id)
+        if endpoint in REPORTS:
+            assert seen_at is not None, "a report is stored with the time it was seen"
+            await record_sighting(
+                self.ctx.command,
+                connection_id=self.ctx.connection.id,
+                raw_record_id=raw_record_id,
+                sync_id=self.ctx.sync_id,
+                seen_at=seen_at,
+            )
+        return raw_record_id
+
+    async def keep_refused(self, me: Item) -> None:
+        """Store a refused key's `/me` in a command of its own, which the sync's failure does
+        not roll back: the scopes it held stay on record."""
+        ctx = self.ctx
+        args: dict[str, JSONValue] = {"connection_id": str(ctx.connection.id)}
+        async with (
+            ctx.session_factory() as session,
+            command_context(session, ctx.command.actor, "etoro.keep_refused_key", args) as cmd,
+        ):
+            await store_raw_record(
+                cmd,
+                connection_id=ctx.connection.id,
+                record_type=ENDPOINTS["me"].record_type,
+                request=_request(endpoint_path("me"), None),
+                content=record_json(me),
+                connector_version=VERSION,
+                sync_id=ctx.sync_id,
+            )
+
+    async def gate(self) -> tuple[str, str]:
+        """`/me` and the read-only gate; the user's (gcid, realCid)."""
+        me = await self.client.me()
+        arrived = datetime.now(UTC)
+        scopes = me.get("scopes")
+        # The client refuses a missing or empty list; the connector checks the scopes itself.
+        if not isinstance(scopes, list) or write_scopes(s for s in scopes if isinstance(s, str)):
+            await self.keep_refused(me)
+            raise ReadOnlyGateError(_GATE)
+        gcid = _id_text(me.get("gcid"), "/me", "gcid")
+        real_cid = _id_text(me.get("realCid"), "/me", "realCid")
+        known = self.cursor.get("gcid")
+        if isinstance(known, str) and known != gcid:
+            raise AccountMismatchError("this key belongs to another eToro user")
+        await self.store("me", me, seen_at=arrived)
+        return gcid, real_cid
+
+    async def reports(self) -> tuple[Item, Item, Item, Item]:
+        """Balances, PnL, aggregate portfolio and instrument breakdown, each sighted when its
+        response arrived."""
+        balances = await self.client.balances()
+        await self.store("balances", balances, params=_BALANCES, seen_at=datetime.now(UTC))
+        pnl = await self.client.pnl()
+        await self.store("pnl", pnl, seen_at=datetime.now(UTC))
+        aggregate = await self.client.aggregate()
+        await self.store("aggregate", aggregate, seen_at=datetime.now(UTC))
+        breakdown = await self.client.breakdown()
+        await self.store("breakdown", breakdown, params=_BREAKDOWN, seen_at=datetime.now(UTC))
+        return balances, pnl, aggregate, breakdown
+
+    async def cash(self, balances: Item) -> dict[str, JSONValue]:
+        """Each Cash account's transactions, newest first, to the newest seen before."""
+        markers = _cursor_texts(self.cursor, "seen_cash")
+        seen: dict[str, JSONValue] = {}
+        for account in _objects(balances, "balances", "balances"):
+            if account.get("accountType") != "Cash":
+                continue
+            account_id = account.get("accountId")
+            if not isinstance(account_id, str):
+                raise _shape("balances", "balances[].accountId")
+            try:
+                items = await self.client.cash_transactions(
+                    account_id, _Seen(markers.get(account_id))
+                )
+            except ValueError:
+                raise _shape("balances", "balances[].accountId") from None
+            path = f"{endpoint_path('cash_transactions')}/{account_id}/transactions"
+            for item in items:
+                if not isinstance(item.get("id"), str):
+                    raise _shape("cash transactions", "id")
+                await self.store("cash_transactions", item, path=path)
+            newest = items[0].get("id") if items else markers.get(account_id)
+            if isinstance(newest, str):
+                seen[account_id] = newest
+        return seen
+
+    async def window(self, min_date: date) -> list[Item]:
+        """One trade-history window, stored as it arrives."""
+        rows = await self.client.trade_history(min_date)
+        for row in rows:
+            await self.store("trade_history", row, params={"minDate": min_date.isoformat()})
+        return rows
+
+    async def opening(self) -> date | None:
+        """The account's opening: the earliest Date Created of the statements stored."""
+        values = await self.ctx.command.session.scalars(
+            text(
+                "select content->'cells'->>'Value' from core.raw_records"
+                " where connection_id = :c and record_type = :t"
+                " and btrim(content->'cells'->>'Label') = 'Date Created'"
+            ),
+            {"c": self.ctx.connection.id, "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type},
+        )
+        days = [
+            read_moment(value.strip(), "Date Created", STATEMENT_ZONE).date()
+            for value in values
+            if isinstance(value, str)
+        ]
+        return min(days, default=None)
+
+    async def trades(self, today: date) -> tuple[date, list[Item]]:
+        """The trade history this sync asks (design §5.2, step 4); (the latest close date
+        stored, or today when there is none, and every row fetched)."""
+        latest = _cursor_date(self.cursor, "trade_history_to")
+        span = timedelta(days=TRADE_WINDOW_DAYS)
+        if latest is not None:
+            rows = await self.window(max(latest - OVERLAP, today - span))
+            return _latest_close(rows, latest), rows
+        opening = await self.opening()
+        seen: set[str] = set()
+        fetched: list[Item] = []
+        for k in range(1, MAX_WINDOWS + 1):
+            min_date = today - span * k
+            rows = await self.window(min_date)
+            fetched.extend(rows)
+            ids = {_id_text(row.get("positionId"), "trade history", "positionId") for row in rows}
+            new = ids - seen
+            seen |= ids
+            if (min_date <= opening) if opening is not None else not new:
+                return _latest_close(fetched, today if not fetched else None), fetched
+        raise EtoroSyncError("eToro's trade history did not end")
+
+    async def orders(self, pnl: Item, trades: list[Item]) -> list[JSONValue]:
+        """`orders:lookup` for each order not looked up before; every order looked up."""
+        before = self.cursor.get("looked_up")
+        looked_up: set[str] = (
+            {v for v in before if isinstance(v, str)} if isinstance(before, list) else set()
+        )
+        wanted: set[str] = set()
+        for position in _objects(_object(pnl, "clientPortfolio"), "positions", "pnl"):
+            order_id = _optional_id(position.get("orderID"), "pnl", "positions[].orderID")
+            if order_id is not None:
+                wanted.add(order_id)
+        for row in trades:
+            order_id = _optional_id(row.get("orderId"), "trade history", "orderId")
+            if order_id is not None:
+                wanted.add(order_id)
+        for order_id in sorted(wanted - looked_up, key=int):
+            order = await self.client.order_lookup(Decimal(order_id))
+            if order is not None:
+                await self.store("order_lookup", order, params={"orderId": order_id})
+            # An order eToro does not know (404) is not asked again either.
+            looked_up.add(order_id)
+        return list[JSONValue](sorted(looked_up, key=int))
+
+    async def balance_history(self, today: date) -> str | None:
+        """Snapshots since the latest stored less 7 days (the first sync: 365 days); the
+        latest snapshot date stored."""
+        latest = _cursor_date(self.cursor, "balance_history_to")
+        oldest = today - timedelta(days=TRADE_WINDOW_DAYS)
+        start = oldest if latest is None else min(max(latest - OVERLAP, oldest), today)
+        body = await self.client.balance_history(start, today)
+        params = {"fromDate": start.isoformat(), "toDate": today.isoformat()}
+        await self.store("balance_history", body, params=params, seen_at=datetime.now(UTC))
+        days = [
+            _day(s.get("date"), "balances/history", "snapshots[].date")
+            for s in _objects(body, "snapshots", "balances/history")
+        ]
+        if latest is not None:
+            days.append(latest)
+        return max(days).isoformat() if days else None
+
+    async def daily(
+        self, today: date, pnl: Item, aggregate: Item, breakdown: Item, trades: list[Item]
+    ) -> dict[str, JSONValue]:
+        """Closed-events, stockback, market data of the instruments held or traded, and
+        candles of those held; the cursor's `candles_to`."""
+        for item in await self.client.closed_events():
+            await self.store("closed_events", item)
+        for item in await self.client.stockback():
+            await self.store("stockback", item)
+
+        opened: dict[str, date] = {}
+        for position in _objects(_object(pnl, "clientPortfolio"), "positions", "pnl"):
+            instrument = _id_text(position.get("instrumentID"), "pnl", "positions[].instrumentID")
+            day = position.get("openDateTime")
+            first = _day(day, "pnl", "positions[].openDateTime") if day is not None else today
+            opened[instrument] = min(opened.get(instrument, first), first)
+        held = set(opened)
+        for item in _objects(aggregate, "instrumentAggregates", "aggregate-portfolio"):
+            held.add(_id_text(item.get("instrumentId"), "aggregate-portfolio", "instrumentId"))
+        for item in _objects(breakdown, "instruments", "instrument-breakdown"):
+            held.add(_id_text(item.get("instrumentId"), "instrument-breakdown", "instrumentId"))
+        traded = {_id_text(r.get("instrumentId"), "trade history", "instrumentId") for r in trades}
+
+        for item in await self.client.instruments([int(i) for i in sorted(held | traded, key=int)]):
+            await self.store("instruments", item)
+        for item in await self.client.instrument_types():
+            await self.store("instrument_types", item)
+        for item in await self.client.exchanges():
+            await self.store("exchanges", item)
+
+        fetched = _cursor_texts(self.cursor, "candles_to")
+        candles_to: dict[str, JSONValue] = dict(fetched)
+        for instrument in sorted(held, key=int):
+            last = _iso_date(fetched.get(instrument))
+            start = (
+                min(last - OVERLAP, today) if last is not None else opened.get(instrument, today)
+            )
+            path = f"{endpoint_path('candles')}/{instrument}/candles"
+            params = {"from": start.isoformat(), "to": today.isoformat()}
+            for item in await self.client.candles(int(instrument), start, today):
+                # A candle names no instrument; its page's instrumentId is the one asked for.
+                candle: Item = {**item, "instrumentId": Decimal(instrument)}
+                await self.store("candles", candle, path=path, params=params)
+            candles_to[instrument] = today.isoformat()
+        return candles_to
+
+    async def sync(self, now: datetime) -> dict[str, JSONValue]:
+        today = now.date()
+        gcid, real_cid = await self.gate()
+        balances, pnl, aggregate, breakdown = await self.reports()
+        seen_cash = await self.cash(balances)
+        trade_history_to, trades = await self.trades(today)
+        looked_up = await self.orders(pnl, trades)
+        balance_history_to = await self.balance_history(today)
+        daily = _due(self.cursor, "daily_at", DAILY_EVERY, now)
+        candles_to: JSONValue = self.cursor.get("candles_to")
+        if daily:
+            candles_to = await self.daily(today, pnl, aggregate, breakdown, trades)
+        return {
+            "gcid": gcid,
+            "real_cid": real_cid,
+            "trade_history_to": trade_history_to.isoformat(),
+            "balance_history_to": balance_history_to,
+            "seen_cash": seen_cash,
+            "daily_at": now.isoformat() if daily else self.cursor.get("daily_at"),
+            "looked_up": looked_up,
+            "candles_to": candles_to if isinstance(candles_to, dict) else {},
+        }
+
+
+# The queries the client sends for balances and the breakdown, noted on their raw records.
+_BALANCES = {"includeZeroBalances": "true", "includeSubAccounts": "true", "expand": "equityDetails"}
+_BREAKDOWN = {"positionLevel": "Normal", "orderLevel": "Normal", "mirrorLevel": "Details"}
+
+
+def _request(path: str, params: Mapping[str, str] | None) -> dict[str, JSONValue]:
+    return {"endpoint": path, "params": dict(params or {})}
+
+
+def _latest_close(rows: list[Item], floor: date | None) -> date:
+    """The latest close date among the rows, or `floor` (one of them is given)."""
+    days = [_day(r.get("closeTimestamp"), "trade history", "closeTimestamp") for r in rows]
+    if floor is not None:
+        days.append(floor)
+    return max(days)
+
+
+class EtoroConnector:
+    name = "etoro"
+    version = VERSION
+    capabilities: frozenset[Capability] = frozenset({"balances", "holdings", "transactions"})
+
+    async def check_access(self, ctx: SyncContext) -> bool:
+        # There is no approval step: a key works as soon as it is created.
+        return True
+
+    async def sync(self, ctx: SyncContext) -> JSONValue:
+        connection = ctx.connection
+        session = ctx.command.session
+        api_key = await load_credential(session, ctx.master_key, connection.id, KEY_PURPOSE)
+        user_key = await load_credential(session, ctx.master_key, connection.id, USER_KEY_PURPOSE)
+        if api_key is None or user_key is None:
+            raise CredentialRejectedError("The eToro Public API Key or User Key is missing")
+        before = connection.cursor
+        cursor: Mapping[str, JSONValue] = before if isinstance(before, dict) else {}
+        run = _Run(ctx, EtoroClient(ctx.http, api_key, user_key), cursor)
+        after = await run.sync(datetime.now(UTC))
+        report = await normalize(ctx, list(dict.fromkeys(run.ids)))
+        checked = {FIELDS} if report.replayed else set[str]()
+        after |= await publish_flags(ctx, {(FIELDS, flag) for flag in report.flagged}, checked)
+        return after
+
+
+# A statement is decoded in full in memory, so it is parsed off the event loop, one at a time,
+# as IBKR's statements are.
+_PARSING = threading.Lock()
+
+
+def _parse_alone(body: bytes) -> EtoroStatement:
+    with _PARSING:
+        return parse_statement(body, STATEMENT_ZONE)
+
+
+async def _latest_report(ctx: SyncContext, record_type: str) -> Mapping[str, JSONValue] | None:
+    """The content of the report record of this type a sync saw last (a refused key's `/me`,
+    never sighted, does not count)."""
+    content = await ctx.command.session.scalar(
+        text(
+            "select r.content from core.raw_records r"
+            " join finance.report_sightings s"
+            " on s.raw_record_id = r.id and s.connection_id = r.connection_id"
+            " where r.connection_id = :c and r.record_type = :t"
+            " order by s.seen_at desc, s.sync_id desc limit 1"
+        ),
+        {"c": ctx.connection.id, "t": record_type},
+    )
+    return cast(dict[str, JSONValue], content) if isinstance(content, dict) else None
+
+
+def _trading_currencies(balances: Mapping[str, JSONValue]) -> list[JSONValue]:
+    """The currency of each Trading account a stored balances record lists."""
+    accounts = balances.get("balances")
+    if not isinstance(accounts, list):
+        return []
+    return [
+        account.get("currency")
+        for account in accounts
+        if isinstance(account, dict) and account.get("accountType") == "Trading"
+    ]
+
+
+async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
+    """The statement must be the connection's Trading account's (design §5.3, §5.5)."""
+    me = await _latest_report(ctx, ENDPOINTS["me"].record_type)
+    balances = await _latest_report(ctx, ENDPOINTS["balances"].record_type)
+    if me is None or balances is None:
+        raise StatementRejected("wait for the eToro connection's first sync to finish")
+    username = me.get("username")
+    if not isinstance(username, str) or (
+        statement.username.strip().casefold() != username.strip().casefold()
+    ):
+        raise StatementRejected("this statement is for another eToro user")
+    currencies = _trading_currencies(balances)
+    currency = statement.currency.strip().upper()
+    if not currencies or any(
+        not isinstance(c, str) or c.strip().upper() != currency for c in currencies
+    ):
+        raise StatementRejected(
+            "this statement's currency is not the eToro Trading account's currency"
+        )
+    earlier = await ctx.command.session.scalar(
+        text(
+            "select exists (select 1 from core.raw_records"
+            " where connection_id = :c and record_type = :t)"
+        ),
+        {"c": ctx.connection.id, "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type},
+    )
+    if not earlier and statement.period_from > statement.created:
+        # The first statement and the API together must cover the account's whole life.
+        raise StatementRejected(
+            "the first eToro statement must start on or before the account's Date Created"
+        )
+
+
+async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> IngestResult:
+    """Check an uploaded statement, store it as a document and one raw record per row, then
+    normalise those records and publish the reader's and the normalizer's flags."""
+    try:
+        # Parsed and checked first: a statement that is refused leaves nothing behind.
+        statement = await asyncio.to_thread(_parse_alone, body)
+    except StatementError as error:
+        raise StatementRejected(str(error)) from None
+    await _check_statement(ctx, statement)
+    if ctx.documents is None:
+        raise RuntimeError("no document store in the sync context")
+    document = await store_document(
+        ctx.command, ctx.documents, body, filename=filename, media_type=XLSX, source=DOCUMENT_SOURCE
+    )
+    request: dict[str, JSONValue] = {"upload": filename, "document_sha256": document.sha256}
+    period: dict[str, JSONValue] = {
+        "from": statement.period_from.isoformat(),
+        "to": statement.period_to.isoformat(),
+    }
+    ids: list[UUID] = []
+    for row in statement.rows:
+        content: JSONValue = {"cells": dict(row.cells), "key": row.key, "period": period}
+        ids.append(
+            await store_raw_record(
+                ctx.command,
+                connection_id=ctx.connection.id,
+                record_type=STATEMENT_SHEETS[row.sheet].record_type,
+                request=request,
+                content=content,
+                connector_version=VERSION,
+                sync_id=ctx.sync_id,
+            )
+        )
+    ids = list(dict.fromkeys(ids))
+    report = await normalize(ctx, ids)
+    found = {(STATEMENT, flag) for flag in statement.flagged}
+    found |= {(FIELDS, flag) for flag in report.flagged}
+    checked = {STATEMENT, FIELDS} if report.replayed else {STATEMENT}
+    flags = await publish_flags(ctx, found, checked)
+    current = (await get_connection(ctx.command.session, ctx.connection.id)).cursor
+    cursor: dict[str, JSONValue] = dict(current) if isinstance(current, dict) else {}
+    await set_cursor(ctx.command, ctx.connection.id, {**cursor, **flags})
+    return IngestResult(ids, statement.flagged)

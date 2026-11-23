@@ -16,11 +16,11 @@ A required path must be present and not null in every item; one under `<array>[]
 of that array, when the array is there. Any other path with a value is flagged by name.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from lararium.modules.finance.typed_tables import column_map
+from lararium.modules.finance.typed_tables import column_map, column_name
 
 
 @dataclass(frozen=True)
@@ -304,12 +304,13 @@ _DECLARED: Mapping[str, tuple[EndpointSpec, dict[str, Kind]]] = {
         numeric="exchangeID",
         text="exchangeDescription",
     ),
-    # One daily candle of `results` (SPEC); its prices are decimal strings.
+    # One daily candle of `results` (SPEC); its prices are decimal strings. A candle names no
+    # instrument: the sync stores each with its page's `instrumentId`, the one it asked for.
     "candles": _endpoint(
         "etoro.candle",
         "etoro_candles",
-        "time",
-        numeric="open high low close volume",
+        "instrumentId time",
+        numeric="instrumentId open high low close volume",
         timestamptz="time",
     ),
 }
@@ -347,8 +348,74 @@ OWN_COLUMNS = frozenset(
         "transaction_id",
         "external_id",
         "item_index",
+        # Links to finance's rows.
+        "finance_account_id",
+        "finance_instrument_id",
+        "snapshot_id",
+        "document_id",
+        # A child row's parent, where the parent's key is one of its fields.
+        "instrument_index",
+        "parent_order_id",
+        "parent_instrument_id",
+        "cash_transaction_id",
+        "snapshot_date",
+        # A statement row's key (Decision 10), its period, and a trade's statement record.
+        "row_key",
+        "period_from",
+        "period_to",
+        "statement_row_key",
+        "statement_raw_record_id",
+        # Financial Summary's open columns: a column's header and its figure.
+        "period_header",
+        "figure",
     }
 )
+
+# Each table's primary key (migration 0031). A report is kept per sync day (`as_of_date`);
+# a ledger row by its external id or its source's id; a statement row by its key.
+KEYS: Mapping[str, tuple[str, ...]] = {
+    "etoro_users": ("connection_id",),
+    "etoro_user_scopes": ("connection_id", "item_index"),
+    "etoro_pnl": ("connection_id", "as_of_date"),
+    "etoro_pnl_positions": ("connection_id", "as_of_date", "item_index"),
+    "etoro_aggregates": ("connection_id", "as_of_date"),
+    "etoro_aggregate_instruments": ("connection_id", "as_of_date", "item_index"),
+    "etoro_breakdowns": ("connection_id", "as_of_date"),
+    "etoro_breakdown_instruments": ("connection_id", "as_of_date", "item_index"),
+    "etoro_breakdown_positions": (
+        "connection_id",
+        "as_of_date",
+        "instrument_index",
+        "item_index",
+    ),
+    "etoro_balances": ("connection_id", "as_of_date"),
+    "etoro_balance_accounts": ("connection_id", "as_of_date", "item_index"),
+    # One request's answer; fromDate and toDate are not required, so the record is the key.
+    "etoro_balance_history": ("connection_id", "raw_record_id"),
+    # A day's snapshot, whichever request brought it last (requests overlap by 7 days).
+    "etoro_balance_snapshots": ("connection_id", "date"),
+    "etoro_balance_account_snapshots": ("connection_id", "snapshot_date", "item_index"),
+    "etoro_cash_transactions": ("connection_id", "id"),
+    "etoro_cash_bank_identifiers": ("connection_id", "cash_transaction_id", "item_index"),
+    # `close:<positionId>` (Decision 9), from trade history, the statement, or both.
+    "etoro_trades": ("connection_id", "external_id"),
+    "etoro_orders": ("connection_id", "order_id"),
+    "etoro_position_executions": ("connection_id", "parent_order_id", "item_index"),
+    "etoro_order_positions_to_close": ("connection_id", "parent_order_id", "item_index"),
+    "etoro_closed_events": ("connection_id", "close_year", "asset_type"),
+    # A payment has no required field: it is its raw record.
+    "etoro_stockback_payments": ("connection_id", "raw_record_id"),
+    "etoro_instruments": ("connection_id", "instrument_id"),
+    "etoro_instrument_images": ("connection_id", "parent_instrument_id", "item_index"),
+    "etoro_instrument_types": ("connection_id", "instrument_type_id"),
+    "etoro_exchanges": ("connection_id", "exchange_id"),
+    "etoro_candles": ("connection_id", "instrument_id", "time"),
+    "etoro_statements": ("connection_id", "document_id"),
+    "etoro_activity": ("connection_id", "row_key"),
+    "etoro_dividends": ("connection_id", "row_key"),
+    "etoro_financial_summary": ("connection_id", "row_key"),
+    "etoro_financial_summary_values": ("connection_id", "row_key", "item_index"),
+}
 
 
 def split(spec: EndpointSpec, path: str) -> tuple[str, str]:
@@ -383,6 +450,8 @@ def _columns(
     for table, mapping in table_columns.items():
         if clash := OWN_COLUMNS & set(mapping.values()):
             raise ValueError(f"{table}: a field would be column {', '.join(sorted(clash))}")
+        if table not in KEYS:
+            raise ValueError(f"{table} has no row key")
     known = frozenset[str]().union(*(spec.known for spec in endpoints.values()))
     if missing := personal - known:
         raise ValueError(f"personal fields not known: {sorted(missing)}")
@@ -520,3 +589,133 @@ STATEMENT_PERSONAL: frozenset[str] = frozenset(
         f"{CLOSED_POSITIONS}.Notes",
     }
 )
+
+
+# Where the statement's columns are typed (Decision 3: the header in snake_case). Closed
+# Positions' columns go onto the trade's row beside trade history's, prefixed, since both
+# sources are kept (design §5.7) and six headers would take trade history's columns.
+STATEMENT_TABLES: Mapping[str, tuple[str, str]] = {
+    CLOSED_POSITIONS: ("etoro_trades", "statement_"),
+    ACCOUNT_ACTIVITY: ("etoro_activity", ""),
+    DIVIDENDS: ("etoro_dividends", ""),
+}
+
+# Each known column's type. Times are `dd/mm/yyyy HH:MM:SS` read as UTC (Decision 11a); a
+# number's placeholder ("-") is no value. The FX rates of Closed Positions are text: the probe
+# found them not to be numbers (eToro writes "N/A" where no conversion applies).
+STATEMENT_KINDS: Mapping[str, Mapping[str, Kind]] = {
+    ACCOUNT_ACTIVITY: {
+        "Date": "timestamptz",
+        "Type": "text",
+        "Details": "text",
+        "Amount": "numeric",
+        "Units / Contracts": "numeric",
+        "Realized Equity Change": "numeric",
+        "Realized Equity": "numeric",
+        "Balance": "numeric",
+        "Position ID": "numeric",
+        "Asset type": "text",
+        "NWA": "numeric",
+    },
+    CLOSED_POSITIONS: {
+        "Position ID": "numeric",
+        "Action": "text",
+        "Long / Short": "text",
+        "Amount": "numeric",
+        "Units / Contracts": "numeric",
+        "Open Date": "timestamptz",
+        "Close Date": "timestamptz",
+        "Leverage": "numeric",
+        "Spread Fees (USD)": "numeric",
+        "Market Spread (USD)": "numeric",
+        "Profit(USD)": "numeric",
+        "Profit(GBP)": "numeric",
+        "FX rate at open (USD)": "text",
+        "FX rate at close (USD)": "text",
+        "Open Rate": "numeric",
+        "Close Rate": "numeric",
+        "Take profit rate": "numeric",
+        "Stop loss rate": "numeric",
+        "Overnight Fees and Dividends": "numeric",
+        "Copied From": "text",
+        "Type": "text",
+        "ISIN": "text",
+        "Notes": "text",
+    },
+    DIVIDENDS: {
+        "Date of Payment": "date",
+        "Instrument Name": "text",
+        "Net Dividend Received (USD)": "numeric",
+        "Net dividends": "numeric",
+        "Currency": "text",
+        "Franked/Unfranked": "text",
+        "Franking Credits (AUD)": "numeric",
+        "Net Dividend Received (GBP)": "numeric",
+        "Withholding Tax Rate (%)": "numeric",
+        "Withholding Tax Amount (USD)": "numeric",
+        "Withholding Tax Amount (GBP)": "numeric",
+        "Position ID": "numeric",
+        "Type": "text",
+        "ISIN": "text",
+    },
+}
+
+# Account Summary's labels as columns of `etoro_statements`, one row per statement: column B
+# (`Value`) typed by the label, column C and on (`Value 2`) as text in `<column>_2`, since the
+# probe did not show what column C holds. Headings and notes carry no value and get no column.
+SUMMARY_HEADINGS = frozenset(
+    {
+        "Details",
+        "N/A - Currency conversion not applicable",
+        "Values shown in brackets indicate negative amounts",
+    }
+)
+_SUMMARY_TEXT = frozenset({"Name", "Username", "Currency", "Account Summary (USD)"})
+_SUMMARY_TIMES = frozenset({"Date Created", "Start Date", "End Date"})
+SUMMARY_KINDS: Mapping[str, Kind] = {
+    label: "text"
+    if label in _SUMMARY_TEXT
+    else "timestamptz"
+    if label in _SUMMARY_TIMES
+    else "numeric"
+    for label in SUMMARY_LABELS
+    if label not in SUMMARY_HEADINGS
+}
+SECOND_VALUE = "_2"
+
+
+def _prefixed(prefix: str) -> Callable[[str], str]:
+    return lambda header: prefix + column_name(header)
+
+
+def _statement_columns() -> dict[str, dict[str, str]]:
+    """Table → statement column (or label) → column, guarded as the API's are: two names that
+    would share a column, or one that would be an own column or an API field's, fail at import."""
+    api = {
+        table: set(mapping.values())
+        for tables in COLUMNS.values()
+        for table, mapping in tables.items()
+    }
+    out: dict[str, dict[str, str]] = {}
+    for sheet, (table, prefix) in STATEMENT_TABLES.items():
+        if frozenset(STATEMENT_KINDS[sheet]) != STATEMENT_SHEETS[sheet].known:
+            raise ValueError(f"{sheet}: the typed columns are not the known ones")
+        out[table] = column_map(STATEMENT_KINDS[sheet], _prefixed(prefix))
+    summary = column_map(SUMMARY_KINDS)
+    out["etoro_statements"] = {
+        **summary,
+        **{
+            f"{label}{SECOND_VALUE}": f"{column}{SECOND_VALUE}" for label, column in summary.items()
+        },
+    }
+    for table, mapping in out.items():
+        if table not in KEYS:
+            raise ValueError(f"{table} has no row key")
+        taken = (OWN_COLUMNS | api.get(table, set())) & set(mapping.values())
+        if taken:
+            raise ValueError(f"{table}: a statement column would be {', '.join(sorted(taken))}")
+    return out
+
+
+# Table → statement column (or Account Summary label; `<label>_2` for its column C) → column.
+STATEMENT_COLUMNS: Mapping[str, Mapping[str, str]] = _statement_columns()

@@ -520,6 +520,12 @@ def test_fields_guard_an_own_column() -> None:
         fields._columns(endpoints, fields.PERSONAL)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_fields_guard_a_table_without_a_key() -> None:
+    endpoints = {**fields.ENDPOINTS, "test": _spec(text="name")}
+    with pytest.raises(ValueError, match="etoro_tests has no row key"):
+        fields._columns(endpoints, fields.PERSONAL)  # pyright: ignore[reportPrivateUsage]
+
+
 def test_fields_guard_an_unknown_personal_path() -> None:
     with pytest.raises(ValueError, match="personal fields not known"):
         fields._columns(fields.ENDPOINTS, fields.PERSONAL | {"nickname"})  # pyright: ignore[reportPrivateUsage]

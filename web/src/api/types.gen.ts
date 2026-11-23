@@ -650,7 +650,7 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account';
     /**
      * Sort Code
      */

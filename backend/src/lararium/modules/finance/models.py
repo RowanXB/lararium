@@ -434,3 +434,52 @@ class TransferDecision(Base):
         ForeignKey("finance.transfers.id", ondelete="CASCADE")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceReview(Base):
+    """A value two sources of one event disagree on, open until the owner takes one
+    (source_reviews)."""
+
+    __tablename__ = "source_reviews"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"))
+    transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="SET NULL")
+    )
+    event_key: Mapped[str] = mapped_column(Text)
+    field: Mapped[str] = mapped_column(Text)
+    api_value: Mapped[str] = mapped_column(Text)
+    statement_value: Mapped[str] = mapped_column(Text)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[str | None] = mapped_column(Text)  # api | statement
+    resolved_by: Mapped[str | None] = mapped_column(Text)
+
+
+class SourceDecision(Base):
+    """The owner's take on a field of an event, which the normalizer replays."""
+
+    __tablename__ = "source_decisions"
+    __table_args__ = FINANCE_SCHEMA
+
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"), primary_key=True)
+    event_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    field: Mapped[str] = mapped_column(Text, primary_key=True)
+    take: Mapped[str] = mapped_column(Text)  # api | statement
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_by: Mapped[str] = mapped_column(Text)
+
+
+class TransferLegFee(Base):
+    """A transfer leg's conversion fee, supplied by its connector (design §5.12)."""
+
+    __tablename__ = "transfer_leg_fees"
+    __table_args__ = FINANCE_SCHEMA
+
+    transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # not negative

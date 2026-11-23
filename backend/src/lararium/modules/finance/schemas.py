@@ -436,6 +436,23 @@ class MainAccountUpdate(BaseModel):
     main_account_id: UUID | None
 
 
+class ReviewOut(BaseModel):
+    """A value two sources of one event disagree on (design §5.7): open, or resolved by the
+    owner taking one of them."""
+
+    id: UUID
+    connection_id: UUID
+    transaction_id: UUID | None
+    event_key: str  # e.g. "close:<positionId>"
+    field: str  # units | cash | profit | booking_date
+    api_value: str
+    statement_value: str
+    opened_at: AwareDatetime
+    resolved_at: AwareDatetime | None
+    resolution: Literal["api", "statement"] | None
+    resolved_by: str | None
+
+
 class TransferOut(BaseModel):
     """A transfer as matching left it. Its id changes when matching reopens it, so a client
     finds it again by its own records' ids."""

@@ -1332,7 +1332,8 @@
             "enum": [
               "uk_bank_account",
               "ibkr_account",
-              "trading212_account"
+              "trading212_account",
+              "etoro_account"
             ],
             "title": "Kind",
             "type": "string"

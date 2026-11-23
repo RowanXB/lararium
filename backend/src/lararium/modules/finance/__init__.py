@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from lararium.modules import ModuleSpec
 from lararium.modules.finance import api, connections_api, transfers_api
+from lararium.modules.finance.etoro.sync import EtoroConnector
 from lararium.modules.finance.ibkr.sync import IbkrConnector
 from lararium.modules.finance.monzo.sync import MonzoConnector
 from lararium.modules.finance.trading212.sync import Trading212Connector
@@ -22,5 +23,6 @@ MODULE = ModuleSpec(
         "monzo": MonzoConnector(),
         "ibkr": IbkrConnector(),
         "trading212": Trading212Connector(),
+        "etoro": EtoroConnector(),
     },
 )

@@ -102,6 +102,11 @@ class ReadOnlyGateError(CredentialRejectedError):
         super().__init__(message)
 
 
+def endpoint_path(endpoint: str) -> str:
+    """An endpoint's path, for the request a raw record notes (never a key or a header)."""
+    return _ENDPOINTS[endpoint][0]
+
+
 def write_scopes(scopes: Iterable[str]) -> list[str]:
     """The scopes the read-only gate refuses, as given: every one not ending `:read` (compared
     after stripping space, ignoring case). An allow-list, since eToro's write-capable scopes are

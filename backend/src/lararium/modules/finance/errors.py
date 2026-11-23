@@ -165,3 +165,15 @@ class LedgerImbalanceError(FinanceError):
     def __init__(self, residuals: dict[UUID, Decimal]) -> None:
         super().__init__("the postings don't balance per instrument")
         self.residuals = residuals
+
+
+class ReviewNotFoundError(FinanceError):
+    """No review item has the given id."""
+
+    template = "no review item has the id {}"
+
+
+class ReviewResolvedError(FinanceError):
+    """The review item is already resolved."""
+
+    template = "the review item {} is already resolved"

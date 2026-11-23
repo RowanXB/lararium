@@ -140,7 +140,9 @@ def _table_rows(sheet: Sheet, spec: StatementSheet, flagged: set[str]) -> list[d
     return out
 
 
-def _moment(value: str, label: str, zone: ZoneInfo) -> datetime:
+def read_moment(value: str, label: str, zone: ZoneInfo) -> datetime:
+    """An Account Summary date-time (`dd/mm/yyyy HH:MM:SS`) in `zone`; `label` names it in
+    the error, never its value."""
     match = _MOMENT.fullmatch(value)
     if match is not None:
         day, month, year, hour, minute, second = (int(part) for part in match.groups())
@@ -195,11 +197,11 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
         cells_by_sheet[name] = read(by_name[name], spec, flagged)
 
     labels = _labels(cells_by_sheet[ACCOUNT_SUMMARY], STATEMENT_SHEETS[ACCOUNT_SUMMARY])
-    period_from = _moment(labels["Start Date"], "Start Date", zone)
-    period_to = _moment(labels["End Date"], "End Date", zone)
+    period_from = read_moment(labels["Start Date"], "Start Date", zone)
+    period_to = read_moment(labels["End Date"], "End Date", zone)
     if period_from > period_to:
         raise StatementError(f"{ACCOUNT_SUMMARY}'s Start Date is after its End Date")
-    created = _moment(labels["Date Created"], "Date Created", zone)
+    created = read_moment(labels["Date Created"], "Date Created", zone)
 
     rows: list[StatementRow] = []
     seen: Counter[str] = Counter()
