@@ -20,6 +20,7 @@ from lararium.modules.finance.trading212.client import (
     BASE,
     MAX_PAGES,
     HistoryNotEndedError,
+    HistoryStoppedError,
     Trading212Client,
 )
 
@@ -198,24 +199,58 @@ async def test_missing_scope_names_permission() -> None:
 async def test_optional_parts_skipped_say_why() -> None:
     client = Env(forbidden("orders:read")).client()
     assert await client.pending_orders() is None
-    assert client.skipped == {"missing permission orders:read"}
+    assert client.skipped == {("pending_orders", "missing permission orders:read")}
 
     client = Env(httpx.Response(404, text="Not Found")).client()
     assert await client.pies() is None
-    assert await client.pie(9001) is None
-    assert client.skipped == {"pies endpoint removed"}
+    assert client.skipped == {("pies", "pies endpoint removed")}
 
     client = Env(forbidden("pies:read")).client()
     assert await client.pies() is None
-    assert client.skipped == {"missing permission pies:read"}
+    assert await client.pie(9001) is None
+    assert client.skipped == {("pies", "missing permission pies:read")}
+
+
+async def test_a_pie_gone_is_skipped_alone() -> None:
+    client = Env(httpx.Response(404, text="Not Found")).client()
+    assert await client.pie(9001) is None
+    assert client.skipped == set()
+
+
+async def test_an_unknown_scope_is_replaced_by_the_endpoints_permission() -> None:
+    client = Env(forbidden("admin:everything")).client()
+    assert await client.pending_orders() is None
+    assert client.skipped == {("pending_orders", "missing permission orders:read")}
+    with pytest.raises(HttpForbiddenError) as raised:
+        await Env(forbidden("admin:everything")).client().positions()
+    assert raised.value.scope == "portfolio"
 
 
 async def test_404_elsewhere_is_not_skipped() -> None:
     env = Env(httpx.Response(404, text="Not Found"))
     with pytest.raises(HttpNotFoundError):
         await env.client().pending_orders()
-    with pytest.raises(HttpNotFoundError):
+    # On the first page of a walk from the start: an ordinary 404.
+    with pytest.raises(HttpNotFoundError) as raised:
         await walk(env.client(), "orders", lambda item: False)
+    assert not isinstance(raised.value, HistoryStoppedError)
+
+
+async def test_a_404_deep_in_a_history_stops_it_with_the_page_to_resume() -> None:
+    env = Env(ok(page(orders(7009), "?limit=50&cursor=9")), httpx.Response(404, text="x"))
+    yielded: list[Any] = []
+    with pytest.raises(HistoryStoppedError) as raised:
+        async for p in env.client().history("orders", lambda item: False):
+            yielded.extend(p.items)
+    assert [item["fill"]["id"] for item in yielded] == [7009]
+    assert raised.value.resume == "?limit=50&cursor=9"
+    assert str(raised.value) == "history stopped early (404)"
+
+    # Going on from a page that is still missing stops again, at the same page.
+    env = Env(httpx.Response(404, text="x"))
+    with pytest.raises(HistoryStoppedError) as raised:
+        await walk(env.client(), "orders", lambda item: False, start="limit=50&cursor=9")
+    assert raised.value.resume == "limit=50&cursor=9"
 
 
 async def test_403_without_scope_names_the_endpoints_permission() -> None:

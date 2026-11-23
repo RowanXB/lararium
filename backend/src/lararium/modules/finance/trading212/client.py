@@ -53,6 +53,10 @@ _ENDPOINTS: Mapping[str, tuple[str, str]] = {
     "pies": (f"{_API}/pies", "pies:read"),
     "pie": (f"{_API}/pies", "pies:read"),
 }
+# The permission names a key can have: a 403's scope is kept only when it is one of these.
+_PERMISSIONS = frozenset(permission for _, permission in _ENDPOINTS.values())
+# The optional part each optional endpoint belongs to (Trading212Client.skipped).
+_PARTS: Mapping[str, str] = {"pending_orders": "pending_orders", "pies": "pies", "pie": "pies"}
 # The OpenAPI bundle's limits (design §3.2); each endpoint is its own pool.
 LIMITS: Mapping[str, RateLimit] = {
     "summary": RateLimit(1, 5),
@@ -68,7 +72,7 @@ LIMITS: Mapping[str, RateLimit] = {
 }
 _NEXT_PAGE = "unexpected next page path"
 _PIE_ID = "a Trading 212 pie id is a whole number"
-# Why an optional part was skipped (Trading212Client.skipped); the sync flags each.
+# Why the pies were skipped when their list is gone (Trading212Client.skipped).
 PIES_REMOVED = "pies endpoint removed"
 # A pie id is below this, as the migration's ids are (at most 19 digits).
 _ID_BOUND = 10**19
@@ -79,6 +83,16 @@ class HistoryPage:
     items: list[Item]
     # The query this page was fetched with.
     params: dict[str, str]
+
+
+class HistoryStoppedError(HttpNotFoundError):
+    """A history page after the first answered 404 (users report these deep in the
+    transactions). Every page before was yielded; `resume` is the missing page's path, to ask
+    again in a later walk."""
+
+    def __init__(self, resume: str) -> None:
+        super().__init__("history stopped early (404)")
+        self.resume = resume
 
 
 class HistoryNotEndedError(HttpRetryableError):
@@ -159,9 +173,9 @@ class Trading212Client:
             clock=clock,
             wall_clock=wall_clock,
         )
-        # The optional parts this client has skipped, and why: `missing permission <scope>`,
-        # or PIES_REMOVED.
-        self.skipped: set[str] = set()
+        # The optional parts this client has skipped, and why: (part, `missing permission
+        # <permission>` or PIES_REMOVED).
+        self.skipped: set[tuple[str, str]] = set()
 
     async def _get(
         self, endpoint: str, *, suffix: str = "", params: Mapping[str, str] | None = None
@@ -170,28 +184,32 @@ class Trading212Client:
         try:
             response = await self._client.get(f"{path}{suffix}", pool=endpoint, params=params)
         except HttpForbiddenError as error:
-            if error.scope is None and not error.cloudflare_block:
-                # Trading 212 names the scope; when it doesn't, it is the endpoint's own.
+            if error.scope not in _PERMISSIONS and not error.cloudflare_block:
+                # Trading 212 names the scope; when it names none, or one that is not a
+                # permission, it is the endpoint's own: no other text of the answer is passed on.
                 raise HttpForbiddenError(permission) from None
             raise
         return response.json
 
     async def _optional(self, endpoint: str, suffix: str = "") -> JSONValue | None:
-        """The answer, or None when the key lacks this optional permission or, for the pies
-        (deprecated by Trading 212), when the endpoint is gone (404). Each skip is recorded in
-        `skipped`."""
+        """The answer, or None when the key lacks this optional permission, or when a pies
+        endpoint (deprecated by Trading 212) answers 404: the list gone, or that one pie gone.
+        A part skipped is recorded in `skipped`; a single pie gone is not a part."""
+        part = _PARTS[endpoint]
         try:
             return await self._get(endpoint, suffix=suffix)
         except HttpForbiddenError as error:
             if error.cloudflare_block:
                 raise
-            # _get names the endpoint's own permission when Trading 212 names none.
-            self.skipped.add(f"missing permission {error.scope or _ENDPOINTS[endpoint][1]}")
+            # _get has made the scope a known permission name.
+            self.skipped.add((part, f"missing permission {error.scope}"))
             return None
         except HttpNotFoundError:
-            if endpoint not in ("pies", "pie"):
+            if endpoint == "pie":
+                return None
+            if endpoint != "pies":
                 raise
-            self.skipped.add(PIES_REMOVED)
+            self.skipped.add((part, PIES_REMOVED))
             return None
 
     async def summary(self) -> Item:
@@ -239,14 +257,23 @@ class Trading212Client:
         """A history endpoint's pages, newest first, from the first page or from `start` (a
         `nextPagePath` given before), until `nextPagePath` is null, a page holds only `seen`
         items (or none), or a page repeats the one before it. `seen` is asked of every item of
-        a page, in order. After MAX_PAGES pages it raises `HistoryNotEndedError`."""
+        a page, in order. After MAX_PAGES pages it raises `HistoryNotEndedError`; a 404 on any
+        page but the first of a walk from the start raises `HistoryStoppedError`."""
         path, _ = _ENDPOINTS[kind]
         endpoint = f"history/{kind}"
         params = {"limit": str(PAGE_LIMIT)} if start is None else _next_params(path, start)
         previous: list[Item] | None = None
+        # The path of the page being asked (None: the first page).
+        current = start
         resume = ""
         for _ in range(MAX_PAGES):
-            body = _object(await self._get(kind, params=params), endpoint)
+            try:
+                answer = await self._get(kind, params=params)
+            except HttpNotFoundError:
+                if current is None:
+                    raise
+                raise HistoryStoppedError(current) from None
+            body = _object(answer, endpoint)
             page = _objects(body.get("items"), endpoint)
             next_page_path = body.get("nextPagePath")
             if page == previous:
@@ -259,5 +286,5 @@ class Trading212Client:
                 raise HttpError(f"Trading 212's {endpoint} answer has an unexpected shape")
             params = _next_params(path, next_page_path)
             previous = page
-            resume = next_page_path
+            current = resume = next_page_path
         raise HistoryNotEndedError(resume)

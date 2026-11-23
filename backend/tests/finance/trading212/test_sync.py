@@ -21,6 +21,7 @@ from lararium.core.connections import (
     ConnectionRecord,
     create_connection,
     get_connection,
+    set_warnings,
     store_credential,
 )
 from lararium.core.connectors import SyncContext
@@ -81,6 +82,28 @@ def transactions(*refs: str) -> list[dict[str, Any]]:
     return [transaction_item(reference=ref) for ref in refs]
 
 
+def _token(items: list[dict[str, Any]]) -> str:
+    """A page's cursor: its first item's id, so it stays the page's as newer pages arrive."""
+    first = items[0]
+    if "order" in first:
+        return str((first["fill"] or first["order"])["id"])
+    return str(first["reference"])
+
+
+class FlakyNotifier:
+    """A notifier whose first send fails."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.failed = False
+
+    async def send(self, text: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("https://hooks.example.test/SECRET-TOKEN")
+        self.messages.append(text)
+
+
 class FakeTrading212:
     """Trading 212's API: each history a list of pages linked by `cursor`, newest first."""
 
@@ -98,6 +121,8 @@ class FakeTrading212:
         self.pies = [pie_json(9001)]
         self.pie_detail = {"instruments": [], "settings": {"id": Decimal(9001), "name": "P"}}
         self.refuse: dict[str, httpx.Response] = {}
+        # Page tokens (`_token`) whose history page answers 404.
+        self.gone: set[str] = set()
         self.requests: list[httpx.Request] = []
         # A fake clock that sleeping advances: pacing waits cost no real time.
         self.now = Decimal(1000)
@@ -116,8 +141,12 @@ class FakeTrading212:
         for kind, history_path in HISTORY.items():
             if path == history_path:
                 pages = self.history[kind]
-                n = int(request.url.params.get("cursor", "0"))
-                next_path = f"limit=50&cursor={n + 1}" if n + 1 < len(pages) else None
+                n = self._index(kind, request)
+                if n > 0 and _token(pages[n]) in self.gone:
+                    return httpx.Response(404, text="Not Found")
+                next_path = (
+                    f"limit=50&cursor={_token(pages[n + 1])}" if n + 1 < len(pages) else None
+                )
                 return self._ok(page(pages[n], next_path))
         bodies: dict[str, Any] = {
             f"{API}/account/summary": self.summary,
@@ -139,13 +168,15 @@ class FakeTrading212:
     def paths(self) -> list[str]:
         return [r.url.path for r in self.requests]
 
+    def _index(self, kind: str, request: httpx.Request) -> int:
+        token = request.url.params.get("cursor")
+        if token is None:
+            return 0
+        return [_token(p) for p in self.history[kind]].index(token)
+
     def cursors(self, kind: str) -> list[int]:
-        """The page numbers asked of a history, in order."""
-        return [
-            int(r.url.params.get("cursor", "0"))
-            for r in self.requests
-            if r.url.path == HISTORY[kind]
-        ]
+        """The pages asked of a history, in order, by their place in it now."""
+        return [self._index(kind, r) for r in self.requests if r.url.path == HISTORY[kind]]
 
 
 @pytest.fixture
@@ -196,19 +227,22 @@ async def _set_warnings(session, connection, warnings: list[str]) -> None:
     )
 
 
+async def _ctx(session, connection, http: httpx.AsyncClient) -> SyncContext:
+    return SyncContext(
+        command=CommandContext(session, CONNECTOR, uuid.uuid4()),
+        connection=await get_connection(session, connection.id),
+        sync_id=uuid.uuid4(),
+        master_key=KEY,
+        http=http,
+        notifier=RecordingNotifier(),
+        session_factory=async_sessionmaker(bind=session.bind),
+    )
+
+
 async def _sync(session, connection, api: FakeTrading212) -> JSONValue:
     """One sync, called directly, as the worker would in its command."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
-        ctx = SyncContext(
-            command=CommandContext(session, CONNECTOR, uuid.uuid4()),
-            connection=await get_connection(session, connection.id),
-            sync_id=uuid.uuid4(),
-            master_key=KEY,
-            http=http,
-            notifier=RecordingNotifier(),
-            session_factory=async_sessionmaker(bind=session.bind),
-        )
-        cursor = await Trading212Connector().sync(ctx)
+        cursor = await Trading212Connector().sync(await _ctx(session, connection, http))
     await _set_cursor(session, connection, cursor)
     return cursor
 
@@ -295,7 +329,7 @@ async def test_first_sync_walks_everything_and_stores_raw(session, run, api) -> 
     second_page = next(r for r in order_rows if r.content["fill"]["id"] == "700001")
     assert second_page.request == {
         "endpoint": HISTORY["orders"],
-        "params": {"limit": "50", "cursor": "1"},
+        "params": {"limit": "50", "cursor": "700002"},
     }
     assert second_page.content["fill"]["walletImpact"]["fxRate"] == "0.8"
     assert second_page.content["order"]["extendedHours"] is False
@@ -314,6 +348,7 @@ async def test_first_sync_walks_everything_and_stores_raw(session, run, api) -> 
         "transactions": "tx-0002",
     }
     assert cursor["resume"] == {}
+    assert (cursor["flags"], cursor["notified"]) == ({}, [])
     for key in ("metadata_at", "rewalk_at"):
         assert isinstance(cursor[key], str)
         assert datetime.fromisoformat(cursor[key]) >= before
@@ -460,7 +495,7 @@ async def test_removed_pies_endpoint_skipped_and_flagged(session, run, api) -> N
     assert len(notifier.messages) == 1
 
 
-async def test_removed_pie_detail_endpoint_skipped_and_flagged(session, run, api) -> None:
+async def test_a_pie_gone_is_skipped_alone(session, run, api) -> None:
     api.refuse[f"{API}/pies/9001"] = httpx.Response(404, text="Not Found")
     connection = await _connection(run)
     after = await _run_sync(session, connection, api)
@@ -468,7 +503,7 @@ async def test_removed_pie_detail_endpoint_skipped_and_flagged(session, run, api
     types = {row.record_type for row in await _records(session, connection)}
     assert "trading212.pie" in types
     assert "trading212.pie_detail" not in types
-    assert after.warnings == ["Trading 212 flagged: pies endpoint removed"]
+    assert after.warnings == []
 
 
 async def test_a_404_on_a_required_endpoint_fails(session, run, api) -> None:
@@ -496,9 +531,13 @@ async def test_missing_required_scope_fails_naming_it(session, run, api) -> None
         403, text="Scope( history:orders ) missing for API key"
     )
     connection = await _connection(run)
-    after = await _run_sync(session, connection, api)
-    assert after.status == "failing"
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    # A new key is needed: the owner is told at once (design §5.13).
+    assert after.status == "needs_reauth"
     assert after.last_error == "Trading 212 key lacks the history:orders permission"
+    [message] = notifier.messages
+    assert "Trading 212 key lacks the history:orders permission" in message
     # The sync rolled back: nothing it stored before the refusal is kept.
     assert await _records(session, connection) == []
 
@@ -533,7 +572,7 @@ async def test_history_longer_than_the_cap_finishes_over_two_syncs(
     assert isinstance(first, dict)
     # What was fetched is kept, and the walk goes on next time from the page after it.
     assert len(await _records(session, connection, "trading212.order")) == 6
-    assert first["resume"] == {"orders": "limit=50&cursor=3"}
+    assert first["resume"] == {"orders": "limit=50&cursor=700004"}
     assert first["seen"]["orders"] == "700010"
 
     api.requests.clear()
@@ -552,7 +591,7 @@ async def test_history_longer_than_the_cap_finishes_over_two_syncs(
 
 async def test_a_rewalk_that_reaches_the_end_drops_the_resume(session, run, api) -> None:
     api.history["orders"] = [orders(700004), orders(700003)]
-    cursor = _later_cursor(rewalk_at=_ago(days=8), resume={"orders": "limit=50&cursor=1"})
+    cursor = _later_cursor(rewalk_at=_ago(days=8), resume={"orders": "limit=50&cursor=700003"})
     connection = await _connection(run, cursor=cursor)
     after = await _sync(session, connection, api)
     assert api.cursors("orders") == [0, 1]
@@ -584,15 +623,7 @@ def test_connector_identity_and_registration() -> None:
 async def test_check_access_is_true(session, run, api) -> None:
     connection = await _connection(run)
     async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
-        ctx = SyncContext(
-            command=CommandContext(session, CONNECTOR, uuid.uuid4()),
-            connection=await get_connection(session, connection.id),
-            sync_id=uuid.uuid4(),
-            master_key=KEY,
-            http=http,
-            notifier=RecordingNotifier(),
-            session_factory=async_sessionmaker(bind=session.bind),
-        )
+        ctx = await _ctx(session, connection, http)
         assert await Trading212Connector().check_access(ctx) is True
     assert api.requests == []
 
@@ -609,3 +640,122 @@ async def test_normalize_is_called_and_reports_nothing_yet(session, run, api, mo
     await _sync(session, connection, api)
     assert called == [len(await _records(session, connection))]
     assert NORMALIZER_VERSION == "trading212-norm-1"
+
+
+async def test_warnings_written_during_the_sync_survive(session, run, api, monkeypatch) -> None:
+    api.refuse[f"{API}/orders"] = httpx.Response(403, text="Scope( orders:read ) missing")
+    field_flag = "Trading 212 flagged: order.someNewField"
+
+    async def normalize(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        # As Task 5's normalizer will: its own flag, written while the sync runs.
+        current = await get_connection(ctx.command.session, ctx.connection.id)
+        await set_warnings(ctx.command, ctx.connection.id, [*current.warnings, field_flag])
+        return NormalizeReport()
+
+    monkeypatch.setattr(t212_sync, "normalize", normalize)
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.warnings == [field_flag, "Trading 212 flagged: missing permission orders:read"]
+    assert notifier.messages == [
+        "Trading 212 Invest: Trading 212 flagged: missing permission orders:read"
+    ]
+
+
+async def test_a_failed_notification_is_sent_next_sync(session, run, api) -> None:
+    api.refuse[f"{API}/orders"] = httpx.Response(403, text="Scope( orders:read ) missing")
+    connection = await _connection(run)
+    notifier = FlakyNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    assert notifier.failed and notifier.messages == []
+    assert after.warnings == ["Trading 212 flagged: missing permission orders:read"]
+    after = await _run_sync(session, connection, api, notifier)
+    assert notifier.messages == [
+        "Trading 212 Invest: Trading 212 flagged: missing permission orders:read"
+    ]
+    await _run_sync(session, connection, api, notifier)
+    assert len(notifier.messages) == 1
+
+
+async def test_a_404_deep_in_a_history_resumes_next_sync(session, run, api) -> None:
+    api.history["orders"] = [orders(700006, 700005), orders(700004, 700003), orders(700002)]
+    api.gone = {"700004"}
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    # What came before the missing page is kept; the walk goes on from it next time.
+    assert after.status == "healthy"
+    assert after.cursor["resume"] == {"orders": "limit=50&cursor=700004"}
+    assert sorted(_fill_ids(await _records(session, connection, "trading212.order"))) == [
+        "700005",
+        "700006",
+    ]
+    flag = "Trading 212 flagged: orders history stopped early (404)"
+    assert after.warnings == [flag]
+    assert notifier.messages == [f"Trading 212 Invest: {flag}"]
+
+    # Still missing: the same page is asked again, and nothing more is said.
+    api.requests.clear()
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.status == "healthy"
+    assert api.cursors("orders") == [0, 1]
+    assert after.cursor["resume"] == {"orders": "limit=50&cursor=700004"}
+    assert len(notifier.messages) == 1
+
+    # Back: the walk finishes, the flag clears, and every order is stored once.
+    api.gone = set()
+    api.requests.clear()
+    after = await _run_sync(session, connection, api, notifier)
+    assert api.cursors("orders") == [0, 1, 2]
+    assert after.cursor["resume"] == {}
+    assert after.warnings == []
+    assert sorted(_fill_ids(await _records(session, connection, "trading212.order"))) == [
+        str(n) for n in range(700002, 700007)
+    ]
+
+
+async def test_a_404_on_the_first_history_page_fails(session, run, api) -> None:
+    api.refuse[HISTORY["dividends"]] = httpx.Response(404, text="Not Found")
+    connection = await _connection(run)
+    after = await _run_sync(session, connection, api)
+    assert after.status == "failing"
+    assert after.last_error == "The API has no such resource (404)"
+
+
+async def test_new_items_while_a_resume_is_pending(session, run, api, monkeypatch) -> None:
+    monkeypatch.setattr(client_module, "MAX_PAGES", 3)
+    api.history["orders"] = [orders(700000 + 2 * n, 700000 + 2 * n - 1) for n in range(5, 0, -1)]
+    connection = await _connection(run)
+    first = await _sync(session, connection, api)
+    assert isinstance(first, dict)
+    assert first["resume"] == {"orders": "limit=50&cursor=700004"}
+
+    api.history["orders"].insert(0, orders(700012, 700011))
+    api.requests.clear()
+    second = await _sync(session, connection, api)
+    # The new page, the page holding what was seen, then on from the page the first stopped at.
+    assert api.cursors("orders") == [0, 1, 4, 5]
+    assert isinstance(second, dict)
+    assert second["resume"] == {}
+    assert second["seen"]["orders"] == "700012"
+    stored = _fill_ids(await _records(session, connection, "trading212.order"))
+    assert sorted(stored) == [str(n) for n in range(700001, 700013)]
+
+
+async def test_a_part_not_checked_keeps_its_flags_whatever_their_text(session, run, api) -> None:
+    flag = "Trading 212 flagged: any reason at all"
+    cursor = _later_cursor(flags={"pies": ["any reason at all"]}, notified=["any reason at all"])
+    connection = await _connection(run, cursor=cursor)
+    await _set_warnings(session, connection, [flag])
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    # Pies are not due: their flag stands, already told.
+    assert after.warnings == [flag]
+    assert after.cursor["flags"] == {"pies": ["any reason at all"]}
+    assert notifier.messages == []
+
+    # Pies due and answering: the flag clears.
+    await _set_cursor(session, connection, {**after.cursor, "metadata_at": _ago(days=2)})
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.warnings == []
+    assert after.cursor["flags"] == {}

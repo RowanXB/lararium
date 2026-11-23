@@ -8,17 +8,19 @@ stores each page as it arrives. One that reaches the client's MAX_PAGES keeps wh
 and the next page's path (`resume`), and the next sync goes on from there after its own
 newest-first pass. Items are stored as Trading 212 sent them; nothing here logs a value.
 
-An optional part skipped (a permission not ticked, the deprecated pies endpoints gone) is
-flagged as a connection warning, and the owner is told once (`publish_flags`).
+A history page after the first that answers 404 (design §3.2) stops that walk the same way,
+its path kept to ask again, and is flagged. An optional part skipped (a permission not ticked,
+the deprecated pies list gone) is flagged too: a connection warning, the owner told once
+(`publish_flags`). A required permission missing rejects the key: it needs a new one.
 """
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from lararium.core.connections import load_credential, set_warnings
+from lararium.core.connections import get_connection, load_credential, set_warnings
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
@@ -28,6 +30,7 @@ from lararium.modules.finance.trading212.client import (
     PIES_REMOVED,
     HistoryKind,
     HistoryNotEndedError,
+    HistoryStoppedError,
     Item,
     Trading212Client,
     endpoint_path,
@@ -45,9 +48,7 @@ REWALK_EVERY = timedelta(days=7)
 METADATA_EVERY = timedelta(hours=24)
 KINDS: tuple[HistoryKind, ...] = ("orders", "dividends", "transactions")
 FLAGGED_PREFIX = "Trading 212 flagged: "
-_MISSING = f"{FLAGGED_PREFIX}missing permission "
-# The flags about the pies, which are fetched only on metadata days.
-_PIE_FLAGS = frozenset({f"{_MISSING}pies:read", f"{FLAGGED_PREFIX}{PIES_REMOVED}"})
+_STOPPED = "history stopped early (404)"
 
 
 class Trading212SyncError(DisplayableError):
@@ -56,6 +57,11 @@ class Trading212SyncError(DisplayableError):
 
 class AccountMismatchError(Trading212SyncError, CredentialRejectedError):
     """The key's account is not the connection's: the owner has to enter the right key."""
+
+
+class MissingPermissionError(Trading212SyncError, CredentialRejectedError):
+    """The key lacks a permission the sync needs. Trading 212 sets a key's permissions when it
+    is created, so the owner has to create a new key (design §5.13: told at once)."""
 
 
 def _text(value: object) -> str | None:
@@ -122,31 +128,75 @@ def _texts(cursor: Mapping[str, JSONValue], key: str) -> dict[str, str]:
     return {k: v for k, v in value.items() if isinstance(v, str)}
 
 
-def _own(warning: str) -> bool:
-    """A flag the sync raises. Other `Trading 212 flagged:` warnings (the normalizer's) are
-    left to their writer."""
-    return warning.startswith(_MISSING) or warning in _PIE_FLAGS
+def _flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
+    """The sync's flags the cursor keeps: part → reasons."""
+    value = cursor.get("flags")
+    if not isinstance(value, dict):
+        return {}
+    return {
+        part: [r for r in reasons if isinstance(r, str)]
+        for part, reasons in value.items()
+        if isinstance(reasons, list)
+    }
 
 
-async def publish_flags(ctx: SyncContext, skipped: Iterable[str], pies_checked: bool) -> None:
-    """Replace the sync's own flags with this run's, keeping every other warning; the pies'
-    flags stand on a day the pies were not fetched. The owner is told, in one message, of each
-    flag not among the previous warnings; a flag whose cause is gone clears without a word."""
+def _own(warning: str, kept: Collection[str]) -> bool:
+    """A flag the sync raises: one the cursor keeps, or one of its shapes. Other `Trading 212
+    flagged:` warnings (the normalizer's, which name fields) are left to their writer."""
+    reason = warning.removeprefix(FLAGGED_PREFIX)
+    return warning.startswith(FLAGGED_PREFIX) and (
+        reason in kept
+        or reason.startswith("missing permission ")
+        or reason == PIES_REMOVED
+        or reason.endswith(f" {_STOPPED}")
+    )
+
+
+async def publish_flags(
+    ctx: SyncContext,
+    found: Iterable[tuple[str, str]],
+    checked: Collection[str],
+    cursor: Mapping[str, JSONValue],
+) -> dict[str, JSONValue]:
+    """Replace the sync's own flags among the connection's warnings with this run's, keeping
+    every other warning, as it stands now (normalize, say, may have written some). `found`:
+    (part, reason) of this run; a part not `checked` this run (the pies, but on metadata days)
+    keeps the flags the cursor holds for it. The owner is told, in one message, of each flag not
+    yet told: a flag counts as told only once a send succeeds, so a failed one is retried next
+    sync; one whose cause is gone clears without a word. Returns the cursor's `flags` and
+    `notified`."""
+    before = _flags(cursor)
+    parts: dict[str, set[str]] = {}
+    for part, reason in found:
+        parts.setdefault(part, set()).add(reason)
+    for part, reasons in before.items():
+        if part not in checked:
+            parts.setdefault(part, set()).update(reasons)
+    reasons = sorted({reason for found_reasons in parts.values() for reason in found_reasons})
+    told_before = cursor.get("notified")
+    told = set(told_before) if isinstance(told_before, list) else set[JSONValue]()
+    notified = [reason for reason in reasons if reason in told]
+    new = [reason for reason in reasons if reason not in told]
     connection = ctx.connection
-    previous = connection.warnings
-    flags = [FLAGGED_PREFIX + name for name in sorted(set(skipped))]
-    if not pies_checked:
-        flags += [w for w in previous if w in _PIE_FLAGS and w not in flags]
-    warnings = [w for w in previous if not _own(w)] + flags
-    new = [flag.removeprefix(FLAGGED_PREFIX) for flag in flags if flag not in previous]
     if new:
         try:
             await ctx.notifier.send(f"{connection.display_name}: {FLAGGED_PREFIX}{', '.join(new)}")
+            notified = reasons
         except Exception as error:
             # The class only: the message could carry the notifier's webhook URL.
             logger.warning("sending a Trading 212 notification failed (%s)", type(error).__name__)
+    kept = {reason for old in before.values() for reason in old}
+    previous = (await get_connection(ctx.command.session, connection.id)).warnings
+    warnings = [w for w in previous if not _own(w, kept)] + [FLAGGED_PREFIX + r for r in reasons]
     if warnings != previous:
         await set_warnings(ctx.command, connection.id, warnings)
+    return {
+        "flags": {
+            part: list[JSONValue](sorted(found_reasons))
+            for part, found_reasons in sorted(parts.items())
+        },
+        "notified": list[JSONValue](notified),
+    }
 
 
 class _Run:
@@ -156,7 +206,9 @@ class _Run:
         self.ctx = ctx
         self.client = client
         self.ids: list[UUID] = []
-        self.pies_checked = False
+        # The parts whose flags this run decides, and the (part, reason) flags it found.
+        self.checked: set[str] = set()
+        self.found: set[tuple[str, str]] = set()
 
     async def store(
         self,
@@ -184,8 +236,8 @@ class _Run:
     async def _pages(
         self, kind: HistoryKind, seen: _Seen | None, start: str | None
     ) -> tuple[str | None, str | None]:
-        """Store a walk's pages; (the newest item's key, the page to resume from when the
-        walk reached the cap)."""
+        """Store a walk's pages; (the newest item's key, the page to go on from when the walk
+        reached the cap or a page after the first answered 404, which is flagged)."""
         newest: str | None = None
         try:
             async for page in self.client.history(kind, seen or _never, start=start):
@@ -194,22 +246,30 @@ class _Run:
                     await self.store(kind, item, params=page.params)
         except HistoryNotEndedError as capped:
             return newest, capped.resume
+        except HistoryStoppedError as stopped:
+            self.found.add((kind, f"{kind} {_STOPPED}"))
+            return newest, stopped.resume
         return newest, None
 
     async def walk(
         self, kind: HistoryKind, marker: str | None, resume: str | None
     ) -> tuple[str | None, str | None]:
         """Walk a history newest first, stopping at `marker` (None: to the end), then on from
-        `resume` when the walk stopped there; a walk to the end has passed what `resume`
-        points to. (The newest key, the resume left.)"""
+        `resume` when the walk stopped there. (The newest key, the resume left.)
+
+        A walk that did not reach `marker` and was not cut short drops `resume`. When it ended
+        at a null `nextPagePath` it has passed every page `resume` points to. When it ended at a
+        page repeating the one before (a pagination fault) it may not have: the weekly re-walk
+        is what finds what lay beyond."""
+        self.checked.add(kind)
         seen = _Seen(kind, marker)
-        newest, capped = await self._pages(kind, seen, None)
-        if capped is None and seen.reached and resume is not None:
-            _, capped = await self._pages(kind, None, resume)
-        return newest, capped
+        newest, left = await self._pages(kind, seen, None)
+        if left is None and seen.reached and resume is not None:
+            _, left = await self._pages(kind, None, resume)
+        return newest, left
 
     async def metadata(self) -> None:
-        self.pies_checked = True
+        self.checked.add("pies")
         for item in await self.client.instruments():
             await self.store("instruments", item)
         for item in await self.client.exchanges():
@@ -244,22 +304,25 @@ class Trading212Connector:
         if key is None or secret is None:
             raise CredentialRejectedError("The Trading 212 API key or secret is missing")
         run = _Run(ctx, Trading212Client(ctx.http, key, secret))
+        before = connection.cursor
+        cursor: Mapping[str, JSONValue] = before if isinstance(before, dict) else {}
         try:
-            cursor = await self._sync(run, datetime.now(UTC))
+            after = await self._sync(run, cursor, datetime.now(UTC))
         except HttpForbiddenError as error:
             if error.cloudflare_block or error.scope is None:
                 raise
-            # The scope is a plain token (readonly_http keeps no other text of the answer).
-            raise Trading212SyncError(
+            # The client keeps a scope only when it is a known permission name.
+            raise MissingPermissionError(
                 f"Trading 212 key lacks the {error.scope} permission"
             ) from None
         await normalize(ctx, list(dict.fromkeys(run.ids)))
-        await publish_flags(ctx, run.client.skipped, run.pies_checked)
-        return cursor
+        found = run.found | run.client.skipped
+        after |= await publish_flags(ctx, found, run.checked, cursor)
+        return after
 
-    async def _sync(self, run: _Run, now: datetime) -> JSONValue:
-        before = run.ctx.connection.cursor
-        cursor: Mapping[str, JSONValue] = before if isinstance(before, dict) else {}
+    async def _sync(
+        self, run: _Run, cursor: Mapping[str, JSONValue], now: datetime
+    ) -> dict[str, JSONValue]:
         client = run.client
         summary = await client.summary()
         account_id = _account_id(summary)
@@ -269,6 +332,7 @@ class Trading212Connector:
         await run.store("summary", summary)
         for item in await client.positions():
             await run.store("positions", item)
+        run.checked.add("pending_orders")
         for item in await client.pending_orders() or []:
             await run.store("pending_orders", item)
 
