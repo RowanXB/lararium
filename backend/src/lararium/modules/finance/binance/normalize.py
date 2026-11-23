@@ -9,12 +9,15 @@ that paid them (rule 3), and the new flags published.
 
 The run writes in a transaction of its own: making a wallet's account and setting the
 connection's config lock its row, which a later step of the sync that walks (in short
-transactions of its own) must be able to write. Its arithmetic is exact, as the ledger's
+transactions of its own) must be able to write. What it touched is queued for reconciliation
+in that transaction (`reconcile.queue_touched`), and the sync's clear reads are recorded as
+reports of the accounts its records made (`balances.record_reads`): an account never exists
+without the report times of the reads made before it. Its arithmetic is exact, as the ledger's
 balance check is.
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
@@ -27,9 +30,11 @@ from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.modules.finance.binance import layout, notices, tables
+from lararium.modules.finance.binance.balances import Read, record_reads
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import record_type
 from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Row, as_api, parse
+from lararium.modules.finance.binance.reconcile import queue_touched
 from lararium.modules.finance.binance.records import (
     BinanceRecordError,
     Current,
@@ -265,19 +270,33 @@ async def publish_flags(run: Run) -> list[str]:
     return new
 
 
-async def normalize(ctx: SyncContext, *, flags: Iterable[str] = ()) -> NormalizeReport:
+async def normalize(
+    ctx: SyncContext,
+    *,
+    flags: Iterable[str] = (),
+    reads: Mapping[str, Read | None] | None = None,
+    daily: bool = False,
+) -> NormalizeReport:
     """Apply the raw records stored since the last run; `flags` are the sync's own (the
-    wallet checks), published with the run's. A new NORMALIZER_VERSION applies them all."""
-    return await _normalize(ctx, everything=False, flags=flags)
+    wallet checks), published with the run's. `reads` (the sync's settled reads) and, with
+    `daily`, the first sync's daily snapshots are recorded as reports of the accounts that
+    exist once the records are applied (`record_reads`). A new NORMALIZER_VERSION applies them
+    all."""
+    return await _normalize(ctx, everything=False, flags=flags, reads=reads, daily=daily)
 
 
 async def regenerate(ctx: SyncContext) -> NormalizeReport:
     """Apply every raw record of the connection again."""
-    return await _normalize(ctx, everything=True, flags=())
+    return await _normalize(ctx, everything=True, flags=(), reads=None, daily=False)
 
 
 async def _normalize(
-    ctx: SyncContext, *, everything: bool, flags: Iterable[str]
+    ctx: SyncContext,
+    *,
+    everything: bool,
+    flags: Iterable[str],
+    reads: Mapping[str, Read | None] | None,
+    daily: bool,
 ) -> NormalizeReport:
     args: dict[str, JSONValue] = {"connection_id": str(ctx.connection.id)}
     with localcontext(prec=MAX_PREC):
@@ -298,8 +317,11 @@ async def _normalize(
                 await _apply(run, record)
                 last = record.id
             await link_payouts(run)
+            if reads is not None:
+                await record_reads(cmd, connection, reads, daily=daily, flag=run.flag)
             run.report.new_flags = await publish_flags(run)
             run.report.touched = run.touched
+            await queue_touched(cmd, connection.id, run.touched)
             values: dict[str, JSONValue] = {}
             if last is not None and through != str(last):
                 values[NORMALIZED_THROUGH_KEY] = str(last)

@@ -3,6 +3,8 @@ Decision 11): the differences stored, warned and told once, closed when the reco
 explains them arrives, and the trade sweep after an unexplained change (design 5.2)."""
 
 import itertools
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -17,6 +19,7 @@ from lararium.core.connections import create_connection, store_credential
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.parse import ApiValue
+from lararium.modules.finance.binance.reconcile import TOUCHED_KEY
 from lararium.modules.finance.binance.sync import SWEPT_KEY
 
 from .fixtures import HOUR_MS, FakeBinance, build_row
@@ -459,33 +462,16 @@ async def test_first_sync_checks_every_daily_interval(
     assert (difference.reported_change, difference.posted_sum) == (3, 0)
 
 
-async def test_a_report_whose_sync_failed_later_is_checked(
-    backend_url: str,
-    owner_url: str,
-    migrated: None,
-    fake: FakeBinance,
-    connector,
-    clock: Clock,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Committed for real: the report's snapshots commit on their own, the failed sync's
-    # transaction rolls back.
+@asynccontextmanager
+async def _committed(
+    backend_url: str, owner_url: str, fake: FakeBinance, clock: Clock
+) -> AsyncIterator[tuple[Any, UUID, Callable[[], Awaitable[Any]]]]:
+    """A connection whose syncs commit for real (each step commits on its own, a failed
+    sync's transaction rolls back), and a sync 4 hours after the last; deleted afterwards."""
     engine = create_engine(backend_url)
     sessions = make_sessionmaker(engine)
     connection_id: UUID | None = None
     system_before = await _system_accounts(owner_url)
-    real = sync_module.opening
-
-    async def broken(ctx) -> set:
-        raise RuntimeError("a later step failed")
-
-    async def sync() -> Any:
-        clock.ms += 4 * HOUR_MS
-        async with sessions() as session:
-            return await run_binance_sync(
-                session, connection_id, fake.handler, session_factory=sessions
-            )
-
     try:
         async with (
             sessions() as setup,
@@ -504,12 +490,42 @@ async def test_a_report_whose_sync_failed_later_is_checked(
                 text("update core.connections set status = 'healthy' where id = :id"),
                 {"id": connection_id},
             )
+        found = connection_id
+
+        async def sync() -> Any:
+            clock.ms += 4 * HOUR_MS
+            async with sessions() as session:
+                return await run_binance_sync(
+                    session, found, fake.handler, session_factory=sessions
+                )
+
+        yield sessions, found, sync
+    finally:
+        if connection_id is not None:
+            await _delete(engine, owner_url, connection_id, system_before)
+        await engine.dispose()
+
+
+async def _broken(*_: Any, **__: Any) -> Any:
+    raise RuntimeError("a later step failed")
+
+
+async def test_a_report_whose_sync_failed_later_is_checked(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _committed(backend_url, owner_url, fake, clock) as (sessions, connection_id, sync):
         fake.set_rows("spot-account", _spot(("AAA", "10")))
         assert (await sync()).status == "healthy"
         fake.set_rows("spot-account", _spot(("AAA", "12")))
-        monkeypatch.setattr(sync_module, "opening", broken)
-        assert (await sync()).status == "failing"
-        monkeypatch.setattr(sync_module, "opening", real)
+        with monkeypatch.context() as patched:
+            patched.setattr(sync_module, "opening", _broken)
+            assert (await sync()).status == "failing"
 
         after = await sync()
 
@@ -519,10 +535,107 @@ async def test_a_report_whose_sync_failed_later_is_checked(
             [difference] = await _differences(session, connection_id)
         assert (difference.from_at, difference.to_at) == (first, second)
         assert third > second
-    finally:
-        if connection_id is not None:
-            await _delete(engine, owner_url, connection_id, system_before)
-        await engine.dispose()
+
+
+async def test_a_changed_old_record_reopens_its_interval_after_a_sync_that_failed_later(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _committed(backend_url, owner_url, fake, clock) as (sessions, connection_id, sync):
+        fake.set_rows("spot-account", _spot(("AAA", "10")))
+        assert (await sync()).status == "healthy"
+        deposited = clock.ms + HOUR_MS
+        fake.add("deposits", _deposit(0, deposited, "5"))
+        fake.set_rows("spot-account", _spot(("AAA", "15")))
+        assert (await sync()).status == "healthy"
+        # The deposit is corrected in place; the sync that posts the change fails after it
+        # committed and before it reconciled.
+        fake.set_rows("deposits", [_deposit(0, deposited, "6")])
+        with monkeypatch.context() as patched:
+            patched.setattr(sync_module, "opening", _broken)
+            failed = await sync()
+            assert failed.status == "failing"
+        assert failed.config[TOUCHED_KEY]
+
+        # Nothing new: the old interval is checked again all the same.
+        after = await sync()
+
+        assert after.status == "healthy", after.last_error
+        assert TOUCHED_KEY not in after.config
+        async with sessions() as session:
+            first, second, *_ = await _as_of(session, connection_id, "Spot", "AAA")
+            [difference] = await _differences(session, connection_id)
+        assert (difference.from_at, difference.to_at) == (first, second)
+        assert (difference.reported_change, difference.posted_sum) == (5, 6)
+        assert difference.closed_at is None
+
+
+async def test_an_account_the_records_make_keeps_its_report_time_when_the_sync_dies_after(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = sync_module.normalize
+
+    async def dies(ctx: Any, **kwargs: Any) -> Any:
+        await real(ctx, **kwargs)
+        raise RuntimeError("the process died after the records were committed")
+
+    def earn(*assets: tuple[str, str]) -> list[dict[str, ApiValue]]:
+        listed = _earn(*assets)[0]["assetBalances"] if assets else []
+        shown = "1" if assets else "0"
+        return [build_row("wallet-balance", walletName="Earn", balance=shown, assetBalances=listed)]
+
+    async with _committed(backend_url, owner_url, fake, clock) as (sessions, connection_id, sync):
+        # Earn took 3 and gave them back (records) and is read empty: its account is made by
+        # the records, after the read.
+        start = clock.ms
+        fake.set_rows("spot-account", _spot(("AAA", "10")))
+        fake.set_rows("wallet-balance", earn())
+        subscription = build_row(
+            "earn-flexible-subscriptions",
+            time=start + HOUR_MS,
+            asset="AAA",
+            amount="3",
+            sourceAccount="SPOT",
+            status="SUCCESS",
+        )
+        redemption = build_row(
+            "earn-flexible-redemptions",
+            time=start + 2 * HOUR_MS,
+            asset="AAA",
+            amount="3",
+            destAccount="SPOT",
+            status="PAID",
+        )
+        fake.add("earn-flexible-subscriptions", subscription)
+        fake.add("earn-flexible-redemptions", redemption)
+        with monkeypatch.context() as patched:
+            patched.setattr(sync_module, "normalize", dies)
+            assert (await sync()).status == "failing"
+
+        async with sessions() as session:
+            assert len(await _reports(session, connection_id, "Earn")) == 1
+        fake.set_rows("wallet-balance", earn(("BBB", "3")))
+
+        after = await sync()
+
+        assert after.status == "healthy", after.last_error
+        async with sessions() as session:
+            first, second = await _reports(session, connection_id, "Earn")
+            [difference] = await _differences(session, connection_id)
+            assert await _openings_of(session, connection_id, "BBB") == []
+        assert (difference.wallet, difference.symbol) == ("Binance Earn", "BBB")
+        assert (difference.from_at, difference.to_at) == (first, second)
 
 
 # Each account's report times, an empty report included.

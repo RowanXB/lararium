@@ -495,6 +495,14 @@ class _Assets:
                     self._ctx, self._connection.id, code, flag=self._flag
                 )
 
+    def unresolved(self, held: Mapping[str, Decimal]) -> str | None:
+        """The first code held (not zero) that has no instrument and is not an `LD` mirror
+        (the only code `asset` gives none); None when every quantity has its instrument."""
+        for code, quantity in sorted(held.items()):
+            if quantity != 0 and self._found.get(code) is None and not code.startswith(_MIRROR):
+                return code
+        return None
+
     def per_instrument(self, held: Mapping[str, Decimal]) -> dict[UUID, Decimal]:
         quantities: dict[UUID, Decimal] = {}
         for code, quantity in held.items():
@@ -561,30 +569,25 @@ async def record_reads(
     ctx: CommandContext,
     connection: ConnectionRecord,
     reads: Mapping[str, Read | None],
-    daily: Sequence[Row] = (),
+    *,
+    daily: bool = False,
+    flag: Flag | None = None,
 ) -> None:
     """A clear read is a report for its wallet whether or not the account existed when it was
     read: for every wallet whose source read is clear and whose account exists now, its report
-    time (`record_report`), and the Spot account's for each daily snapshot of `daily`. Run after
-    the records made the accounts they name; writing one twice writes nothing."""
+    time (`record_report`); with `daily`, the first sync's daily snapshots again
+    (`backfill_daily_snapshots`), which reports the days it writes on the Spot account if it
+    exists now. Run, in the transaction that applies the records, after they made the accounts
+    they name; writing one twice writes nothing."""
     for wallet in _wallets(reads):
         account = await _mapped_account(ctx, connection, wallet.key)
         if account is not None:
             await record_report(
                 ctx, connection, account, wallet.read.read_from, wallet.read.read_to
             )
-    spot = await _mapped_account(ctx, connection, "spot") if daily else None
-    if spot is not None:
-        for at in _daily_times(daily):
-            await record_report(ctx, connection, spot, at, at)
-
-
-def _daily_times(rows: Sequence[Row]) -> list[datetime]:
-    return [
-        tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
-        for row in rows
-        if row.get("type") == _DAILY_SPOT
-    ]
+    if daily:
+        rows = await daily_rows(ctx.session, connection.id)
+        await backfill_daily_snapshots(ctx, connection, rows, flag=flag)
 
 
 async def daily_rows(session: AsyncSession, connection_id: UUID) -> list[Row]:
@@ -626,7 +629,12 @@ async def backfill_daily_snapshots(
 ) -> int:
     """Each `snapshot` row of type SPOT as `reported` Spot snapshots at its own `updateTime`
     (`free + locked`, `LD` mirrors dropped), an asset the day before held and this day not at
-    0; how many were written. A snapshot already written is not written again."""
+    0; how many were written. A snapshot already written is not written again.
+
+    A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
+    report says every instrument it does not list was 0, so a day is reported only when the
+    Spot account exists and every quantity of the day has its instrument. A day with a code
+    that has none (other than an `LD` mirror) is not written at all and is flagged."""
     flag = flag or (lambda _: None)
     days: list[tuple[datetime, dict[str, Decimal]]] = []
     for row in rows:
@@ -642,10 +650,14 @@ async def backfill_daily_snapshots(
     assets = _Assets(ctx, connection, flag)
     await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
 
-    account: UUID | None = None
+    account = await _mapped_account(ctx, connection, "spot")
     before: set[UUID] = set()
     written = 0
     for at, held in days:
+        missing = assets.unresolved(held)
+        if missing is not None:
+            flag(f"a daily Spot snapshot was not written: {missing} has no instrument")
+            continue
         quantities = assets.per_instrument(held)
         if quantities and account is None:
             account = await wallet_account(ctx, connection, "spot")

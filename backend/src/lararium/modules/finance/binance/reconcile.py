@@ -15,6 +15,10 @@ interval holding a posting the run created, changed or removed, and every stored
 still open. So a daily snapshot of the first sync and a report whose sync failed later are
 checked, a late record closes its interval and a change to an old record reopens it. Warnings
 and messages name the wallet, the asset and the two times, never an amount.
+
+A run that commits postings queues what it touched (`queue_touched`) in the same transaction,
+and the reconciliation that checks them clears the queue in its own: a sync that fails between
+the two leaves them for the next one.
 """
 
 import itertools
@@ -30,6 +34,7 @@ from sqlalchemy import Select, func, select, text, union
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.commands import CommandContext
 from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
@@ -48,6 +53,9 @@ type Touched = Collection[Point]
 
 # The newest report time (epoch ms) the last reconciliation covered.
 RECONCILED_KEY = "reconciled_through"
+# Per "<account id>:<instrument id>", the earliest and latest `occurred_at` (epoch ms) of the
+# postings committed runs touched that no reconciliation has checked yet.
+TOUCHED_KEY = "touched_pending"
 # Earn's flexible position runs ahead of its records by the reward still accruing.
 _EARN = "earn"
 _REALTIME = "REALTIME"
@@ -177,6 +185,44 @@ async def _accruing(
     return Decimal(largest) if largest is not None else Decimal(0)
 
 
+async def queue_touched(ctx: CommandContext, connection_id: UUID, touched: Touched) -> None:
+    """Add `touched` to `config["touched_pending"]`, in the caller's transaction (the one that
+    commits the postings): per (account, instrument), the earliest and latest time touched."""
+    if not touched:
+        return
+    config = (await get_connection(ctx.session, connection_id)).config
+    held = config.get(TOUCHED_KEY)
+    spans: dict[str, JSONValue] = dict(held) if isinstance(held, dict) else {}
+    for account_id, instrument_id, at in touched:
+        key, ms = f"{account_id}:{instrument_id}", millis(at)
+        low, high = ms, ms
+        span = spans.get(key)
+        if isinstance(span, list) and len(span) == 2:
+            first, last = span
+            if isinstance(first, int) and isinstance(last, int):
+                low, high = min(first, ms), max(last, ms)
+        spans[key] = [low, high]
+    if spans != held:
+        await update_config(ctx, connection_id, {TOUCHED_KEY: spans})
+
+
+def _pending(config: dict[str, JSONValue]) -> list[tuple[UUID, datetime, datetime]]:
+    """The queued spans (`queue_touched`): (account, earliest, latest)."""
+    held = config.get(TOUCHED_KEY)
+    found: list[tuple[UUID, datetime, datetime]] = []
+    for key, span in (held if isinstance(held, dict) else {}).items():
+        if not (isinstance(span, list) and len(span) == 2):
+            continue
+        low, high = span
+        try:
+            account_id = UUID(key.split(":")[0])
+        except ValueError:
+            continue
+        if isinstance(low, int) and isinstance(high, int):
+            found.append((account_id, moment(low), moment(high)))
+    return found
+
+
 def reconciled_through(config: dict[str, JSONValue]) -> datetime | None:
     found = config.get(RECONCILED_KEY)
     if isinstance(found, int) and not isinstance(found, bool):
@@ -191,13 +237,16 @@ async def check(
 ) -> list[Difference]:
     """The differences among the connection's intervals that end after
     `config["reconciled_through"]` (all of them when it is not set) and those holding one of
-    `touched`'s (account, instrument, `occurred_at`); every instrument of such an interval is
-    checked."""
+    `touched`'s (account, instrument, `occurred_at`) or a time of a span queued in
+    `config["touched_pending"]`; every instrument of such an interval is checked."""
     config = (await get_connection(session, connection_id)).config
     through = reconciled_through(config)
-    points: defaultdict[UUID, list[datetime]] = defaultdict(list)
+    # Per account, spans of touched times: a point is a span of one moment.
+    spans: defaultdict[UUID, list[tuple[datetime, datetime]]] = defaultdict(list)
     for account_id, _, at in touched:
-        points[account_id].append(at)
+        spans[account_id].append((at, at))
+    for account_id, low, high in _pending(config):
+        spans[account_id].append((low, high))
     accounts = list(await session.scalars(_owned(connection_id).order_by(models.Account.id)))
     earn = {a for a, key in (await wallets(session, connection_id)).items() if key == _EARN}
     decimals: dict[UUID, int] = {}
@@ -207,7 +256,8 @@ async def check(
             times = await report_times(session, account_id)
             for from_at, to_at in itertools.pairwise(times):
                 fresh = through is None or to_at > through
-                if not fresh and not any(from_at < at <= to_at for at in points[account_id]):
+                held = any(low <= to_at and from_at < high for low, high in spans[account_id])
+                if not fresh and not held:
                     continue
                 before = await reported_at(session, account_id, from_at)
                 after = await reported_at(session, account_id, to_at)
@@ -374,11 +424,16 @@ async def reconcile(run: Run) -> tuple[list[Difference], list[Difference]]:
         lines = [await warning_text(session, connection_id, d) for d in opened]
         await notices.queue(run.command, connection_id, lines=lines)
     await _set_warnings(run)
-    # Every interval up to the newest report is checked now; the next run starts after it.
+    # Every interval up to the newest report is checked now, and every queued span: the next
+    # run starts after them.
     newest = await newest_report(session, connection_id)
     config = (await get_connection(session, connection_id)).config
+    values: dict[str, JSONValue] = {}
     if newest is not None and reconciled_through(config) != newest:
-        await update_config(run.command, connection_id, {RECONCILED_KEY: millis(newest)})
+        values[RECONCILED_KEY] = millis(newest)
+    remove = [TOUCHED_KEY] if TOUCHED_KEY in config else []
+    if values or remove:
+        await update_config(run.command, connection_id, values, remove=remove)
     return opened, closed
 
 

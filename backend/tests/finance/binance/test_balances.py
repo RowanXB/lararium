@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import text
 
 from lararium.core.json_types import JSONValue
+from lararium.modules.finance.binance import balances
 from lararium.modules.finance.binance.balances import (
     Read,
     ambiguous,
@@ -484,6 +485,72 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     assert written == 4
     # Once written, the same rows write nothing.
     assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 0
+
+
+async def _spot_reports(session, connection_id: UUID) -> list[datetime]:
+    found = await session.scalars(
+        text(
+            "select r.as_of from finance.binance_account_reports r"
+            " join finance.accounts a on a.id = r.account_id"
+            " where r.connection_id = :c and a.name = 'Binance Spot' order by r.as_of"
+        ),
+        {"c": connection_id},
+    )
+    return list(found)
+
+
+async def test_a_day_is_reported_only_when_its_snapshots_are_written_in_full(
+    session, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = await binance_connection(run)
+    day = 24 * HOUR_MS
+    one, two, three = (NOW_MS - n * day - 1_000 for n in (3, 2, 1))
+    rows = [
+        # An LD mirror and a zero balance do not keep a day from being written.
+        _daily("SPOT", one, ("AAA", "2"), ("LDAAA", "5"), ("CCC", "0")),
+        # BBB cannot be resolved: nothing of the day is written, not even AAA.
+        _daily("SPOT", two, ("AAA", "3"), ("BBB", "1")),
+        _daily("SPOT", three, ("AAA", "4")),
+    ]
+    real = balances.asset
+
+    async def unresolved(ctx, connection_id, code, *, flag=None):
+        return None if code == "BBB" else await real(ctx, connection_id, code, flag=flag)
+
+    monkeypatch.setattr(balances, "asset", unresolved)
+    flags: list[str] = []
+
+    await run(backfill_daily_snapshots, connection, rows, flag=flags.append)
+
+    written = {at for _, _, _, at in await _snapshots(session, connection.id)}
+    assert written == {_at(one), _at(three)}
+    assert await _spot_reports(session, connection.id) == [_at(one), _at(three)]
+    assert [(s, q) for _, s, q, at in await _snapshots(session, connection.id)] == [
+        ("AAA", 2),
+        ("AAA", 4),
+    ]
+    assert flags == ["a daily Spot snapshot was not written: BBB has no instrument"]
+
+
+async def test_days_holding_nothing_are_reported_once_the_records_make_the_account(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    day = 24 * HOUR_MS
+    one, two = (NOW_MS - n * day - 1_000 for n in (2, 1))
+    fake.add("snapshot", _daily("SPOT", one, ("AAA", "0")), _daily("SPOT", two, ("BBB", "0")))
+    fake.add("deposits", _deposit(0, NOW_MS - HOUR_MS, "2"))
+    fake.set_rows("spot-account", _spot(("AAA", "2", "0")))
+    config = later_config()
+    del config["first_sync_done"]
+    config["cursors"].pop("snapshot:SPOT")  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+    connection = await binance_connection(run, config=config)
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    reports = await _spot_reports(session, connection.id)
+    assert reports[:2] == [_at(one), _at(two)] and len(reports) == 3
+    assert [at for _, _, _, at in await _snapshots(session, connection.id)] == [reports[2]]
 
 
 async def test_first_sync_writes_the_daily_snapshots(
