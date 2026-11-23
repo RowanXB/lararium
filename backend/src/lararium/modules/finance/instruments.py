@@ -27,7 +27,15 @@ InstrumentKind = Literal[
     "fiat", "equity", "etf", "fund", "bond", "crypto", "option", "cfd", "other"
 ]
 IdentifierScheme = Literal[
-    "iso4217", "isin", "figi", "ticker_mic", "ibkr_conid", "etoro_id", "chain_contract", "coingecko"
+    "iso4217",
+    "isin",
+    "figi",
+    "ticker_mic",
+    "ibkr_conid",
+    "etoro_id",
+    "trading212_ticker",
+    "chain_contract",
+    "coingecko",
 ]
 
 _UPPERCASE_SCHEMES = frozenset({"iso4217", "isin", "figi"})

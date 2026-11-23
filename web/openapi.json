@@ -1331,7 +1331,8 @@
           "kind": {
             "enum": [
               "uk_bank_account",
-              "ibkr_account"
+              "ibkr_account",
+              "trading212_account"
             ],
             "title": "Kind",
             "type": "string"
@@ -2744,6 +2745,7 @@
               "ticker_mic",
               "ibkr_conid",
               "etoro_id",
+              "trading212_ticker",
               "chain_contract",
               "coingecko"
             ],

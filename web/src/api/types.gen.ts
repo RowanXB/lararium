@@ -650,7 +650,7 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account';
     /**
      * Sort Code
      */
@@ -1220,7 +1220,7 @@ export type InstrumentIdentifierModel = {
     /**
      * Scheme
      */
-    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'chain_contract' | 'coingecko';
+    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko';
     /**
      * Value
      */
