@@ -304,6 +304,14 @@ async def test_a_transport_failure_is_a_binance_error_without_the_url() -> None:
     assert "binance.com" not in str(caught.value) and API_KEY not in str(caught.value)
 
 
+async def test_a_failed_query_is_named_by_its_label() -> None:
+    env = Env(error(400, -1102))
+    with pytest.raises(BinanceError) as caught:
+        await env.client().call(SPOT)
+    assert str(caught.value) == f"Binance request failed (HTTP 400, code -1102), {SPOT.label}"
+    assert caught.value.label == SPOT.label
+
+
 async def test_retries_429_then_gives_up() -> None:
     env = Env(
         httpx.Response(429, headers={"Retry-After": "2"}),

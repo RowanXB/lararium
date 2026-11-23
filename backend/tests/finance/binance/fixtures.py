@@ -399,6 +399,9 @@ class FakeBinance:
             return _json({"serverTime": self.now()})
         if label == "api-restrictions":
             return _json({**build_row(label), **self.permissions})
+        # A parameter the catalogue always sends is one Binance refuses to go without.
+        if any(name not in own for name, _ in endpoint.variants):
+            return _error(400, -1102)
         if too_wide := self._too_wide(endpoint, own):
             return too_wide
         own, refused = self._spanned(endpoint, own)

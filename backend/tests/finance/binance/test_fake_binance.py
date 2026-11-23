@@ -57,7 +57,9 @@ async def ask(
 @pytest.mark.parametrize("label", sorted(ENDPOINTS))
 async def test_every_label_answers_in_its_catalogue_shape(label: str) -> None:
     fake = FakeBinance()
-    body = await ask(fake, label)
+    # The parameters the catalogue always sends: Binance refuses the query without them.
+    always = {name: values[0] for name, values in ENDPOINTS[label].variants}
+    body = await ask(fake, label, always)
     parsed = parse(label, body)
 
     assert parsed.unknown_fields == set() and parsed.unknown_enums == set()
@@ -151,7 +153,8 @@ async def test_page_paging_counts_from_the_endpoints_first_page_and_reports_the_
 
     fiat = FakeBinance()
     fiat.add("fiat-orders", *[build_row("fiat-orders", i) for i in range(3)])
-    got = parse("fiat-orders", await ask(fiat, "fiat-orders", {"page": 1, "rows": 2}))
+    asked = {"transactionType": 0, "page": 1, "rows": 2}
+    got = parse("fiat-orders", await ask(fiat, "fiat-orders", asked))
     assert len(got.rows) == 2
 
 
@@ -362,3 +365,9 @@ async def test_trades_are_asked_for_at_most_a_day_at_a_time() -> None:
             await ask(fake, "my-trades", params)
         assert not isinstance(caught.value, BinanceNotPresent)
         assert caught.value.code in (-1127, -1128)
+
+
+async def test_a_query_without_a_parameter_the_catalogue_always_sends_is_refused() -> None:
+    with pytest.raises(BinanceError) as caught:
+        await ask(FakeBinance(), "earn-flexible-rewards")
+    assert caught.value.code == -1102

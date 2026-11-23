@@ -449,6 +449,9 @@ ENDPOINTS: dict[str, Endpoint] = {
         window=29,
         paging="page",
         page=100,
+        # Binance refuses the request without `type` (-1102), whatever its documentation's
+        # "Default: ALL" says.
+        variants=(("type", ("ALL",)),),
         kind="history",
         phase="A",
     ),

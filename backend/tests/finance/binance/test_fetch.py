@@ -157,6 +157,17 @@ async def test_walk_stores_rows_once(session, run, fake, clock) -> None:
     assert len(set(first) & set(second)) == 1
 
 
+async def test_flexible_rewards_are_asked_with_their_type(session, run, fake, clock) -> None:
+    """Binance refuses the rewards history without `type`, which the fake does too."""
+    fake.add("earn-flexible-rewards", build_row("earn-flexible-rewards", time=NOW_MS - DAY_MS))
+    connection = await binance_connection(run)
+
+    stored = await _walk(session, connection, fake, clock, "earn-flexible-rewards")
+
+    assert len(stored) == 1
+    assert {s.params["type"] for s in fake.calls("earn-flexible-rewards")} == {"ALL"}
+
+
 async def test_absent_product_is_recorded_and_skipped(session, run, fake, clock) -> None:
     fake.fail("dividends", code=-3003)
     connection = await binance_connection(run)

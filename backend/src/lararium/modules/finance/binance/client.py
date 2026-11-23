@@ -77,6 +77,13 @@ class BinanceError(DisplayableError):
         super().__init__(_describe(http_status, code))
         self.http_status = http_status
         self.code = code
+        self.label: str | None = None
+
+    def name_query(self, label: str) -> None:
+        """Say which catalogue query failed, once; the message gains ", <label>"."""
+        if self.label is None:
+            self.label = label
+            self.args = (f"{self.args[0]}, {label}", *self.args[1:])
 
 
 class BinanceKeyRejected(BinanceError, CredentialRejectedError):
@@ -307,6 +314,19 @@ class BinanceClient:
         return body
 
     async def _request(
+        self, endpoint: Endpoint, params: Mapping[str, str | int | bool]
+    ) -> tuple[ApiValue, int, int]:
+        try:
+            return await self._exchange(endpoint, params)
+        except BinanceError as error:
+            # Which query failed is what tells a wrong request from an outage; a label is
+            # the catalogue's own name, never part of the key or the query.
+            # A rejected key, a ban and an absent product say what they are already.
+            if type(error) is BinanceError:
+                error.name_query(endpoint.label)
+            raise
+
+    async def _exchange(
         self, endpoint: Endpoint, params: Mapping[str, str | int | bool]
     ) -> tuple[ApiValue, int, int]:
         """The answer, and the local clock just before and just after the exchange that gave it."""

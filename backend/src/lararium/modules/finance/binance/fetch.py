@@ -299,13 +299,18 @@ async def window_rows(
     return [row for page in pages for row in page.rows]
 
 
-def _keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
-    """One cursor key and its fixed parameters per variant (`snapshot:SPOT`, ...)."""
-    if not endpoint.variants:
-        return [(endpoint.label, {})]
+def cursor_keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
+    """One cursor key and its fixed parameters per variant (`snapshot:SPOT`, ...). A parameter
+    with one value only is always sent and splits nothing, so it is not in the key."""
     names = [name for name, _ in endpoint.variants]
+    split = [len(values) > 1 for _, values in endpoint.variants]
     return [
-        (":".join([endpoint.label, *values]), dict(zip(names, values, strict=True)))
+        (
+            ":".join(
+                [endpoint.label, *(v for v, named in zip(values, split, strict=True) if named)]
+            ),
+            dict(zip(names, values, strict=True)),
+        )
         for values in itertools.product(*(values for _, values in endpoint.variants))
     ]
 
@@ -318,7 +323,7 @@ def backfill_complete(config: Mapping[str, JSONValue]) -> bool:
     return all(
         key in missing or _mapping(cursors.get(key)).get("complete") is True
         for label in HISTORY_LABELS
-        for key, _ in _keys(ENDPOINTS[label])
+        for key, _ in cursor_keys(ENDPOINTS[label])
     )
 
 
@@ -326,7 +331,7 @@ async def walk(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID
     """Fetch one history label (every variant) from its cursor; the raw record ids stored."""
     endpoint = ENDPOINTS[label]
     ids: list[UUID] = []
-    for key, fixed in _keys(endpoint):
+    for key, fixed in cursor_keys(endpoint):
         ids += await _walk_key(ctx, client, endpoint, key, fixed)
     return ids
 

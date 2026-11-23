@@ -26,7 +26,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import BinanceClient, HmacSigner
-from lararium.modules.finance.binance.fetch import CURSORS_KEY
+from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys
 from lararium.modules.finance.binance.sync import HISTORY_LABELS
 from lararium.worker import jobs
 
@@ -74,9 +74,7 @@ def complete_cursors(fetched_to: int) -> dict[str, JSONValue]:
     state: JSONValue = {"fetched_to": fetched_to, "backfilled_to": 0, "complete": True}
     cursors: dict[str, JSONValue] = {}
     for label in HISTORY_LABELS:
-        variants = ENDPOINTS[label].variants
-        keys = [f"{label}:{v}" for _, values in variants for v in values] or [label]
-        cursors.update(dict.fromkeys(keys, state))
+        cursors.update(dict.fromkeys((key for key, _ in cursor_keys(ENDPOINTS[label])), state))
     return cursors
 
 

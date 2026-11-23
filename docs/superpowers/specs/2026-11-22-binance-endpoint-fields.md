@@ -1113,7 +1113,7 @@ Id: `rows[].redeemId`. Time: `rows[].time`. Seen: yes.
 Weight 150 (IP) · signed · doc `…simple-earn/api/rest-api/flexible-locked#get-flexible-rewards-history`
 Request: `productId`, `asset` optional; `type` (BONUS = bonus tiered APR, REALTIME = real-time APR, REWARDS = historical rewards, ALL; "Default: ALL") + the shared rule.
 Id: **none**. A record is identified by `asset` + `productId` + `type` + `time`. Time: `rows[].time`. Seen: yes.
-**Doc vs real:** the docs name the product field `projectId`; the real field is **`productId`**. Real wins.
+**Doc vs real:** the docs name the product field `projectId`; the real field is **`productId`**. Real wins. The docs give `type` a default; the real endpoint refuses a request without it (HTTP 400, code -1102), so `type=ALL` is always sent.
 
 | Field | Type | Meaning / enum |
 |---|---|---|
