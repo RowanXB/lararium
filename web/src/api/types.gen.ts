@@ -185,6 +185,16 @@ export type BodyStageImport = {
 };
 
 /**
+ * Body_upload_etoro_statement
+ */
+export type BodyUploadEtoroStatement = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * Body_upload_ibkr_statement
  */
 export type BodyUploadIbkrStatement = {
@@ -452,6 +462,40 @@ export type DateFormat = string;
 export type Delimiter = string;
 
 export type Encoding = 'utf-8-sig' | 'utf-8' | 'cp1252' | 'latin-1';
+
+/**
+ * EtoroConnectionIn
+ */
+export type EtoroConnectionIn = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+/**
+ * EtoroConnectionUpdate
+ */
+export type EtoroConnectionUpdate = {
+    /**
+     * Public Api Key
+     */
+    public_api_key: string;
+    /**
+     * User Key
+     */
+    user_key: string;
+};
+
+/**
+ * EtoroUploadOut
+ */
+export type EtoroUploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
 
 /**
  * FinanceSettingsOut
@@ -1525,6 +1569,71 @@ export type QifProfileConfig = {
 };
 
 /**
+ * ReviewOut
+ *
+ * A value two sources of one event disagree on (design §5.7): open, or resolved by the
+ * owner taking one of them.
+ */
+export type ReviewOut = {
+    /**
+     * Api Value
+     */
+    api_value: string;
+    /**
+     * Connection Id
+     */
+    connection_id: string;
+    /**
+     * Event Key
+     */
+    event_key: string;
+    /**
+     * Field
+     */
+    field: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Opened At
+     */
+    opened_at: string;
+    /**
+     * Resolution
+     */
+    resolution: 'api' | 'statement' | null;
+    /**
+     * Resolved At
+     */
+    resolved_at: string | null;
+    /**
+     * Resolved By
+     */
+    resolved_by: string | null;
+    /**
+     * Statement Value
+     */
+    statement_value: string;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string | null;
+};
+
+/**
+ * ReviewResolve
+ *
+ * Which source's value the owner takes for a review item.
+ */
+export type ReviewResolve = {
+    /**
+     * Take
+     */
+    take: 'api' | 'statement';
+};
+
+/**
  * SettingsOut
  */
 export type SettingsOut = {
@@ -1850,6 +1959,24 @@ export type ValidationError = {
 };
 
 /**
+ * EtoroConnectionIn
+ */
+export type EtoroConnectionInWritable = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Public Api Key
+     */
+    public_api_key: string;
+    /**
+     * User Key
+     */
+    user_key: string;
+};
+
+/**
  * IbkrConnectionCreate
  */
 export type IbkrConnectionCreateWritable = {
@@ -1971,6 +2098,31 @@ export type CreateMonzoConnectionResponses = {
 };
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
+
+export type CreateEtoroConnectionData = {
+    body: EtoroConnectionInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/etoro';
+};
+
+export type CreateEtoroConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateEtoroConnectionError = CreateEtoroConnectionErrors[keyof CreateEtoroConnectionErrors];
+
+export type CreateEtoroConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateEtoroConnectionResponse = CreateEtoroConnectionResponses[keyof CreateEtoroConnectionResponses];
 
 export type CreateIbkrConnectionData = {
     body: IbkrConnectionCreateWritable;
@@ -2107,6 +2259,66 @@ export type DisableConnectionResponses = {
 
 export type DisableConnectionResponse = DisableConnectionResponses[keyof DisableConnectionResponses];
 
+export type UpdateEtoroConnectionData = {
+    body: EtoroConnectionUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/etoro';
+};
+
+export type UpdateEtoroConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateEtoroConnectionError = UpdateEtoroConnectionErrors[keyof UpdateEtoroConnectionErrors];
+
+export type UpdateEtoroConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateEtoroConnectionResponse = UpdateEtoroConnectionResponses[keyof UpdateEtoroConnectionResponses];
+
+export type UploadEtoroStatementData = {
+    body: BodyUploadEtoroStatement;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/etoro-statement';
+};
+
+export type UploadEtoroStatementErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadEtoroStatementError = UploadEtoroStatementErrors[keyof UploadEtoroStatementErrors];
+
+export type UploadEtoroStatementResponses = {
+    /**
+     * Successful Response
+     */
+    202: EtoroUploadOut;
+};
+
+export type UploadEtoroStatementResponse = UploadEtoroStatementResponses[keyof UploadEtoroStatementResponses];
+
 export type UpdateIbkrConnectionData = {
     body: IbkrConnectionUpdateWritable;
     path: {
@@ -2166,6 +2378,72 @@ export type UploadIbkrStatementResponses = {
 };
 
 export type UploadIbkrStatementResponse = UploadIbkrStatementResponses[keyof UploadIbkrStatementResponses];
+
+export type ListSourceReviewsData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/reviews';
+};
+
+export type ListSourceReviewsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSourceReviewsError = ListSourceReviewsErrors[keyof ListSourceReviewsErrors];
+
+export type ListSourceReviewsResponses = {
+    /**
+     * Response List Source Reviews
+     *
+     * Successful Response
+     */
+    200: Array<ReviewOut>;
+};
+
+export type ListSourceReviewsResponse = ListSourceReviewsResponses[keyof ListSourceReviewsResponses];
+
+export type ResolveSourceReviewData = {
+    body: ReviewResolve;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+        /**
+         * Review Id
+         */
+        review_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/reviews/{review_id}/resolve';
+};
+
+export type ResolveSourceReviewErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ResolveSourceReviewError = ResolveSourceReviewErrors[keyof ResolveSourceReviewErrors];
+
+export type ResolveSourceReviewResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type ResolveSourceReviewResponse = ResolveSourceReviewResponses[keyof ResolveSourceReviewResponses];
 
 export type SyncConnectionNowData = {
     body?: never;

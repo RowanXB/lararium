@@ -860,6 +860,17 @@ def test_connection_operation_ids() -> None:
             "/api/v1/connections/{connection_id}/trading212",
         ): "update_trading212_connection",
         ("post", "/api/v1/connections/{connection_id}/ibkr-statement"): "upload_ibkr_statement",
+        ("post", "/api/v1/connections/etoro"): "create_etoro_connection",
+        ("put", "/api/v1/connections/{connection_id}/etoro"): "update_etoro_connection",
+        (
+            "post",
+            "/api/v1/connections/{connection_id}/etoro-statement",
+        ): "upload_etoro_statement",
+        ("get", "/api/v1/connections/{connection_id}/reviews"): "list_source_reviews",
+        (
+            "post",
+            "/api/v1/connections/{connection_id}/reviews/{review_id}/resolve",
+        ): "resolve_source_review",
     }
     schema = spec["components"]["schemas"]["MonzoConnectionCreate"]
     assert schema["properties"]["client_secret"]["writeOnly"] is True

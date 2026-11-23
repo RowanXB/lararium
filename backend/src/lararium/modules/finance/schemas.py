@@ -453,6 +453,12 @@ class ReviewOut(BaseModel):
     resolved_by: str | None
 
 
+class ReviewResolve(BaseModel):
+    """Which source's value the owner takes for a review item."""
+
+    take: Literal["api", "statement"]
+
+
 class TransferOut(BaseModel):
     """A transfer as matching left it. Its id changes when matching reopens it, so a client
     finds it again by its own records' ids."""

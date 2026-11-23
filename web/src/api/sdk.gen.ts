@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateIbkrConnectionData, CreateIbkrConnectionErrors, CreateIbkrConnectionResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, CreateTrading212ConnectionData, CreateTrading212ConnectionErrors, CreateTrading212ConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListTransactionPairCandidatesData, ListTransactionPairCandidatesErrors, ListTransactionPairCandidatesResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransactionsData, PairTransactionsErrors, PairTransactionsResponses, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, SetMainAccountData, SetMainAccountErrors, SetMainAccountResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateIbkrConnectionData, UpdateIbkrConnectionErrors, UpdateIbkrConnectionResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, UpdateTrading212ConnectionData, UpdateTrading212ConnectionErrors, UpdateTrading212ConnectionResponses, UploadIbkrStatementData, UploadIbkrStatementErrors, UploadIbkrStatementResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
+import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateEtoroConnectionData, CreateEtoroConnectionErrors, CreateEtoroConnectionResponses, CreateIbkrConnectionData, CreateIbkrConnectionErrors, CreateIbkrConnectionResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, CreateTrading212ConnectionData, CreateTrading212ConnectionErrors, CreateTrading212ConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListSourceReviewsData, ListSourceReviewsErrors, ListSourceReviewsResponses, ListTransactionPairCandidatesData, ListTransactionPairCandidatesErrors, ListTransactionPairCandidatesResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransactionsData, PairTransactionsErrors, PairTransactionsResponses, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, ResolveSourceReviewData, ResolveSourceReviewErrors, ResolveSourceReviewResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, SetMainAccountData, SetMainAccountErrors, SetMainAccountResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateEtoroConnectionData, UpdateEtoroConnectionErrors, UpdateEtoroConnectionResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateIbkrConnectionData, UpdateIbkrConnectionErrors, UpdateIbkrConnectionResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, UpdateTrading212ConnectionData, UpdateTrading212ConnectionErrors, UpdateTrading212ConnectionResponses, UploadEtoroStatementData, UploadEtoroStatementErrors, UploadEtoroStatementResponses, UploadIbkrStatementData, UploadIbkrStatementErrors, UploadIbkrStatementResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -28,6 +28,18 @@ export const listConnections = <ThrowOnError extends boolean = false>(options?: 
  */
 export const createMonzoConnection = <ThrowOnError extends boolean = false>(options: Options<CreateMonzoConnectionData, ThrowOnError>): RequestResult<CreateMonzoConnectionResponses, CreateMonzoConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateMonzoConnectionResponses, CreateMonzoConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Create Etoro Connection
+ */
+export const createEtoroConnection = <ThrowOnError extends boolean = false>(options: Options<CreateEtoroConnectionData, ThrowOnError>): RequestResult<CreateEtoroConnectionResponses, CreateEtoroConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateEtoroConnectionResponses, CreateEtoroConnectionErrors, ThrowOnError>({
+    url: '/api/v1/connections/etoro',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -77,6 +89,38 @@ export const authorizeConnection = <ThrowOnError extends boolean = false>(option
 export const disableConnection = <ThrowOnError extends boolean = false>(options: Options<DisableConnectionData, ThrowOnError>): RequestResult<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError> => (options.client ?? client).post<DisableConnectionResponses, DisableConnectionErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/disable', ...options });
 
 /**
+ * Update Etoro Connection
+ *
+ * Replace the two keys (new ones after the old were rejected). The sync's gate checks
+ * that they are read-only and belong to the same user.
+ */
+export const updateEtoroConnection = <ThrowOnError extends boolean = false>(options: Options<UpdateEtoroConnectionData, ThrowOnError>): RequestResult<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError>({
+    url: '/api/v1/connections/{connection_id}/etoro',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Upload Etoro Statement
+ *
+ * Ingest an eToro account statement (xlsx) the owner downloaded, normalise it with the
+ * API's records and heal the transfers, in one command (design §5.3). Its file is written
+ * last, just before the commit: a refused or failed upload leaves none behind.
+ */
+export const uploadEtoroStatement = <ThrowOnError extends boolean = false>(options: Options<UploadEtoroStatementData, ThrowOnError>): RequestResult<UploadEtoroStatementResponses, UploadEtoroStatementErrors, ThrowOnError> => (options.client ?? client).post<UploadEtoroStatementResponses, UploadEtoroStatementErrors, ThrowOnError>({
+    ...formDataBodySerializer,
+    url: '/api/v1/connections/{connection_id}/etoro-statement',
+    ...options,
+    headers: {
+        'Content-Type': null,
+        ...options.headers
+    }
+});
+
+/**
  * Update Ibkr Connection
  *
  * Replace the token, its expiry and the query id (a new token after the old one expired).
@@ -102,6 +146,28 @@ export const uploadIbkrStatement = <ThrowOnError extends boolean = false>(option
     ...options,
     headers: {
         'Content-Type': null,
+        ...options.headers
+    }
+});
+
+/**
+ * List Source Reviews
+ *
+ * The connection's review items (design §5.7): open ones first, newest first.
+ */
+export const listSourceReviews = <ThrowOnError extends boolean = false>(options: Options<ListSourceReviewsData, ThrowOnError>): RequestResult<ListSourceReviewsResponses, ListSourceReviewsErrors, ThrowOnError> => (options.client ?? client).get<ListSourceReviewsResponses, ListSourceReviewsErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/reviews', ...options });
+
+/**
+ * Resolve Source Review
+ *
+ * Take one source's value, recorded as the owner's decision, and normalise at once so the
+ * decision posts now, then heal the transfers the new postings touch.
+ */
+export const resolveSourceReview = <ThrowOnError extends boolean = false>(options: Options<ResolveSourceReviewData, ThrowOnError>): RequestResult<ResolveSourceReviewResponses, ResolveSourceReviewErrors, ThrowOnError> => (options.client ?? client).post<ResolveSourceReviewResponses, ResolveSourceReviewErrors, ThrowOnError>({
+    url: '/api/v1/connections/{connection_id}/reviews/{review_id}/resolve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
         ...options.headers
     }
 });

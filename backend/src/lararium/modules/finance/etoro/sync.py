@@ -56,7 +56,7 @@ from sqlalchemy import text
 from lararium.core.commands import command_context
 from lararium.core.connections import load_credential, lock_connection, merge_cursor
 from lararium.core.connectors import Capability, SyncContext
-from lararium.core.documents import store_document
+from lararium.core.documents import record_document
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
@@ -141,6 +141,8 @@ class IngestResult:
     raw_record_ids: list[UUID]
     # The reader's flags ("<sheet>.<column>", an unknown sheet, an unknown label).
     flagged: frozenset[str]
+    # The statement's document, whose bytes the caller writes last (record_document).
+    document_sha256: str
 
 
 def _shape(endpoint: str, field: str) -> EtoroSyncError:
@@ -158,6 +160,11 @@ def _id_text(value: ApiValue, endpoint: str, field: str) -> str:
     ):
         return str(int(value))
     raise _shape(endpoint, field)
+
+
+def me_ids(me: Item) -> tuple[str, str]:
+    """`/me`'s (gcid, realCid), each a positive whole id as text."""
+    return _id_text(me.get("gcid"), "/me", "gcid"), _id_text(me.get("realCid"), "/me", "realCid")
 
 
 def _optional_id(value: ApiValue, endpoint: str, field: str) -> str | None:
@@ -325,8 +332,7 @@ class _Run:
                 # The refusal stands whatever happens to its record; the class only is logged.
                 logger.warning("recording a refused eToro key failed (%s)", type(error).__name__)
             raise ReadOnlyGateError(_GATE)
-        gcid = _id_text(me.get("gcid"), "/me", "gcid")
-        real_cid = _id_text(me.get("realCid"), "/me", "realCid")
+        gcid, real_cid = me_ids(me)
         known = self.cursor.get("gcid")
         if isinstance(known, str) and known != gcid:
             raise AccountMismatchError("this key belongs to another eToro user")
@@ -661,18 +667,20 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
 
 
 async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> IngestResult:
-    """Check an uploaded statement, store it as a document and one raw record per row, then
-    normalise those records and publish the reader's and the normalizer's flags."""
+    """Check an uploaded statement, record it as a document and store one raw record per row,
+    then normalise those records and publish the reader's and the normalizer's flags.
+
+    The document's bytes are not written here: the caller writes them
+    (`store.put(result.document_sha256, body)`) once the rest of its command is done, just
+    before it commits (record_document), so a command that fails leaves no file behind."""
     try:
         # Parsed and checked first: a statement that is refused leaves nothing behind.
         statement = await asyncio.to_thread(_parse_alone, body)
     except StatementError as error:
         raise StatementRejected(str(error)) from None
     await _check_statement(ctx, statement)
-    if ctx.documents is None:
-        raise RuntimeError("no document store in the sync context")
-    document = await store_document(
-        ctx.command, ctx.documents, body, filename=filename, media_type=XLSX, source=DOCUMENT_SOURCE
+    document = await record_document(
+        ctx.command, body, filename=filename, media_type=XLSX, source=DOCUMENT_SOURCE
     )
     # The period is the upload's, not the row's: a row two statements share is one record.
     period: dict[str, JSONValue] = {
@@ -710,4 +718,4 @@ async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> Inge
     checked = {STATEMENT, IN_FULL} | ({FIELDS} if report.replayed else set[str]())
     flags = await publish_flags(ctx, found, checked)
     await merge_cursor(ctx.command, ctx.connection.id, flags)
-    return IngestResult(ids, statement.flagged)
+    return IngestResult(ids, statement.flagged, document.sha256)

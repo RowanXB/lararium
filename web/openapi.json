@@ -384,6 +384,20 @@
         "title": "Body_stage_import",
         "type": "object"
       },
+      "Body_upload_etoro_statement": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_etoro_statement",
+        "type": "object"
+      },
       "Body_upload_ibkr_statement": {
         "properties": {
           "file": {
@@ -990,6 +1004,78 @@
           "latin-1"
         ],
         "type": "string"
+      },
+      "EtoroConnectionIn": {
+        "properties": {
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "public_api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Public Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "user_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "User Key",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "public_api_key",
+          "user_key",
+          "display_name"
+        ],
+        "title": "EtoroConnectionIn",
+        "type": "object"
+      },
+      "EtoroConnectionUpdate": {
+        "properties": {
+          "public_api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Public Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "user_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "User Key",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "public_api_key",
+          "user_key"
+        ],
+        "title": "EtoroConnectionUpdate",
+        "type": "object"
+      },
+      "EtoroUploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "EtoroUploadOut",
+        "type": "object"
       },
       "FinanceSettingsOut": {
         "properties": {
@@ -3340,6 +3426,125 @@
         "title": "QifProfileConfig",
         "type": "object"
       },
+      "ReviewOut": {
+        "description": "A value two sources of one event disagree on (design \u00a75.7): open, or resolved by the\nowner taking one of them.",
+        "properties": {
+          "api_value": {
+            "title": "Api Value",
+            "type": "string"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "event_key": {
+            "title": "Event Key",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "opened_at": {
+            "format": "date-time",
+            "title": "Opened At",
+            "type": "string"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "enum": [
+                  "api",
+                  "statement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "resolved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By"
+          },
+          "statement_value": {
+            "title": "Statement Value",
+            "type": "string"
+          },
+          "transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
+          }
+        },
+        "required": [
+          "id",
+          "connection_id",
+          "transaction_id",
+          "event_key",
+          "field",
+          "api_value",
+          "statement_value",
+          "opened_at",
+          "resolved_at",
+          "resolution",
+          "resolved_by"
+        ],
+        "title": "ReviewOut",
+        "type": "object"
+      },
+      "ReviewResolve": {
+        "description": "Which source's value the owner takes for a review item.",
+        "properties": {
+          "take": {
+            "enum": [
+              "api",
+              "statement"
+            ],
+            "title": "Take",
+            "type": "string"
+          }
+        },
+        "required": [
+          "take"
+        ],
+        "title": "ReviewResolve",
+        "type": "object"
+      },
       "SettingsOut": {
         "properties": {
           "timezone": {
@@ -3982,6 +4187,47 @@
         ]
       }
     },
+    "/api/v1/connections/etoro": {
+      "post": {
+        "operationId": "create_etoro_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EtoroConnectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Etoro Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/ibkr": {
       "post": {
         "operationId": "create_ibkr_connection",
@@ -4211,6 +4457,114 @@
         ]
       }
     },
+    "/api/v1/connections/{connection_id}/etoro": {
+      "put": {
+        "description": "Replace the two keys (new ones after the old were rejected). The sync's gate checks\nthat they are read-only and belong to the same user.",
+        "operationId": "update_etoro_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EtoroConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Etoro Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/etoro-statement": {
+      "post": {
+        "description": "Ingest an eToro account statement (xlsx) the owner downloaded, normalise it with the\nAPI's records and heal the transfers, in one command (design \u00a75.3). Its file is written\nlast, just before the commit: a refused or failed upload leaves none behind.",
+        "operationId": "upload_etoro_statement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_etoro_statement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EtoroUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Etoro Statement",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/{connection_id}/ibkr": {
       "put": {
         "description": "Replace the token, its expiry and the query id (a new token after the old one expired).",
@@ -4314,6 +4668,111 @@
           }
         },
         "summary": "Upload Ibkr Statement",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/reviews": {
+      "get": {
+        "description": "The connection's review items (design \u00a75.7): open ones first, newest first.",
+        "operationId": "list_source_reviews",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewOut"
+                  },
+                  "title": "Response List Source Reviews",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Source Reviews",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/reviews/{review_id}/resolve": {
+      "post": {
+        "description": "Take one source's value, recorded as the owner's decision, and normalise at once so the\ndecision posts now, then heal the transfers the new postings touch.",
+        "operationId": "resolve_source_review",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewResolve"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Source Review",
         "tags": [
           "connections"
         ]

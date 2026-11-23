@@ -66,7 +66,33 @@ from lararium.deps import (
     get_actor,
     get_actor_allowing_navigation,
 )
+from lararium.modules.finance import models, transfers
 from lararium.modules.finance.api import read_upload
+from lararium.modules.finance.errors import ReviewNotFoundError
+from lararium.modules.finance.etoro.client import (
+    EtoroClient,
+    ReadOnlyGateError,
+    write_scopes,
+)
+from lararium.modules.finance.etoro.normalize import EtoroDataError
+from lararium.modules.finance.etoro.normalize import normalize as etoro_normalize
+from lararium.modules.finance.etoro.statement import StatementError
+from lararium.modules.finance.etoro.sync import (
+    KEY_PURPOSE as ETORO_KEY_PURPOSE,
+)
+from lararium.modules.finance.etoro.sync import (
+    USER_KEY_PURPOSE as ETORO_USER_KEY_PURPOSE,
+)
+from lararium.modules.finance.etoro.sync import (
+    EtoroSyncError,
+    StatementRejected,
+    StatementTooEarly,
+    me_ids,
+)
+from lararium.modules.finance.etoro.sync import (
+    ingest_statement as ingest_etoro_statement,
+)
+from lararium.modules.finance.etoro.xlsx import XlsxError
 from lararium.modules.finance.ibkr.normalize import normalize
 from lararium.modules.finance.ibkr.parser import FlexDataError
 from lararium.modules.finance.ibkr.sync import (
@@ -78,6 +104,8 @@ from lararium.modules.finance.ibkr.sync import (
 from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.readonly_http import HttpAuthError, HttpError
+from lararium.modules.finance.schemas import ReviewOut, ReviewResolve
+from lararium.modules.finance.source_reviews import list_reviews, resolve_review
 from lararium.modules.finance.trading212.client import Trading212Client
 from lararium.modules.finance.trading212.sync import (
     KEY_PURPOSE as T212_KEY_PURPOSE,
@@ -89,7 +117,7 @@ from lararium.modules.finance.trading212.sync import (
     Trading212SyncError,
     summary_account_id,
 )
-from lararium.modules.finance.transfers_api import healing_command
+from lararium.modules.finance.transfers_api import LOCK_TIMEOUT, healing_command
 from lararium.worker.app import defer_await_approval, defer_sync
 
 logger = logging.getLogger(__name__)
@@ -109,6 +137,8 @@ AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "author
 
 # A one-year, all-sections, three-account Flex statement is about 10 MB: M2's 5 MiB is too small.
 MAX_IBKR_UPLOAD_BYTES = 64 * 1024 * 1024
+# An eToro account statement of several years is well under 1 MiB.
+MAX_ETORO_UPLOAD_BYTES = 16 * 1024 * 1024
 XML_TYPES = ("application/xml", "text/xml")
 GENERIC_TYPE = "application/octet-stream"
 QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
@@ -164,6 +194,20 @@ class Trading212ConnectionUpdate(BaseModel):
 class Trading212ConnectionIn(Trading212ConnectionUpdate):
     display_name: str = Field(min_length=1, max_length=200)
     account_kind: Literal["invest", "isa"]
+
+
+class EtoroConnectionUpdate(BaseModel):
+    public_api_key: SecretStr = Field(min_length=1, max_length=500)
+    user_key: SecretStr = Field(min_length=1, max_length=500)
+
+
+class EtoroConnectionIn(EtoroConnectionUpdate):
+    display_name: str = Field(min_length=1, max_length=200)
+
+
+class EtoroUploadOut(BaseModel):
+    # The statement rows the upload stored, once each.
+    raw_records: int
 
 
 class IbkrUploadOut(BaseModel):
@@ -669,3 +713,257 @@ async def upload_ibkr_statement(
             {"error": "statement_invalid", "message": str(exc)},
         ) from exc
     return IbkrUploadOut(raw_records=len(result.raw_record_ids))
+
+
+# eToro (design §5.1, §5.3, §5.7, §5.14) ---------------------------------------------------
+
+ETORO_GATE = "This eToro key can trade or move money. Create a key with Read permission."
+
+
+def _not_etoro(connection: ConnectionRecord) -> HTTPException | None:
+    if connection.connector != "etoro":
+        return _unprocessable("not_etoro", "this is not an eToro connection")
+    return None
+
+
+async def _etoro_user(http: httpx.AsyncClient, body: EtoroConnectionUpdate) -> tuple[str, str]:
+    """The key's user (gcid, realCid), from one `/me` call, and the read-only gate (Decision
+    13): a key that can trade or move money is refused before anything is written. Every
+    message is fixed text: no scope, nothing the answer or the request holds."""
+    client = EtoroClient(
+        http,
+        Secret(body.public_api_key.get_secret_value()),
+        Secret(body.user_key.get_secret_value()),
+    )
+    try:
+        me = await client.me()
+    except ReadOnlyGateError as error:
+        # Its message is one of the client's fixed texts (no scopes, or not read-only).
+        raise _unprocessable("key_not_read_only", str(error)) from None
+    except HttpAuthError:
+        raise _unprocessable("key_rejected", "eToro rejected this key") from None
+    except HttpError:
+        raise _unprocessable(
+            "key_not_checked",
+            "eToro could not check this key: eToro must be reachable, and its firewall must"
+            " accept this server. Try again.",
+        ) from None
+    scopes = me.get("scopes")
+    if not isinstance(scopes, list) or write_scopes([s for s in scopes if isinstance(s, str)]):
+        raise _unprocessable("key_not_read_only", ETORO_GATE)
+    try:
+        return me_ids(me)
+    except EtoroSyncError as error:
+        # Names the endpoint and field only.
+        raise _unprocessable("no_user_id", str(error)) from None
+
+
+async def _store_etoro_keys(
+    ctx: CommandContext, master_key: bytes, connection_id: UUID, body: EtoroConnectionUpdate
+) -> None:
+    for purpose, value in (
+        (ETORO_KEY_PURPOSE, body.public_api_key),
+        (ETORO_USER_KEY_PURPOSE, body.user_key),
+    ):
+        await store_credential(
+            ctx, master_key, connection_id, purpose, value.get_secret_value(), None
+        )
+
+
+@router.post("/etoro", name="create_etoro_connection", status_code=status.HTTP_201_CREATED)
+async def create_etoro_connection(
+    body: EtoroConnectionIn,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+) -> ConnectionOut:
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    gcid, real_cid = await _etoro_user(http, body)
+    args = body.model_dump(mode="json", exclude={"public_api_key", "user_key"})
+    async with command_context(session, actor, "create_etoro_connection", args) as ctx:
+        taken = any(
+            isinstance(other.cursor, dict) and other.cursor.get("real_cid") == real_cid
+            for other in await list_connections(session)
+            if other.connector == "etoro"
+        )
+        if taken:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"error": "already_connected", "message": "this eToro user is already connected"},
+            )
+        created = await create_connection(
+            ctx, connector="etoro", display_name=body.display_name, config={}
+        )
+        await _store_etoro_keys(ctx, master_key, created.id, body)
+        # Where the sync looks, so its user check works from the first run.
+        await set_cursor(ctx, created.id, {"gcid": gcid, "real_cid": real_cid})
+        # There is no approval step: a key works as soon as it is created.
+        record = await set_status(ctx, created.id, "healthy")
+    # After the commit, so the job finds the connection.
+    await defer_sync(record.id)
+    return _out(record, settings)
+
+
+@router.put("/{connection_id}/etoro", name="update_etoro_connection")
+async def update_etoro_connection(
+    connection_id: UUID,
+    body: EtoroConnectionUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> ConnectionOut:
+    """Replace the two keys (new ones after the old were rejected). The sync's gate checks
+    that they are read-only and belong to the same user."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "update_etoro_connection", args) as ctx:
+        connection = await lock_connection(ctx, connection_id)
+        if (refusal := _not_etoro(connection)) is not None:
+            raise refusal
+        if connection.status == "disabled":
+            raise _unprocessable("not_updatable", "a disabled connection can't be updated")
+        await _store_etoro_keys(ctx, master_key, connection_id, body)
+        await transition_status(
+            ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
+        )
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
+    return _out(record, settings)
+
+
+async def _lock_for_normalizing(ctx: CommandContext, connection_id: UUID) -> ConnectionRecord:
+    """Lock waits bounded by LOCK_TIMEOUT; the connection's row first, as a sync locks it
+    before it normalizes, then the matching lock, before the command locks any other row (the
+    order healing_command keeps), so heal_transfers at the end waits on nothing."""
+    await ctx.session.execute(select(func.set_config("lock_timeout", LOCK_TIMEOUT, True)))
+    connection = await lock_connection(ctx, connection_id)
+    await transfers.lock_transfers(ctx)
+    return connection
+
+
+def _etoro_sync_context(
+    ctx: CommandContext,
+    connection: ConnectionRecord,
+    sync_id: UUID,
+    settings: Settings,
+    http: httpx.AsyncClient,
+    session_factory: SessionFactoryDep,
+) -> SyncContext:
+    return SyncContext(
+        command=ctx,
+        connection=connection,
+        sync_id=sync_id,
+        master_key=_require_master_key(settings),
+        http=http,
+        notifier=notifier_from_settings(settings, http),
+        session_factory=session_factory,
+    )
+
+
+@router.post(
+    "/{connection_id}/etoro-statement",
+    name="upload_etoro_statement",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_etoro_statement(
+    connection_id: UUID,
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+    store: DocumentStoreDep,
+    session_factory: SessionFactoryDep,
+) -> EtoroUploadOut:
+    """Ingest an eToro account statement (xlsx) the owner downloaded, normalise it with the
+    API's records and heal the transfers, in one command (design §5.3). Its file is written
+    last, just before the commit: a refused or failed upload leaves none behind."""
+    settings = _settings(request)
+    connection = await get_connection(session, connection_id)
+    if (refusal := _not_etoro(connection)) is not None:
+        raise refusal
+    body = await read_upload(file, MAX_ETORO_UPLOAD_BYTES)
+    filename = (file.filename or "statement.xlsx").replace("\\", "/").rsplit("/", 1)[-1][:200]
+    # The audit records which file, never its content.
+    args: dict[str, JSONValue] = {
+        "connection_id": str(connection_id),
+        "filename": filename,
+        "size_bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+    try:
+        async with command_context(session, actor, "upload_etoro_statement", args) as ctx:
+            connection = await _lock_for_normalizing(ctx, connection_id)
+            sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
+            sync_ctx = _etoro_sync_context(
+                ctx, connection, sync_id, settings, http, session_factory
+            )
+            result = await ingest_etoro_statement(sync_ctx, body, filename)
+            await transfers.heal_transfers(ctx)
+            # The bytes last, once nothing in the command can fail but its commit.
+            store.put(result.document_sha256, body)
+    except StatementTooEarly as error:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, {"error": "first_sync_pending", "message": str(error)}
+        ) from None
+    except (StatementRejected, StatementError, XlsxError, EtoroDataError) as error:
+        # The message names a sheet, a column, a rule or a masked position id, never a
+        # value (R27, Decision 9).
+        raise _unprocessable("statement_invalid", str(error)) from None
+    return EtoroUploadOut(raw_records=len(result.raw_record_ids))
+
+
+@router.get("/{connection_id}/reviews", name="list_source_reviews")
+async def list_source_reviews(connection_id: UUID, session: SessionDep) -> list[ReviewOut]:
+    """The connection's review items (design §5.7): open ones first, newest first."""
+    await get_connection(session, connection_id)
+    return await list_reviews(session, connection_id)
+
+
+@router.post(
+    "/{connection_id}/reviews/{review_id}/resolve",
+    name="resolve_source_review",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def resolve_source_review(
+    connection_id: UUID,
+    review_id: UUID,
+    body: ReviewResolve,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+    session_factory: SessionFactoryDep,
+) -> None:
+    """Take one source's value, recorded as the owner's decision, and normalise at once so the
+    decision posts now, then heal the transfers the new postings touch."""
+    settings = _settings(request)
+    args: dict[str, JSONValue] = {
+        "connection_id": str(connection_id),
+        "review_id": str(review_id),
+        "take": body.take,
+    }
+    async with command_context(session, actor, "resolve_source_review", args) as ctx:
+        connection = await _lock_for_normalizing(ctx, connection_id)
+        owner = await session.scalar(
+            select(models.SourceReview.connection_id).where(models.SourceReview.id == review_id)
+        )
+        if owner != connection_id:
+            # Another connection's item is not this one's to resolve.
+            raise ReviewNotFoundError(str(review_id))
+        await resolve_review(ctx, review_id, body.take)
+        if connection.connector == "etoro":
+            sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
+            sync_ctx = _etoro_sync_context(
+                ctx, connection, sync_id, settings, http, session_factory
+            )
+            try:
+                # Nothing new to apply: each run applies the positions decided on.
+                await etoro_normalize(sync_ctx, [])
+            except EtoroDataError as error:
+                # What is stored cannot be posted; the message names no value.
+                raise _unprocessable("not_postable", str(error)) from None
+        await transfers.heal_transfers(ctx)

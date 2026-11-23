@@ -4,14 +4,17 @@ import { type FormEvent, useId, useState } from "react";
 import {
   authorizeConnection,
   type ConnectionOut,
+  createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
   createTrading212Connection,
   disableConnection,
   listConnections,
   syncConnectionNow,
+  updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
+  uploadEtoroStatement,
   uploadIbkrStatement,
 } from "../api";
 import { TextField } from "../components/TextField";
@@ -127,17 +130,29 @@ function useIbkrCredentialsForm(
   return { fields, submit, error, done, pending: mutation.isPending };
 }
 
-type Trading212Keys = { api_key: string; api_secret: string };
+// A connector's two keys: the body field each is sent as, and its label.
+type KeyFields<K extends string> = readonly [[K, string], [K, string]];
 
-// Key and secret with both cleared as soon as they are sent; the request variables are
-// dropped from the mutation cache (gcTime 0 and reset) so they are never kept.
-function useTrading212KeysForm(
-  send: (body: Trading212Keys) => Promise<unknown>,
+const TRADING212_KEYS = [
+  ["api_key", "API key"],
+  ["api_secret", "API secret"],
+] as const satisfies KeyFields<string>;
+const ETORO_KEYS = [
+  ["public_api_key", "Public API Key"],
+  ["user_key", "User Key"],
+] as const satisfies KeyFields<string>;
+
+// Two keys as password fields, both cleared as soon as they are sent; the request variables
+// are dropped from the mutation cache (gcTime 0 and reset) so they are never kept.
+function useKeysForm<K extends string>(
+  keys: KeyFields<K>,
+  send: (body: Record<K, string>) => Promise<unknown>,
   onDone: () => void,
   doneMessage: string,
 ) {
-  const [apiKey, setApiKey] = useState("");
-  const [apiSecret, setApiSecret] = useState("");
+  const [[firstName, firstLabel], [secondName, secondLabel]] = keys;
+  const [first, setFirst] = useState("");
+  const [second, setSecond] = useState("");
   const [error, setError] = useState<string>();
   const [done, setDone] = useState<string>();
   const mutation = useMutation({
@@ -153,21 +168,19 @@ function useTrading212KeysForm(
     event.preventDefault();
     setError(undefined);
     setDone(undefined);
-    mutation.mutate(
-      { api_key: apiKey.trim(), api_secret: apiSecret.trim() },
-      { onSettled: () => mutation.reset() },
-    );
-    setApiKey("");
-    setApiSecret("");
+    const body = { [firstName]: first.trim(), [secondName]: second.trim() } as Record<K, string>;
+    mutation.mutate(body, { onSettled: () => mutation.reset() });
+    setFirst("");
+    setSecond("");
   }
   const fields = (
     <>
-      <TextField label="API key" type="password" value={apiKey} onChange={setApiKey} required />
+      <TextField label={firstLabel} type="password" value={first} onChange={setFirst} required />
       <TextField
-        label="API secret"
+        label={secondLabel}
         type="password"
-        value={apiSecret}
-        onChange={setApiSecret}
+        value={second}
+        onChange={setSecond}
         required
       />
     </>
@@ -177,7 +190,8 @@ function useTrading212KeysForm(
 
 function UpdateTrading212KeysForm({ connection }: { connection: ConnectionOut }) {
   const queryClient = useQueryClient();
-  const form = useTrading212KeysForm(
+  const form = useKeysForm(
+    TRADING212_KEYS,
     async (body) =>
       await updateTrading212Connection({
         path: { connection_id: connection.id },
@@ -187,6 +201,26 @@ function UpdateTrading212KeysForm({ connection }: { connection: ConnectionOut })
     () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
     "Keys updated",
   );
+  return <UpdateKeysForm form={form} />;
+}
+
+function UpdateEtoroKeysForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const form = useKeysForm(
+    ETORO_KEYS,
+    async (body) =>
+      await updateEtoroConnection({
+        path: { connection_id: connection.id },
+        body,
+        throwOnError: true,
+      }),
+    () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    "Keys updated",
+  );
+  return <UpdateKeysForm form={form} />;
+}
+
+function UpdateKeysForm({ form }: { form: ReturnType<typeof useKeysForm> }) {
   return (
     <form aria-label="Update keys" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-2">
       {form.fields}
@@ -228,19 +262,60 @@ function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
 }
 
 function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload a Flex statement"
+      accept=".xml,text/xml"
+      help="To add a closed account (such as a closed ISA), run your Flex query in Client Portal with closed accounts selected, then upload the XML here."
+      send={async (file) =>
+        (
+          await uploadIbkrStatement({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
+function UploadEtoroStatement({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload eToro statement (xlsx)"
+      accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      help="Download it from eToro's web app: Portfolio → History → Account Statement, as Excel. The first one must start on or before the day you opened the account."
+      send={async (file) =>
+        (
+          await uploadEtoroStatement({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
+function UploadStatement({
+  label,
+  accept,
+  help,
+  send,
+}: {
+  label: string;
+  accept: string;
+  help: string;
+  send: (file: File) => Promise<{ raw_records: number }>;
+}) {
   const queryClient = useQueryClient();
   const id = useId();
   const [result, setResult] = useState<string>();
   const [error, setError] = useState<string>();
   const upload = useMutation({
-    mutationFn: async (file: File) =>
-      (
-        await uploadIbkrStatement({
-          path: { connection_id: connection.id },
-          body: { file },
-          throwOnError: true,
-        })
-      ).data,
+    mutationFn: send,
     onSuccess: async (data, file) => {
       setError(undefined);
       setResult(`Uploaded ${file.name}: ${data.raw_records} records ingested.`);
@@ -253,11 +328,11 @@ function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
   });
   return (
     <div className="grid gap-1.5">
-      <Label htmlFor={id}>Upload a Flex statement</Label>
+      <Label htmlFor={id}>{label}</Label>
       <Input
         id={id}
         type="file"
-        accept=".xml,text/xml"
+        accept={accept}
         disabled={upload.isPending}
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -265,10 +340,7 @@ function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
           event.target.value = "";
         }}
       />
-      <p className="text-sm text-muted-foreground">
-        To add a closed account (such as a closed ISA), run your Flex query in Client Portal with
-        closed accounts selected, then upload the XML here.
-      </p>
+      <p className="text-sm text-muted-foreground">{help}</p>
       {result && <p role="status" className="text-sm">{result}</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
     </div>
@@ -296,6 +368,7 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
   });
   const isIbkr = connection.connector === "ibkr";
   const isTrading212 = connection.connector === "trading212";
+  const isEtoro = connection.connector === "etoro";
   const isMonzo = connection.connector === "monzo";
   const expiry =
     isIbkr && connection.credential_expires_at
@@ -364,9 +437,16 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
             Trading 212 rejected the key. Update it to resume syncing.
           </p>
         )}
+        {isEtoro && connection.status === "needs_reauth" && (
+          <p role="alert" className="text-sm text-destructive">
+            eToro rejected the keys. Update them to resume syncing.
+          </p>
+        )}
         {isIbkr && <UpdateIbkrTokenForm connection={connection} />}
         {isTrading212 && <UpdateTrading212KeysForm connection={connection} />}
+        {isEtoro && <UpdateEtoroKeysForm connection={connection} />}
         {isIbkr && <UploadFlexStatement connection={connection} />}
+        {isEtoro && <UploadEtoroStatement connection={connection} />}
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" disabled={sync.isPending} onClick={() => sync.mutate()}>
             Sync now
@@ -517,7 +597,8 @@ function AddTrading212Form() {
   const kindId = useId();
   const [displayName, setDisplayName] = useState("");
   const [kind, setKind] = useState<"invest" | "isa">("invest");
-  const form = useTrading212KeysForm(
+  const form = useKeysForm(
+    TRADING212_KEYS,
     async (keys) =>
       await createTrading212Connection({
         body: { display_name: displayName.trim(), account_kind: kind, ...keys },
@@ -571,6 +652,48 @@ function AddTrading212Form() {
   );
 }
 
+function AddEtoroForm() {
+  const queryClient = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const form = useKeysForm(
+    ETORO_KEYS,
+    async (keys) =>
+      await createEtoroConnection({
+        body: { display_name: displayName.trim(), ...keys },
+        throwOnError: true,
+      }),
+    () => {
+      setDisplayName("");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+    "eToro connected",
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add eToro</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form aria-label="Add eToro" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-2">
+          <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
+          {form.fields}
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Create a key in eToro under Settings → Trading → API Key Management, Environment Real,
+            Permission Read.
+          </p>
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={form.pending}>
+              Add eToro
+            </Button>
+            {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+            {form.done && <p role="status" className="text-sm">{form.done}</p>}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function ConnectionsPage() {
   const connections = useQuery({
     queryKey: ["connections"],
@@ -602,6 +725,7 @@ export function ConnectionsPage() {
       />
       <AddIbkrForm />
       <AddTrading212Form />
+      <AddEtoroForm />
     </div>
   );
 }
