@@ -48,7 +48,6 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -78,6 +77,7 @@ from lararium.modules.finance.etoro.fields import (
 )
 from lararium.modules.finance.etoro.normalize import normalize
 from lararium.modules.finance.etoro.statement import (
+    STATEMENT_ZONE,
     EtoroStatement,
     StatementError,
     parse_statement,
@@ -95,8 +95,6 @@ KEY_PURPOSE = "public_api_key"
 USER_KEY_PURPOSE = "user_key"
 DOCUMENT_SOURCE = "finance.etoro"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-# Decision 11a: the statement's times are UTC.
-STATEMENT_ZONE = ZoneInfo("UTC")
 FLAGGED_PREFIX = "eToro flagged: "
 # The parts flags are published under: the normalizer's, those it finds in full every run
 # (instruments untyped, of a type the ledger does not hold or of no known currency; positions

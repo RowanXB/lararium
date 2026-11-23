@@ -682,6 +682,10 @@ SUMMARY_KINDS: Mapping[str, Kind] = {
     if label not in SUMMARY_HEADINGS
 }
 SECOND_VALUE = "_2"
+# Labels the probe found more than once (two "Name" rows): each later occurrence has columns of
+# its own, `<column>_occurrence_<n>` (and `..._2` for its column C), keyed `<label>#<n>`.
+REPEATED_LABELS: Mapping[str, int] = {"Name": 2}
+OCCURRENCE = "#"
 
 
 def _prefixed(prefix: str) -> Callable[[str], str]:
@@ -702,6 +706,10 @@ def _statement_columns() -> dict[str, dict[str, str]]:
             raise ValueError(f"{sheet}: the typed columns are not the known ones")
         out[table] = column_map(STATEMENT_KINDS[sheet], _prefixed(prefix))
     summary = column_map(SUMMARY_KINDS)
+    for label, count in REPEATED_LABELS.items():
+        summary |= {
+            f"{label}{OCCURRENCE}{n}": f"{summary[label]}_occurrence_{n}" for n in range(1, count)
+        }
     out["etoro_statements"] = {
         **summary,
         **{

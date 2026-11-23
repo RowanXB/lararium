@@ -945,7 +945,8 @@ async def test_statement_flags_published_once(session, run, api, tmp_path) -> No
     assert result.flagged == frozenset({"Closed Positions.Brand New Column"})
     after = await get_connection(session, connection.id)
     assert after.warnings == [flag]
-    assert notifier.messages == [f"eToro: {flag}"]
+    # The statement's close differs from the API's (a review, told on its own).
+    assert [m for m in notifier.messages if "disagree" not in m] == [f"eToro: {flag}"]
     # A sync keeps the statement's flag, and does not tell it again.
     sync_notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, sync_notifier)

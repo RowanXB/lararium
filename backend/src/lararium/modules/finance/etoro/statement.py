@@ -23,7 +23,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from lararium.core.errors import DisplayableError
@@ -44,6 +44,9 @@ UNKNOWN_LABEL = f"{ACCOUNT_SUMMARY}.<unknown label>"
 _DIGIT = re.compile(r"[0-9]")
 
 _MOMENT = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2})")
+_DAY = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})(?:$| )")
+# Decision 11a: the statement's times are UTC.
+STATEMENT_ZONE = ZoneInfo("UTC")
 
 
 class StatementError(DisplayableError, ValueError):
@@ -140,17 +143,29 @@ def _table_rows(sheet: Sheet, spec: StatementSheet, flagged: set[str]) -> list[d
     return out
 
 
-def read_moment(value: str, label: str, zone: ZoneInfo) -> datetime:
-    """An Account Summary date-time (`dd/mm/yyyy HH:MM:SS`) in `zone`; `label` names it in
-    the error, never its value."""
-    match = _MOMENT.fullmatch(value)
+def read_moment(value: str, label: str, zone: ZoneInfo, sheet: str = ACCOUNT_SUMMARY) -> datetime:
+    """A statement date-time (`dd/mm/yyyy HH:MM:SS`) in `zone`; the sheet and `label` (its
+    label or column) name it in the error, never its value."""
+    match = _MOMENT.fullmatch(value.strip())
     if match is not None:
         day, month, year, hour, minute, second = (int(part) for part in match.groups())
         try:
             return datetime(year, month, day, hour, minute, second, tzinfo=zone)
         except ValueError:
             pass
-    raise StatementError(f"{ACCOUNT_SUMMARY}.{label} is not a date-time (dd/mm/yyyy HH:MM:SS)")
+    raise StatementError(f"{sheet}.{label} is not a date-time (dd/mm/yyyy HH:MM:SS)")
+
+
+def read_day(value: str, label: str, sheet: str) -> date:
+    """A statement date (`dd/mm/yyyy`, a time after it ignored)."""
+    match = _DAY.match(value.strip())
+    if match is not None:
+        day, month, year = (int(part) for part in match.groups())
+        try:
+            return date(year, month, day)
+        except ValueError:
+            pass
+    raise StatementError(f"{sheet}.{label} is not a date (dd/mm/yyyy)")
 
 
 def _labels(rows: list[dict[str, str]], spec: StatementSheet) -> dict[str, str]:

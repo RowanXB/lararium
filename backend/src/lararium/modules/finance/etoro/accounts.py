@@ -116,12 +116,31 @@ async def accounts(run: Run, balances: Sequence[Report]) -> None:
             etoro_id = normalize_identifier("etoro_account", text_at(entry, "accountId"))
             seen[etoro_id] = (kind, text_at(entry, "currency").upper())
             run.account_types[etoro_id] = kind_name
+            run.account_currencies[etoro_id] = seen[etoro_id][1]
     trading = sorted(i for i, t in run.account_types.items() if t == "Trading")
     if len(trading) > 1:
         raise EtoroDataError("eToro's balances list more than one Trading account")
     run.trading_id = trading[0] if trading else None
     for etoro_id, (kind, currency) in sorted(seen.items()):
         await _account(run, etoro_id, kind, currency)
+
+
+async def account_identifier(run: Run, etoro_id: str) -> UUID:
+    """The registry row of one of the connection's accounts (`etoro_account`)."""
+    return await run.shared(
+        ("identifier", "etoro_account", etoro_id),
+        lambda cmd: get_or_create_identifier(cmd, "etoro_account", etoro_id),
+    )
+
+
+def money_account(run: Run, currency: str) -> str | None:
+    """The eToro Money account a transfer of the Trading account names: the Cash account in
+    the transfer's other currency, else the only Cash account; None when neither is one."""
+    cash = sorted(i for i, kind in run.account_types.items() if kind == "Cash")
+    named = [i for i in cash if run.account_currencies.get(i) == currency]
+    if len(named) == 1:
+        return named[0]
+    return cash[0] if len(cash) == 1 else None
 
 
 async def trading_identifier(run: Run) -> UUID | None:

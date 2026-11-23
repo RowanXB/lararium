@@ -439,7 +439,9 @@ async def test_close_from_trade_history(session, ledger) -> None:
     assert tuple(trade) == (Decimal("20.00"), Decimal("500.00"), True, True)
 
 
-async def test_close_fees_are_a_fee_posting(session, ledger) -> None:
+async def test_close_fees_are_typed_not_posted(session, ledger) -> None:
+    # A close's `fees` are the position's overnight fees and dividends, which the statement
+    # posts as rows of their own (Task 11): the close posts its proceeds alone.
     await ledger.normalize(*_ledger_entries())
     row = trade_row(POSITION) | {
         "investment": Decimal("500.00"),
@@ -452,10 +454,12 @@ async def test_close_fees_are_a_fee_posting(session, ledger) -> None:
         BALANCES, ("trade_history", row), ("order_lookup", lookup_body(ORDER, POSITION))
     )
     postings = await _postings(session, f"close:{POSITION}")
-    assert postings[2:] == [
-        (TRADING, "USD", Decimal("-1.50"), None, None, None, None, True),
-        ("Unassigned", "USD", Decimal("1.50"), None, None, None, None, False),
-    ]
+    assert postings[1:] == [(TRADING, "USD", Decimal("520.00"), None, None, None, None, False)]
+    fees = await session.scalar(
+        text("select fees from finance.etoro_trades where external_id = :e"),
+        {"e": f"close:{POSITION}"},
+    )
+    assert fees == Decimal("1.50")
     assert await find_unbalanced_transactions(session) == []
 
 

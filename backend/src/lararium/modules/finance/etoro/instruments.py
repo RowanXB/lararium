@@ -117,6 +117,30 @@ async def listing(
     return found.id
 
 
+async def statement_listing(
+    ctx: CommandContext, isin: str, currency: str, symbol: str, kind: InstrumentKind
+) -> UUID:
+    """The instrument of a position only the statement has (its close older than the API's
+    trade history): found by ISIN in the asset currency, else created with the ISIN (when the
+    registry does not hold it already). eToro's id joins it once the API names the position
+    (`listing` finds it by the ISIN the statement gave)."""
+    quote = await get_currency(ctx.session, listing_currency(currency)[0])
+    found = await find_same_listing(ctx.session, isin, quote.id)
+    if found is not None:
+        return found.id
+    free = await find_by_identifier(ctx.session, "isin", isin) is None
+    created = await create_instrument(
+        ctx,
+        kind=kind,
+        symbol=symbol,
+        name=symbol,
+        decimals=DECIMALS,
+        quote_instrument_id=quote.id,
+        identifiers=[InstrumentIdentifier("isin", isin)] if free else [],
+    )
+    return created.id
+
+
 async def reclassify(ctx: CommandContext, connection_id: UUID) -> list[UUID]:
     """Give each instrument made without a type the kind the connection's market data now
     says it is; returns those it says the ledger does not hold (what they posted is voided:

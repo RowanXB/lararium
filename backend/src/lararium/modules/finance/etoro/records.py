@@ -7,14 +7,22 @@ with `parentPositionId`, design §6), else from the latest PnL report that lists
 survives the position leaving PnL. An open adds the units at `amount / units` in the account's
 currency (`accountCurrency`) and takes `amount` out; a close takes the units out at
 `(investment + netProfit) / units` and puts that cash in. A non-zero execution fee or tax
-(orders:lookup), and a close's trade-history `fees`, are fee postings (`is_fee`) countered
-on Unassigned; a negative one is flagged and not posted. A position that is not real
-(`settlementTypeID` 1, `settlementType` real), has leverage other than 1, or is copied (a
-`mirrorID` or `socialTradeId`) is flagged and posts nothing; so does one no source states the
-settlement of (counted apart, `settlement_unknown`), and one on an instrument of a type the
-ledger does not hold or of no known currency. A run applies the positions its records name
-(this sync's PnL, trade history and lookups; every one on a replay) and the closes not posted
-yet, each from everything stored.
+(orders:lookup) is a fee posting (`is_fee`) countered on Unassigned; a negative one is flagged
+and not posted. A close's trade-history `fees` are typed, not posted: they are the position's
+overnight fees and dividends, which the statement posts as rows of their own (Task 11). A
+position that is not real (`settlementTypeID` 1, `settlementType` real), has leverage other
+than 1, or is copied (a `mirrorID` or `socialTradeId`) is flagged and posts nothing; so does
+one no source states the settlement of (counted apart, `settlement_unknown`), and one on an
+instrument of a type the ledger does not hold or of no known currency. A run applies the
+positions its records name (this sync's PnL, trade history and lookups, the statement rows it
+was given, and those the owner has decided on; every one on a replay) and the closes not
+posted yet, each from everything stored.
+
+**The statement** (statement_ledger) has a position's "Open Position" and "Position closed"
+rows and its Closed Positions row. When the API has the event its values post; else the
+statement's (merge.py says which, and opens a review item where they disagree). A position
+only the statement has posts from it when Closed Positions says it is real, on the instrument
+its ISIN names.
 
 **eToro Money** (key `cash:<id>`): only a `settled` row posts, its `amount` in its currency, a
 debit negative. A bank transfer goes through transfer_contra as a bank transfer, naming the
@@ -41,6 +49,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text
 
+from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.connector_run import (
     OPENING,
@@ -50,7 +59,8 @@ from lararium.modules.finance.connector_run import (
     settle_rounding,
 )
 from lararium.modules.finance.errors import FinanceValidationError
-from lararium.modules.finance.etoro import accounts
+from lararium.modules.finance.etoro import accounts, merge, statement_ledger
+from lararium.modules.finance.etoro.merge import TradeEvent
 from lararium.modules.finance.etoro.state import (
     LONDON,
     EtoroDataError,
@@ -113,6 +123,12 @@ class Position:
     breakdown: tuple[Record, Item] | None = None
     trade: Record | None = None
     lookup: Record | None = None
+    # What the account statement says of it (statement_ledger).
+    statement: statement_ledger.Trade | None = None
+
+    @property
+    def from_api(self) -> bool:
+        return self.pnl is not None or self.trade is not None
 
     def execution(self) -> Item | None:
         if self.lookup is None:
@@ -188,10 +204,11 @@ def _assemble(
     trades: Mapping[str, Record],
     lookups: Mapping[str, Record],
     by_execution: Mapping[str, Record],
+    statement: statement_ledger.Trade | None = None,
 ) -> Position:
     """The position with its close and its order's lookup (by the order id its close or PnL
-    item gives, else the lookup whose executions list it)."""
-    position = Position(position_id, pnl, breakdown, trades.get(position_id))
+    item gives, else the lookup whose executions list it), and the statement's rows."""
+    position = Position(position_id, pnl, breakdown, trades.get(position_id), statement=statement)
     order_id = ""
     if position.trade is not None:
         order_id = text_at(position.trade.content, "orderId")
@@ -208,16 +225,18 @@ async def positions(
     lookups: Mapping[str, Record],
     given: set[str],
     replay: bool,
+    statement: statement_ledger.Statement,
 ) -> list[Position]:
     """The positions the run applies (module doc). `trades` and `lookups` are every stored
-    one (by position and by order id), `given` the position ids this run's trade history and
-    lookups name. An item this run's reports do not give is the latest stored one."""
+    one (by position and by order id), `given` the position ids this run's trade history,
+    lookups and statement rows name. An item this run's reports do not give is the latest
+    stored one; a position's statement rows are every stored one."""
     ordered = [r.record for r in sorted(reports, key=lambda r: r.order)]
     pnl = _pnl_items(r for r in ordered if r.endpoint == "pnl")
     breakdown = _breakdown_items(r for r in ordered if r.endpoint == "breakdown")
     wanted = set(pnl) | given
     if replay:
-        wanted |= set(trades)
+        wanted |= set(trades) | set(statement.trades)
         for lookup in lookups.values():
             wanted |= {
                 id_at(lookup, item, "positionId")
@@ -228,7 +247,9 @@ async def positions(
         breakdown = await _latest_items(run, "breakdown") | breakdown
     by_execution = _by_execution(lookups)
     return [
-        _assemble(p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution)
+        _assemble(
+            p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution, statement.trades.get(p)
+        )
         for p in sorted(wanted, key=int)
     ]
 
@@ -319,7 +340,8 @@ async def _account_currency(run: Run) -> InstrumentRecord:
     return await run.currency(run.account_currency)
 
 
-async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID | None:
+def _api_open(position: Position) -> TradeEvent | None:
+    """The API's open: trade history's once the position closed, else PnL's."""
     if position.trade is not None:
         record, item = position.trade, position.trade.content
         occurred_at = moment_at(record, item, "openTimestamp")
@@ -330,7 +352,38 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
         units, amount = number_at(record, item, "units"), number_at(record, item, "amount")
     else:
         return None
-    units, amount = units.copy_abs(), amount.copy_abs()
+    return TradeEvent(
+        units.copy_abs(), amount.copy_abs(), None, local_date(occurred_at, LONDON), occurred_at
+    )
+
+
+def _api_close(position: Position) -> TradeEvent | None:
+    """The API's close: trade history's `investment` + `netProfit`. Its `fees` are typed, not
+    posted: they are the position's overnight fees and dividends (as PnL's `totalFees`),
+    which the statement posts as rows of their own, so posting them here would count them
+    twice (Task 11; design §5.7)."""
+    if position.trade is None:
+        return None
+    record, item = position.trade, position.trade.content
+    profit = number_at(record, item, "netProfit")
+    occurred_at = moment_at(record, item, "closeTimestamp")
+    return TradeEvent(
+        number_at(record, item, "units").copy_abs(),
+        number_at(record, item, "investment") + profit,
+        profit,
+        local_date(occurred_at, LONDON),
+        occurred_at,
+    )
+
+
+async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID | None:
+    key = f"{OPEN}{position.position_id}"
+    api = _api_open(position)
+    statement = statement_ledger.open_event(position.statement, position.position_id)
+    if api is None and statement is None:
+        return None
+    values, found = await merge.choose(run, key, api, statement)
+    units, amount = values.units, values.cash
     if units == 0:
         raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
     currency = await _account_currency(run)
@@ -356,16 +409,21 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
         postings += _fees(run, unassigned, currency.id, fees)
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Buy {_plain(units)} {await run.symbol(instrument_id)}"
-    return await run.post(f"{OPEN}{position.position_id}", occurred_at, description, postings)
+    transaction_id = await run.post(key, values.occurred_at, description, postings)
+    await merge.review(run, key, transaction_id, found)
+    return transaction_id
 
 
-async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID:
-    assert position.trade is not None
-    record, item = position.trade, position.trade.content
-    units = number_at(record, item, "units").copy_abs()
+async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID | None:
+    key = f"{CLOSE}{position.position_id}"
+    api = _api_close(position)
+    statement = statement_ledger.close_event(position.statement, position.position_id)
+    if api is None and statement is None:
+        return None
+    values, found = await merge.choose(run, key, api, statement)
+    units, proceeds = values.units, values.cash
     if units == 0:
         raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
-    proceeds = number_at(record, item, "investment") + number_at(record, item, "netProfit")
     if proceeds < 0:
         raise EtoroDataError(
             f"eToro position {ending(position.position_id)} closed for less than 0"
@@ -383,15 +441,11 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
     ]
     if proceeds != 0:
         postings.append(PostingInput(run.trading, currency.id, proceeds))
-    postings += _fees(run, unassigned, currency.id, [(number_at(record, item, "fees"), "Fee")])
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Sell {_plain(units)} {await run.symbol(instrument_id)}"
-    return await run.post(
-        f"{CLOSE}{position.position_id}",
-        moment_at(record, item, "closeTimestamp"),
-        description,
-        postings,
-    )
+    transaction_id = await run.post(key, values.occurred_at, description, postings)
+    await merge.review(run, key, transaction_id, found)
+    return transaction_id
 
 
 async def link_open(run: Run, position_id: str, transaction_id: UUID | None) -> None:
@@ -412,26 +466,50 @@ async def link_open(run: Run, position_id: str, transaction_id: UUID | None) -> 
     )
 
 
+def etoro_instrument(position: Position) -> str:
+    """eToro's id of the position's instrument, as the API gives it; empty without one."""
+    source = position.trade.content if position.trade is not None else None
+    etoro_id = text_at(source, "instrumentId") if source is not None else ""
+    if not etoro_id and position.pnl is not None:
+        etoro_id = text_at(position.pnl[1], "instrumentID")
+    return etoro_id
+
+
+async def _instrument(run: Run, position: Position) -> UUID | None:
+    """The position's instrument when it posts: the API's settlement and instrument when the
+    API has the position, else the statement's (statement_ledger)."""
+    statement = position.statement
+    if position.from_api:
+        settlement = _settlement(position)
+    elif statement is not None:
+        settlement = statement_ledger.settlement(statement)
+    else:
+        return None
+    if settlement == "unsupported":
+        run.flag(UNSUPPORTED_POSITION)
+    elif settlement == "unknown" and not position.from_api:
+        run.flag(statement_ledger.UNPLACED)
+    elif settlement == "real":
+        if position.from_api:
+            return await run.instrument(etoro_instrument(position))
+        assert statement is not None
+        return await statement_ledger.instrument(run, position.position_id, statement)
+    return None
+
+
 async def position(run: Run, position: Position) -> None:
     """Post (or void) the position's open and close, and type its close."""
     key = position.position_id
-    if position.pnl is None and position.trade is None:
+    statement = position.statement
+    if not position.from_api and (
+        statement is None or (statement.open, statement.close, statement.closed) == (None,) * 3
+    ):
         return  # a lookup alone says nothing to post
-    instrument_id: UUID | None = None
-    settlement = _settlement(position)
-    if settlement == "unsupported":
-        run.flag(UNSUPPORTED_POSITION)
-    elif settlement == "real":
-        source = position.trade.content if position.trade is not None else None
-        etoro_id = text_at(source, "instrumentId") if source is not None else ""
-        if not etoro_id and position.pnl is not None:
-            etoro_id = text_at(position.pnl[1], "instrumentID")
-        instrument_id = await run.instrument(etoro_id)
+    instrument_id = await _instrument(run, position)
     opened = closed = None
     if instrument_id is not None:
         opened = await _post_open(run, position, instrument_id)
-        if position.trade is not None:
-            closed = await _post_close(run, position, instrument_id)
+        closed = await _post_close(run, position, instrument_id)
     if opened is None:
         await run.void(f"{OPEN}{key}")
     if closed is None:
@@ -439,6 +517,8 @@ async def position(run: Run, position: Position) -> None:
     await link_open(run, key, opened)
     if position.trade is not None:
         await trade_row(run, position.trade, closed, instrument_id)
+    if statement is not None and statement.closed is not None:
+        await statement_ledger.closed_row(run, statement.closed, key, closed, instrument_id)
 
 
 async def settlement_unknown(

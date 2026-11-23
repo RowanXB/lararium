@@ -266,6 +266,7 @@ class Run(ConnectorRun):
         # The accounts the balances list, by eToro account id, and their types.
         self.accounts: dict[str, UUID] = {}
         self.account_types: dict[str, str] = {}
+        self.account_currencies: dict[str, str] = {}
         self.trading_id: str | None = None
         # The Trading account's currency (accountCurrency, design §3.1).
         self.account_currency = ""
@@ -278,6 +279,10 @@ class Run(ConnectorRun):
         # (instrument, currency, day) → price: current rates and daily candles.
         self.current_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self.candle_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
+        # eToro instrument id → the ISIN a statement's Closed Positions gave a position of it.
+        self.isins: dict[str, str] = {}
+        # (event key, field) of each review item this run opened (merge.review), to tell.
+        self.reviews: list[tuple[str, str]] = []
         self._instruments: dict[str, UUID | None] = {}
 
     @property
@@ -320,11 +325,18 @@ class Run(ConnectorRun):
         if not currency and await find_by_identifier(self.session, "etoro_id", etoro_id) is None:
             found = None
         else:
-            found = await listing(self.command, int(etoro_id), symbol, name, currency, None)
+            found = await listing(
+                self.command, int(etoro_id), symbol, name, currency, self.isins.get(etoro_id)
+            )
             if found is None:
                 self.flag_value("instruments", "instrumentTypeID", type_id)
         self._instruments[etoro_id] = found
         return found
+
+    def forget_instruments(self) -> None:
+        """Drop what `instrument` found: a merge has made two of them one."""
+        self._instruments.clear()
+        self._symbols.clear()
 
     async def contra(self, key: str, account_id: UUID, identifier_id: UUID | None) -> UUID:
         """Unassigned or In transit for a movement of two postings, as transfer_contra says."""

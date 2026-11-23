@@ -1,5 +1,5 @@
-"""eToro raw records into the ledger (design §5.5-5.10): the API's side. The statement's rows
-(Task 11) are passed by here, as is a refused key's record (sync.REFUSED_KEY).
+"""eToro raw records into the ledger (design §5.5-5.10): the API's records and the account
+statement's rows (statement_ledger.py). A refused key's record (sync.REFUSED_KEY) is passed by.
 
 Deterministic from its inputs and versioned (NORMALIZER_VERSION, stored in the connection's
 config, Decision 8): when the stored version differs, the run replays every raw record the
@@ -9,10 +9,13 @@ as it was then. A run otherwise applies the records it was given and its own syn
 sightings.
 
 In order: the accounts (accounts.py, from the balances); the market data, which types the
-instruments (reports.py, instruments.py); opens and closes of the positions the run's records
-name, and eToro Money's transactions, as connector transactions (records.py); the order
-lookups, closed events, stockback and candles; the reports, typed per day with reported
-snapshots (reports.py); eToro Money's opening adjustment (records.py); and prices.
+instruments (reports.py, instruments.py); the ISINs the statement brings, merging instruments
+(statement_ledger.py), before any instrument is found; opens and closes of the positions the
+run's records name, from the API or the statement (records.py, merge.py), and eToro Money's
+transactions, as connector transactions (records.py); the statement's cash events and typed
+rows (statement_ledger.py); the order lookups, closed events, stockback and candles; the
+reports, typed per day with reported snapshots (reports.py); eToro Money's opening adjustment
+(records.py); prices; and a notification of the review items the run opened (merge.py).
 
 Every record's fields are checked first: a required one missing fails the run; an unknown one
 with a value is flagged, as are values and types the mapping does not know. Some flags are
@@ -32,7 +35,7 @@ from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.connector_items import lacks, leaves
-from lararium.modules.finance.etoro import accounts, records, reports
+from lararium.modules.finance.etoro import accounts, merge, records, reports, statement_ledger
 from lararium.modules.finance.etoro.fields import ENDPOINTS
 from lararium.modules.finance.etoro.instruments import currency_flags, reclassify, type_flags
 from lararium.modules.finance.etoro.state import (
@@ -223,13 +226,15 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     lookups = await _latest_stored(run, "order_lookup")
     lookups |= {record_key(r): r for r in by_endpoint["order_lookup"]}
     await _context(run, seen, lookups)
+    statement = await statement_ledger.load(run, raw_record_ids, replay)
     given = {id_at(r, r.content, "positionId") for r in by_endpoint["trade_history"]}
+    given |= statement.position_ids() | await merge.decided_positions(run)
     # Closes not posted yet (their instrument's currency unknown, say): tried again.
     given |= set(
         await run.session.scalars(
             text(
-                "select position_id::text from finance.etoro_trades where connection_id = :c"
-                " and transaction_id is null and raw_record_id is not null"
+                "select split_part(external_id, ':', 2) from finance.etoro_trades"
+                " where connection_id = :c and transaction_id is null"
             ),
             {"c": run.connection_id},
         )
@@ -239,13 +244,25 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
             id_at(lookup, item, "positionId")
             for item in objects_at(lookup.content, "positionExecutions")
         }
-    for position in await records.positions(run, seen, trades, lookups, given, replay):
+    applied = await records.positions(run, seen, trades, lookups, given, replay, statement)
+    # The statement's ISINs before any instrument is found: a merge changes what they are.
+    await statement_ledger.isins(
+        run,
+        [
+            (etoro_id, position.statement)
+            for position in applied
+            if position.statement is not None and (etoro_id := records.etoro_instrument(position))
+        ],
+    )
+    for position in applied:
         await records.position(run, position)
     for record in sorted(
         by_endpoint["cash_transactions"],
         key=lambda r: (text_at(r.content, "postedAt"), record_key(r)),
     ):
         await records.cash(run, record)
+    await statement_ledger.cash_events(run, statement)
+    await statement_ledger.typed(run, statement)
 
     await reports.lookups(run, by_endpoint["order_lookup"])
     await reports.keyed(run, by_endpoint)
@@ -267,6 +284,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     }
     if any(connection.config.get(key) != value for key, value in values.items()):
         await update_config(ctx.command, connection.id, values)
+    await merge.notify(ctx, connection.display_name, run.reviews)
     return report
 
 
