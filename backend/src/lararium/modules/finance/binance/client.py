@@ -26,9 +26,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from lararium import __version__
 from lararium.core.errors import CredentialRejectedError, DisplayableError
-from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint
+from lararium.modules.finance.binance.parse import ApiValue
 
 type Clock = Callable[[], int]
 type Sleep = Callable[[int], Awaitable[None]]
@@ -139,8 +139,9 @@ class Ed25519Signer:
                 private_key_pem.reveal().encode(),
                 passphrase.reveal().encode() if passphrase is not None else None,
             )
-        except (ValueError, TypeError):
-            # The library's messages can describe the key.
+        except Exception:
+            # Whatever the library says (a wrong passphrase, an unsupported algorithm, a
+            # malformed PEM), its message can describe the key.
             raise ValueError("the Ed25519 private key can't be read") from None
         if not isinstance(key, Ed25519PrivateKey):
             raise ValueError("the private key is not an Ed25519 key")
@@ -202,7 +203,7 @@ class Limiter:
             return
 
 
-def _json(text: str) -> JSONValue:
+def _json(text: str) -> ApiValue:
     def refuse(_: str) -> Decimal:
         raise ValueError("non-finite number")
 
@@ -250,13 +251,12 @@ class BinanceClient:
         return self._clock() + self._offset
 
     async def sync_clock(self) -> None:
-        sent = self._clock()
-        body = await self.call(ENDPOINTS["time"])
-        received = self._clock()
+        body, sent, received = await self._request(ENDPOINTS["time"], {})
         server = body.get("serverTime") if isinstance(body, dict) else None
         if not isinstance(server, int) or isinstance(server, bool):
             raise BinanceError(200)
-        # The server read its clock about halfway through the round trip.
+        # The server read its clock about halfway through the round trip. Only the request
+        # that was answered counts: not the limiter's waits, nor a 429's.
         self._offset = server - (sent + received) // 2
 
     def _bucket(self, endpoint: Endpoint) -> str:
@@ -290,9 +290,21 @@ class BinanceClient:
 
     async def call(
         self, endpoint: Endpoint, params: Mapping[str, str | int | bool] = {}
-    ) -> JSONValue:
+    ) -> ApiValue:
         """Send one catalogue query; numbers in the answer are `Decimal`."""
-        if (endpoint.method, endpoint.host, endpoint.path) not in ALLOWED:
+        body, _, _ = await self._request(endpoint, params)
+        return body
+
+    async def _request(
+        self, endpoint: Endpoint, params: Mapping[str, str | int | bool]
+    ) -> tuple[ApiValue, int, int]:
+        """The answer, and the local clock just before and just after the exchange that gave it."""
+        # A hand-built endpoint can carry a listed route with other terms (unsigned, a lighter
+        # weight, another limit): only the catalogue's own is sent.
+        if (
+            ENDPOINTS.get(endpoint.label) != endpoint
+            or (endpoint.method, endpoint.host, endpoint.path) not in ALLOWED
+        ):
             raise RequestRefused(f"Binance request refused: {endpoint.label} is not a listed query")
         if RESERVED & params.keys():
             raise RequestRefused("Binance request refused: a parameter is set by the client")
@@ -304,6 +316,7 @@ class BinanceClient:
             await self._limiter.acquire(
                 self._bucket(endpoint), endpoint.weight, self.caps[endpoint.limit]
             )
+            sent = self._clock()
             try:
                 response = await self._http.request(
                     endpoint.method,
@@ -314,13 +327,14 @@ class BinanceClient:
             except httpx.HTTPError:
                 # httpx's messages can quote the URL, which carries the signed query.
                 raise BinanceError(None) from None
+            received = self._clock()
             self._note_used_weight(endpoint, response)
             status = response.status_code
             if status == 429 and retries < MAX_RETRIES:
                 retries += 1
                 await self._sleep(self._retry_after(response) * 1000)
                 continue
-            return self._result(response)
+            return self._result(response), sent, received
 
     @staticmethod
     def _retry_after(response: httpx.Response) -> int:
@@ -329,7 +343,7 @@ class BinanceClient:
         return min(max(int(shown), low), high) if shown.isdecimal() else RETRY_AFTER_DEFAULT
 
     @staticmethod
-    def _result(response: httpx.Response) -> JSONValue:
+    def _result(response: httpx.Response) -> ApiValue:
         status = response.status_code
         if 200 <= status < 300:
             try:

@@ -10,7 +10,9 @@ from urllib.parse import parse_qsl, unquote
 
 import httpx
 import pytest
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from lararium import __version__
@@ -438,3 +440,94 @@ async def test_messages_never_contain_key_material() -> None:
     with pytest.raises(RequestRefused) as caught_refused:
         await refused.client().call(dataclasses.replace(SPOT, path="/nope"))
     assert API_KEY not in str(caught_refused.value)
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        pytest.param(dataclasses.replace(WITHDRAWALS, signed=False), id="unsigned"),
+        pytest.param(dataclasses.replace(WITHDRAWALS, weight=1), id="lighter"),
+        pytest.param(dataclasses.replace(WITHDRAWALS, limit="ip"), id="another-limit"),
+        pytest.param(dataclasses.replace(WITHDRAWALS, page_size=5), id="another-page-size"),
+        pytest.param(dataclasses.replace(SPOT, label="spot-copy"), id="another-label"),
+    ],
+)
+async def test_only_the_catalogues_own_endpoint_is_sent(refused: Endpoint) -> None:
+    # Each one names a route the allowlist lists.
+    assert (refused.method, refused.host, refused.path) in ALLOWED
+    env = Env(ok(), repeat_last=True)
+    with pytest.raises(RequestRefused):
+        await env.client().call(refused)
+    assert env.requests == []
+
+
+async def test_sync_clock_leaves_out_a_429s_wait() -> None:
+    env = Env(
+        error(429, None, **{"Retry-After": "7"}), ok(json.dumps({"serverTime": START_MS + 9_000}))
+    )
+    client = env.client()
+    await client.sync_clock()
+
+    assert env.sleeps == [7_000]
+    # The server's reading was taken in the second exchange, at START + 7 s locally.
+    assert client.now_ms() == env.now + 2_000
+
+
+async def test_sync_clock_leaves_out_the_limiters_wait() -> None:
+    env = Env(ok(), ok(json.dumps({"serverTime": START_MS + 1_100})))
+    client = env.client()
+    await client.call(SPOT)
+    await client.sync_clock()
+
+    assert env.sleeps == [100]
+    assert client.now_ms() == env.now + 1_000
+
+
+def _pem(key: Ed25519PrivateKey | rsa.RSAPrivateKey, passphrase: str | None = None) -> str:
+    encryption: serialization.KeySerializationEncryption = (
+        serialization.BestAvailableEncryption(passphrase.encode())
+        if passphrase
+        else serialization.NoEncryption()
+    )
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, encryption
+    ).decode()
+
+
+def _boom(*_: object, **__: object) -> None:
+    raise UnsupportedAlgorithm("detail-from-the-library: key bytes 0xdeadbeef")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["rsa", "wrong-passphrase", "missing-passphrase", "unneeded-passphrase", "garbage", "backend"],
+)
+def test_a_key_that_cannot_be_loaded_is_a_clean_error(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ed = Ed25519PrivateKey.generate()
+    pem, passphrase = {
+        "rsa": (_pem(rsa.generate_private_key(65537, 2048)), None),
+        "wrong-passphrase": (_pem(ed, "right-pp-31"), "wrong-pp-77"),
+        "missing-passphrase": (_pem(ed, "right-pp-31"), None),
+        "unneeded-passphrase": (_pem(ed), "some-pp-55"),
+        "garbage": ("-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----", None),
+        "backend": (_pem(ed), None),
+    }[case]
+    if case == "backend":
+        monkeypatch.setattr(serialization, "load_pem_private_key", _boom)
+
+    with pytest.raises(ValueError) as caught:
+        Ed25519Signer(Secret(pem), Secret(passphrase) if passphrase else None)
+
+    error = caught.value
+    assert str(error) in {
+        "the Ed25519 private key can't be read",
+        "the private key is not an Ed25519 key",
+    }
+    # Nothing the library said, and no way back to it.
+    assert error.__cause__ is None
+    assert error.__context__ is None or error.__suppress_context__
+    shown = repr(error) + str(error.args)
+    assert not any(line in shown for line in pem.splitlines()[1:-1])
+    assert not any(word in shown for word in ("pp-", "deadbeef", "library", "Bad", "decrypt"))

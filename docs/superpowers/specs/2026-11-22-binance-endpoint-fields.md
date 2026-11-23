@@ -1103,7 +1103,7 @@ Id: `rows[].redeemId`. Time: `rows[].time`. Seen: yes.
 | rows[].amount | decimal string | redeemed amount |
 | rows[].asset | string | asset |
 | rows[].time | integer | epoch ms |
-| rows[].projectId | string | documented name; **real name is `productId`** |
+| rows[].productId | string | product id (the docs name it `projectId`; the real name is `productId`) |
 | rows[].redeemId | integer | redemption id |
 | rows[].destAccount | string | SPOT, FUNDING |
 | rows[].status | string | CREATED, PAID, FAILED |
@@ -1119,7 +1119,7 @@ Id: **none**. A record is identified by `asset` + `productId` + `type` + `time`.
 |---|---|---|
 | rows[].asset | string | asset |
 | rows[].rewards | decimal string | reward amount |
-| rows[].projectId | string | documented name; **real name is `productId`** |
+| rows[].productId | string | product id (the docs name it `projectId`; the real name is `productId`) |
 | rows[].type | string | BONUS, REALTIME, REWARDS |
 | rows[].time | integer | epoch ms |
 | total | integer | row count |
@@ -1560,11 +1560,30 @@ Weight 400 (IP). Request: `orderId`, `loanCoin` optional; `startTime`/`endTime` 
 | total | integer | row count |
 
 #### `vip-loan-collateral-account` — GET /sapi/v1/loan/vip/collateral/account
-Weight **6000** (IP). Request: `orderId`, `collateralAccountId` optional. Fields: `rows[].collateralAccountId` (string), `rows[].collateralCoin` (string, comma-separated), `total` (integer).
+Weight **6000** (IP). Request: `orderId`, `collateralAccountId` optional.
+
+| Field | Type | Meaning |
+|---|---|---|
+| rows[].collateralAccountId | string | collateral account id |
+| rows[].collateralCoin | string | comma-separated assets |
+| total | integer | row count |
 
 #### `vip-loan-requests` — GET /sapi/v1/loan/vip/request/data
 Weight 400 (UID). Id: `rows[].requestId`. Time: `rows[].loanDate` (epoch ms as text).
-Fields: `rows[].loanAccountId` (string, loan receiving account), `rows[].orderId` (string), `rows[].requestId` (string), `rows[].loanCoin` (string), `rows[].loanAmount` (decimal string), `rows[].collateralAccountId` (string, comma list), `rows[].collateralCoin` (string, comma list), `rows[].loanTerm` (string), `rows[].status` (string: Accruing_Interest, Overdue, Liquidating, Repaying, Repaid, Liquidated, Pending, Failed), `rows[].loanDate` (string), `total` (integer).
+
+| Field | Type | Meaning / enum |
+|---|---|---|
+| rows[].loanAccountId | string | loan receiving account |
+| rows[].orderId | string | order id |
+| rows[].requestId | string | request id |
+| rows[].loanCoin | string | loan asset |
+| rows[].loanAmount | decimal string | loan amount |
+| rows[].collateralAccountId | string | comma-separated account ids |
+| rows[].collateralCoin | string | comma-separated assets |
+| rows[].loanTerm | string | loan term |
+| rows[].status | string | Accruing_Interest, Overdue, Liquidating, Repaying, Repaid, Liquidated, Pending, Failed |
+| rows[].loanDate | string | epoch ms as text |
+| total | integer | row count |
 
 ---
 
