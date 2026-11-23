@@ -15,13 +15,16 @@ cut-off (connector_run.holdings), within the instrument's tolerance:
 
 **"Upload a statement" in place of a difference.** Only a statement posts Trading's transfers
 with eToro Money and its fees, taxes and dividends (ruling R30). So the differences in
-Trading's cash whose cut-off is after the latest statement's end become one prompt, "<Trading's
-name>: upload an eToro statement covering <the day after that end, else the account's earliest
-record> onward", when a statement would explain them: none has been uploaded; or eToro
+Trading's cash after what the latest statement covers (a snapshot day after the last day it
+covers in full, covered_through; a current figure seen after its end) become one prompt,
+"<Trading's name>: upload an eToro statement covering <the first day it does not cover in
+full, else the account's earliest record> onward", when a statement would explain them: none
+has been uploaded; or eToro
 Money has an internal transfer with Trading after that end (only a statement brings Trading's
 leg, so it has none yet); or the API states fees, taxes or dividends after that end (an
 execution's or a close's fees or taxes, or a position's `totalFees` or
-`overnightFeesAndDividends` changed since the end's day). Any other difference is an ordinary
+`overnightFeesAndDividends` changed since the end's London day, the day its rows are
+stamped with). Any other difference is an ordinary
 one. The prompt names no end (ruling R34): its text, and so its one notification, changes only
 when a new statement moves its start.
 
@@ -38,7 +41,7 @@ the day and the amount, never another value.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -54,6 +57,7 @@ from lararium.modules.finance.etoro.fields import STATEMENT_SHEETS
 from lararium.modules.finance.etoro.records import end_of
 from lararium.modules.finance.etoro.reports import trading_cash
 from lararium.modules.finance.etoro.state import (
+    LONDON,
     EtoroDataError,
     Report,
     id_at,
@@ -113,6 +117,14 @@ class Checked:
 class Period:
     start: datetime
     end: datetime
+
+
+def covered_through(end: datetime) -> date:
+    """The last day a statement ending at `end` covers in full, in UTC: its end's day when it
+    ends at the day's end (End Date 23:59:59), else the day before, so the rest of a day it was
+    downloaded on counts as not covered (the next statement overlaps it; its rows are keyed)."""
+    at = end.astimezone(UTC)
+    return at.date() if at.time() >= time(23, 59, 59) else at.date() - timedelta(days=1)
 
 
 def prompt(account_name: str, start: date) -> str:
@@ -212,8 +224,9 @@ class _Check:
         self, trading: UUID, name: str, since: date | None, covered: date | None
     ) -> None:
         """Trading's cash against balance history's on each day since `since` (every day when
-        None), at the end of the day. A day on or before `covered` (the latest statement's last
-        day, in UTC) is one the statement covers, so a difference on it is ordinary."""
+        None), at the end of the day. A day on or before `covered` (covered_through: the last
+        day the latest statement covers in full) is one it covers, so a difference on it is
+        ordinary."""
         rows = await self.session.execute(
             text(
                 "select s.snapshot_date, s.cash, s.currency"
@@ -265,7 +278,12 @@ class _Check:
         )
         if stated:
             return True
-        day = end.astimezone(UTC).date()
+        # A London day: it is compared with the days the position rows are stamped with
+        # (`as_of_date`, Report.day, the London date of their sighting). The last one that ends
+        # by the statement's end (End Date 23:59:59 counting as its day's end), so every
+        # sighting stamped with it or before is before the end: in BST a statement ending
+        # 23:59:59 UTC ends at 00:59:59 London the next day, whose sightings are mostly after.
+        day = (end + timedelta(seconds=1)).astimezone(LONDON).date() - timedelta(days=1)
         for table, column in (
             ("etoro_pnl_positions", "total_fees"),
             ("etoro_breakdown_positions", "overnight_fees_and_dividends"),
@@ -393,7 +411,7 @@ async def _check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | No
         trading,
         trading_name,
         statement.start.astimezone(UTC).date() if statement else None,
-        statement.end.astimezone(UTC).date() if statement else None,
+        covered_through(statement.end) if statement else None,
     )
 
     explainable = [d for d in run.found if d.explainable]
@@ -403,7 +421,7 @@ async def _check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | No
         statement is None or await run.explained(trading, trading_etoro_id, statement.end)
     ):
         if statement is not None:
-            start = statement.end.astimezone(UTC).date() + timedelta(days=1)
+            start = covered_through(statement.end) + timedelta(days=1)
         else:
             start = await run.earliest(trading) or min(d.day for d in explainable)
         found = [d for d in found if not d.explainable]

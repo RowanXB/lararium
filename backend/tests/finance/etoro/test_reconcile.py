@@ -405,3 +405,64 @@ async def test_data_reconciliation_cannot_read_does_not_fail(session, run, caplo
     ]
     await reconcile.publish(ctx, None)
     assert await _warnings(session, ledger) == [UNRECONCILED]
+
+
+async def test_a_fee_change_after_a_summer_statement_counts(session, run, ledger) -> None:
+    """In BST a statement ending 23:59:59 UTC ends at 00:59:59 London the next day: a positions
+    report sighted after it that London day is after the end, though stamped with the end's
+    London date."""
+    await run(lambda ctx: set_warnings(ctx, ledger.connection.id, [OTHER]))
+    await ledger.normalize(
+        ("me", me_json()),
+        ("balances", balances_body()),
+        now=datetime(2026, 6, 30, 12, 0, tzinfo=UTC),
+    )
+    june = build_statement(
+        summary(
+            username=USERNAME,
+            start="01/06/2026 00:00:00",
+            end="30/06/2026 23:59:59",
+            created="01/06/2026 09:15:00",
+        ),
+        [transfer_in("01/06/2026 10:00:00")],
+    )
+    await ledger.upload(june)
+    # 00:30 UTC is 01:30 London on 1 July: a buy of 4 for 500, and 0.40 of fees since.
+    opened = "2026-07-01T00:10:00.000Z"
+    await ledger.normalize(
+        *_sync(
+            "759.60",
+            [_trading(date(2026, 6, 30), "1260.00")],
+            positions=(pnl_position(POSITION, opened=opened),),
+            breakdown=(breakdown_position(POSITION, overnightFeesAndDividends=Decimal("-0.40")),),
+            units="4",
+        ),
+        now=datetime(2026, 7, 1, 0, 30, tzinfo=UTC),
+    )
+    assert await _warnings(session, ledger) == [
+        OTHER,
+        "eToro Trading: upload an eToro statement covering 2026-07-01 onward",
+    ]
+
+
+async def test_a_statement_ending_mid_day_leaves_that_day_uncovered(session, run, ledger) -> None:
+    """Downloaded on its end day, a statement ends mid-day: the rest of that day is not
+    covered, so a difference on it is one a statement explains, and the prompt starts there.
+    (A statement ending 23:59:59 covers its last day:
+    test_a_difference_on_the_statements_last_day_is_ordinary.)"""
+    await run(lambda ctx: set_warnings(ctx, ledger.connection.id, [OTHER]))
+    await ledger.normalize(("me", me_json()), ("balances", balances_body()), now=FIRST)
+    partial = build_statement(
+        summary(username=USERNAME, end="31/10/2026 14:30:00"), [transfer_in()]
+    )
+    await ledger.upload(partial)
+    history = [_trading(date(2026, 10, 31), "1300.00"), _trading(date(2026, 11, 1), "2510.00")]
+    await ledger.normalize(
+        *_sync("2510.00", history),
+        *_transfer_to_trading(1),
+        now=datetime(2026, 11, 2, 12, 0, tzinfo=UTC),
+    )
+    assert await _warnings(session, ledger) == [
+        OTHER,
+        "eToro Trading: upload an eToro statement covering 2026-10-31 onward",
+    ]
