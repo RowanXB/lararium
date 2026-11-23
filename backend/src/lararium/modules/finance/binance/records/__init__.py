@@ -304,6 +304,7 @@ async def post(
     description: str,
     postings: Sequence[PostingInput],
     counterparty_identifier_id: UUID | None = None,
+    counterparty_name: str | None = None,
     never_transfer: bool = False,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
@@ -333,7 +334,9 @@ async def post(
             connection_id=run.connection.id,
             external_id=key,
             counterparty=CounterpartyFields(
-                identifier_id=counterparty_identifier_id, never_transfer=never_transfer
+                identifier_id=counterparty_identifier_id,
+                name=counterparty_name,
+                never_transfer=never_transfer,
             ),
         ),
     )

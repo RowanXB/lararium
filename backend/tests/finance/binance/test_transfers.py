@@ -5,7 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
@@ -111,6 +111,7 @@ async def test_withdrawal_to_an_unknown_address_appears_in_suggestions(session, 
     assert (suggestion.kind, suggestion.value) == ("chain_address", OTHER_ADDRESS)
     assert (suggestion.sort_code, suggestion.account_number) == (None, None)
     assert (suggestion.outgoing, suggestion.incoming) == (1, 0)
+    assert suggestion.names == ("NET1 address",)  # the network, never the address
     assert await list_transfers(session) == []
 
 
@@ -149,7 +150,7 @@ async def test_deposit_from_a_registered_address(session, run) -> None:
         (await _spot(session)),
     )
     held = await _holdings(session, _day())
-    assert held["Binance Spot"] + held["Own wallet"] == Decimal(5) - Decimal(5)
+    assert held == {"Binance Spot": Decimal(5), "Own wallet": Decimal(-5)}
     assert await find_transfer_violations(session) == []
 
 
@@ -203,8 +204,6 @@ async def test_binance_deposit_address_is_not_registered(session, run) -> None:
 
 
 async def test_chain_address_checked_by_database(session, run) -> None:
-    from sqlalchemy import exc
-
     for bad in ("0x123", "0x" + "g!" * 20, "a" * 129):
         with pytest.raises(exc.IntegrityError):
             async with session.begin_nested():
@@ -252,9 +251,7 @@ async def test_failed_withdrawal_to_a_registered_address_stops_being_a_transfer(
     await _heal(session)
 
     key = f"withdrawal:{failed['id']}"
-    assert await list_transfers(session) == [] or all(
-        t.status == "rejected" for t in await list_transfers(session)
-    )
+    assert await list_transfers(session) == []
     derived = await session.scalar(
         text(
             "select count(*) from finance.transactions where origin in ('inference', 'rule')"
@@ -272,3 +269,29 @@ async def test_failed_withdrawal_to_a_registered_address_stops_being_a_transfer(
     assert await find_transfer_violations(session) == []
     assert await _heal(session) == 0
     await assert_balanced_and_quiet(session, connection.id)
+
+
+async def test_counterparty_name_is_the_network_only(session, run) -> None:
+    connection = await binance_connection(run)
+    named = _withdrawal(6, id="w-1", address=OTHER_ADDRESS, network="NET1")
+    bare = _withdrawal(6, id="w-2", address=WALLET_ADDRESS, network=None)
+    internal = _withdrawal(6, id="w-3", transferType=1, txId="Internal transfer 3")
+    invalid = _withdrawal(6, id="w-4", address="short")
+
+    await normalize_rows(session, connection.id, ("withdrawals", [named, bare, internal, invalid]))
+
+    names = {
+        r.external_id: r.counterparty_name
+        for r in await session.execute(
+            text(
+                "select external_id, counterparty_name from finance.transactions"
+                " where external_id like 'withdrawal:w-_'"
+            )
+        )
+    }
+    assert names == {
+        "withdrawal:w-1": "NET1 address",
+        "withdrawal:w-2": "address",
+        "withdrawal:w-3": None,
+        "withdrawal:w-4": None,
+    }

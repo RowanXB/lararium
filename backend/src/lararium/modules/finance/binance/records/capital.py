@@ -19,6 +19,7 @@ from lararium.modules.finance.binance.parse import Row
 from lararium.modules.finance.binance.records import (
     Run,
     amount,
+    code,
     fees,
     integer,
     live,
@@ -71,6 +72,15 @@ async def counterparty_identifier(run: Run, label: str, row: Row) -> UUID | None
         run.flag(f"{label}.{name} is not a chain address")
         return None
     return await run.chain_address(address)
+
+
+def counterparty_name(row: Row, identifier_id: UUID | None) -> str | None:
+    """What Suggestions shows for an address: its network code, never the address. None when
+    no address was identified."""
+    if identifier_id is None:
+        return None
+    network = code(text(row, "network"))
+    return "address" if network in ("missing", "<other>") else f"{network} address"
 
 
 async def _wallet(run: Run, label: str, row: Row) -> UUID | None:
@@ -129,6 +139,7 @@ async def deposit(run: Run, row: Row) -> None:
             PostingInput(contra, instrument_id, -quantity),
         ],
         counterparty_identifier_id=identifier_id,
+        counterparty_name=counterparty_name(row, identifier_id),
     )
     await run.typed(transaction_id=transaction_id)
 
@@ -164,6 +175,7 @@ async def withdrawal(run: Run, row: Row) -> None:
             PostingInput(contra, instrument_id, quantity),
         ],
         counterparty_identifier_id=identifier_id,
+        counterparty_name=counterparty_name(row, identifier_id),
         never_transfer=ended,
     )
     await run.typed(transaction_id=transaction_id)
