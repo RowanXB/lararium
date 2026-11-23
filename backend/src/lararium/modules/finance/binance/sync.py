@@ -37,6 +37,7 @@ from lararium.modules.finance.binance.balances import (
     store_reports,
 )
 from lararium.modules.finance.binance.client import (
+    MAX_RETRIES,
     BinanceClient,
     BinanceNotPresent,
     Clock,
@@ -141,6 +142,7 @@ def make_client(
     passphrase: Secret | None = None,
     clock: Clock = wall_clock,
     sleep: Sleep = real_sleep,
+    retries: int = MAX_RETRIES,
 ) -> BinanceClient:
     """A client for key material: HMAC (`api_secret`) or Ed25519 (`private_key`). A missing or
     unusable key is a `CredentialRejectedError` whose message never describes the key."""
@@ -155,7 +157,7 @@ def make_client(
         raise CredentialRejectedError(str(error)) from None
     if api_key is None or signer is None:
         raise CredentialRejectedError("The Binance API key is missing")
-    return BinanceClient(http, api_key, signer, clock=clock, sleep=sleep)
+    return BinanceClient(http, api_key, signer, clock=clock, sleep=sleep, retries=retries)
 
 
 async def open_client(

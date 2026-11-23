@@ -20,6 +20,7 @@ from lararium.config import Settings
 from lararium.core.connections import (
     get_connection,
     load_credential,
+    record_sync_failure,
     set_status,
     update_config,
 )
@@ -379,16 +380,65 @@ async def test_update_refuses_another_account(api, session, run, fake, queue) ->
     assert _queued(queue) == []
 
 
-async def test_update_refuses_a_key_that_can_do_more_than_read(api, session, run, fake) -> None:
+async def test_update_refuses_a_key_that_can_do_more_than_read(
+    api, session, run, fake, queue
+) -> None:
     created = await _create(api)
+    queue.jobs.clear()
+    await run(set_status, created["id"], "needs_reauth", error="Binance rejected the key")
+    fake.requests.clear()
     fake.permissions["enableSpotAndMarginTrading"] = True
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance",
+        json=HMAC | {"api_key": "ak-TEST-new-5555", "api_secret": OTHER_SECRET},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert "can do more than read" in response.json()["detail"]["message"]
+    assert [seen.label for seen in fake.requests] == ["time", "api-restrictions"]
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    secret = await load_credential(session, KEY, created["id"], "api_secret")
+    assert key is not None and key.reveal() == API_KEY
+    assert secret is not None and secret.reveal() == API_SECRET
+    assert (await get_connection(session, created["id"])).status == "needs_reauth"
+    assert _queued(queue) == []
+
+
+async def test_update_of_a_failing_connection_restores_health_and_the_failure_count(
+    api, session, run
+) -> None:
+    created = await _create(api)
+    for _ in range(3):
+        await run(record_sync_failure, created["id"], "Binance request failed")
+    await run(set_status, created["id"], "failing", error="Binance request failed")
+    assert (await get_connection(session, created["id"])).consecutive_failures == 3
 
     response = await api.put(
         f"/api/v1/connections/{created['id']}/binance", json=BODY, headers=OWNER
     )
 
-    assert response.status_code == 422
-    assert "can do more than read" in response.json()["detail"]["message"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["last_error"], body["consecutive_failures"]) == (
+        "healthy",
+        None,
+        0,
+    )
+    assert (await get_connection(session, created["id"])).consecutive_failures == 0
+
+
+@pytest.mark.parametrize("label", ["time", "api-restrictions", "spot-account"])
+async def test_a_rate_limited_check_answers_at_once(api, session, fake, label) -> None:
+    fake.fail(label, status=429, retry_after=60)
+
+    response = await api.post("/api/v1/connections/binance", json=BODY, headers=OWNER)
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["error"] == "binance_unavailable"
+    assert len(fake.calls(label)) == 1
+    assert await _count(session, "core.connections") == 0
 
 
 async def test_update_refuses_other_connectors_and_disabled_connections(api, session, run) -> None:
@@ -516,3 +566,63 @@ async def test_register_chain_address(api, run) -> None:
     assert refused.status_code == 422
     assert refused.json()["detail"]["message"]
     assert bad not in refused.text
+
+
+SECRET_VALUE = "sv-TEST-echo-2718"
+
+
+async def _ibkr_connection(api) -> str:
+    """Ids of an IBKR connection (for its update route)."""
+    created = await api.post(
+        "/api/v1/connections/ibkr",
+        json={
+            "display_name": "I",
+            "token": "tok-TEST-1",
+            "token_expires_on": "2099-01-01",
+            "query_id": "123456",
+        },
+        headers=OWNER,
+    )
+    return created.json()["id"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("post", "/api/v1/connections", {"display_name": "M", "client_secret": SECRET_VALUE}),
+        (
+            "post",
+            "/api/v1/connections/ibkr",
+            {"display_name": "I", "token": SECRET_VALUE, "token_expires_on": "2099-01-01"},
+        ),
+        ("put", "/api/v1/connections/{id}/ibkr", {"token": SECRET_VALUE}),
+        (
+            "post",
+            "/api/v1/connections/binance",
+            {"display_name": "B", "key_type": "hmac", "api_secret": SECRET_VALUE},
+        ),
+        (
+            "put",
+            "/api/v1/connections/{id}/binance",
+            {"key_type": "hmac", "api_secret": SECRET_VALUE},
+        ),
+    ],
+)
+async def test_a_validation_error_never_echoes_the_body(api, method, path, body) -> None:
+    connection_id = await _ibkr_connection(api)
+
+    response = await api.request(
+        method.upper(), path.replace("{id}", connection_id), json=body, headers=OWNER
+    )
+
+    assert response.status_code == 422
+    assert SECRET_VALUE not in response.text
+    errors = response.json()["detail"]
+    assert errors and all({"loc", "msg", "type"} <= set(error) for error in errors)
+    assert all("input" not in error and "ctx" not in error for error in errors)
+
+
+def test_every_route_of_the_connections_routers_hides_the_body() -> None:
+    routes = [*connections_api.router.routes, *connections_api.callback_router.routes]
+    assert routes
+    assert all(isinstance(route, connections_api.BodylessErrorRoute) for route in routes)

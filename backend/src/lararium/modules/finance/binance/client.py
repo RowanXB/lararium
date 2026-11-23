@@ -232,6 +232,7 @@ class BinanceClient:
         clock: Clock = wall_clock,
         sleep: Sleep = real_sleep,
         limiter: Limiter | None = None,
+        retries: int = MAX_RETRIES,
     ) -> None:
         self._http = http
         self._api_key = api_key
@@ -239,6 +240,7 @@ class BinanceClient:
         self._clock = clock
         self._sleep = sleep
         self._limiter = limiter or Limiter(clock, sleep)
+        self._retries = retries
         self._offset = 0
         # Per limit kind; a task that reads a host's own limits replaces its entry.
         self.caps = dict(DEFAULT_CAPS)
@@ -330,7 +332,7 @@ class BinanceClient:
             received = self._clock()
             self._note_used_weight(endpoint, response)
             status = response.status_code
-            if status == 429 and retries < MAX_RETRIES:
+            if status == 429 and retries < self._retries:
                 retries += 1
                 await self._sleep(self._retry_after(response) * 1000)
                 continue

@@ -7,7 +7,7 @@ the OAuth code and state never reach a response, the audit log or the logs.
 import hashlib
 import logging
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
@@ -24,17 +24,16 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.encoders import jsonable_encoder
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.config import Settings, load_master_key
 from lararium.core.actors import Actor
-from lararium.core.commands import command_context
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     AUTHORISED_AT_KEY,
     ConnectionRecord,
@@ -47,6 +46,7 @@ from lararium.core.connections import (
     load_credential,
     lock_connection,
     request_sync,
+    reset_failures,
     set_credential_expiry,
     set_status,
     store_credential,
@@ -120,9 +120,36 @@ XML_TYPES = ("application/xml", "text/xml")
 GENERIC_TYPE = "application/octet-stream"
 QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
 
-router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
+
+class BodylessErrorRoute(APIRoute):
+    """A route whose request-validation errors never repeat the request. FastAPI puts the
+    offending input in each error, and for a missing field that is the whole body: the
+    client secret, the Flex token, a Binance key. Everything else about the error stays."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handle = super().get_route_handler()
+
+        async def guarded(request: Request) -> Response:
+            try:
+                return await handle(request)
+            except RequestValidationError as exc:
+                bare = [
+                    {key: value for key, value in error.items() if key not in ("input", "ctx")}
+                    for error in exc.errors()
+                ]
+                raise RequestValidationError(bare) from None
+
+        return guarded
+
+
+router = APIRouter(
+    prefix=PREFIX,
+    tags=["connections"],
+    dependencies=[Depends(get_actor)],
+    route_class=BodylessErrorRoute,
+)
 # The callback alone may be a cross-site navigation (from auth.monzo.com).
-callback_router = APIRouter(prefix=PREFIX, tags=["connections"])
+callback_router = APIRouter(prefix=PREFIX, tags=["connections"], route_class=BodylessErrorRoute)
 
 
 class ConnectionOut(BaseModel):
@@ -229,17 +256,6 @@ def install(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(callback_router)
     app.add_exception_handler(ConnectionNotFoundError, _connection_not_found)
-    app.add_exception_handler(RequestValidationError, _validation_error)
-
-
-async def _validation_error(request: Request, exc: Exception) -> JSONResponse:
-    """FastAPI's answer, except that a Binance key's route never repeats the request: an error
-    of a missing field carries the whole body, secrets included."""
-    assert isinstance(exc, RequestValidationError)
-    if not request.url.path.endswith("/binance"):
-        return await request_validation_exception_handler(request, exc)
-    errors = [{k: v for k, v in e.items() if k not in ("input", "ctx")} for e in exc.errors()]
-    return JSONResponse({"detail": jsonable_encoder(errors)}, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
 
 async def _connection_not_found(request: Request, exc: Exception) -> JSONResponse:
@@ -650,6 +666,8 @@ async def _checked_uid(
             api_secret=material.get("api_secret"),
             private_key=material.get("private_key"),
             passphrase=material.get("private_key_passphrase"),
+            # Someone is waiting: a 429 is an answer, not a wait of up to a minute.
+            retries=0,
         )
         await pass_gate(client)
         uid = uid_of((await read_balances(client, [ACCOUNT_LABEL]))[ACCOUNT_LABEL])
@@ -667,7 +685,7 @@ async def _checked_uid(
 
 
 async def _store_key(
-    ctx: Any, master_key: bytes, connection_id: UUID, material: dict[str, Secret]
+    ctx: CommandContext, master_key: bytes, connection_id: UUID, material: dict[str, Secret]
 ) -> None:
     """Store the key's parts and drop the others (a switch of key type leaves none behind)."""
     for purpose in ("api_key", "api_secret", "private_key", "private_key_passphrase"):
@@ -758,9 +776,11 @@ async def update_binance_connection(
             )
         await _store_key(ctx, master_key, connection_id, material)
         await update_config(ctx, connection_id, {"key_type": body.key_type})
-        await transition_status(
+        moved = await transition_status(
             ctx, connection_id, "healthy", only_from=("needs_reauth", "failing"), clear_error=True
         )
+        if moved is not None:
+            await reset_failures(ctx, connection_id)
         record = await get_connection(session, connection_id)
     await defer_sync(connection_id)
     return await _out_with_state(session, record, settings)

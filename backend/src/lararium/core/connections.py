@@ -256,6 +256,11 @@ async def record_sync_success(
     )
 
 
+async def reset_failures(ctx: CommandContext, connection_id: UUID) -> ConnectionRecord:
+    """Forget the failures in a row, for the owner's fix of what failed (a key replaced)."""
+    return await _update(ctx, connection_id, consecutive_failures=0)
+
+
 async def record_sync_failure(ctx: CommandContext, connection_id: UUID, error: str) -> int:
     """Record a failed sync; return the number of failures in a row, this one included."""
     record = await _update(
