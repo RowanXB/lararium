@@ -9,9 +9,10 @@ type Props = {
   onChange: (value: string) => void;
   required?: boolean;
   type?: string;
+  autoComplete?: string;
 };
 
-export function TextField({ label, value, onChange, required, type }: Props) {
+export function TextField({ label, value, onChange, required, type, autoComplete }: Props) {
   const id = useId();
   return (
     <div className="grid gap-1.5">
@@ -19,6 +20,7 @@ export function TextField({ label, value, onChange, required, type }: Props) {
       <Input
         id={id}
         type={type}
+        autoComplete={autoComplete}
         value={value}
         required={required}
         onChange={(e) => onChange(e.target.value)}

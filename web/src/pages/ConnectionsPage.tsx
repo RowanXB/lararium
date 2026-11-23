@@ -3,15 +3,20 @@ import { type FormEvent, useId, useState } from "react";
 
 import {
   authorizeConnection,
+  type BinanceConnectionCreateWritable,
   type ConnectionOut,
+  createBinanceConnection,
   createIbkrConnection,
   createMonzoConnection,
   disableConnection,
+  listAccounts,
   listConnections,
   syncConnectionNow,
+  updateBinanceConnection,
   updateIbkrConnection,
   uploadIbkrStatement,
 } from "../api";
+import { LabelledSelect } from "../components/LabelledSelect";
 import { TextField } from "../components/TextField";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -199,7 +204,193 @@ function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
   );
 }
 
-function ConnectionCard({ connection }: { connection: ConnectionOut }) {
+type BinanceKeyType = BinanceConnectionCreateWritable["key_type"];
+type BinanceKey = Omit<BinanceConnectionCreateWritable, "display_name">;
+
+const BINANCE_KEY_TYPES: { value: BinanceKeyType; label: string }[] = [
+  { value: "hmac", label: "HMAC" },
+  { value: "ed25519", label: "Ed25519" },
+];
+
+// A PEM key has line breaks that a password input would strip, so it is a textarea that
+// masks its text instead.
+function PrivateKeyField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const id = useId();
+  return (
+    <div className="grid gap-1.5">
+      <Label htmlFor={id}>Private key</Label>
+      <textarea
+        id={id}
+        value={value}
+        required
+        rows={3}
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+        style={{ WebkitTextSecurity: "disc" } as React.CSSProperties}
+        className="w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base outline-none md:text-sm"
+      />
+    </div>
+  );
+}
+
+// Every secret is cleared as soon as it is sent, whether the request then succeeds or fails;
+// the request variables are dropped from the mutation cache (gcTime 0 and reset).
+function useBinanceKeyForm(
+  send: (key: BinanceKey) => Promise<unknown>,
+  onDone: () => void,
+  doneMessage: string,
+) {
+  const [keyType, setKeyType] = useState<BinanceKeyType>("hmac");
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+  const mutation = useMutation({
+    gcTime: 0,
+    mutationFn: send,
+    onSuccess: () => {
+      setDone(doneMessage);
+      onDone();
+    },
+    onError: (failure) => setError(errorMessage(failure)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setDone(undefined);
+    mutation.mutate(
+      keyType === "hmac"
+        ? { key_type: keyType, api_key: apiKey.trim(), api_secret: apiSecret.trim() }
+        : {
+            key_type: keyType,
+            api_key: apiKey.trim(),
+            private_key: privateKey,
+            ...(passphrase ? { private_key_passphrase: passphrase } : {}),
+          },
+      { onSettled: () => mutation.reset() },
+    );
+    setApiKey("");
+    setApiSecret("");
+    setPrivateKey("");
+    setPassphrase("");
+  }
+  const fields = (
+    <>
+      <LabelledSelect
+        label="Key type"
+        value={keyType}
+        options={BINANCE_KEY_TYPES}
+        onChange={setKeyType}
+      />
+      <TextField
+        label="API key"
+        type="password"
+        autoComplete="off"
+        value={apiKey}
+        onChange={setApiKey}
+        required
+      />
+      {keyType === "hmac" ? (
+        <TextField
+          label="Secret key"
+          type="password"
+          autoComplete="off"
+          value={apiSecret}
+          onChange={setApiSecret}
+          required
+        />
+      ) : (
+        <>
+          <PrivateKeyField value={privateKey} onChange={setPrivateKey} />
+          <TextField
+            label="Passphrase (optional)"
+            type="password"
+            autoComplete="new-password"
+            value={passphrase}
+            onChange={setPassphrase}
+          />
+        </>
+      )}
+    </>
+  );
+  return { fields, submit, error, done, pending: mutation.isPending };
+}
+
+function formatUtc(iso: string): string {
+  return new Date(iso).toISOString().slice(0, 16).replace("T", " ");
+}
+
+function BinanceState({
+  state,
+  accountNames,
+}: {
+  state: NonNullable<ConnectionOut["binance"]>;
+  accountNames: Map<string, string>;
+}) {
+  return (
+    <div className="space-y-2">
+      {state.wallets.length > 0 && (
+        <p className="text-sm">Wallets: {state.wallets.join(", ")}</p>
+      )}
+      {!state.first_sync_done && (
+        <p role="status" className="text-sm font-medium">
+          First sync in progress
+        </p>
+      )}
+      {state.differences.length > 0 && (
+        <ul className="space-y-1 text-sm text-amber-600">
+          {state.differences.map((difference) => (
+            <li key={`${difference.account_id}/${difference.symbol}/${difference.from_at}`}>
+              {`${accountNames.get(difference.account_id) ?? "Binance account"}: ${difference.symbol}, ${formatUtc(difference.from_at)} to ${formatUtc(difference.to_at)} (UTC)`}
+            </li>
+          ))}
+        </ul>
+      )}
+      {state.flags.map((flag) => (
+        <p key={flag} className="text-sm text-amber-600">
+          {flag}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function UpdateBinanceKeyForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const form = useBinanceKeyForm(
+    async (body) =>
+      await updateBinanceConnection({
+        path: { connection_id: connection.id },
+        body,
+        throwOnError: true,
+      }),
+    () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    "Key updated",
+  );
+  return (
+    <form aria-label="Update key" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-3">
+      {form.fields}
+      <div className="flex items-center gap-3 sm:col-span-3">
+        <Button type="submit" variant="outline" disabled={form.pending}>
+          Update key
+        </Button>
+        {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+        {form.done && <p role="status" className="text-sm">{form.done}</p>}
+      </div>
+    </form>
+  );
+}
+
+function ConnectionCard({
+  connection,
+  accountNames,
+}: {
+  connection: ConnectionOut;
+  accountNames: Map<string, string>;
+}) {
   const queryClient = useQueryClient();
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["connections"] });
   const path = { connection_id: connection.id };
@@ -219,6 +410,7 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
     },
   });
   const isIbkr = connection.connector === "ibkr";
+  const isMonzo = connection.connector === "monzo";
   const expiry =
     isIbkr && connection.credential_expires_at
       ? tokenExpiry(connection.credential_expires_at)
@@ -236,7 +428,7 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {!isIbkr && connection.status === "authorising" && (
+        {isMonzo && connection.status === "authorising" && (
           <p role="status" className="rounded-md border border-primary p-3 font-medium">
             Approve the request in the Monzo app within 4 minutes of authorising: only then can
             Lararium fetch your full history. Once you approve, it fetches it, which can take a
@@ -275,19 +467,23 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
             IBKR rejected the token or query. Update them to resume syncing.
           </p>
         )}
-        {!isIbkr && !connection.webhook_enabled && (
+        {isMonzo && !connection.webhook_enabled && (
           <p className="text-sm text-muted-foreground">
             Webhooks are off, so new Monzo transactions arrive within 30 minutes.
           </p>
         )}
         {failed && <p className="text-sm text-destructive">{errorMessage(failed.error)}</p>}
+        {connection.binance && (
+          <BinanceState state={connection.binance} accountNames={accountNames} />
+        )}
+        {connection.connector === "binance" && <UpdateBinanceKeyForm connection={connection} />}
         {isIbkr && <UpdateIbkrTokenForm connection={connection} />}
         {isIbkr && <UploadFlexStatement connection={connection} />}
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" disabled={sync.isPending} onClick={() => sync.mutate()}>
             Sync now
           </Button>
-          {!isIbkr && AUTHORISABLE.includes(connection.status) && (
+          {isMonzo && AUTHORISABLE.includes(connection.status) && (
             <Button disabled={authorise.isPending} onClick={() => authorise.mutate()}>
               Authorise
             </Button>
@@ -428,6 +624,47 @@ function AddIbkrForm() {
   );
 }
 
+function AddBinanceForm() {
+  const queryClient = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const form = useBinanceKeyForm(
+    async (key) =>
+      await createBinanceConnection({
+        body: { display_name: displayName.trim(), ...key },
+        throwOnError: true,
+      }),
+    () => {
+      setDisplayName("");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+    "Binance connected",
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add Binance</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form aria-label="Add Binance" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-2">
+          <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
+          {form.fields}
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Create an API key on Binance with only <strong>Enable Reading</strong> ticked. Any
+            other permission is refused.
+          </p>
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={form.pending}>
+              Add Binance
+            </Button>
+            {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+            {form.done && <p role="status" className="text-sm">{form.done}</p>}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function ConnectionsPage() {
   const connections = useQuery({
     queryKey: ["connections"],
@@ -440,6 +677,14 @@ export function ConnectionsPage() {
   const callbackError = new URLSearchParams(window.location.search).get("error");
   const banner = callbackError ? CALLBACK_ERRORS[callbackError] : undefined;
   const list = connections.data ?? [];
+  const hasDifferences = list.some((connection) => connection.binance?.differences.length);
+  // Only fetched when a difference needs an account's name.
+  const accounts = useQuery({
+    queryKey: ["accounts"],
+    queryFn: async () => (await listAccounts({ throwOnError: true })).data,
+    enabled: hasDifferences,
+  });
+  const accountNames = new Map((accounts.data ?? []).map((account) => [account.id, account.name]));
 
   return (
     <div className="space-y-6">
@@ -452,12 +697,13 @@ export function ConnectionsPage() {
         <p className="text-sm text-destructive">{errorMessage(connections.error)}</p>
       )}
       {list.map((connection) => (
-        <ConnectionCard key={connection.id} connection={connection} />
+        <ConnectionCard key={connection.id} connection={connection} accountNames={accountNames} />
       ))}
       <AddMonzoForm
         redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined}
       />
       <AddIbkrForm />
+      <AddBinanceForm />
     </div>
   );
 }

@@ -318,7 +318,7 @@ it("registers a suggestion against an account", async () => {
   );
 });
 
-it("shows a chain-address suggestion by its value, without a register form", async () => {
+it("registers a chain-address suggestion against an account", async () => {
   const address = `0x${"1".repeat(40)}`;
   vi.mocked(listTransferSuggestions).mockResolvedValueOnce({
     data: [
@@ -331,10 +331,19 @@ it("shows a chain-address suggestion by its value, without a register form", asy
       },
     ],
   } as never);
+  const user = userEvent.setup();
   renderPage();
   const suggestions = await section("Suggestions");
   expect(await suggestions.findByText(address)).toBeInTheDocument();
-  expect(suggestions.queryByRole("button", { name: "Register" })).toBeNull();
+  await user.click(await suggestions.findByRole("combobox", { name: "Account" }));
+  await user.click(await screen.findByRole("option", { name: "Bank A" }));
+  await user.click(suggestions.getByRole("button", { name: "Register" }));
+  expect(addAccountIdentifier).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { account_id: BANK_A },
+      body: { kind: "chain_address", value: address },
+    }),
+  );
   expect(suggestions.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
 });
 

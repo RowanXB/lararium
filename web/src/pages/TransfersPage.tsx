@@ -295,12 +295,12 @@ function SuggestionItem({
   accounts: AccountOut[];
 }) {
   const [accountId, setAccountId] = useState<string>();
-  // Registering a chain address from here comes with the Accounts page's identifier form.
   const bank = suggestion.kind === "uk_bank_account";
+  const registrable = bank || suggestion.kind === "chain_address";
   const register = useWrite(async (account: string) =>
     addAccountIdentifier({
       path: { account_id: account },
-      body: { kind: "uk_bank_account", value: suggestion.value },
+      body: { kind: bank ? "uk_bank_account" : "chain_address", value: suggestion.value },
       throwOnError: true,
     }),
   );
@@ -332,7 +332,7 @@ function SuggestionItem({
         </p>
       </div>
       <div className="flex flex-wrap items-end gap-2">
-        {bank && (
+        {registrable && (
           <>
             <LabelledSelect
               label="Account"
