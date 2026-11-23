@@ -24,6 +24,7 @@ from uuid import UUID
 from lararium.core.commands import command_context
 from lararium.core.connections import get_connection, lock_connection, update_config
 from lararium.core.connectors import SyncContext
+from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.binance import layout
@@ -49,6 +50,9 @@ LOOKBACK_MARGIN_MS = 60_000
 FIRST_SYNC_ONLY = frozenset({"snapshot"})
 RECORD_NAMES = {"my-trades": "spot_trade"}
 TRADES_LABEL = "my-trades"
+# The longest time range a trade request may ask (end minus start, in ms): the catalogue's
+# my-trades says it "can't be longer than 24 hours".
+TRADE_SPAN_MS = DAY_MS - 1
 
 # The phases built so far: what a sync reads (kind account, balance or position) and walks.
 BALANCE_LABELS = [
@@ -306,6 +310,18 @@ def _keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
     ]
 
 
+def backfill_complete(config: Mapping[str, JSONValue]) -> bool:
+    """Whether every history label's first walk has ended: each of its keys complete, or not
+    served by Binance (`not_present`)."""
+    cursors = _mapping(config.get(CURSORS_KEY))
+    missing = _mapping(config.get(NOT_PRESENT_KEY))
+    return all(
+        key in missing or _mapping(cursors.get(key)).get("complete") is True
+        for label in HISTORY_LABELS
+        for key, _ in _keys(ENDPOINTS[label])
+    )
+
+
 async def walk(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
     """Fetch one history label (every variant) from its cursor; the raw record ids stored."""
     endpoint = ENDPOINTS[label]
@@ -415,25 +431,34 @@ async def walk_trades(
     label: str,
     symbols: Sequence[str],
     since_ms: int | None = None,
+    until_ms: int | None = None,
 ) -> list[UUID]:
-    """Fetch each symbol's trades after its last trade id (or, with `since_ms`, from that
-    time); the raw record ids stored. Each page is stored with its symbol's cursor."""
+    """Fetch each symbol's trades after its last trade id; the raw record ids stored. Each
+    page is stored with its symbol's cursor.
+
+    With `since_ms`, the sweep instead: every trade of each symbol from `since_ms` to
+    `until_ms` (now when None), whatever the interval's length, by time windows Binance
+    accepts (`TRADE_SPAN_MS`). The sweep leaves the cursors as they are: the walk by trade id
+    still asks everything after a symbol's last id, so nothing before the interval is skipped.
+    """
+    if since_ms is not None:
+        until = until_ms if until_ms is not None else client.now_ms()
+        return await _sweep_trades(ctx, client, label, symbols, since_ms, until)
     endpoint = ENDPOINTS[label]
     cursor_name, size_name, first = paging_params(endpoint)
     id_field = endpoint.id_fields[-1]
     size = endpoint.page_size
-    low, _ = endpoint.time_params
     cursors = _mapping((await fresh_config(ctx)).get(CURSORS_KEY))
     record = record_type(label)
     ids: list[UUID] = []
     for symbol in symbols:
         key = f"{label}:{symbol}"
         last = _int(cursors.get(key))
-        params: dict[str, str | int] = {"symbol": symbol, size_name: size}
-        if since_ms is not None:
-            params[low] = since_ms
-        else:
-            params[cursor_name] = last + 1 if last is not None else first
+        params: dict[str, str | int] = {
+            "symbol": symbol,
+            size_name: size,
+            cursor_name: last + 1 if last is not None else first,
+        }
         while True:
             rows = await _ask(client, endpoint, params)
             if not rows:
@@ -452,3 +477,60 @@ async def walk_trades(
                 break
             params = {"symbol": symbol, size_name: size, cursor_name: top + 1}
     return ids
+
+
+async def _sweep_trades(
+    ctx: SyncContext,
+    client: BinanceClient,
+    label: str,
+    symbols: Sequence[str],
+    since_ms: int,
+    until_ms: int,
+) -> list[UUID]:
+    endpoint = ENDPOINTS[label]
+    record = record_type(label)
+    ids: list[UUID] = []
+    for symbol in symbols:
+        start = since_ms
+        while start <= until_ms:
+            end = min(start + TRADE_SPAN_MS, until_ms)
+            rows = await _trades_between(client, endpoint, symbol, start, end)
+            if rows:
+                request: dict[str, JSONValue] = {
+                    "symbol": symbol,
+                    "startTime": start,
+                    "endTime": end,
+                }
+                ids += await commit(
+                    ctx,
+                    f"{label}:{symbol}",
+                    record=record,
+                    request=request,
+                    contents=_contents(endpoint, rows),
+                )
+            start = end + 1
+    return ids
+
+
+async def _trades_between(
+    client: BinanceClient, endpoint: Endpoint, symbol: str, start: int, end: int
+) -> list[Row]:
+    """Every trade of the symbol in [start, end]. A time range cannot be paged by id (the
+    catalogue lists no such combination), so a full answer has its range split in two until
+    each half fits, whichever trades of the range Binance gave first."""
+    low, high = endpoint.time_params
+    _, size_name, _ = paging_params(endpoint)
+    size = endpoint.page_size
+    params: dict[str, str | int] = {"symbol": symbol, low: start, high: end, size_name: size}
+    rows = await _ask(client, endpoint, params)
+    if len(rows) < size:
+        return rows
+    if end == start:
+        raise DisplayableError(
+            f"Binance has more trades of {symbol} in one millisecond than one answer holds"
+        )
+    middle = start + (end - start) // 2
+    return [
+        *await _trades_between(client, endpoint, symbol, start, middle),
+        *await _trades_between(client, endpoint, symbol, middle + 1, end),
+    ]

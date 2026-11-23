@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from lararium.core.connections import get_connection
+from lararium.core.errors import DisplayableError
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import (
     LAUNCH_MS,
@@ -19,7 +20,7 @@ from lararium.modules.finance.binance.fetch import (
     windows,
 )
 
-from .fixtures import DAY_MS, NOW_MS, FakeBinance, build_response, build_row
+from .fixtures import DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
 from .syncing import Clock, binance_connection, client_for, context
 
 DEPOSITS = ENDPOINTS["deposits"]
@@ -333,3 +334,69 @@ async def test_a_walk_failing_midway_keeps_what_it_stored(session, run, fake, cl
     cursor = (await _config(session, connection))["cursors"]["deposits"]
     assert cursor["complete"] is False
     assert cursor["backfilled_to"] == NOW_MS - 89 * DAY_MS
+
+
+# The sweep: every trade of the symbols in an interval, whatever its length.
+
+
+async def test_a_sweep_walks_an_interval_of_any_length_a_day_at_a_time(
+    session, run, fake, clock
+) -> None:
+    since, until = NOW_MS - 3 * DAY_MS, NOW_MS - 1
+    inside = [since + hours * HOUR_MS for hours in (1, 30, 55, 70)]
+    times = [since - HOUR_MS, *inside, until + HOUR_MS]
+    fake.add("my-trades", *[build_row("my-trades", i, time=at) for i, at in enumerate(times)])
+    connection = await binance_connection(run, config={"cursors": {"my-trades:AAABBB": 1_005}})
+
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        ids = await walk_trades(
+            ctx, client, "my-trades", ["AAABBB"], since_ms=since, until_ms=until
+        )
+
+    assert len(set(ids)) == len(inside)
+    calls = fake.calls("my-trades")
+    asked = [(int(s.params["startTime"]), int(s.params["endTime"])) for s in calls]
+    assert all("fromId" not in s.params for s in calls)
+    assert asked[0][0] == since and asked[-1][1] == until
+    for (_, end), (start, _) in itertools.pairwise(asked):
+        assert start == end + 1
+    assert all(end - start < DAY_MS for start, end in asked)
+    assert len(asked) == 3
+    # The sweep leaves the symbol's cursor to the walk by trade id.
+    assert (await _config(session, connection))["cursors"]["my-trades:AAABBB"] == 1_005
+
+
+async def test_a_full_page_of_a_sweep_window_is_split(session, run, fake, clock) -> None:
+    since = NOW_MS - DAY_MS
+    rows = [build_row("my-trades", i, time=since + i * 60_000) for i in range(1001)]
+    fake.add("my-trades", *rows)
+    connection = await binance_connection(run)
+
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        ids = await walk_trades(
+            ctx,
+            client_for(clock, http),
+            "my-trades",
+            ["AAABBB"],
+            since_ms=since,
+            until_ms=NOW_MS - 1,
+        )
+
+    assert len(set(ids)) == 1001
+    assert len(fake.calls("my-trades")) == 3
+
+
+async def test_a_full_page_in_one_millisecond_fails_the_sweep(session, run, fake, clock) -> None:
+    at = NOW_MS - HOUR_MS
+    fake.add("my-trades", *[build_row("my-trades", i, time=at) for i in range(1000)])
+    connection = await binance_connection(run)
+
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        with pytest.raises(DisplayableError, match="AAABBB"):
+            await walk_trades(
+                ctx, client_for(clock, http), "my-trades", ["AAABBB"], since_ms=at, until_ms=at
+            )

@@ -331,3 +331,34 @@ async def test_a_single_record_label_answers_with_what_is_stored() -> None:
 async def test_an_override_naming_no_field_is_an_error() -> None:
     with pytest.raises(KeyError):
         build_row("deposits", amunt="1")
+
+
+async def test_trades_are_asked_for_at_most_a_day_at_a_time() -> None:
+    # The catalogue's my-trades: "The time between startTime and endTime can't be longer than
+    # 24 hours"; a start alone is the 24 hours from it; a time cannot go with fromId.
+    fake = FakeBinance()
+    start = BASE_TIME_MS
+    fake.add(
+        "my-trades",
+        *[build_row("my-trades", seq, time=start + seq * 12 * HOUR_MS) for seq in range(4)],
+    )
+    day = {"symbol": "AAABBB", "startTime": start, "endTime": start + DAY_MS}
+    assert [r["id"] for r in parse("my-trades", await ask(fake, "my-trades", day)).rows] == [
+        1_000,
+        1_001,
+        1_002,
+    ]
+    from_start = {"symbol": "AAABBB", "startTime": start + 12 * HOUR_MS}
+    assert [r["id"] for r in parse("my-trades", await ask(fake, "my-trades", from_start)).rows] == [
+        1_001,
+        1_002,
+        1_003,
+    ]
+    for params in (
+        {"symbol": "AAABBB", "startTime": start, "endTime": start + DAY_MS + 1},
+        {"symbol": "AAABBB", "startTime": start, "fromId": 1_000},
+    ):
+        with pytest.raises(BinanceError) as caught:
+            await ask(fake, "my-trades", params)
+        assert not isinstance(caught.value, BinanceNotPresent)
+        assert caught.value.code in (-1127, -1128)

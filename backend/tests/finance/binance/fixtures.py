@@ -218,6 +218,10 @@ _FILTERS = (
     "isolatedSymbol",
 )
 _DEFAULT_SIZES = {"current": 10, "pageIndex": 10, "page": 100, "fromId": 500}
+# The catalogue's my-trades: "The time between startTime and endTime can't be longer than 24
+# hours"; a start (or an end) alone asks the 24 hours from (or to) it; a time and `fromId` are
+# not a supported combination.
+_TIME_SPANS = {"my-trades": DAY_MS}
 
 
 @dataclass(frozen=True)
@@ -392,6 +396,9 @@ class FakeBinance:
             return _json({**build_row(label), **self.permissions})
         if too_wide := self._too_wide(endpoint, own):
             return too_wide
+        own, refused = self._spanned(endpoint, own)
+        if refused is not None:
+            return refused
         chosen = self._select(endpoint, own)
         if not chosen and endpoint.rows == "" and not self._stored.get(label):
             return _json(build_response(label, [build_row(label)]))
@@ -409,6 +416,25 @@ class FakeBinance:
         if int(own[high]) - int(own[low]) >= (endpoint.window_days + 1) * DAY_MS:
             return _error(400, -1127)
         return None
+
+    @staticmethod
+    def _spanned(
+        endpoint: Endpoint, own: Mapping[str, str]
+    ) -> tuple[Mapping[str, str], httpx.Response | None]:
+        """The request's time range as Binance reads it for a label with a fixed longest span:
+        refused when wider or combined with `fromId`, completed when one end is missing."""
+        span = _TIME_SPANS.get(endpoint.label)
+        low, high = endpoint.time_params
+        if span is None or (low not in own and high not in own):
+            return own, None
+        if "fromId" in own:
+            return own, _error(400, -1128)
+        if low in own and high in own:
+            wide = int(own[high]) - int(own[low]) > span
+            return own, _error(400, -1127) if wide else None
+        if low in own:
+            return {**own, high: str(int(own[low]) + span)}, None
+        return {**own, low: str(int(own[high]) - span)}, None
 
     def _select(self, endpoint: Endpoint, own: Mapping[str, str]) -> list[Rowdict]:
         rows = [

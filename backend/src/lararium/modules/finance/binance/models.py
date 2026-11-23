@@ -6,6 +6,7 @@ gives a table's model; `models_of(label)` the models of a label, the root first.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID
 
@@ -19,13 +20,14 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy import Uuid as UuidType
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeEngine
 
-from lararium.core.models import Base
+from lararium.core.models import UUIDV7, Base
 from lararium.modules.finance.binance import layout
 
 FINANCE = "finance"
@@ -58,6 +60,28 @@ class AssetsSeen(Base):
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ReconciliationDifference(Base):
+    """An interval between two consecutive reported snapshots of one account and instrument
+    whose reported change the postings in between do not explain (plan Decision 11)."""
+
+    __tablename__ = "binance_reconciliation_differences"
+    __table_args__ = (
+        UniqueConstraint("account_id", "instrument_id", "from_at", "to_at"),
+        FINANCE_SCHEMA,
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    # The `as_of` of the two snapshots.
+    from_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    to_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reported_change: Mapped[Decimal] = mapped_column(Numeric)
+    posted_sum: Mapped[Decimal] = mapped_column(Numeric)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 def _class_name(table: str) -> str:

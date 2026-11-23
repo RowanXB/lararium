@@ -22,6 +22,7 @@ from lararium.modules.finance.binance.balances import (
 )
 from lararium.modules.finance.binance.fetch import to_json, walk
 from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError
+from lararium.modules.finance.binance.reconcile import open_differences
 
 from .fixtures import HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
 from .syncing import (
@@ -166,7 +167,7 @@ async def test_movement_during_balance_read_is_not_counted_twice(
     assert (wallet, symbol, quantity) == ("Binance Spot", "AAA", Decimal(15))
     assert as_of > _at(deposited[0])
     assert await _balance(session, connection.id, "Spot", "AAA", as_of.date()) == 15
-    # Task 7 adds: no reconciliation difference
+    assert await open_differences(session, connection.id) == []
 
 
 async def test_transfer_between_two_wallet_reads(
@@ -214,7 +215,7 @@ async def test_transfer_between_two_wallet_reads(
     day = earn_as_of.date()
     assert await _balance(session, connection.id, "Spot", "AAA", day) == 7
     assert await _balance(session, connection.id, "Earn", "AAA", day) == 3
-    # Task 7 adds: no reconciliation difference
+    assert await open_differences(session, connection.id) == []
 
 
 async def test_read_still_ambiguous_after_three_rounds_writes_no_snapshot(
