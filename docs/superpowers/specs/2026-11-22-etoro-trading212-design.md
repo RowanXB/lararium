@@ -323,7 +323,7 @@ Every field goes to its ledger home when it has one (dates to the transaction; q
 
 ### 5.11 Reconciliation
 
-After every sync and every statement upload, per account, as M5 §5.11 (warnings beginning with the account's name are replaced in full; each new difference is notified once; nothing is corrected automatically):
+After every sync and every statement upload, per account, as M5 §5.11, except that a connection's reconciliation warnings are owned by record (ruling R35): the cursor keeps the texts it last published and those the owner was told, and exactly those are replaced in full, never warnings matched by their text; each new difference is notified once, counted only once a send succeeds; a run that cannot reconcile keeps the last check's warnings and adds "eToro Trading could not be reconciled"; nothing is corrected automatically. A day of balance history on or before the UTC date of the latest statement's end is covered by it, so a difference on it is an ordinary one:
 
 - **Trading 212**: each instrument's quantity against `positions`; GBP cash against `availableToTrade + reservedForOrders + inPies`, at the sync's time.
 - **eToro Trading**: each instrument's units against the open positions; USD cash against balance history's Trading `cash` on each snapshot day since the latest statement's start, and against PnL `credit` plus frozen cash now.

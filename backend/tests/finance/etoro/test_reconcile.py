@@ -1,6 +1,7 @@
 """Reconciling eToro's accounts against what eToro reports (design §5.11), and the prompt to
 upload a statement where one would explain Trading's cash (Decision 12)."""
 
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from lararium.core.connections import get_connection, set_warnings
+from lararium.modules.finance.etoro import reconcile
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.reconcile import UNRECONCILED
 
@@ -342,3 +344,64 @@ async def test_no_trading_account_keeps_the_last_check(session, run) -> None:
     )
     assert await _warnings(session, ledger) == []
     assert len(ledger.notifier.messages) == 2
+
+
+def _transfer_to_trading(day: int) -> list[tuple[str, Any]]:
+    """eToro Money takes 1000 GBP in and sends it on to Trading on 2026-11-<day>: a cause a
+    statement would explain."""
+    deposit = bank_item("80000601", "1000.00") | {"postedAt": f"2026-11-0{day}T09:00:00Z"}
+    out = cash_item("80000602", "1000.00") | {
+        "direction": "debit",
+        "transactionSubtype": "transferSent",
+        "postedAt": f"2026-11-0{day}T10:00:00Z",
+    }
+    return [("cash_transactions", deposit), ("cash_transactions", out)]
+
+
+async def test_a_difference_on_the_statements_last_day_is_ordinary(session, run, ledger) -> None:
+    await _after_october(run, ledger)
+    # October's statement covers 2026-10-31 in full: eToro's 40 more that day is a difference,
+    # even while a transfer after it asks for the next statement.
+    history = [_trading(date(2026, 10, 31), "1300.00"), _trading(date(2026, 11, 1), "2510.00")]
+    await ledger.normalize(
+        *_sync("2510.00", history),
+        *_transfer_to_trading(1),
+        now=datetime(2026, 11, 2, 12, 0, tzinfo=UTC),
+    )
+    assert await _warnings(session, ledger) == [
+        OTHER,
+        "eToro Trading USD differs from eToro's report on 2026-10-31 by -40.00",
+        "eToro Trading: upload an eToro statement covering 2026-11-01 onward",
+    ]
+
+
+async def test_ordinary_differences_stand_beside_the_prompt(session, run, ledger) -> None:
+    await _after_october(run, ledger)
+    # The prompt stands (a transfer after the statement's end), and still: a day the statement
+    # covers differs, and eToro reports 2 units the books do not hold.
+    history = [_trading(date(2026, 10, 30), "1250.00"), _trading(date(2026, 11, 1), "2510.00")]
+    await ledger.normalize(
+        *_sync("2510.00", history, units="2"),
+        *_transfer_to_trading(1),
+        now=datetime(2026, 11, 2, 12, 0, tzinfo=UTC),
+    )
+    assert await _warnings(session, ledger) == [
+        OTHER,
+        "eToro Trading USD differs from eToro's report on 2026-10-30 by 10.00",
+        "eToro Trading ZZQA differs from eToro's report on 2026-11-02 by -2",
+        "eToro Trading: upload an eToro statement covering 2026-11-01 onward",
+    ]
+
+
+async def test_data_reconciliation_cannot_read_does_not_fail(session, run, caplog) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(("balances", balances_body()))
+    # An account the map names that is gone: reconciliation cannot run, and says so.
+    ctx = await ledger.context()
+    gone = {TRADING_ACCOUNT: uuid.uuid4()}
+    assert await reconcile.check(ctx, gone) is None
+    assert [r.getMessage() for r in caplog.records if "reconciliation" in r.getMessage()] == [
+        "eToro reconciliation could not run (EtoroDataError)"
+    ]
+    await reconcile.publish(ctx, None)
+    assert await _warnings(session, ledger) == [UNRECONCILED]

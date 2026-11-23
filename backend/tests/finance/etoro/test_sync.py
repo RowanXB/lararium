@@ -1063,3 +1063,23 @@ async def test_an_upload_during_a_sync_keeps_its_flag(
     after = await get_connection(session, connection.id)
     assert _flags(after.warnings) == []
     assert isinstance(after.cursor, dict) and after.cursor["flags"] == {}
+
+
+async def test_reconciliation_record_survives_the_worker(session, run, api) -> None:
+    """The sync's cursor replaces the row's (record_sync_success): it must carry what
+    reconciliation recorded, so the next run replaces its warnings rather than adding to them."""
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    first = await _run_sync(session, connection, api, notifier)
+    assert isinstance(first.cursor, dict)
+    found = first.cursor["reconciliation"]
+    # This file's data is not made to reconcile: the first sync finds differences.
+    assert isinstance(found, dict) and found["checked"]
+    assert first.cursor["reconciliation_notified"] == found["checked"]
+    told = len(notifier.messages)
+    second = await _run_sync(session, connection, api, notifier)
+    assert second.warnings == first.warnings
+    assert len(second.warnings) == len(set(second.warnings))
+    assert isinstance(second.cursor, dict)
+    assert second.cursor["reconciliation"] == found
+    assert len(notifier.messages) == told

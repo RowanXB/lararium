@@ -23,14 +23,13 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
-from lararium.modules.finance import connector_flags, models
-from lararium.modules.finance.connector_run import holdings
-from lararium.modules.finance.money import to_plain_str, tolerance
+from lararium.modules.finance import connector_flags
+from lararium.modules.finance.connector_run import differences
+from lararium.modules.finance.money import to_plain_str
 
 PLATFORM = "Trading 212"
 # What every reconciliation warning holds, after the account's name (Decision 12).
@@ -62,22 +61,10 @@ async def check(
 ) -> list[Mismatch]:
     """Each instrument whose ledger quantity at `at` (the report's arrival, on `day`)
     differs from `reported` beyond its tolerance, by symbol."""
-    i = models.Instrument
-    held = await holdings(session, account_id, at)
-    ids = set(held) | set(reported)
-    if not ids:
-        return []
-    described = {
-        row.id: row
-        for row in await session.execute(select(i.id, i.symbol, i.decimals).where(i.id.in_(ids)))
-    }
-    found: list[Mismatch] = []
-    for instrument_id in ids:
-        difference = held.get(instrument_id, Decimal(0)) - reported.get(instrument_id, Decimal(0))
-        instrument = described[instrument_id]
-        if difference.copy_abs() > tolerance(instrument.decimals):
-            found.append(Mismatch(account_name, instrument.symbol, day, difference))
-    return sorted(found, key=lambda m: m.symbol)
+    return [
+        Mismatch(account_name, symbol, day, difference)
+        for symbol, difference in await differences(session, account_id, at, reported)
+    ]
 
 
 async def publish(ctx: SyncContext, mismatches: list[Mismatch] | None) -> dict[str, JSONValue]:

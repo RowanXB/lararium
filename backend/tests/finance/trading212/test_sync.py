@@ -29,6 +29,7 @@ from lararium.core.errors import CredentialRejectedError
 from lararium.core.json_types import JSONValue
 from lararium.modules import registry
 from lararium.modules.finance.trading212 import client as client_module
+from lararium.modules.finance.trading212 import normalize as t212_normalize
 from lararium.modules.finance.trading212 import sync as t212_sync
 from lararium.modules.finance.trading212.client import Trading212Client
 from lararium.modules.finance.trading212.normalize import NORMALIZER_VERSION, NormalizeReport
@@ -799,3 +800,26 @@ async def test_each_report_is_sighted_every_sync(session, run, api) -> None:
         {"c": connection.id},
     )
     assert first >= before
+
+
+async def test_reconciliation_record_survives_the_worker(session, run, api, monkeypatch) -> None:
+    """The sync's cursor replaces the row's (record_sync_success): it must carry what
+    reconciliation recorded, so the next run replaces its warnings rather than adding to them."""
+    monkeypatch.setattr(t212_sync, "normalize", t212_normalize.normalize)
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    await _run_sync(session, connection, api, notifier)
+    # Later, Trading 212 reports a position the history does not explain.
+    api.positions = [position_json(quantity="99")]
+    first = await _run_sync(session, connection, api, notifier)
+    assert isinstance(first.cursor, dict)
+    found = first.cursor["reconciliation"]
+    assert isinstance(found, dict) and found["checked"]
+    assert first.cursor["reconciliation_notified"] == found["checked"]
+    told = len(notifier.messages)
+    second = await _run_sync(session, connection, api, notifier)
+    assert second.warnings == first.warnings
+    assert len(second.warnings) == len(set(second.warnings))
+    assert isinstance(second.cursor, dict)
+    assert second.cursor["reconciliation"] == found
+    assert len(notifier.messages) == told

@@ -8,7 +8,7 @@ instruments and the mapping of its records.
 """
 
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from typing import ClassVar, Literal, Protocol
@@ -115,6 +115,35 @@ async def holdings(
             .group_by(p.instrument_id)
         )
     }
+
+
+async def differences(
+    session: AsyncSession,
+    account_id: UUID,
+    at: datetime,
+    reported: Mapping[UUID, Decimal],
+    *,
+    only: Collection[UUID] | None = None,
+) -> list[tuple[str, Decimal]]:
+    """(symbol, the books' quantity less the report's) of each instrument whose holding at
+    `at` differs from `reported` beyond its tolerance, by symbol: those the report names, and
+    those the account holds (of `only`, when given), which a report omitting them puts at 0."""
+    held = await holdings(session, account_id, at)
+    ids = (set(held) if only is None else set(held) & set(only)) | set(reported)
+    if not ids:
+        return []
+    i = models.Instrument
+    described = {
+        row.id: row
+        for row in await session.execute(select(i.id, i.symbol, i.decimals).where(i.id.in_(ids)))
+    }
+    found: list[tuple[str, Decimal]] = []
+    for instrument_id in ids:
+        difference = held.get(instrument_id, Decimal(0)) - reported.get(instrument_id, Decimal(0))
+        instrument = described[instrument_id]
+        if difference.copy_abs() > tolerance(instrument.decimals):
+            found.append((instrument.symbol, difference))
+    return sorted(found)
 
 
 async def reported_snapshot(

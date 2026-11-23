@@ -35,6 +35,7 @@ check's warnings stand, with UNRECONCILED. Warnings name the account, the symbol
 the day and the amount, never another value.
 """
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -47,12 +48,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import connector_flags, models
-from lararium.modules.finance.connector_run import holdings
+from lararium.modules.finance.connector_run import differences, holdings
+from lararium.modules.finance.errors import UnknownCurrencyError
 from lararium.modules.finance.etoro.fields import STATEMENT_SHEETS
 from lararium.modules.finance.etoro.records import end_of
 from lararium.modules.finance.etoro.reports import trading_cash
 from lararium.modules.finance.etoro.state import (
-    LONDON,
     EtoroDataError,
     Report,
     id_at,
@@ -63,9 +64,15 @@ from lararium.modules.finance.etoro.state import (
     text_at,
 )
 from lararium.modules.finance.identifiers import normalize_identifier
-from lararium.modules.finance.instruments import find_by_identifier, get_currency
+from lararium.modules.finance.instruments import (
+    InstrumentRecord,
+    find_by_identifier,
+    get_currency,
+)
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import list_sightings
+
+logger = logging.getLogger(__name__)
 
 PLATFORM = "eToro"
 # What every reconciliation warning holds, after the account's name (Decision 12).
@@ -96,7 +103,8 @@ class Difference:
 
 @dataclass(frozen=True)
 class Checked:
-    """What one check found: the connection's reconciliation warnings, in order."""
+    """What one check found: the connection's reconciliation warnings (the publisher keeps
+    them sorted, connector_flags)."""
 
     warnings: list[str]
 
@@ -152,26 +160,10 @@ class _Check:
     ) -> None:
         """Each instrument (of `only`, when given) whose quantity at `at` differs from
         `reported` beyond its tolerance."""
-        held = await holdings(self.session, account_id, at)
-        ids = (set(held) if only is None else set(held) & only) | set(reported)
-        if not ids:
-            return
-        i = models.Instrument
-        described = {
-            row.id: row
-            for row in await self.session.execute(
-                select(i.id, i.symbol, i.decimals).where(i.id.in_(ids))
-            )
-        }
-        for instrument_id in ids:
-            difference = held.get(instrument_id, Decimal(0)) - reported.get(
-                instrument_id, Decimal(0)
-            )
-            instrument = described[instrument_id]
-            if difference.copy_abs() > tolerance(instrument.decimals):
-                self.found.append(
-                    Difference(account_name, instrument.symbol, day, difference, explainable)
-                )
+        for symbol, difference in await differences(
+            self.session, account_id, at, reported, only=only
+        ):
+            self.found.append(Difference(account_name, symbol, day, difference, explainable))
 
     async def sighted_with(self, report: Report, endpoint: str) -> Report | None:
         """The report of the endpoint the same sync saw, if any."""
@@ -217,10 +209,11 @@ class _Check:
         )
 
     async def history(
-        self, trading: UUID, name: str, since: date | None, end: datetime | None
+        self, trading: UUID, name: str, since: date | None, covered: date | None
     ) -> None:
         """Trading's cash against balance history's on each day since `since` (every day when
-        None), at the end of the day."""
+        None), at the end of the day. A day on or before `covered` (the latest statement's last
+        day, in UTC) is one the statement covers, so a difference on it is ordinary."""
         rows = await self.session.execute(
             text(
                 "select s.snapshot_date, s.cash, s.currency"
@@ -233,16 +226,15 @@ class _Check:
             {"c": self.connection_id, "a": trading, "since": since},
         )
         for row in rows:
-            currency = await get_currency(self.session, row.currency.strip().upper())
-            at = end_of(row.snapshot_date)
+            currency = await _currency(self.session, row.currency)
             await self.compare(
                 trading,
                 name,
-                at,
+                end_of(row.snapshot_date),
                 row.snapshot_date,
                 {currency.id: Decimal(row.cash)},
                 only={currency.id},
-                explainable=end is None or at > end,
+                explainable=covered is None or row.snapshot_date > covered,
             )
 
     async def explained(self, trading: UUID, trading_etoro_id: str, end: datetime) -> bool:
@@ -273,7 +265,7 @@ class _Check:
         )
         if stated:
             return True
-        day = end.astimezone(LONDON).date()
+        day = end.astimezone(UTC).date()
         for table, column in (
             ("etoro_pnl_positions", "total_fees"),
             ("etoro_breakdown_positions", "overnight_fees_and_dividends"),
@@ -316,10 +308,33 @@ class _Check:
         return min(days) if days else None
 
 
+async def _currency(session: AsyncSession, code: str) -> InstrumentRecord:
+    try:
+        return await get_currency(session, code.strip().upper())
+    except UnknownCurrencyError:
+        raise EtoroDataError("an eToro report names a currency Lararium does not know") from None
+
+
+def _name(names: Mapping[UUID, str], account_id: UUID) -> str:
+    if account_id not in names:
+        raise EtoroDataError("an eToro account Lararium mapped is missing")
+    return names[account_id]
+
+
 async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | None:
     """Compare the connection's accounts (eToro account id → finance account) with the latest
-    reports eToro gave, as the module doc says; None when they cannot be (no balances yet, or
-    not exactly one Trading account among them)."""
+    reports eToro gave, as the module doc says; None when they cannot be: no balances yet, not
+    exactly one Trading account among them, or data reconciliation cannot read (a malformed
+    statement period, a currency Lararium does not know, a mapped account that is gone),
+    which is logged by its class alone and never fails the sync or upload."""
+    try:
+        return await _check(ctx, accounts)
+    except EtoroDataError as error:
+        logger.warning("eToro reconciliation could not run (%s)", type(error).__name__)
+        return None
+
+
+async def _check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | None:
     session = ctx.command.session
     connection_id = ctx.connection.id
     balances = await latest_sighted(session, connection_id, "balances")
@@ -338,17 +353,17 @@ async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | Non
         return None
     [trading_etoro_id] = trading_ids
     trading = accounts[trading_etoro_id]
-    trading_name = names[trading]
+    trading_name = _name(names, trading)
 
     # eToro Money: each account's currency against its balance.
     for etoro_id, (kind, code, balance) in sorted(kinds.items()):
         account_id = accounts.get(etoro_id)
         if kind != "Cash" or account_id is None or not code:
             continue
-        currency = await get_currency(session, code.upper())
+        currency = await _currency(session, code)
         await run.compare(
             account_id,
-            names[account_id],
+            _name(names, account_id),
             balances.seen_at,
             balances.day,
             {currency.id: balance},
@@ -364,7 +379,7 @@ async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | Non
         await run.units(trading, trading_name, aggregate)
     pnl = await latest_sighted(session, connection_id, "pnl")
     if pnl is not None and code:
-        currency = await get_currency(session, code)
+        currency = await _currency(session, code)
         await run.compare(
             trading,
             trading_name,
@@ -378,7 +393,7 @@ async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | Non
         trading,
         trading_name,
         statement.start.astimezone(UTC).date() if statement else None,
-        statement.end if statement else None,
+        statement.end.astimezone(UTC).date() if statement else None,
     )
 
     explainable = [d for d in run.found if d.explainable]
