@@ -411,9 +411,10 @@ class ImportBatchDetailOut(ImportBatchOut):
 
 
 class IdentifierCreate(BaseModel):
-    # Only a UK bank account is registered by hand; the connectors register their own ids.
-    kind: Literal["uk_bank_account"]
-    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+    # Only a UK bank account or a chain address is registered by hand; the connectors register
+    # their own ids.
+    kind: Literal["uk_bank_account", "chain_address"]
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678", or an address
 
 
 class IdentifierOut(BaseModel):

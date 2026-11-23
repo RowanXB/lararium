@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, bindparam, func, select, update
+from sqlalchemy import ColumnElement, Text, bindparam, delete, func, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -393,6 +393,17 @@ async def store_credential(
     ctx.record_change(
         f"credential:{connection_id}:{purpose}", {"expires_at": _optional_iso(expires_at)}
     )
+
+
+async def delete_credential(ctx: CommandContext, connection_id: UUID, purpose: str) -> None:
+    """Remove a stored credential, if there is one."""
+    removed = await ctx.session.scalar(
+        delete(Credential)
+        .where(Credential.connection_id == connection_id, Credential.purpose == purpose)
+        .returning(Credential.purpose)
+    )
+    if removed is not None:
+        ctx.record_change(f"credential:{connection_id}:{purpose}", {"deleted": True})
 
 
 async def load_credential(

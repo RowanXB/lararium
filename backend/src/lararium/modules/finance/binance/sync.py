@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from uuid import UUID
 
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from lararium.core.connections import (
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
+from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import layout, notices
 from lararium.modules.finance.binance.balances import (
     Read,
@@ -129,29 +131,70 @@ def gate_problem(restrictions: ApiValue) -> str | None:
     return None
 
 
-async def open_client(
-    ctx: SyncContext, *, clock: Clock = wall_clock, sleep: Sleep = real_sleep
+def make_client(
+    http: httpx.AsyncClient,
+    api_key: Secret | None,
+    key_type: JSONValue,
+    *,
+    api_secret: Secret | None = None,
+    private_key: Secret | None = None,
+    passphrase: Secret | None = None,
+    clock: Clock = wall_clock,
+    sleep: Sleep = real_sleep,
 ) -> BinanceClient:
-    """A client for the connection's key: HMAC (`api_secret`) or Ed25519 (`private_key`)."""
-    connection = ctx.connection
-
-    async def credential(purpose: str):
-        return await load_credential(ctx.command.session, ctx.master_key, connection.id, purpose)
-
-    api_key = await credential("api_key")
-    key_type = connection.config.get("key_type")
+    """A client for key material: HMAC (`api_secret`) or Ed25519 (`private_key`). A missing or
+    unusable key is a `CredentialRejectedError` whose message never describes the key."""
     signer: Signer | None = None
     try:
-        if key_type == "hmac" and (secret := await credential("api_secret")) is not None:
-            signer = HmacSigner(secret)
-        elif key_type == "ed25519" and (pem := await credential("private_key")) is not None:
-            signer = Ed25519Signer(pem, await credential("private_key_passphrase"))
+        if key_type == "hmac" and api_secret is not None:
+            signer = HmacSigner(api_secret)
+        elif key_type == "ed25519" and private_key is not None:
+            signer = Ed25519Signer(private_key, passphrase)
     except ValueError as error:
         # Its message is written to be shown and never describes the key.
         raise CredentialRejectedError(str(error)) from None
     if api_key is None or signer is None:
         raise CredentialRejectedError("The Binance API key is missing")
-    return BinanceClient(ctx.http, api_key, signer, clock=clock, sleep=sleep)
+    return BinanceClient(http, api_key, signer, clock=clock, sleep=sleep)
+
+
+async def open_client(
+    ctx: SyncContext, *, clock: Clock = wall_clock, sleep: Sleep = real_sleep
+) -> BinanceClient:
+    """A client for the connection's stored key."""
+    connection = ctx.connection
+
+    async def credential(purpose: str):
+        return await load_credential(ctx.command.session, ctx.master_key, connection.id, purpose)
+
+    return make_client(
+        ctx.http,
+        await credential("api_key"),
+        connection.config.get("key_type"),
+        api_secret=await credential("api_secret"),
+        private_key=await credential("private_key"),
+        passphrase=await credential("private_key_passphrase"),
+        clock=clock,
+        sleep=sleep,
+    )
+
+
+async def pass_gate(client: BinanceClient) -> Read:
+    """Sync the clock, then ask `api-restrictions`: the key may do nothing but read. Nothing
+    else is sent with a key the gate refuses."""
+    await client.sync_clock()
+    gate = (await read_balances(client, [GATE_LABEL]))[GATE_LABEL]
+    problem = gate_problem(as_api(gate.body))
+    if problem is not None:
+        raise CredentialRejectedError(f"this key can do more than read: {problem}")
+    return gate
+
+
+def uid_of(account: Read) -> str | None:
+    """The account id a `spot-account` read answers for."""
+    found = parse(ACCOUNT_LABEL, as_api(account.body)).body
+    found = found.get("uid") if isinstance(found, dict) else None
+    return None if found is None else str(found)
 
 
 # Hooks the later tasks fill in, in the order a sync runs them.
@@ -290,12 +333,7 @@ class BinanceConnector:
 
     async def _gated_client(self, ctx: SyncContext) -> tuple[BinanceClient, Read]:
         client = await open_client(ctx, clock=self._clock, sleep=self._sleep)
-        await client.sync_clock()
-        gate = (await read_balances(client, [GATE_LABEL]))[GATE_LABEL]
-        problem = gate_problem(as_api(gate.body))
-        if problem is not None:
-            raise CredentialRejectedError(f"this key can do more than read: {problem}")
-        return client, gate
+        return client, await pass_gate(client)
 
     async def check_access(self, ctx: SyncContext) -> bool:
         # There is no approval step: a key that passes the gate works at once.
@@ -309,9 +347,8 @@ class BinanceConnector:
             return connection.cursor
         client, gate = await self._gated_client(ctx)
         account = (await read_balances(client, [ACCOUNT_LABEL]))[ACCOUNT_LABEL]
-        uid = parse(ACCOUNT_LABEL, as_api(account.body)).body
-        uid = uid.get("uid") if isinstance(uid, dict) else None
-        if uid is None or str(uid) != str(connection.config.get("uid")):
+        uid = uid_of(account)
+        if uid is None or uid != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
         reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
         for read in reads.values():

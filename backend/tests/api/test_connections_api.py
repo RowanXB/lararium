@@ -269,6 +269,7 @@ async def test_create_connection_hides_secret(api, session) -> None:
         "warnings",
         "redirect_uri",
         "webhook_enabled",
+        "binance",
     }
 
 
@@ -871,6 +872,8 @@ def test_connection_operation_ids() -> None:
         ("get", "/api/v1/connections/oauth/monzo/callback"): "monzo_oauth_callback",
         ("post", "/api/v1/connections/{connection_id}/sync"): "sync_connection_now",
         ("post", "/api/v1/connections/{connection_id}/disable"): "disable_connection",
+        ("post", "/api/v1/connections/binance"): "create_binance_connection",
+        ("put", "/api/v1/connections/{connection_id}/binance"): "update_binance_connection",
         ("post", "/api/v1/connections/ibkr"): "create_ibkr_connection",
         ("put", "/api/v1/connections/{connection_id}/ibkr"): "update_ibkr_connection",
         ("post", "/api/v1/connections/{connection_id}/ibkr-statement"): "upload_ibkr_statement",

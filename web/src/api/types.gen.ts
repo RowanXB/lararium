@@ -163,6 +163,100 @@ export type BalanceModeUpdate = {
 };
 
 /**
+ * BinanceConnectionCreate
+ */
+export type BinanceConnectionCreate = {
+    /**
+     * Api Secret
+     */
+    api_secret?: null;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: null;
+};
+
+/**
+ * BinanceConnectionState
+ */
+export type BinanceConnectionState = {
+    /**
+     * Differences
+     */
+    differences: Array<BinanceDifferenceOut>;
+    /**
+     * First Sync Done
+     */
+    first_sync_done: boolean;
+    /**
+     * Flags
+     */
+    flags: Array<string>;
+    /**
+     * Wallets
+     */
+    wallets: Array<string>;
+};
+
+/**
+ * BinanceConnectionUpdate
+ */
+export type BinanceConnectionUpdate = {
+    /**
+     * Api Secret
+     */
+    api_secret?: null;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: null;
+};
+
+/**
+ * BinanceDifferenceOut
+ *
+ * A reconciliation difference that still holds: where and when, never an amount.
+ */
+export type BinanceDifferenceOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * From At
+     */
+    from_at: string;
+    /**
+     * Symbol
+     */
+    symbol: string;
+    /**
+     * To At
+     */
+    to_at: string;
+};
+
+/**
  * Body_stage_import
  */
 export type BodyStageImport = {
@@ -234,6 +328,7 @@ export type CardTypes = Array<string>;
  * ConnectionOut
  */
 export type ConnectionOut = {
+    binance?: BinanceConnectionState | null;
     /**
      * Connector
      */
@@ -612,7 +707,7 @@ export type IdentifierCreate = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account';
+    kind: 'uk_bank_account' | 'chain_address';
     /**
      * Value
      */
@@ -1830,6 +1925,62 @@ export type ValidationError = {
 };
 
 /**
+ * BinanceConnectionCreate
+ */
+export type BinanceConnectionCreateWritable = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret?: string | null;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: string | null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: string | null;
+};
+
+/**
+ * BinanceConnectionUpdate
+ */
+export type BinanceConnectionUpdateWritable = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret?: string | null;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: string | null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: string | null;
+};
+
+/**
  * IbkrConnectionCreate
  */
 export type IbkrConnectionCreateWritable = {
@@ -1930,6 +2081,31 @@ export type CreateMonzoConnectionResponses = {
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
 
+export type CreateBinanceConnectionData = {
+    body: BinanceConnectionCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/binance';
+};
+
+export type CreateBinanceConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBinanceConnectionError = CreateBinanceConnectionErrors[keyof CreateBinanceConnectionErrors];
+
+export type CreateBinanceConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateBinanceConnectionResponse = CreateBinanceConnectionResponses[keyof CreateBinanceConnectionResponses];
+
 export type CreateIbkrConnectionData = {
     body: IbkrConnectionCreateWritable;
     path?: never;
@@ -2009,6 +2185,36 @@ export type AuthorizeConnectionResponses = {
 };
 
 export type AuthorizeConnectionResponse = AuthorizeConnectionResponses[keyof AuthorizeConnectionResponses];
+
+export type UpdateBinanceConnectionData = {
+    body: BinanceConnectionUpdateWritable;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/binance';
+};
+
+export type UpdateBinanceConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBinanceConnectionError = UpdateBinanceConnectionErrors[keyof UpdateBinanceConnectionErrors];
+
+export type UpdateBinanceConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateBinanceConnectionResponse = UpdateBinanceConnectionResponses[keyof UpdateBinanceConnectionResponses];
 
 export type DisableConnectionData = {
     body?: never;

@@ -346,6 +346,208 @@
         "title": "BalanceModeUpdate",
         "type": "object"
       },
+      "BinanceConnectionCreate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Secret"
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "key_type": {
+            "enum": [
+              "hmac",
+              "ed25519"
+            ],
+            "title": "Key Type",
+            "type": "string"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "private_key_passphrase": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key Passphrase"
+          }
+        },
+        "required": [
+          "key_type",
+          "api_key",
+          "display_name"
+        ],
+        "title": "BinanceConnectionCreate",
+        "type": "object"
+      },
+      "BinanceConnectionState": {
+        "properties": {
+          "differences": {
+            "items": {
+              "$ref": "#/components/schemas/BinanceDifferenceOut"
+            },
+            "title": "Differences",
+            "type": "array"
+          },
+          "first_sync_done": {
+            "title": "First Sync Done",
+            "type": "boolean"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "wallets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Wallets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "wallets",
+          "first_sync_done",
+          "differences",
+          "flags"
+        ],
+        "title": "BinanceConnectionState",
+        "type": "object"
+      },
+      "BinanceConnectionUpdate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Secret"
+          },
+          "key_type": {
+            "enum": [
+              "hmac",
+              "ed25519"
+            ],
+            "title": "Key Type",
+            "type": "string"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "private_key_passphrase": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key Passphrase"
+          }
+        },
+        "required": [
+          "key_type",
+          "api_key"
+        ],
+        "title": "BinanceConnectionUpdate",
+        "type": "object"
+      },
+      "BinanceDifferenceOut": {
+        "description": "A reconciliation difference that still holds: where and when, never an amount.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "from_at": {
+            "format": "date-time",
+            "title": "From At",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "to_at": {
+            "format": "date-time",
+            "title": "To At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "symbol",
+          "from_at",
+          "to_at"
+        ],
+        "title": "BinanceDifferenceOut",
+        "type": "object"
+      },
       "Body_stage_import": {
         "properties": {
           "account_id": {
@@ -461,6 +663,16 @@
       },
       "ConnectionOut": {
         "properties": {
+          "binance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BinanceConnectionState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "connector": {
             "title": "Connector",
             "type": "string"
@@ -1261,7 +1473,10 @@
       "IdentifierCreate": {
         "properties": {
           "kind": {
-            "const": "uk_bank_account",
+            "enum": [
+              "uk_bank_account",
+              "chain_address"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -3942,6 +4157,47 @@
         ]
       }
     },
+    "/api/v1/connections/binance": {
+      "post": {
+        "operationId": "create_binance_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BinanceConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Binance Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/ibkr": {
       "post": {
         "operationId": "create_ibkr_connection",
@@ -4082,6 +4338,60 @@
           }
         },
         "summary": "Authorize Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/binance": {
+      "put": {
+        "description": "Replace the key (a new one after the old was rejected). It must belong to the account\nalready connected.",
+        "operationId": "update_binance_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BinanceConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Binance Connection",
         "tags": [
           "connections"
         ]
