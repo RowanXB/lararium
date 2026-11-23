@@ -148,8 +148,4 @@ async def trading_identifier(run: Run) -> UUID | None:
     names (design §5.12)."""
     if run.trading_id is None:
         return None
-    trading_id = run.trading_id
-    return await run.shared(
-        ("identifier", "etoro_account", trading_id),
-        lambda cmd: get_or_create_identifier(cmd, "etoro_account", trading_id),
-    )
+    return await account_identifier(run, run.trading_id)

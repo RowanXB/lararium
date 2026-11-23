@@ -14,12 +14,19 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from lararium.core import models as core_models
 from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance.connector_run import holdings
+from lararium.modules.finance.etoro import statement_ledger
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.fields import ACCOUNT_ACTIVITY, ACCOUNT_SUMMARY
-from lararium.modules.finance.etoro.merge import TradeEvent, disagreements, posting_values
-from lararium.modules.finance.etoro.normalize import NormalizeReport
+from lararium.modules.finance.etoro.merge import (
+    TradeEvent,
+    agreements,
+    disagreements,
+    posting_values,
+)
+from lararium.modules.finance.etoro.normalize import EtoroDataError, NormalizeReport, normalize
 from lararium.modules.finance.etoro.statement import parse_statement
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
@@ -51,7 +58,14 @@ from .statement_fixtures import (
     statement_sheets,
     summary,
 )
-from .test_normalize_api import Ledger, _connection, _delete_derived, _postings, _rows
+from .test_normalize_api import (
+    Ledger,
+    _connection,
+    _delete_derived,
+    _ledger_state,
+    _postings,
+    _rows,
+)
 
 POSITION = int(POSITION_1)
 ORDER = POSITION + 500
@@ -127,18 +141,21 @@ def close_row(balance: str = "1280.00") -> dict[str, str]:
     )
 
 
-def trade_statement(closed_units: str = "4") -> bytes:
+def trade_statement(
+    closed_units: str = "4", closed_profit: str = "20.00", close_change: str = "20.00"
+) -> bytes:
     """A statement of one transfer in (with its fee) and one position opened and closed;
-    `closed_units` the units Closed Positions says the position opened and closed with."""
+    `closed_units` and `closed_profit` what Closed Positions says of it, `close_change` the
+    close row's Realized Equity Change."""
     return build_statement(
         summary(username=USERNAME),
         [
             transfer_in(),
             conversion_fee("01/10/2026 10:00:00"),
             open_row(),
-            close_row(),
+            close_row() | {"Realized Equity Change": close_change},
         ],
-        [closed_row() | {"Units / Contracts": closed_units}],
+        [closed_row() | {"Units / Contracts": closed_units, "Profit(USD)": closed_profit}],
         financial=[
             {
                 "Name": "Dividends",
@@ -262,6 +279,19 @@ def _expected_trade_ledger(body: bytes) -> dict[str, tuple]:
     }
 
 
+async def _review_links(session, ledger: Ledger) -> list[tuple]:
+    """(event key, field, API value, statement value, resolution, linked external id)."""
+    rows = await _rows(
+        session,
+        "select r.event_key, r.field, r.api_value, r.statement_value, r.resolution,"
+        " t.external_id from finance.source_reviews r"
+        " left join finance.transactions t on t.id = r.transaction_id"
+        " where r.connection_id = :c order by r.opened_at, r.field",
+        c=ledger.connection.id,
+    )
+    return [tuple(r) for r in rows]
+
+
 async def _leg_fees(session) -> list[tuple]:
     rows = await _rows(
         session,
@@ -311,6 +341,9 @@ def test_posting_values_and_disagreements() -> None:
     )
     with pytest.raises(ValueError):
         posting_values(None, None, {})
+    # Agreeing is stated by both and equal: a profit one source leaves out agrees on nothing.
+    assert agreements(api, statement) == ["cash"]
+    assert agreements(api, same) == ["units", "cash", "booking_date"]
 
 
 # Cash events (design §5.7) ----------------------------------------------------------------------
@@ -779,12 +812,22 @@ async def test_resolve_toward_statement_reposts_and_replays(session, run, ledger
         (TRADING, "USD", Decimal("-500.00"), None, None, None, None, False),
     ]
     before = await _ledger(session, ledger)
-    # Regeneration replays the owner's decision.
+    state = await _ledger_state(session, ledger.connection)
+    fees = await _leg_fees(session)
+    links = await _review_links(session, ledger)
+    assert links == [(f"open:{POSITION}", "units", "4", "5", "statement", f"open:{POSITION}")]
+    assert fees != []
+    # Regeneration replays the owner's decision, the statement's typed rows, the leg fee, and
+    # the review's link to its transaction.
     await _delete_derived(session, ledger.connection)
     await ledger.replay()
     assert await _ledger(session, ledger) == before
+    assert await _ledger_state(session, ledger.connection) == state
+    assert await _leg_fees(session) == fees
+    assert await _review_links(session, ledger) == links
     [closed] = await list_reviews(session, ledger.connection.id)
     assert closed.resolution == "statement"
+    assert closed.transaction_id == await _transaction_id(session, f"open:{POSITION}")
     assert len(ledger.disagreement_messages()) == 1
     # A later change in either source's value reopens it, and the API's value posts again.
     await ledger.upload(trade_statement(closed_units="6"))
@@ -966,7 +1009,7 @@ async def test_trading_cash_equals_statement_balance_each_second(session, ledger
     await ledger.normalize(*BASE)
     activity = [
         transfer_in(),
-        conversion_fee("01/10/2026 10:00:00"),
+        conversion_fee("01/10/2026 10:00:00") | {"Balance": "1260.00"},
         open_row(),
         # One second's rows out of balance order: the fee's row shows the balance after both.
         activity_row("05/10/2026 09:00:00", "Withdraw Fee", "-5.00", balance="655.00"),
@@ -994,27 +1037,163 @@ async def test_trading_cash_equals_statement_balance_each_second(session, ledger
             details="GBP",
             balance="280.55",
         ),
-        conversion_fee("25/10/2026 10:00:00", "-5.00", "Withdrawal"),
+        conversion_fee("25/10/2026 10:00:00", "-5.00", "Withdrawal") | {"Balance": "280.55"},
     ]
     await ledger.upload(
         build_statement(summary(username=USERNAME), activity, [closed_row()], [dividend_row()])
     )
     account = await _account(session, TRADING)
     usd = (await get_currency(session, "USD")).id
-    by_second: dict[datetime, set[Decimal]] = {}
-    for row in activity:
-        day, moment = row["Date"].split(" ")
-        d, m, y = (int(p) for p in day.split("/"))
-        hh, mm, ss = (int(p) for p in moment.split(":"))
-        at = datetime(y, m, d, hh, mm, ss, tzinfo=UTC)
-        by_second.setdefault(at, set()).add(Decimal(row["Balance"]))
-    for at, balances in sorted(by_second.items()):
+    by_second: dict[datetime, list[dict[str, str]]] = {}
+    for cells in activity:
+        moment = datetime.strptime(cells["Date"], "%d/%m/%Y %H:%M:%S").replace(tzinfo=UTC)
+        by_second.setdefault(moment, []).append(cells)
+    closing = Decimal(0)
+    for at, rows in sorted(by_second.items()):
+        # The balance after the second: the one before plus the cash its rows move (design
+        # §5.7), which is one of the second's Balances, whatever order its rows are listed in.
+        closing += sum((statement_ledger.cash(_row(cells)) for cells in rows), Decimal(0))
+        assert closing in {Decimal(cells["Balance"]) for cells in rows}, at
         cash = (await holdings(session, account, at + timedelta(microseconds=999999))).get(
             usd, Decimal(0)
         )
-        assert cash in balances, at
-    assert (await holdings(session, account, NOW))[usd] == Decimal("280.55")
+        assert cash == closing, at
+    assert closing == Decimal("280.55")
     assert await find_unbalanced_transactions(session) == []
+
+
+def _row(cells: dict[str, str]) -> statement_ledger.Row:
+    """An Account Activity row as the normalizer reads it."""
+    return statement_ledger.Row(uuid.uuid4(), ACCOUNT_ACTIVITY, "0" * 32, cells, NOW, NOW, "", NOW)
+
+
+# Review fixes -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("statement_first", [True, False])
+async def test_disagreement_the_same_in_either_order(session, ledger, statement_first) -> None:
+    body = trade_statement(closed_units="5")
+    if statement_first:
+        await ledger.normalize(*BASE)
+        await ledger.upload(body)
+        await ledger.normalize(*BASE, *TRADES, now=NOW + timedelta(days=1))
+    else:
+        await ledger.normalize(*BASE, *TRADES)
+        await ledger.upload(body)
+    assert await _review_links(session, ledger) == [
+        (f"open:{POSITION}", "units", "4", "5", None, f"open:{POSITION}")
+    ]
+    assert len(ledger.disagreement_messages()) == 1
+    assert await _leg_fees(session) == [
+        (f"activity:{_key(body, 'Transfer: GBP > USD')}", "USD", Decimal("6.30"))
+    ]
+    # The API's value posts either way.
+    assert (await _postings(session, f"open:{POSITION}"))[0][2] == Decimal(4)
+
+
+NO_CURRENCY = [entry for entry in BASE if entry[0] != "aggregate"]
+
+
+@pytest.mark.parametrize("statement_first", [True, False])
+async def test_statement_names_the_currency_the_api_lacks(session, ledger, statement_first) -> None:
+    # Neither the aggregate nor the breakdown gives the instrument's currency: the
+    # statement's activity does ("ZZQA/USD"), so the API's trade posts once it is uploaded.
+    body = trade_statement()
+    if statement_first:
+        await ledger.normalize(*NO_CURRENCY)
+        await ledger.upload(body)
+        await ledger.normalize(*NO_CURRENCY, *TRADES, now=NOW + timedelta(days=1))
+    else:
+        await ledger.normalize(*NO_CURRENCY, *TRADES)
+        assert f"open:{POSITION}" not in await _ledger(session, ledger)
+        await ledger.upload(body)
+    assert await _ledger(session, ledger) == _expected_trade_ledger(body)
+    account = await _account(session, TRADING)
+    usd = (await get_currency(session, "USD")).id
+    assert (await holdings(session, account, NOW + timedelta(days=2)))[usd] == Decimal("1280.00")
+
+
+async def test_review_stays_open_when_a_source_stops_stating_its_field(session, ledger) -> None:
+    await ledger.normalize(*BASE, *TRADES)
+    await ledger.upload(trade_statement(closed_profit="25.00"))
+    assert await _review_links(session, ledger) == [
+        (f"close:{POSITION}", "profit", "20", "25", None, f"close:{POSITION}")
+    ]
+    # A re-issue states no profit (Closed Positions and the close row leave it out): nothing
+    # agrees on it, so its review stays open.
+    await ledger.upload(trade_statement(closed_profit="-", close_change="-"))
+    [review] = await list_reviews(session, ledger.connection.id)
+    assert (review.field, review.resolved_at) == ("profit", None)
+
+
+async def test_a_placeholder_cash_is_flagged_not_zero(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [transfer_in(), activity_row("05/10/2026 09:00:00", "Withdraw Fee", "-5.00", change="-")],
+    )
+    report = await ledger.upload(body)
+    assert f"{ACCOUNT_ACTIVITY}.Realized Equity Change has no number" in report.flagged
+    assert f"activity:{_key(body, 'Withdraw Fee')}" not in await _ledger(session, ledger)
+
+
+async def test_a_malformed_period_is_a_data_error(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    r = core_models.RawRecord
+    raw = r(
+        connection_id=ledger.connection.id,
+        sync_id=uuid.uuid4(),
+        record_type="etoro.statement.account_activity",
+        request={"period": {"from": "not a moment", "to": "2026-10-31T23:59:59+00:00"}},
+        content={"cells": transfer_in(), "key": "0" * 32},
+        content_hash="f" * 64,
+        connector_version="etoro-sync-1",
+        fetched_at=NOW,
+    )
+    session.add(raw)
+    await session.flush()
+    with pytest.raises(EtoroDataError, match="statement period"):
+        await normalize(await ledger.context(), [raw.id])
+
+
+async def test_isin_another_listing_holds_is_flagged_not_failed(session, run, ledger) -> None:
+    usd, gbp = await get_currency(session, "USD"), await get_currency(session, "GBP")
+    # One holder in another currency; then one in USD that already has an eToro id.
+    await run(
+        lambda ctx: create_instrument(
+            ctx,
+            kind="equity",
+            symbol="ZZQA.L",
+            name="Synthetic Quality A",
+            decimals=4,
+            quote_instrument_id=gbp.id,
+            identifiers=[InstrumentIdentifier("isin", ISIN)],
+        )
+    )
+    await ledger.normalize(*BASE, *TRADES)
+    report = await ledger.upload(trade_statement())
+    assert statement_ledger.ISIN_ELSEWHERE in report.flagged
+    await session.execute(
+        text("delete from finance.instrument_identifiers where value = :v"), {"v": ISIN}
+    )
+    await run(
+        lambda ctx: create_instrument(
+            ctx,
+            kind="equity",
+            symbol="ZZQA.X",
+            name="Synthetic Quality A",
+            decimals=4,
+            quote_instrument_id=usd.id,
+            identifiers=[
+                InstrumentIdentifier("isin", ISIN),
+                InstrumentIdentifier("etoro_id", "9999"),
+            ],
+        )
+    )
+    report = await ledger.upload(trade_statement(closed_units="4", closed_profit="20.0"))
+    assert statement_ledger.NOT_MERGED in report.flagged
+    # The upload went through; the trade stays on eToro's instrument.
+    assert (await _postings(session, f"open:{POSITION}"))[0][1] == SYMBOL
 
 
 # Helpers ------------------------------------------------------------------------------------

@@ -95,24 +95,54 @@ async def open_review(
 async def close_agreed(
     ctx: CommandContext, connection_id: UUID, event_key: str, fields: Collection[str]
 ) -> None:
-    """Close the event's open items on these fields, whose two sources now agree: resolved
-    `api` by AGREED, no decision recorded, no one told."""
+    """Close the event's open items on these fields, which both sources now state and agree
+    on: resolved `api` by AGREED, no decision recorded, no one told. The items are locked
+    first, as `open_review` locks them."""
     if not fields:
         return
     r = models.SourceReview
-    closed = await ctx.session.scalars(
+    ids = list(
+        await ctx.session.scalars(
+            select(r.id)
+            .where(
+                r.connection_id == connection_id,
+                r.event_key == event_key,
+                r.field.in_(sorted(fields)),
+                r.resolved_at.is_(None),
+            )
+            .order_by(r.id)
+            .with_for_update()
+        )
+    )
+    if not ids:
+        return
+    await ctx.session.execute(
+        update(r)
+        .where(r.id.in_(ids))
+        .values(resolved_at=func.now(), resolution="api", resolved_by=AGREED)
+    )
+    for review_id in ids:
+        ctx.record_change(f"source_review:{review_id}", {"resolution": "api", "by": AGREED})
+
+
+async def link_reviews(
+    ctx: CommandContext, connection_id: UUID, event_key: str, transaction_id: UUID | None
+) -> None:
+    """Point the event's review items, open or resolved, at the transaction it posts now:
+    regeneration posts it anew, and deleting the old one unlinked them."""
+    r = models.SourceReview
+    linked = await ctx.session.scalars(
         update(r)
         .where(
             r.connection_id == connection_id,
             r.event_key == event_key,
-            r.field.in_(sorted(fields)),
-            r.resolved_at.is_(None),
+            r.transaction_id.is_distinct_from(transaction_id),
         )
-        .values(resolved_at=func.now(), resolution="api", resolved_by=AGREED)
+        .values(transaction_id=transaction_id)
         .returning(r.id)
     )
-    for review_id in closed:
-        ctx.record_change(f"source_review:{review_id}", {"resolution": "api", "by": AGREED})
+    for review_id in linked:
+        ctx.record_change(f"source_review:{review_id}", {"transaction_id": str(transaction_id)})
 
 
 async def resolve_review(ctx: CommandContext, review_id: UUID, take: Take) -> None:

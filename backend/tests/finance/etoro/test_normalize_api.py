@@ -1214,6 +1214,11 @@ _TYPED_TABLES = (
     "etoro_instrument_types",
     "etoro_exchanges",
     "etoro_candles",
+    "etoro_activity",
+    "etoro_dividends",
+    "etoro_statements",
+    "etoro_financial_summary_values",
+    "etoro_financial_summary",
 )
 
 

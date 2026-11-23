@@ -15,7 +15,10 @@ Resolving an item is the owner's decision (source_reviews): taking the statement
 that field post from the statement. A decision holds for the values it was made on, so
 regeneration replays it; a later change in either source's value reopens the review, and the
 API's value posts until the owner decides again. An open item whose two sources come to agree
-closes on its own, resolved `api` by "sources agree", untold.
+closes on its own, resolved `api` by "sources agree", untold; only a field both sources
+state counts, so one a source stops stating keeps its item open. The profit makes no posting
+(a close posts its units and cash), so taking the statement's profit changes no posting; it
+settles the item.
 
 Messages name a position by its last four digits and the field, never a value.
 """
@@ -32,7 +35,13 @@ from sqlalchemy import text
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance.etoro.state import Run, ending
 from lararium.modules.finance.money import to_plain_str
-from lararium.modules.finance.source_reviews import AGREED, Take, close_agreed, open_review
+from lararium.modules.finance.source_reviews import (
+    AGREED,
+    Take,
+    close_agreed,
+    link_reviews,
+    open_review,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +81,18 @@ def disagreements(api: TradeEvent, statement: TradeEvent) -> list[tuple[str, str
             continue
         found.append((field, _text(theirs), _text(ours)))
     return found
+
+
+def agreements(api: TradeEvent, statement: TradeEvent) -> list[str]:
+    """The fields both sources state and agree on: a field one of them leaves out agrees on
+    nothing, so an open review of it stays open."""
+    return [
+        field
+        for field in FIELDS
+        if (theirs := getattr(api, field)) is not None
+        and (ours := getattr(statement, field)) is not None
+        and theirs == ours
+    ]
 
 
 def posting_values(
@@ -130,30 +151,30 @@ async def takes(run: Run, key: str, found: Sequence[tuple[str, str, str]]) -> di
 
 @dataclass(frozen=True)
 class Choice:
-    """The values an event posts; its disagreements, to review once posted; and whether both
-    sources had it (so the fields they agree on can close their items)."""
+    """The values an event posts; its disagreements, to review once posted; and the fields
+    both sources state and agree on, whose open items close."""
 
     values: TradeEvent
     found: list[tuple[str, str, str]]
-    both: bool
+    agreed: list[str]
 
 
 async def choose(
     run: Run, key: str, api: TradeEvent | None, statement: TradeEvent | None
 ) -> Choice:
-    both = api is not None and statement is not None
-    found = disagreements(api, statement) if api is not None and statement is not None else []
-    return Choice(posting_values(api, statement, await takes(run, key, found)), found, both)
+    found: list[tuple[str, str, str]] = []
+    agreed: list[str] = []
+    if api is not None and statement is not None:
+        found, agreed = disagreements(api, statement), agreements(api, statement)
+    return Choice(posting_values(api, statement, await takes(run, key, found)), found, agreed)
 
 
-async def review(run: Run, key: str, transaction_id: UUID | None, choice: Choice) -> None:
-    """Open a review item for each disagreement the owner has not seen with these values, and
-    close the open ones on fields the two sources now agree on."""
-    if choice.both:
-        disagreeing = {field for field, _, _ in choice.found}
-        await close_agreed(
-            run.command, run.connection_id, key, [f for f in FIELDS if f not in disagreeing]
-        )
+async def review(run: Run, key: str, transaction_id: UUID, choice: Choice) -> None:
+    """Link the event's review items to its transaction, close the open ones on fields the
+    two sources now agree on, and open one for each disagreement the owner has not seen with
+    these values."""
+    await link_reviews(run.command, run.connection_id, key, transaction_id)
+    await close_agreed(run.command, run.connection_id, key, choice.agreed)
     for field, theirs, ours in choice.found:
         if await open_review(
             run.command, run.connection_id, transaction_id, key, field, theirs, ours
