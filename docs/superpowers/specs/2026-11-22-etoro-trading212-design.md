@@ -166,7 +166,7 @@ On prompt, not on a schedule: Lararium notifies "upload an eToro statement" when
 
 **eToro** (connector `etoro`):
 - One connection. Credentials: purpose `public_api_key` and `user_key`. Config: the account map (eToro account id → finance account id), and `realCid`/`gcid` from `/me`.
-- **Read-only gate.** Every sync starts with `/me`. If any scope ends in `:write`, or is `money:transfer`, the sync refuses (`CredentialRejectedError`, "this key can trade or move money; create a Read key"). Nothing else is called.
+- **Read-only gate.** Every sync starts with `/me`. If any scope does not end in `:read` (an allow-list: eToro's `money:transfer` shows not every write-capable scope is named `:write`), the sync refuses (`CredentialRejectedError`, "this key can trade or move money; create a Read key"). Nothing else is called.
 - A 401/403 on `/me` raises `CredentialRejectedError`.
 
 **Both connectors** send only GET, to their own host, with redirects off (so credentials can't follow a redirect), and the User-Agent of §3.1. The HTTP client refuses any other method; this is the enforcement of goal 7, whatever a key allows.
