@@ -464,8 +464,16 @@ explain how it got there.
 
 What is built so far (phase A):
 
-- **Wallets**: Spot, Funding and Earn. Every wallet with a balance in Binance's wallet list
-  is counted; a wallet Lararium doesn't know is flagged by name and still gets an account.
+- **Wallets**: Spot, Funding and Earn. Every other wallet with a balance in Binance's wallet
+  list (Cross Margin, Futures, Trading Bots, an unknown one and so on) is counted from that
+  list, per asset, without records of its own in phase A, so its changes show as
+  reconciliation differences; a wallet Lararium doesn't know is flagged by name and still gets
+  an account, and one whose balance is not zero but which lists no asset is flagged by name.
+  Crypto-loan debt is not read until phase B.
+- **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
+  Lararium already has. If Lararium has no currency with that ISO 4217 code, the sync fails
+  (the connection shows `UnknownCurrencyError`, without naming the currency) until one is
+  added.
 - **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
   (subscriptions, redemptions and rewards).
 
@@ -529,13 +537,18 @@ Binance holdings are valued in EUR from a daily price for each asset:
   pair, or its USDT pair divided by `EURUSDT`). Stablecoins are priced the same way, never
   assumed to be worth one.
 - **CoinGecko**, optional. Set `LARARIUM_COINGECKO_API_KEY` in `infra/.env` (a Demo-plan key
-  works) and run `make up`. It is used only for assets Binance's own markets cannot price,
-  never on a day Binance has a price. Without the key such an asset shows as missing a price.
+  works) and run `make up`. For any asset Binance does not price up to yesterday (one with no
+  market on Binance, or whose pair stopped trading), it fills the days of the last 365 that
+  have no Binance price; it is never used on a day Binance has a price. With the key,
+  CoinGecko's listing of Binance's markets also gives each Binance asset its CoinGecko id,
+  which decides which existing instrument the asset is (the same coin held elsewhere).
+  Without the key an asset Binance cannot price shows as missing a price.
   CoinGecko's terms require attribution: Price data provided by
   [CoinGecko](https://www.coingecko.com).
-- **ECB reference rates**, fetched daily through Frankfurter (`api.frankfurter.dev`, no key),
-  so EUR prices can be shown in your reporting currency. They only fill days for which no
-  other source has a rate between those two currencies.
+- **ECB reference rates**, fetched daily through Frankfurter (`api.frankfurter.dev`, no key)
+  on every installation, with or without a Binance connection, so EUR prices can be shown in
+  your reporting currency. They only fill days for which no other source has a rate between
+  those two currencies.
 
 ### What phase B adds
 

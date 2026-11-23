@@ -399,8 +399,13 @@ Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，�
 
 目前已实现的部分（阶段 A）：
 
-- **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中每个有余额的钱包都会计入；Lararium
-  不认识的钱包会按名称标记，并且仍会得到一个账户。
+- **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中其他每个有余额的钱包（Cross Margin、
+  Futures、Trading Bots、未知的钱包等）都按该列表逐个资产计入；在阶段 A 它们没有自己的记录，
+  所以它们的变化会显示为对账差异。Lararium 不认识的钱包会按名称标记，并且仍会得到一个账户；
+  余额不为零却没有列出任何资产的钱包也会按名称标记。加密货币借贷的负债要到阶段 B 才会读取。
+- **Binance 上的法币**（Binance 标记为法定货币的资产，例如 EUR）就是 Lararium 已有的那个币种。
+  如果 Lararium 没有该 ISO 4217 代码的币种，同步会失败（连接显示 `UnknownCurrencyError`，
+  不写出是哪个币种），直到添加了该币种为止。
 - **记录**：充值、提现、现货交易、闪兑（convert）、资产分红，以及活期 Earn（申购、赎回和收益）。
 
 Spot、活期 Earn、充值、提现、交易、闪兑和分红已用真实账户核对过。Funding 和阶段 A 其余的响应
@@ -453,11 +458,15 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 - **Binance 的日 K 线**，通过 Binance 自己的 EUR 市场换算成 EUR（该资产的 EUR 交易对，或其
   USDT 交易对除以 `EURUSDT`）。稳定币也同样定价，从不假设等于一。
 - **CoinGecko**，可选。在 `infra/.env` 中设置 `LARARIUM_COINGECKO_API_KEY`（Demo 套餐的密钥
-  即可），然后运行 `make up`。它只用于 Binance 自己的市场无法定价的资产，且从不用于 Binance
-  已有价格的日子。没有这个密钥时，这类资产会显示为缺少价格。CoinGecko 的条款要求署名：
+  即可），然后运行 `make up`。对 Binance 没有定价到昨天的任何资产（在 Binance 上没有市场的
+  资产，或交易对已停止交易的资产），它会填补最近 365 天里没有 Binance 价格的日子；它从不用于
+  Binance 已有价格的日子。设置了密钥时，CoinGecko 对 Binance 市场的列表还会给每个 Binance
+  资产它的 CoinGecko id，由此决定该资产对应哪个已有的 instrument（在别处持有的同一种币）。
+  没有这个密钥时，Binance 无法定价的资产会显示为缺少价格。CoinGecko 的条款要求署名：
   Price data provided by [CoinGecko](https://www.coingecko.com)。
-- **ECB 参考汇率**，每天通过 Frankfurter（`api.frankfurter.dev`，无需密钥）获取，使 EUR 价格
-  可以显示为你的报告币种。它们只填补没有任何其他来源提供这两种币种之间汇率的日子。
+- **ECB 参考汇率**，每天通过 Frankfurter（`api.frankfurter.dev`，无需密钥）获取，每个安装都会
+  运行，无论有没有 Binance 连接，使 EUR 价格可以显示为你的报告币种。它们只填补没有任何其他
+  来源提供这两种币种之间汇率的日子。
 
 ### 阶段 B 将增加
 
