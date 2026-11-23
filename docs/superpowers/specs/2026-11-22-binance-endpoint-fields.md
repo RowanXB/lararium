@@ -15,7 +15,7 @@ Conventions:
 - Weight rule: `IP` = counted per IP (SAPI: 12,000/min per endpoint; `/api`: 6,000/min shared), `UID` = counted per account (SAPI: 180,000/min per endpoint).
 - "Doc" gives the anchor under `developers.binance.com/en/docs/catalog/`.
 
-Endpoint count: 107 endpoints with a full field table (the probe's 85 + 22 added), 19 more listed by one line. See "Totals" at the end.
+Endpoint count: 108 endpoints with a field table (the probe's 85 + 22 added + `klines`, which the prices need), 19 more listed by one line. See "Index of labels" and "Totals" at the end.
 
 ---
 
@@ -82,6 +82,26 @@ Id: `symbols[].symbol`. Time: `serverTime`. Seen: yes.
 For M7 only `symbol`, `status`, `baseAsset`, `quoteAsset` matter (to enumerate pairs for `my-trades`); the rest is trading-rule metadata.
 
 ---
+
+### `klines` — GET /api/v3/klines
+Host api.binance.com · weight 2 (IP, `/api` pool) · unsigned · doc `core-trading-spot-trading/api/rest-api/market-data-endpoints#klinecandlestick-data`
+Request: `symbol` and `interval` required (M7 uses `1d`); `startTime`, `endTime` optional (epoch ms); `limit` default 500, max 1000; `timeZone` default 0 (UTC). Bars come oldest first.
+Id: `symbol` (from the request) + open time. Time: open time. Seen: not probed. The body is an array of arrays; each bar is positional, so the paths below are positions.
+
+| Field | Type | Meaning |
+|---|---|---|
+| [][0] | integer | open time, epoch ms |
+| [][1] | decimal string | open price |
+| [][2] | decimal string | high price |
+| [][3] | decimal string | low price |
+| [][4] | decimal string | close price |
+| [][5] | decimal string | base asset volume |
+| [][6] | integer | close time, epoch ms (23:59:59.999 UTC for a `1d` bar) |
+| [][7] | decimal string | quote asset volume |
+| [][8] | integer | number of trades |
+| [][9] | decimal string | taker buy base asset volume |
+| [][10] | decimal string | taker buy quote asset volume |
+| [][11] | string | unused |
 
 ## 2. Key and account (Wallet REST API)
 
@@ -2165,6 +2185,123 @@ Daily snapshots (`snapshot`): real `updateTime` is 23:59:59 UTC of each day (the
 
 Everything else that returned records matched the docs field for field: `api-restrictions`, `account-info`, `account-status`, `api-trading-status`, `spot-account`, `user-asset`, `earn-account`, `bfusd-account`, `rwusd-account`, `um-balance`, `um-account` (assets and totals), `cm-balance`, `eth-staking-account`, `sol-staking-account`, `onchain-account`, `soft-staking-list` rows, `dci-accounts`, `discount-accounts`, `snapshot` (SPOT), `withdrawals`, `dividends`, `earn-flexible-subscriptions`, `my-trades`.
 No real shape exists (empty or refused) for: funding wallet, locked earn, all staking/on-chain histories, loans, every margin history, futures income and positions (USDⓈ-M), fiat, C2C, Pay, rebate, dust, universal transfers, dual investment and discount buy positions. Their columns rest on the docs alone.
+
+---
+
+## Index of labels
+
+One row per endpoint M7 reads, for the test that keeps the code's catalogue equal to this document. "Fields" says where the label's field table is: under its own heading, or in section 12's table for the two Portfolio Margin reads, whose fields are listed in prose there.
+
+| Label | Method | Host | Path | Fields |
+|---|---|---|---|---|
+| `account-info` | GET | api.binance.com | /sapi/v1/account/info | own heading |
+| `account-status` | GET | api.binance.com | /sapi/v1/account/status | own heading |
+| `api-restrictions` | GET | api.binance.com | /sapi/v1/account/apiRestrictions | own heading |
+| `api-trading-status` | GET | api.binance.com | /sapi/v1/account/apiTradingStatus | own heading |
+| `asset-detail` | GET | api.binance.com | /sapi/v1/asset/assetDetail | own heading |
+| `bfusd-account` | GET | api.binance.com | /sapi/v1/bfusd/account | own heading |
+| `bfusd-redemptions` | GET | api.binance.com | /sapi/v1/bfusd/history/redemptionHistory | own heading |
+| `bfusd-rewards` | GET | api.binance.com | /sapi/v1/bfusd/history/rewardsHistory | own heading |
+| `bfusd-subscriptions` | GET | api.binance.com | /sapi/v1/bfusd/history/subscriptionHistory | own heading |
+| `bnsol-rewards` | GET | api.binance.com | /sapi/v1/sol-staking/sol/history/bnsolRewardsHistory | own heading |
+| `c2c` | GET | api.binance.com | /sapi/v1/c2c/orderMatch/listUserOrderHistory | own heading |
+| `cloud-mining` | GET | api.binance.com | /sapi/v1/asset/ledger-transfer/cloud-mining/queryByPage | own heading |
+| `cm-account` | GET | dapi.binance.com | /dapi/v1/account | own heading |
+| `cm-balance` | GET | dapi.binance.com | /dapi/v1/balance | own heading |
+| `cm-income` | GET | dapi.binance.com | /dapi/v1/income | own heading |
+| `cm-positions` | GET | dapi.binance.com | /dapi/v1/positionRisk | own heading |
+| `cm-trades` | GET | dapi.binance.com | /dapi/v1/userTrades | own heading |
+| `coin-config` | GET | api.binance.com | /sapi/v1/capital/config/getall | own heading |
+| `convert` | GET | api.binance.com | /sapi/v1/convert/tradeFlow | own heading |
+| `dci-accounts` | GET | api.binance.com | /sapi/v1/dci/product/accounts | own heading |
+| `dci-positions` | GET | api.binance.com | /sapi/v1/dci/product/positions | own heading |
+| `deposits` | GET | api.binance.com | /sapi/v1/capital/deposit/hisrec | own heading |
+| `discount-accounts` | GET | api.binance.com | /sapi/v1/accumulator/product/sum-holding | own heading |
+| `discount-positions` | GET | api.binance.com | /sapi/v1/accumulator/product/position/list | own heading |
+| `dividends` | GET | api.binance.com | /sapi/v1/asset/assetDividend | own heading |
+| `dust` | GET | api.binance.com | /sapi/v1/asset/dribblet | own heading |
+| `earn-account` | GET | api.binance.com | /sapi/v1/simple-earn/account | own heading |
+| `earn-flexible-collateral` | GET | api.binance.com | /sapi/v1/simple-earn/flexible/history/collateralRecord | own heading |
+| `earn-flexible-position` | GET | api.binance.com | /sapi/v1/simple-earn/flexible/position | own heading |
+| `earn-flexible-redemptions` | GET | api.binance.com | /sapi/v1/simple-earn/flexible/history/redemptionRecord | own heading |
+| `earn-flexible-rewards` | GET | api.binance.com | /sapi/v1/simple-earn/flexible/history/rewardsRecord | own heading |
+| `earn-flexible-subscriptions` | GET | api.binance.com | /sapi/v1/simple-earn/flexible/history/subscriptionRecord | own heading |
+| `earn-locked-position` | GET | api.binance.com | /sapi/v1/simple-earn/locked/position | own heading |
+| `earn-locked-redemptions` | GET | api.binance.com | /sapi/v1/simple-earn/locked/history/redemptionRecord | own heading |
+| `earn-locked-rewards` | GET | api.binance.com | /sapi/v1/simple-earn/locked/history/rewardsRecord | own heading |
+| `earn-locked-subscriptions` | GET | api.binance.com | /sapi/v1/simple-earn/locked/history/subscriptionRecord | own heading |
+| `eth-redemptions` | GET | api.binance.com | /sapi/v1/eth-staking/eth/history/redemptionHistory | own heading |
+| `eth-stakes` | GET | api.binance.com | /sapi/v1/eth-staking/eth/history/stakingHistory | own heading |
+| `eth-staking-account` | GET | api.binance.com | /sapi/v2/eth-staking/account | own heading |
+| `exchange-info` | GET | api.binance.com | /api/v3/exchangeInfo | own heading |
+| `fiat-orders` | GET | api.binance.com | /sapi/v1/fiat/orders | own heading |
+| `fiat-payments` | GET | api.binance.com | /sapi/v1/fiat/payments | own heading |
+| `funding-asset` | POST | api.binance.com | /sapi/v1/asset/get-funding-asset | own heading |
+| `klines` | GET | api.binance.com | /api/v3/klines | own heading |
+| `loan-flexible-borrows` | GET | api.binance.com | /sapi/v2/loan/flexible/borrow/history | own heading |
+| `loan-flexible-liquidations` | GET | api.binance.com | /sapi/v2/loan/flexible/liquidation/history | own heading |
+| `loan-flexible-ltv-adjustments` | GET | api.binance.com | /sapi/v2/loan/flexible/ltv/adjustment/history | own heading |
+| `loan-flexible-ongoing` | GET | api.binance.com | /sapi/v2/loan/flexible/ongoing/orders | own heading |
+| `loan-flexible-repays` | GET | api.binance.com | /sapi/v2/loan/flexible/repay/history | own heading |
+| `margin-account` | GET | api.binance.com | /sapi/v1/margin/account | own heading |
+| `margin-borrow-repay` | GET | api.binance.com | /sapi/v1/margin/borrow-repay | own heading |
+| `margin-capital-flow` | GET | api.binance.com | /sapi/v1/margin/capital-flow | own heading |
+| `margin-interest` | GET | api.binance.com | /sapi/v1/margin/interestHistory | own heading |
+| `margin-isolated-account` | GET | api.binance.com | /sapi/v1/margin/isolated/account | own heading |
+| `margin-liquidation-loan` | GET | api.binance.com | /sapi/v1/margin/liquidation-loan | own heading |
+| `margin-liquidation-loan-repays` | GET | api.binance.com | /sapi/v1/margin/liquidation-loan/repay-history | own heading |
+| `margin-liquidations` | GET | api.binance.com | /sapi/v1/margin/forceLiquidationRec | own heading |
+| `margin-small-liability` | GET | api.binance.com | /sapi/v1/margin/exchange-small-liability-history | own heading |
+| `margin-trades` | GET | api.binance.com | /sapi/v1/margin/myTrades | own heading |
+| `margin-transfers` | GET | api.binance.com | /sapi/v1/margin/transfer | own heading |
+| `my-trades` | GET | api.binance.com | /api/v3/myTrades | own heading |
+| `onchain-account` | GET | api.binance.com | /sapi/v1/onchain-yields/account | own heading |
+| `onchain-locked-position` | GET | api.binance.com | /sapi/v1/onchain-yields/locked/position | own heading |
+| `onchain-redemptions` | GET | api.binance.com | /sapi/v1/onchain-yields/locked/history/redemptionRecord | own heading |
+| `onchain-rewards` | GET | api.binance.com | /sapi/v1/onchain-yields/locked/history/rewardsRecord | own heading |
+| `onchain-subscriptions` | GET | api.binance.com | /sapi/v1/onchain-yields/locked/history/subscriptionRecord | own heading |
+| `opt-account` | GET | eapi.binance.com | /eapi/v1/marginAccount | own heading |
+| `opt-bill` | GET | eapi.binance.com | /eapi/v1/bill | own heading |
+| `opt-exercises` | GET | eapi.binance.com | /eapi/v1/exerciseRecord | own heading |
+| `opt-positions` | GET | eapi.binance.com | /eapi/v1/position | own heading |
+| `opt-trades` | GET | eapi.binance.com | /eapi/v1/userTrades | own heading |
+| `pay` | GET | api.binance.com | /sapi/v1/pay/transactions | own heading |
+| `pm-account` | GET | papi.binance.com | /papi/v1/account | §12 table |
+| `pm-balance` | GET | papi.binance.com | /papi/v1/balance | §12 table |
+| `rebate` | GET | api.binance.com | /sapi/v1/rebate/taxQuery | own heading |
+| `rwusd-account` | GET | api.binance.com | /sapi/v1/rwusd/account | own heading |
+| `rwusd-redemptions` | GET | api.binance.com | /sapi/v1/rwusd/history/redemptionHistory | own heading |
+| `rwusd-rewards` | GET | api.binance.com | /sapi/v1/rwusd/history/rewardsHistory | own heading |
+| `rwusd-subscriptions` | GET | api.binance.com | /sapi/v1/rwusd/history/subscriptionHistory | own heading |
+| `snapshot` | GET | api.binance.com | /sapi/v1/accountSnapshot | own heading |
+| `soft-staking-list` | GET | api.binance.com | /sapi/v1/soft-staking/list | own heading |
+| `soft-staking-rewards` | GET | api.binance.com | /sapi/v1/soft-staking/history/rewardsRecord | own heading |
+| `sol-boost-rewards` | GET | api.binance.com | /sapi/v1/sol-staking/sol/history/boostRewardsHistory | own heading |
+| `sol-redemptions` | GET | api.binance.com | /sapi/v1/sol-staking/sol/history/redemptionHistory | own heading |
+| `sol-stakes` | GET | api.binance.com | /sapi/v1/sol-staking/sol/history/stakingHistory | own heading |
+| `sol-staking-account` | GET | api.binance.com | /sapi/v1/sol-staking/account | own heading |
+| `sol-unclaimed-rewards` | GET | api.binance.com | /sapi/v1/sol-staking/sol/history/unclaimedRewards | own heading |
+| `spot-account` | GET | api.binance.com | /api/v3/account | own heading |
+| `time` | GET | api.binance.com | /api/v3/time | own heading |
+| `travel-deposits` | GET | api.binance.com | /sapi/v1/localentity/deposit/history | own heading |
+| `travel-withdrawals` | GET | api.binance.com | /sapi/v1/localentity/withdraw/history | own heading |
+| `um-account` | GET | fapi.binance.com | /fapi/v3/account | own heading |
+| `um-balance` | GET | fapi.binance.com | /fapi/v3/balance | own heading |
+| `um-income` | GET | fapi.binance.com | /fapi/v1/income | own heading |
+| `um-positions` | GET | fapi.binance.com | /fapi/v3/positionRisk | own heading |
+| `um-trades` | GET | fapi.binance.com | /fapi/v1/userTrades | own heading |
+| `universal-transfer` | GET | api.binance.com | /sapi/v1/asset/transfer | own heading |
+| `user-asset` | POST | api.binance.com | /sapi/v3/asset/getUserAsset | own heading |
+| `vip-loan-collateral-account` | GET | api.binance.com | /sapi/v1/loan/vip/collateral/account | own heading |
+| `vip-loan-interest` | GET | api.binance.com | /sapi/v1/loan/vip/accruedInterest | own heading |
+| `vip-loan-ongoing` | GET | api.binance.com | /sapi/v1/loan/vip/ongoing/orders | own heading |
+| `vip-loan-repays` | GET | api.binance.com | /sapi/v1/loan/vip/repay/history | own heading |
+| `vip-loan-requests` | GET | api.binance.com | /sapi/v1/loan/vip/request/data | own heading |
+| `wallet-balance` | GET | api.binance.com | /sapi/v1/asset/wallet/balance | own heading |
+| `wbeth-rewards` | GET | api.binance.com | /sapi/v1/eth-staking/eth/history/wbethRewardsHistory | own heading |
+| `wbeth-unwraps` | GET | api.binance.com | /sapi/v1/eth-staking/wbeth/history/unwrapHistory | own heading |
+| `wbeth-wraps` | GET | api.binance.com | /sapi/v1/eth-staking/wbeth/history/wrapHistory | own heading |
+| `withdrawals` | GET | api.binance.com | /sapi/v1/capital/withdraw/history | own heading |
 
 ---
 
