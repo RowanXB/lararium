@@ -237,7 +237,7 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
 **Posting rules:** design §5.7 (Trading 212). Until the owner's first trade, the sign rules are: `fill.quantity` positive for BUY and negative for SELL whatever its sign in the row (side decides); cash = −`netValue` for BUY and +`netValue` for SELL when `netValue` ≥ 0, else `netValue` as given; each `taxes[]` entry a fee posting of −|quantity|. Rows whose result does not balance within the rounding rule fail the sync naming the fill id. Transactions: DEPOSIT, INTEREST_ON_FREE_CASH, LENDING_INTEREST +|amount|; WITHDRAW, FEE −|amount|; TRANSFER with `amount` as given, and flagged once (`Trading 212 flagged: TRANSFER`) so the owner's real check confirms its sign. Account: `asset`/`broker`/`transactions`, named per design §5.5, tax wrapper from the connection's `account_kind`. Pies: rows in `trading212_pies`; no postings. Reconciliation: design §5.11 at the sync's time; `reported` snapshots per instrument and for GBP cash (`availableToTrade + reservedForOrders + inPies`).
 
 - [ ] **Step 1: Write the failing tests:**
-  - `test_buy_usd_stock_with_fx_fee`: BUY 3 `ZZQA_US_EQ` at 100.00 USD, `fxRate` 0.8, `netValue` 241.20 GBP, taxes `CURRENCY_CONVERSION_FEE` 1.20 GBP → `ZZQA +3 @cost 80.00 GBP`, GBP −240.00, GBP −1.20 `is_fee`, Unassigned +1.20; `trading212_orders` and `trading212_order_taxes` rows.
+  - `test_buy_usd_stock_with_fx_fee`: BUY 3 `ZZQA_US_EQ` at 100.00 USD, `fxRate` 0.8, `netValue` 241.20 GBP, taxes `CURRENCY_CONVERSION_FEE` 1.20 GBP → `ZZQA +3 @cost 80.00 GBP`, GBP −240.00, GBP −1.20 `is_fee`, Unassigned +1.20 (weights +240.00 −240.00 −1.20 +1.20 = 0, as `ledger._weight` counts them; the account's GBP falls by 241.20, the `netValue`, as IBKR's commission does); `trading212_orders` and `trading212_order_taxes` rows.
   - `test_sell_weighs_by_price`; `test_split_from_unassigned`; `test_dividend_against_unassigned`.
   - `test_deposit_through_transfer_contra`: a DEPOSIT → `bank_transfer` false (card, design §5.12), contra Unassigned until a card merchant is registered.
   - `test_cancelled_order_no_transaction`.
@@ -337,7 +337,7 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
 
 **Interfaces:**
 - Consumes: Task 9; as Task 5.
-- Produces: `NORMALIZER_VERSION = "etoro-norm-1"`; `async def normalize(ctx, raw_record_ids) -> NormalizeReport`; `async def listing(ctx, instrument_id: int, symbol: str, name: str, currency: str, isin: str | None) -> UUID | None`; `async def merge_instruments(ctx, keep: UUID, drop: UUID) -> None` (moves postings, prices and identifiers from `drop` to `keep`, deletes `drop`, audited).
+- Produces: `NORMALIZER_VERSION = "etoro-norm-1"`; `async def normalize(ctx, raw_record_ids) -> NormalizeReport`; `async def listing(ctx, instrument_id: int, symbol: str, name: str, currency: str, isin: str | None) -> UUID | None`; `async def merge_instruments(ctx, keep: UUID, drop: UUID) -> None`: repoints **every row that references `drop`** to `keep` (postings, their cost and price instruments, prices, balance snapshots, identifiers, the typed tables' instrument columns, and any other column with a foreign key to `finance.instruments`, found from the catalog so a later table is covered), then deletes `drop`, audited. A price of `drop` on a date and source `keep` already has is discarded (`keep`'s stays); any other unique conflict fails the merge naming the table, before anything is written.
 
 **Rules:** design §5.5–§5.7 for accounts (one per Balances entry; MoneyFarm `snapshots` with a `reported` snapshot per sync; other account types flagged), instruments (kinds 5 → `equity`, 6 → `etf`; non-real, leveraged or mirrored positions flagged), opens and closes from the API (USD cost), eToro Money transactions (`settled` only), prices from candles and current rates (source `etoro`), `etoro_balance_history` and `reported` cash snapshots per day, `etoro_users` from `/me`.
 
@@ -350,6 +350,7 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
   - `test_internal_transfer_names_trading`: an `internalTransfer` debit → counterparty identifier = Trading's `etoro_account` (per Task 0 check 4's rule).
   - `test_pending_cash_row_not_posted`.
   - `test_cfd_flagged_not_posted`.
+  - `test_merge_after_positions_recorded`: an API sync records an eToro position (a `reported` snapshot and an `etoro_positions` row) for an instrument without an ISIN; a statement then brings an ISIN an IBKR instrument in the same currency holds → one instrument remains; the snapshot, the typed rows, the postings and the prices all reference it; no row references the deleted id.
   - `test_personal_fields_stored_not_logged` (caplog empty of them).
 - [ ] **Step 2: Run** `uv run pytest tests/finance/etoro/test_normalize_api.py -q`; expected: FAIL.
 - [ ] **Step 3: Implement.**
