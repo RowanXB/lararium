@@ -4,6 +4,9 @@
 # Lararium is AGPL-3.0-or-later. A dependency may carry any licence the FSF lists as
 # compatible with GPLv3 (https://www.gnu.org/licenses/license-list.html): AGPLv3 section 13
 # lets AGPL code be combined with GPLv3 code, so the GPLv3-compatible set is the AGPL one too.
+# `X WITH exception` passes only when listed so in full (e.g. "GPL-2.0-or-later WITH
+# Classpath-exception-2.0"), after reviewing the exception: nothing stops a package writing a
+# restriction there. None of ours uses one yet.
 # Not here, so they fail: GPL-2.0-only and LGPL-2.0-only (no "or later" to reach v3),
 # EPL-1.0, CDDL-1.0, the original 4-clause BSD, SSPL and the non-commercial or no-derivatives
 # Creative Commons licences, among others.

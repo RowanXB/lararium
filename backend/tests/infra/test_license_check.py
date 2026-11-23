@@ -21,7 +21,15 @@ def _load() -> Any:
 
 
 lc = _load()
-ALLOWED = frozenset({"MIT", "Apache-2.0", "BSD-3-Clause", "GPL-2.0-or-later"})
+ALLOWED = frozenset(
+    {
+        "MIT",
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "GPL-2.0-or-later",
+        "GPL-2.0-only WITH Classpath-exception-2.0",
+    }
+)
 
 
 @pytest.mark.parametrize(
@@ -34,7 +42,11 @@ ALLOWED = frozenset({"MIT", "Apache-2.0", "BSD-3-Clause", "GPL-2.0-or-later"})
         ("(MIT OR GPL-2.0-only) AND Apache-2.0", True),
         ("MIT OR GPL-2.0-only AND Apache-2.0", True),  # AND binds tighter
         ("GPL-2.0-only OR GPL-2.0-only AND MIT", False),
-        ("GPL-2.0-or-later WITH Classpath-exception-2.0", True),
+        # WITH passes only as a listed pair: anything can follow it, a restriction too.
+        ("GPL-2.0-only WITH Classpath-exception-2.0", True),
+        ("GPL-2.0-or-later WITH Classpath-exception-2.0", False),
+        ("Apache-2.0 WITH Commons-Clause", False),
+        ("(GPL-2.0-only WITH Classpath-exception-2.0) AND MIT", True),
         ("(MIT)", True),
         # Not SPDX expressions, so unknown: they fail.
         ("", False),

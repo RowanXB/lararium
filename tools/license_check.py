@@ -49,7 +49,8 @@ def _tokens(expression: str) -> list[str] | None:
 
 def parse(expression: str) -> Node | None:
     """An SPDX licence expression as a tree, or None when it isn't one. `X WITH exception`
-    becomes X: an exception only grants more."""
+    stays one identifier, "X WITH exception": it passes only when listed so in full, since
+    anything can be written after WITH (a restriction such as Commons-Clause included)."""
     tokens = _tokens(expression)
     if not tokens:
         return None
@@ -91,7 +92,7 @@ def parse(expression: str) -> Node | None:
             take()
             if peek() in {None, "(", ")", "AND", "OR", "WITH"}:
                 return None
-            take()
+            return f"{token} WITH {take()}"
         return token
 
     def both() -> Node | None:
@@ -204,9 +205,11 @@ def python_license(metadata: importlib.metadata.PackageMetadata) -> str:
     return "classifiers: " + "; ".join(classifiers) if classifiers else ""
 
 
-def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str]]:
-    """The backend's production dependencies, as installed here, and the problems found:
-    one that should be installed and isn't, or at another version than uv.lock pins."""
+def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str], list[str]]:
+    """The backend's production dependencies, as installed here; the problems found (one
+    that should be installed and isn't, or at another version than uv.lock pins); and those
+    not checked because their marker leaves them out of this platform. CI runs on Linux,
+    as the image does, so there every dependency the image ships is checked."""
     export = subprocess.run(
         [
             "uv",
@@ -228,6 +231,7 @@ def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str]]:
     ).stdout
     dependencies: list[Dependency] = []
     problems: list[str] = []
+    other_platforms: list[str] = []
     for line in export.splitlines():
         requirement, _, marker = line.partition(";")
         if not requirement.strip() or requirement.startswith(("#", "-")):
@@ -236,9 +240,10 @@ def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str]]:
         try:
             distribution = importlib.metadata.distribution(name)
         except importlib.metadata.PackageNotFoundError:
-            if not marker.strip():
+            if marker.strip():
+                other_platforms.append(f"python {name} {version} ({marker.strip()})")
+            else:
                 problems.append(f"python {name} {version} is not installed: run make backend-sync")
-            # else it is only for other platforms (its marker excludes this one)
             continue
         if distribution.version != version:
             problems.append(
@@ -248,7 +253,7 @@ def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str]]:
         dependencies.append(
             Dependency("python", name, version, python_license(distribution.metadata))
         )
-    return dependencies, problems
+    return dependencies, problems, other_platforms
 
 
 def npm_dependencies(web: Path) -> list[Dependency]:
@@ -271,7 +276,9 @@ def npm_dependencies(web: Path) -> list[Dependency]:
 
 def main() -> int:
     policy = load_policy(POLICY)
-    python, problems = python_dependencies(ROOT / "backend")
+    python, problems, other_platforms = python_dependencies(ROOT / "backend")
+    for skipped in other_platforms:
+        print(f"note: not checked on this platform, which its marker excludes: {skipped}")
     npm = npm_dependencies(ROOT / "web")
     problems += check([*python, *npm], policy)
     for problem in problems:
