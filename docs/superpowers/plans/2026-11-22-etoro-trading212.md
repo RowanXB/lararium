@@ -16,7 +16,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-22-etoro-trading212-design.md` (the M6 design; read it first), with the M5 design `2026-11-18-ibkr-flex-design.md`, the M4 design `2026-11-15-transfer-matching-design.md`, the transfer-evidence and owner-pair designs (2026-11-21), and the parent `2026-11-11-financial-gate-phase1-design.md` (§6.3, §6.6, §7.6, §8.3, §13, §14).
 
-**Builds on:** `main` at `68e0bec` or later. **Migrations are numbered after the latest on `main` when Task 3 starts** (0029 on 2026-11-23, so `0030` onward); below they are written `00A`, `00B`, `00C` in order.
+**Builds on:** `main` at `68e0bec` or later. **Migrations are numbered after the latest on `main` when Task 3 starts** (0029 on 2026-11-23, so `0030` onward); below they are written `00A`, `00B`, `00C`, `00D`, numbered in the order the tasks land.
 
 ## Decisions
 
@@ -63,7 +63,7 @@ Choices the design leaves to the builder, made here so tasks don't have to:
     - Checks 1, 2, 4, 6 and 8 remain.
     The rest is filled in by Task 0. Until then the provisional values above stand, and Tasks 8–12 and 16 (which use the zone, the decimals, check 4's rule and N) do not start; Tasks 1–7, 14, 15 and 17 may.
 
-**Not in this plan:** screens beyond the three forms; Trading 212 bank-transfer deposits by payment reference; CFDs, leverage, copy trading, Options, Crypto wallet; FX rates into `finance.fx_rates`; Trading 212's CSV export unless Task 0 brings it in (then Task 7a is added by a plan amendment).
+**Not in this plan:** screens beyond the three forms; Trading 212 bank-transfer deposits by payment reference; CFDs, leverage, copy trading, Options, Crypto wallet; FX rates into `finance.fx_rates`; posting Trading 212 export rows of an `Action` other than deposits and withdrawals before the first real trade shows how they match API records (Task 13a stores and flags them).
 
 ## Global Constraints
 
@@ -97,6 +97,7 @@ backend/
     00A_finance_trading212.py      # Task 3: trading212_* tables, trading212_account kind, trading212_ticker scheme
     00B_finance_etoro.py           # Task 9: etoro_* tables, etoro_account kind, source_reviews, source_decisions, transfer_leg_fees
     00C_finance_card_merchants.py  # Task 15: card_merchant kind, account_identifier_holders
+    00D_finance_trading212_export.py  # Task 13a: trading212_export_rows
   src/lararium/modules/finance/
     typed_tables.py, readonly_http.py, source_reviews.py
     trading212/…, etoro/…
@@ -130,7 +131,7 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
   7. a Trading 212 CSV export the owner downloads from the app: headers, value classes, row counts (check 7);
   8. the maximum decimal places of eToro units and Trading 212 quantities seen (check 8).
 - [ ] **Step 2: The owner** downloads a second eToro statement overlapping the first, and a Trading 212 CSV export of each account, into `private/m6-probe/statement/`, and runs both probes.
-- [ ] **Step 3: Record the findings** as Decision 11a (no values), set N (Decision 16), the statement zone (Decision 11), the decimals (Task 5, Task 10), and decide check 7: if the CSV has fields the API lacks, add Task 7a (an upload like eToro's statement) to this plan with the owner's approval; otherwise note it is left out.
+- [ ] **Step 3: Record the findings** as Decision 11a (no values), set N (Decision 16), the statement zone (Decision 11), the decimals (Task 5, Task 10), and, after the first trade, record how trade rows of the Trading 212 export match API records (Task 13a). Check 7 already decided the export is imported, optionally (owner, 2026-11-23).
 - [ ] **Step 4: Commit** the plan amendment `docs: record what the M6 audit of the owner's data showed`.
 
 ### Task 1: Typed-table helpers
@@ -423,6 +424,44 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
 - [ ] **Step 4: Run** `make check`; expected: green.
 - [ ] **Step 5: Commit** `feat: connect eToro and upload its statements through the API and the Connections page`.
 
+### Task 13a: Trading 212 export upload (optional)
+
+The owner decided on 2026-11-23 to import the export as well as the API, and to keep it optional (design §3a, §5.3a). **Nothing may depend on it.** Without an upload, Trading 212 syncs, posts, reconciles and pairs in full, and no warning or notification asks for one.
+
+**Files:**
+- Create: `trading212/export.py`, `migrations/versions/00D_finance_trading212_export.py`, `tests/finance/trading212/test_export.py`, `tests/api/test_trading212_export_api.py`
+- Modify: `trading212/normalize.py`, `trading212/fields.py` (`EXPORT_REQUIRED`, `EXPORT_KNOWN`), `connections_api.py`, `schemas.py`, `ConnectionsPage.tsx` (+ test), `web/openapi.json`, `web/src/api/*`
+
+**Interfaces:**
+- Consumes: Tasks 5 and 9 (`source_reviews`, `decision_for`); the CSV parsing of the M2 importer is not reused (its profile model is for bank statements).
+- Produces:
+  - `@dataclass(frozen=True) class ExportRow(key: str, cells: Mapping[str, str])`;
+  - `def parse_export(body: bytes) -> tuple[tuple[ExportRow, ...], frozenset[str]]`, which returns the rows and the flagged columns. It reads UTF-8 with an optional BOM. Required columns: `Action`, `Time (UTC)`, `ID`, `Total`, `Currency (Total)`. A missing one raises `ExportError` naming it. The key is `ID`.
+  - `async def ingest_export(ctx: SyncContext, body: bytes, filename: str) -> IngestResult`. It stores the document (`source = "finance.trading212"`) and raw records `trading212.export_row`, then normalises.
+  - `POST /api/v1/connections/{id}/trading212-export` `upload_trading212_export`. It takes a CSV of at most 16 MiB and returns 202. It returns 409 before the first sync, and 422 when an `ID` the API knows belongs to another account. The file input on a Trading 212 connection reads "Upload Trading 212 export (CSV, optional)".
+- The table `finance.trading212_export_rows` has: connection, `ID`, the transaction it enriches (nullable), one column per known column (Decision 3), and `notes_transaction_id` parsed from `Notes` matching `^Transaction ID: (\S+)$`.
+
+**Rules:** design §5.3a.
+- A row whose `ID` is an API transaction `reference` enriches that record.
+- A deposit or withdrawal row the API lacks posts as `transaction:<ID>`. The sign comes from `Action`, `Total` is the amount, and the key is the same one the API would use, so a later API row only enriches it.
+- Other actions are stored and flagged (`Trading 212 flagged: export action <Action>`), and post nothing.
+- A disagreement on a posting value becomes a review item (Decision 14). There, `take: "statement"` means the export.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `test_parse_export_columns`: the audited header; a BOM; a missing `ID` names it; an extra column with a value is flagged.
+  - `test_notes_transaction_id_typed`.
+  - `test_export_row_enriches_api_deposit`: the postings are unchanged, and the export row links the transaction.
+  - `test_export_only_deposit_posts_then_api_enriches`: the same ledger as API-first.
+  - `test_trade_row_flagged_not_posted`.
+  - `test_upload_twice_writes_nothing`.
+  - `test_other_accounts_ids_refused_422`.
+  - `test_works_without_export`: a full Trading 212 history synced with no upload gives no export warning, flag or notification, and reconciles clean.
+  - vitest `uploads a Trading 212 export`.
+- [ ] **Step 2: Run** `uv run pytest tests/finance/trading212/test_export.py tests/api/test_trading212_export_api.py -q`; expected: FAIL.
+- [ ] **Step 3: Implement**, then `make openapi`.
+- [ ] **Step 4: Run** `make check`; expected: green.
+- [ ] **Step 5: Commit** `feat: import Trading 212 exports alongside the API, optionally`.
+
 ## Phase D: transfers
 
 ### Task 14: Cross-currency pairing and the conversion posting
@@ -544,7 +583,8 @@ Not code. The implementer extends `private/m6-probe/` (gitignored), the owner ru
   | §5.1 connections and keys | 2, 3, 6, 7, 9, 13 |
   | §5.2 fetching | 3, 4, 7, 9 |
   | §5.3 statement upload | 8, 9, 13 |
-  | §5.4 storage | 3, 9 (CSV export: Task 0 check 7) |
+  | §5.3a Trading 212 export | 13a |
+  | §5.4 storage | 3, 9, 13a |
   | §5.5 accounts | 5, 10 |
   | §5.6 instruments | 5, 10, 11 |
   | §5.7 records | 5, 10, 11 |

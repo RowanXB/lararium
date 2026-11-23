@@ -52,6 +52,7 @@ The probes printed only field names, value shapes, counts and yes/no checks, nev
 1. **Trading 212: one connection per account** (Invest, Stocks ISA), syncing positions, cash, orders, dividends, transactions and pies into a broker account each.
 2. **eToro: one connection** syncing three accounts: eToro Trading (USD broker), eToro Money (GBP cash), MoneyFarm ISA (balance only).
 3. **The eToro statement fills what the API lacks.** Uploaded to the eToro connection, it supplies the Trading account's cash events (transfers, conversion fees, withdrawals, dividends, overnight fees, adjustments) and enriches what the API already recorded (ISIN, FX rates, spreads, GBP profit, withholding tax). Where both give a value that makes a posting and they disagree, both are kept and the owner is asked (owner, 2026-11-23; §5.7).
+3a. **Trading 212's CSV export is imported too** (owner, 2026-11-23, by the rule that every format is imported unless another is its superset): uploaded to the account's Trading 212 connection, it adds what the API lacks (the deposit's card "Transaction ID" in `Notes`, and whatever its trade rows carry) under the same precedence as the eToro statement (§5.3a). **It is optional** (owner, 2026-11-23): a connection that never receives one syncs, posts, reconciles and pairs in full from the API, and nothing prompts for it.
 4. **Every field each source returns is stored typed**, API and statement alike (owner's rule of 2026-11-15, amended 2026-11-21: derivable fields too; only a field with a better home goes there instead). An unknown field or enum value is flagged by name, never by value.
 5. **Records are the truth; reports check them** (M5's approach A). After every sync and upload, each account's positions and cash are checked against what the platform reports.
 6. **Transfers pair, across currencies.** Monzo ↔ eToro Money and eToro Money ↔ eToro Trading pair automatically; the latter posts the conversion and its fee (parent §8.3). Monzo card deposits into Trading 212 pair automatically when unambiguous. The owner can pair two records of different currencies by hand.
@@ -60,11 +61,10 @@ The probes printed only field names, value shapes, counts and yes/no checks, nev
 
 ### Non-goals
 
-- **Web UI beyond three forms** (add Trading 212, add eToro, upload an eToro statement). Cross-currency pairing, the "statement needed" prompt and review of conflicts are API and notifications only in M6 (owner, 2026-11-23).
+- **Web UI beyond four forms** (add Trading 212, add eToro, upload an eToro statement, upload a Trading 212 export). Cross-currency pairing, the "statement needed" prompt and review of conflicts are API and notifications only in M6 (owner, 2026-11-23).
 - **CFDs, leverage, copy trading (mirrors), Smart Portfolios, eToro Options, Crypto wallet, Spaceship, Plaee.** The owner holds none. Their rows and balances are flagged and not posted (§5.6); reconciliation shows their effect.
 - **MoneyFarm positions or transactions.** eToro's API gives its balance only.
 - **Telling Trading 212 accounts apart for bank-transfer deposits by payment reference.** There is no such deposit yet (owner's rule: no features for hypothetical cases). It is reconsidered when the first one appears; until then the owner pairs it by hand (§5.12).
-- **Trading 212's CSV export.** See §5.4 and §8: its use is decided after the Task 0 audit.
 - **eToro's PDF statement.** The xlsx is a superset (§1); Task 0 confirms it.
 - **Tax calculations** (out of Phase 1). **Runtime NAV alerts, stale-sync heartbeats** (M9).
 
@@ -205,6 +205,16 @@ On prompt, not on a schedule: Lararium notifies "upload an eToro statement" when
 - **Overlapping statements** write each row once. A statement row has no id (except Position ID on trade rows), so its key is: date-time, Type, Details, Amount, Units, Position ID, plus its occurrence number among identical rows of that statement. The same row in two overlapping statements has the same key. **Builder-check call to verify in Task 0:** that eToro lists the same event identically in two statements covering it.
 - A statement's period is recorded; reconciliation uses it (§5.11).
 
+### 5.3a The Trading 212 CSV upload
+
+- **Optional.** Nothing depends on it: the API alone posts every record, reconciliation compares against the API's reports only, and no warning or notification asks for an export. An upload only adds its typed fields and any row the API skipped.
+- What the audit showed (deposits only so far): columns `Action`, `Time (UTC)`, `Notes`, `ID`, `Total`, `Currency (Total)`. `ID` equals the API's transaction `reference`, and `Time (UTC)` equals its `dateTime`. `Notes` carries "Transaction ID: <id>", which the API does not return. Trade rows' columns are unknown until the owner's first trade.
+- `POST /connections/{id}/trading212-export`: a CSV file, at most 16 MiB; 409 until the connection's first sync has finished; 202, then ingested and normalised like the eToro statement. The owner downloads it from the app (History → export); Lararium never calls `POST /history/exports`, which is a write that notifies the owner's phone.
+- The file is a document (`source = "finance.trading212"`); each row is a raw record `trading212.export_row` with its cells as text.
+- **Columns.** Required: `Action`, `Time (UTC)`, `ID`, `Total`, `Currency (Total)`. Every other column is typed by Decision 3's rule once known; a column not yet known, with a value, is flagged by name and kept in the raw record. `Notes` is stored as text, and "Transaction ID: <id>" also as a typed `notes_transaction_id`.
+- **Keys.** A row whose `ID` is an API transaction's `reference` belongs to that record (`transaction:<ID>`); the row only enriches it. A row of another `Action` (a trade, a dividend, interest) is matched to the API's record by the rule the first real rows show (the plan's Task 0 records it); until then such rows are stored typed, flagged, and not posted, because the API posts those events.
+- **Precedence** is the eToro statement's (§5.7): the API's values make the postings; a CSV row the API lacks (a skipped page) posts from the CSV; a disagreement in a posting value is a review item. The CSV must belong to the connection's account: its `ID`s that the API knows must be on that account, else 422.
+
 ### 5.4 Storage
 
 - **Raw records**: every API response row and statement row (§5.3), record types `etoro.*` and `trading212.*`. Request metadata: the endpoint and query (never a key).
@@ -233,7 +243,7 @@ On prompt, not on a schedule: Lararium notifies "upload an eToro statement" when
 | `finance.etoro_closed_events`, `finance.etoro_stockback` | connection, row | every field |
 
 - **Generic broker tables (M5's open question): not made.** The two platforms share few fields under different meanings; each gets its own tables, as IBKR has.
-- **Trading 212's CSV export: decided after Task 0.** Its columns are undocumented, the API's `POST /history/exports` is a write (it creates a report and notifies the owner's phone), and the owner has no rows that would show what it adds. Task 0 asks the owner to download one from the app and probes its shape; if it has fields the API lacks (users report card and withholding detail), the plan adds an upload route like eToro's statement; otherwise it is left out (§8).
+- **Trading 212's CSV export** is stored in `finance.trading212_export_rows` (keyed by connection and `ID`, plus the record it enriches), one column per known column (§5.3a).
 
 ### 5.5 Accounts
 
@@ -370,13 +380,14 @@ Through the existing notifier, never with keys, ids beyond last four characters,
 - `POST /connections/etoro`: display name, Public API Key, User Key → 201; refuses a key with write scopes (422, naming none of them beyond "write"); queues a sync.
 - `PUT /connections/{id}/etoro`: new keys.
 - `POST /connections/{id}/etoro-statement`: §5.3.
+- `POST /connections/{id}/trading212-export`: §5.3a.
 - `POST /transactions/{id}/pair`: accepts different fiat instruments or different amounts (§5.12).
 - `GET /accounts/{id}/identifiers` and the registry routes accept the new kinds.
 - Review items from §5.7 are listed by a `GET` on the connection (`/connections/{id}/reviews`) and resolved by `POST .../reviews/{id}/resolve` with `{"take": "api" | "statement"}`, stored as an owner decision (§5.7). **Builder-check call:** the minimal shape; the UI comes later.
 
 Audit arguments never include keys.
 
-**Connections page:** an "Add Trading 212" form (kind, key, secret as password fields), an "Add eToro" form (two password fields), and on an eToro connection an "Upload eToro statement (xlsx)" file input. Nothing else (owner, 2026-11-23).
+**Connections page:** an "Add Trading 212" form (kind, key, secret as password fields), an "Add eToro" form (two password fields), on an eToro connection an "Upload eToro statement (xlsx)" file input, and on a Trading 212 connection an "Upload Trading 212 export (CSV, optional)" file input. Nothing else (owner, 2026-11-23).
 
 ## 6. Edge cases
 
@@ -406,7 +417,6 @@ Audit arguments never include keys.
 
 - Screens: cross-currency pairing, review items, statement prompts, pies (owner, 2026-11-23: backend first).
 - Identifying Trading 212 bank-transfer deposits by payment reference, once one exists.
-- Trading 212's CSV export, if Task 0 does not bring it into M6 (§5.4).
 - A price source for Trading 212-only instruments before the connection's first day.
 - M9: runtime NAV checks, stale-sync heartbeats, reconciliation views.
 
@@ -421,7 +431,7 @@ Audit arguments never include keys.
   4. that each eToro Money internal transfer has exactly one statement transfer row within the window, and how its counterparty names Trading (§5.12). Fallback: where two candidates exist, the owner pairs them (`several_candidates`), so a failure here does not stop the plan;
   5. the time gap between each Monzo card payment and its Trading 212 deposit, to pin N (§5.12). Fallback: if the gaps do not separate the owner's two deposits, they are paired by the owner;
   6. the xlsx-over-PDF superset (every PDF field present in the xlsx);
-  7. a Trading 212 CSV export's columns (§5.4), deciding whether M6 imports it;
+  7. a Trading 212 CSV export's columns (§5.3a): done for deposits (§5.3a); trade rows after the first trade;
   8. `decimals` for units and quantities (§5.6).
   Trading 212's sign conventions and `netValue` formula wait for the owner's first trade; the plan writes the mapping from the docs and the real check confirms it (§10).
 
@@ -434,6 +444,7 @@ Audit arguments never include keys.
 - **eToro accounts modelled separately.**
 - **Trading 212 deposits**: by Apple Pay so far, maybe bank transfer later. **Pies** will be used.
 - **Backend first**; UI later, except what entering keys and uploading needs.
+- **Trading 212's CSV export is imported** as well as the API (2026-11-23, after the audit showed a field the API lacks), **optionally**: everything works without it.
 
 ## 10. Verification
 
