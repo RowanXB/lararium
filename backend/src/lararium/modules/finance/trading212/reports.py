@@ -18,8 +18,8 @@ from uuid import UUID
 from sqlalchemy import select, text
 
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import reported_snapshot
 from lararium.modules.finance.pricing import record_price
-from lararium.modules.finance.trading212 import reconcile
 from lararium.modules.finance.trading212.fields import COLUMNS
 from lararium.modules.finance.trading212.instruments import reclassify
 from lararium.modules.finance.trading212.state import (
@@ -141,7 +141,7 @@ async def _snapshot(run: Run, report: Report) -> UUID | None:
         if found is None:
             return None
         instrument_id, quantity = found, number_at(record, record.content, "quantity")
-    return await reconcile.reported_snapshot(
+    return await reported_snapshot(
         run.command, run.account, instrument_id, quantity, report.seen_at, report.day
     )
 

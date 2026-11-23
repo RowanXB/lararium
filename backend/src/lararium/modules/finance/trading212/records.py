@@ -21,19 +21,25 @@ history arriving later moves it, and a full history leaves none.
 
 from collections.abc import Sequence
 from datetime import datetime, time, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select, text
+from sqlalchemy import func, select, text
 
 from lararium.core import models as core_models
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import (
+    holdings,
+    not_opening,
+    per_unit,
+    settle_rounding,
+)
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.ledger import CounterpartyFields, PostingInput, compute_residuals
+from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import first_sighting, list_sightings
-from lararium.modules.finance.trading212 import accounts, reconcile, reports
+from lararium.modules.finance.trading212 import accounts, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS
 from lararium.modules.finance.trading212.state import (
     LONDON,
@@ -75,8 +81,6 @@ _THROUGH_CONTRA = frozenset({"DEPOSIT", "WITHDRAW", "TRANSFER"})
 TRANSFER = "TRANSFER"
 # The owner checks the first real TRANSFER's sign (design §10).
 TRANSFER_FLAG = "TRANSFER"
-# A fill's price per share is its cash over its quantity, to this place.
-_PER_UNIT = Decimal(1).scaleb(-10)
 OPENING = "opening:"
 OPENING_DESCRIPTION = "Opening balance adjustment"
 
@@ -101,16 +105,6 @@ def _fees(
     return postings
 
 
-def _per_unit(total: Decimal, quantity: Decimal) -> Decimal:
-    """total / quantity to _PER_UNIT's place, without trailing zeros."""
-    with localcontext(prec=80):
-        value = (total / quantity).quantize(_PER_UNIT, rounding=ROUND_HALF_EVEN)
-    trimmed = value.normalize()
-    exponent = trimmed.as_tuple().exponent
-    assert isinstance(exponent, int)  # finite
-    return trimmed if exponent <= 0 else trimmed.quantize(Decimal(1))
-
-
 def _plain(quantity: Decimal) -> str:
     return to_plain_str(quantity.copy_abs().normalize())
 
@@ -123,20 +117,19 @@ async def _rounding(
     currency: InstrumentRecord,
     quantity: Decimal,
 ) -> None:
-    """A residual within the ledger's tolerance stays; one within what the price's rounding
-    explains (|quantity| times half its last place) is posted to Unassigned (memo
-    "rounding", design §5.7); more fails the run, naming the fill."""
-    allowed = tolerance(currency.decimals) + quantity.copy_abs() * _PER_UNIT / 2
-    for instrument_id, residual in compute_residuals(postings).items():
-        decimals = (await get_instrument(run.session, instrument_id)).decimals
-        if residual.copy_abs() <= tolerance(decimals):
-            continue
-        if instrument_id != currency.id or residual.copy_abs() > allowed:
-            raise Trading212DataError(
-                f"Trading 212 order fill {fill_id}: its cash differs from its quantity times"
-                " price by more than rounding"
-            )
-        postings.append(PostingInput(unassigned, instrument_id, -residual, memo="rounding"))
+    """The fill's rounding residual (connector_run.settle_rounding); more than rounding
+    fails the run, naming the fill."""
+    await settle_rounding(
+        run.session,
+        postings,
+        unassigned,
+        currency,
+        quantity,
+        lambda: Trading212DataError(
+            f"Trading 212 order fill {fill_id}: its cash differs from its quantity times"
+            " price by more than rounding"
+        ),
+    )
 
 
 async def _post_fill(run: Run, record: Record, key: str, order: Item, fill: Item) -> UUID | None:
@@ -185,7 +178,7 @@ async def _post_fill(run: Run, record: Record, key: str, order: Item, fill: Item
     if fill_type == "TRADE":
         if quantity == 0:
             raise Trading212DataError(f"Trading 212 order fill {fill_id} has no quantity")
-        price = _per_unit(gross.copy_abs(), quantity.copy_abs())
+        price = per_unit(gross.copy_abs(), quantity.copy_abs())
         if currency is None or price == 0:
             # Nothing to weigh the shares by: they come from (or go to) Unassigned.
             postings += [
@@ -388,10 +381,6 @@ async def unidentified_transfers(run: Run) -> list[Record]:
 # Openings ------------------------------------------------------------------------------
 
 
-def _not_opening() -> ColumnElement[bool]:
-    return func.coalesce(models.Transaction.external_id, "").not_like(f"{OPENING}%")
-
-
 async def _earliest_report(run: Run) -> tuple[Report, list[Record]] | None:
     """The account's first summary sighting, and the positions its sync saw."""
     first = await first_sighting(run.session, run.connection_id, ENDPOINTS["summary"].record_type)
@@ -412,7 +401,7 @@ async def openings(run: Run) -> None:
         return
     summary, positions = earliest
     found = await reports.reported(run, summary.record, positions, current=False)
-    held = await reconcile.holdings(run.session, run.account, summary.seen_at, _not_opening())
+    held = await holdings(run.session, run.account, summary.seen_at, not_opening())
     t, p = models.Transaction, models.Posting
     live = t.status != "void"
     prefix = f"{OPENING}{run.trading212_id}:"
@@ -428,7 +417,7 @@ async def openings(run: Run) -> None:
     first = await run.session.scalar(
         select(func.min(t.booking_date))
         .join(p, p.transaction_id == t.id)
-        .where(p.account_id == run.account, live, _not_opening())
+        .where(p.account_id == run.account, live, not_opening())
     )
     start = summary.day
     day = (min(start, first) if first is not None else start) - timedelta(days=1)
@@ -466,7 +455,7 @@ async def void_unsupported(run: Run, instrument_ids: Sequence[UUID]) -> None:
                 t.connection_id == run.connection_id,
                 t.status != "void",
                 p.instrument_id.in_(instrument_ids),
-                _not_opening(),
+                not_opening(),
             )
         )
     )

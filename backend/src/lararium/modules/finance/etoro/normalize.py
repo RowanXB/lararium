@@ -15,12 +15,14 @@ lookups, closed events, stockback and candles; the reports, typed per day with r
 snapshots (reports.py); eToro Money's opening adjustment (records.py); and prices.
 
 Every record's fields are checked first: a required one missing fails the run; an unknown one
-with a value is flagged, as are values and types the mapping does not know. The instruments
-still without a type, or of one the ledger does not hold, are reported in full every run.
+with a value is flagged, as are values and types the mapping does not know. Some flags are
+found in full every run, so they clear once their cause is gone: instruments still without a
+type, of one the ledger does not hold, or of no known currency, and positions no source
+states the settlement of.
 """
 
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
@@ -29,9 +31,10 @@ from sqlalchemy import text
 from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
+from lararium.modules.finance.connector_items import lacks, leaves
 from lararium.modules.finance.etoro import accounts, records, reports
 from lararium.modules.finance.etoro.fields import ENDPOINTS
-from lararium.modules.finance.etoro.instruments import reclassify, type_flags
+from lararium.modules.finance.etoro.instruments import currency_flags, reclassify, type_flags
 from lararium.modules.finance.etoro.state import (
     EtoroDataError,
     NormalizeReport,
@@ -71,48 +74,13 @@ _REPORTS = ("me", "balances", "pnl", "aggregate", "breakdown", "balance_history"
 _KEY_KIND = {"trade_history": "position id", "cash_transactions": "transaction id"}
 
 
-def _join(path: str, key: str) -> str:
-    return f"{path}.{key}" if path else key
-
-
-def _leaves(value: JSONValue, path: str) -> Iterator[str]:
-    """The paths of the item's values (fields.py's notation); null and empty ones have none."""
-    if isinstance(value, dict):
-        for key, entry in value.items():
-            yield from _leaves(entry, _join(path, key))
-    elif isinstance(value, list):
-        for entry in value:
-            yield from _leaves(entry, f"{path}[]")
-    elif value is not None:
-        yield path
-
-
-def _lacks(container: JSONValue, parts: Sequence[str]) -> bool:
-    """Whether a required path (split at its dots) is missing below `container`: one under an
-    array only where that array is there."""
-    head, rest = parts[0], parts[1:]
-    value = container.get(head.removesuffix("[]")) if isinstance(container, dict) else None
-    if head.endswith("[]"):
-        if value is None:
-            return False
-        if not isinstance(value, list):
-            return True
-        return any(e is None if not rest else _lacks(e, rest) for e in value)
-    if not rest:
-        return value is None
-    if value is None:
-        # A parent missing: the path is missing, unless it lies in an array.
-        return not any(p.endswith("[]") for p in rest)
-    return _lacks(value, rest)
-
-
 def _check(run: Run, record: Record) -> None:
     """Required fields fail the run when missing; unknown ones with a value are flagged."""
     spec = ENDPOINTS[record.endpoint]
     for path in sorted(spec.required):
-        if _lacks(record.content, path.split(".")):
+        if lacks(record.content, path.split(".")):
             raise EtoroDataError(f"{spec.record_type} lacks {path}")
-    for path in sorted(set(_leaves(record.content, "")) - spec.known):
+    for path in sorted(set(leaves(record.content)) - spec.known):
         run.flag(f"{record.endpoint}.{path}")
 
 
@@ -157,7 +125,7 @@ async def _latest_stored(run: Run, endpoint: str) -> dict[str, Record]:
 
 async def _context(run: Run, seen: Sequence[Report], lookups: dict[str, Record]) -> None:
     """The Trading account's currency, and each instrument's asset currency and a symbol:
-    from the run's reports, else the latest stored, else the order lookups."""
+    from the run's reports, else the latest stored (and a symbol from the order lookups)."""
     for endpoint in ("aggregate", "breakdown"):
         found = [r for r in seen if r.endpoint == endpoint]
         latest = (
@@ -176,12 +144,11 @@ async def _context(run: Run, seen: Sequence[Report], lookups: dict[str, Record])
             if text_at(entry, "accountId").lower() == run.trading_id:
                 run.account_currency = text_at(entry, "currency").upper()
     for lookup in lookups.values():
+        # Its symbol only: its `asset.currency` is not the asset's (the probe found USD there
+        # for a position the aggregate gave in GBP).
         etoro_id = text_at(lookup.content, "asset.instrumentId")
-        if etoro_id:
-            if code := text_at(lookup.content, "asset.currency").upper():
-                run.asset_currencies[etoro_id] = code
-            if symbol := text_at(lookup.content, "asset.symbol"):
-                run.symbols[etoro_id] = symbol
+        if etoro_id and (symbol := text_at(lookup.content, "asset.symbol")):
+            run.symbols[etoro_id] = symbol
     rows = await run.session.execute(
         text(
             "select id, currency from ("
@@ -255,6 +222,16 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     lookups |= {record_key(r): r for r in by_endpoint["order_lookup"]}
     await _context(run, seen, lookups)
     given = {id_at(r, r.content, "positionId") for r in by_endpoint["trade_history"]}
+    # Closes not posted yet (their instrument's currency unknown, say): tried again.
+    given |= set(
+        await run.session.scalars(
+            text(
+                "select position_id::text from finance.etoro_trades where connection_id = :c"
+                " and transaction_id is null and raw_record_id is not null"
+            ),
+            {"c": run.connection_id},
+        )
+    )
     for lookup in by_endpoint["order_lookup"]:
         given |= {
             id_at(lookup, item, "positionId")
@@ -274,9 +251,12 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     await records.openings(run)
     await reports.prices(run)
     await _links(run)
-    report.instrument_flags = await type_flags(
+    report.flags_in_full = await type_flags(
         run.session, run.connection_id, sorted(run.accounts.values())
     )
+    report.flags_in_full |= await currency_flags(run.session, run.connection_id)
+    if unknown := await records.settlement_unknown(run):
+        report.flags_in_full.add(f"{records.SETTLEMENT_UNKNOWN} ({unknown})")
 
     # Only this normaliser's keys: others stay as they are.
     values: dict[str, JSONValue] = {

@@ -152,6 +152,26 @@ async def find_by_identifier(
     return found[0] if found else None
 
 
+async def find_same_listing(
+    session: AsyncSession, isin: str, quote_instrument_id: UUID
+) -> InstrumentRecord | None:
+    """An instrument with the ISIN, quoted in the currency: the same listing, as another
+    source holds it (design M5 §5.6, M6 §5.6)."""
+    i, instrument = models.InstrumentIdentifier, models.Instrument
+    found = await session.scalar(
+        select(instrument.id)
+        .join(i, i.instrument_id == instrument.id)
+        .where(
+            i.scheme == "isin",
+            i.value == normalize_identifier("isin", isin),
+            instrument.quote_instrument_id == quote_instrument_id,
+        )
+        .order_by(instrument.id)
+        .limit(1)
+    )
+    return None if found is None else await get_instrument(session, found)
+
+
 async def get_currency(session: AsyncSession, iso_code: str) -> InstrumentRecord:
     found = await find_by_identifier(session, "iso4217", iso_code)
     if found is None:

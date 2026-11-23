@@ -20,7 +20,7 @@ to publish, as are the instruments still without a type, which every run finds i
 """
 
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
@@ -28,6 +28,7 @@ from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.connector_items import lacks, leaves
 from lararium.modules.finance.report_sightings import list_sightings
 from lararium.modules.finance.trading212 import accounts, reconcile, records, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS, MAP_ENTRIES
@@ -59,67 +60,13 @@ _REPORTS = ("summary", "positions", "pending_orders", "pies", "pie")
 _KEY_KIND = {"orders": "fill or order id", "dividends": "reference", "transactions": "reference"}
 
 
-def _join(path: str, key: str) -> str:
-    return f"{path}.{key}" if path else key
-
-
-def _leaves(value: JSONValue, path: str) -> Iterator[str]:
-    """The paths of the item's values (fields.py's notation); null and empty ones have none."""
-    if isinstance(value, dict):
-        entries = MAP_ENTRIES.get(f"{path}{{}}")
-        if entries is not None:
-            key_field, value_field = entries
-            for entry in value.values():
-                yield f"{path}{{}}.{key_field}"
-                yield from _leaves(entry, f"{path}{{}}.{value_field}")
-            return
-        for key, entry in value.items():
-            yield from _leaves(entry, _join(path, key))
-    elif isinstance(value, list):
-        for entry in value:
-            yield from _leaves(entry, f"{path}[]")
-    elif value is not None:
-        yield path
-
-
-def _lacks(container: JSONValue, parts: Sequence[str], path: str = "") -> bool:
-    """Whether a required path (split at its dots) is missing below `container`: one under an
-    array or a map only where that array or map is there."""
-    head, rest = parts[0], parts[1:]
-    name = head.removesuffix("[]").removesuffix("{}")
-    here = _join(path, head)
-    value = container.get(name) if isinstance(container, dict) else None
-    if head.endswith("[]"):
-        if value is None:
-            return False
-        if not isinstance(value, list):
-            return True
-        return any(e is None if not rest else _lacks(e, rest, here) for e in value)
-    if head.endswith("{}"):
-        if value is None:
-            return False
-        key_field, value_field = MAP_ENTRIES[here]
-        if not isinstance(value, dict) or not rest or rest[0] not in (key_field, value_field):
-            return True
-        if rest[0] == key_field:
-            return False
-        below = rest[1:]
-        return any(v is None if not below else _lacks(v, below, here) for v in value.values())
-    if not rest:
-        return value is None
-    if value is None:
-        # A parent missing: the path is missing, unless it lies in an array or map.
-        return not any(p.endswith(("[]", "{}")) for p in rest)
-    return _lacks(value, rest, here)
-
-
 def _check(run: Run, record: Record) -> None:
     """Required fields fail the run when missing; unknown ones with a value are flagged."""
     spec = ENDPOINTS[record.endpoint]
     for path in sorted(spec.required):
-        if _lacks(record.content, path.split(".")):
+        if lacks(record.content, path.split("."), MAP_ENTRIES):
             raise Trading212DataError(f"{spec.record_type} lacks {path}")
-    for path in sorted(set(_leaves(record.content, "")) - spec.known):
+    for path in sorted(set(leaves(record.content, "", MAP_ENTRIES)) - spec.known):
         run.flag(f"{record.endpoint}.{path}")
 
 

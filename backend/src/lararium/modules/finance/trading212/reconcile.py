@@ -23,61 +23,20 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.commands import CommandContext
 from lararium.core.connections import get_connection, set_warnings
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import holdings
 from lararium.modules.finance.money import to_plain_str, tolerance
-from lararium.modules.finance.snapshots import record_snapshot
 
 logger = logging.getLogger(__name__)
 
 PLATFORM = "Trading 212"
 # What every reconciliation warning holds, after the account's name (Decision 12).
 DIFFERS = f" differs from {PLATFORM}'s report on "
-
-
-async def reported_snapshot(
-    ctx: CommandContext,
-    account_id: UUID,
-    instrument_id: UUID,
-    quantity: Decimal,
-    as_of: datetime,
-    day: date,
-) -> UUID:
-    """The reported snapshot of the figure seen at `as_of`: the day's latest at or before it
-    when that says the same, else a new one at `as_of`. So sightings applied again, or in
-    order from the first, find the snapshots they made."""
-    s = models.BalanceSnapshot
-    latest = (
-        await ctx.session.execute(
-            select(s.id, s.quantity)
-            .where(
-                s.account_id == account_id,
-                s.instrument_id == instrument_id,
-                s.kind == "reported",
-                s.as_of_date == day,
-                s.as_of <= as_of,
-            )
-            .order_by(s.as_of.desc(), s.recorded_at.desc(), s.id.desc())
-            .limit(1)
-        )
-    ).one_or_none()
-    if latest is not None and latest.quantity == quantity:
-        return latest.id
-    record = await record_snapshot(
-        ctx,
-        account_id=account_id,
-        instrument_id=instrument_id,
-        quantity=quantity,
-        as_of=as_of,
-        as_of_date=day,
-        kind="reported",
-    )
-    return record.id
 
 
 @dataclass(frozen=True)
@@ -93,26 +52,6 @@ class Mismatch:
             f"{self.account_name} {self.symbol}{DIFFERS}{self.day.isoformat()}"
             f" by {to_plain_str(self.difference)}"
         )
-
-
-async def holdings(
-    session: AsyncSession,
-    account_id: UUID,
-    at: datetime,
-    *also: ColumnElement[bool],
-) -> dict[UUID, Decimal]:
-    """The account's quantity of each instrument: its non-void postings that occurred at or
-    before `at` (and meet `also`)."""
-    t, p = models.Transaction, models.Posting
-    return {
-        row.instrument_id: Decimal(row.total)
-        for row in await session.execute(
-            select(p.instrument_id, func.sum(p.quantity).label("total"))
-            .join(t, t.id == p.transaction_id)
-            .where(p.account_id == account_id, t.status != "void", t.occurred_at <= at, *also)
-            .group_by(p.instrument_id)
-        )
-    }
 
 
 async def check(

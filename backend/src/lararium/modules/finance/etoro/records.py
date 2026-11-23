@@ -8,18 +8,22 @@ survives the position leaving PnL. An open adds the units at `amount / units` in
 currency (`accountCurrency`) and takes `amount` out; a close takes the units out at
 `(investment + netProfit) / units` and puts that cash in. A non-zero execution fee or tax
 (orders:lookup), and a close's trade-history `fees`, are fee postings (`is_fee`) countered
-on Unassigned. A position that is not real (`settlementTypeID` 1, `settlementType` real), has
-leverage other than 1, or is copied (a `mirrorID` or `socialTradeId`) is flagged and posts
-nothing; so does one on an instrument of a type the ledger does not hold. A run applies the
-positions its records name (this sync's PnL, trade history and lookups; every one on a
-replay), each from everything stored.
+on Unassigned; a negative one is flagged and not posted. A position that is not real
+(`settlementTypeID` 1, `settlementType` real), has leverage other than 1, or is copied (a
+`mirrorID` or `socialTradeId`) is flagged and posts nothing; so does one no source states the
+settlement of (counted apart, `settlement_unknown`), and one on an instrument of a type the
+ledger does not hold or of no known currency. A run applies the positions its records name
+(this sync's PnL, trade history and lookups; every one on a replay) and the closes not posted
+yet, each from everything stored.
 
 **eToro Money** (key `cash:<id>`): only a `settled` row posts, its `amount` in its currency, a
 debit negative. A bank transfer goes through transfer_contra as a bank transfer, naming the
-other bank's account when it is a UK one (a GB IBAN, or a sort code and account number); an
-internal transfer names the Trading account when its counterparty's name says trading (Task 0,
-check 4), and goes to Unassigned when it names MoneyFarm or the ISA (design §5.12) or neither
-(flagged); a card payment or balance adjustment goes to Unassigned.
+other bank's account when it is a UK one (a GB IBAN, or a sort code and account number), or
+giving its account number alone, which the transfer engine reads as an imported row's (ruling
+R28); an IBAN outside the UK names nothing and is flagged. An internal transfer names the
+Trading account when its counterparty's name says trading (Task 0, check 4), and goes to
+Unassigned when it names MoneyFarm or the ISA (design §5.12), or neither, or Trading while the
+balances list none (both flagged); a card payment or balance adjustment goes to Unassigned.
 
 **Opening balances** (design §5.5): eToro Money's earliest balance-history snapshot, less
 what its records post up to the end of that day, is one opening adjustment per currency,
@@ -31,13 +35,20 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
 
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import (
+    OPENING,
+    holdings,
+    not_opening,
+    per_unit,
+    settle_rounding,
+)
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro import accounts
 from lararium.modules.finance.etoro.state import (
@@ -47,6 +58,8 @@ from lararium.modules.finance.etoro.state import (
     Record,
     Report,
     Run,
+    decimal_text,
+    ending,
     flat,
     id_at,
     moment_at,
@@ -59,17 +72,17 @@ from lararium.modules.finance.etoro.state import (
 )
 from lararium.modules.finance.identifiers import get_or_create_identifier, normalize_identifier
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.ledger import CounterpartyFields, PostingInput, compute_residuals
+from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
 from lararium.modules.finance.money import to_plain_str, tolerance
 
 OPEN = "open:"
 CLOSE = "close:"
-OPENING = "opening:"
 OPENING_DESCRIPTION = "Opening balance adjustment"
 UNSUPPORTED_POSITION = "a CFD, leveraged or copied position"
+SETTLEMENT_UNKNOWN = "position settlement unknown"
+NEGATIVE_FEE = "a negative fee or tax"
 UNKNOWN_INTERNAL = "an internal transfer names no account Lararium knows"
-# A price per unit is cash over units, to this place.
-_PER_UNIT = Decimal(1).scaleb(-10)
+NOT_UK = "bank transfer to a non-UK account"
 # eToro Money's enums (SPEC): a value not listed is flagged and posts nothing.
 _STATUSES = frozenset(
     {"failed", "authorized", "settled", "rejected", "returned", "expired", "unknown"}
@@ -196,38 +209,40 @@ async def positions(
     return found
 
 
-def _supported(position: Position) -> bool:
-    """Real, unleveraged and not copied, as every source that says so agrees; one with no
-    source stating its settlement or its leverage is not taken to be."""
+type Settlement = Literal["real", "unsupported", "unknown"]
+
+
+def _settlement(position: Position) -> Settlement:
+    """`real` when every source that says so agrees it is real, unleveraged and not copied;
+    `unknown` when none states its settlement (eToro's lookup of its order missing, say), so
+    it is not taken to be real; else `unsupported`. One with no source stating its leverage
+    is not taken to be unleveraged."""
     pnl = position.pnl[1] if position.pnl is not None else None
     breakdown = position.breakdown[1] if position.breakdown is not None else None
     trade = position.trade.content if position.trade is not None else None
     lookup = position.lookup.content if position.lookup is not None else None
-    leverage = [text_at(i, "leverage") for i in (pnl, breakdown, trade)]
-    leverage.append(text_at(lookup, "asset.leverage"))
-    leverage = [v for v in leverage if v]
+    record = position.trade or (position.pnl[0] if position.pnl is not None else None)
+    assert record is not None  # a position has a trade or a PnL item (position())
+
+    def numbers(*found: tuple[str, str]) -> list[Decimal]:
+        return [decimal_text(record, value, path) for value, path in found if value]
+
+    leverage = numbers(
+        *((text_at(i, "leverage"), "leverage") for i in (pnl, breakdown, trade)),
+        (text_at(lookup, "asset.leverage"), "asset.leverage"),
+    )
     settled = [text_at(pnl, "settlementTypeID") or None]
     settled.append(text_at(breakdown, "settlementType").lower() or None)
     settled.append(text_at(lookup, "asset.settlementType").lower() or None)
     real = [v in ("1", "real") for v in settled if v is not None]
-    copied = [text_at(pnl, "mirrorID"), text_at(trade, "socialTradeId")]
-    return (
-        bool(leverage)
-        and all(Decimal(v) == 1 for v in leverage)
-        and bool(real)
-        and all(real)
-        and all(Decimal(v) == 0 for v in copied if v)
+    copied = numbers(
+        (text_at(pnl, "mirrorID"), "mirrorID"), (text_at(trade, "socialTradeId"), "socialTradeId")
     )
-
-
-def _per_unit(total: Decimal, quantity: Decimal) -> Decimal:
-    """total / quantity to _PER_UNIT's place, without trailing zeros."""
-    with localcontext(prec=80):
-        value = (total / quantity).quantize(_PER_UNIT, rounding=ROUND_HALF_EVEN)
-    trimmed = value.normalize()
-    exponent = trimmed.as_tuple().exponent
-    assert isinstance(exponent, int)  # finite
-    return trimmed if exponent <= 0 else trimmed.quantize(Decimal(1))
+    if (real and not all(real)) or any(v != 1 for v in leverage) or any(v != 0 for v in copied):
+        return "unsupported"
+    if not real:
+        return "unknown"
+    return "real" if leverage else "unsupported"
 
 
 def _plain(quantity: Decimal) -> str:
@@ -235,14 +250,16 @@ def _plain(quantity: Decimal) -> str:
 
 
 def _fees(
-    account_id: UUID, unassigned: UUID, currency_id: UUID, fees: Sequence[tuple[Decimal, str]]
+    run: Run, unassigned: UUID, currency_id: UUID, fees: Sequence[tuple[Decimal, str]]
 ) -> list[PostingInput]:
-    """Each fee on the account, then Unassigned's counterpart."""
-    postings = [
-        PostingInput(account_id, currency_id, -amount.copy_abs(), is_fee=True, memo=memo)
-        for amount, memo in fees
-        if amount != 0
-    ]
+    """Each fee on the Trading account, then Unassigned's counterpart. A negative one (a
+    refund, perhaps) is flagged and not posted: what it would be is unknown."""
+    postings: list[PostingInput] = []
+    for amount, memo in fees:
+        if amount < 0:
+            run.flag(NEGATIVE_FEE)
+        elif amount > 0:
+            postings.append(PostingInput(run.trading, currency_id, -amount, is_fee=True, memo=memo))
     total = sum((p.quantity for p in postings), Decimal(0))
     if total != 0:
         postings.append(PostingInput(unassigned, currency_id, -total))
@@ -257,20 +274,19 @@ async def _rounding(
     currency: InstrumentRecord,
     quantity: Decimal,
 ) -> None:
-    """A residual within the ledger's tolerance stays; one within what the price's rounding
-    explains (|quantity| times half its last place) is posted to Unassigned (memo
-    "rounding", design §5.7); more fails the run, naming the position."""
-    allowed = tolerance(currency.decimals) + quantity.copy_abs() * _PER_UNIT / 2
-    for instrument_id, residual in compute_residuals(postings).items():
-        decimals = (await get_instrument(run.session, instrument_id)).decimals
-        if residual.copy_abs() <= tolerance(decimals):
-            continue
-        if instrument_id != currency.id or residual.copy_abs() > allowed:
-            raise EtoroDataError(
-                f"eToro position {position_id}: its cash differs from its units times price"
-                " by more than rounding"
-            )
-        postings.append(PostingInput(unassigned, instrument_id, -residual, memo="rounding"))
+    """The position's rounding residual (connector_run.settle_rounding); more than rounding
+    fails the run, naming the position by its last digits."""
+    await settle_rounding(
+        run.session,
+        postings,
+        unassigned,
+        currency,
+        quantity,
+        lambda: EtoroDataError(
+            f"eToro position {ending(position_id)}: its cash differs from its units times price"
+            " by more than rounding"
+        ),
+    )
 
 
 async def _account_currency(run: Run) -> InstrumentRecord:
@@ -292,7 +308,7 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
         return None
     units, amount = units.copy_abs(), amount.copy_abs()
     if units == 0:
-        raise EtoroDataError(f"eToro position {position.position_id} has no units")
+        raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
     currency = await _account_currency(run)
     unassigned = await run.system_account("unassigned")
     postings = [
@@ -300,7 +316,7 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
             run.trading,
             instrument_id,
             units,
-            cost_per_unit=_per_unit(amount, units),
+            cost_per_unit=per_unit(amount, units),
             cost_instrument_id=currency.id,
         )
     ]
@@ -313,7 +329,7 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
             (number_at(position.lookup, opening, "fees"), "Execution fee"),
             (number_at(position.lookup, opening, "taxes"), "Execution tax"),
         ]
-        postings += _fees(run.trading, unassigned, currency.id, fees)
+        postings += _fees(run, unassigned, currency.id, fees)
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Buy {_plain(units)} {await run.symbol(instrument_id)}"
     return await run.post(f"{OPEN}{position.position_id}", occurred_at, description, postings)
@@ -324,10 +340,12 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
     record, item = position.trade, position.trade.content
     units = number_at(record, item, "units").copy_abs()
     if units == 0:
-        raise EtoroDataError(f"eToro position {position.position_id} has no units")
+        raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
     proceeds = number_at(record, item, "investment") + number_at(record, item, "netProfit")
     if proceeds < 0:
-        raise EtoroDataError(f"eToro position {position.position_id} closed for less than 0")
+        raise EtoroDataError(
+            f"eToro position {ending(position.position_id)} closed for less than 0"
+        )
     currency = await _account_currency(run)
     unassigned = await run.system_account("unassigned")
     postings = [
@@ -335,15 +353,13 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
             run.trading,
             instrument_id,
             -units,
-            price_per_unit=_per_unit(proceeds, units),
+            price_per_unit=per_unit(proceeds, units),
             price_instrument_id=currency.id,
         )
     ]
     if proceeds != 0:
         postings.append(PostingInput(run.trading, currency.id, proceeds))
-    postings += _fees(
-        run.trading, unassigned, currency.id, [(number_at(record, item, "fees"), "Fee")]
-    )
+    postings += _fees(run, unassigned, currency.id, [(number_at(record, item, "fees"), "Fee")])
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Sell {_plain(units)} {await run.symbol(instrument_id)}"
     return await run.post(
@@ -378,9 +394,10 @@ async def position(run: Run, position: Position) -> None:
     if position.pnl is None and position.trade is None:
         return  # a lookup alone says nothing to post
     instrument_id: UUID | None = None
-    if not _supported(position):
+    settlement = _settlement(position)
+    if settlement == "unsupported":
         run.flag(UNSUPPORTED_POSITION)
-    else:
+    elif settlement == "real":
         source = position.trade.content if position.trade is not None else None
         etoro_id = text_at(source, "instrumentId") if source is not None else ""
         if not etoro_id and position.pnl is not None:
@@ -398,6 +415,36 @@ async def position(run: Run, position: Position) -> None:
     await link_open(run, key, opened)
     if position.trade is not None:
         await trade_row(run, position.trade, closed, instrument_id)
+
+
+async def settlement_unknown(run: Run) -> int:
+    """How many of the connection's positions (closed, or listed in PnL) no source states
+    the settlement of: their PnL and breakdown items, and their order's lookup, as
+    _settlement reads them. Found in full, so the flag clears once a source states it."""
+    found = await run.session.scalar(
+        text(
+            "with known as ("
+            " select position_id, order_id from finance.etoro_trades"
+            " where connection_id = :c and position_id is not null"
+            " union select position_id, order_id from finance.etoro_pnl_positions"
+            " where connection_id = :c),"
+            " ordered as ("
+            " select order_id from finance.etoro_orders"
+            " where connection_id = :c and asset_settlement_type is not null),"
+            " stated as ("
+            " select position_id from finance.etoro_pnl_positions"
+            " where connection_id = :c and settlement_type_id is not null"
+            " union select position_id from finance.etoro_breakdown_positions"
+            " where connection_id = :c and settlement_type is not null"
+            " union select e.position_id from finance.etoro_position_executions e"
+            " where e.connection_id = :c and e.parent_order_id in (select order_id from ordered))"
+            " select count(distinct k.position_id) from known k"
+            " where k.position_id not in (select position_id from stated)"
+            " and (k.order_id is null or k.order_id not in (select order_id from ordered))"
+        ),
+        {"c": run.connection_id},
+    )
+    return int(found or 0)
 
 
 async def trade_row(
@@ -419,23 +466,38 @@ async def trade_row(
 # eToro Money -----------------------------------------------------------------------------
 
 
-def _bank_account(identifiers: Sequence[Item]) -> str | None:
-    """The UK bank account the counterparty's identifiers name, in the registry's form; None
-    for none, or a bank account outside the UK."""
+_ACCOUNT_NUMBER = re.compile(r"[0-9]{8}")
+
+
+@dataclass(frozen=True)
+class _Bank:
+    """What a bank transfer's identifiers say of the other bank account: a UK one in the
+    registry's form, or its account number alone (ruling R28); `abroad` for an IBAN outside
+    the UK."""
+
+    uk_bank_account: str | None = None
+    account_number: str | None = None
+    abroad: bool = False
+
+
+def _bank(identifiers: Sequence[Item]) -> _Bank:
     by_name = {text_at(i, "name").casefold(): text_at(i, "value") for i in identifiers}
     iban = re.sub(r"\s", "", by_name.get("iban", "")).upper()
-    if (found := _UK_IBAN.fullmatch(iban)) is not None:
-        value = f"{found[1]}:{found[2]}"
-    else:
-        sort_code = by_name.get("sortcode", "")
-        number = by_name.get("bankaccountnumber", "") or by_name.get("accountnumber", "")
-        if not sort_code or not number:
-            return None
-        value = f"{sort_code}:{number}"
-    try:
-        return normalize_identifier("uk_bank_account", value)
-    except FinanceValidationError:
-        return None
+    if iban:
+        found = _UK_IBAN.fullmatch(iban)
+        return _Bank(f"{found[1]}:{found[2]}") if found else _Bank(abroad=True)
+    number = re.sub(
+        r"[\s-]", "", by_name.get("bankaccountnumber", "") or by_name.get("accountnumber", "")
+    )
+    sort_code = by_name.get("sortcode", "")
+    if sort_code and number:
+        try:
+            return _Bank(normalize_identifier("uk_bank_account", f"{sort_code}:{number}"))
+        except FinanceValidationError:
+            return _Bank()
+    if _ACCOUNT_NUMBER.fullmatch(number):
+        return _Bank(account_number=number)
+    return _Bank()
 
 
 async def _counterparty(run: Run, record: Record, kind: str) -> tuple[CounterpartyFields, bool]:
@@ -444,22 +506,28 @@ async def _counterparty(run: Run, record: Record, kind: str) -> tuple[Counterpar
     content = record.content
     name = text_at(content, "counterparty.name") or None
     if kind == "bankTransfer":
-        value = _bank_account(objects_at(content, "bankTransferTransactionDetails.bankIdentifier"))
+        bank = _bank(objects_at(content, "bankTransferTransactionDetails.bankIdentifier"))
+        if bank.abroad:
+            run.flag(NOT_UK)
         identifier = None
-        if value is not None:
+        if (value := bank.uk_bank_account) is not None:
             identifier = await run.shared(
                 ("identifier", "uk_bank_account", value),
                 lambda cmd: get_or_create_identifier(cmd, "uk_bank_account", value),
             )
         reference = text_at(content, "bankTransferTransactionDetails.paymentReference") or None
-        return CounterpartyFields(identifier, name, reference, bank_transfer=True), True
+        fields = CounterpartyFields(
+            identifier, name, reference, bank_transfer=True, account_number=bank.account_number
+        )
+        return fields, True
     if kind == "internalTransfer":
         trading = _TRADING.search(name or "") is not None
         moneyfarm = _MONEYFARM.search(name or "") is not None
         identifier = None
         if trading and not moneyfarm:
             identifier = await accounts.trading_identifier(run)
-        elif not moneyfarm:
+        if identifier is None and not (moneyfarm and not trading):
+            # Neither account named, both, or Trading while the balances list none.
             run.flag(UNKNOWN_INTERNAL)
         return CounterpartyFields(identifier, name), True
     return CounterpartyFields(name=name), False
@@ -487,7 +555,7 @@ async def cash(run: Run, record: Record) -> None:
             currency = await run.currency(text_at(content, "currency"))
             counterparty, through = await _counterparty(run, record, kind)
             contra = (
-                await run.contra(key, account_id, 0, counterparty.identifier_id)
+                await run.contra(key, account_id, counterparty.identifier_id)
                 if through
                 else await run.system_account("unassigned")
             )
@@ -539,27 +607,6 @@ async def cash(run: Run, record: Record) -> None:
 # Openings --------------------------------------------------------------------------------
 
 
-def _not_opening() -> ColumnElement[bool]:
-    return func.coalesce(models.Transaction.external_id, "").not_like(f"{OPENING}%")
-
-
-async def holdings(
-    session: AsyncSession, account_id: UUID, at: datetime, *also: ColumnElement[bool]
-) -> dict[UUID, Decimal]:
-    """The account's quantity of each instrument: its non-void postings that occurred at or
-    before `at` (and meet `also`)."""
-    t, p = models.Transaction, models.Posting
-    return {
-        row.instrument_id: Decimal(row.total)
-        for row in await session.execute(
-            select(p.instrument_id, func.sum(p.quantity).label("total"))
-            .join(t, t.id == p.transaction_id)
-            .where(p.account_id == account_id, t.status != "void", t.occurred_at <= at, *also)
-            .group_by(p.instrument_id)
-        )
-    }
-
-
 def end_of(day: date) -> datetime:
     """A balance-history snapshot's moment: the end of its date, in UTC (design §5.8)."""
     return datetime.combine(day, time.max, UTC)
@@ -600,12 +647,12 @@ async def openings(run: Run) -> None:
             day = earliest.snapshot_date
             found[(await run.currency(earliest.currency.upper())).id] = Decimal(earliest.cash)
             held = await holdings(
-                run.session, account_id, end_of(earliest.snapshot_date), _not_opening()
+                run.session, account_id, end_of(earliest.snapshot_date), not_opening()
             )
         first = await run.session.scalar(
             select(func.min(t.booking_date))
             .join(p, p.transaction_id == t.id)
-            .where(p.account_id == account_id, live, _not_opening())
+            .where(p.account_id == account_id, live, not_opening())
         )
         opening_balances = await run.system_account("opening_balances")
         for instrument_id in sorted(set(found) | current):
@@ -645,7 +692,7 @@ async def void_unsupported(run: Run, instrument_ids: Sequence[UUID]) -> None:
                 t.connection_id == run.connection_id,
                 t.status != "void",
                 p.instrument_id.in_(instrument_ids),
-                _not_opening(),
+                not_opening(),
             )
             .distinct()
         )

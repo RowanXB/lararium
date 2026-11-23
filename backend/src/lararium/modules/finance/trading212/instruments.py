@@ -20,21 +20,19 @@ one has what it posted voided.
 from collections.abc import Mapping
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
-from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import listing_currency
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     InstrumentKind,
-    InstrumentRecord,
     add_identifiers,
     create_instrument,
     find_by_identifier,
+    find_same_listing,
     get_currency,
-    get_instrument,
-    normalize_identifier,
     replace_identifier,
     set_kind,
 )
@@ -54,39 +52,10 @@ def instrument_kind(trading212_type: str | None) -> InstrumentKind | None:
     return KINDS.get(trading212_type)
 
 
-# Trading 212 quotes London listings in pence; the ledger lists them in pounds (ruling R19).
-_SUBUNITS: Mapping[str, tuple[str, int]] = {"GBX": ("GBP", -2)}
-
-
-def listing_currency(code: str) -> tuple[str, int]:
-    """The ISO 4217 currency a listing quoted in `code` is held in, and the power of ten that
-    turns a price in `code` into one in it."""
-    return _SUBUNITS.get(code, (code, 0))
-
-
 def symbol(instrument: Mapping[str, str]) -> str:
     """The metadata's short name, else the ticker before its exchange suffix."""
     short = instrument.get("shortName", "").strip()
     return short or instrument["ticker"].split("_", 1)[0]
-
-
-async def _same_listing(
-    ctx: CommandContext, isin: str, quote_instrument_id: UUID
-) -> InstrumentRecord | None:
-    """An instrument with the ISIN, quoted in the currency."""
-    i, instrument = models.InstrumentIdentifier, models.Instrument
-    found = await ctx.session.scalar(
-        select(instrument.id)
-        .join(i, i.instrument_id == instrument.id)
-        .where(
-            i.scheme == "isin",
-            i.value == normalize_identifier("isin", isin),
-            instrument.quote_instrument_id == quote_instrument_id,
-        )
-        .order_by(instrument.id)
-        .limit(1)
-    )
-    return None if found is None else await get_instrument(ctx.session, found)
 
 
 async def listing(
@@ -109,7 +78,7 @@ async def listing(
 
     found = await find_by_identifier(ctx.session, SCHEME, ticker)
     if found is None and isin:
-        found = await _same_listing(ctx, isin, currency.id)
+        found = await find_same_listing(ctx.session, isin, currency.id)
         if found is not None and current:
             # Found by ISIN, so no instrument holds this ticker: it can take it.
             found = await replace_identifier(ctx, found.id, identifiers[0])

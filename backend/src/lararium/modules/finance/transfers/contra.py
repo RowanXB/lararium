@@ -155,8 +155,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
     the one its counterparty bank account is registered to, else the one registered under
-    the account number its import rows print alone, else the main account of a manual
-    sub-account for a bank transfer naming no bank account), weak_holder (apart from holder:
+    the account number its import rows print alone (or its connector gives alone), else the
+    main account of a manual sub-account for a bank transfer naming no bank account),
+    weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
     bank account, or its import rows print part of one), bank_transfer, source_kind,
@@ -301,7 +302,16 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             .scalar_subquery()
         )
 
-    number_holder = registered_alone(2, evidence.c.numbers[1])
+    # A connector's record gives the account number alone on the transaction itself (ruling
+    # R28): the same evidence as an import row's, and counted with theirs.
+    own_number = t.counterparty_account_number
+    printed = func.coalesce(func.cardinality(evidence.c.numbers), 0)
+    number_count = case(
+        (own_number.is_(None), printed),
+        (own_number == any_(evidence.c.numbers), printed),
+        else_=printed + 1,
+    )
+    number_holder = registered_alone(2, func.coalesce(own_number, evidence.c.numbers[1]))
     # The record's own account, looked up per record too, not joined, for the same reason.
     a = aliased(models.Account, name="own_account")
     own_account = (
@@ -309,7 +319,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     )
     names_nothing = and_(
         t.counterparty_identifier_id.is_(None),
-        func.coalesce(func.cardinality(evidence.c.numbers), 0) == 0,
+        number_count == 0,
         ~func.coalesce(evidence.c.partial, false()),
     )
     holder = case(
@@ -317,7 +327,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             t.counterparty_identifier_id.is_not(None),
             select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
         ),
-        (func.cardinality(evidence.c.numbers) == 1, number_holder),
+        (number_count == 1, number_holder),
         # A savings sub-account moves money only to and from its main account.
         (
             and_(
@@ -336,7 +346,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         (
             and_(
                 t.counterparty_identifier_id.is_(None),
-                func.coalesce(func.cardinality(evidence.c.numbers), 0) == 0,
+                number_count == 0,
                 func.cardinality(evidence.c.sort_codes) == 1,
             ),
             registered_alone(1, evidence.c.sort_codes[1]),
@@ -358,6 +368,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             weak_holder.label("weak_holder"),
             or_(
                 t.counterparty_identifier_id.is_not(None),
+                own_number.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
             t.bank_transfer,

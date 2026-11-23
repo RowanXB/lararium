@@ -18,14 +18,13 @@ is stored for it, so the official close wins whichever arrives first. No FX rate
 """
 
 from collections.abc import Sequence
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select, text
 
-from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import reported_snapshot
 from lararium.modules.finance.etoro.records import end_of, link_open
 from lararium.modules.finance.etoro.state import (
     SOURCE,
@@ -43,51 +42,10 @@ from lararium.modules.finance.etoro.state import (
 )
 from lararium.modules.finance.identifiers import normalize_identifier
 from lararium.modules.finance.pricing import record_price
-from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.typed_tables import parse_date
 
 # Balances entries whose `balance` is the account's cash or value, as a reported snapshot.
 _SNAPSHOT_TYPES = frozenset({"Cash", "MoneyFarm"})
-
-
-async def reported_snapshot(
-    ctx: CommandContext,
-    account_id: UUID,
-    instrument_id: UUID,
-    quantity: Decimal,
-    as_of: datetime,
-    day: date,
-) -> UUID:
-    """The reported snapshot of the figure seen at `as_of`: the day's latest at or before it
-    when that says the same, else a new one at `as_of`. So sightings applied again, or in
-    order from the first, find the snapshots they made."""
-    s = models.BalanceSnapshot
-    latest = (
-        await ctx.session.execute(
-            select(s.id, s.quantity)
-            .where(
-                s.account_id == account_id,
-                s.instrument_id == instrument_id,
-                s.kind == "reported",
-                s.as_of_date == day,
-                s.as_of <= as_of,
-            )
-            .order_by(s.as_of.desc(), s.recorded_at.desc(), s.id.desc())
-            .limit(1)
-        )
-    ).one_or_none()
-    if latest is not None and latest.quantity == quantity:
-        return latest.id
-    record = await record_snapshot(
-        ctx,
-        account_id=account_id,
-        instrument_id=instrument_id,
-        quantity=quantity,
-        as_of=as_of,
-        as_of_date=day,
-        kind="reported",
-    )
-    return record.id
 
 
 # Market data and lookups -----------------------------------------------------------------
@@ -340,7 +298,7 @@ async def _breakdown(run: Run, report: Report) -> None:
 
 async def _current_price(run: Run, report: Report, item: Item, instrument_id: object) -> None:
     rate = number_or_none(report.record, item, "currentRate")
-    code = text_at(item, "assetCurrency")
+    code = text_at(item, "assetCurrency").upper()
     if not isinstance(instrument_id, UUID) or rate is None or rate <= 0 or not code:
         return
     quote_id, price = await run.price(code, rate)
@@ -495,7 +453,7 @@ async def prices(run: Run) -> None:
     """Each candle's close for its day; a current rate for its day where no candle of the
     connection's is stored for it (module doc)."""
     p = models.Price
-    wanted = [(k, v, True) for k, v in run.candle_prices.items()]
+    wanted = list(run.candle_prices.items())
     for key, price in run.current_prices.items():
         if key in run.candle_prices:
             continue
@@ -511,8 +469,8 @@ async def prices(run: Run) -> None:
             {"c": run.connection_id, "i": instrument_id, "d": day},
         )
         if not has_candle:
-            wanted.append((key, price, True))
-    for (instrument_id, quote_id, day), price, _ in wanted:
+            wanted.append((key, price))
+    for (instrument_id, quote_id, day), price in wanted:
         stored = await run.session.scalar(
             select(p.price).where(
                 p.instrument_id == instrument_id,

@@ -7,64 +7,42 @@ counterparty or bank detail (fields.PERSONAL) never reaches a message or a log.
 """
 
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
-from typing import Literal
+from decimal import Decimal, InvalidOperation
+from typing import ClassVar
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
-from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import ConnectionRecord
 from lararium.core.connectors import SyncContext
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
-from lararium.modules.finance import models
+from lararium.modules.finance import connector_items
+from lararium.modules.finance.connector_items import (
+    Item,
+    flat,
+    object_at,
+    objects_at,
+    text_at,
+    value_at,
+)
+from lararium.modules.finance.connector_run import LONDON, ConnectorRun
 from lararium.modules.finance.etoro.fields import COLUMNS, ENDPOINTS
-from lararium.modules.finance.etoro.instruments import listing, listing_currency
-from lararium.modules.finance.instruments import (
-    InstrumentRecord,
-    find_by_identifier,
-    get_currency,
-    get_instrument,
-)
-from lararium.modules.finance.ledger import (
-    CounterpartyFields,
-    PostingInput,
-    TransactionInput,
-    upsert_connector_transaction,
-    void_transaction,
-)
+from lararium.modules.finance.etoro.instruments import listing
+from lararium.modules.finance.instruments import find_by_identifier
 from lararium.modules.finance.report_sightings import Sighting
-from lararium.modules.finance.system_accounts import (
-    SystemAccountKey,
-    get_or_create_system_account,
-)
-from lararium.modules.finance.transfers import transfer_contra
-from lararium.modules.finance.typed_tables import (
-    Fields,
-    Value,
-    parse_decimal,
-    parse_moment,
-    typed_values,
-    upsert_typed,
-)
+
+__all__ = ["LONDON", "Item", "flat", "object_at", "objects_at", "text_at", "value_at"]
 
 SOURCE = "etoro"
-# The owner's reporting zone: a record's booking date and a report's day (Decision 11).
-LONDON = ZoneInfo("Europe/London")
-# An enum value fit to name in a flag (eToro's are camelCase words, or numbers).
-_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]{0,39}")
 _DIGITS = re.compile(r"[0-9]{1,19}")
-
-type Item = dict[str, JSONValue]
 
 
 class EtoroDataError(DisplayableError):
@@ -87,9 +65,10 @@ class NormalizeReport:
     flagged: set[str] = field(default_factory=set[str])
     # The run replayed every stored record, so `flagged` is all there is to flag.
     replayed: bool = False
-    # Flags every run finds in full (instruments whose type eToro has not given, or gave as
-    # one the ledger does not hold).
-    instrument_flags: set[str] = field(default_factory=set[str])
+    # Flags every run finds in full: instruments whose type eToro has not given, or gave as
+    # one the ledger does not hold, or whose currency it has not given; positions whose
+    # settlement no source states.
+    flags_in_full: set[str] = field(default_factory=set[str])
 
 
 @dataclass(frozen=True)
@@ -201,43 +180,9 @@ async def latest_sighted(
 # Reading items ---------------------------------------------------------------------------
 
 
-def value_at(item: Item | None, path: str) -> JSONValue:
-    value: JSONValue = item
-    for part in path.split("."):
-        if not isinstance(value, dict):
-            return None
-        value = value.get(part)
-    return value
-
-
-def text_at(item: Item | None, path: str) -> str:
-    """The field as text; a number is its text (raw records keep numbers so)."""
-    value = value_at(item, path)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    return value.strip() if isinstance(value, str) else ""
-
-
-def object_at(item: Item | None, path: str) -> Item | None:
-    value = value_at(item, path)
-    return value if isinstance(value, dict) else None
-
-
-def objects_at(item: Item | None, path: str) -> list[Item]:
-    value = value_at(item, path)
-    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
-
-
 def number_or_none(record: Record, item: Item | None, path: str) -> Decimal | None:
     """The field as a number; None when absent."""
-    value = value_at(item, path)
-    if isinstance(value, int) and not isinstance(value, bool):
-        value = str(value)
-    if value is None or value == "":
-        return None
-    if not isinstance(value, str):
-        raise EtoroDataError(f"{record.record_type} {path} is not a number")
-    return parse_decimal(value, f"{record.record_type} {path}")
+    return connector_items.number_or_none(item, path, record.record_type, EtoroDataError)
 
 
 def number_at(record: Record, item: Item | None, path: str) -> Decimal:
@@ -258,27 +203,20 @@ def id_at(record: Record, item: Item | None, path: str) -> str:
 
 
 def moment_at(record: Record, item: Item | None, path: str) -> datetime:
-    value = text_at(item, path)
-    if not value:
-        raise EtoroDataError(f"{record.record_type} lacks {path}")
-    moment = parse_moment(value, f"{record.record_type} {path}")
-    if moment.tzinfo is None:
-        raise EtoroDataError(f"{record.record_type} {path} has no time zone")
-    return moment
+    return connector_items.moment_at(item, path, record.record_type, EtoroDataError)
 
 
-def flat(item: Item, prefix: str = "") -> dict[str, Value]:
-    """The item's values by dotted path, arrays left out: they are child rows."""
-    found: dict[str, Value] = {}
-    for key, value in item.items():
-        path = f"{prefix}{key}"
-        if isinstance(value, dict):
-            found |= flat(value, f"{path}.")
-        elif isinstance(value, bool | str) or value is None:
-            found[path] = value
-        elif not isinstance(value, list):
-            found[path] = str(value)
-    return found
+def decimal_text(record: Record, value: str, path: str) -> Decimal:
+    """A number already read as text (text_at), as a Decimal."""
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        raise EtoroDataError(f"{record.record_type} {path} is not a number") from None
+
+
+def ending(position_id: str) -> str:
+    """A position as messages name it: its last four digits (design §5.13)."""
+    return f"···{position_id[-4:]}"
 
 
 def record_key(record: Record) -> str:
@@ -312,16 +250,16 @@ def record_key(record: Record) -> str:
 # One run ---------------------------------------------------------------------------------
 
 
-class Run:
+class Run(ConnectorRun):
+    COLUMNS: ClassVar = COLUMNS
+    RECORD_TYPES: ClassVar = {name: spec.record_type for name, spec in ENDPOINTS.items()}
+    # eToro's enum values are camelCase words, or numbers.
+    CODE: ClassVar = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]{0,39}")
+
     def __init__(
         self, ctx: SyncContext, connection: ConnectionRecord, report: NormalizeReport
     ) -> None:
-        self.ctx = ctx
-        self.command = ctx.command
-        self.session = ctx.command.session
-        self.connection_id = connection.id
-        self.config = connection.config
-        self.sync_id = ctx.sync_id
+        super().__init__(ctx, connection, report)
         self.report = report
         # eToro account id → finance account id, as the connection's config keeps it.
         self.account_map: dict[str, JSONValue] = {}
@@ -331,7 +269,8 @@ class Run:
         self.trading_id: str | None = None
         # The Trading account's currency (accountCurrency, design §3.1).
         self.account_currency = ""
-        # eToro instrument id → its asset currency, and a symbol a position or order gave.
+        # eToro instrument id → its asset currency (the aggregate's or the breakdown's), and
+        # a symbol a position or order gave.
         self.asset_currencies: dict[str, str] = {}
         self.symbols: dict[str, str] = {}
         # eToro instrument id → the metadata's (type id, symbol, display name), None unlisted.
@@ -340,62 +279,12 @@ class Run:
         self.current_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self.candle_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self._instruments: dict[str, UUID | None] = {}
-        self._symbols: dict[UUID, str] = {}
-        self._currencies: dict[str, InstrumentRecord] = {}
-        self._shared: dict[tuple[str, ...], UUID] = {}
 
     @property
     def trading(self) -> UUID:
         if self.trading_id is None:
             raise EtoroDataError("eToro's balances list no Trading account")
         return self.accounts[self.trading_id]
-
-    def flag(self, name: str) -> None:
-        self.report.flagged.add(name)
-
-    def flag_value(self, endpoint: str, path: str, value: str) -> None:
-        """An enum value the mapping does not know, named when it looks like one."""
-        named = _CODE.fullmatch(value) is not None
-        self.flag(f"{endpoint}.{path}={value}" if named else f"{endpoint}.{path}")
-
-    def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
-        setattr(self.report, outcome, getattr(self.report, outcome) + 1)
-
-    async def shared(
-        self, key: tuple[str, ...], work: Callable[[CommandContext], Awaitable[UUID]]
-    ) -> UUID:
-        """A row other connections share, found or created in a transaction of its own and
-        committed at once: its lock must not be held until this sync commits."""
-        if key not in self._shared:
-            async with (
-                self.ctx.session_factory() as session,
-                command_context(session, self.command.actor, "finance.shared_row", {}) as cmd,
-            ):
-                self._shared[key] = await work(cmd)
-        return self._shared[key]
-
-    async def system_account(self, key: SystemAccountKey) -> UUID:
-        return await self.shared(
-            ("system_account", key), lambda cmd: get_or_create_system_account(cmd, key)
-        )
-
-    async def currency(self, code: str) -> InstrumentRecord:
-        if code not in self._currencies:
-            self._currencies[code] = await get_currency(self.session, code)
-        return self._currencies[code]
-
-    async def price(self, code: str, price: Decimal) -> tuple[UUID, Decimal]:
-        """A price eToro gives in an asset currency, as finance.prices keeps it: (the
-        listing's currency, the price in it); pence (GBX) are pounds / 100."""
-        listed, exponent = listing_currency(code)
-        return (await self.currency(listed)).id, price.scaleb(exponent)
-
-    async def symbol(self, instrument_id: UUID) -> str:
-        if instrument_id not in self._symbols:
-            self._symbols[instrument_id] = (
-                await get_instrument(self.session, instrument_id)
-            ).symbol
-        return self._symbols[instrument_id]
 
     async def load_metadata(self, ids: set[str]) -> None:
         """The metadata of these instruments, read at once (else `instrument` reads each)."""
@@ -417,8 +306,10 @@ class Run:
         }
 
     async def instrument(self, etoro_id: str) -> UUID | None:
-        """The instrument eToro's id names, found or created; None, flagged, for a type the
-        ledger does not hold or one new to the ledger whose currency eToro has not given."""
+        """The instrument eToro's id names, found or created; None for a type the ledger does
+        not hold (flagged), or for one new to the ledger whose asset currency neither the
+        aggregate nor the breakdown has given (flagged in full: instruments.currency_flags),
+        which is created, and its rows posted, once one does."""
         if etoro_id in self._instruments:
             return self._instruments[etoro_id]
         await self.load_metadata({etoro_id})
@@ -427,7 +318,6 @@ class Run:
         currency = self.asset_currencies.get(etoro_id, "")
         found: UUID | None
         if not currency and await find_by_identifier(self.session, "etoro_id", etoro_id) is None:
-            self.flag(f"instrument {etoro_id}: no currency")
             found = None
         else:
             found = await listing(self.command, int(etoro_id), symbol, name, currency, None)
@@ -436,85 +326,6 @@ class Run:
         self._instruments[etoro_id] = found
         return found
 
-    # Typed tables -----------------------------------------------------------------------
-
-    async def typed(
-        self, endpoint: str, table: str, values: Mapping[str, Value], under: str = ""
-    ) -> dict[str, object]:
-        """The values that are known fields of the table's rows, by column, typed. `under`:
-        the path of the array the values are an item of."""
-        columns = COLUMNS[endpoint][table]
-        by_column: dict[str, Value] = {}
-        labels: dict[str, str] = {}
-        for path, value in values.items():
-            column = columns.get(f"{under}{path}")
-            if column is not None:
-                by_column[column] = value
-                labels[column] = f"{ENDPOINTS[endpoint].record_type} {under}{path}"
-        return dict(await typed_values(self.session, table, by_column, labels))
-
-    async def upsert(self, table: str, key: Fields, values: Fields) -> None:
-        await upsert_typed(self.command, table, key, values)
-
-    async def prune(self, table: str, parent: Mapping[str, object], keep: int) -> None:
-        """Delete the parent's child rows from index `keep` on: an array that shrank."""
-        where = " and ".join(f"{column} = :{column}" for column in parent)
-        await self.session.execute(
-            text(f"delete from finance.{table} where {where} and item_index >= :keep"),
-            {**parent, "keep": keep},
-        )
-
-    # The ledger -------------------------------------------------------------------------
-
-    async def live(self, key: str) -> UUID | None:
-        t = models.Transaction
-        return await self.session.scalar(
-            select(t.id).where(
-                t.connection_id == self.connection_id, t.external_id == key, t.status != "void"
-            )
-        )
-
-    async def void(self, key: str) -> None:
-        """Void the connection's live transaction under the key, if there is one: a record
-        eToro changed to one that posts nothing leaves no entry."""
-        posted = await self.live(key)
-        if posted is not None:
-            await void_transaction(self.command, posted, voided_by="connector")
-
-    async def post(
-        self,
-        key: str,
-        occurred_at: datetime,
-        description: str,
-        postings: Sequence[PostingInput],
-        counterparty: CounterpartyFields | None = None,
-    ) -> UUID:
-        record, outcome = await upsert_connector_transaction(
-            self.command,
-            TransactionInput(
-                occurred_at=occurred_at,
-                booking_date=local_date(occurred_at, LONDON),
-                description=description,
-                postings=postings,
-                origin="connector",
-                connection_id=self.connection_id,
-                external_id=key,
-                counterparty=counterparty or CounterpartyFields(),
-            ),
-        )
-        self.count(outcome)
-        return record.id
-
-    async def contra(
-        self, key: str, account_id: UUID, other_postings: int, identifier_id: UUID | None
-    ) -> UUID:
-        """Unassigned or In transit, as transfer_contra says."""
-        await self.system_account("unassigned")
-        await self.system_account("in_transit")
-        return await transfer_contra(
-            self.session,
-            source=("connection", f"{self.connection_id}:{key}"),
-            own_account_id=account_id,
-            counterparty_identifier_id=identifier_id,
-            other_postings=other_postings,
-        )
+    async def contra(self, key: str, account_id: UUID, identifier_id: UUID | None) -> UUID:
+        """Unassigned or In transit for a movement of two postings, as transfer_contra says."""
+        return await self.contra_for(key, account_id, 0, identifier_id)

@@ -6,58 +6,41 @@ name record types, fields and Trading 212's fill ids, never a value.
 """
 
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import ClassVar
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core import models as core_models
-from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import ConnectionRecord
 from lararium.core.connectors import SyncContext
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
-from lararium.modules.finance import models
-from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
-from lararium.modules.finance.ledger import (
-    CounterpartyFields,
-    PostingInput,
-    TransactionInput,
-    upsert_connector_transaction,
-    void_transaction,
+from lararium.modules.finance import connector_items
+from lararium.modules.finance.connector_items import (
+    Item,
+    flat,
+    object_at,
+    objects_at,
+    text_at,
+    value_at,
 )
+from lararium.modules.finance.connector_run import LONDON, ConnectorRun
 from lararium.modules.finance.report_sightings import Sighting
-from lararium.modules.finance.system_accounts import (
-    SystemAccountKey,
-    get_or_create_system_account,
-)
 from lararium.modules.finance.trading212.fields import COLUMNS, ENDPOINTS
-from lararium.modules.finance.trading212.instruments import listing, listing_currency
-from lararium.modules.finance.transfers import transfer_contra
-from lararium.modules.finance.typed_tables import (
-    Fields,
-    Value,
-    parse_decimal,
-    parse_moment,
-    typed_values,
-    upsert_typed,
-)
+from lararium.modules.finance.trading212.instruments import listing
+from lararium.modules.finance.typed_tables import Fields, upsert_typed
+
+__all__ = ["LONDON", "Item", "flat", "object_at", "objects_at", "text_at", "value_at"]
 
 SOURCE = "trading212"
-# The owner's reporting zone: a record's booking date and a report's day (Decision 11).
-LONDON = ZoneInfo("Europe/London")
-# An enum value fit to name in a flag.
-_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,39}")
-
-type Item = dict[str, JSONValue]
 
 
 class Trading212DataError(DisplayableError):
@@ -172,67 +155,14 @@ async def stored(
 # Reading items ---------------------------------------------------------------------------
 
 
-def value_at(item: Item | None, path: str) -> JSONValue:
-    value: JSONValue = item
-    for part in path.split("."):
-        if not isinstance(value, dict):
-            return None
-        value = value.get(part)
-    return value
-
-
-def text_at(item: Item | None, path: str) -> str:
-    """The field as text; a number is its text (raw records keep numbers so)."""
-    value = value_at(item, path)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    return value.strip() if isinstance(value, str) else ""
-
-
-def object_at(item: Item | None, path: str) -> Item | None:
-    value = value_at(item, path)
-    return value if isinstance(value, dict) else None
-
-
-def objects_at(item: Item | None, path: str) -> list[Item]:
-    value = value_at(item, path)
-    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
-
-
 def number_at(record: Record, item: Item | None, path: str) -> Decimal:
     """The field as a number; 0 when absent."""
-    value = value_at(item, path)
-    if isinstance(value, int) and not isinstance(value, bool):
-        value = str(value)
-    if value is None or value == "":
-        return Decimal(0)
-    if not isinstance(value, str):
-        raise Trading212DataError(f"{record.record_type} {path} is not a number")
-    return parse_decimal(value, f"{record.record_type} {path}")
+    found = connector_items.number_or_none(item, path, record.record_type, Trading212DataError)
+    return Decimal(0) if found is None else found
 
 
 def moment_at(record: Record, item: Item | None, path: str) -> datetime:
-    value = text_at(item, path)
-    if not value:
-        raise Trading212DataError(f"{record.record_type} lacks {path}")
-    moment = parse_moment(value, f"{record.record_type} {path}")
-    if moment.tzinfo is None:
-        raise Trading212DataError(f"{record.record_type} {path} has no time zone")
-    return moment
-
-
-def flat(item: Item, prefix: str = "") -> dict[str, Value]:
-    """The item's values by dotted path, arrays and maps left out: they are child rows."""
-    found: dict[str, Value] = {}
-    for key, value in item.items():
-        path = f"{prefix}{key}"
-        if isinstance(value, dict):
-            found |= flat(value, f"{path}.")
-        elif isinstance(value, bool | str) or value is None:
-            found[path] = value
-        elif not isinstance(value, list):
-            found[path] = str(value)
-    return found
+    return connector_items.moment_at(item, path, record.record_type, Trading212DataError)
 
 
 def record_key(record: Record) -> str:
@@ -262,17 +192,15 @@ def record_key(record: Record) -> str:
 # One run ---------------------------------------------------------------------------------
 
 
-class Run:
+class Run(ConnectorRun):
+    COLUMNS: ClassVar = COLUMNS
+    RECORD_TYPES: ClassVar = {name: spec.record_type for name, spec in ENDPOINTS.items()}
+    CODE: ClassVar = re.compile(r"[A-Z][A-Z0-9_]{0,39}")
+
     def __init__(
         self, ctx: SyncContext, connection: ConnectionRecord, report: NormalizeReport
     ) -> None:
-        self.ctx = ctx
-        self.command = ctx.command
-        self.session = ctx.command.session
-        self.connection_id = connection.id
-        self.config = connection.config
-        # This sync: its reports are its sightings (report_sightings).
-        self.sync_id = ctx.sync_id
+        super().__init__(ctx, connection, report)
         self.report = report
         self.account_id: UUID | None = None
         # The account's Trading 212 id.
@@ -286,61 +214,11 @@ class Run:
         self.position_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self.fill_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self._instruments: dict[tuple[str, bool], UUID | None] = {}
-        self._symbols: dict[UUID, str] = {}
-        self._currencies: dict[str, InstrumentRecord] = {}
-        self._shared: dict[tuple[str, ...], UUID] = {}
 
     @property
     def account(self) -> UUID:
         assert self.account_id is not None  # set before any record is applied
         return self.account_id
-
-    def flag(self, name: str) -> None:
-        self.report.flagged.add(name)
-
-    def flag_value(self, endpoint: str, path: str, value: str) -> None:
-        """An enum value the mapping does not know, named when it looks like one."""
-        named = _CODE.fullmatch(value) is not None
-        self.flag(f"{endpoint}.{path}={value}" if named else f"{endpoint}.{path}")
-
-    def count(self, outcome: Literal["created", "updated", "unchanged"]) -> None:
-        setattr(self.report, outcome, getattr(self.report, outcome) + 1)
-
-    async def shared(
-        self, key: tuple[str, ...], work: Callable[[CommandContext], Awaitable[UUID]]
-    ) -> UUID:
-        """A row other connections share, found or created in a transaction of its own and
-        committed at once: its lock must not be held until this sync commits."""
-        if key not in self._shared:
-            async with (
-                self.ctx.session_factory() as session,
-                command_context(session, self.command.actor, "finance.shared_row", {}) as cmd,
-            ):
-                self._shared[key] = await work(cmd)
-        return self._shared[key]
-
-    async def system_account(self, key: SystemAccountKey) -> UUID:
-        return await self.shared(
-            ("system_account", key), lambda cmd: get_or_create_system_account(cmd, key)
-        )
-
-    async def currency(self, code: str) -> InstrumentRecord:
-        if code not in self._currencies:
-            self._currencies[code] = await get_currency(self.session, code)
-        return self._currencies[code]
-
-    async def price(self, code: str, price: Decimal) -> tuple[UUID, Decimal]:
-        """A price Trading 212 gives in an instrument's currency, as finance.prices keeps it:
-        (the listing's currency, the price in it); pence (GBX) are pounds / 100."""
-        listed, exponent = listing_currency(code)
-        return (await self.currency(listed)).id, price.scaleb(exponent)
-
-    async def symbol(self, instrument_id: UUID) -> str:
-        if instrument_id not in self._symbols:
-            self._symbols[instrument_id] = (
-                await get_instrument(self.session, instrument_id)
-            ).symbol
-        return self._symbols[instrument_id]
 
     async def load_metadata(self, tickers: set[str]) -> None:
         """Read the metadata of these tickers at once (else `instrument` reads each)."""
@@ -386,33 +264,9 @@ class Run:
         self._instruments[(ticker, current)] = found
         return found
 
-    # Typed tables -----------------------------------------------------------------------
-
-    async def typed(
-        self, endpoint: str, table: str, values: Mapping[str, Value], under: str = ""
-    ) -> dict[str, object]:
-        """The values that are known fields of the table's rows, by column, typed. `under`:
-        the path of the array or map the values are an entry of."""
-        columns = COLUMNS[endpoint][table]
-        by_column: dict[str, Value] = {}
-        labels: dict[str, str] = {}
-        for path, value in values.items():
-            column = columns.get(f"{under}{path}")
-            if column is not None:
-                by_column[column] = value
-                labels[column] = f"{ENDPOINTS[endpoint].record_type} {under}{path}"
-        return dict(await typed_values(self.session, table, by_column, labels))
-
     async def upsert(self, table: str, key: Fields, values: Fields) -> None:
+        # This module's name for the write, which a test can watch.
         await upsert_typed(self.command, table, key, values)
-
-    async def prune(self, table: str, parent: Mapping[str, object], keep: int) -> None:
-        """Delete the parent's child rows from index `keep` on: an array that shrank."""
-        where = " and ".join(f"{column} = :{column}" for column in parent)
-        await self.session.execute(
-            text(f"delete from finance.{table} where {where} and item_index >= :keep"),
-            {**parent, "keep": keep},
-        )
 
     async def stored_records(self, table: str, column: str) -> dict[str, UUID]:
         """The raw record each of the connection's rows was last written from."""
@@ -425,56 +279,10 @@ class Run:
         )
         return {row.key: row.raw_record_id for row in rows}
 
-    # The ledger -------------------------------------------------------------------------
-
-    async def void(self, key: str) -> None:
-        """Void the connection's live transaction under the key, if there is one: a row
-        Trading 212 changed to one that posts nothing leaves no entry."""
-        t = models.Transaction
-        posted = await self.session.scalar(
-            select(t.id).where(
-                t.connection_id == self.connection_id, t.external_id == key, t.status != "void"
-            )
-        )
-        if posted is not None:
-            await void_transaction(self.command, posted, voided_by="connector")
-
-    async def post(
-        self,
-        key: str,
-        occurred_at: datetime,
-        description: str,
-        postings: Sequence[PostingInput],
-        counterparty: CounterpartyFields | None = None,
-    ) -> UUID:
-        record, outcome = await upsert_connector_transaction(
-            self.command,
-            TransactionInput(
-                occurred_at=occurred_at,
-                booking_date=local_date(occurred_at, LONDON),
-                description=description,
-                postings=postings,
-                origin="connector",
-                connection_id=self.connection_id,
-                external_id=key,
-                # Trading 212 names no counterparty, and no deposit is a bank transfer
-                # (design §5.12): a card's is paired by the card payment.
-                counterparty=counterparty or CounterpartyFields(),
-            ),
-        )
-        self.count(outcome)
-        return record.id
-
     async def contra(
         self, key: str, other_postings: int, identifier_id: UUID | None = None
     ) -> UUID:
-        """Unassigned or In transit, as transfer_contra says."""
-        await self.system_account("unassigned")
-        await self.system_account("in_transit")
-        return await transfer_contra(
-            self.session,
-            source=("connection", f"{self.connection_id}:{key}"),
-            own_account_id=self.account,
-            counterparty_identifier_id=identifier_id,
-            other_postings=other_postings,
-        )
+        """Unassigned or In transit, as transfer_contra says. Trading 212 names no
+        counterparty, and no deposit is a bank transfer (design §5.12): a card's is paired by
+        the card payment."""
+        return await self.contra_for(key, self.account, other_postings, identifier_id)

@@ -32,6 +32,7 @@ from lararium.modules.finance.etoro.fields import ENDPOINTS
 from lararium.modules.finance.etoro.instruments import merge_instruments
 from lararium.modules.finance.etoro.normalize import (
     NORMALIZER_VERSION,
+    EtoroDataError,
     NormalizeReport,
     normalize,
 )
@@ -45,6 +46,8 @@ from lararium.modules.finance.ledger import find_unbalanced_transactions
 from lararium.modules.finance.pricing import record_price
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
+from lararium.modules.finance.system_accounts import system_account_ids
+from lararium.modules.finance.transfers.contra import eligible_records
 from tests.finance.trading212.fixtures import isin
 
 from .fixtures import (
@@ -528,7 +531,7 @@ async def test_unsupported_instrument_type_not_posted(session, ledger) -> None:
 async def test_untyped_instrument_posts_as_other_until_typed(session, ledger) -> None:
     report = await ledger.normalize(*_ledger_entries()[:-1])
     assert await _postings(session, f"open:{POSITION}") != []
-    assert report.instrument_flags == {f"instrument type unknown {SYMBOL}"}
+    assert report.flags_in_full == {f"instrument type unknown {SYMBOL}"}
     report = await ledger.normalize(META, now=NOW + timedelta(hours=1))
     kind = await session.scalar(
         text(
@@ -537,7 +540,7 @@ async def test_untyped_instrument_posts_as_other_until_typed(session, ledger) ->
         )
     )
     assert kind == "equity"
-    assert report.instrument_flags == set()
+    assert report.flags_in_full == set()
 
 
 async def test_untyped_then_unsupported_is_voided(session, ledger) -> None:
@@ -547,7 +550,7 @@ async def test_untyped_then_unsupported_is_voided(session, ledger) -> None:
         ("instruments", instrument_meta(type_id=10)), now=NOW + timedelta(hours=1)
     )
     assert await _postings(session, f"open:{POSITION}") == []
-    assert report.instrument_flags == {f"instrument type unsupported {SYMBOL}"}
+    assert report.flags_in_full == {f"instrument type unsupported {SYMBOL}"}
 
 
 async def test_gbx_listing_and_prices_in_pounds(session, ledger) -> None:
@@ -555,7 +558,8 @@ async def test_gbx_listing_and_prices_in_pounds(session, ledger) -> None:
         BALANCES,
         ("pnl", pnl_body([pnl_position(POSITION)])),
         ("aggregate", aggregate_body([(INSTRUMENT_ID, "GBX", "4")])),
-        ("breakdown", breakdown_body([breakdown_position(POSITION, currency="GBX", rate="250")])),
+        # The breakdown writes it in lower case: it is still pence.
+        ("breakdown", breakdown_body([breakdown_position(POSITION, currency="gbx", rate="250")])),
         META,
         ("candles", candle_item(date(2026, 5, 29), "248.0")),
     )
@@ -627,8 +631,8 @@ async def test_cash_bank_transfer_identified_by_iban(session, run, ledger) -> No
     assert tx.bank_transfer is True
     assert tx.payment_reference == "SYNTHREF01"
     assert tx.counterparty_identifier_id is not None
-    # A debit is negative; a bank not in the UK names no identifier.
-    await ledger.normalize(
+    # A debit is negative; a bank not in the UK names no identifier, and is flagged.
+    report = await ledger.normalize(
         BALANCES,
         (
             "cash_transactions",
@@ -640,6 +644,7 @@ async def test_cash_bank_transfer_identified_by_iban(session, run, ledger) -> No
         ("Unassigned", "GBP", Decimal("40.00"), None, None, None, None, False),
     ]
     assert (await _transaction(session, "cash:80000012")).counterparty_identifier_id is None
+    assert report.flagged == {"bank transfer to a non-UK account"}
 
 
 async def test_internal_transfer_names_trading(session, ledger) -> None:
@@ -901,6 +906,13 @@ async def test_merge_after_positions_recorded(session, run, ledger) -> None:
     )
     await run(lambda ctx: merge_instruments(ctx, keep, drop))
     assert await _references(session, drop) == []
+    # The finer of the two precisions stays: eToro's 6 places, not the IBKR listing's 4.
+    assert (
+        await session.scalar(
+            text("select decimals from finance.instruments where id = :i"), {"i": keep}
+        )
+        == 6
+    )
     assert (
         await session.scalar(
             text("select count(*) from finance.instruments where id = :i"), {"i": drop}
@@ -983,8 +995,24 @@ async def test_merge_refuses_another_currency(session, run, ledger) -> None:
 async def test_personal_fields_stored_not_logged(session, ledger, caplog) -> None:
     me = me_json()
     item = bank_item("80000081", "15.00")
+    abroad = bank_item("80000082", "5.00", identifier=("iban", "DE00ZZZZ0000000000000000"))
+    unknown = cash_item("80000083", "1.00") | {
+        "counterparty": {"name": "Somewhere Personal", "type": "internal_account"}
+    }
     with caplog.at_level(logging.DEBUG):
-        await ledger.normalize(BALANCES, ("me", me), ("cash_transactions", item))
+        report = await ledger.normalize(
+            BALANCES,
+            ("me", me),
+            ("cash_transactions", item),
+            ("cash_transactions", abroad),
+            ("cash_transactions", unknown),
+        )
+    # The flags name what is wrong, never whose it is.
+    flags = " ".join(report.flagged | report.flags_in_full)
+    assert report.flagged == {
+        "bank transfer to a non-UK account",
+        "an internal transfer names no account Lararium knows",
+    }
     [user] = await _rows(
         session,
         "select first_name, last_name, date_of_birth, username from finance.etoro_users"
@@ -1015,5 +1043,314 @@ async def test_personal_fields_stored_not_logged(session, ledger, caplog) -> Non
         "GB33ZZZZ04000412345678",
         "04000412345678",
         "SYNTHREF01",
+        "DE00ZZZZ0000000000000000",
+        "Somewhere Personal",
     ):
         assert value not in caplog.text
+        assert value not in flags
+
+
+# Review fixes (Task 10, round 1) --------------------------------------------------------------
+
+
+async def test_bank_transfer_by_account_number_alone(session, run, ledger) -> None:
+    # The probe's shape: one identifier, `bankAccountNumber`, and no sort code anywhere.
+    own = await run(
+        lambda ctx: create_account(
+            ctx,
+            name="Synthetic Bank",
+            ledger_type="asset",
+            subtype="bank",
+            balance_mode="transactions",
+        )
+    )
+    await run(lambda ctx: assign_identifier(ctx, own.id, "uk_bank_account", "040004:12345678"))
+    item = bank_item("80000091", "75.00", identifier=("bankAccountNumber", "12345678"))
+    report = await ledger.normalize(BALANCES, ("cash_transactions", item))
+    assert report.flagged == set()
+    tx = await _transaction(session, "cash:80000091")
+    assert tx.counterparty_identifier_id is None
+    assert tx.bank_transfer is True
+    number = await session.scalar(
+        text("select counterparty_account_number from finance.transactions where id = :i"),
+        {"i": tx.id},
+    )
+    assert number == "12345678"
+    # The engine's account-number evidence names the own account registered under it.
+    records = eligible_records(await system_account_ids(session))
+    holder = await session.scalar(select(records.c.holder).where(records.c.transaction_id == tx.id))
+    assert holder == own.id
+
+
+async def test_settlement_unknown_has_its_own_flag(session, ledger) -> None:
+    # A close whose order eToro could not look up, of a position no PnL report listed.
+    row = trade_row(POSITION) | {"instrumentId": INSTRUMENT_ID, "orderId": ORDER}
+    report = await ledger.normalize(
+        BALANCES,
+        ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "0")])),
+        META,
+        ("trade_history", row),
+    )
+    assert await _transaction(session, f"close:{POSITION}") is None
+    assert "a CFD, leveraged or copied position" not in report.flagged
+    assert "position settlement unknown (1)" in report.flags_in_full
+    [trade] = await _rows(
+        session,
+        "select transaction_id from finance.etoro_trades where external_id = :e",
+        e=f"close:{POSITION}",
+    )
+    assert trade.transaction_id is None
+    # Once its lookup arrives, it posts, and the flag clears.
+    report = await ledger.normalize(
+        BALANCES, ("order_lookup", lookup_body(ORDER, POSITION)), now=NOW + timedelta(hours=1)
+    )
+    assert await _postings(session, f"close:{POSITION}") != []
+    assert not any(f.startswith("position settlement unknown") for f in report.flags_in_full)
+
+
+async def test_instrument_currency_unknown_waits_for_the_aggregate(session, ledger) -> None:
+    # Trade history and a lookup only: the lookup's `asset.currency` is not the asset's.
+    row = trade_row(POSITION) | {"instrumentId": INSTRUMENT_ID, "orderId": ORDER}
+    report = await ledger.normalize(
+        BALANCES, META, ("trade_history", row), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    assert await _transaction(session, f"close:{POSITION}") is None
+    assert (
+        await session.scalar(
+            text("select count(*) from finance.instrument_identifiers where scheme = 'etoro_id'")
+        )
+        == 0
+    )
+    assert report.flags_in_full == {f"instrument currency unknown {SYMBOL}"}
+    # A later sync's aggregate gives it: the instrument is made and the trade posts.
+    report = await ledger.normalize(
+        BALANCES,
+        ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "0")])),
+        now=NOW + timedelta(hours=1),
+    )
+    assert await _postings(session, f"open:{POSITION}") != []
+    assert await _postings(session, f"close:{POSITION}") != []
+    assert report.flags_in_full == set()
+
+
+async def test_internal_transfer_to_trading_without_one_is_flagged(session, ledger) -> None:
+    balances = balances_body()
+    balances["balances"] = [b for b in balances["balances"] if b["accountType"] != "Trading"]
+    item = cash_item("80000101", "20.00") | {
+        "counterparty": {"name": "eToro Trading account", "type": "internal_account"}
+    }
+    report = await ledger.normalize(("balances", balances), ("cash_transactions", item))
+    assert (await _postings(session, "cash:80000101"))[1][0] == "Unassigned"
+    assert report.flagged == {"an internal transfer names no account Lararium knows"}
+
+
+async def test_non_numeric_leverage_is_a_data_error(ledger) -> None:
+    with pytest.raises(EtoroDataError, match="leverage is not a number"):
+        await ledger.normalize(*_ledger_entries(leverage="two"))
+
+
+async def test_negative_fee_is_flagged_not_charged(session, ledger) -> None:
+    report = await ledger.normalize(
+        *_ledger_entries(), ("order_lookup", lookup_body(ORDER, POSITION, fees="-0.40"))
+    )
+    assert [p[7] for p in await _postings(session, f"open:{POSITION}")] == [False, False]
+    assert "a negative fee or tax" in report.flagged
+
+
+async def test_errors_name_a_position_by_its_last_digits(ledger) -> None:
+    with pytest.raises(EtoroDataError) as raised:
+        await ledger.normalize(*_ledger_entries(units="0"))
+    assert "···0101" in str(raised.value)
+    assert str(POSITION) not in str(raised.value)
+
+
+# Regeneration (parent §6.6) ------------------------------------------------------------------
+
+_TYPED_TABLES = (
+    "etoro_user_scopes",
+    "etoro_users",
+    "etoro_pnl_positions",
+    "etoro_pnl",
+    "etoro_aggregate_instruments",
+    "etoro_aggregates",
+    "etoro_breakdown_positions",
+    "etoro_breakdown_instruments",
+    "etoro_breakdowns",
+    "etoro_balance_accounts",
+    "etoro_balances",
+    "etoro_balance_account_snapshots",
+    "etoro_balance_snapshots",
+    "etoro_balance_history",
+    "etoro_cash_bank_identifiers",
+    "etoro_cash_transactions",
+    "etoro_trades",
+    "etoro_position_executions",
+    "etoro_order_positions_to_close",
+    "etoro_orders",
+    "etoro_closed_events",
+    "etoro_stockback_payments",
+    "etoro_instrument_images",
+    "etoro_instruments",
+    "etoro_instrument_types",
+    "etoro_exchanges",
+    "etoro_candles",
+)
+
+
+async def _ledger_state(session, connection) -> dict[str, Any]:
+    """What normalize derives for the connection, by external id and content, no UUIDs of
+    derived rows."""
+    state: dict[str, Any] = {}
+    rows = await session.execute(
+        text(
+            "select t.external_id, t.status, t.occurred_at, t.booking_date, t.description,"
+            " t.bank_transfer, ci.value as counterparty, t.counterparty_account_number,"
+            " (select json_agg(json_build_array(a.name, i.symbol, p.quantity::text,"
+            "   p.cost_per_unit::text, p.price_per_unit::text, p.is_fee, p.memo)"
+            "   order by p.position)"
+            "  from finance.postings p join finance.accounts a on a.id = p.account_id"
+            "  join finance.instruments i on i.id = p.instrument_id"
+            "  where p.transaction_id = t.id) as postings"
+            " from finance.transactions t"
+            " left join finance.account_identifiers ci on ci.id = t.counterparty_identifier_id"
+            " where t.connection_id = :c order by t.external_id"
+        ),
+        {"c": connection.id},
+    )
+    state["transactions"] = [tuple(r) for r in rows]
+    prices = await session.execute(
+        text(
+            "select i.symbol, q.symbol, p.price, p.as_of_date from finance.prices p"
+            " join finance.instruments i on i.id = p.instrument_id"
+            " join finance.instruments q on q.id = p.quote_instrument_id"
+            " where p.source = 'etoro' order by 1, 4"
+        )
+    )
+    state["prices"] = [tuple(r) for r in prices]
+    snapshots = await session.execute(
+        text(
+            "select a.name, i.symbol, s.quantity, s.as_of, s.as_of_date"
+            " from finance.balance_snapshots s"
+            " join finance.instruments i on i.id = s.instrument_id"
+            " join finance.accounts a on a.id = s.account_id"
+            " where a.source_connection_id = :c order by 1, 2, 4"
+        ),
+        {"c": connection.id},
+    )
+    state["snapshots"] = [tuple(r) for r in snapshots]
+    for table in _TYPED_TABLES:
+        found = await session.execute(
+            text(
+                "select (to_jsonb(r) - 'transaction_id' - 'snapshot_id')::text as row,"
+                " t.external_id, s.as_of from finance."
+                + table
+                + " r left join finance.transactions t"
+                " on t.id = (to_jsonb(r) ->> 'transaction_id')::uuid"
+                " left join finance.balance_snapshots s"
+                " on s.id = (to_jsonb(r) ->> 'snapshot_id')::uuid"
+                " where r.connection_id = :c order by 1"
+            ),
+            {"c": connection.id},
+        )
+        state[table] = [tuple(r) for r in found]
+    return state
+
+
+async def _delete_derived(session, connection) -> None:
+    """Everything normalize writes for the connection, leaving its raw records, sightings,
+    accounts and instruments (parent §6.6)."""
+    c = {"c": connection.id}
+    for table in _TYPED_TABLES:
+        await session.execute(text(f"delete from finance.{table} where connection_id = :c"), c)
+    await session.execute(text("delete from finance.transactions where connection_id = :c"), c)
+    await session.execute(
+        text(
+            "delete from finance.balance_snapshots s using finance.accounts a"
+            " where a.id = s.account_id and a.source_connection_id = :c"
+        ),
+        c,
+    )
+    await session.execute(text("delete from finance.prices where source = 'etoro'"))
+
+
+async def test_regenerate_the_ledger_from_raw_records(session, ledger) -> None:
+    first, second = date(2026, 5, 30), date(2026, 5, 31)
+    closed, partial, remainder = POSITION + 10, POSITION, POSITION + 1
+    history = history_body(
+        [
+            (
+                first,
+                [(CASH_ACCOUNT, "Cash", "GBP", "300.00"), (TRADING_ACCOUNT, "Trading", "USD", "0")],
+            ),
+            (
+                second,
+                [(CASH_ACCOUNT, "Cash", "GBP", "350.00"), (TRADING_ACCOUNT, "Trading", "USD", "5")],
+            ),
+        ]
+    )
+    # Day one: two positions open; balance history, candles, the current rate, eToro Money.
+    await ledger.normalize(
+        BALANCES,
+        ("me", me_json()),
+        (
+            "pnl",
+            pnl_body(
+                [
+                    pnl_position(partial, units="10", amount="1000.00"),
+                    pnl_position(closed, units="2", amount="250.00"),
+                ]
+            ),
+        ),
+        ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "12")])),
+        ("breakdown", breakdown_body([breakdown_position(partial), breakdown_position(closed)])),
+        META,
+        ("order_lookup", lookup_body(ORDER, partial, fees="0.75")),
+        ("order_lookup", lookup_body(closed + 500, closed)),
+        ("balance_history", history),
+        ("candles", candle_item(first, "124.10")),
+        ("candles", candle_item(second, "125.20")),
+        ("cash_transactions", bank_item("80000111", "50.00")),
+        (
+            "cash_transactions",
+            bank_item("80000112", "10.00", "debit", ("bankAccountNumber", "12345678")),
+        ),
+    )
+    # Day two: one closed in full, the other in part, its remainder a position of its own.
+    partial_row = trade_row(partial) | {
+        "investment": Decimal("400.00"),
+        "netProfit": Decimal("20.00"),
+        "units": Decimal("4"),
+        "orderId": ORDER,
+    }
+    closed_row = trade_row(closed) | {
+        "investment": Decimal("250.00"),
+        "netProfit": Decimal("-10.00"),
+        "units": Decimal("2"),
+        "fees": Decimal("0.50"),
+        "orderId": closed + 500,
+    }
+    await ledger.normalize(
+        BALANCES,
+        (
+            "pnl",
+            pnl_body(
+                [pnl_position(remainder, units="6", amount="600.00", parentPositionID=partial)]
+            ),
+        ),
+        ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "6")])),
+        ("breakdown", breakdown_body([breakdown_position(remainder, rate="127.5")])),
+        ("trade_history", partial_row),
+        ("trade_history", closed_row),
+        ("candles", candle_item(NOW.date(), "126.00")),
+        now=NOW + timedelta(days=1),
+    )
+    before = await _ledger_state(session, ledger.connection)
+    keys = [t[0] for t in before["transactions"]]
+    for key in (f"open:{partial}", f"close:{partial}", f"open:{remainder}", f"close:{closed}"):
+        assert key in keys
+    assert any(k.startswith(f"opening:{CASH_ACCOUNT}:") for k in keys)
+    assert before["prices"] and before["snapshots"]
+
+    await _delete_derived(session, ledger.connection)
+    await ledger.replay()
+    assert await _ledger_state(session, ledger.connection) == before

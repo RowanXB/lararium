@@ -107,6 +107,8 @@ class Transaction(Base):
     counterparty_name: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The other side's account number, when the source gives it without a sort code.
+    counterparty_account_number: Mapped[str | None] = mapped_column(Text)
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(

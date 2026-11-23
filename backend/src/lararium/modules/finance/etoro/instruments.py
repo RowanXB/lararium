@@ -21,23 +21,22 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
-from lararium.modules.finance import models
+from lararium.modules.finance.connector_run import listing_currency
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     InstrumentKind,
-    InstrumentRecord,
     add_identifiers,
     create_instrument,
     find_by_identifier,
+    find_same_listing,
     get_currency,
     get_instrument,
-    normalize_identifier,
     set_kind,
 )
 
@@ -46,14 +45,6 @@ KINDS: Mapping[str, InstrumentKind] = {"5": "equity", "6": "etf"}
 # eToro's precision of fractional units (design §5.6).
 DECIMALS = 6
 SCHEME = "etoro_id"
-
-_SUBUNITS: Mapping[str, tuple[str, int]] = {"GBX": ("GBP", -2)}
-
-
-def listing_currency(code: str) -> tuple[str, int]:
-    """The ISO 4217 currency a listing quoted in `code` is held in, and the power of ten that
-    turns a price in `code` into one in it."""
-    return _SUBUNITS.get(code, (code, 0))
 
 
 async def instrument_type(session: AsyncSession, instrument_id: int) -> str | None:
@@ -75,25 +66,6 @@ def instrument_kind(type_id: str | None) -> InstrumentKind | None:
     if type_id is None:
         return "other"
     return KINDS.get(type_id)
-
-
-async def _same_listing(
-    ctx: CommandContext, isin: str, quote_instrument_id: UUID
-) -> InstrumentRecord | None:
-    """An instrument with the ISIN, quoted in the currency."""
-    i, instrument = models.InstrumentIdentifier, models.Instrument
-    found = await ctx.session.scalar(
-        select(instrument.id)
-        .join(i, i.instrument_id == instrument.id)
-        .where(
-            i.scheme == "isin",
-            i.value == normalize_identifier("isin", isin),
-            instrument.quote_instrument_id == quote_instrument_id,
-        )
-        .order_by(instrument.id)
-        .limit(1)
-    )
-    return None if found is None else await get_instrument(ctx.session, found)
 
 
 async def listing(
@@ -121,7 +93,7 @@ async def listing(
             raise FinanceValidationError("an eToro instrument new to the ledger needs its currency")
         quote = await get_currency(ctx.session, listing_currency(currency)[0])
         if isin is not None:
-            found = await _same_listing(ctx, isin, quote.id)
+            found = await find_same_listing(ctx.session, isin, quote.id)
         if found is None:
             # The registry holds an identifier once: a second listing of one ISIN goes without.
             free = [
@@ -201,6 +173,45 @@ async def type_flags(
         elif row.type not in KINDS:
             flags.add(f"{UNSUPPORTED} {row.symbol}")
     return flags
+
+
+CURRENCY_UNKNOWN = "instrument currency unknown"
+
+
+async def currency_flags(session: AsyncSession, connection_id: UUID) -> set[str]:
+    """The instruments the connection's positions and trades name that the ledger does not
+    hold yet because neither the aggregate nor the breakdown has given their currency (an
+    order lookup's `asset.currency` is not taken: the probe found it to differ). Named by
+    symbol: the market data's, else an order's or the breakdown's, else eToro's id."""
+    rows = await session.execute(
+        text(
+            "with named as ("
+            " select instrument_id from finance.etoro_trades"
+            " where connection_id = :c and instrument_id is not null"
+            " union select instrument_id from finance.etoro_pnl_positions"
+            " where connection_id = :c),"
+            " priced as ("
+            " select instrument_id from finance.etoro_aggregate_instruments"
+            " where connection_id = :c and asset_currency is not null"
+            " union select instrument_id from finance.etoro_breakdown_positions"
+            " where connection_id = :c and asset_currency is not null)"
+            " select n.instrument_id::text as id,"
+            " coalesce((select m.symbol_full from finance.etoro_instruments m"
+            " where m.connection_id = :c and m.instrument_id = n.instrument_id),"
+            " (select o.asset_symbol from finance.etoro_orders o where o.connection_id = :c"
+            " and o.asset_instrument_id = n.instrument_id and o.asset_symbol is not null"
+            " order by o.order_id limit 1),"
+            " (select b.symbol from finance.etoro_breakdown_instruments b"
+            " where b.connection_id = :c and b.instrument_id = n.instrument_id"
+            " and b.symbol is not null order by b.as_of_date desc limit 1)) as symbol"
+            " from named n"
+            " where n.instrument_id not in (select instrument_id from priced)"
+            " and not exists (select 1 from finance.instrument_identifiers ii"
+            " where ii.scheme = 'etoro_id' and ii.value = n.instrument_id::text)"
+        ),
+        {"c": connection_id},
+    )
+    return {f"{CURRENCY_UNKNOWN} {row.symbol or f'eToro {row.id}'}" for row in rows}
 
 
 # Merging ---------------------------------------------------------------------------------
@@ -352,11 +363,18 @@ async def merge_instruments(ctx: CommandContext, keep: UUID, drop: UUID) -> None
         if count:
             moved_rows[f"{reference.table}.{reference.column}"] = count
     await session.execute(text("delete from finance.instruments where id = :drop"), params)
+    if dropped.decimals > kept.decimals:
+        # The finer of the two: the dropped one's quantities must still be held exactly.
+        await session.execute(
+            text("update finance.instruments set decimals = :d where id = :keep"),
+            {**params, "d": dropped.decimals},
+        )
 
     record = await get_instrument(session, keep)
     data: dict[str, JSONValue] = {
         "id": str(record.id),
         "symbol": record.symbol,
+        "decimals": record.decimals,
         "identifiers": [{"scheme": i.scheme, "value": i.value} for i in record.identifiers],
     }
     ctx.emit("finance.instrument.merged", keep, {"kept": str(keep), "dropped": str(drop)})
