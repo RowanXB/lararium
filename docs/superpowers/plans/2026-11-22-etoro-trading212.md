@@ -22,7 +22,7 @@
 
 Choices the design leaves to the builder, made here so tasks don't have to:
 
-1. **Branch and PRs.** Implementation branch `feat/claude-etoro-trading212`. Phases B (Trading 212), C (eToro) and D (transfers) may each be a PR stacked on the previous, each green on its own; Phase A goes with B.
+1. **Branch and PR** (owner, 2026-11-23). Implementation continues on PR #32's branch `feat/claude-etoro-trading212-design`, so the design and plan change with the code in one PR. Each phase (A shared, B Trading 212, C eToro, D transfers, E wrap-up) ends green, so it can be reviewed on its own.
 2. **Package layout.**
 
    | File | Holds |
@@ -61,14 +61,14 @@ Choices the design leaves to the builder, made here so tasks don't have to:
     - **Check 5: N.** Each Monzo card payment and its Trading 212 deposit are 0 seconds apart (CSV `Time (UTC)` and API `dateTime` agree to the second); the two deposits are 512 seconds apart. N = 2 minutes stands.
     - **Check 7, Trading 212 CSV (deposits only so far).** Columns `Action`, `Time (UTC)`, `Notes`, `ID`, `Total`, `Currency (Total)`. `ID` equals the API's `reference` and the time equals the API's `dateTime`. `Notes` carries a "Transaction ID: …" the API does not return, so the API is not a superset of the CSV; trade rows' columns are unknown until the first trade.
     - Checks 1, 2, 4, 6 and 8 remain.
-    The rest is filled in by Task 0. Until then the provisional values above stand, and Tasks 8–12 and 16 (which use the zone, the decimals, check 4's rule and N) do not start; Tasks 1–7, 14, 15 and 17 may.
+    The rest is filled in by Task 0. Until then the provisional values above stand, and Tasks 8–12 (which use the zone, the decimals and check 4's rule) do not start; the others may, since N is settled (check 5).
 
 **Not in this plan:** screens beyond the three forms; Trading 212 bank-transfer deposits by payment reference; CFDs, leverage, copy trading, Options, Crypto wallet; FX rates into `finance.fx_rates`; posting Trading 212 export rows of an `Action` other than deposits and withdrawals before the first real trade shows how they match API records (Task 13a stores and flags them).
 
 ## Global Constraints
 
 - **Everything in plans 1, 3, 4 and M5 still applies:** Python 3.13, the uv lockfile enforced, ruff, pyright strict on `src/`, import-linter; PostgreSQL 18; `NUMERIC`/`Decimal`/strings and the word `float` nowhere in `src/`; UUIDv7; UTC `timestamptz` plus a separate `date`; English UI copy and docs (only the README also has `README.zh-CN.md`); AGPL-3.0-compatible dependencies only.
-- **Git.** Branch `feat/claude-etoro-trading212`; commit messages `<type>: <summary>`; signed commits (`local-signed-git-commit` skill); commit by explicit path, never `git add -A`.
+- **Git.** Branch `feat/claude-etoro-trading212-design` (PR #32); commit messages `<type>: <summary>`; signed commits (`local-signed-git-commit` skill); commit by explicit path, never `git add -A`.
 - **Writes.** Through `command_context`, audited. The worker acts as `Actor("connector", "trading212")` or `Actor("connector", "etoro")`; the API as the owner.
 - **Errors.** Domain checks before every database rule; 4xx with a readable `message`, never 500.
 - **Read-only.** Only GET, only to the connector's own host, no redirects (Decision 5). An eToro key with a write scope is never used beyond `/me` (Decision 13).
@@ -600,4 +600,4 @@ The owner decided on 2026-11-23 to import the export as well as the API, and to 
   | §10 verification | 18, 19 |
 
 - **Types:** `ReadOnlyClient` (Task 2) is used by Tasks 3 and 7; `typed_values`/`upsert_typed` (Task 1) by Tasks 5, 10, 11; `ingest_statement` (Task 9) by Task 13; `source_reviews` (Task 9) by Tasks 11 and 13; `transfer_leg_fees` (created in `00B` by Task 9, written by Task 11, read by Task 14); `_post_conversion` (Task 14) is reused by Task 17; `Pairable.holders` (Task 15) by Task 16.
-- **Gate:** Tasks 8–12 and 16 depend on Task 0's findings (zone, decimals, check 4's rule, N); Tasks 1–7, 14, 15 and 17 do not (Decision 11a).
+- **Gate:** Tasks 8–12 depend on Task 0's remaining findings (zone, decimals, check 4's rule); the others do not (Decision 11a).
