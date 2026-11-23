@@ -401,3 +401,109 @@ def _endpoint_columns(
 
 # Endpoint → table → known path → column (Decision 3: `column_name` of the path below the row).
 COLUMNS: Mapping[str, Mapping[str, Mapping[str, str]]] = _columns(ENDPOINTS, PERSONAL)
+
+
+# The account statement (xlsx): its sheets and their columns, as the owner's statement probe
+# showed them (2026-11-23). A "table" sheet is a header row, then one row per data row; a
+# "labels" sheet is a label in column A and its values to the right. Financial Summary's columns
+# after Name are its periods, which change with the statement, so they are not checked.
+@dataclass(frozen=True)
+class StatementSheet:
+    record_type: str
+    layout: Literal["table", "labels"]
+    # Columns (a table) or labels (labels) that must be present; a label once only.
+    required: tuple[str, ...]
+    known: frozenset[str]
+    # The columns of the row key (Decision 10), in order; empty: every cell and the period.
+    key: tuple[str, ...]
+    open_columns: bool = False
+
+
+_ACTIVITY_COLUMNS = """Date|Type|Details|Amount|Units / Contracts|Realized Equity Change|
+Realized Equity|Balance|Position ID|Asset type|NWA"""
+_CLOSED_COLUMNS = """Position ID|Action|Long / Short|Amount|Units / Contracts|Open Date|
+Close Date|Leverage|Spread Fees (USD)|Market Spread (USD)|Profit(USD)|Profit(GBP)|
+FX rate at open (USD)|FX rate at close (USD)|Open Rate|Close Rate|Take profit rate|
+Stop loss rate|Overnight Fees and Dividends|Copied From|Type|ISIN|Notes"""
+_DIVIDEND_COLUMNS = """Date of Payment|Instrument Name|Net Dividend Received (USD)|
+Net dividends|Currency|Franked/Unfranked|Franking Credits (AUD)|Net Dividend Received (GBP)|
+Withholding Tax Rate (%)|Withholding Tax Amount (USD)|Withholding Tax Amount (GBP)|
+Position ID|Type|ISIN"""
+_SUMMARY_LABELS = """Details|Name|Username|Currency|Date Created|Start Date|End Date|
+Account Summary (USD)|Beginning Realized Equity|Deposits|Internal Transfer|
+Transfer to Trading (from eToro Money)|Refunds|Credits|Adjustments|
+Profit or Loss (Closed positions only)|Dividends|Dividend CFD|Stocks Lending|Transfer in|
+Transfer out|Overnight Fees|Opening and Closing Spread|Admin Fees|SDRT Charge|Withdrawals|
+Transfer to eToro Money (from Trading)|Withdrawal Fees|Deposit/Withdrawal FX Conversion Fee|
+Ending Realized Equity|N/A - Currency conversion not applicable|
+Values shown in brackets indicate negative amounts|Beginning Unrealized Equity|
+Ending Unrealized Equity"""
+
+
+def _names(names: str) -> tuple[str, ...]:
+    return tuple(name.strip() for name in names.replace("\n", "").split("|"))
+
+
+ACTIVITY_COLUMNS = _names(_ACTIVITY_COLUMNS)
+CLOSED_COLUMNS = _names(_CLOSED_COLUMNS)
+DIVIDEND_COLUMNS = _names(_DIVIDEND_COLUMNS)
+SUMMARY_LABELS = _names(_SUMMARY_LABELS)
+
+ACCOUNT_SUMMARY = "Account Summary"
+CLOSED_POSITIONS = "Closed Positions"
+ACCOUNT_ACTIVITY = "Account Activity"
+DIVIDENDS = "Dividends"
+FINANCIAL_SUMMARY = "Financial Summary"
+# Static text; it stays only in the stored document (design §5.3).
+GLOSSARY = "Glossary"
+
+STATEMENT_SHEETS: Mapping[str, StatementSheet] = {
+    ACCOUNT_SUMMARY: StatementSheet(
+        "etoro.statement.account_summary",
+        "labels",
+        ("Username", "Currency", "Date Created", "Start Date", "End Date"),
+        frozenset(SUMMARY_LABELS),
+        (),
+    ),
+    CLOSED_POSITIONS: StatementSheet(
+        "etoro.statement.closed_position",
+        "table",
+        _names("Position ID|Open Date|Close Date|Units / Contracts|Amount|Profit(USD)|ISIN"),
+        frozenset(CLOSED_COLUMNS),
+        ("Position ID", "Open Date", "Close Date", "Units / Contracts", "Amount"),
+    ),
+    ACCOUNT_ACTIVITY: StatementSheet(
+        "etoro.statement.account_activity",
+        "table",
+        ACTIVITY_COLUMNS[:9],
+        frozenset(ACTIVITY_COLUMNS),
+        ("Date", "Type", "Details", "Amount", "Units / Contracts", "Position ID"),
+    ),
+    # The row key's columns are required: a row without them has no key.
+    DIVIDENDS: StatementSheet(
+        "etoro.statement.dividend",
+        "table",
+        ("Date of Payment", "Position ID", "Net Dividend Received (USD)"),
+        frozenset(DIVIDEND_COLUMNS),
+        ("Date of Payment", "Position ID", "Net Dividend Received (USD)"),
+    ),
+    FINANCIAL_SUMMARY: StatementSheet(
+        "etoro.statement.financial_summary",
+        "table",
+        ("Name",),
+        frozenset({"Name"}),
+        (),
+        open_columns=True,
+    ),
+}
+
+# Stored typed, never logged or put in a message: the owner's names and username, and the
+# free text of Details and Notes.
+STATEMENT_PERSONAL: frozenset[str] = frozenset(
+    {
+        f"{ACCOUNT_SUMMARY}.Name",
+        f"{ACCOUNT_SUMMARY}.Username",
+        f"{ACCOUNT_ACTIVITY}.Details",
+        f"{CLOSED_POSITIONS}.Notes",
+    }
+)
