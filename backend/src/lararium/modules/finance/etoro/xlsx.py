@@ -35,6 +35,10 @@ MAX_CELL_CHARS = 32_767  # Excel's own limit on one cell's text
 _MAX_COLUMNS = 16_384  # Excel's own limit, column XFD
 _END_OF_CENTRAL_DIRECTORY = b"PK\x05\x06"
 _END_RECORD_BYTES = 22
+_ZIP64_LOCATOR = b"PK\x06\x07"
+_ZIP64_LOCATOR_BYTES = 20
+_DIRECTORY_HEADER = b"PK\x01\x02"
+_DIRECTORY_HEADER_BYTES = 46
 
 _DECLARATION = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 _REFERENCE = re.compile(r"([A-Z]{1,3})[1-9][0-9]*")
@@ -113,14 +117,36 @@ def _parse(
         raise XlsxError(f"{what} is not well-formed XML") from None
 
 
-def _entries(body: bytes) -> int:
-    """The entry count the end-of-central-directory record states, read before the central
-    directory is parsed. A Zip64 count (0xFFFF) is more than any xlsx has."""
-    start = max(0, len(body) - _END_RECORD_BYTES - 0xFFFF)  # the record and its comment
-    end = body.rfind(_END_OF_CENTRAL_DIRECTORY, start)
+def _check_entries(body: bytes) -> None:
+    """Refuse more than MAX_ENTRIES entries before `zipfile` reads the central directory.
+
+    `zipfile` ignores the end record's entry count and parses every header within the
+    directory's stated size, so the count proves nothing: the headers are walked here instead,
+    as `zipfile` will walk them (from the end record back by the directory's size, each header's
+    length from its own fields), stopping at the first one past the limit. A Zip64 locator is
+    refused outright: `zipfile` reads it whatever the count says, and no xlsx needs one."""
+    search = max(0, len(body) - _END_RECORD_BYTES - 0xFFFF)  # the record and its comment
+    end = body.rfind(_END_OF_CENTRAL_DIRECTORY, search)
     if end < 0 or len(body) < end + _END_RECORD_BYTES:
         raise XlsxError("the file is not an xlsx workbook")
-    return int.from_bytes(body[end + 10 : end + 12], "little")
+    locator = end - _ZIP64_LOCATOR_BYTES
+    if locator >= 0 and body[locator : locator + 4] == _ZIP64_LOCATOR:
+        raise XlsxError("the file is a Zip64 archive, which is refused")
+    size = int.from_bytes(body[end + 12 : end + 16], "little")
+    position = end - size
+    if position < 0:
+        raise XlsxError("the file is not an xlsx workbook")
+    entries = 0
+    while position < end:
+        if body[position : position + 4] != _DIRECTORY_HEADER:
+            raise XlsxError("the file is not an xlsx workbook")
+        entries += 1
+        if entries > MAX_ENTRIES:
+            raise XlsxError(f"the file has more than {MAX_ENTRIES} parts")
+        name, extra, comment = (
+            int.from_bytes(body[position + at : position + at + 2], "little") for at in (28, 30, 32)
+        )
+        position += _DIRECTORY_HEADER_BYTES + name + extra + comment
 
 
 def _column(reference: str, what: str) -> int:
@@ -139,8 +165,7 @@ class _Workbook:
     def __init__(self, body: bytes) -> None:
         if len(body) > MAX_PART_BYTES:
             raise XlsxError("the file is larger than 16 MiB")
-        if _entries(body) > MAX_ENTRIES:
-            raise XlsxError(f"the file has more than {MAX_ENTRIES} parts")
+        _check_entries(body)
         try:
             self._zip = zipfile.ZipFile(io.BytesIO(body))
             infos = self._zip.infolist()
@@ -197,27 +222,32 @@ class _Workbook:
         what = "the shared strings"
         strings = self._strings
         runs: list[str] = []
+        length = 0
         depth = {"si": 0, "rPh": 0, "t": 0}
 
         def start(tag: str, _: dict[str, str]) -> None:
+            nonlocal length
             local = _local(tag)
             if local in depth:
                 depth[local] += 1
             if local == "si":
                 runs.clear()
+                length = 0
 
         def end(tag: str) -> None:
             local = _local(tag)
             if local in depth:
                 depth[local] -= 1
             if local == "si":
-                strings.append(_checked("".join(runs)))
+                strings.append("".join(runs))
                 if len(strings) > MAX_CELLS:
                     raise XlsxError(f"the workbook has more than {MAX_CELLS} shared strings")
 
         def text(data: str) -> None:
+            nonlocal length
             # A phonetic hint (rPh) is not part of the string.
             if depth["si"] and depth["t"] and not depth["rPh"]:
+                length = _within_cell(length, data)
                 runs.append(data)
 
         _parse(self.part(name, what), what, start, end, text)
@@ -229,11 +259,12 @@ class _Workbook:
         kind = "n"
         value: list[str] = []
         inline: list[str] = []
+        length = 0  # of the open cell's text, value and inline string together
         depth = {"c": 0, "v": 0, "is": 0, "rPh": 0, "t": 0}
         position = 0
 
         def start(tag: str, attributes: dict[str, str]) -> None:
-            nonlocal row, position, column, kind
+            nonlocal row, position, column, kind, length
             local = _local(tag)
             if local in depth:
                 depth[local] += 1
@@ -248,6 +279,7 @@ class _Workbook:
                 kind = attributes.get("t", "n")
                 value.clear()
                 inline.clear()
+                length = 0
 
         def end(tag: str) -> None:
             nonlocal row, position
@@ -268,18 +300,21 @@ class _Workbook:
                 row = None
 
         def text(data: str) -> None:
+            nonlocal length
             if not depth["c"]:
                 return
             if depth["v"]:
+                length = _within_cell(length, data)
                 value.append(data)
             elif depth["is"] and depth["t"] and not depth["rPh"]:
+                length = _within_cell(length, data)
                 inline.append(data)
 
         _parse(self.part(name, what), what, start, end, text)
         return tuple(rows)
 
     def _value(self, kind: str, value: str, inline: str) -> str:
-        text = _checked(self._text(kind, value, inline))
+        text = self._text(kind, value, inline)
         self._chars += len(text)
         if self._chars > MAX_TEXT_CHARS:
             raise XlsxError(f"the workbook has more than {MAX_TEXT_CHARS} characters of text")
@@ -298,10 +333,12 @@ class _Workbook:
         return value  # a number, a formula's string, an error code or an ISO date, as stored
 
 
-def _checked(text: str) -> str:
-    if len(text) > MAX_CELL_CHARS:
+def _within_cell(length: int, data: str) -> int:
+    """A cell's text so far plus `data`, refused past MAX_CELL_CHARS before it is joined."""
+    length += len(data)
+    if length > MAX_CELL_CHARS:
         raise XlsxError(f"a cell's text is longer than {MAX_CELL_CHARS} characters")
-    return text
+    return length
 
 
 def _target(base: str, relationship: _Relationship, what: str) -> str:

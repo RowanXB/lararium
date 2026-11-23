@@ -193,6 +193,18 @@ def test_summary_rows_keyed_by_period_and_label() -> None:
     assert [row.cells for row in corrected.rows] != [row.cells for row in statement.rows]
 
 
+def test_summary_key_ignores_spaces_around_the_label() -> None:
+    def keyed(label: str, name: str) -> list[str]:
+        sheets = statement_sheets(
+            summary(), [], financial=[{**FINANCIAL[0], "Name": name}, FINANCIAL[1]]
+        )
+        sheet, rows = sheets[0]
+        sheets[0] = (sheet, [*rows, [("shared", label), ("number", "3")]])
+        return [row.key for row in parse(build_workbook(sheets)).rows]
+
+    assert keyed(" Deposits ", "  Synthetic figure ") == keyed("Deposits", "Synthetic figure")
+
+
 def test_repeated_summary_label_gets_occurrence_keys() -> None:
     sheets = statement_sheets(summary(), [])
     name, rows = sheets[0]

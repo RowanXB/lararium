@@ -211,7 +211,11 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
             identity: list[str | int] = [sheet.name]
             if spec.per_period:
                 identity.extend((labels["Start Date"], labels["End Date"]))
-            identity.extend(cells[column] for column in spec.key)
+            # A period sheet's label or Name is stripped, as `_labels` reads it, so a re-issue
+            # differing only in surrounding spaces keeps its key.
+            identity.extend(
+                cells[column].strip() if spec.per_period else cells[column] for column in spec.key
+            )
             same = _key(identity)
             rows.append(StatementRow(sheet.name, _key([*identity, seen[same]]), cells))
             seen[same] += 1
