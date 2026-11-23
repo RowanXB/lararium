@@ -390,6 +390,88 @@ Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请�
 3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
    上传这个 XML（最大 64 MiB）。请在最近一次同步之后再运行导出：旧文件里某行若已被 IBKR 更正，上传会把更正覆盖回去。
 
+## 连接 Binance
+
+Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，使用的密钥只能读取。它不会
+交易、转账、申购或提现：客户端只发送查询。每个有余额的 Binance 钱包会成为 Lararium 里的一个
+账户，其余额就是 Binance 报告的余额，而 Binance 列出的记录（充值、提现、交易等）用来解释余额
+是怎么来的。
+
+目前已实现的部分（阶段 A）：
+
+- **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中每个有余额的钱包都会计入；Lararium
+  不认识的钱包会按名称标记，并且仍会得到一个账户。
+- **记录**：充值、提现、现货交易、闪兑（convert）、资产分红，以及活期 Earn（申购、赎回和收益）。
+
+Spot、活期 Earn、充值、提现、交易、闪兑和分红已用真实账户核对过。Funding 和阶段 A 其余的响应
+结构依据 Binance 的文档，尚未用真实账户核对。
+
+### 1. 创建只读 API 密钥
+
+在 Binance 创建一个 API 密钥，只勾选 **Enable Reading**。Lararium 在每次同步开始时检查密钥的
+权限：只要开启了其他任何权限，无论已知还是未知，同步都会拒绝这个密钥；没有 **Enable Reading**
+的密钥同样会被拒绝。IP 限制可选。两种密钥类型都支持：HMAC（“system generated”）和 Ed25519
+（“self-generated”）。注意 Binance 只为 `api.binance.com` 提供 Ed25519 密钥的文档。
+
+### 2. 添加连接
+
+在 Connections 页面选择 **Add Binance**，填写显示名称、密钥类型、API key 及其 secret（Ed25519
+密钥则填 PEM 格式的私钥，若有口令则一并填写）。密钥会加密保存，之后不再显示；**Update key**
+可以替换它。同一个 Binance 账户只能连接一次。Binance 不会报告只读密钥的到期时间，因此没有到期
+提醒；密钥被拒绝时，连接会显示需要新密钥，并通知你。
+
+### 首次同步做什么
+
+首次同步会把每个历史端点尽可能往回拉取到 Binance 提供的最早时间，然后对 Binance 列出的每个
+交易对拉取成交记录，因为成交记录端点需要指定交易对。这大约是 3,750 个请求，按 Binance 的
+`/api` 速率限制大约需要 15 分钟；Lararium 会自行控制节奏，保持在限制之下。首次同步可以续传：
+中途中断后，下一次同步会从停下的地方继续。之后每 4 小时同步一次，**Sync now** 则总会运行。
+它们从上一次同步前 7 天开始请求，所以之后才确认的充值也会被收进来。
+
+Binance 并没有列出所有改变过余额的事件（例如很久以前的一笔 P2P 买入）。对每个资产，Binance
+报告的最早余额与记录合计之间的差额，会作为一笔 **Opening balance adjustment** 记一次，日期是
+该账户最早记录的前一天。它在每次同步时重新推导，所以一条早于该余额的迟到记录会让它随之变动。
+
+### 对账差异
+
+每次同步，对每个账户和资产，都会把两次余额报告之间的变化与这期间记录的合计做对比。如果两者
+不一致，连接上会列出一条 **对账差异（reconciliation difference）** 并发送一次通知。余额仍然
+是 Binance 报告的数字；这条差异会一直列着，直到有记录能解释它，而且不会自动修正。通知里不会
+带数值、地址或哈希。
+
+### 提现到你自己的钱包
+
+提现到 Lararium 不认识的链上地址，会进入 Unassigned，该地址出现在 Suggestions 里。要让它成为
+转账，在 Accounts 页面打开某个账户的 **Identifiers**，把钱包地址添加为 **Chain address**，做法
+见[登记标识](#登记标识)。此后提现到该地址会显示为在途转账，网络手续费单独记账。每笔充值和提现
+还会保存交易哈希、网络和地址，以便以后按哈希配对钱包。
+
+### 价格
+
+Binance 持仓按每个资产的每日价格以 EUR 估值：
+
+- **Binance 的日 K 线**，通过 Binance 自己的 EUR 市场换算成 EUR（该资产的 EUR 交易对，或其
+  USDT 交易对除以 `EURUSDT`）。稳定币也同样定价，从不假设等于一。
+- **CoinGecko**，可选。在 `infra/.env` 中设置 `LARARIUM_COINGECKO_API_KEY`（Demo 套餐的密钥
+  即可），然后运行 `make up`。它只用于 Binance 自己的市场无法定价的资产，且从不用于 Binance
+  已有价格的日子。没有这个密钥时，这类资产会显示为缺少价格。CoinGecko 的条款要求署名：
+  Price data provided by [CoinGecko](https://www.coingecko.com)。
+- **ECB 参考汇率**，每天通过 Frankfurter（`api.frankfurter.dev`，无需密钥）获取，使 EUR 价格
+  可以显示为你的报告币种。它们只填补没有任何其他来源提供这两种币种之间汇率的日子。
+
+### 阶段 B 将增加
+
+尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
+
+- 钱包之间的划转和小额资产兑换（dust）
+- 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押
+- 加密货币借贷，记为债务
+- 杠杆，全仓和逐仓
+- USD-M 和 COIN-M 合约
+- 期权
+- 法币订单、银行卡支付、P2P、Pay 和返佣
+- Portfolio Margin，以及 Trading Bots 和 Copy Trading 钱包（Binance 没有为它们提供记录）
+
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
 不做这一步，每 30 分钟轮询一次也能用。想在大约一分钟内看到付款，就需要给 Monzo 一个它能调用的公网
