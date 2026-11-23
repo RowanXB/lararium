@@ -34,12 +34,13 @@ from lararium.modules.finance.ledger import (
     upsert_connector_transaction,
     void_transaction,
 )
+from lararium.modules.finance.report_sightings import Sighting
 from lararium.modules.finance.system_accounts import (
     SystemAccountKey,
     get_or_create_system_account,
 )
 from lararium.modules.finance.trading212.fields import COLUMNS, ENDPOINTS
-from lararium.modules.finance.trading212.instruments import listing
+from lararium.modules.finance.trading212.instruments import listing, listing_currency
 from lararium.modules.finance.transfers import transfer_contra
 from lararium.modules.finance.typed_tables import (
     Fields,
@@ -96,10 +97,41 @@ class Record:
     def record_type(self) -> str:
         return ENDPOINTS[self.endpoint].record_type
 
+
+@dataclass(frozen=True)
+class Report:
+    """A report record as one sync saw it (report_sightings): it holds at `seen_at`."""
+
+    record: Record
+    sync_id: UUID
+    seen_at: datetime
+
+    @property
+    def endpoint(self) -> str:
+        return self.record.endpoint
+
+    @property
+    def content(self) -> Item:
+        return self.record.content
+
     @property
     def day(self) -> date:
-        """The day of the fetch that first stored it: what it reports is dated by it."""
-        return local_date(self.fetched_at, LONDON)
+        return local_date(self.seen_at, LONDON)
+
+    @property
+    def order(self) -> tuple[datetime, UUID, UUID]:
+        return self.seen_at, self.sync_id, self.record.id
+
+
+async def reports_of(session: AsyncSession, sightings: Sequence[Sighting]) -> list[Report]:
+    """The sightings' records, as reports, in the order seen."""
+    records = {r.id: r for r in await records_of(session, [s.raw_record_id for s in sightings])}
+    found = [
+        Report(records[s.raw_record_id], s.sync_id, s.seen_at)
+        for s in sightings
+        if s.raw_record_id in records
+    ]
+    return sorted(found, key=lambda r: r.order)
 
 
 _ENDPOINT_OF = {spec.record_type: name for name, spec in ENDPOINTS.items()}
@@ -232,20 +264,15 @@ def record_key(record: Record) -> str:
 
 class Run:
     def __init__(
-        self,
-        ctx: SyncContext,
-        connection: ConnectionRecord,
-        now: datetime,
-        report: NormalizeReport,
+        self, ctx: SyncContext, connection: ConnectionRecord, report: NormalizeReport
     ) -> None:
         self.ctx = ctx
         self.command = ctx.command
         self.session = ctx.command.session
         self.connection_id = connection.id
         self.config = connection.config
-        # The sync's time and day: reconciliation is at them.
-        self.now = now
-        self.day = local_date(now, LONDON)
+        # This sync: its reports are its sightings (report_sightings).
+        self.sync_id = ctx.sync_id
         self.report = report
         self.account_id: UUID | None = None
         # The account's Trading 212 id.
@@ -301,6 +328,12 @@ class Run:
         if code not in self._currencies:
             self._currencies[code] = await get_currency(self.session, code)
         return self._currencies[code]
+
+    async def price(self, code: str, price: Decimal) -> tuple[UUID, Decimal]:
+        """A price Trading 212 gives in an instrument's currency, as finance.prices keeps it:
+        (the listing's currency, the price in it); pence (GBX) are pounds / 100."""
+        listed, exponent = listing_currency(code)
+        return (await self.currency(listed)).id, price.scaleb(exponent)
 
     async def symbol(self, instrument_id: UUID) -> str:
         if instrument_id not in self._symbols:

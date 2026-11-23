@@ -32,6 +32,7 @@ from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.readonly_http import HttpForbiddenError, record_json
+from lararium.modules.finance.report_sightings import record_sighting
 from lararium.modules.finance.trading212.client import (
     PIES_REMOVED,
     HistoryKind,
@@ -58,6 +59,8 @@ FLAGGED_PREFIX = "Trading 212 flagged: "
 FIELDS = "fields"
 INSTRUMENT_TYPES = "instrument_types"
 _STOPPED = "history stopped early (404)"
+# What Trading 212 reports now, rather than records: each storing is sighted.
+REPORTS = frozenset({"summary", "positions", "pending_orders", "pies", "pie"})
 
 
 class Trading212SyncError(DisplayableError):
@@ -225,22 +228,34 @@ class _Run:
         item: Item,
         request_path: str | None = None,
         params: Mapping[str, str] | None = None,
+        *,
+        seen_at: datetime | None = None,
     ) -> None:
+        """Store the item; a report (`seen_at`: when its response arrived) is also sighted,
+        stored now or before (report_sightings)."""
         request: dict[str, JSONValue] = {
             "endpoint": request_path or endpoint_path(endpoint),
             "params": dict(params or {}),
         }
-        self.ids.append(
-            await store_raw_record(
+        raw_record_id = await store_raw_record(
+            self.ctx.command,
+            connection_id=self.ctx.connection.id,
+            record_type=ENDPOINTS[endpoint].record_type,
+            request=request,
+            content=record_json(item),
+            connector_version=VERSION,
+            sync_id=self.ctx.sync_id,
+        )
+        self.ids.append(raw_record_id)
+        if endpoint in REPORTS:
+            assert seen_at is not None, "a report is stored with the time it was seen"
+            await record_sighting(
                 self.ctx.command,
                 connection_id=self.ctx.connection.id,
-                record_type=ENDPOINTS[endpoint].record_type,
-                request=request,
-                content=record_json(item),
-                connector_version=VERSION,
+                raw_record_id=raw_record_id,
                 sync_id=self.ctx.sync_id,
+                seen_at=seen_at,
             )
-        )
 
     async def _pages(
         self, kind: HistoryKind, seen: _Seen | None, start: str | None
@@ -283,8 +298,10 @@ class _Run:
             await self.store("instruments", item)
         for item in await self.client.exchanges():
             await self.store("exchanges", item)
-        for pie in await self.client.pies() or []:
-            await self.store("pies", pie)
+        pies = await self.client.pies() or []
+        arrived = datetime.now(UTC)
+        for pie in pies:
+            await self.store("pies", pie, seen_at=arrived)
             pie_id = pie.get("id")
             if not isinstance(pie_id, Decimal):
                 raise Trading212SyncError("Trading 212's pies answer has no pie id")
@@ -293,7 +310,12 @@ class _Run:
             except ValueError:
                 raise Trading212SyncError("Trading 212's pies answer has no pie id") from None
             if detail is not None:
-                await self.store("pie", detail, f"{endpoint_path('pie')}/{int(pie_id)}")
+                await self.store(
+                    "pie",
+                    detail,
+                    f"{endpoint_path('pie')}/{int(pie_id)}",
+                    seen_at=datetime.now(UTC),
+                )
 
 
 class Trading212Connector:
@@ -338,16 +360,23 @@ class Trading212Connector:
     ) -> dict[str, JSONValue]:
         client = run.client
         summary = await client.summary()
+        # When the summary arrived: what it reports holds then (the reconciliation's and the
+        # opening's cut-off), not at the transaction's start, before the request.
+        arrived = datetime.now(UTC)
         account_id = _account_id(summary)
         known = cursor.get("account_id")
         if isinstance(known, str) and known != account_id:
             raise AccountMismatchError("this key belongs to another Trading 212 account")
-        await run.store("summary", summary)
-        for item in await client.positions():
-            await run.store("positions", item)
+        await run.store("summary", summary, seen_at=arrived)
+        positions = await client.positions()
+        arrived = datetime.now(UTC)
+        for item in positions:
+            await run.store("positions", item, seen_at=arrived)
         run.checked.add("pending_orders")
-        for item in await client.pending_orders() or []:
-            await run.store("pending_orders", item)
+        pending = await client.pending_orders() or []
+        arrived = datetime.now(UTC)
+        for item in pending:
+            await run.store("pending_orders", item, seen_at=arrived)
 
         rewalk = _due(cursor, "rewalk_at", REWALK_EVERY, now)
         seen_before = _texts(cursor, "seen")

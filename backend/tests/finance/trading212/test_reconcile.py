@@ -147,3 +147,17 @@ async def test_reconciliation_waits_for_a_summary(session, run) -> None:
     # A run without the account's summary checks nothing, and keeps what the last one found.
     await ledger.normalize(("dividends", dividend_item()), now=LATER.replace(hour=13))
     assert (await get_connection(session, connection.id)).warnings == before
+
+
+async def test_a_fill_after_the_summary_is_no_difference(session, run) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    await _consistent(ledger)
+    # The summary and positions arrive at noon; a buy fills a minute later, before the
+    # history is fetched: the report does not hold it yet.
+    after = order_item(order_id=500002, fill_id=700002)
+    after["fill"]["filledAt"] = (LATER + timedelta(minutes=1)).isoformat()
+    report = await ledger.normalize(
+        SUMMARY, ("positions", position_json()), ("orders", after), now=LATER
+    )
+    assert report.mismatches == []

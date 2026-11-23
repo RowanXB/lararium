@@ -13,10 +13,10 @@ whose postings still do not balance within rounding fails the run, naming the fi
 movement's sign comes from its type; a TRANSFER's is taken as given and flagged.
 
 Opening balances (design §5.5): Trading 212's history depth is undocumented. What the
-account's earliest summary reports (cash and positions) less what the history posts up to
-its time is one opening adjustment per instrument, against Opening balances, the day before
-the account's earliest record; every run sets it afresh, so history arriving later moves it,
-and a full history leaves none.
+account's first summary reports (cash and the positions its sync saw), less what the history
+posts up to the time that summary arrived, is one opening adjustment per instrument, against
+Opening balances, the day before the account's earliest record; every run sets it afresh, so
+history arriving later moves it, and a full history leaves none.
 """
 
 from collections.abc import Sequence
@@ -24,7 +24,7 @@ from datetime import datetime, time, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, select, text
 
 from lararium.core import models as core_models
 from lararium.core.timeutil import local_date
@@ -32,11 +32,14 @@ from lararium.modules.finance import models
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
 from lararium.modules.finance.ledger import CounterpartyFields, PostingInput, compute_residuals
 from lararium.modules.finance.money import to_plain_str, tolerance
-from lararium.modules.finance.trading212 import accounts
+from lararium.modules.finance.report_sightings import first_sighting, list_sightings
+from lararium.modules.finance.trading212 import accounts, reconcile, reports
+from lararium.modules.finance.trading212.fields import ENDPOINTS
 from lararium.modules.finance.trading212.state import (
     LONDON,
     Item,
     Record,
+    Report,
     Run,
     Trading212DataError,
     flat,
@@ -45,6 +48,7 @@ from lararium.modules.finance.trading212.state import (
     object_at,
     objects_at,
     record_key,
+    reports_of,
     stored,
     text_at,
 )
@@ -236,8 +240,8 @@ async def _post_fill(run: Run, record: Record, key: str, order: Item, fill: Item
         await _rounding(run, fill_id, postings, unassigned, currency, quantity)
         price = number_at(record, fill, "price")
         if price > 0:
-            quote = await run.currency(text_at(order, "instrument.currency"))
-            run.fill_prices[(instrument_id, quote.id, local_date(occurred_at, LONDON))] = price
+            quote_id, in_quote = await run.price(text_at(order, "instrument.currency"), price)
+            run.fill_prices[(instrument_id, quote_id, local_date(occurred_at, LONDON))] = in_quote
     return await run.post(key, occurred_at, description, postings)
 
 
@@ -388,58 +392,29 @@ def _not_opening() -> ColumnElement[bool]:
     return func.coalesce(models.Transaction.external_id, "").not_like(f"{OPENING}%")
 
 
-async def _earliest_report(run: Run) -> tuple[Record, list[Record]] | None:
-    """The account's earliest summary, and the positions its sync fetched."""
-    summaries = await stored(run.session, run.connection_id, ["summary"])
-    if not summaries:
+async def _earliest_report(run: Run) -> tuple[Report, list[Record]] | None:
+    """The account's first summary sighting, and the positions its sync saw."""
+    first = await first_sighting(run.session, run.connection_id, ENDPOINTS["summary"].record_type)
+    if first is None:
         return None
-    summary = summaries[0]
-    r = core_models.RawRecord
-    positions = await stored(
-        run.session, run.connection_id, ["positions"], r.sync_id == summary.sync_id
+    seen = await reports_of(
+        run.session, await list_sightings(run.session, run.connection_id, sync_id=first.sync_id)
     )
-    return summary, positions
+    [summary] = [r for r in seen if r.record.id == first.raw_record_id]
+    return summary, [r.record for r in seen if r.endpoint == "positions"]
 
 
 async def openings(run: Run) -> None:
-    """Set the account's opening adjustments (module doc)."""
+    """Set the account's opening adjustments (module doc): its first summary's report, at the
+    time it arrived, less what the history posts up to then."""
     earliest = await _earliest_report(run)
     if earliest is None:
         return
     summary, positions = earliest
-    content = summary.content
-    currency = await run.currency(text_at(content, "currency"))
-    reported: dict[UUID, Decimal] = {
-        currency.id: sum(
-            (
-                number_at(summary, content, f"cash.{part}")
-                for part in ("availableToTrade", "reservedForOrders", "inPies")
-            ),
-            Decimal(0),
-        )
-    }
-    for position in positions:
-        instrument_id = await run.instrument(position, object_at(position.content, "instrument"))
-        if instrument_id is not None:
-            quantity = number_at(position, position.content, "quantity")
-            reported[instrument_id] = reported.get(instrument_id, Decimal(0)) + quantity
-
+    found = await reports.reported(run, summary.record, positions, current=False)
+    held = await reconcile.holdings(run.session, run.account, summary.seen_at, _not_opening())
     t, p = models.Transaction, models.Posting
     live = t.status != "void"
-    held = {
-        row.instrument_id: Decimal(row.total)
-        for row in await run.session.execute(
-            select(p.instrument_id, func.sum(p.quantity).label("total"))
-            .join(t, t.id == p.transaction_id)
-            .where(
-                p.account_id == run.account,
-                live,
-                _not_opening(),
-                t.occurred_at <= summary.fetched_at,
-            )
-            .group_by(p.instrument_id)
-        )
-    }
     prefix = f"{OPENING}{run.trading212_id}:"
     current = {
         UUID(key.removeprefix(prefix))
@@ -455,13 +430,13 @@ async def openings(run: Run) -> None:
         .join(p, p.transaction_id == t.id)
         .where(p.account_id == run.account, live, _not_opening())
     )
-    start = local_date(summary.fetched_at, LONDON)
+    start = summary.day
     day = (min(start, first) if first is not None else start) - timedelta(days=1)
     occurred_at = datetime.combine(day, time(), LONDON)
     opening_balances = await run.system_account("opening_balances")
-    for instrument_id in sorted(set(reported) | set(held) | current):
+    for instrument_id in sorted(set(found) | set(held) | current):
         key = f"{prefix}{instrument_id}"
-        difference = reported.get(instrument_id, Decimal(0)) - held.get(instrument_id, Decimal(0))
+        difference = found.get(instrument_id, Decimal(0)) - held.get(instrument_id, Decimal(0))
         decimals = (await get_instrument(run.session, instrument_id)).decimals
         if difference.copy_abs() <= tolerance(decimals):
             await run.void(key)
@@ -474,4 +449,50 @@ async def openings(run: Run) -> None:
                 PostingInput(run.account, instrument_id, difference),
                 PostingInput(opening_balances, instrument_id, -difference),
             ],
+        )
+
+
+async def void_unsupported(run: Run, instrument_ids: Sequence[UUID]) -> None:
+    """Void what the connection posted on instruments its metadata now says the ledger does
+    not hold: their fills, and the dividends paid on them."""
+    if not instrument_ids:
+        return
+    t, p = models.Transaction, models.Posting
+    keys = set(
+        await run.session.scalars(
+            select(t.external_id)
+            .join(p, p.transaction_id == t.id)
+            .where(
+                t.connection_id == run.connection_id,
+                t.status != "void",
+                p.instrument_id.in_(instrument_ids),
+                _not_opening(),
+            )
+        )
+    )
+    keys |= set(
+        await run.session.scalars(
+            text(
+                "select t.external_id from finance.trading212_dividends d"
+                " join finance.transactions t on t.id = d.transaction_id"
+                " join finance.instrument_identifiers ii on ii.scheme = 'trading212_ticker'"
+                " and ii.value = d.instrument_ticker"
+                " where d.connection_id = :c and t.status <> 'void'"
+                " and ii.instrument_id = any(cast(:i as uuid[]))"
+            ),
+            {"c": run.connection_id, "i": list(instrument_ids)},
+        )
+    )
+    for key in sorted(k for k in keys if k is not None):
+        await run.void(key)
+    # As a row that posts nothing: its typed row links no transaction (a replay's does not).
+    for table in ("trading212_orders", "trading212_dividends"):
+        await run.session.execute(
+            text(
+                f"update finance.{table} r set transaction_id = null"
+                " from finance.transactions t"
+                " where t.id = r.transaction_id and r.connection_id = :c"
+                " and t.external_id = any(cast(:k as text[]))"
+            ),
+            {"c": run.connection_id, "k": sorted(k for k in keys if k is not None)},
         )

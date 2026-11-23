@@ -10,6 +10,7 @@ from lararium.modules.finance.instruments import (
     list_instruments,
     replace_identifier,
     set_hidden,
+    set_kind,
 )
 
 
@@ -128,3 +129,20 @@ async def test_replace_identifier_renames_a_listing(session, run, usd) -> None:
     assert InstrumentIdentifier("isin", "US00ZZQA0008") in with_isin.identifiers
     with pytest.raises(FinanceValidationError):
         await run(replace_identifier, usd.id, InstrumentIdentifier("iso4217", "EUR"))
+
+
+async def test_set_kind_never_makes_or_unmakes_a_currency(session, run, usd) -> None:
+    listing = await run(
+        create_instrument,
+        kind="other",
+        symbol="ZZQA",
+        name="Zzqa Example Corp",
+        decimals=8,
+        quote_instrument_id=usd.id,
+        identifiers=[],
+    )
+    assert (await run(set_kind, listing.id, "equity")).kind == "equity"
+    with pytest.raises(FinanceValidationError):
+        await run(set_kind, listing.id, "fiat")
+    with pytest.raises(FinanceValidationError):
+        await run(set_kind, usd.id, "equity")

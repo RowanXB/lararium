@@ -2,13 +2,16 @@
 
 Deterministic from its inputs and versioned (NORMALIZER_VERSION, stored in the connection's
 config, Decision 8): when the stored version differs, the run replays every raw record the
-connection holds (the latest copy of each history and metadata item, and every report), so
-what a new version stores is filled in for what an older one saw.
+connection holds (the latest copy of each history and metadata item, and every sighting of a
+report, report_sightings), so what a new version stores is filled in for what an older one
+saw, dated as it was then. A run otherwise applies the records it was given and its own
+sync's sightings.
 
 In order: the account (accounts.py); instrument and exchange metadata (reports.py); order
 fills, dividends and cash movements as connector transactions, then the opening adjustments
 (records.py); the summaries, positions, pending orders and pies, typed per day, with reported
-snapshots, and prices (reports.py); reconciliation of this sync's report (reconcile.py).
+snapshots, and prices (reports.py); reconciliation of this sync's report, at the time its
+summary arrived (reconcile.py).
 
 Every record's fields are checked first: a required one missing fails the run; an unknown one
 with a value is flagged. Flags (unknown fields, unknown values of the enums that decide
@@ -18,7 +21,6 @@ to publish, as are the instruments still without a type, which every run finds i
 
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
@@ -26,16 +28,19 @@ from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.report_sightings import list_sightings
 from lararium.modules.finance.trading212 import accounts, reconcile, records, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS, MAP_ENTRIES
-from lararium.modules.finance.trading212.instruments import unknown_types
+from lararium.modules.finance.trading212.instruments import type_flags
 from lararium.modules.finance.trading212.state import (
     NormalizeReport,
     Record,
+    Report,
     Run,
     Trading212DataError,
     record_key,
     records_of,
+    reports_of,
     stored,
     text_at,
 )
@@ -52,7 +57,6 @@ _KEYED = (*_LEDGER, "instruments", "exchanges")
 _REPORTS = ("summary", "positions", "pending_orders", "pies", "pie")
 # What each ledger key is, as an error names it.
 _KEY_KIND = {"orders": "fill or order id", "dividends": "reference", "transactions": "reference"}
-UNKNOWN_TYPE = "instrument type unknown"
 
 
 def _join(path: str, key: str) -> str:
@@ -121,20 +125,19 @@ def _check(run: Run, record: Record) -> None:
 
 async def _records(
     ctx: SyncContext, raw_record_ids: Sequence[UUID], replay: bool
-) -> tuple[list[Record], list[Record], list[Record]]:
-    """(the keyed items, one per key; the reports; this run's own records). With `replay`,
-    also the latest copy of every keyed item and every report the connection holds.
+) -> tuple[list[Record], list[Report]]:
+    """(the keyed items, one per key; the reports). The reports are this sync's sightings;
+    with `replay`, every sighting the connection has, and the latest copy of every keyed item.
 
     One ledger key with two contents in one run fails it, naming the record type and the
     key's kind (Decision 9): an item repeated unchanged is one raw record."""
     session = ctx.command.session
-    own = await records_of(session, raw_record_ids)
     keyed: dict[tuple[str, str], Record] = {}
-    reported: dict[UUID, Record] = {}
-    for record in sorted(own, key=lambda r: (r.fetched_at, r.id)):
+    for record in sorted(
+        await records_of(session, raw_record_ids), key=lambda r: (r.fetched_at, r.id)
+    ):
         if record.endpoint in _REPORTS:
-            reported[record.id] = record
-            continue
+            continue  # a report is read from its sighting
         key = (record.endpoint, record_key(record))
         held = keyed.get(key)
         if held is not None and record.endpoint in _LEDGER and held.content != record.content:
@@ -148,59 +151,54 @@ async def _records(
         for record in await stored(session, ctx.connection.id, _KEYED):
             if (key := (record.endpoint, record_key(record))) not in given:
                 keyed[key] = record  # oldest first, so the latest copy stays
-        for record in await stored(session, ctx.connection.id, _REPORTS):
-            reported.setdefault(record.id, record)
-    return list(keyed.values()), list(reported.values()), own
+    sightings = await list_sightings(
+        session, ctx.connection.id, sync_id=None if replay else ctx.sync_id
+    )
+    return list(keyed.values()), await reports_of(session, sightings)
 
 
-def _tickers(by_endpoint: dict[str, list[Record]], reported: Sequence[Record]) -> set[str]:
+def _tickers(by_endpoint: dict[str, list[Record]], reports_: Sequence[Report]) -> set[str]:
     found = {text_at(r.content, "order.instrument.ticker") for r in by_endpoint["orders"]}
     found |= {text_at(r.content, "instrument.ticker") for r in by_endpoint["dividends"]}
     found |= {
-        text_at(r.content, "instrument.ticker") for r in reported if r.endpoint == "positions"
+        text_at(r.content, "instrument.ticker") for r in reports_ if r.endpoint == "positions"
     }
     return found - {""}
 
 
-async def normalize(
-    ctx: SyncContext, raw_record_ids: Sequence[UUID], *, now: datetime | None = None
-) -> NormalizeReport:
-    """Apply raw records to the ledger; `now` is the sync's time (default: now).
+async def normalize(ctx: SyncContext, raw_record_ids: Sequence[UUID]) -> NormalizeReport:
+    """Apply raw records, and this sync's sightings of reports (report_sightings), to the
+    ledger.
 
     Its arithmetic on amounts is exact, as the ledger's balance check is: the default context
     rounds to 28 digits, which could leave postings that do not balance."""
     with localcontext(prec=MAX_PREC):
-        return await _normalize(ctx, list(dict.fromkeys(raw_record_ids)), now or datetime.now(UTC))
+        return await _normalize(ctx, list(dict.fromkeys(raw_record_ids)))
 
 
-async def _normalize(
-    ctx: SyncContext, raw_record_ids: list[UUID], now: datetime
-) -> NormalizeReport:
+async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeReport:
     connection = await get_connection(ctx.command.session, ctx.connection.id)
     replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
-    keyed, reported, own = await _records(ctx, raw_record_ids, replay)
+    keyed, seen = await _records(ctx, raw_record_ids, replay)
     report = NormalizeReport(replayed=replay)
-    run = Run(ctx, connection, now, report)
+    run = Run(ctx, connection, report)
     by_endpoint: defaultdict[str, list[Record]] = defaultdict(list)
     for record in sorted(keyed, key=lambda r: (record_key(r), r.fetched_at, r.id)):
         _check(run, record)
         by_endpoint[record.endpoint].append(record)
-    for record in reported:
+    for record in {r.record.id: r.record for r in seen}.values():
         _check(run, record)
 
-    own_ids = {record.id for record in own}
-    summaries = sorted(
-        (r for r in own if r.endpoint == "summary"), key=lambda r: (r.fetched_at, r.id)
-    )
+    own = [r for r in seen if r.sync_id == ctx.sync_id]
+    summaries = [r for r in own if r.endpoint == "summary"]
     summary = summaries[-1] if summaries else None
-    latest_stored = [r for r in reported if r.endpoint == "summary"]
-    await accounts.account(
-        run, summary or max(latest_stored, key=lambda r: (r.fetched_at, r.id), default=None)
-    )
+    latest = [r for r in seen if r.endpoint == "summary"]
+    await accounts.account(run, (summary or latest[-1]).record if summary or latest else None)
 
-    await reports.instruments(run, by_endpoint["instruments"], replay)
+    unsupported = await reports.instruments(run, by_endpoint["instruments"], replay)
     await reports.exchanges(run, by_endpoint["exchanges"], replay)
-    await run.load_metadata(_tickers(by_endpoint, reported))
+    await records.void_unsupported(run, unsupported)
+    await run.load_metadata(_tickers(by_endpoint, seen))
     for record in sorted(by_endpoint["orders"], key=records.order_time):
         await records.order(run, record)
     for record in sorted(
@@ -215,26 +213,25 @@ async def _normalize(
         await records.cash_movement(run, record)
     await records.openings(run)
 
-    await reports.apply(run, reported, own_ids)
+    await reports.apply(run, seen)
     await reports.prices(run)
 
-    # Reconciliation (design §5.11), at the sync's time: only a run with this sync's summary
-    # has what Trading 212 reports now; another keeps the warnings the last check left.
+    # Reconciliation (design §5.11), at the time this sync's summary arrived: only a run with
+    # one has what Trading 212 reports now; another keeps the warnings the last check left.
     if summary is not None:
-        positions = [r for r in own if r.endpoint == "positions"]
+        positions = [r.record for r in own if r.endpoint == "positions"]
         account = await get_account(run.session, run.account)
         mismatches = await reconcile.check(
             run.session,
             run.account,
             account.name,
-            run.day,
-            await reports.reported(run, summary, positions),
+            summary.seen_at,
+            summary.day,
+            await reports.reported(run, summary.record, positions),
         )
         report.mismatches = [m.warning for m in mismatches]
         await reconcile.publish(ctx, mismatches)
-    report.instrument_flags = {
-        f"{UNKNOWN_TYPE} {ticker}" for ticker in await unknown_types(run.session, run.account)
-    }
+    report.instrument_flags = await type_flags(run.session, run.connection_id, run.account)
 
     # Only this normaliser's keys: others (the account kind) stay as they are.
     values: dict[str, JSONValue] = {

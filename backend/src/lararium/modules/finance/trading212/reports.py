@@ -2,14 +2,14 @@
 metadata; each summary, position, pending order and pie, typed per day, the summary's cash and
 each position a `reported` snapshot; and prices.
 
-A report is dated by the fetch that first stored its raw record (Record.day, its fetched_at):
-a raw record is stored once per content, so that is the only time it carries, and a run that
-replays every record (a new normalizer version) rebuilds each day's rows and snapshots as the
-runs of that day left them. A day's row is the latest report of the day. Everything here is
+A report is dated by the sync that saw it (report_sightings): a raw record is stored once per
+content, so content that comes back (A, B, A) is one record, seen each time. Each sighting of
+a summary or a position is a reported snapshot at its time; a day's typed row and price are
+the day's latest sighting. Applied to every sighting in the order seen (a new normalizer
+version's replay), they come out as the syncs that saw them left them. Everything here is
 written only when it differs from what is stored.
 """
 
-from collections import defaultdict
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
@@ -20,29 +20,34 @@ from sqlalchemy import select, text
 from lararium.modules.finance import models
 from lararium.modules.finance.pricing import record_price
 from lararium.modules.finance.trading212 import reconcile
+from lararium.modules.finance.trading212.fields import COLUMNS
 from lararium.modules.finance.trading212.instruments import reclassify
 from lararium.modules.finance.trading212.state import (
     SOURCE,
     Record,
+    Report,
     Run,
     flat,
     number_at,
     object_at,
     objects_at,
-    stored,
+    record_key,
     text_at,
 )
 
 _CASH = ("availableToTrade", "reservedForOrders", "inPies")
+# The pie row's columns a detail fills: cleared on a day its sync fetched no detail.
+_DETAIL_COLUMNS = tuple(sorted(COLUMNS["pie"]["trading212_pies"].values()))
 
 
 # Metadata --------------------------------------------------------------------------------
 
 
-async def instruments(run: Run, records: Sequence[Record], replay: bool) -> None:
+async def instruments(run: Run, records: Sequence[Record], replay: bool) -> list[UUID]:
     """Every tradable instrument, typed; an instrument made without a type takes the one its
-    ticker now has. One unchanged since its row was written from it is skipped (the list
-    holds thousands), except when a new version replays."""
+    ticker now has. Returns those made without a type that the ledger does not hold. One
+    unchanged since its row was written from it is skipped (the list holds thousands), except
+    when a new version replays."""
     stored = {} if replay else await run.stored_records("trading212_instruments", "ticker")
     for record in records:
         ticker = text_at(record.content, "ticker")
@@ -55,8 +60,7 @@ async def instruments(run: Run, records: Sequence[Record], replay: bool) -> None
             {"connection_id": run.connection_id, "ticker": ticker},
             values | {"raw_record_id": record.id},
         )
-    if records:
-        await reclassify(run.command, run.connection_id)
+    return await reclassify(run.command, run.connection_id) if records else []
 
 
 async def exchanges(run: Run, records: Sequence[Record], replay: bool) -> None:
@@ -124,121 +128,94 @@ def cash(record: Record) -> Decimal:
     return sum((number_at(record, content, f"cash.{part}") for part in _CASH), Decimal(0))
 
 
-async def _summary(run: Run, record: Record) -> None:
-    """The cash as a reported snapshot, and the summary typed for its day."""
-    content = record.content
-    currency = await run.currency(text_at(content, "currency"))
-    snapshot_id = await reconcile.reported_snapshot(
-        run.command, run.account, currency.id, cash(record), record.fetched_at, record.day
+async def _snapshot(run: Run, report: Report) -> UUID | None:
+    """The reported snapshot of a summary's cash or a position's quantity, as seen."""
+    record = report.record
+    if report.endpoint == "summary":
+        instrument_id = (await run.currency(text_at(record.content, "currency"))).id
+        quantity = cash(record)
+    else:
+        found = await run.instrument(
+            record, object_at(record.content, "instrument"), current=report.sync_id == run.sync_id
+        )
+        if found is None:
+            return None
+        instrument_id, quantity = found, number_at(record, record.content, "quantity")
+    return await reconcile.reported_snapshot(
+        run.command, run.account, instrument_id, quantity, report.seen_at, report.day
     )
-    values = await run.typed("summary", "trading212_accounts", flat(content))
+
+
+async def _summary(run: Run, report: Report, snapshot_id: UUID | None) -> None:
+    values = await run.typed("summary", "trading212_accounts", flat(report.content))
     await run.upsert(
         "trading212_accounts",
-        {"connection_id": run.connection_id, "as_of_date": record.day},
+        {"connection_id": run.connection_id, "as_of_date": report.day},
         values
         | {
             "account_id": run.account,
             "account_kind": run.config.get("account_kind"),
             "snapshot_id": snapshot_id,
-            "raw_record_id": record.id,
+            "raw_record_id": report.record.id,
         },
     )
 
 
-async def _position(run: Run, record: Record, current: bool) -> None:
-    """The position as a reported snapshot and a price for its day, typed. `current`: it is
-    one of this sync's positions, whose ticker is the one Trading 212 uses now."""
+async def _position(run: Run, report: Report, snapshot_id: UUID | None) -> None:
+    """The position typed for its day, and its price for the day."""
+    record = report.record
     content = record.content
-    snapshot_id = None
-    instrument_id = await run.instrument(record, object_at(content, "instrument"), current=current)
-    if instrument_id is not None:
-        snapshot_id = await reconcile.reported_snapshot(
-            run.command,
-            run.account,
-            instrument_id,
-            number_at(record, content, "quantity"),
-            record.fetched_at,
-            record.day,
-        )
-        price = number_at(record, content, "currentPrice")
-        if price > 0:
-            quote = await run.currency(text_at(content, "instrument.currency"))
-            run.position_prices[(instrument_id, quote.id, record.day)] = price
+    instrument_id = await run.instrument(
+        record, object_at(content, "instrument"), current=report.sync_id == run.sync_id
+    )
+    price = number_at(record, content, "currentPrice")
+    if instrument_id is not None and price > 0:
+        quote_id, in_quote = await run.price(text_at(content, "instrument.currency"), price)
+        run.position_prices[(instrument_id, quote_id, report.day)] = in_quote
     values = await run.typed("positions", "trading212_positions", flat(content))
     ticker = values.pop("instrument_ticker")
     await run.upsert(
         "trading212_positions",
-        {"connection_id": run.connection_id, "as_of_date": record.day, "instrument_ticker": ticker},
+        {"connection_id": run.connection_id, "as_of_date": report.day, "instrument_ticker": ticker},
         values | {"snapshot_id": snapshot_id, "raw_record_id": record.id},
     )
 
 
-async def _pending_order(run: Run, record: Record) -> None:
-    values = await run.typed("pending_orders", "trading212_pending_orders", flat(record.content))
+async def _pending_order(run: Run, report: Report) -> None:
+    values = await run.typed("pending_orders", "trading212_pending_orders", flat(report.content))
     order_id = values.pop("id")
     await run.upsert(
         "trading212_pending_orders",
-        {"connection_id": run.connection_id, "as_of_date": record.day, "id": order_id},
-        values | {"raw_record_id": record.id},
+        {"connection_id": run.connection_id, "as_of_date": report.day, "id": order_id},
+        values | {"raw_record_id": report.record.id},
     )
 
 
-async def _pie_records(run: Run) -> tuple[dict[str, list[Record]], dict[str, list[Record]]]:
-    """Every stored pie list item and pie detail of the connection, by pie id, oldest first."""
-    lists: defaultdict[str, list[Record]] = defaultdict(list)
-    details: defaultdict[str, list[Record]] = defaultdict(list)
-    for record in await stored(run.session, run.connection_id, ["pies", "pie"]):
-        if record.endpoint == "pies":
-            lists[text_at(record.content, "id")].append(record)
-        else:
-            details[text_at(record.content, "settings.id")].append(record)
-    return lists, details
-
-
-def _latest(records: Sequence[Record], day: date) -> Record | None:
-    """The latest of the records (oldest first) stored by the end of the day."""
-    found = [record for record in records if record.day <= day]
-    return found[-1] if found else None
-
-
-async def _pies(run: Run, records: Sequence[Record]) -> None:
-    """A pie's row for each day a list item or detail of it was stored: the latest list item
-    and detail by the end of that day (a pie the list did not hold yet has none). Typed only;
-    no postings."""
-    days = sorted(
-        {
-            (text_at(r.content, "id" if r.endpoint == "pies" else "settings.id"), r.day)
-            for r in records
-        }
+async def _pie(run: Run, listed: Report, detail: Report | None) -> None:
+    """A pie's row for the day: the list's item, and the detail the same sync fetched (none:
+    the detail's columns and rows cleared). Typed only; no postings."""
+    values = await run.typed("pies", "trading212_pies", flat(listed.content))
+    pie_id = values.pop("id")
+    if detail is not None:
+        values |= await run.typed("pie", "trading212_pies", flat(detail.content))
+    else:
+        values |= dict.fromkeys(_DETAIL_COLUMNS)
+    await run.upsert(
+        "trading212_pies",
+        {"connection_id": run.connection_id, "id": pie_id, "as_of_date": listed.day},
+        values
+        | {
+            "raw_record_id": listed.record.id,
+            "detail_raw_record_id": detail.record.id if detail is not None else None,
+        },
     )
-    if not days:
-        return
-    lists, details = await _pie_records(run)
-    for pie, day in days:
-        listed = _latest(lists[pie], day)
-        if listed is None:
-            continue
-        detail = _latest(details[pie], day)
-        values = await run.typed("pies", "trading212_pies", flat(listed.content))
-        pie_id = values.pop("id")
-        if detail is not None:
-            values |= await run.typed("pie", "trading212_pies", flat(detail.content))
-        await run.upsert(
-            "trading212_pies",
-            {"connection_id": run.connection_id, "id": pie_id, "as_of_date": day},
-            values
-            | {
-                "raw_record_id": listed.id,
-                "detail_raw_record_id": detail.id if detail is not None else None,
-            },
-        )
-        if detail is not None:
-            await _pie_detail(run, detail, pie_id, day)
+    await _pie_detail(run, detail, pie_id, listed.day)
 
 
-async def _pie_detail(run: Run, record: Record, pie_id: object, day: date) -> None:
+async def _pie_detail(run: Run, report: Report | None, pie_id: object, day: date) -> None:
     endpoint = "pie"
-    content = record.content
+    content = report.content if report is not None else {}
+    raw_record_id = report.record.id if report is not None else None
     parent = {"connection_id": run.connection_id, "pie_id": pie_id, "as_of_date": day}
     entries = objects_at(content, "instruments")
     for n, entry in enumerate(entries):
@@ -248,7 +225,7 @@ async def _pie_detail(run: Run, record: Record, pie_id: object, day: date) -> No
         await run.upsert(
             "trading212_pie_instruments",
             parent | {"item_index": n},
-            values | {"raw_record_id": record.id},
+            values | {"raw_record_id": raw_record_id},
         )
         issues = objects_at(entry, "issues")
         for m, issue in enumerate(issues):
@@ -261,7 +238,7 @@ async def _pie_detail(run: Run, record: Record, pie_id: object, day: date) -> No
             await run.upsert(
                 "trading212_pie_instrument_issues",
                 parent | {"instrument_index": n, "item_index": m},
-                values | {"raw_record_id": record.id},
+                values | {"raw_record_id": raw_record_id},
             )
         await run.prune(
             "trading212_pie_instrument_issues", parent | {"instrument_index": n}, len(issues)
@@ -278,7 +255,7 @@ async def _pie_detail(run: Run, record: Record, pie_id: object, day: date) -> No
         await run.upsert(
             "trading212_pie_instrument_shares",
             parent | {"ticker": ticker},
-            values | {"raw_record_id": record.id},
+            values | {"raw_record_id": raw_record_id},
         )
     await run.session.execute(
         text(
@@ -289,36 +266,48 @@ async def _pie_detail(run: Run, record: Record, pie_id: object, day: date) -> No
     )
 
 
-async def apply(run: Run, records: Sequence[Record], own: set[UUID]) -> None:
-    """Every report given, oldest first, so a day's row is its latest. `own`: the ids of this
-    sync's records."""
-    ordered = sorted(records, key=lambda r: (r.fetched_at, r.id))
-    for record in ordered:
-        match record.endpoint:
+async def apply(run: Run, reports: Sequence[Report]) -> None:
+    """Every sighting, in the order seen: each summary and position a snapshot; then each
+    day's latest sighting of an item its typed row (and price)."""
+    ordered = sorted(reports, key=lambda r: r.order)
+    snapshots: dict[tuple[UUID, UUID], UUID | None] = {}
+    latest: dict[tuple[str, date, str], Report] = {}
+    for report in ordered:
+        if report.endpoint in ("summary", "positions"):
+            snapshots[(report.sync_id, report.record.id)] = await _snapshot(run, report)
+        latest[(report.endpoint, report.day, record_key(report.record))] = report
+    details = {(r.sync_id, record_key(r.record)): r for r in ordered if r.endpoint == "pie"}
+    for (endpoint, _, key), report in latest.items():
+        snapshot_id = snapshots.get((report.sync_id, report.record.id))
+        match endpoint:
             case "summary":
-                await _summary(run, record)
+                await _summary(run, report, snapshot_id)
             case "positions":
-                await _position(run, record, record.id in own)
+                await _position(run, report, snapshot_id)
             case "pending_orders":
-                await _pending_order(run, record)
+                await _pending_order(run, report)
+            case "pies":
+                await _pie(run, report, details.get((report.sync_id, key)))
             case _:
                 pass
-    await _pies(run, [r for r in ordered if r.endpoint in ("pies", "pie")])
 
 
-async def reported(run: Run, summary: Record, positions: Sequence[Record]) -> dict[UUID, Decimal]:
-    """What this sync's summary and positions report: each instrument's quantity, and the
-    cash in the summary's currency."""
-    found: defaultdict[UUID, Decimal] = defaultdict(Decimal)
+async def reported(
+    run: Run, summary: Record, positions: Sequence[Record], *, current: bool = True
+) -> dict[UUID, Decimal]:
+    """What a sync's summary and positions report (`current`: this sync's): each
+    instrument's quantity, and the cash in the summary's currency."""
+    found: dict[UUID, Decimal] = {}
     for record in positions:
         instrument_id = await run.instrument(
-            record, object_at(record.content, "instrument"), current=True
+            record, object_at(record.content, "instrument"), current=current
         )
         if instrument_id is not None:
-            found[instrument_id] += number_at(record, record.content, "quantity")
+            quantity = number_at(record, record.content, "quantity")
+            found[instrument_id] = found.get(instrument_id, Decimal(0)) + quantity
     currency = await run.currency(text_at(summary.content, "currency"))
-    found[currency.id] += cash(summary)
-    return dict(found)
+    found[currency.id] = found.get(currency.id, Decimal(0)) + cash(summary)
+    return found
 
 
 async def prices(run: Run) -> None:

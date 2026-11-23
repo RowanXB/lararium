@@ -11,14 +11,16 @@ place of the ticker it holds. A history row's ticker never replaces one, so an o
 the history cannot take the name back.
 
 An instrument Trading 212's metadata does not list (yet, or any more) is made with kind
-`other`, and flagged while it stays so (`unknown_types`); the metadata's type reclassifies it
-when it arrives (`reclassify`).
+`other`, and flagged while it stays so (`type_flags`); the metadata's type reclassifies it
+when it arrives (`reclassify`). Whether a row posts follows the metadata's type now, live
+and on replay alike: one the ledger does not hold posts nothing, and an instrument found to be
+one has what it posted voided.
 """
 
 from collections.abc import Mapping
 from uuid import UUID
 
-from sqlalchemy import exists, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -50,6 +52,16 @@ def instrument_kind(trading212_type: str | None) -> InstrumentKind | None:
     if trading212_type is None:
         return "other"
     return KINDS.get(trading212_type)
+
+
+# Trading 212 quotes London listings in pence; the ledger lists them in pounds (ruling R19).
+_SUBUNITS: Mapping[str, tuple[str, int]] = {"GBX": ("GBP", -2)}
+
+
+def listing_currency(code: str) -> tuple[str, int]:
+    """The ISO 4217 currency a listing quoted in `code` is held in, and the power of ten that
+    turns a price in `code` into one in it."""
+    return _SUBUNITS.get(code, (code, 0))
 
 
 def symbol(instrument: Mapping[str, str]) -> str:
@@ -89,7 +101,7 @@ async def listing(
     if kind is None:
         return None
     ticker = instrument["ticker"].strip()
-    currency = await get_currency(ctx.session, instrument["currency"])
+    currency = await get_currency(ctx.session, listing_currency(instrument["currency"])[0])
     isin = instrument.get("isin", "").strip()
     identifiers = [InstrumentIdentifier(SCHEME, ticker)]
     if isin:
@@ -125,9 +137,10 @@ async def listing(
     return found.id
 
 
-async def reclassify(ctx: CommandContext, connection_id: UUID) -> None:
+async def reclassify(ctx: CommandContext, connection_id: UUID) -> list[UUID]:
     """Give each instrument made without a type the kind the connection's metadata now says
-    its ticker is."""
+    its ticker is; returns those the metadata says the ledger does not hold (their postings
+    are not postable: records.void_unsupported)."""
     rows = await ctx.session.execute(
         text(
             "select i.id, m.type from finance.instruments i"
@@ -135,26 +148,46 @@ async def reclassify(ctx: CommandContext, connection_id: UUID) -> None:
             " on ii.instrument_id = i.id and ii.scheme = 'trading212_ticker'"
             " join finance.trading212_instruments m"
             " on m.connection_id = :c and m.ticker = ii.value"
-            " where i.kind = 'other' and m.type = any(cast(:t as text[]))"
+            " where i.kind = 'other'"
         ),
-        {"c": connection_id, "t": sorted(KINDS)},
+        {"c": connection_id},
     )
+    unsupported: list[UUID] = []
     for row in rows.all():
-        await set_kind(ctx, row.id, KINDS[row.type])
+        kind = KINDS.get(row.type)
+        if kind is None:
+            unsupported.append(row.id)
+        else:
+            await set_kind(ctx, row.id, kind)
+    return sorted(unsupported)
 
 
-async def unknown_types(session: AsyncSession, account_id: UUID) -> list[str]:
-    """The tickers of the account's instruments (posted or reported on it) still without a
-    type."""
-    i, ii = models.Instrument, models.InstrumentIdentifier
-    p, s = models.Posting, models.BalanceSnapshot
-    used = exists().where(p.instrument_id == i.id, p.account_id == account_id) | exists().where(
-        s.instrument_id == i.id, s.account_id == account_id
+UNKNOWN = "instrument type unknown"
+UNSUPPORTED = "instrument type unsupported"
+
+
+async def type_flags(session: AsyncSession, connection_id: UUID, account_id: UUID) -> set[str]:
+    """The account's instruments (posted or reported on it) made without a type: those the
+    metadata has not typed yet, and those it typed as one the ledger does not hold."""
+    rows = await session.execute(
+        text(
+            "select ii.value as ticker, m.type from finance.instruments i"
+            " join finance.instrument_identifiers ii"
+            " on ii.instrument_id = i.id and ii.scheme = 'trading212_ticker'"
+            " left join finance.trading212_instruments m"
+            " on m.connection_id = :c and m.ticker = ii.value"
+            " where i.kind = 'other' and ("
+            " exists (select 1 from finance.postings p"
+            " where p.instrument_id = i.id and p.account_id = :a)"
+            " or exists (select 1 from finance.balance_snapshots s"
+            " where s.instrument_id = i.id and s.account_id = :a))"
+        ),
+        {"c": connection_id, "a": account_id},
     )
-    tickers = await session.scalars(
-        select(ii.value)
-        .join(i, i.id == ii.instrument_id)
-        .where(ii.scheme == SCHEME, i.kind == "other", used)
-        .order_by(ii.value)
-    )
-    return list(tickers)
+    flags: set[str] = set()
+    for row in rows:
+        if row.type is None:
+            flags.add(f"{UNKNOWN} {row.ticker}")
+        elif row.type not in KINDS:
+            flags.add(f"{UNSUPPORTED} {row.ticker}")
+    return flags

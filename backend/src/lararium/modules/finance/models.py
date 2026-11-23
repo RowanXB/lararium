@@ -195,6 +195,18 @@ class BalanceSnapshot(Base):
     )
 
 
+class ReportSighting(Base):
+    """A sync's sighting of a report record it stored or found stored (report_sightings)."""
+
+    __tablename__ = "report_sightings"
+    __table_args__ = FINANCE_SCHEMA
+
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"), primary_key=True)
+    raw_record_id: Mapped[UUID] = mapped_column(ForeignKey("core.raw_records.id"), primary_key=True)
+    sync_id: Mapped[UUID] = mapped_column(primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Price(Base):
     __tablename__ = "prices"
     __table_args__ = FINANCE_SCHEMA

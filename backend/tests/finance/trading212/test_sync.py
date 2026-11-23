@@ -770,3 +770,32 @@ async def test_a_part_not_checked_keeps_its_flags_whatever_their_text(session, r
     after = await _run_sync(session, connection, api, notifier)
     assert after.warnings == []
     assert after.cursor["flags"] == {}
+
+
+async def test_each_report_is_sighted_every_sync(session, run, api) -> None:
+    connection = await _connection(run)
+    before = datetime.now(UTC)
+    await _sync(session, connection, api)
+    await _sync(session, connection, api)
+    # The same summary twice is one raw record, seen by both syncs.
+    assert len(await _records(session, connection, "trading212.summary")) == 1
+    rows = await session.execute(
+        text(
+            "select r.record_type, count(*) as n, min(s.seen_at) as first"
+            " from finance.report_sightings s join core.raw_records r on r.id = s.raw_record_id"
+            " where s.connection_id = :c group by r.record_type"
+        ),
+        {"c": connection.id},
+    )
+    counts = {row.record_type: row.n for row in rows}
+    assert counts["trading212.summary"] == 2
+    assert counts["trading212.position"] == 2
+    # Pies are fetched on metadata days only: the first sync's.
+    assert counts["trading212.pie"] == counts["trading212.pie_detail"] == 1
+    # History and metadata are not reports.
+    assert "trading212.order" not in counts and "trading212.instrument" not in counts
+    first = await session.scalar(
+        text("select min(seen_at) from finance.report_sightings where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert first >= before

@@ -1,5 +1,5 @@
-"""Trading 212: the trading212_account registry kind, the trading212_ticker scheme, and the
-typed tables of what the API returns.
+"""Trading 212: the trading212_account registry kind, the trading212_ticker scheme, the
+typed tables of what the API returns, and when a sync saw each report it stored.
 
 Every known path of the Trading 212 field lists (trading212/fields.py) is a typed column of a
 finance.trading212_* table, named by the snake_case of its dotted path below the row (M6
@@ -7,6 +7,10 @@ design, Decision 3); an array of objects or a map is a child table keyed by its 
 item's index (or the map's key). Numbers, ids among them, are numeric; strings text; instants
 timestamptz; flags boolean. Each row carries its connection, its key and the raw record it was
 read from; a row that is posted links its ledger row, which it outlives (SET NULL).
+
+finance.report_sightings (any connector's): a raw record is stored once per content, so a
+report whose content returns is one record. Each sync records each report record it stores or
+finds stored, with the time its response arrived: what dates a report.
 
 Revision ID: 0030
 Revises: 0029
@@ -324,6 +328,20 @@ _TABLES = [
 _SCHEMES = """'iso4217', 'isin', 'figi', 'ticker_mic', 'ibkr_conid', 'etoro_id', 'chain_contract',
           'coingecko'"""
 
+_SIGHTINGS = [
+    """
+    CREATE TABLE finance.report_sightings (
+      connection_id uuid NOT NULL REFERENCES core.connections (id),
+      raw_record_id uuid NOT NULL REFERENCES core.raw_records (id),
+      sync_id uuid NOT NULL,
+      seen_at timestamptz NOT NULL,
+      PRIMARY KEY (connection_id, raw_record_id, sync_id)
+    )
+    """,
+    "CREATE INDEX report_sightings_sync ON finance.report_sightings (connection_id, sync_id)",
+    "CREATE INDEX report_sightings_seen ON finance.report_sightings (connection_id, seen_at)",
+]
+
 UPGRADE = [
     """
     ALTER TABLE finance.account_identifiers
@@ -340,9 +358,11 @@ UPGRADE = [
         CHECK (scheme IN ({_SCHEMES}, 'trading212_ticker'))
     """,
     *_UPGRADE_TABLES,
+    *_SIGHTINGS,
 ]
 
 DOWNGRADE = [
+    "DROP TABLE finance.report_sightings",
     *(f"DROP TABLE finance.{name}" for name in reversed(_TABLES)),
     "DELETE FROM finance.instrument_identifiers WHERE scheme = 'trading212_ticker'",
     f"""

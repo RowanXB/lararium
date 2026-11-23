@@ -1,12 +1,13 @@
 """Reconciling a Trading 212 account against what Trading 212 reports (design §5.11,
 Decision 12).
 
-At each sync's time, every instrument's quantity Trading 212 reports (its positions) and the
-account's cash (`availableToTrade + reservedForOrders + inPies`, in the account's currency)
-must equal the sum of the account's non-void postings booked on or before that day, within the
-instrument's tolerance. An instrument the ledger holds and the positions omit counts as
-reported 0. Each reported figure is a `reported` snapshot at the sync's time, one per day
-while it stays the same.
+At the sync's time (when its summary arrived, report_sightings), every instrument's quantity
+Trading 212 reports (its positions) and the account's cash (`availableToTrade +
+reservedForOrders + inPies`, in the account's currency) must equal the sum of the account's
+non-void postings that occurred at or before it, within the instrument's tolerance: a fill
+after the summary is not in it yet. An instrument the ledger holds and the positions omit
+counts as reported 0. Each reported figure is a `reported` snapshot at its sighting's time; a
+sighting saying what the day's snapshot before it says reuses that one.
 
 The warnings are what the latest check found: each run that has the account's summary
 replaces the connection's reconciliation warnings in full, whatever the account is called
@@ -22,7 +23,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -47,8 +48,9 @@ async def reported_snapshot(
     as_of: datetime,
     day: date,
 ) -> UUID:
-    """The reported snapshot of the figure: the day's latest when it says the same, else a
-    new one at `as_of`."""
+    """The reported snapshot of the figure seen at `as_of`: the day's latest at or before it
+    when that says the same, else a new one at `as_of`. So sightings applied again, or in
+    order from the first, find the snapshots they made."""
     s = models.BalanceSnapshot
     latest = (
         await ctx.session.execute(
@@ -58,6 +60,7 @@ async def reported_snapshot(
                 s.instrument_id == instrument_id,
                 s.kind == "reported",
                 s.as_of_date == day,
+                s.as_of <= as_of,
             )
             .order_by(s.as_of.desc(), s.recorded_at.desc(), s.id.desc())
             .limit(1)
@@ -92,25 +95,38 @@ class Mismatch:
         )
 
 
-async def check(
+async def holdings(
     session: AsyncSession,
     account_id: UUID,
-    account_name: str,
-    day: date,
-    reported: Mapping[UUID, Decimal],
-) -> list[Mismatch]:
-    """Each instrument whose ledger quantity at the end of `day` differs from `reported`
-    beyond its tolerance, by symbol."""
-    t, p, i = models.Transaction, models.Posting, models.Instrument
-    held = {
+    at: datetime,
+    *also: ColumnElement[bool],
+) -> dict[UUID, Decimal]:
+    """The account's quantity of each instrument: its non-void postings that occurred at or
+    before `at` (and meet `also`)."""
+    t, p = models.Transaction, models.Posting
+    return {
         row.instrument_id: Decimal(row.total)
         for row in await session.execute(
             select(p.instrument_id, func.sum(p.quantity).label("total"))
             .join(t, t.id == p.transaction_id)
-            .where(p.account_id == account_id, t.status != "void", t.booking_date <= day)
+            .where(p.account_id == account_id, t.status != "void", t.occurred_at <= at, *also)
             .group_by(p.instrument_id)
         )
     }
+
+
+async def check(
+    session: AsyncSession,
+    account_id: UUID,
+    account_name: str,
+    at: datetime,
+    day: date,
+    reported: Mapping[UUID, Decimal],
+) -> list[Mismatch]:
+    """Each instrument whose ledger quantity at `at` (the report's arrival, on `day`)
+    differs from `reported` beyond its tolerance, by symbol."""
+    i = models.Instrument
+    held = await holdings(session, account_id, at)
     ids = set(held) | set(reported)
     if not ids:
         return []
