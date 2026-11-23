@@ -429,3 +429,24 @@ async def test_every_routed_attribute_has_a_column(session) -> None:
         if (table, column_name(table, attribute)) not in columns
     ]
     assert missing == []
+
+
+def test_known_attributes_map_to_distinct_columns() -> None:
+    from lararium.modules.finance.ibkr.fields import (
+        INSTRUMENT_FIELDS,
+        PERSONAL_FIELDS,
+        SECTIONS,
+    )
+    from lararium.modules.finance.typed_tables import column_map
+
+    for spec in SECTIONS.values():
+        column_map(sorted(spec.known | spec.required))
+    column_map(sorted(INSTRUMENT_FIELDS))
+    column_map(sorted(PERSONAL_FIELDS))
+
+
+async def test_typed_values_refuses_attributes_that_alias_one_column(session) -> None:
+    with pytest.raises(FlexDataError, match=r"^Section: 'fxRate' and 'fx_rate' are both column"):
+        await typed_values(
+            session, "ibkr_nav", "Section", {"fxRate": "1", "fx_rate": "2", "total": "3"}
+        )
