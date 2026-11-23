@@ -21,6 +21,7 @@ from lararium.modules.finance.readonly_http import (
     Clock,
     HttpError,
     HttpForbiddenError,
+    HttpNotFoundError,
     HttpRetryableError,
     JSONValue,
     RateLimit,
@@ -67,6 +68,8 @@ LIMITS: Mapping[str, RateLimit] = {
 }
 _NEXT_PAGE = "unexpected next page path"
 _PIE_ID = "a Trading 212 pie id is a whole number"
+# Why an optional part was skipped (Trading212Client.skipped); the sync flags each.
+PIES_REMOVED = "pies endpoint removed"
 # A pie id is below this, as the migration's ids are (at most 19 digits).
 _ID_BOUND = 10**19
 
@@ -156,6 +159,9 @@ class Trading212Client:
             clock=clock,
             wall_clock=wall_clock,
         )
+        # The optional parts this client has skipped, and why: `missing permission <scope>`,
+        # or PIES_REMOVED.
+        self.skipped: set[str] = set()
 
     async def _get(
         self, endpoint: str, *, suffix: str = "", params: Mapping[str, str] | None = None
@@ -171,12 +177,21 @@ class Trading212Client:
         return response.json
 
     async def _optional(self, endpoint: str, suffix: str = "") -> JSONValue | None:
-        """The answer, or None when the key lacks this optional permission."""
+        """The answer, or None when the key lacks this optional permission or, for the pies
+        (deprecated by Trading 212), when the endpoint is gone (404). Each skip is recorded in
+        `skipped`."""
         try:
             return await self._get(endpoint, suffix=suffix)
         except HttpForbiddenError as error:
             if error.cloudflare_block:
                 raise
+            # _get names the endpoint's own permission when Trading 212 names none.
+            self.skipped.add(f"missing permission {error.scope or _ENDPOINTS[endpoint][1]}")
+            return None
+        except HttpNotFoundError:
+            if endpoint not in ("pies", "pie"):
+                raise
+            self.skipped.add(PIES_REMOVED)
             return None
 
     async def summary(self) -> Item:

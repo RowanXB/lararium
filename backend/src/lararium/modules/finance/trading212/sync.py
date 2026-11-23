@@ -7,20 +7,25 @@ read to the end); once a day, instrument and exchange metadata and the pies. A h
 stores each page as it arrives. One that reaches the client's MAX_PAGES keeps what it stored
 and the next page's path (`resume`), and the next sync goes on from there after its own
 newest-first pass. Items are stored as Trading 212 sent them; nothing here logs a value.
+
+An optional part skipped (a permission not ticked, the deprecated pies endpoints gone) is
+flagged as a connection warning, and the owner is told once (`publish_flags`).
 """
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from lararium.core.connections import load_credential
+from lararium.core.connections import load_credential, set_warnings
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.readonly_http import HttpForbiddenError, record_json
 from lararium.modules.finance.trading212.client import (
+    PIES_REMOVED,
     HistoryKind,
     HistoryNotEndedError,
     Item,
@@ -30,6 +35,8 @@ from lararium.modules.finance.trading212.client import (
 from lararium.modules.finance.trading212.fields import ENDPOINTS
 from lararium.modules.finance.trading212.normalize import normalize
 
+logger = logging.getLogger(__name__)
+
 VERSION = "trading212-sync-1"
 KEY_PURPOSE = "api_key"
 SECRET_PURPOSE = "api_secret"
@@ -37,6 +44,10 @@ SECRET_PURPOSE = "api_secret"
 REWALK_EVERY = timedelta(days=7)
 METADATA_EVERY = timedelta(hours=24)
 KINDS: tuple[HistoryKind, ...] = ("orders", "dividends", "transactions")
+FLAGGED_PREFIX = "Trading 212 flagged: "
+_MISSING = f"{FLAGGED_PREFIX}missing permission "
+# The flags about the pies, which are fetched only on metadata days.
+_PIE_FLAGS = frozenset({f"{_MISSING}pies:read", f"{FLAGGED_PREFIX}{PIES_REMOVED}"})
 
 
 class Trading212SyncError(DisplayableError):
@@ -111,6 +122,33 @@ def _texts(cursor: Mapping[str, JSONValue], key: str) -> dict[str, str]:
     return {k: v for k, v in value.items() if isinstance(v, str)}
 
 
+def _own(warning: str) -> bool:
+    """A flag the sync raises. Other `Trading 212 flagged:` warnings (the normalizer's) are
+    left to their writer."""
+    return warning.startswith(_MISSING) or warning in _PIE_FLAGS
+
+
+async def publish_flags(ctx: SyncContext, skipped: Iterable[str], pies_checked: bool) -> None:
+    """Replace the sync's own flags with this run's, keeping every other warning; the pies'
+    flags stand on a day the pies were not fetched. The owner is told, in one message, of each
+    flag not among the previous warnings; a flag whose cause is gone clears without a word."""
+    connection = ctx.connection
+    previous = connection.warnings
+    flags = [FLAGGED_PREFIX + name for name in sorted(set(skipped))]
+    if not pies_checked:
+        flags += [w for w in previous if w in _PIE_FLAGS and w not in flags]
+    warnings = [w for w in previous if not _own(w)] + flags
+    new = [flag.removeprefix(FLAGGED_PREFIX) for flag in flags if flag not in previous]
+    if new:
+        try:
+            await ctx.notifier.send(f"{connection.display_name}: {FLAGGED_PREFIX}{', '.join(new)}")
+        except Exception as error:
+            # The class only: the message could carry the notifier's webhook URL.
+            logger.warning("sending a Trading 212 notification failed (%s)", type(error).__name__)
+    if warnings != previous:
+        await set_warnings(ctx.command, connection.id, warnings)
+
+
 class _Run:
     """One sync: the client, and the raw records it has stored."""
 
@@ -118,6 +156,7 @@ class _Run:
         self.ctx = ctx
         self.client = client
         self.ids: list[UUID] = []
+        self.pies_checked = False
 
     async def store(
         self,
@@ -170,6 +209,7 @@ class _Run:
         return newest, capped
 
     async def metadata(self) -> None:
+        self.pies_checked = True
         for item in await self.client.instruments():
             await self.store("instruments", item)
         for item in await self.client.exchanges():
@@ -214,6 +254,7 @@ class Trading212Connector:
                 f"Trading 212 key lacks the {error.scope} permission"
             ) from None
         await normalize(ctx, list(dict.fromkeys(run.ids)))
+        await publish_flags(ctx, run.client.skipped, run.pies_checked)
         return cursor
 
     async def _sync(self, run: _Run, now: datetime) -> JSONValue:

@@ -69,6 +69,10 @@ class HttpForbiddenError(HttpError):
         self.cloudflare_block = cloudflare_block
 
 
+class HttpNotFoundError(HttpError):
+    """404: the API has no such resource (an endpoint removed, an item gone)."""
+
+
 class HttpRetryableError(HttpError):
     """A failure a later sync may not meet again: rate limited, a server error, a redirect, a
     timeout."""
@@ -249,6 +253,9 @@ class ReadOnlyClient:
             found = _SCOPE.search(body)
             scope = found.group(1) if found else None
             raise HttpForbiddenError(scope, cloudflare_block=_CLOUDFLARE_1010 in body)
+        if status == 404:
+            # Fixed text: never the path, which can carry an id.
+            raise HttpNotFoundError("The API has no such resource (404)")
         if 300 <= status < 400:
             raise HttpRetryableError(f"The API redirected the request ({status})")
         if status >= 500:

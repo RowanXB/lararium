@@ -189,6 +189,13 @@ async def _set_cursor(session, connection, cursor: JSONValue) -> None:
     )
 
 
+async def _set_warnings(session, connection, warnings: list[str]) -> None:
+    await session.execute(
+        text("update core.connections set warnings = cast(:w as jsonb) where id = :id"),
+        {"w": json.dumps(warnings), "id": connection.id},
+    )
+
+
 async def _sync(session, connection, api: FakeTrading212) -> JSONValue:
     """One sync, called directly, as the worker would in its command."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
@@ -396,6 +403,80 @@ async def test_a_key_without_optional_permissions_skips_them(session, run, api) 
     assert "trading212.pending_order" not in types
     assert "trading212.pie" not in types
     assert "trading212.instrument" in types
+    assert after.warnings == [
+        "Trading 212 flagged: missing permission orders:read",
+        "Trading 212 flagged: missing permission pies:read",
+    ]
+
+
+async def test_missing_optional_scope_flagged_once(session, run, api) -> None:
+    api.refuse[f"{API}/orders"] = httpx.Response(403, text="Scope( orders:read ) missing")
+    connection = await _connection(run)
+    await _set_warnings(session, connection, ["Some other warning"])
+    notifier = RecordingNotifier()
+    await _run_sync(session, connection, api, notifier)
+    after = await _run_sync(session, connection, api, notifier)
+    assert notifier.messages == [
+        "Trading 212 Invest: Trading 212 flagged: missing permission orders:read"
+    ]
+    assert after.warnings == [
+        "Some other warning",
+        "Trading 212 flagged: missing permission orders:read",
+    ]
+
+    # The permission ticked: the flag clears, and nothing more is said.
+    del api.refuse[f"{API}/orders"]
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.warnings == ["Some other warning"]
+    assert len(notifier.messages) == 1
+
+
+async def test_flags_of_other_origins_are_kept(session, run, api) -> None:
+    connection = await _connection(run)
+    # A field flag, as the normalizer will write: not the sync's to clear.
+    kept = ["Trading 212 flagged: order.someNewField"]
+    await _set_warnings(session, connection, kept)
+    after = await _run_sync(session, connection, api)
+    assert after.warnings == kept
+
+
+async def test_removed_pies_endpoint_skipped_and_flagged(session, run, api) -> None:
+    api.refuse[f"{API}/pies"] = httpx.Response(404, text="Not Found")
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.status == "healthy"
+    types = {row.record_type for row in await _records(session, connection)}
+    assert "trading212.pie" not in types
+    assert {"trading212.instrument", "trading212.exchange", "trading212.order"} <= types
+    assert after.warnings == ["Trading 212 flagged: pies endpoint removed"]
+    assert notifier.messages == ["Trading 212 Invest: Trading 212 flagged: pies endpoint removed"]
+
+    # The next sync does not ask for pies (a day's): the flag stands, and nothing more is said.
+    api.requests.clear()
+    after = await _run_sync(session, connection, api, notifier)
+    assert f"{API}/pies" not in api.paths()
+    assert after.warnings == ["Trading 212 flagged: pies endpoint removed"]
+    assert len(notifier.messages) == 1
+
+
+async def test_removed_pie_detail_endpoint_skipped_and_flagged(session, run, api) -> None:
+    api.refuse[f"{API}/pies/9001"] = httpx.Response(404, text="Not Found")
+    connection = await _connection(run)
+    after = await _run_sync(session, connection, api)
+    assert after.status == "healthy"
+    types = {row.record_type for row in await _records(session, connection)}
+    assert "trading212.pie" in types
+    assert "trading212.pie_detail" not in types
+    assert after.warnings == ["Trading 212 flagged: pies endpoint removed"]
+
+
+async def test_a_404_on_a_required_endpoint_fails(session, run, api) -> None:
+    api.refuse[f"{API}/positions"] = httpx.Response(404, text="Not Found")
+    connection = await _connection(run)
+    after = await _run_sync(session, connection, api)
+    assert after.status == "failing"
+    assert after.last_error == "The API has no such resource (404)"
 
 
 async def test_401_needs_reauth(session, run, api) -> None:

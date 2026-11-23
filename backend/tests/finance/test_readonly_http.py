@@ -14,6 +14,7 @@ from lararium.modules.finance.readonly_http import (
     HttpAuthError,
     HttpError,
     HttpForbiddenError,
+    HttpNotFoundError,
     HttpRetryableError,
     RateLimit,
     ReadOnlyClient,
@@ -215,10 +216,20 @@ async def test_timeout_is_retryable() -> None:
 
 
 async def test_other_4xx_is_http_error() -> None:
-    env = Env(httpx.Response(404))
+    env = Env(httpx.Response(410))
     with pytest.raises(HttpError) as caught:
         await env.client().get("/v1/x", pool="default")
+    assert not isinstance(caught.value, HttpRetryableError | HttpNotFoundError)
+
+
+async def test_404_is_not_found_and_never_names_the_path() -> None:
+    env = Env(httpx.Response(404, text="no /v1/secret-path-789"))
+    with pytest.raises(HttpNotFoundError) as caught:
+        await env.client().get("/v1/secret-path-789", pool="default", params={"q": QUERY_VALUE})
+    assert isinstance(caught.value, HttpError)
     assert not isinstance(caught.value, HttpRetryableError)
+    assert str(caught.value) == "The API has no such resource (404)"
+    assert "secret-path-789" not in repr(caught.value)
 
 
 async def test_pacing_per_pool() -> None:

@@ -13,6 +13,7 @@ from lararium.modules.finance.readonly_http import (
     HttpAuthError,
     HttpError,
     HttpForbiddenError,
+    HttpNotFoundError,
     HttpRetryableError,
 )
 from lararium.modules.finance.trading212.client import (
@@ -192,6 +193,29 @@ async def test_missing_scope_names_permission() -> None:
     assert await Env(forbidden("pies:read")).client().pies() is None
     assert await Env(forbidden("pies:read")).client().pie(9001) is None
     assert await Env(forbidden("orders:read")).client().pending_orders() is None
+
+
+async def test_optional_parts_skipped_say_why() -> None:
+    client = Env(forbidden("orders:read")).client()
+    assert await client.pending_orders() is None
+    assert client.skipped == {"missing permission orders:read"}
+
+    client = Env(httpx.Response(404, text="Not Found")).client()
+    assert await client.pies() is None
+    assert await client.pie(9001) is None
+    assert client.skipped == {"pies endpoint removed"}
+
+    client = Env(forbidden("pies:read")).client()
+    assert await client.pies() is None
+    assert client.skipped == {"missing permission pies:read"}
+
+
+async def test_404_elsewhere_is_not_skipped() -> None:
+    env = Env(httpx.Response(404, text="Not Found"))
+    with pytest.raises(HttpNotFoundError):
+        await env.client().pending_orders()
+    with pytest.raises(HttpNotFoundError):
+        await walk(env.client(), "orders", lambda item: False)
 
 
 async def test_403_without_scope_names_the_endpoints_permission() -> None:
