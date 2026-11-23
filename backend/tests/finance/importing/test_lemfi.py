@@ -304,6 +304,14 @@ def test_savings_period_with_a_dash() -> None:
     assert statement.period == (date(2027, 5, 1), date(2027, 5, 31))
 
 
+def test_interest_payout_rows_pay_interest() -> None:
+    rows = _rows(_parse(_savings(SAVINGS_ROWS)))
+    assert [r.interest for r in rows] == [True, False, False]
+    # A payout's time of day or lack of one makes no difference.
+    payout = LemfiRow("01 May, 2027", ("Savings Interest Payout",), paid_in="80.12", time=None)
+    assert [r.interest for r in _rows(_parse(_savings([payout])))] == [True]
+
+
 def test_interest_must_add_up_exactly() -> None:
     """Review finding: the penny allowed on money in and out let interest be a penny short."""
     with pytest.raises(FileFormatError, match=r"interest is 80.11"):

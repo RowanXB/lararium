@@ -238,7 +238,11 @@ When money moves between two of your own accounts, Lararium changes both balance
 worth neither dips nor counts the money twice, even while it is on its way. It recognises a
 transfer by the other side's sort code and account number (names vary too much to be used), so
 it needs to know which bank accounts are yours. The examples use a Monzo connection and a
-manual account called "Bank A".
+manual account called "Bank A". An imported row that prints only the other side's account number
+(no sort code) identifies it too, when exactly one of your registered accounts has that number.
+A row that prints only a sort code is weaker evidence: it pairs only with a row on the one
+registered account with that sort code, when that row names no bank account and each is the
+other's only candidate, and it never makes a transfer on its own.
 
 ### Manual accounts: hybrid, with an opening snapshot
 
@@ -280,6 +284,20 @@ transfer, by amount and date, but only if its source marks it as a bank transfer
 of the same amount never pairs. Transfers are in GBP; Lararium posts no exchange or fee
 differences.
 
+### Giving a savings account its main account
+
+A savings account that has no bank account of its own to register (a Revolut or LemFi
+savings account whose statements you import, say) can be given a **main account**: on the
+Accounts page, pick one in its **Main account** select (a manual account only; a connected
+account's connector sets it). The main account is an open account of yours (not the account
+itself, and not one the ledger keeps) that has no main account of its own. As for an account
+with identifiers, it must be an asset or liability that isn't snapshots-only, so that its
+side of a transfer counts. One main account can have several savings accounts, and an
+account that is already some account's main account can't be given a main account itself.
+A bank transfer of the savings account that names no bank account then names its main account,
+so it pairs with the main account's side by amount and date, and Lararium goes through the
+whole history at once. Choose **None** to undo it; the history is matched anew.
+
 ### The Transfers page
 
 Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
@@ -319,7 +337,12 @@ What the buttons do (each decision is kept across re-syncs):
 - **Unpair** (on a matched transfer): these two records are not the same transfer, though each
   may still be one. They are never paired again automatically, and each is matched on its own.
   If that was a mistake, each one's transfer lists the other as an *Unpaired* candidate; Pair it
-  to undo.
+  to undo. A pair made by a sort code alone has **Reject** instead (**Undo** restores it): neither
+  of its records is a transfer without the other, so once unpaired, neither would offer the other
+  to pair again. When only the pairing is wrong (one of its records belongs with another), unpair
+  it through the API instead (`POST /api/v1/finance/transfers/{id}/unpair`) and pair that record
+  with the right one, as *Records that name no account* below describes: Reject would mark both
+  records as no transfer, and a rejected record can't be paired.
 - **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
   differs has none): these two records are one transfer. Your choice outranks any other
   candidate.
@@ -603,8 +626,8 @@ part, as an export does, and its closing balance, taken when it was made, is kep
 end a Revolut statement on a day that is over to have it all. Tembo prints no opening balance
 and no totals: there its Plan value must equal the rows' last balance, its transaction type
 gives each amount's direction, and its page numbers and period (first to last row) must leave
-nothing out. A Tembo statement is made on demand, so like an export it lists in full only the
-days between its first and last. LemFi's money in and out totals may each be a penny below their
+nothing out. A Tembo statement lists everything from the account's opening to the day it is made, so it
+lists in full every day from its Account open date to the day before its Valuation date. LemFi's money in and out totals may each be a penny below their
 rows' sum (LemFi cuts them down to the penny); interest and the closing balance must still
 follow from the rows exactly. A LemFi statement must also number all its pages ("Page n of
 N"), so one missing a page is refused.
@@ -631,10 +654,13 @@ by amount and date (below).
   with the arranged overdraft limit), `include_only` (`{"column": ["value", ...]}`: rows with
   another value are skipped, e.g. pending card payments), `row_order` (`oldest_first` or
   `newest_first`), `sign` (below), `amount_format` (`decimal_separator`, `.` or `,`;
-  `thousands_separator`, none by default, or `,` `.` space `'`) and `currency` (every row's
+  `thousands_separator`, none by default, or `,` `.` space `'`), `currency` (every row's
   currency, for a file that states it once rather than per row, such as LemFi's `Money in
-  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column). A line that
-  repeats the header is not a row.
+  (GBP)`; otherwise the one picked at upload, or a mapped `currency` column) and
+  `interest_descriptions` (the descriptions of rows that pay interest, for a bank that prints
+  no type codes, such as LemFi's `Savings Interest Payout`: like a card payment, such a row
+  is never taken as the other side of a transfer by amount and date). A line that repeats
+  the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,

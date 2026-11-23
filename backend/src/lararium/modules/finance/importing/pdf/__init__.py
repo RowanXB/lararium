@@ -135,7 +135,7 @@ def check(result: LayoutResult) -> None:
 
 def _row(layout_row: LayoutRow, local_tz: ZoneInfo) -> ParsedRow:
     """The row, at the time of day it prints in local_tz; without one occurred_at stays None."""
-    row = layout_row.row
+    row = replace(layout_row.row, interest=layout_row.interest)
     if layout_row.time_of_day is None:
         return row
     return replace(

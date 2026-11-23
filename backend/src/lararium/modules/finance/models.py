@@ -340,6 +340,7 @@ class ImportRow(Base):
     booking_date: Mapped[date | None]
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     time_unit: Mapped[str | None] = mapped_column(Text)
+    interest: Mapped[bool] = mapped_column(server_default=text("false"))
     occurred_tz: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, server_default=text("''"))
     quantity: Mapped[Decimal | None] = mapped_column(Numeric)

@@ -911,6 +911,13 @@
             "title": "Include Only",
             "type": "object"
           },
+          "interest_descriptions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Interest Descriptions",
+            "type": "array"
+          },
           "overdraft_footer_label": {
             "anyOf": [
               {
@@ -1897,6 +1904,10 @@
             ],
             "title": "Instrument Id"
           },
+          "interest": {
+            "title": "Interest",
+            "type": "boolean"
+          },
           "is_gap": {
             "anyOf": [
               {
@@ -2118,6 +2129,7 @@
           "booking_date",
           "occurred_at",
           "time_unit",
+          "interest",
           "value_date",
           "description",
           "payee",
@@ -2832,6 +2844,27 @@
           "hidden"
         ],
         "title": "InstrumentUpdate",
+        "type": "object"
+      },
+      "MainAccountUpdate": {
+        "properties": {
+          "main_account_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Main Account Id"
+          }
+        },
+        "required": [
+          "main_account_id"
+        ],
+        "title": "MainAccountUpdate",
         "type": "object"
       },
       "MonzoConnectionCreate": {
@@ -3723,6 +3756,11 @@
           "to_account_name": {
             "title": "To Account Name",
             "type": "string"
+          },
+          "weak": {
+            "default": false,
+            "title": "Weak",
+            "type": "boolean"
           }
         },
         "required": [
@@ -4577,6 +4615,60 @@
           }
         },
         "summary": "Remove Account Identifier",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/accounts/{account_id}/main-account": {
+      "post": {
+        "description": "Give a manual account a main account, or clear it; its transfers are matched anew.",
+        "operationId": "set_main_account",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MainAccountUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Main Account",
         "tags": [
           "finance"
         ]

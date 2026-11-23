@@ -205,6 +205,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             date_format="%d %b, %Y %H:%M",
             currency="GBP",
             amount_format=_GROUPED,
+            interest_descriptions=[lemfi.INTEREST_PAYOUT],
             extract=[
                 CsvExtract(column="Description", patterns=lemfi.DESCRIPTION_PATTERNS),
                 CsvExtract(column="Details", patterns=lemfi.DETAILS_PATTERNS),

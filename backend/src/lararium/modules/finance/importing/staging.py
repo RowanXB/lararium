@@ -88,6 +88,7 @@ class ImportRowRecord:
     booking_date: date | None
     occurred_at: datetime | None
     time_unit: TimeUnit | None  # what the file gave occurred_at to; None with it
+    interest: bool  # the row pays interest: never a bank transfer
     description: str
     quantity: Decimal | None
     fee: Decimal  # NOT NULL: 0 when the file states none
@@ -1784,6 +1785,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "booking_date": parsed.booking_date,
         "occurred_at": parsed.occurred_at or _midnight(parsed.booking_date, local_tz),
         "time_unit": parsed.time_unit,
+        "interest": parsed.interest,
         "occurred_tz": local_tz.key,
         "description": parsed.description,
         "quantity": parsed.quantity,
