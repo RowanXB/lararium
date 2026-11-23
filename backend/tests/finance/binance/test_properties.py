@@ -99,7 +99,9 @@ _CHANGED = "changed by something no record explains"
 # The history labels with records of their own (the daily snapshots are a report).
 RECORD_LABELS = [label for label in [*HISTORY_LABELS, TRADES_LABEL] if label != "snapshot"]
 _ACCRUING_MS = 48 * 3_600_000
-EXAMPLES = settings(max_examples=60, deadline=None)
+# The profile's examples (tests/finance/conftest.py): "ci" by default, "deep" with
+# HYPOTHESIS_PROFILE=deep (HYPOTHESIS_MAX_EXAMPLES of them, random).
+EXAMPLES = settings(max_examples=settings().max_examples)
 
 
 def _ms(at: datetime) -> int:
@@ -155,7 +157,7 @@ class World:
         while day <= last:
             at = _day_end_ms(day) - 999
             held = holdings_of(self.history.balance(at), "spot")
-            row = build_row("snapshot", type="SPOT", updateTime=at)
+            row = build_row("snapshot", type="spot", updateTime=at)
             data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
             data["balances"] = [
                 {"asset": asset, "free": format(q, "f"), "locked": "0"}
@@ -498,6 +500,28 @@ class Env:
                 starts[wallet] = min(candidates)
         return starts
 
+    async def assert_balances_are_the_truth(self) -> None:
+        """After a sync later than every record: each wallet's balance is what Binance reports
+        it holds (the history's balance at its end)."""
+        found = await self.balances(_at(self.clock.ms).date() + timedelta(days=1))
+        true = self.history.balance(self.history.end_ms)
+        for wallet, name in ACCOUNT_NAMES.items():
+            shown = {a: q for (n, a), q in found.items() if n == name}
+            assert shown == holdings_of(true, wallet), wallet
+
+    async def reads_made_again(self) -> bool:
+        """Whether a sync stored a balance read a snapshot comes from more than once: a
+        movement fell into it and it was made again."""
+        again = await self.session.scalar(
+            text(
+                "select exists (select 1 from core.raw_records where connection_id = :c"
+                " and record_type in ('binance.spot_account', 'binance.funding_asset',"
+                " 'binance.wallet_balance') group by sync_id, record_type having count(*) > 1)"
+            ),
+            {"c": self.connection_id},
+        )
+        return again is True
+
     async def delete_derived(self) -> None:
         """What normalising writes from the raw records: the transactions and the typed
         record rows."""
@@ -590,10 +614,10 @@ async def test_every_transaction_balances(
 ) -> None:
     plan = data.draw(schedule(history), label="schedule")
     _notes(history, plan)
-    event(f"reads made again: {bool(plan.inside)}")
     async with isolated(connection, history) as env:
         await env.play(plan)  # checks it after every sync
         assert await find_unbalanced_transactions(env.session) == []
+        event(f"reads made again: {await env.reads_made_again()}")
 
 
 @EXAMPLES
@@ -709,6 +733,9 @@ async def _remove_one(
     note(f"removed: {removed.describe()}")
     async with isolated(connection, history, hidden=[removed]) as env:
         await env.play(plan)
+        # The last sync is after everything: every wallet's balance is its last report, which
+        # holds the removed record's effect although no record posted it.
+        await env.assert_balances_are_the_truth()
         found = await env.open_differences()
         expected = await _expected_differences(env, removed)
         return removed, found, expected, await env.reports()
