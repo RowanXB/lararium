@@ -296,7 +296,8 @@ side of a transfer counts. One main account can have several savings accounts, a
 account that is already some account's main account can't be given a main account itself.
 A bank transfer of the savings account that names no bank account then names its main account,
 so it pairs with the main account's side by amount and date, and Lararium goes through the
-whole history at once. Choose **None** to undo it; the history is matched anew.
+whole history at once. Only a row of the main account that names no bank account either can
+be that side: a payment to someone else's account of the same amount is left alone. Choose **None** to undo it; the history is matched anew.
 
 ### The Transfers page
 

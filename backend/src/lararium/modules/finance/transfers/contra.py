@@ -159,8 +159,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     sub-account for a bank transfer naming no bank account), weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
-    bank account, or its import rows print part of one), bank_transfer, source_kind,
-    source_ref.
+    bank account, or its import rows print part of one), by_main_account (holder is the
+    main account, which only its being a sub-account's bank transfer gives), bank_transfer,
+    source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -312,22 +313,21 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         func.coalesce(func.cardinality(evidence.c.numbers), 0) == 0,
         ~func.coalesce(evidence.c.partial, false()),
     )
+    # A savings sub-account moves money only to and from its main account. Naming nothing,
+    # it is neither of holder's cases before this one.
+    by_main_account = and_(
+        names_nothing,
+        t.bank_transfer,
+        own_account.c.source_kind == "manual",
+        own_account.c.parent_account_id.is_not(None),
+    )
     holder = case(
         (
             t.counterparty_identifier_id.is_not(None),
             select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
         ),
         (func.cardinality(evidence.c.numbers) == 1, number_holder),
-        # A savings sub-account moves money only to and from its main account.
-        (
-            and_(
-                names_nothing,
-                t.bank_transfer,
-                own_account.c.source_kind == "manual",
-                own_account.c.parent_account_id.is_not(None),
-            ),
-            own_account.c.parent_account_id,
-        ),
+        (by_main_account, own_account.c.parent_account_id),
         else_=None,
     )
     # Weak evidence, apart from holder, which only pairs.weak_tier reads: the import rows
@@ -360,6 +360,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 t.counterparty_identifier_id.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
+            by_main_account.label("by_main_account"),
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
@@ -390,6 +391,7 @@ _OWN_RECORDS = Table(
     Column("holder", Uuid),
     Column("weak_holder", Uuid),
     Column("names_account", Boolean, nullable=False),
+    Column("by_main_account", Boolean, nullable=False),
     Column("bank_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),

@@ -299,6 +299,100 @@ async def test_a_sub_account_row_naming_an_account_ignores_the_main(
     assert await list_transfers(session) == []
 
 
+@pytest.mark.parametrize(
+    "printed",
+    [
+        RowDetails(account_number="50000001"),
+        RowDetails(account_ending="0001"),
+        RowDetails(sort_code="500000"),
+        None,  # the posted transaction names a stranger's bank account in full
+    ],
+    ids=["account number", "account ending", "sort code", "full account"],
+)
+async def test_a_sub_accounts_deposit_takes_no_main_account_payment_naming_a_bank_account(
+    session, run, imported_bank, statement_row, heal, printed
+) -> None:
+    """A move between a sub-account and its main account prints no bank account on either
+    side, so a payment to someone else's account, the same day and of the same amount, is
+    no candidate, and the move pairs alone (transfer evidence design §5.2)."""
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    stranger = None
+    if printed is None:
+        stranger = await run(get_or_create_identifier, "uk_bank_account", STRANGER)
+    sent = await statement_row(m, "-100", complete=FULL)
+    await statement_row(m, "-100", details=printed, identifier_id=stranger)
+    received = await statement_row(s, "100")
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "matched")
+    assert {t.out_transaction_id, t.in_transaction_id} == {sent, received}
+    assert t.review_reason is None
+    await assert_consistent(session)
+
+
+async def test_a_sub_accounts_deposit_never_pairs_with_a_main_account_row_naming_a_bank_account(
+    session, imported_bank, statement_row, heal
+) -> None:
+    """Even as the only row of that amount: it is somebody else's payment, and the move's
+    own row lies before what the main account's imports list (settled, no placeholder)."""
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    await statement_row(m, "-100", details=RowDetails(account_number="50000001"), complete=FULL)
+    received = await statement_row(s, "100")
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "before_history")
+    assert (t.out_transaction_id, t.in_transaction_id) == (None, received)
+    assert await placeholders(session) == []
+
+
+async def test_a_main_account_row_naming_the_sub_accounts_own_bank_account_pairs(
+    session, run, imported_bank, statement_row, heal
+) -> None:
+    """A sub-account with bank details of its own, registered: the main account's row
+    names it, and the two pair, each naming the other."""
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m, identifier=Y_ID)
+    named = await run(get_or_create_identifier, "uk_bank_account", Y_ID)
+    sent = await statement_row(m, "-100", identifier_id=named, complete=FULL)
+    received = await statement_row(s, "100")
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (m.id, s.id, "matched")
+    assert {t.out_transaction_id, t.in_transaction_id} == {sent, received}
+
+
+async def test_preview_match_takes_no_staged_row_naming_a_stranger_for_a_sub_accounts_move(
+    session, run, gbp, imported_bank, statement_row, heal
+) -> None:
+    """preview_match reads the relation matching does: a row not yet posted on the main
+    account that names someone else's account is no counterpart of the sub-account's
+    move."""
+    m = await imported_bank("M")
+    s = await imported_bank("S", main=m)
+    stranger = await run(get_or_create_identifier, "uk_bank_account", STRANGER)
+    received = await statement_row(s, "100")
+    await heal()
+
+    async def preview(identifier_id):
+        return await preview_match(
+            session,
+            account_id=m.id,
+            instrument_id=gbp.id,
+            quantity=Decimal(-100),
+            occurred_at=datetime.combine(DAY, time(), UTC),
+            counterparty=CounterpartyFields(identifier_id=identifier_id, bank_transfer=True),
+            complete=FULL,
+        )
+
+    assert await preview(None) == received
+    assert await preview(stranger) is None
+
+
 async def test_interest_on_a_sub_account_is_no_transfer(
     session, imported_bank, statement_row, heal
 ) -> None:

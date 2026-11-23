@@ -50,6 +50,7 @@ class Pairable:
     bank_transfer: bool
     weak_holder: UUID | None = None  # the account its sort code alone names (weak_tier)
     names_account: bool = False  # it names a bank account, or prints part of one
+    by_main_account: bool = False  # holder is its main account, for it names no bank account
 
     @property
     def sends(self) -> bool:
@@ -78,13 +79,18 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     """The tier the registry gives two records of opposite sign, in the same instrument,
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
-    other's account and each other one a bank transfer. Decisions are not considered."""
+    other's account and each other one a bank transfer. A sub-account's move, identified by
+    its main account alone, takes no other one that names a bank account: such a move prints
+    none on either side, so that row is a payment to or from somebody else's account
+    (transfer evidence design §5.2). Decisions are not considered."""
     if c.account_id == r.account_id or not (r.identified or c.identified):
         return None
     for x, other in ((r, c), (c, r)):
         if x.identified and x.holder != other.account_id:
             return None
         if not x.identified and not x.bank_transfer:
+            return None
+        if x.by_main_account and not other.identified and other.names_account:
             return None
     return MUTUAL if r.identified and c.identified else ONE_SIDED
 
@@ -241,6 +247,7 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.weak_holder,
         e.c.names_account,
+        e.c.by_main_account,
     ).where(or_(*can_pair))
     if excluding:
         query = query.where(e.c.transaction_id.not_in(list(excluding)))
@@ -257,6 +264,7 @@ async def _load_records(
             bank_transfer=row.bank_transfer,
             weak_holder=row.weak_holder,
             names_account=row.names_account,
+            by_main_account=row.by_main_account,
         )
         for row in await session.execute(query)
     ]
