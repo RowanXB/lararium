@@ -13,13 +13,12 @@ it has no `binance` price (source `coingecko`).
 Nothing here logs or reports a price, an amount or a key.
 """
 
-import json
 import logging
 import re
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Context, Decimal, localcontext
 from uuid import UUID
 
@@ -40,19 +39,24 @@ from lararium.modules.finance import models
 from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import (
+    MAX_RETRIES,
+    WINDOW_MS,
     BinanceClient,
     BinanceNotPresent,
     Clock,
     Sleep,
+    load_json,
     real_sleep,
+    retry_after,
     wall_clock,
 )
+from lararium.modules.finance.binance.fetch import DAY_MS
 from lararium.modules.finance.binance.instruments import clash_flag
 from lararium.modules.finance.binance.models import CoingeckoId
 from lararium.modules.finance.binance.normalize import FLAGS_KEY, Run, publish_flags
 from lararium.modules.finance.binance.parse import ApiValue, parse
 from lararium.modules.finance.binance.reconcile import wallets
-from lararium.modules.finance.binance.tables import moment, records, store, time_value
+from lararium.modules.finance.binance.tables import millis, moment, records, store, time_value
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.instruments import (
     REPORTING_CURRENCY_KEY,
@@ -72,18 +76,12 @@ COINGECKO_SOURCE = "coingecko"
 SIGNIFICANT_DIGITS = 12
 # Enough that a quotient and a product lose nothing before the rounding to 12 digits.
 _WORKING_PRECISION = 60
-DAY_MS = 86_400_000
-_EPOCH = date(1970, 1, 1)
 # One request asks for at most this many bars; the catalogue's span is a day less than it.
 MAX_BARS = 1_000
 
 BASE_URL = "https://api.coingecko.com/api/v3"
 KEY_HEADER = "x-cg-demo-api-key"
 CALLS_PER_MINUTE = 25
-WINDOW_MS = 60_000
-MAX_RETRIES = 3
-RETRY_AFTER_RANGE = (1, 300)
-RETRY_AFTER_DEFAULT = 30
 # The free plan's history: a range may not start earlier than this many days before now.
 HISTORY_DAYS = 365
 # CoinGecko lists about two thousand Binance tickers, a hundred a page.
@@ -174,13 +172,6 @@ def _failed(status: int | None) -> CoinGeckoError:
     return CoinGeckoError(f"CoinGecko request failed ({shown})")
 
 
-def _plain_json(body: str) -> ApiValue:
-    def refuse(_: str) -> Decimal:
-        raise ValueError("non-finite number")
-
-    return json.loads(body, parse_float=Decimal, parse_constant=refuse)
-
-
 class CoinGeckoClient:
     """The few CoinGecko requests the prices use, at a fixed https base, no redirects, at most
     25 calls a minute. The key is sent in a header only."""
@@ -227,20 +218,14 @@ class CoinGeckoClient:
             status = response.status_code
             if status == 429 and retries < MAX_RETRIES:
                 retries += 1
-                await self._sleep(self._retry_after(response) * 1000)
+                await self._sleep(retry_after(response) * 1000)
                 continue
             if not 200 <= status < 300:
                 raise _failed(status)
             try:
-                return _plain_json(response.text)
+                return load_json(response.text)
             except ValueError:
                 raise _failed(status) from None
-
-    @staticmethod
-    def _retry_after(response: httpx.Response) -> int:
-        shown = response.headers.get("Retry-After", "")
-        low, high = RETRY_AFTER_RANGE
-        return min(max(int(shown), low), high) if shown.isdecimal() else RETRY_AFTER_DEFAULT
 
     async def tickers(self, page: int) -> ApiValue:
         """A page of Binance's tickers: each names its base and quote asset and their ids."""
@@ -264,7 +249,7 @@ class CoinGeckoClient:
 
 
 def _ms(day: date) -> int:
-    return (day - _EPOCH).days * DAY_MS
+    return millis(datetime.combine(day, time(), UTC))
 
 
 def _day(ms: int) -> date:

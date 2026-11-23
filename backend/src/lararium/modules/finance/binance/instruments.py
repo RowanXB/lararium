@@ -26,7 +26,8 @@ from lararium.modules.finance.instruments import (
 )
 
 DECIMALS = 8
-_MIRROR = "LD"
+# The prefix of a code that mirrors another asset in Earn (`LDAAA` stands for `AAA`).
+MIRROR = "LD"
 
 
 async def assets_seen(session: AsyncSession, connection_id: UUID) -> set[str]:
@@ -129,7 +130,7 @@ async def asset(
     """
     session = ctx.session
     code = normalize_identifier("binance_asset", code)
-    if code.startswith(_MIRROR) and await _known(session, connection_id, code[len(_MIRROR) :]):
+    if code.startswith(MIRROR) and await _known(session, connection_id, code[len(MIRROR) :]):
         return None
     await _see(session, connection_id, code)
     name, legal_money = await _coin(session, connection_id, code)

@@ -57,6 +57,11 @@ def moment(ms: int) -> datetime:
     return _EPOCH + timedelta(milliseconds=ms)
 
 
+def millis(at: datetime) -> int:
+    """A datetime as epoch milliseconds (`moment`'s inverse)."""
+    return (at - _EPOCH) // timedelta(milliseconds=1)
+
+
 def _moment_ms(label: str, path: str | None, value: ApiValue) -> datetime:
     try:
         return moment(_integer(label, path, value))

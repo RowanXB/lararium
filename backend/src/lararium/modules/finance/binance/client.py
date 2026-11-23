@@ -203,16 +203,25 @@ class Limiter:
             return
 
 
-def _json(text: str) -> ApiValue:
+def load_json(text: str) -> ApiValue:
+    """A JSON answer with its numbers exact (`Decimal`); a non-finite number is a ValueError."""
+
     def refuse(_: str) -> Decimal:
         raise ValueError("non-finite number")
 
     return json.loads(text, parse_float=Decimal, parse_constant=refuse)
 
 
+def retry_after(response: httpx.Response) -> int:
+    """The seconds a 429 asks to wait: `Retry-After` within 1 to 300, else 30."""
+    shown = response.headers.get("Retry-After", "")
+    low, high = RETRY_AFTER_RANGE
+    return min(max(int(shown), low), high) if shown.isdecimal() else RETRY_AFTER_DEFAULT
+
+
 def _error_code(response: httpx.Response) -> int | None:
     try:
-        body = _json(response.text)
+        body = load_json(response.text)
     except ValueError:
         return None
     if isinstance(body, dict):
@@ -334,22 +343,16 @@ class BinanceClient:
             status = response.status_code
             if status == 429 and retries < self._retries:
                 retries += 1
-                await self._sleep(self._retry_after(response) * 1000)
+                await self._sleep(retry_after(response) * 1000)
                 continue
             return self._result(response), sent, received
-
-    @staticmethod
-    def _retry_after(response: httpx.Response) -> int:
-        shown = response.headers.get("Retry-After", "")
-        low, high = RETRY_AFTER_RANGE
-        return min(max(int(shown), low), high) if shown.isdecimal() else RETRY_AFTER_DEFAULT
 
     @staticmethod
     def _result(response: httpx.Response) -> ApiValue:
         status = response.status_code
         if 200 <= status < 300:
             try:
-                return _json(response.text)
+                return load_json(response.text)
             except ValueError:
                 raise BinanceError(status) from None
         code = _error_code(response)

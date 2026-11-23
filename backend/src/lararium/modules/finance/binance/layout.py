@@ -54,11 +54,11 @@ TABLE_LABELS: tuple[str, ...] = (
     "klines",
 )
 
-# Columns a record's table has beyond the catalogue's fields (design 5.12, Task 4).
+# Columns a record's table has beyond the catalogue's fields (design 5.12).
 EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "deposits": (("tx_hash", "text"), ("is_onchain", "boolean")),
     "withdrawals": (("tx_hash", "text"), ("is_onchain", "boolean")),
-    # The key of the dividend a reward is linked to (Task 6).
+    # The key of the dividend a reward is linked to (rule 3).
     "earn-flexible-rewards": (("dividend_id", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
