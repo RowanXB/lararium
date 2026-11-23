@@ -12,6 +12,15 @@ from typing import Any
 GCID = 90000001
 REAL_CID = 90000002
 CASH_ACCOUNT = "0f9e8d7c-1111-4222-8333-944455556666"
+# The 16 read scopes the owner's Read key holds (the probe; scope names, no personal values).
+OWNER_READ_SCOPES = [
+    f"etoro-public:{name}:read"
+    for name in (
+        "agent-portfolio club crypto feed market-data money.balance money.cash-transactions"
+        " notifications pi-data pnl-alerts sso-applications sso-scopes trade.demo trade.real"
+        " user-info watchlist"
+    ).split()
+]
 READ_SCOPES = [
     "etoro-public:trade.real:read",
     "etoro-public:money.balance:read",

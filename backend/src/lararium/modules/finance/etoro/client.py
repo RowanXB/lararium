@@ -5,8 +5,9 @@ paced per eToro's rate-limit pool. The public API key and the user key are read 
 `Secret`s inside each request's headers, beside a fresh `x-request-id`; they are never kept
 revealed.
 
-The read-only gate (design §5.1) is the connector's: it calls `me()` before anything else and
-refuses the key when `write_scopes` lists any of its scopes.
+The read-only gate (design §5.1, Decision 13) is structural: every call but `me()` raises
+`ReadOnlyGateError` before sending until `me()` has returned scopes that all pass the allow-list
+(`write_scopes` lists none). The connector calls `me()` first and refuses the key otherwise.
 """
 
 import asyncio
@@ -14,7 +15,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -24,6 +25,7 @@ from lararium.core.errors import CredentialRejectedError
 from lararium.core.secrets import Secret
 from lararium.modules.finance.readonly_http import (
     Clock,
+    HttpAuthError,
     HttpError,
     HttpForbiddenError,
     HttpNotFoundError,
@@ -38,8 +40,9 @@ from lararium.modules.finance.readonly_http import (
 )
 
 BASE = "https://public-api.etoro.com"
-# Trade history: each window's minDate is this many days after the one before (eToro: a
-# request's look-back at most a year less a day); each window's pages end on a short page.
+# Trade history: the sync walks back in windows whose minDate is this many days apart (eToro:
+# a request's look-back at most a year less a day). A window's pages end on an empty page,
+# never a short one: eToro states no page-size cap, so a short page proves nothing.
 TRADE_WINDOW_DAYS = 364
 TRADE_PAGE = 100
 CASH_PAGE = 500
@@ -82,6 +85,7 @@ _ENDPOINTS: Mapping[str, tuple[str, str]] = {
 }
 _GATE = "This eToro key can trade or move money. Create a key with Read permission."
 _CLOUDFLARE = "eToro's firewall refused this client's User-Agent (403)"
+_ME_FORBIDDEN = "eToro refused the key on /me (403)"
 _WHOLE = "an eToro id is a whole number"
 # An id is below this, as a bigint column holds it (at most 19 digits).
 _ID_BOUND = 10**19
@@ -90,26 +94,18 @@ _ACCOUNT_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,63}")
 
 
 class ReadOnlyGateError(CredentialRejectedError):
-    """The key holds a scope that can trade or move money. The message names no scope."""
+    """The key holds a scope that is not read-only, or `me()` has not cleared it yet. The
+    message names no scope."""
 
     def __init__(self) -> None:
         super().__init__(_GATE)
 
 
 def write_scopes(scopes: Iterable[str]) -> list[str]:
-    """The scopes that can trade or move money: any ending `:write`, and `money:transfer`
-    (bare or under eToro's `etoro-public:` prefix, as `/me` returns them). Matching ignores
-    case and surrounding space, so an odd spelling fails closed; the scopes come back as given."""
-    found: list[str] = []
-    for scope in scopes:
-        plain = scope.strip().lower()
-        if (
-            plain.endswith(":write")
-            or plain == "money:transfer"
-            or plain.endswith(":money:transfer")
-        ):
-            found.append(scope)
-    return found
+    """The scopes the read-only gate refuses, as given: every one not ending `:read` (compared
+    after stripping space, ignoring case). An allow-list, since eToro's write-capable scopes are
+    not all named `:write` (`money:transfer`)."""
+    return [scope for scope in scopes if not scope.strip().lower().endswith(":read")]
 
 
 def _shape(endpoint: str, field: str | None = None) -> HttpError:
@@ -173,16 +169,15 @@ class EtoroClient:
             clock=clock,
             wall_clock=wall_clock,
         )
-        self._wall_clock = wall_clock
-
-    def _today(self) -> date:
-        """Today's UTC date, by the wall clock."""
-        return datetime.fromtimestamp(int(self._wall_clock()), UTC).date()
+        # Whether `me()` has returned only read scopes; until then only `/me` is sent.
+        self._cleared = False
 
     async def _get(
         self, endpoint: str, *, suffix: str = "", params: Mapping[str, str] | None = None
     ) -> JSONValue:
         path, pool = _ENDPOINTS[endpoint]
+        if endpoint != "me" and not self._cleared:
+            raise ReadOnlyGateError()
         try:
             response = await self._client.get(f"{path}{suffix}", pool=pool, params=params)
         except HttpForbiddenError as error:
@@ -200,12 +195,20 @@ class EtoroClient:
         return _objects(body.get(field), endpoint, field)
 
     async def me(self) -> Item:
-        """The user's ids, personal fields and the key's scopes. `scopes` must be a list of
-        strings, so the read-only gate never passes a key it could not read."""
-        body = _object(await self._get("me"), "/me")
+        """The user's ids, personal fields and the key's scopes, and the gate: the other calls
+        are allowed only when every scope passes `write_scopes`. A key with any other scope is
+        returned too (its scopes are worth recording), but the gate stays shut. `scopes` must be
+        a list of strings, else the answer is refused. A 403 here is the key refused
+        (design §5.1); Cloudflare's 1010 stays retryable."""
+        self._cleared = False
+        try:
+            body = _object(await self._get("me"), "/me")
+        except HttpForbiddenError:
+            raise HttpAuthError(_ME_FORBIDDEN) from None
         scopes = body.get("scopes")
         if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
             raise _shape("/me", "scopes")
+        self._cleared = not write_scopes(cast(list[str], scopes))
         return body
 
     async def pnl(self) -> Item:
@@ -241,66 +244,78 @@ class EtoroClient:
         of every item of a page, in order; every page fetched is returned."""
         if not _ACCOUNT_ID.fullmatch(account_id):
             raise ValueError("an eToro cash account id is letters, digits and dashes")
-        endpoint = "cash transactions"
-        suffix = f"/{account_id}/transactions"
-        params = {"pageSize": str(CASH_PAGE)}
+        return await self._follow(
+            "cash_transactions",
+            "cash transactions",
+            suffix=f"/{account_id}/transactions",
+            query={"pageSize": str(CASH_PAGE)},
+            token=("nextPageToken", "pageToken"),
+            # A list, not a generator: `all` would stop asking at the first unseen item.
+            done=lambda page: all([seen(item) for item in page]),
+        )
+
+    async def _follow(
+        self,
+        endpoint: str,
+        label: str,
+        *,
+        suffix: str,
+        query: Mapping[str, str],
+        token: tuple[str, str],
+        done: Callable[[list[Item]], bool] = lambda page: False,
+    ) -> list[Item]:
+        """Every `results` item of an endpoint paged by an opaque token: `token` is (the
+        pagination field that gives it, the query parameter that takes it). It stops when
+        `hasNext` is not true or `done(page)`; a repeated token, a missing one while `hasNext`
+        is true, or MAX_PAGES pages raise."""
+        field, parameter = token
+        params = dict(query)
         items: list[Item] = []
         for _ in range(MAX_PAGES):
-            body = _object(
-                await self._get("cash_transactions", suffix=suffix, params=params), endpoint
-            )
-            page = _objects(body.get("results"), endpoint, "results")
+            body = _object(await self._get(endpoint, suffix=suffix, params=params), label)
+            page = _objects(body.get("results"), label, "results")
             items.extend(page)
             pagination = body.get("pagination")
             if not isinstance(pagination, dict):
-                raise _shape(endpoint, "pagination")
-            # A list, not a generator: `all` would stop asking at the first unseen item.
-            if all([seen(item) for item in page]) or pagination.get("hasNext") is not True:
+                raise _shape(label, "pagination")
+            if done(page) or pagination.get("hasNext") is not True:
                 return items
-            token = pagination.get("nextPageToken")
-            if not isinstance(token, str) or not token:
-                raise _shape(endpoint, "pagination.nextPageToken")
-            if token == params.get("pageToken"):
-                raise HttpRetryableError(f"eToro's {endpoint} repeated a page")
-            params = {"pageSize": str(CASH_PAGE), "pageToken": token}
-        raise HttpRetryableError(f"eToro's {endpoint} did not end")
+            next_token = pagination.get(field)
+            if not isinstance(next_token, str) or not next_token:
+                raise _shape(label, f"pagination.{field}")
+            if next_token == params.get(parameter):
+                raise HttpRetryableError(f"eToro's {label} repeated a page")
+            params = {**query, parameter: next_token}
+        raise HttpRetryableError(f"eToro's {label} did not end")
 
     async def trade_history(self, min_date: date) -> list[Item]:
-        """Closed trades since `min_date`, asked in windows: the first from `min_date`, each
-        next one TRADE_WINDOW_DAYS later, while it starts by today. Each window is paged until a
-        short page. eToro has no end date, so a later window can repeat rows an earlier one
-        gave; an exact repeat is dropped, anything else is kept for the caller to judge."""
-        today = self._today()
-        rows: list[Item] = []
-        keys: set[str] = set()
-        start = min_date
-        while True:
-            for row in await self._trade_window(start):
-                key = _key(row)
-                if key not in keys:
-                    keys.add(key)
-                    rows.append(row)
-            start += timedelta(days=TRADE_WINDOW_DAYS)
-            if start > today:
-                return rows
-
-    async def _trade_window(self, start: date) -> list[Item]:
+        """One window: every trade eToro closed from `min_date` to now, which is the contract
+        the sync's walk back relies on (it asks windows TRADE_WINDOW_DAYS apart until one adds
+        no new `positionId`, or `min_date` passes the account's opening). Pages are asked with
+        `page`/`pageSize` until an empty page; a short page does not end it, since eToro may
+        cap the page below TRADE_PAGE. A row repeated exactly (the pages shifting under a new
+        close) is dropped; a row that differs is kept for the caller to judge. A full page
+        repeated (`page` ignored) or MAX_PAGES pages raise."""
         endpoint = "trade history"
         rows: list[Item] = []
+        keys: set[str] = set()
         previous: list[Item] | None = None
         for number in range(1, MAX_PAGES + 1):
             params = {
-                "minDate": start.isoformat(),
+                "minDate": min_date.isoformat(),
                 "page": str(number),
                 "pageSize": str(TRADE_PAGE),
             }
             page = _objects(await self._get("trade_history", params=params), endpoint)
-            if page == previous:
-                # `page` ignored: going on would only fetch the same rows.
-                raise HttpRetryableError(f"eToro's {endpoint} repeated a page")
-            rows.extend(page)
-            if len(page) < TRADE_PAGE:
+            if not page:
                 return rows
+            if page == previous:
+                raise HttpRetryableError(f"eToro's {endpoint} repeated a page")
+            for row in page:
+                key = _key(row)
+                if key not in keys:
+                    keys.add(key)
+                    rows.append(row)
             previous = page
         raise HttpRetryableError(f"eToro's {endpoint} did not end")
 
@@ -358,8 +373,6 @@ class EtoroClient:
         """Daily candles from `start` to `end`, both included, following `nextCursor`."""
         if end < start:
             raise ValueError("a candle range ends on or after its start")
-        endpoint = "candles"
-        suffix = f"/{_whole(instrument_id)}/candles"
         query = {
             "interval": "1d",
             "from": f"{start.isoformat()}T00:00:00Z",
@@ -367,20 +380,10 @@ class EtoroClient:
             "to": f"{(end + timedelta(days=1)).isoformat()}T00:00:00Z",
             "limit": str(CANDLE_LIMIT),
         }
-        params = dict(query)
-        items: list[Item] = []
-        for _ in range(MAX_PAGES):
-            body = _object(await self._get("candles", suffix=suffix, params=params), endpoint)
-            items.extend(_objects(body.get("results"), endpoint, "results"))
-            pagination = body.get("pagination")
-            if not isinstance(pagination, dict):
-                raise _shape(endpoint, "pagination")
-            if pagination.get("hasNext") is not True:
-                return items
-            cursor = pagination.get("nextCursor")
-            if not isinstance(cursor, str) or not cursor:
-                raise _shape(endpoint, "pagination.nextCursor")
-            if cursor == params.get("cursor"):
-                raise HttpRetryableError(f"eToro's {endpoint} repeated a page")
-            params = {**query, "cursor": cursor}
-        raise HttpRetryableError(f"eToro's {endpoint} did not end")
+        return await self._follow(
+            "candles",
+            "candles",
+            suffix=f"/{_whole(instrument_id)}/candles",
+            query=query,
+            token=("nextCursor", "cursor"),
+        )

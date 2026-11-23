@@ -353,8 +353,11 @@ OWN_COLUMNS = frozenset(
 
 def split(spec: EndpointSpec, path: str) -> tuple[str, str]:
     """The table a known path's value goes to, and the path below that table's row. An array of
-    plain values is its child table's one column (SCALAR_ITEMS)."""
+    plain values is its child table's one column (SCALAR_ITEMS); an array of objects is not a
+    path of its own."""
     if path in spec.children:
+        if path not in SCALAR_ITEMS:
+            raise ValueError(f"{spec.record_type}: {path} is an array of objects, not a field")
         return spec.children[path], SCALAR_ITEMS[path]
     owner = max((c for c in spec.children if path.startswith(f"{c}.")), key=len, default=None)
     if owner is None:
@@ -362,11 +365,14 @@ def split(spec: EndpointSpec, path: str) -> tuple[str, str]:
     return spec.children[owner], path.removeprefix(f"{owner}.")
 
 
-def _columns() -> dict[str, dict[str, dict[str, str]]]:
+def _columns(
+    endpoints: Mapping[str, EndpointSpec], personal: frozenset[str]
+) -> dict[str, dict[str, dict[str, str]]]:
     """Endpoint → table → known path → column. Built through `column_map`, per table across
-    every endpoint writing it, so two paths that would share a column fail at import."""
+    every endpoint writing it, so two paths that would share a column fail at import, as do a
+    required or personal path that is not known and a field whose column is an own column."""
     by_table: dict[str, set[str]] = {}
-    for spec in ENDPOINTS.values():
+    for spec in endpoints.values():
         unknown = spec.required - spec.known
         if unknown:
             raise ValueError(f"{spec.record_type} requires unknown {sorted(unknown)}")
@@ -377,10 +383,10 @@ def _columns() -> dict[str, dict[str, dict[str, str]]]:
     for table, mapping in table_columns.items():
         if clash := OWN_COLUMNS & set(mapping.values()):
             raise ValueError(f"{table}: a field would be column {', '.join(sorted(clash))}")
-    known = frozenset[str]().union(*(spec.known for spec in ENDPOINTS.values()))
-    if missing := PERSONAL - known:
+    known = frozenset[str]().union(*(spec.known for spec in endpoints.values()))
+    if missing := personal - known:
         raise ValueError(f"personal fields not known: {sorted(missing)}")
-    return {name: _endpoint_columns(spec, table_columns) for name, spec in ENDPOINTS.items()}
+    return {name: _endpoint_columns(spec, table_columns) for name, spec in endpoints.items()}
 
 
 def _endpoint_columns(
@@ -394,4 +400,4 @@ def _endpoint_columns(
 
 
 # Endpoint → table → known path → column (Decision 3: `column_name` of the path below the row).
-COLUMNS: Mapping[str, Mapping[str, Mapping[str, str]]] = _columns()
+COLUMNS: Mapping[str, Mapping[str, Mapping[str, str]]] = _columns(ENDPOINTS, PERSONAL)
