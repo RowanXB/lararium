@@ -68,6 +68,7 @@ from lararium.modules.finance.binance.normalize import Run, normalize
 from lararium.modules.finance.binance.notices import tell
 from lararium.modules.finance.binance.opening import set_openings
 from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
+from lararium.modules.finance.binance.prices import update_prices
 from lararium.modules.finance.binance.reconcile import (
     Difference,
     Point,
@@ -320,10 +321,6 @@ async def reconciliation(ctx: SyncContext, touched: Touched) -> None:
         await reconcile(run)
 
 
-async def prices(ctx: SyncContext, client: BinanceClient) -> None:
-    """Daily bars into EUR prices (Task 10, plan Decision 13)."""
-
-
 class BinanceConnector:
     name = "binance"
     version = VERSION
@@ -378,7 +375,7 @@ class BinanceConnector:
             await reports(ctx, settled, first=first)
             touched |= await opening(ctx)
         await reconciliation(ctx, touched)
-        await prices(ctx, client)
+        await update_prices(ctx, client, sleep=self._sleep)
         # Last: what the steps queued is told once the sync has got this far.
         await tell(ctx)
         return {"fetched_at": now_ms}

@@ -22,7 +22,7 @@ from lararium.modules.finance.transfers import (
 )
 from lararium.modules.finance.transfers.queries import list_transfers
 
-from .fixtures import BASE_TIME_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
+from .fixtures import BASE_TIME_MS, DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
@@ -375,6 +375,12 @@ async def test_flags_are_stored_and_notified_once(
 ) -> None:
     row = _deposit(1, insertTime=NOW_MS - 2 * HOUR_MS, completeTime=NOW_MS - 2 * HOUR_MS)
     fake.add("deposits", {**row, "extraField": "secret-value-4242"})
+    # The asset has a EUR market, so it is not flagged as unpriced.
+    fake.add(
+        "exchange-info",
+        build_row("exchange-info", symbol="AAAEUR", baseAsset="AAA", quoteAsset="EUR"),
+    )
+    fake.add("klines", build_row("klines", **{"0": NOW_MS - DAY_MS}), when={"symbol": "AAAEUR"})
     # Spot reports what the deposit brought (a report that left it out would make it an
     # opening of its opposite).
     fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="5", locked="0")])

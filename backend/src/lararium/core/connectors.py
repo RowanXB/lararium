@@ -55,6 +55,8 @@ class SyncContext:
     # The owner asked for this sync ("Sync now"): a connector that waits between syncs runs
     # it anyway. Connectors that sync whenever they are run need not look.
     requested: bool = False
+    # The operator's CoinGecko key, for a connector that prices what its provider cannot.
+    coingecko_api_key: Secret | None = field(default=None, repr=False)
 
 
 class Connector(Protocol):

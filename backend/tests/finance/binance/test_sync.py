@@ -538,7 +538,13 @@ async def _delete(
                 text("delete from core.credentials where connection_id = :id"), params
             )
             # The typed tables (child rows go with their parent), and what the reports wrote.
-            roots = [t.name for label in TABLE_LABELS for t in layout(label) if t.parent is None]
+            # (The bars are market data: no connection's.)
+            roots = [
+                t.name
+                for label in TABLE_LABELS
+                for t in layout(label)
+                if t.parent is None and label != "klines"
+            ]
             for table in [*roots, "binance_assets_seen"]:
                 await conn.execute(
                     text(f"delete from finance.{table} where connection_id = :id"), params

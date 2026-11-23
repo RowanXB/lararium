@@ -1,6 +1,7 @@
 """Migration 0030 goes down to 0029 and up again, taking what it added and leaving the rest;
-migration 0031 (`never_transfer`) likewise down to 0030, and 0032 (the reconciliation
-differences and the account report times) down to 0031."""
+migration 0031 (`never_transfer`) likewise down to 0030, 0032 (the reconciliation
+differences and the account report times) down to 0031, and 0033 (the daily bars and the
+CoinGecko ids) down to 0032."""
 
 from pathlib import Path
 
@@ -88,5 +89,29 @@ def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
             command.upgrade(config, "head")
         with engine.begin() as connection:
             assert connection.execute(text(_DIFFERENCES)).scalar() is True
+    finally:
+        engine.dispose()
+
+
+_PRICES = (
+    "select to_regclass('finance.binance_klines') is not null"
+    " and to_regclass('finance.binance_coingecko_ids') is not null"
+)
+
+
+def test_prices_migration_round_trip(owner_url: str, migrated: None) -> None:
+    config = Config(str(BACKEND / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", owner_url)
+    engine = create_engine(owner_url)
+    try:
+        try:
+            command.downgrade(config, "0032")
+            with engine.begin() as connection:
+                assert connection.execute(text(_PRICES)).scalar() is False
+                assert connection.execute(text(_DIFFERENCES)).scalar() is True
+        finally:
+            command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(text(_PRICES)).scalar() is True
     finally:
         engine.dispose()

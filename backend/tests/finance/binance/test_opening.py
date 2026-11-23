@@ -282,6 +282,14 @@ async def test_first_sync_notifies_once_with_counts(
 ) -> None:
     fake.add("deposits", _deposit(0, _utc("2026-11-21T10:00"), "3"))
     fake.add("deposits", _deposit(1, _utc("2026-11-21T11:00"), "4", coin="BBB"))
+    # Both assets have a EUR market, so none is flagged as unpriced.
+    for coin in ("AAA", "BBB"):
+        pair = f"{coin}EUR"
+        fake.add(
+            "exchange-info",
+            build_row("exchange-info", symbol=pair, baseAsset=coin, quoteAsset="EUR"),
+        )
+        fake.add("klines", build_row("klines", **{"0": NOW_MS - DAY_MS}), when={"symbol": pair})
     fake.set_rows(
         "spot-account",
         [

@@ -143,6 +143,7 @@ async def run_binance_sync(
     *,
     notifier: Any = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    settings: Settings = SETTINGS,
 ) -> ConnectionRecord:
     """One sync through the worker's run_sync; the connection after it."""
     if not isinstance(transport, httpx.MockTransport):
@@ -151,7 +152,7 @@ async def run_binance_sync(
         await jobs.run_sync(
             session,
             connection_id,
-            settings=SETTINGS,
+            settings=settings,
             http=http,
             notifier=notifier or RecordingNotifier(),
             session_factory=session_factory or async_sessionmaker(bind=session.bind),

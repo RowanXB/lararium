@@ -17,6 +17,7 @@ from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS
 from lararium.modules.finance.binance.models import (
     AccountReport,
     AssetsSeen,
+    CoingeckoId,
     ReconciliationDifference,
     model_of,
     models_of,
@@ -25,6 +26,7 @@ from lararium.modules.finance.binance.parse import BinanceDataError, parse
 from lararium.modules.finance.binance.tables import (
     columns_for,
     content_hash,
+    moment,
     records,
     store,
     store_response,
@@ -147,6 +149,7 @@ def test_keys() -> None:
     assert key("snapshot") == ("connection_id", "type", "update_time")
     assert key("user-asset") == ("connection_id", "snapshot_at", "asset")
     assert key("spot-account") == ("connection_id", "snapshot_at")
+    assert key("klines") == ("symbol", "open_time")
     assert key("asset-detail") == ("connection_id", "snapshot_at", "asset")
     responses = {
         t.label: t for label in layout.TABLE_LABELS for t in layout.layout(label) if t.response
@@ -160,6 +163,8 @@ def test_keys() -> None:
 
 def test_reports_have_read_to_and_records_a_transaction() -> None:
     for label in layout.TABLE_LABELS:
+        if label == "klines":
+            continue  # market data, tested on its own
         root = layout.layout(label)[0]
         names = {c.name for c in root.columns}
         if ENDPOINTS[label].kind == "history":
@@ -168,6 +173,42 @@ def test_reports_have_read_to_and_records_a_transaction() -> None:
         else:
             assert "read_to" in names and "snapshot_at" in names, label
             assert not root.column("read_to").nullable
+
+
+def test_a_bar_has_a_column_per_position_by_the_type_rules() -> None:
+    bars = layout.layout("klines")[0]
+    assert [(c.name, c.sql, c.nullable) for c in bars.columns] == [
+        ("symbol", "text", False),
+        ("open_time", "timestamptz", False),
+        ("open", "numeric", False),
+        ("high", "numeric", False),
+        ("low", "numeric", False),
+        ("close", "numeric", False),
+        ("volume", "numeric", False),
+        ("close_time", "timestamptz", False),
+        ("quote_volume", "numeric", False),
+        ("trades", "bigint", False),
+        ("taker_buy_base_volume", "numeric", False),
+        ("taker_buy_quote_volume", "numeric", False),
+        ("unused", "text", True),
+    ]
+    assert not bars.record and bars.parent is None
+
+
+async def test_a_bar_is_stored_once_per_symbol_and_open_time(session, run) -> None:
+    bar = build_row("klines")
+    parsed = parse("klines", build_response("klines", [bar]))
+    [row] = records("klines", parsed)
+    assert await run(store, "klines", {"symbol": "AAAEUR"}, row) is True
+    assert await run(store, "klines", {"symbol": "AAAEUR"}, row) is False
+    assert await run(store, "klines", {"symbol": "BBBEUR"}, row) is True
+    found = await session.execute(
+        text("select symbol, open_time, close, trades from finance.binance_klines order by symbol")
+    )
+    assert [tuple(r) for r in found] == [
+        ("AAAEUR", moment(BASE_TIME_MS), Decimal("1.5"), 7),
+        ("BBBEUR", moment(BASE_TIME_MS), Decimal("1.5"), 7),
+    ]
 
 
 def test_deposit_and_withdrawal_extras() -> None:
@@ -186,7 +227,7 @@ def _compile(column) -> str:
 
 async def test_models_are_the_migrated_tables(session) -> None:
     models = [model_of(t.name) for label in layout.TABLE_LABELS for t in layout.layout(label)]
-    models += [AccountReport, AssetsSeen, ReconciliationDifference]
+    models += [AccountReport, AssetsSeen, CoingeckoId, ReconciliationDifference]
     found = {
         row.relname
         for row in await session.execute(
@@ -489,6 +530,8 @@ async def test_a_record_is_keyed_by_the_connection_and_its_id(session, run) -> N
 async def test_every_label_with_a_table_can_be_stored(session, run) -> None:
     connection = await _connection(run)
     for label in layout.TABLE_LABELS:
+        if label == "klines":
+            continue  # keyed by the symbol, not a connection: see the bars test
         record = layout.layout(label)[0].record
         parsed = parse(label, build_response(label, [build_row(label)]))
         key: dict[str, object] = {"connection_id": connection}

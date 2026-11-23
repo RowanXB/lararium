@@ -51,6 +51,7 @@ TABLE_LABELS: tuple[str, ...] = (
     "earn-flexible-redemptions",
     "earn-flexible-rewards",
     "my-trades",
+    "klines",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12, Task 4).
@@ -64,6 +65,24 @@ INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),
     "withdrawals": (("network", "tx_hash"),),
 }
+
+# A bar of `klines` is positional, so its columns are named by what each position holds
+# (the catalogue's meaning column); the table is market data, with no connection.
+BAR_COLUMNS = {
+    "0": "open_time",
+    "1": "open",
+    "2": "high",
+    "3": "low",
+    "4": "close",
+    "5": "volume",
+    "6": "close_time",
+    "7": "quote_volume",
+    "8": "trades",
+    "9": "taker_buy_base_volume",
+    "10": "taker_buy_quote_volume",
+    "11": "unused",
+}
+BARS_LABEL = "klines"
 
 CONTENT_HASH = "content_hash"
 OCCURRENCE = "occurrence"
@@ -238,6 +257,8 @@ def _field_columns(
 @cache
 def layout(label: str) -> tuple[Table, ...]:
     """The tables of a label, the root first and each parent before its children."""
+    if label == BARS_LABEL:
+        return (_bars_table(),)
     endpoint = ENDPOINTS[label]
     record = endpoint.kind == "history"
     root = root_scope(label)
@@ -273,6 +294,26 @@ def layout(label: str) -> tuple[Table, ...]:
     if envelope := [p for p in places if p.envelope]:
         tables.append(_response_table(label, record, envelope, objects))
     return tuple(tables)
+
+
+def _bars_table() -> Table:
+    """The daily bars of one symbol: its name and one column per position of a bar, keyed by
+    the symbol and the open time. Bars are market data shared by every connection."""
+    root = root_scope(BARS_LABEL)
+    columns = [Column("symbol", "text", False)]
+    for field in FIELDS[BARS_LABEL]:
+        place = _place(field, root)
+        (column,) = _field_columns([place], {}, frozenset(), "")
+        columns.append(replace(column, name=BAR_COLUMNS[place.reads[0]]))
+    return Table(
+        name=table_name(BARS_LABEL),
+        label=BARS_LABEL,
+        scope=root,
+        parent=None,
+        key=("symbol", "open_time"),
+        columns=tuple(columns),
+        record=False,
+    )
 
 
 def _response_table(

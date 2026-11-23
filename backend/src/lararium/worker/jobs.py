@@ -125,6 +125,7 @@ async def run_sync(
                     full_backfill=backfill,
                     documents=LocalDocumentStore(settings.document_dir),
                     requested=requested,
+                    coingecko_api_key=_coingecko_key(settings),
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
@@ -243,6 +244,11 @@ def _webhook_target(settings: Settings) -> WebhookTarget | None:
         return None
     base_url, secret = webhook
     return WebhookTarget(base_url, Secret(secret.get_secret_value()))
+
+
+def _coingecko_key(settings: Settings) -> Secret | None:
+    key = settings.coingecko_api_key
+    return None if key is None else Secret(key.get_secret_value())
 
 
 def _master_key(settings: Settings) -> bytes:

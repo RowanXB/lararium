@@ -97,6 +97,23 @@ async def _same_symbol(session: AsyncSession, code: str) -> list[UUID]:
     return list(rows)
 
 
+async def _by_coingecko_id(session: AsyncSession, code: str) -> UUID | None:
+    """The crypto instrument that has the asset's CoinGecko id (a lookup of `prices` found it),
+    unless it already stands for another Binance asset."""
+    coin = await session.scalar(
+        text("select coingecko_id from finance.binance_coingecko_ids where asset = :a"),
+        {"a": code},
+    )
+    if coin is None:
+        return None
+    found = await find_by_identifier(session, "coingecko", coin)
+    if found is None or found.kind != "crypto":
+        return None
+    if any(i.scheme == "binance_asset" for i in found.identifiers):
+        return None
+    return found.id
+
+
 async def asset(
     ctx: CommandContext,
     connection_id: UUID,
@@ -120,7 +137,10 @@ async def asset(
     found = await find_by_identifier(session, "binance_asset", code)
     if found is not None:
         return found.id
-    # Task 10 adds the step between: the instrument of the asset's `coingecko` id.
+    by_id = await _by_coingecko_id(session, code)
+    if by_id is not None:
+        await add_identifiers(ctx, by_id, [identifier])
+        return by_id
     same = await _same_symbol(session, code)
     if len(same) == 1:
         await add_identifiers(ctx, same[0], [identifier])

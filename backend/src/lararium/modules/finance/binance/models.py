@@ -98,6 +98,18 @@ class ReconciliationDifference(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CoingeckoId(Base):
+    """The CoinGecko id a Binance asset was looked up under (design 5.10); none when the lookup
+    found no id, which is asked again after a while."""
+
+    __tablename__ = "binance_coingecko_ids"
+    __table_args__ = FINANCE_SCHEMA
+
+    asset: Mapped[str] = mapped_column(Text, primary_key=True)
+    coingecko_id: Mapped[str | None] = mapped_column(Text)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 def _class_name(table: str) -> str:
     return "".join(part.capitalize() for part in table.split("_"))
 
