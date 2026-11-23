@@ -5,16 +5,18 @@ When two sources of an event (eToro's API and its statement) disagree on a value
 posting or its date, the normalizer opens a review item: both values, open until the owner
 takes one. Taking one is also a decision, kept by the event's key and the field, which the
 normalizer reads (`decision_for`), so regeneration replays it. A disagreement the owner has
-decided, with the same values, opens nothing; a later change in either value does.
+decided, with the same values, opens nothing; a later change in either value does. An open
+item whose sources come to agree closes on its own (`close_agreed`), decided by no one.
 
 Values are kept as text, as the normalizer compares them; they are the owner's data, so no
 message here names one.
 """
 
+from collections.abc import Collection
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +26,8 @@ from lararium.modules.finance.errors import ReviewNotFoundError, ReviewResolvedE
 from lararium.modules.finance.schemas import ReviewOut
 
 type Take = Literal["api", "statement"]
+# Who closed an item whose two sources came to agree: no one decided it.
+AGREED = "sources agree"
 
 
 async def open_review(
@@ -42,7 +46,8 @@ async def open_review(
     same = (r.connection_id == connection_id, r.event_key == event_key, r.field == field)
     rows = await ctx.session.execute(
         select(r.id, r.api_value, r.statement_value, r.resolved_at)
-        .where(*same)
+        # An item closed because the sources agreed was decided by no one.
+        .where(*same, or_(r.resolved_at.is_(None), r.resolved_by != AGREED))
         .order_by(r.resolved_at.desc().nulls_first(), r.opened_at.desc())
         .limit(1)
         .with_for_update()
@@ -85,6 +90,29 @@ async def open_review(
         return False
     ctx.record_change(f"source_review:{review_id}", {"event_key": event_key, "field": field})
     return True
+
+
+async def close_agreed(
+    ctx: CommandContext, connection_id: UUID, event_key: str, fields: Collection[str]
+) -> None:
+    """Close the event's open items on these fields, whose two sources now agree: resolved
+    `api` by AGREED, no decision recorded, no one told."""
+    if not fields:
+        return
+    r = models.SourceReview
+    closed = await ctx.session.scalars(
+        update(r)
+        .where(
+            r.connection_id == connection_id,
+            r.event_key == event_key,
+            r.field.in_(sorted(fields)),
+            r.resolved_at.is_(None),
+        )
+        .values(resolved_at=func.now(), resolution="api", resolved_by=AGREED)
+        .returning(r.id)
+    )
+    for review_id in closed:
+        ctx.record_change(f"source_review:{review_id}", {"resolution": "api", "by": AGREED})
 
 
 async def resolve_review(ctx: CommandContext, review_id: UUID, take: Take) -> None:

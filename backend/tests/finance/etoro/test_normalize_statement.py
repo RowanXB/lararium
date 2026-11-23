@@ -715,6 +715,33 @@ async def test_disagreement_opens_one_review(session, ledger) -> None:
     assert len(ledger.disagreement_messages()) == 1
 
 
+async def test_review_closes_when_the_sources_agree(session, ledger) -> None:
+    await ledger.normalize(*BASE, *TRADES)
+    await ledger.upload(trade_statement(closed_units="5"))
+    [review] = await list_reviews(session, ledger.connection.id)
+    assert review.resolved_at is None
+    # A corrected statement agrees with the API: the item closes on its own, untold.
+    await ledger.upload(trade_statement(closed_units="4"))
+    [closed] = await list_reviews(session, ledger.connection.id)
+    assert (closed.id, closed.resolution, closed.resolved_by) == (
+        review.id,
+        "api",
+        "sources agree",
+    )
+    assert closed.resolved_at is not None
+    assert len(ledger.disagreement_messages()) == 1
+    # Not an owner's decision: a new disagreement opens a new item and is told.
+    await ledger.upload(trade_statement(closed_units="6"))
+    reviews = await list_reviews(session, ledger.connection.id)
+    assert [(r.statement_value, r.resolution) for r in reviews] == [("6", None), ("5", "api")]
+    assert len(ledger.disagreement_messages()) == 2
+    decisions = await session.scalar(
+        text("select count(*) from finance.source_decisions where connection_id = :c"),
+        {"c": ledger.connection.id},
+    )
+    assert decisions == 0
+
+
 async def test_partial_close_no_review(session, ledger) -> None:
     # Four of ten units closed: the "Open Position" row is the whole position's; Closed
     # Positions, as trade history, the closed part's.

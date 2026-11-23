@@ -346,11 +346,10 @@ async def test_open_from_api_cost_in_usd(session, ledger) -> None:
     await ledger.normalize(
         *_ledger_entries(), ("order_lookup", lookup_body(ORDER, POSITION, fees="0.75"))
     )
+    # The execution fee is typed, not posted: the statement posts fees and taxes (R30).
     assert await _postings(session, f"open:{POSITION}") == [
         (TRADING, SYMBOL, Decimal(4), Decimal(125), "USD", None, None, False),
         (TRADING, "USD", Decimal("-500.00"), None, None, None, None, False),
-        (TRADING, "USD", Decimal("-0.75"), None, None, None, None, True),
-        ("Unassigned", "USD", Decimal("0.75"), None, None, None, None, False),
     ]
     tx = await _transaction(session, f"open:{POSITION}")
     assert tx.occurred_at == datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
@@ -1160,12 +1159,22 @@ async def test_non_numeric_leverage_is_a_data_error(ledger) -> None:
         await ledger.normalize(*_ledger_entries(leverage="two"))
 
 
-async def test_negative_fee_is_flagged_not_charged(session, ledger) -> None:
-    report = await ledger.normalize(
-        *_ledger_entries(), ("order_lookup", lookup_body(ORDER, POSITION, fees="-0.40"))
-    )
-    assert [p[7] for p in await _postings(session, f"open:{POSITION}")] == [False, False]
-    assert "a negative fee or tax" in report.flagged
+async def test_execution_fees_and_taxes_typed_not_posted(session, ledger) -> None:
+    # R30: an open's execution fees and taxes (SDRT, say) post only from the statement's rows.
+    for fees, taxes in (("0.75", "1.10"), ("-0.40", "0")):
+        report = await ledger.normalize(
+            *_ledger_entries(),
+            ("order_lookup", lookup_body(ORDER, POSITION, fees=fees, taxes=taxes)),
+        )
+        assert [p[7] for p in await _postings(session, f"open:{POSITION}")] == [False, False]
+        assert not any("fee" in flag for flag in report.flagged)
+        [typed] = await _rows(
+            session,
+            "select opening_data_fees, opening_data_taxes from finance.etoro_position_executions"
+            " where connection_id = :c",
+            c=ledger.connection.id,
+        )
+        assert tuple(typed) == (Decimal(fees), Decimal(taxes))
 
 
 async def test_errors_name_a_position_by_its_last_digits(ledger) -> None:

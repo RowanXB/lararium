@@ -14,7 +14,8 @@ Each opens one review item on the transaction, both values kept, and is told to 
 Resolving an item is the owner's decision (source_reviews): taking the statement's value makes
 that field post from the statement. A decision holds for the values it was made on, so
 regeneration replays it; a later change in either source's value reopens the review, and the
-API's value posts until the owner decides again.
+API's value posts until the owner decides again. An open item whose two sources come to agree
+closes on its own, resolved `api` by "sources agree", untold.
 
 Messages name a position by its last four digits and the field, never a value.
 """
@@ -31,7 +32,7 @@ from sqlalchemy import text
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance.etoro.state import Run, ending
 from lararium.modules.finance.money import to_plain_str
-from lararium.modules.finance.source_reviews import Take, open_review
+from lararium.modules.finance.source_reviews import AGREED, Take, close_agreed, open_review
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +113,11 @@ async def takes(run: Run, key: str, found: Sequence[tuple[str, str, str]]) -> di
             " from finance.source_decisions d"
             " join lateral (select api_value, statement_value from finance.source_reviews r"
             " where r.connection_id = d.connection_id and r.event_key = d.event_key"
-            " and r.field = d.field and r.resolved_at is not null"
+            " and r.field = d.field and r.resolved_at is not null and r.resolved_by <> :agreed"
             " order by r.resolved_at desc, r.opened_at desc limit 1) r on true"
             " where d.connection_id = :c and d.event_key = :e"
         ),
-        {"c": run.connection_id, "e": key},
+        {"c": run.connection_id, "e": key, "agreed": AGREED},
     )
     decided = {row.field: (row.take, row.api_value, row.statement_value) for row in rows}
     result: dict[str, Take] = {}
@@ -127,19 +128,33 @@ async def takes(run: Run, key: str, found: Sequence[tuple[str, str, str]]) -> di
     return result
 
 
+@dataclass(frozen=True)
+class Choice:
+    """The values an event posts; its disagreements, to review once posted; and whether both
+    sources had it (so the fields they agree on can close their items)."""
+
+    values: TradeEvent
+    found: list[tuple[str, str, str]]
+    both: bool
+
+
 async def choose(
     run: Run, key: str, api: TradeEvent | None, statement: TradeEvent | None
-) -> tuple[TradeEvent, list[tuple[str, str, str]]]:
-    """The values the event posts, and the disagreements to review once it is posted."""
+) -> Choice:
+    both = api is not None and statement is not None
     found = disagreements(api, statement) if api is not None and statement is not None else []
-    return posting_values(api, statement, await takes(run, key, found)), found
+    return Choice(posting_values(api, statement, await takes(run, key, found)), found, both)
 
 
-async def review(
-    run: Run, key: str, transaction_id: UUID | None, found: Sequence[tuple[str, str, str]]
-) -> None:
-    """Open a review item for each disagreement the owner has not seen with these values."""
-    for field, theirs, ours in found:
+async def review(run: Run, key: str, transaction_id: UUID | None, choice: Choice) -> None:
+    """Open a review item for each disagreement the owner has not seen with these values, and
+    close the open ones on fields the two sources now agree on."""
+    if choice.both:
+        disagreeing = {field for field, _, _ in choice.found}
+        await close_agreed(
+            run.command, run.connection_id, key, [f for f in FIELDS if f not in disagreeing]
+        )
+    for field, theirs, ours in choice.found:
         if await open_review(
             run.command, run.connection_id, transaction_id, key, field, theirs, ours
         ):

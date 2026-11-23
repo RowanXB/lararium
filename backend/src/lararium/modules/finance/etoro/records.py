@@ -6,10 +6,10 @@ closed (what closed is what was opened: a partial close's remainder is a positio
 with `parentPositionId`, design §6), else from the latest PnL report that lists it, so it
 survives the position leaving PnL. An open adds the units at `amount / units` in the account's
 currency (`accountCurrency`) and takes `amount` out; a close takes the units out at
-`(investment + netProfit) / units` and puts that cash in. A non-zero execution fee or tax
-(orders:lookup) is a fee posting (`is_fee`) countered on Unassigned; a negative one is flagged
-and not posted. A close's trade-history `fees` are typed, not posted: they are the position's
-overnight fees and dividends, which the statement posts as rows of their own (Task 11). A
+`(investment + netProfit) / units` and puts that cash in. The API's fees and taxes are typed,
+not posted (ruling R30): an open's execution fees and taxes (orders:lookup; SDRT among them)
+and a close's trade-history `fees` (the position's overnight fees and dividends) are what the
+statement posts as rows of their own, so posting them here too would count them twice. A
 position that is not real (`settlementTypeID` 1, `settlementType` real), has leverage other
 than 1, or is copied (a `mirrorID` or `socialTradeId`) is flagged and posts nothing; so does
 one no source states the settlement of (counted apart, `settlement_unknown`), and one on an
@@ -74,7 +74,6 @@ from lararium.modules.finance.etoro.state import (
     id_at,
     moment_at,
     number_at,
-    object_at,
     objects_at,
     record_key,
     records_of,
@@ -90,7 +89,6 @@ CLOSE = "close:"
 OPENING_DESCRIPTION = "Opening balance adjustment"
 UNSUPPORTED_POSITION = "a CFD, leveraged or copied position"
 SETTLEMENT_UNKNOWN = "position settlement unknown"
-NEGATIVE_FEE = "a negative fee or tax"
 UNKNOWN_INTERNAL = "an internal transfer names no account Lararium knows"
 NOT_UK = "bank transfer to a non-UK account"
 # eToro Money's enums (SPEC): a value not listed is flagged and posts nothing.
@@ -294,23 +292,6 @@ def _plain(quantity: Decimal) -> str:
     return to_plain_str(quantity.copy_abs().normalize())
 
 
-def _fees(
-    run: Run, unassigned: UUID, currency_id: UUID, fees: Sequence[tuple[Decimal, str]]
-) -> list[PostingInput]:
-    """Each fee on the Trading account, then Unassigned's counterpart. A negative one (a
-    refund, perhaps) is flagged and not posted: what it would be is unknown."""
-    postings: list[PostingInput] = []
-    for amount, memo in fees:
-        if amount < 0:
-            run.flag(NEGATIVE_FEE)
-        elif amount > 0:
-            postings.append(PostingInput(run.trading, currency_id, -amount, is_fee=True, memo=memo))
-    total = sum((p.quantity for p in postings), Decimal(0))
-    if total != 0:
-        postings.append(PostingInput(unassigned, currency_id, -total))
-    return postings
-
-
 async def _rounding(
     run: Run,
     position_id: str,
@@ -359,9 +340,7 @@ def _api_open(position: Position) -> TradeEvent | None:
 
 def _api_close(position: Position) -> TradeEvent | None:
     """The API's close: trade history's `investment` + `netProfit`. Its `fees` are typed, not
-    posted: they are the position's overnight fees and dividends (as PnL's `totalFees`),
-    which the statement posts as rows of their own, so posting them here would count them
-    twice (Task 11; design §5.7)."""
+    posted (module doc)."""
     if position.trade is None:
         return None
     record, item = position.trade, position.trade.content
@@ -382,7 +361,8 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
     statement = statement_ledger.open_event(position.statement, position.position_id)
     if api is None and statement is None:
         return None
-    values, found = await merge.choose(run, key, api, statement)
+    choice = await merge.choose(run, key, api, statement)
+    values = choice.values
     units, amount = values.units, values.cash
     if units == 0:
         raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
@@ -399,18 +379,10 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
     ]
     if amount != 0:
         postings.append(PostingInput(run.trading, currency.id, -amount))
-    execution = position.execution()
-    if execution is not None and position.lookup is not None:
-        opening = object_at(execution, "openingData")
-        fees = [
-            (number_at(position.lookup, opening, "fees"), "Execution fee"),
-            (number_at(position.lookup, opening, "taxes"), "Execution tax"),
-        ]
-        postings += _fees(run, unassigned, currency.id, fees)
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Buy {_plain(units)} {await run.symbol(instrument_id)}"
     transaction_id = await run.post(key, values.occurred_at, description, postings)
-    await merge.review(run, key, transaction_id, found)
+    await merge.review(run, key, transaction_id, choice)
     return transaction_id
 
 
@@ -420,7 +392,8 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
     statement = statement_ledger.close_event(position.statement, position.position_id)
     if api is None and statement is None:
         return None
-    values, found = await merge.choose(run, key, api, statement)
+    choice = await merge.choose(run, key, api, statement)
+    values = choice.values
     units, proceeds = values.units, values.cash
     if units == 0:
         raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
@@ -444,7 +417,7 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
     await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Sell {_plain(units)} {await run.symbol(instrument_id)}"
     transaction_id = await run.post(key, values.occurred_at, description, postings)
-    await merge.review(run, key, transaction_id, found)
+    await merge.review(run, key, transaction_id, choice)
     return transaction_id
 
 
