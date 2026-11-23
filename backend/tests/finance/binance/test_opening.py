@@ -188,6 +188,45 @@ async def test_opening_is_never_after_the_earliest_report(session, run) -> None:
     assert (opening.quantity, opening.occurred_at) == (10, reported)
 
 
+async def test_records_of_an_asset_the_earliest_report_omits_open_at_minus_their_sum(
+    session, run
+) -> None:
+    # The report is complete: BBB is not in it, so the account held none of it then.
+    connection = await binance_connection(run, config=later_config())
+    await _deposits(
+        session,
+        connection.id,
+        _deposit(0, _utc("2026-11-01T10:00"), "4"),
+        _deposit(1, _utc("2026-11-02T10:00"), "5", coin="BBB"),
+    )
+    account_id, aaa = await _spot_aaa(session, connection.id)
+    bbb = await run(asset, connection.id, "BBB")
+    await _report(run, account_id, aaa, "4", _utc("2026-11-20T12:00"))
+
+    assert await _openings(session, connection.id) == 1
+
+    [opening] = await _opening(session, connection.id)
+    assert opening.external_id == f"opening:spot:{bbb}"
+    assert (opening.quantity, opening.booking_date) == (-5, date(2026, 10, 31))
+    # With no snapshot of BBB, the hybrid rule sums its postings: 0 from the deposit on.
+    assert await _balance(session, account_id, bbb, date(2026, 11, 20)) == 0
+    assert await _balance(session, account_id, bbb, date(2026, 11, 2)) == 0
+    assert await _balance(session, account_id, bbb, date(2026, 10, 31)) == -5
+
+
+async def test_an_asset_first_reported_later_is_no_opening(session, run) -> None:
+    connection = await binance_connection(run, config=later_config())
+    await _deposits(session, connection.id, _deposit(0, _utc("2026-11-01T10:00"), "10"))
+    account_id, aaa = await _spot_aaa(session, connection.id)
+    bbb = await run(asset, connection.id, "BBB")
+    await _report(run, account_id, aaa, "10", _utc("2026-11-20T12:00"))
+    await _report(run, account_id, aaa, "10", _utc("2026-11-21T12:00"))
+    await _report(run, account_id, bbb, "3", _utc("2026-11-21T12:00"))
+
+    assert await _openings(session, connection.id) == 0
+    assert await _opening(session, connection.id) == []
+
+
 async def test_wallet_with_no_record_starts_at_its_report(session, run) -> None:
     connection = await binance_connection(run, config=later_config())
     account_id = await run(wallet_account, connection, "funding")
@@ -235,9 +274,7 @@ async def test_no_opening_before_the_first_sync_finishes(session, run) -> None:
     assert opening.quantity == 3
     config = (await get_connection(session, connection.id)).config
     assert config["first_sync_done"] is True
-    assert config[PENDING_LINES_KEY] == [
-        "Binance's first sync is done: deposits 1; 1 opening adjustment"
-    ]
+    assert config[PENDING_LINES_KEY] == ["first sync finished: deposits 1; 1 opening adjustment"]
 
 
 async def test_first_sync_notifies_once_with_counts(
@@ -262,7 +299,7 @@ async def test_first_sync_notifies_once_with_counts(
     assert after.status == "healthy", after.last_error
     assert after.config["first_sync_done"] is True
     [message] = [m for m in notifier.messages if "first sync" in m]
-    assert message == "Binance: Binance's first sync is done: deposits 2; 1 opening adjustment"
+    assert message == "Binance: first sync finished: deposits 2; 1 opening adjustment"
     for value in ("AAA", "BBB", "10", "3", ADDRESS):
         assert value not in message.removeprefix("Binance: ")
     [opening] = await _opening(session, connection.id)

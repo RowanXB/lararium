@@ -201,7 +201,7 @@ async def first_sync_line(session: AsyncSession, connection_id: UUID, openings: 
             counts.append(f"{label} {found}")
     plural = "" if openings == 1 else "s"
     return (
-        f"Binance's first sync is done: {', '.join(counts) or 'no records'};"
+        f"first sync finished: {', '.join(counts) or 'no records'};"
         f" {openings} opening adjustment{plural}"
     )
 

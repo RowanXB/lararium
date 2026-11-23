@@ -1,18 +1,25 @@
 """Binance's reported balances against the records posted (design 5.11, plan Decision 11).
 
-An interval is two consecutive `reported` snapshots of one account and instrument: its reported
-change is the second quantity less the first, its posted sum the account's non-void postings
-of the instrument with `as_of(before) < occurred_at <= as_of(after)` (what the `hybrid` rule
-adds after the first snapshot and the second already holds). A difference beyond the
-instrument's tolerance is stored, named in the connection's warnings and told once; it is never
-corrected. One that no longer holds (the record that explains it arrived) is closed.
+An account's reports are the times it has `reported` snapshots at; a wallet's report is
+complete, so an instrument a report does not list is 0 there (`reported_at`). An interval is two
+consecutive reports of one account: an instrument's reported change is its quantity at the
+second less its quantity at the first, its posted sum the account's non-void postings of it
+with `from_at < occurred_at <= to_at` (what the `hybrid` rule adds after the first report and
+the second already holds). A difference beyond the instrument's tolerance is stored, named in
+the connection's warnings and told once; it is never corrected. One that no longer holds (the
+record that explains it arrived) is closed.
 
-A run checks the newest interval of every account and instrument and every interval holding a
-posting the run created, changed or removed, so a late record closes its interval and a change
-to an old record reopens it. Warnings and messages name the wallet, the asset and the two
-times, never an amount.
+Every interval is checked once it exists: a run checks every interval ending after
+`config["reconciled_through"]` (the newest report the last reconciliation covered), every
+interval holding a posting the run created, changed or removed, and every stored difference
+still open. So a daily snapshot of the first sync and a report whose sync failed later are
+checked, a late record closes its interval and a change to an old record reopens it. Warnings
+and messages name the wallet, the asset and the two times, never an amount.
 """
 
+import itertools
+import re
+from collections import defaultdict
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,29 +27,38 @@ from decimal import MAX_PREC, Decimal, localcontext
 from uuid import UUID
 
 from sqlalchemy import Select, func, select, text
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.connections import get_connection, set_warnings
+from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
 from lararium.modules.finance.binance import notices
 from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_name
+from lararium.modules.finance.binance.balances import millis
 from lararium.modules.finance.binance.models import ReconciliationDifference
 from lararium.modules.finance.binance.records import Run
+from lararium.modules.finance.binance.tables import moment
 from lararium.modules.finance.money import to_plain_str, tolerance
 
 # (account, instrument, occurred_at) of a posting a run created, changed or removed.
 type Point = tuple[UUID, UUID, datetime]
 type Touched = Collection[Point]
 
-WARNING_PREFIX = "Binance "
-_FLAGS_KEY = "flags"
+# The newest report time (epoch ms) the last reconciliation covered.
+RECONCILED_KEY = "reconciled_through"
 # Earn's flexible position runs ahead of its records by the reward still accruing.
 _EARN = "earn"
 _REALTIME = "REALTIME"
 _ACCRUING = timedelta(hours=48)
 _SHOWN = "%Y-%m-%d %H:%M:%S"
+_MOMENT = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+# The warnings `reconcile` writes, and only those.
+_WARNING = re.compile(
+    rf"Binance .+: .+ changed by something no record explains between {_MOMENT}"
+    rf" and {_MOMENT} \(UTC\)"
+)
 
 
 @dataclass(frozen=True)
@@ -61,55 +77,54 @@ class Difference:
         return (self.account_id, self.instrument_id, self.from_at, self.to_at)
 
 
-# The intervals, and what was posted in each.
+# An account's reports: one definition, which the opening uses too.
+# Phase A: every wallet's reports are its snapshots. Phase B gives the futures wallets theirs
+# from `wallet_balance` (Decision 11: their snapshot also carries unrealised profit), as a
+# second source beside these, with those accounts left out of them.
 
-# Phase A: every wallet's reported change is its snapshots'. Phase B gives the futures wallets
-# theirs from `wallet_balance` (Decision 11: their snapshot also carries unrealised profit), as
-# a second source beside this one, with those accounts left out of it.
-_SNAPSHOT_INTERVALS = """
-with reported as (
-  select distinct on (s.account_id, s.instrument_id, s.as_of)
-    s.account_id, s.instrument_id, s.as_of, s.quantity
-  from finance.balance_snapshots s
-  join finance.accounts a on a.id = s.account_id
-  where a.source_connection_id = :c and s.kind = 'reported'
-  order by s.account_id, s.instrument_id, s.as_of, s.recorded_at desc, s.id desc
-),
-intervals as (
-  select account_id, instrument_id,
-    lag(as_of) over w as from_at, lag(quantity) over w as from_quantity,
-    as_of as to_at, quantity as to_quantity,
-    row_number() over (
-      partition by account_id, instrument_id order by as_of desc
-    ) as newest
-  from reported
-  window w as (partition by account_id, instrument_id order by as_of)
-),
-touched as (
-  select * from unnest(
-    cast(:accounts as uuid[]), cast(:instruments as uuid[]), cast(:times as timestamptz[])
-  ) as t (account_id, instrument_id, at)
-)
-select v.account_id, v.instrument_id, v.from_at, v.to_at,
-  v.to_quantity - v.from_quantity as reported_change,
-  coalesce((
-    select sum(p.quantity) from finance.postings p
-    join finance.transactions t on t.id = p.transaction_id
-    where p.account_id = v.account_id and p.instrument_id = v.instrument_id
-      and t.status <> 'void' and t.occurred_at > v.from_at and t.occurred_at <= v.to_at
-  ), 0) as posted_sum,
-  i.decimals
-from intervals v
-join finance.instruments i on i.id = v.instrument_id
-where v.from_at is not null and (
-  v.newest = 1 or exists (
-    select 1 from touched t
-    where t.account_id = v.account_id and t.instrument_id = v.instrument_id
-      and t.at > v.from_at and t.at <= v.to_at
-  )
-)
-order by v.to_at, v.account_id, v.instrument_id
-"""
+
+async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
+    """The times the account was reported at (each `as_of` of its `reported` snapshots),
+    oldest first."""
+    s = models.BalanceSnapshot
+    rows = await session.scalars(
+        select(s.as_of)
+        .where(s.account_id == account_id, s.kind == "reported")
+        .distinct()
+        .order_by(s.as_of)
+    )
+    return list(rows)
+
+
+async def reported_at(session: AsyncSession, account_id: UUID, at: datetime) -> dict[UUID, Decimal]:
+    """Each instrument's quantity in the account's report at `at` (the latest recorded of a
+    time). A report is complete: an instrument it does not list is 0 there."""
+    s = models.BalanceSnapshot
+    rows = await session.execute(
+        select(s.instrument_id, s.quantity)
+        .where(s.account_id == account_id, s.kind == "reported", s.as_of == at)
+        .ext(distinct_on(s.instrument_id))
+        .order_by(s.instrument_id, s.recorded_at.desc(), s.id.desc())
+    )
+    return {row.instrument_id: row.quantity for row in rows}
+
+
+async def _posted(
+    session: AsyncSession, account_id: UUID, after: datetime, through: datetime
+) -> dict[UUID, Decimal]:
+    t, p = models.Transaction, models.Posting
+    rows = await session.execute(
+        select(p.instrument_id, func.sum(p.quantity).label("total"))
+        .join(t, t.id == p.transaction_id)
+        .where(
+            p.account_id == account_id,
+            t.status != "void",
+            t.occurred_at > after,
+            t.occurred_at <= through,
+        )
+        .group_by(p.instrument_id)
+    )
+    return {row.instrument_id: row.total for row in rows}
 
 
 async def wallets(session: AsyncSession, connection_id: UUID) -> dict[UUID, str]:
@@ -164,50 +179,78 @@ async def _accruing(
     return Decimal(largest) if largest is not None else Decimal(0)
 
 
+def reconciled_through(config: dict[str, JSONValue]) -> datetime | None:
+    found = config.get(RECONCILED_KEY)
+    if isinstance(found, int) and not isinstance(found, bool):
+        return moment(found)
+    return None
+
+
 async def check(
     session: AsyncSession,
     connection_id: UUID,
     touched: Touched,
 ) -> list[Difference]:
-    """The differences among the newest interval of every (account, instrument) of the
-    connection and every interval holding one of `touched`'s (account, instrument,
-    `occurred_at`)."""
-    points = sorted(touched)
-    rows = await session.execute(
-        text(_SNAPSHOT_INTERVALS),
-        {
-            "c": connection_id,
-            "accounts": [a for a, _, _ in points],
-            "instruments": [i for _, i, _ in points],
-            "times": [at for _, _, at in points],
-        },
-    )
+    """The differences among the connection's intervals that end after
+    `config["reconciled_through"]` (all of them when it is not set) and those holding one of
+    `touched`'s (account, instrument, `occurred_at`); every instrument of such an interval is
+    checked."""
+    config = (await get_connection(session, connection_id)).config
+    through = reconciled_through(config)
+    points: defaultdict[UUID, list[datetime]] = defaultdict(list)
+    for account_id, _, at in touched:
+        points[account_id].append(at)
+    accounts = list(await session.scalars(_owned(connection_id).order_by(models.Account.id)))
     earn = {a for a, key in (await wallets(session, connection_id)).items() if key == _EARN}
+    decimals: dict[UUID, int] = {}
     found: list[Difference] = []
     with localcontext(prec=MAX_PREC):
-        for row in rows.all():
-            reported, posted = Decimal(row.reported_change), Decimal(row.posted_sum)
-            ahead = reported - posted
-            if ahead.copy_abs() <= tolerance(row.decimals):
-                continue
-            if row.account_id in earn and 0 < ahead <= await _accruing(
-                session, connection_id, row.instrument_id, row.to_at
-            ):
-                continue
-            found.append(
-                Difference(
-                    row.account_id, row.instrument_id, row.from_at, row.to_at, reported, posted
-                )
-            )
-    return found
+        for account_id in accounts:
+            times = await report_times(session, account_id)
+            for from_at, to_at in itertools.pairwise(times):
+                fresh = through is None or to_at > through
+                if not fresh and not any(from_at < at <= to_at for at in points[account_id]):
+                    continue
+                before = await reported_at(session, account_id, from_at)
+                after = await reported_at(session, account_id, to_at)
+                posted = await _posted(session, account_id, from_at, to_at)
+                for instrument_id in sorted({*before, *after, *posted}):
+                    zero = Decimal(0)
+                    change = after.get(instrument_id, zero) - before.get(instrument_id, zero)
+                    total = Decimal(posted.get(instrument_id, zero))
+                    ahead = change - total
+                    if instrument_id not in decimals:
+                        decimals[instrument_id] = (
+                            await session.get_one(models.Instrument, instrument_id)
+                        ).decimals
+                    if ahead.copy_abs() <= tolerance(decimals[instrument_id]):
+                        continue
+                    if account_id in earn and 0 < ahead <= await _accruing(
+                        session, connection_id, instrument_id, to_at
+                    ):
+                        continue
+                    found.append(
+                        Difference(account_id, instrument_id, from_at, to_at, change, total)
+                    )
+    return sorted(found, key=lambda d: (d.to_at, d.account_id, d.instrument_id))
 
 
-# What is stored.
+async def newest_report(session: AsyncSession, connection_id: UUID) -> datetime | None:
+    """The newest report time of any of the connection's accounts."""
+    s = models.BalanceSnapshot
+    return await session.scalar(
+        select(func.max(s.as_of)).where(
+            s.kind == "reported", s.account_id.in_(_owned(connection_id))
+        )
+    )
 
 
 def _owned(connection_id: UUID) -> Select[UUID]:
     a = models.Account
     return select(a.id).where(a.source_connection_id == connection_id)
+
+
+# What is stored.
 
 
 async def _stored(
@@ -331,21 +374,20 @@ async def reconcile(run: Run) -> tuple[list[Difference], list[Difference]]:
         lines = [await warning_text(session, connection_id, d) for d in opened]
         await notices.queue(run.command, connection_id, lines=lines)
     await _set_warnings(run)
+    # Every interval up to the newest report is checked now; the next run starts after it.
+    newest = await newest_report(session, connection_id)
+    config = (await get_connection(session, connection_id)).config
+    if newest is not None and reconciled_through(config) != newest:
+        await update_config(run.command, connection_id, {RECONCILED_KEY: millis(newest)})
     return opened, closed
 
 
 async def _set_warnings(run: Run) -> None:
-    """The connection's warnings beginning `Binance ` that are not its flags are its open
-    differences."""
+    """The connection's difference warnings (those `warning_text` writes) are its open
+    differences; every other warning is kept."""
     session, connection_id = run.session, run.connection.id
     connection = await get_connection(session, connection_id)
-    flags = connection.config.get(_FLAGS_KEY)
-    flagged = {
-        notices.FLAG_PREFIX + flag
-        for flag in (flags if isinstance(flags, list) else [])
-        if isinstance(flag, str)
-    }
-    kept = [w for w in connection.warnings if not w.startswith(WARNING_PREFIX) or w in flagged]
+    kept = [w for w in connection.warnings if not _WARNING.fullmatch(w)]
     texts = [
         await warning_text(session, connection_id, d)
         for d in await open_differences(session, connection_id)

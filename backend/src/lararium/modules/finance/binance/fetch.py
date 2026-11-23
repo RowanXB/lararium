@@ -496,10 +496,13 @@ async def _sweep_trades(
             end = min(start + TRADE_SPAN_MS, until_ms)
             rows = await _trades_between(client, endpoint, symbol, start, end)
             if rows:
+                low, high = endpoint.time_params
+                _, size_name, _ = paging_params(endpoint)
                 request: dict[str, JSONValue] = {
                     "symbol": symbol,
-                    "startTime": start,
-                    "endTime": end,
+                    low: start,
+                    high: end,
+                    size_name: endpoint.page_size,
                 }
                 ids += await commit(
                     ctx,

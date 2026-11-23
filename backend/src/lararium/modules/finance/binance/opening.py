@@ -1,12 +1,16 @@
 """The opening balance adjustment (design 5.8, plan Decision 12): what a wallet held before the
 history its records go back to.
 
-For every (account, instrument) with a reported snapshot: the earliest reported quantity less
-the sum of the account's non-void postings of the instrument up to that snapshot's `as_of`,
-the opening itself left out. It is derived, not decided: set afresh after every normalising
-run once the first sync's backfill is complete, so a late record from before the earliest
-report moves it, and regenerating from the raw records gives the same ledger. A residual of 0
-voids it.
+At each account's earliest report (the earliest time any of its instruments was reported, a
+daily snapshot included; `reconcile.report_times`), for every instrument the account has a
+snapshot or a posting of: its quantity in that report (0 when the report does not list it, as
+a report is complete; `reconcile.reported_at`) less the sum of the account's non-void postings
+of it up to that time, the opening itself left out. An asset first reported later is not an
+opening: its appearance is a reconciliation difference unless a record explains it.
+
+It is derived, not decided: set afresh after every normalising run once the first sync's
+backfill is complete, so a late record from before the earliest report moves it, and
+regenerating from the raw records gives the same ledger. A residual of 0 voids it.
 
 It is dated the day before the account's earliest other record (at 00:00 UTC), or at the
 earliest report when the account has no record, and never after the earliest report: what
@@ -19,11 +23,9 @@ from decimal import MAX_PREC, Decimal, localcontext
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, func, not_, select
-from sqlalchemy.dialects.postgresql import distinct_on
 
-from lararium.core.connections import get_connection
 from lararium.modules.finance import models
-from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY
+from lararium.modules.finance.binance.reconcile import report_times, reported_at, wallets
 from lararium.modules.finance.binance.records import Run, post, remove
 from lararium.modules.finance.ledger import PostingInput
 
@@ -53,16 +55,17 @@ async def _earliest_record(run: Run, account_id: UUID) -> datetime | None:
     return None if day is None else datetime.combine(day, time(), UTC)
 
 
-async def _earliest_reports(run: Run, account_id: UUID) -> list[tuple[UUID, Decimal, datetime]]:
-    """(instrument, quantity, as_of) of the account's earliest reported snapshot of each."""
-    s = models.BalanceSnapshot
-    rows = await run.session.execute(
-        select(s.instrument_id, s.quantity, s.as_of)
-        .where(s.account_id == account_id, s.kind == "reported")
-        .ext(distinct_on(s.instrument_id))
-        .order_by(s.instrument_id, s.as_of, s.recorded_at.desc(), s.id.desc())
+async def _instruments(run: Run, account_id: UUID) -> set[UUID]:
+    """Every instrument the account has a posting of (its openings included, so one no longer
+    needed is voided)."""
+    t, p = models.Transaction, models.Posting
+    rows = await run.session.scalars(
+        select(p.instrument_id)
+        .distinct()
+        .join(t, t.id == p.transaction_id)
+        .where(p.account_id == account_id, t.status != "void")
     )
-    return [(row.instrument_id, row.quantity, row.as_of) for row in rows]
+    return set(rows)
 
 
 async def _posted(run: Run, account_id: UUID, instrument_id: UUID, through: datetime) -> Decimal:
@@ -84,24 +87,26 @@ async def _posted(run: Run, account_id: UUID, instrument_id: UUID, through: date
 async def set_openings(run: Run) -> int:
     """Set every wallet account's openings afresh (`opening:<wallet key>:<instrument id>`,
     against Opening balances); how many there are now."""
-    mapped = (await get_connection(run.session, run.connection.id)).config.get(ACCOUNT_MAP_KEY)
     made = 0
+    accounts = await wallets(run.session, run.connection.id)
     with localcontext(prec=MAX_PREC):
-        for wallet, value in sorted((mapped if isinstance(mapped, dict) else {}).items()):
-            try:
-                account_id = UUID(value) if isinstance(value, str) else None
-            except ValueError:
-                account_id = None
-            if account_id is None:
+        for account_id, wallet in sorted(accounts.items(), key=lambda item: item[1]):
+            times = await report_times(run.session, account_id)
+            if not times:
+                for instrument_id in sorted(await _instruments(run, account_id)):
+                    await remove(run, f"{OPENING_PREFIX}{wallet}:{instrument_id}")
                 continue
+            earliest = times[0]
+            reported = await reported_at(run.session, account_id, earliest)
             first = await _earliest_record(run, account_id)
-            for instrument_id, quantity, as_of in await _earliest_reports(run, account_id):
+            for instrument_id in sorted({*reported, *await _instruments(run, account_id)}):
                 key = f"{OPENING_PREFIX}{wallet}:{instrument_id}"
-                residual = quantity - await _posted(run, account_id, instrument_id, as_of)
+                quantity = reported.get(instrument_id, Decimal(0))
+                residual = quantity - await _posted(run, account_id, instrument_id, earliest)
                 if residual == 0:
                     await remove(run, key)
                     continue
-                at = as_of if first is None else min(first - timedelta(days=1), as_of)
+                at = earliest if first is None else min(first - timedelta(days=1), earliest)
                 await post(
                     run,
                     key,

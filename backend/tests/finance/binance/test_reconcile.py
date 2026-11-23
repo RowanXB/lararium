@@ -2,25 +2,36 @@
 Decision 11): the differences stored, warned and told once, closed when the record that
 explains them arrives, and the trade sweep after an unexplained change (design 5.2)."""
 
+import itertools
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
+from lararium.core.connections import create_connection, store_credential
+from lararium.db import create_engine, make_sessionmaker
+from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.parse import ApiValue
 from lararium.modules.finance.binance.sync import SWEPT_KEY
 
 from .fixtures import HOUR_MS, FakeBinance, build_row
 from .syncing import (
+    API_KEY,
+    API_SECRET,
+    KEY,
+    UID,
     Clock,
     RecordingNotifier,
     binance_connection,
     later_config,
     run_binance_sync,
 )
+from .test_sync import _delete, _system_accounts
 
 _CHANGED = "changed by something no record explains"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -139,6 +150,32 @@ def _warning(wallet: str, symbol: str, from_at: datetime, to_at: datetime) -> st
 
 def _told(notifier: RecordingNotifier) -> list[str]:
     return [m for m in notifier.messages if _CHANGED in m]
+
+
+def _covers(swept: list, from_at: datetime, to_at: datetime) -> None:
+    """Each symbol's sweep asked the whole interval, window after window."""
+    for symbol in {s.params["symbol"] for s in swept}:
+        asked = sorted(
+            (int(s.params["startTime"]), int(s.params["endTime"]))
+            for s in swept
+            if s.params["symbol"] == symbol
+        )
+        assert asked[0][0] == _ms(from_at) and asked[-1][1] == _ms(to_at)
+        assert all(b[0] == a[1] + 1 for a, b in itertools.pairwise(asked))
+
+
+async def _openings_of(session, connection_id: UUID, symbol: str) -> list[Any]:
+    rows = await session.execute(
+        text(
+            "select t.id from finance.transactions t"
+            " join finance.postings p on p.transaction_id = t.id"
+            " join finance.instruments i on i.id = p.instrument_id"
+            " where t.connection_id = :c and t.external_id like 'opening:%'"
+            " and t.status <> 'void' and i.symbol = :s"
+        ),
+        {"c": connection_id, "s": symbol},
+    )
+    return list(rows)
 
 
 async def _later(session, connection, fake: FakeBinance, clock: Clock, notifier=None):
@@ -312,10 +349,10 @@ async def test_round_trip_through_unseen_asset_found_by_sweep(
 
     after = await _later(session, connection, fake, clock, notifier)
 
-    [first, _] = await _as_of(session, connection.id, "Spot", "STB")
+    [first, second] = await _as_of(session, connection.id, "Spot", "STB")
     swept = [s for s in fake.calls("my-trades") if "startTime" in s.params]
     assert sorted({s.params["symbol"] for s in swept}) == ["AAASTB", "ZZZSTB"]
-    assert all(int(s.params["startTime"]) <= start for s in swept[:1])
+    _covers(swept, first, second)
     assert await _differences(session, connection.id) == []
     assert _told(notifier) == []
     assert not [w for w in after.warnings if _CHANGED in w]
@@ -326,3 +363,163 @@ async def test_round_trip_through_unseen_asset_found_by_sweep(
 
     assert [s for s in fake.calls("my-trades") if "startTime" in s.params] == []
     assert await _differences(session, connection.id) == []
+
+
+async def test_a_difference_the_sweep_does_not_explain_is_told_once(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    _pairs(fake, ("ZZZ", "STB"))
+    fake.set_rows("spot-account", _spot(("STB", "100")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.set_rows("spot-account", _spot(("STB", "102")))
+    fake.requests.clear()
+    notifier = RecordingNotifier()
+
+    await _later(session, connection, fake, clock, notifier)
+
+    first, second = await _as_of(session, connection.id, "Spot", "STB")
+    swept = [s for s in fake.calls("my-trades") if "startTime" in s.params]
+    _covers(swept, first, second)
+    [difference] = await _differences(session, connection.id)
+    assert (difference.from_at, difference.to_at, difference.reported_change) == (first, second, 2)
+    assert len(_told(notifier)) == 1
+
+    fake.requests.clear()
+    again = RecordingNotifier()
+    await _later(session, connection, fake, clock, again)
+
+    assert [s for s in fake.calls("my-trades") if "startTime" in s.params] == []
+    [still] = await _differences(session, connection.id)
+    assert still.closed_at is None
+    assert _told(again) == []
+
+
+async def test_a_new_asset_with_no_record_is_a_difference_not_an_opening(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.set_rows("spot-account", _spot(("AAA", "10"), ("BBB", "3")))
+    notifier = RecordingNotifier()
+
+    await _later(session, connection, fake, clock, notifier)
+
+    first, second = await _as_of(session, connection.id, "Spot", "AAA")
+    [difference] = await _differences(session, connection.id)
+    assert (difference.symbol, difference.from_at, difference.to_at) == ("BBB", first, second)
+    assert (difference.reported_change, difference.posted_sum) == (3, 0)
+    assert await _openings_of(session, connection.id, "BBB") == []
+    assert len(_told(notifier)) == 1
+
+
+async def test_a_new_asset_bought_is_neither_a_difference_nor_an_opening(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    _pairs(fake, ("BBB", "AAA"))
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.add("my-trades", _trade(0, clock.ms + HOUR_MS, "BBBAAA", buyer=True, qty="3", price="2"))
+    fake.set_rows("spot-account", _spot(("AAA", "4"), ("BBB", "3")))
+
+    await _later(session, connection, fake, clock)
+
+    assert await _differences(session, connection.id) == []
+    assert await _openings_of(session, connection.id, "BBB") == []
+
+
+async def test_first_sync_checks_every_daily_interval(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    def daily(at_ms: int, free: str) -> dict[str, Any]:
+        row = build_row("snapshot", type="SPOT", updateTime=at_ms)
+        data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+        data["balances"] = [{"asset": "AAA", "free": free, "locked": "0"}]
+        return {**row, "data": data}
+
+    day = 24 * HOUR_MS
+    days = [clock.ms - n * day - 1_000 for n in (3, 2, 1)]
+    fake.add("snapshot", daily(days[0], "2"), daily(days[1], "5"), daily(days[2], "5"))
+    fake.set_rows("spot-account", _spot(("AAA", "5")))
+    config = later_config()
+    del config["first_sync_done"]
+    config["cursors"].pop("snapshot:SPOT")  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+    connection = await binance_connection(run, config=config)
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    reported = await _as_of(session, connection.id, "Spot", "AAA")
+    assert len(reported) == 4
+    # A step between two daily snapshots, neither the newest interval nor holding a record.
+    [difference] = await _differences(session, connection.id)
+    assert (difference.from_at, difference.to_at) == (reported[0], reported[1])
+    assert (difference.reported_change, difference.posted_sum) == (3, 0)
+
+
+async def test_a_report_whose_sync_failed_later_is_checked(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Committed for real: the report's snapshots commit on their own, the failed sync's
+    # transaction rolls back.
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id: UUID | None = None
+    system_before = await _system_accounts(owner_url)
+    real = sync_module.opening
+
+    async def broken(ctx) -> set:
+        raise RuntimeError("a later step failed")
+
+    async def sync() -> Any:
+        clock.ms += 4 * HOUR_MS
+        async with sessions() as session:
+            return await run_binance_sync(
+                session, connection_id, fake.handler, session_factory=sessions
+            )
+
+    try:
+        async with (
+            sessions() as setup,
+            command_context(setup, Actor("user", "dev"), "test.setup", {}) as ctx,
+        ):
+            connection = await create_connection(
+                ctx,
+                connector="binance",
+                display_name=f"Binance {uuid4()}",
+                config={"key_type": "hmac", "uid": UID, **later_config()},
+            )
+            connection_id = connection.id
+            await store_credential(ctx, KEY, connection_id, "api_key", API_KEY, None)
+            await store_credential(ctx, KEY, connection_id, "api_secret", API_SECRET, None)
+            await setup.execute(
+                text("update core.connections set status = 'healthy' where id = :id"),
+                {"id": connection_id},
+            )
+        fake.set_rows("spot-account", _spot(("AAA", "10")))
+        assert (await sync()).status == "healthy"
+        fake.set_rows("spot-account", _spot(("AAA", "12")))
+        monkeypatch.setattr(sync_module, "opening", broken)
+        assert (await sync()).status == "failing"
+        monkeypatch.setattr(sync_module, "opening", real)
+
+        after = await sync()
+
+        assert after.status == "healthy", after.last_error
+        async with sessions() as session:
+            first, second, third = await _as_of(session, connection_id, "Spot", "AAA")
+            [difference] = await _differences(session, connection_id)
+        assert (difference.from_at, difference.to_at) == (first, second)
+        assert third > second
+    finally:
+        if connection_id is not None:
+            await _delete(engine, owner_url, connection_id, system_before)
+        await engine.dispose()
