@@ -179,6 +179,17 @@ class FakeTrading212:
         return [self._index(kind, r) for r in self.requests if r.url.path == HISTORY[kind]]
 
 
+@pytest.fixture(autouse=True)
+def _no_ledger(monkeypatch) -> None:
+    """These tests are of the sync: its fake history is not one account's consistent books,
+    so the normalizer (test_normalize, test_reconcile) is left out."""
+
+    async def normalize(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        return NormalizeReport()
+
+    monkeypatch.setattr(t212_sync, "normalize", normalize)
+
+
 @pytest.fixture
 def api(monkeypatch) -> FakeTrading212:
     fake = FakeTrading212()

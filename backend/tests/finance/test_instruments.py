@@ -8,6 +8,7 @@ from lararium.modules.finance.instruments import (
     find_by_identifier,
     get_currency,
     list_instruments,
+    replace_identifier,
     set_hidden,
 )
 
@@ -103,3 +104,27 @@ async def test_create_fiat_with_its_code(session, run) -> None:
         identifiers=[InstrumentIdentifier("iso4217", "ngn")],
     )
     assert (await get_currency(session, "NGN")).id == naira.id
+
+
+async def test_replace_identifier_renames_a_listing(session, run, usd) -> None:
+    listing = await run(
+        create_instrument,
+        kind="equity",
+        symbol="ZZQA",
+        name="Zzqa Example Corp",
+        decimals=8,
+        quote_instrument_id=usd.id,
+        identifiers=[InstrumentIdentifier("trading212_ticker", "ZZQA_US_EQ")],
+    )
+    renamed = await run(
+        replace_identifier, listing.id, InstrumentIdentifier("trading212_ticker", "ZZQB_US_EQ")
+    )
+    assert renamed.identifiers == (InstrumentIdentifier("trading212_ticker", "ZZQB_US_EQ"),)
+    assert await find_by_identifier(session, "trading212_ticker", "ZZQA_US_EQ") is None
+    # A scheme the instrument has none of is added; a currency's code is never replaced.
+    with_isin = await run(
+        replace_identifier, listing.id, InstrumentIdentifier("isin", "US00ZZQA0008")
+    )
+    assert InstrumentIdentifier("isin", "US00ZZQA0008") in with_isin.identifiers
+    with pytest.raises(FinanceValidationError):
+        await run(replace_identifier, usd.id, InstrumentIdentifier("iso4217", "EUR"))

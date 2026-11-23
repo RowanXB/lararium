@@ -270,6 +270,35 @@ async def add_identifiers(
     return record
 
 
+async def replace_identifier(
+    ctx: CommandContext, instrument_id: UUID, identifier: InstrumentIdentifier
+) -> InstrumentRecord:
+    """Give the instrument's identifier of the scheme a new value: a source that renamed a
+    listing it knows (Trading 212 renames tickers). One of a scheme the instrument has none of
+    is added instead. The value must not be another instrument's: the caller looked it up.
+    Currencies keep their ISO 4217 code, so that scheme is refused."""
+    if identifier.scheme == "iso4217":
+        raise FinanceValidationError("an ISO 4217 code can't be replaced")
+    current = await get_instrument(ctx.session, instrument_id)
+    if identifier.scheme not in {i.scheme for i in current.identifiers}:
+        return await add_identifiers(ctx, instrument_id, [identifier])
+    i = models.InstrumentIdentifier
+    value = normalize_identifier(identifier.scheme, identifier.value)
+    replaced = await ctx.session.scalar(
+        update(i)
+        .where(i.instrument_id == instrument_id, i.scheme == identifier.scheme, i.value != value)
+        .values(value=value)
+        .returning(i.value)
+    )
+    if replaced is None:
+        return current
+    record = await get_instrument(ctx.session, instrument_id)
+    data = _event_data(record)
+    ctx.emit("finance.instrument.updated", record.id, data)
+    ctx.record_change(f"instrument:{record.id}", data)
+    return record
+
+
 async def set_hidden(ctx: CommandContext, instrument_id: UUID, hidden: bool) -> InstrumentRecord:
     updated = await ctx.session.scalar(
         update(models.Instrument)

@@ -12,6 +12,11 @@ A history page after the first that answers 404 (design §3.2) stops that walk t
 its path kept to ask again, and is flagged. An optional part skipped (a permission not ticked,
 the deprecated pies list gone) is flagged too: a connection warning, the owner told once
 (`publish_flags`). A required permission missing rejects the key: it needs a new one.
+
+The normalizer's flags (fields, values and instrument types it does not know, a TRANSFER) are
+published the same way, as the part `fields`. A run normalizes only what it fetched, so they
+add to the ones before; a run that replays every record (a new normalizer version) has them
+all, and replaces them.
 """
 
 import logging
@@ -48,6 +53,8 @@ REWALK_EVERY = timedelta(days=7)
 METADATA_EVERY = timedelta(hours=24)
 KINDS: tuple[HistoryKind, ...] = ("orders", "dividends", "transactions")
 FLAGGED_PREFIX = "Trading 212 flagged: "
+# The part the normalizer's flags are published under.
+FIELDS = "fields"
 _STOPPED = "history stopped early (404)"
 
 
@@ -141,8 +148,8 @@ def _flags(cursor: Mapping[str, JSONValue]) -> dict[str, list[str]]:
 
 
 def _own(warning: str, kept: Collection[str]) -> bool:
-    """A flag the sync raises: one the cursor keeps, or one of its shapes. Other `Trading 212
-    flagged:` warnings (the normalizer's, which name fields) are left to their writer."""
+    """A flag the sync publishes: one the cursor keeps (the normalizer's among them), or one
+    of the sync's shapes. Other `Trading 212 flagged:` warnings are left to their writer."""
     reason = warning.removeprefix(FLAGGED_PREFIX)
     return warning.startswith(FLAGGED_PREFIX) and (
         reason in kept
@@ -315,8 +322,10 @@ class Trading212Connector:
             raise MissingPermissionError(
                 f"Trading 212 key lacks the {error.scope} permission"
             ) from None
-        await normalize(ctx, list(dict.fromkeys(run.ids)))
-        found = run.found | run.client.skipped
+        report = await normalize(ctx, list(dict.fromkeys(run.ids)))
+        if report.replayed:
+            run.checked.add(FIELDS)
+        found = run.found | run.client.skipped | {(FIELDS, flag) for flag in report.flagged}
         after |= await publish_flags(ctx, found, run.checked, cursor)
         return after
 
