@@ -37,6 +37,7 @@ from lararium.core.notify import Notifier, notifier_from_settings
 from lararium.core.secrets import Secret
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
+from lararium.modules.finance.ecb import run_fetch_ecb_rates
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.monzo.webhooks import process_inbox
 from lararium.modules.finance.transfers import (
@@ -487,6 +488,17 @@ async def check_transfers(timestamp: int) -> None:
     settings = get_settings()
     async with _job_resources(settings) as (http, sessions), sessions() as session:
         await run_check_transfers(session, notifier=notifier_from_settings(settings, http))
+
+
+# The ECB publishes its reference rates around 16:00 CET.
+@procrastinate_app.periodic(cron="30 16 * * *")
+@procrastinate_app.task(name="fetch_ecb_rates", queueing_lock="fetch_ecb_rates")
+async def fetch_ecb_rates(timestamp: int) -> int:
+    settings = get_settings()
+    async with _job_resources(settings) as (http, sessions):
+        written = await run_fetch_ecb_rates(sessions, http, datetime.now(UTC).date())
+    logger.info("stored %d ECB rates", written)
+    return written
 
 
 @procrastinate_app.periodic(cron="* * * * *")
