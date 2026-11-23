@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
 from lararium.modules.finance.system_accounts import SystemAccountKey
-from lararium.modules.finance.transfers.contra import SourceRef, eligible_records, names_source
+from lararium.modules.finance.transfers.contra import SourceRef, eligible_records, names_sources
 from lararium.modules.finance.transfers.settings import TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
@@ -216,17 +216,19 @@ async def _load_records(
     e = eligible_records(system)
     t = models.Transaction
     decided = {source for pair in decisions.paired for source in pair}
+    # Looked up first and passed as values: nested in the own-records query as a subquery,
+    # the planner may run it for each record (26 s of a heal on 19 decisions, 2026-11-23).
     decided_ids = (
-        select(t.id).where(or_(*(names_source(t, source) for source in decided)))
+        list(await session.scalars(select(t.id).where(names_sources(t, decided))))
         if decided
-        else None
+        else []
     )
     can_pair = [
         e.c.bank_transfer,
         e.c.counterparty_identifier_id.is_not(None),
         e.c.holder.is_not(None),
     ]
-    if decided_ids is not None:
+    if decided_ids:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
     query = select(
         e.c.transaction_id,

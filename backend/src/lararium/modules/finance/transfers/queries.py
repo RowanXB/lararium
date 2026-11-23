@@ -49,7 +49,7 @@ from lararium.modules.finance.transfers.contra import (
     eligible_records,
     is_rejected,
     load_own_record,
-    names_source,
+    names_sources,
     source_ref,
 )
 from lararium.modules.finance.transfers.pairs import pair_relation
@@ -435,10 +435,11 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
     if not others:
         return []
     t = models.Transaction
+    named = list(await session.scalars(select(t.id).where(names_sources(t, others))))
     found = await session.scalars(
         select(e.c.transaction_id)
         .where(
-            e.c.transaction_id.in_(select(t.id).where(or_(*(names_source(t, x) for x in others)))),
+            e.c.transaction_id.in_(named),
             e.c.account_id != record.account_id,
             e.c.instrument_id == record.instrument_id,
             e.c.quantity == -record.quantity,
