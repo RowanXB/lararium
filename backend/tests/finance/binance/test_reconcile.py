@@ -438,6 +438,65 @@ async def test_a_trade_of_assets_first_seen_in_its_sync_is_fetched_by_it(
     assert await _differences(session, connection.id) == []
 
 
+async def test_a_trade_of_assets_first_seen_in_its_sync_is_checked_against_its_reads(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # BBB is first named by this sync's deposit record; a trade of AAABBB happens while Spot is
+    # read. The trade is fetched before the reads are settled, so the read is made again.
+    _pairs(fake, ("AAA", "BBB"))
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.add("deposits", _deposit(0, clock.ms + HOUR_MS, "10", coin="BBB"))
+    fake.set_rows("spot-account", _spot(("AAA", "10"), ("BBB", "10")))
+
+    def trade(asked: int) -> None:
+        if asked == 0:
+            fake.add("my-trades", _trade(0, clock.ms, "AAABBB", buyer=True, qty="3", price="2"))
+            fake.set_rows("spot-account", _spot(("AAA", "13"), ("BBB", "4")))
+            clock.ms += 10_000
+
+    fake.when_asked("spot-account", trade)
+    fake.requests.clear()
+
+    await _later(session, connection, fake, clock)
+
+    # The Spot read and the Spot read made again.
+    assert len(fake.calls("spot-account")) == 2
+    assert await _differences(session, connection.id) == []
+    assert await _openings_of(session, connection.id, "BBB") == []
+
+
+async def test_an_asset_a_report_omits_is_zero_there_whatever_its_records_say(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # BBB is bought on Spot (the trade is posted) and leaves it by a record that is not
+    # posted, before the next sync; the next Spot report does not list it, Funding's does.
+    _pairs(fake, ("BBB", "AAA"))
+    fake.set_rows("spot-account", _spot(("AAA", "10")))
+    fake.set_rows("funding-asset", [_funding("BBB", "5")])
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.add("my-trades", _trade(0, clock.ms + HOUR_MS, "BBBAAA", buyer=True, qty="3", price="2"))
+    fake.set_rows("spot-account", _spot(("AAA", "4")))
+    fake.set_rows("funding-asset", [_funding("BBB", "8")])
+
+    await _later(session, connection, fake, clock)
+
+    [report] = await _as_of(session, connection.id, "Spot", "BBB")
+    assert await _balance(session, connection.id, "Spot", "BBB", report.date()) == 0
+    assert await _balance(session, connection.id, "Funding", "BBB", report.date()) == 8
+    found = {
+        (d.wallet, d.symbol): (d.reported_change, d.posted_sum)
+        for d in await _differences(session, connection.id)
+    }
+    assert found == {("Binance Spot", "BBB"): (0, 3), ("Binance Funding", "BBB"): (3, 0)}
+
+    await _later(session, connection, fake, clock)
+
+    assert await _as_of(session, connection.id, "Spot", "BBB") == [report]
+
+
 async def test_a_new_asset_bought_is_neither_a_difference_nor_an_opening(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
@@ -458,7 +517,7 @@ async def test_first_sync_checks_every_daily_interval(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
     def daily(at_ms: int, free: str) -> dict[str, Any]:
-        row = build_row("snapshot", type="SPOT", updateTime=at_ms)
+        row = build_row("snapshot", type="spot", updateTime=at_ms)
         data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
         data["balances"] = [{"asset": "AAA", "free": free, "locked": "0"}]
         return {**row, "data": data}

@@ -451,6 +451,22 @@ def test_wallet_flags() -> None:
     # A valuation of 0 with a quantity listed is not zero.
     dust = [_wallet("Spot", ("AAA", "0.00000001"), balance="0")]
     assert wallet_flags(dust, {"spot": True}) == []
+    # A wallet counted from the list whose balance is not zero must list what it holds.
+    assert wallet_flags([_wallet("Earn", balance="2")], {}) == [
+        "wallet Earn has a balance but lists no asset"
+    ]
+    assert wallet_flags([_wallet("Earn", ("AAA", "1"), balance="2")], {}) == []
+
+
+async def test_a_wallet_with_a_balance_and_no_assets_listed_is_flagged(session, run) -> None:
+    connection = await binance_connection(run)
+    flags: list[str] = []
+    listed = [_wallet("Trading Bots", balance="0.5"), _wallet("Copy Trading", balance="0")]
+
+    await _report(run, connection, {"wallet-balance": _read("wallet-balance", listed)}, flags)
+
+    assert flags == ["wallet Trading Bots has a balance but lists no asset"]
+    assert await _snapshots(session, connection.id) == []
 
 
 # The daily snapshots of the first sync.
@@ -468,9 +484,9 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     day_one = NOW_MS - 2 * 24 * HOUR_MS - 1_000  # 23:59:59 UTC
     day_two = day_one + 24 * HOUR_MS
     rows = [
-        _daily("SPOT", day_two, ("AAA", "3")),
-        _daily("SPOT", day_one, ("AAA", "2"), ("BBB", "1"), ("LDAAA", "5")),
-        _daily("MARGIN", day_two, ("CCC", "7")),
+        _daily("spot", day_two, ("AAA", "3")),
+        _daily("spot", day_one, ("AAA", "2"), ("BBB", "1"), ("LDAAA", "5")),
+        _daily("margin", day_two, ("CCC", "7")),
     ]
 
     written = await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
@@ -507,10 +523,10 @@ async def test_a_day_is_reported_only_when_its_snapshots_are_written_in_full(
     one, two, three = (NOW_MS - n * day - 1_000 for n in (3, 2, 1))
     rows = [
         # An LD mirror and a zero balance do not keep a day from being written.
-        _daily("SPOT", one, ("AAA", "2"), ("LDAAA", "5"), ("CCC", "0")),
+        _daily("spot", one, ("AAA", "2"), ("LDAAA", "5"), ("CCC", "0")),
         # BBB cannot be resolved: nothing of the day is written, not even AAA.
-        _daily("SPOT", two, ("AAA", "3"), ("BBB", "1")),
-        _daily("SPOT", three, ("AAA", "4")),
+        _daily("spot", two, ("AAA", "3"), ("BBB", "1")),
+        _daily("spot", three, ("AAA", "4")),
     ]
     real = balances.asset
 
@@ -537,7 +553,7 @@ async def test_days_holding_nothing_are_reported_once_the_records_make_the_accou
 ) -> None:
     day = 24 * HOUR_MS
     one, two = (NOW_MS - n * day - 1_000 for n in (2, 1))
-    fake.add("snapshot", _daily("SPOT", one, ("AAA", "0")), _daily("SPOT", two, ("BBB", "0")))
+    fake.add("snapshot", _daily("spot", one, ("AAA", "0")), _daily("spot", two, ("BBB", "0")))
     fake.add("deposits", _deposit(0, NOW_MS - HOUR_MS, "2"))
     fake.set_rows("spot-account", _spot(("AAA", "2", "0")))
     config = later_config()
@@ -557,7 +573,7 @@ async def test_first_sync_writes_the_daily_snapshots(
     session, run, fake: FakeBinance, connector
 ) -> None:
     day = NOW_MS - 24 * HOUR_MS - 1_000
-    fake.add("snapshot", _daily("SPOT", day, ("AAA", "2")))
+    fake.add("snapshot", _daily("spot", day, ("AAA", "2")))
     fake.set_rows("spot-account", _spot(("AAA", "2", "0")))
     config = later_config()
     del config["first_sync_done"]
@@ -738,7 +754,7 @@ async def test_an_unreadable_daily_snapshot_fails_naming_the_field(
     run, change: dict, field: str
 ) -> None:
     connection = await binance_connection(run)
-    row = _daily("SPOT", NOW_MS - 1_000, ("AAA", "1"))
+    row = _daily("spot", NOW_MS - 1_000, ("AAA", "1"))
     if "free" in change:
         row["data"]["balances"][0]["free"] = change["free"]
     else:

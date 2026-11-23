@@ -42,6 +42,9 @@ type Rowdict = dict[str, ApiValue]
 
 # Text fields that hold an asset code.
 _ASSET_NAMES = {"currency", "token", "coin", "fiat", "feeAsset"}
+# Values the catalogue document records for a field Binance answers with no listed enum: the
+# daily snapshot's `type` is lower-case in the answer although the request asks `SPOT`.
+_RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {"snapshot": {"snapshotVos[].type": "spot"}}
 # Text times written as "YYYY-MM-DD HH:MM:SS" (UTC); every other text time is epoch ms digits.
 _UTC_TEXT_LABELS = {"withdrawals", "travel-withdrawals"}
 
@@ -75,6 +78,8 @@ def _text(name: str, seq: int) -> str:
 
 
 def _scalar(label: str, spec: Field, seq: int) -> ApiValue:
+    if spec.path in _RESPONSE_VALUES.get(label, {}):
+        return _RESPONSE_VALUES[label][spec.path]
     if spec.enum is not None:
         first = sorted(spec.enum)[0]
         return int(first) if spec.type in ("integer", "id", "time_ms") else first

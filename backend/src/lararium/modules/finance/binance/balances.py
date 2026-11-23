@@ -21,7 +21,7 @@ from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select, text
-from sqlalchemy.dialects.postgresql import distinct_on, insert
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext, command_context
@@ -37,6 +37,7 @@ from lararium.modules.finance.binance.catalogue import (
     ENDPOINTS,
     FIELDS,
     WALLETS,
+    Field,
     paging_params,
     wallet_key,
 )
@@ -50,15 +51,14 @@ from lararium.modules.finance.binance.fetch import (
     walk,
     walk_trades,
 )
-from lararium.modules.finance.binance.instruments import asset
+from lararium.modules.finance.binance.instruments import MIRROR, asset
 from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Row, as_api, parse
-from lararium.modules.finance.binance.tables import moment
+from lararium.modules.finance.binance.tables import millis, moment
 from lararium.modules.finance.errors import AccountNotFoundError
 from lararium.modules.finance.snapshots import record_snapshot
 
 type Flag = Callable[[str], None]
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Times Binance gives to the second may be up to a second early (plan Decision 9).
 MARGIN = timedelta(seconds=2)
 ROUNDS = 3
@@ -78,13 +78,10 @@ _VOLATILE = {"exchange-info": frozenset({"serverTime"})}
 OWN_SOURCES = {"spot": "spot-account", "funding": "funding-asset"}
 _SPOT_FIELDS = ("free", "locked")
 _HELD_FIELDS = ("free", "locked", "freeze", "withdrawing")
-_MIRROR = "LD"
 _DAILY = "snapshot"
+# Binance answers the daily snapshot's `type` in lower case (`spot`) although the request asks
+# for `SPOT` (the catalogue document): it is compared without case.
 _DAILY_SPOT = "SPOT"
-
-
-def millis(at: datetime) -> int:
-    return (at - _EPOCH) // timedelta(milliseconds=1)
 
 
 @dataclass(frozen=True)
@@ -176,14 +173,13 @@ def ambiguous(read: Read, record_times: Collection[datetime]) -> bool:
     return any(low <= at <= high for at in record_times)
 
 
-def _time_paths(label: str) -> list[tuple[str, list[str]]]:
-    """Every time field of a label's record (a deposit's `insertTime` and `completeTime`): its
-    catalogue path and the keys from the record to it. Each is a moment the balance may have
-    moved."""
+def _record_paths(label: str, wanted: Callable[[Field], bool]) -> list[tuple[str, list[str]]]:
+    """The `wanted` fields of a label's record that are its own (not inside an array or a map
+    of it): each one's catalogue path and the keys from the record to it."""
     root = layout.root_scope(label)
     paths: list[tuple[str, list[str]]] = []
     for field in FIELDS[label]:
-        if field.type not in ("time_ms", "time_text"):
+        if not wanted(field):
             continue
         tokens = layout.tokens(field.path)
         rest = tokens[len(root) :]
@@ -191,6 +187,59 @@ def _time_paths(label: str) -> list[tuple[str, list[str]]]:
             continue
         paths.append((field.path, list(rest)))
     return paths
+
+
+def _time_paths(label: str) -> list[tuple[str, list[str]]]:
+    """Every time field of a label's record (a deposit's `insertTime` and `completeTime`). Each
+    is a moment the balance may have moved."""
+    return _record_paths(label, lambda field: field.type in ("time_ms", "time_text"))
+
+
+def _is_asset(field: Field) -> bool:
+    name = field.path.rpartition(".")[2]
+    return field.type == "text" and (name in ("coin", "asset") or name.endswith("Asset"))
+
+
+def _asset_paths(label: str) -> list[tuple[str, list[str]]]:
+    """Every field of a label's record that names an asset (a deposit's `coin`, a convert's
+    `fromAsset` and `toAsset`, a trade's `commissionAsset`)."""
+    return _record_paths(label, _is_asset)
+
+
+def read_assets(reads: Mapping[str, Read | None]) -> set[str]:
+    """Every asset a wallet's source read shows a quantity of, clear or not."""
+    shown = {
+        label: replace(read, unclear=False) for label, read in reads.items() if read is not None
+    }
+    return {code for wallet in _wallets(shown) for code, q in wallet.held.items() if q != 0}
+
+
+async def record_assets(ctx: SyncContext, after: UUID | None) -> set[str]:
+    """Every asset the connection's records stored after the raw record `after` (all with
+    None) name: what the next normalising run will see."""
+    found: set[str] = set()
+    async with ctx.session_factory() as session:
+        for label in [*HISTORY_LABELS, TRADES_LABEL]:
+            paths = _asset_paths(label)
+            if not paths:
+                continue
+            row = "content -> 'row'" if not ENDPOINTS[label].id_fields else "content"
+            values = ", ".join(f"{row} #>> cast(:p{i} as text[])" for i in range(len(paths)))
+            since = "" if after is None else " and id > :after"
+            result = await session.execute(
+                text(
+                    f"select {values} from core.raw_records"
+                    f" where connection_id = :c and record_type = :t{since}"
+                ),
+                {
+                    "c": ctx.connection.id,
+                    "t": record_type(label),
+                    "after": after,
+                    **{f"p{i}": keys for i, (_, keys) in enumerate(paths)},
+                },
+            )
+            found |= {code for codes in result for code in codes if code}
+    return found
 
 
 async def record_times(ctx: SyncContext) -> list[datetime]:
@@ -232,7 +281,7 @@ async def settle_reads(
     reads: dict[str, Read],
     *,
     symbols: Sequence[str] = (),
-) -> dict[str, Read | None]:
+) -> dict[str, Read]:
     """Make the ambiguous reads again, then walk the history labels forwards again (and the
     trades of `symbols`), at most 3 rounds; a read still ambiguous after them is the last one
     made, marked `unclear`.
@@ -240,7 +289,7 @@ async def settle_reads(
     Only the reads a snapshot comes from are made again; every other read is kept as it is.
     Each read made again is stored as a raw record, as the first one was.
     """
-    settled: dict[str, Read | None] = dict(reads)
+    settled = dict(reads)
     times = await record_times(ctx)
     pending = [
         label for label in SOURCE_LABELS if label in reads and ambiguous(reads[label], times)
@@ -260,9 +309,7 @@ async def settle_reads(
         settled.update(again)
         pending = [label for label in pending if ambiguous(again[label], times)]
     for label in pending:
-        read = settled[label]
-        if read is not None:
-            settled[label] = replace(read, unclear=True)
+        settled[label] = replace(settled[label], unclear=True)
     return settled
 
 
@@ -360,8 +407,9 @@ def _listed_non_zero(row: Row) -> bool:
 
 def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> list[str]:
     """What the wallet list says that the connector cannot account for: a wallet name it does
-    not know, and a wallet (by key, in `derived`) whose zero or non-zero state in the list
-    disagrees with its own source."""
+    not know, a wallet (by key, in `derived`) whose zero or non-zero state in the list
+    disagrees with its own source, and a wallet counted from the list whose `balance` is not
+    zero but which lists no asset to count."""
     flags: list[str] = []
     for row in wallet_balance:
         name = wallet_name_of(row)
@@ -370,6 +418,10 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
         key = wallet_key(name)
         if key in derived and _listed_non_zero(row) != derived[key]:
             flags.append(f"wallet {name} disagrees with its own report")
+        balance = _amount(WALLET_LIST, "[].balance", row.get("balance"))
+        listed = any(quantity != 0 for quantity in _listed_held(row).values())
+        if key not in OWN_SOURCES and balance != 0 and not listed:
+            flags.append(f"wallet {name} has a balance but lists no asset")
     return flags
 
 
@@ -434,16 +486,32 @@ async def _mapped_account(
         return None
 
 
-async def _latest(session: AsyncSession, account_id: UUID) -> dict[UUID, Decimal]:
-    """The latest reported quantity of each instrument of the account."""
-    s = models.BalanceSnapshot
+async def _held_at(session: AsyncSession, account_id: UUID, at: datetime) -> dict[UUID, Decimal]:
+    """Each instrument's balance of the account at `at` by the `hybrid` rule valuation uses
+    (`v1_balances_asof`): its latest snapshot up to `at` plus the non-void postings after that
+    snapshot up to `at`; with no snapshot, the sum of its postings up to `at`."""
     rows = await session.execute(
-        select(s.instrument_id, s.quantity)
-        .where(s.account_id == account_id, s.kind == "reported")
-        .ext(distinct_on(s.instrument_id))
-        .order_by(s.instrument_id, s.as_of.desc(), s.recorded_at.desc(), s.id.desc())
+        text(
+            "with snaps as ("
+            "  select distinct on (instrument_id) instrument_id, quantity, as_of"
+            "  from finance.balance_snapshots where account_id = :a and as_of <= :t"
+            "  order by instrument_id, as_of_date desc, as_of desc, recorded_at desc, id desc"
+            "), posted as ("
+            "  select p.instrument_id, p.quantity, t.occurred_at from finance.postings p"
+            "  join finance.transactions t on t.id = p.transaction_id"
+            "  where p.account_id = :a and t.status <> 'void' and t.occurred_at <= :t"
+            "), keys as ("
+            "  select instrument_id from snaps union select instrument_id from posted"
+            ")"
+            " select k.instrument_id, coalesce(s.quantity, 0) + coalesce(sum(p.quantity)"
+            "  filter (where s.as_of is null or p.occurred_at > s.as_of), 0) as held"
+            " from keys k left join snaps s on s.instrument_id = k.instrument_id"
+            " left join posted p on p.instrument_id = k.instrument_id"
+            " group by k.instrument_id, s.quantity, s.as_of"
+        ),
+        {"a": account_id, "t": at},
     )
-    return {row.instrument_id: row.quantity for row in rows}
+    return {row.instrument_id: Decimal(row.held) for row in rows}
 
 
 async def _snapshot(
@@ -466,10 +534,19 @@ async def record_report(
     account_id: UUID,
     as_of: datetime,
     read_to: datetime,
-) -> None:
+    *,
+    listed: Collection[UUID],
+) -> list[UUID]:
     """That the account was reported at `as_of` (its read's `read_from`), whatever the read
-    listed: a wallet's report is complete, so an asset it does not list is 0 there, and an
-    empty report is a report too."""
+    listed, and what that means for the instruments it did not list; the instruments given a
+    snapshot of 0.
+
+    A wallet's report is complete: an instrument it does not list (`listed`: those it shows a
+    quantity of) is 0 there, and an empty report is a report too. So every other instrument
+    whose balance at `as_of` is not 0 (`_held_at`: the `hybrid` rule, which adds postings to
+    the latest snapshot) gets a `reported` snapshot of 0 then; otherwise the records would
+    stand in for what the report said. Writing one twice writes nothing: the 0 is then the
+    balance."""
     if read_to < as_of:
         raise ValueError("a report's read ends before it starts")
     await ctx.session.execute(
@@ -477,6 +554,11 @@ async def record_report(
         .values(connection_id=connection.id, account_id=account_id, as_of=as_of, read_to=read_to)
         .on_conflict_do_nothing()
     )
+    held = await _held_at(ctx.session, account_id, as_of)
+    gone = sorted(i for i, quantity in held.items() if quantity != 0 and i not in listed)
+    for instrument in gone:
+        await _snapshot(ctx, account_id, instrument, Decimal(0), as_of)
+    return gone
 
 
 class _Assets:
@@ -489,7 +571,7 @@ class _Assets:
     async def resolve(self, codes: Collection[str]) -> None:
         # Every other code before an `LD` one, so that the asset a mirror stands for is known
         # when the mirror is met (in another wallet, in the same sync).
-        for code in sorted(codes, key=lambda c: (c.startswith(_MIRROR), c)):
+        for code in sorted(codes, key=lambda c: (c.startswith(MIRROR), c)):
             if code not in self._found:
                 self._found[code] = await asset(
                     self._ctx, self._connection.id, code, flag=self._flag
@@ -499,7 +581,7 @@ class _Assets:
         """The first code held (not zero) that has no instrument and is not an `LD` mirror
         (the only code `asset` gives none); None when every quantity has its instrument."""
         for code, quantity in sorted(held.items()):
-            if quantity != 0 and self._found.get(code) is None and not code.startswith(_MIRROR):
+            if quantity != 0 and self._found.get(code) is None and not code.startswith(MIRROR):
                 return code
         return None
 
@@ -523,10 +605,10 @@ async def report_balances(
     `read_from` of the read its balance came from; what it wrote, by (wallet key, instrument).
 
     A wallet whose source read is None or `unclear` gets no snapshot (an unclear read's report
-    is stored). An instrument whose latest snapshot is not zero and that the wallet no longer
-    holds gets a snapshot of 0. An asset never held gets none, and a wallet that holds nothing
-    gets no account. `flag` is told about the wallet list
-    (`wallet_flags`) and what `asset` flags.
+    is stored). An instrument the report does not list and whose balance is not 0 then gets
+    a snapshot of 0 (`record_report`). An asset never held gets none, and a wallet that holds
+    nothing gets no account. `flag` is told about the wallet list (`wallet_flags`) and what
+    `asset` flags.
     """
     flag = flag or (lambda _: None)
     listed = reads.get(WALLET_LIST)
@@ -552,12 +634,14 @@ async def report_balances(
             account = await _mapped_account(ctx, connection, wallet.key)
         if account is None:
             continue
-        await record_report(ctx, connection, account, wallet.read.read_from, wallet.read.read_to)
-        latest = await _latest(ctx.session, account)
-        gone = {i: Decimal(0) for i, q in latest.items() if q != 0 and i not in quantities}
-        for instrument, quantity in {**quantities, **gone}.items():
-            await _snapshot(ctx, account, instrument, quantity, wallet.read.read_from)
+        at = wallet.read.read_from
+        for instrument, quantity in quantities.items():
+            await _snapshot(ctx, account, instrument, quantity, at)
             written[(wallet.key, instrument)] = quantity
+        for instrument in await record_report(
+            ctx, connection, account, at, wallet.read.read_to, listed=set(quantities)
+        ):
+            written[(wallet.key, instrument)] = Decimal(0)
 
     if listed is not None and not listed.unclear:
         for name in wallet_flags(parse(listed.label, as_api(listed.body)).rows, derived):
@@ -575,15 +659,20 @@ async def record_reads(
 ) -> None:
     """A clear read is a report for its wallet whether or not the account existed when it was
     read: for every wallet whose source read is clear and whose account exists now, its report
-    time (`record_report`); with `daily`, the first sync's daily snapshots again
+    (`record_report`: its time, and a 0 for each instrument it does not list that the records
+    would otherwise hold then); with `daily`, the first sync's daily snapshots again
     (`backfill_daily_snapshots`), which reports the days it writes on the Spot account if it
     exists now. Run, in the transaction that applies the records, after they made the accounts
-    they name; writing one twice writes nothing."""
-    for wallet in _wallets(reads):
+    and postings they name; writing one twice writes nothing."""
+    wallets = _wallets(reads)
+    assets = _Assets(ctx, connection, flag or (lambda _: None))
+    await assets.resolve({code for w in wallets for code, q in w.held.items() if q != 0})
+    for wallet in wallets:
         account = await _mapped_account(ctx, connection, wallet.key)
         if account is not None:
+            shown = set(assets.per_instrument(wallet.held))
             await record_report(
-                ctx, connection, account, wallet.read.read_from, wallet.read.read_to
+                ctx, connection, account, wallet.read.read_from, wallet.read.read_to, listed=shown
             )
     if daily:
         rows = await daily_rows(ctx.session, connection.id)
@@ -595,7 +684,7 @@ async def daily_rows(session: AsyncSession, connection_id: UUID) -> list[Row]:
     contents = await session.scalars(
         text(
             "select content from core.raw_records where connection_id = :c"
-            " and record_type = :t and content ->> 'type' = :k"
+            " and record_type = :t and upper(content ->> 'type') = :k"
         ),
         {"c": connection_id, "t": record_type(_DAILY), "k": _DAILY_SPOT},
     )
@@ -628,8 +717,9 @@ async def backfill_daily_snapshots(
     flag: Flag | None = None,
 ) -> int:
     """Each `snapshot` row of type SPOT as `reported` Spot snapshots at its own `updateTime`
-    (`free + locked`, `LD` mirrors dropped), an asset the day before held and this day not at
-    0; how many were written. A snapshot already written is not written again.
+    (`free + locked`, `LD` mirrors dropped), an asset held then that the day does not list at
+    0 (`record_report`); how many were written. A snapshot already written is not written
+    again.
 
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
@@ -638,7 +728,8 @@ async def backfill_daily_snapshots(
     flag = flag or (lambda _: None)
     days: list[tuple[datetime, dict[str, Decimal]]] = []
     for row in rows:
-        if row.get("type") != _DAILY_SPOT:
+        kind = row.get("type")
+        if not isinstance(kind, str) or kind.upper() != _DAILY_SPOT:
             continue
         data = row.get("data")
         balances = data.get("balances") if isinstance(data, dict) else None
@@ -651,7 +742,6 @@ async def backfill_daily_snapshots(
     await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
 
     account = await _mapped_account(ctx, connection, "spot")
-    before: set[UUID] = set()
     written = 0
     for at, held in days:
         missing = assets.unresolved(held)
@@ -663,11 +753,9 @@ async def backfill_daily_snapshots(
             account = await wallet_account(ctx, connection, "spot")
         if account is None:
             continue
-        await record_report(ctx, connection, account, at, at)
-        gone = {i: Decimal(0) for i in before if i not in quantities}
-        for instrument, quantity in {**quantities, **gone}.items():
+        for instrument, quantity in quantities.items():
             if not await _reported_at(ctx.session, account, instrument, at, quantity):
                 await _snapshot(ctx, account, instrument, quantity, at)
                 written += 1
-        before = set(quantities)
+        written += len(await record_report(ctx, connection, account, at, at, listed=quantities))
     return written

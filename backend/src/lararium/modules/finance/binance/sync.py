@@ -2,6 +2,36 @@
 history walks into raw records (design §5.1 to §5.3).
 
 Nothing here logs or reports a row's values, the key, an address or a hash.
+
+The connection's `config` keys, what each holds and who writes it:
+
+- `key_type`: `hmac` or `ed25519` (the routes, on create and key update).
+- `uid`: the Binance account the key answers for (the create route; checked on every sync).
+- `account_map`: wallet key to finance account id (`accounts.wallet_account`).
+- `cursors`: per history label (or `<label>:<variant>`) `{fetched_to, backfilled_to,
+  complete}`, per `my-trades:<symbol>` the last trade id (`fetch.commit`).
+- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
+- `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
+- `normalized_through`: the last raw record id applied (`normalize`).
+- `normalizer_version`: the NORMALIZER_VERSION that applied them; another replays all
+  (`normalize`).
+- `flags`: every flag already published (`normalize.publish_flags`).
+- `report_digests`: per report label, the digest of its last stored answer
+  (`balances.store_reports`).
+- `swept`: the (asset, interval start in ms) pairs whose trades were swept (`sweep`).
+- `reconciled_through`: the newest report time the last reconciliation covered
+  (`reconcile.reconcile`).
+- `touched_pending`: per `<account>:<instrument>`, the span of posting times committed runs
+  touched that no reconciliation has checked yet (`reconcile.queue_touched`, cleared by
+  `reconcile.reconcile`).
+- `pending_flags`, `pending_lines`: what is queued for the sync's one message and not told
+  yet (`notices.queue`, cleared by `notices.tell`).
+- `bars_asked`: per symbol, the first and last day of bars already asked (`prices`).
+- `coingecko_ids_asked`: the last attempt to read CoinGecko's id map, `{at_ms, ok}`
+  (`prices`).
+- `sync_requested`: the owner asked for this sync ("Sync now", a key update); it makes the
+  sync run although one is not due (core's `request_sync`; the worker removes it once a
+  sync succeeds).
 """
 
 from collections.abc import Callable, Mapping
@@ -29,7 +59,9 @@ from lararium.modules.finance.binance.balances import (
     backfill_daily_snapshots,
     daily_rows,
     millis,
+    read_assets,
     read_balances,
+    record_assets,
     report_balances,
     settle_reads,
     store_read,
@@ -63,7 +95,7 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import assets_seen as seen
-from lararium.modules.finance.binance.normalize import Run, normalize
+from lararium.modules.finance.binance.normalize import NORMALIZED_THROUGH_KEY, Run, normalize
 from lararium.modules.finance.binance.notices import tell
 from lararium.modules.finance.binance.opening import set_openings
 from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
@@ -86,7 +118,7 @@ DUE_AFTER = timedelta(hours=4)
 FIRST_SYNC_DONE_KEY = "first_sync_done"
 # (asset, interval start in ms) of every interval already swept for that asset's trades.
 SWEPT_KEY = "swept"
-# The wallets that trade, whose unexplained change sends for the sweep (Task 18 adds margin).
+# The wallets that trade, whose unexplained change sends for the sweep.
 SWEPT_WALLETS = frozenset({"spot"})
 
 GATE_LABEL = "api-restrictions"
@@ -198,9 +230,6 @@ def uid_of(account: Read) -> str | None:
     found = parse(ACCOUNT_LABEL, as_api(account.body)).body
     found = found.get("uid") if isinstance(found, dict) else None
     return None if found is None else str(found)
-
-
-# Hooks the later tasks fill in, in the order a sync runs them.
 
 
 async def assets_seen(ctx: SyncContext) -> set[str]:
@@ -363,19 +392,13 @@ class BinanceConnector:
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
-        symbols = trade_symbols(info, await assets_seen(ctx), everything=first)
-        await walk_trades(ctx, client, TRADES_LABEL, symbols)
+        symbols = await walk_symbols(ctx, client, info, reads, everything=first)
 
         settled = await settle_reads(ctx, client, reads, symbols=await _traded(ctx, symbols, first))
         # The wallet checks' flags, published with the records' (one line, Decision 15).
         flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
         touched = set((await normalize(ctx, flags=flags, reads=settled, daily=first)).touched)
-        # This sync's reads and records are seen only once reported and normalised: a symbol
-        # they complete is walked now, not a sync later (Decision 7: every asset ever seen).
-        if not first and (more := await _completed(ctx, info, symbols)):
-            await walk_trades(ctx, client, TRADES_LABEL, more)
-            touched |= (await normalize(ctx, reads=settled)).touched
         touched |= await opening(ctx)
         # The first sync asked every symbol from its first trade: a sweep finds nothing more.
         if not first and await sweep(ctx, client, info, await differences(ctx, touched)):
@@ -405,9 +428,30 @@ class BinanceConnector:
         return reads
 
 
-async def _completed(ctx: SyncContext, info: ApiValue, walked: list[str]) -> list[str]:
-    """The symbols both of whose assets are seen now and that this sync has not walked."""
-    return [s for s in trade_symbols(info, await assets_seen(ctx)) if s not in walked]
+async def walk_symbols(
+    ctx: SyncContext,
+    client: BinanceClient,
+    info: ApiValue,
+    reads: Mapping[str, Read],
+    *,
+    everything: bool,
+) -> list[str]:
+    """Walk the trades of this sync's symbols; the symbols walked. With `everything` (the
+    first sync) every listed symbol; otherwise those both of whose assets the account has shown
+    (Decision 7): every asset seen, those this sync's balance reads show and those its records
+    not yet normalised name. A trade walked can name another (its commission asset), so the
+    set is worked out again until a walk adds no symbol: every trade of this sync's symbols is
+    fetched before its reads are settled against them."""
+    walked: list[str] = []
+    while True:
+        through = (await fresh_config(ctx)).get(NORMALIZED_THROUGH_KEY)
+        after = UUID(through) if isinstance(through, str) else None
+        shown = await assets_seen(ctx) | read_assets(reads) | await record_assets(ctx, after)
+        more = [s for s in trade_symbols(info, shown, everything=everything) if s not in walked]
+        if not more:
+            return walked
+        await walk_trades(ctx, client, TRADES_LABEL, more)
+        walked += more
 
 
 async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:
