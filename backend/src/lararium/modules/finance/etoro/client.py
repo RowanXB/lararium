@@ -84,6 +84,7 @@ _ENDPOINTS: Mapping[str, tuple[str, str]] = {
     "candles": ("/api/v1/data/instruments", "market_data"),
 }
 _GATE = "This eToro key can trade or move money. Create a key with Read permission."
+_NO_SCOPES = "This eToro key reports no permissions. Create a key with Read permission."
 _CLOUDFLARE = "eToro's firewall refused this client's User-Agent (403)"
 _ME_FORBIDDEN = "eToro refused the key on /me (403)"
 _WHOLE = "an eToro id is a whole number"
@@ -94,11 +95,11 @@ _ACCOUNT_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,63}")
 
 
 class ReadOnlyGateError(CredentialRejectedError):
-    """The key holds a scope that is not read-only, or `me()` has not cleared it yet. The
-    message names no scope."""
+    """The key holds a scope that is not read-only, reports none, or `me()` has not cleared it
+    yet. The message is fixed text and names no scope."""
 
-    def __init__(self) -> None:
-        super().__init__(_GATE)
+    def __init__(self, message: str = _GATE) -> None:
+        super().__init__(message)
 
 
 def write_scopes(scopes: Iterable[str]) -> list[str]:
@@ -198,8 +199,8 @@ class EtoroClient:
         """The user's ids, personal fields and the key's scopes, and the gate: the other calls
         are allowed only when every scope passes `write_scopes`. A key with any other scope is
         returned too (its scopes are worth recording), but the gate stays shut. `scopes` must be
-        a list of strings, else the answer is refused. A 403 here is the key refused
-        (design §5.1); Cloudflare's 1010 stays retryable."""
+        a list of strings, else the answer is refused; an empty list raises `ReadOnlyGateError`.
+        A 403 here is the key refused (design §5.1); Cloudflare's 1010 stays retryable."""
         self._cleared = False
         try:
             body = _object(await self._get("me"), "/me")
@@ -208,6 +209,9 @@ class EtoroClient:
         scopes = body.get("scopes")
         if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
             raise _shape("/me", "scopes")
+        if not scopes:
+            # Nothing to check is not a pass: fail closed.
+            raise ReadOnlyGateError(_NO_SCOPES)
         self._cleared = not write_scopes(cast(list[str], scopes))
         return body
 

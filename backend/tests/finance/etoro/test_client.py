@@ -175,6 +175,19 @@ async def test_a_read_key_clears_the_gate_and_a_later_write_me_shuts_it() -> Non
     assert len(env.requests) == 3
 
 
+async def test_a_key_reporting_no_scopes_is_refused() -> None:
+    env = Env(ok(me_json([])), ok({"clientPortfolio": {}}), answer_me=False)
+    client = env.client()
+    with pytest.raises(ReadOnlyGateError) as raised:
+        await client.me()
+    assert str(raised.value) == (
+        "This eToro key reports no permissions. Create a key with Read permission."
+    )
+    with pytest.raises(ReadOnlyGateError):
+        await client.pnl()
+    assert [r.url.path for r in env.requests] == [ME]
+
+
 async def test_a_403_on_me_is_a_credential_rejection() -> None:
     env = Env(httpx.Response(403, text='{"errorCode":"Forbidden"}'), answer_me=False)
     with pytest.raises(CredentialRejectedError) as raised:
