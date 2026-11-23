@@ -193,6 +193,30 @@ async def test_first_sync_asks_every_symbol_and_is_then_done(session, run, fake,
     assert after.config[CURSORS_KEY]["my-trades:AAABBB"] == 1000
 
 
+async def test_a_later_sync_asks_the_symbols_whose_assets_it_has_seen(
+    session, run, fake, connector
+) -> None:
+    pairs = [("AAA", "BBB"), ("CCC", "STB"), ("AAA", "STB")]
+    fake.add(
+        "exchange-info",
+        *[build_row("exchange-info", symbol=b + q, baseAsset=b, quoteAsset=q) for b, q in pairs],
+    )
+    fake.add("my-trades", build_row("my-trades", 0, time=NOW_MS - DAY_MS))
+    connection = await binance_connection(run, config=later_config())
+    other = await binance_connection(run, config=later_config())
+    for owner, code in ((connection.id, "AAA"), (connection.id, "STB"), (other.id, "CCC")):
+        await session.execute(
+            text("insert into finance.binance_assets_seen (connection_id, asset) values (:c, :a)"),
+            {"c": owner, "a": code},
+        )
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    # CCC was seen by another connection only; AAA and STB are both seen here.
+    assert sorted(s.params["symbol"] for s in fake.calls("my-trades")) == ["AAASTB"]
+
+
 # "Sync now": the owner's request reaches the sync.
 
 

@@ -2745,7 +2745,8 @@
               "ibkr_conid",
               "etoro_id",
               "chain_contract",
-              "coingecko"
+              "coingecko",
+              "binance_asset"
             ],
             "title": "Scheme",
             "type": "string"

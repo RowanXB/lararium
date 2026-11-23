@@ -9,6 +9,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from lararium.core.json_types import JSONValue
 from lararium.core.models import UUIDV7, Base
 
+# The Binance tables are built from the catalogue (binance/layout.py); importing them here puts
+# them in the metadata with the rest of the finance schema.
+from lararium.modules.finance.binance.models import AssetsSeen as AssetsSeen
+
 FINANCE_SCHEMA = {"schema": "finance"}
 
 

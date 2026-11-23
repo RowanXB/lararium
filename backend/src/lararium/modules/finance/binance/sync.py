@@ -38,6 +38,7 @@ from lararium.modules.finance.binance.fetch import (
     walk,
     walk_trades,
 )
+from lararium.modules.finance.binance.instruments import assets_seen as seen
 from lararium.modules.finance.binance.parse import ApiValue, parse
 
 # Permissions a reading key may have; any other that is true refuses the sync.
@@ -184,9 +185,9 @@ async def store_read(ctx: SyncContext, read: BalanceRead) -> UUID:
 
 
 async def assets_seen(ctx: SyncContext) -> set[str]:
-    """Every asset the connection has shown, in a balance or a record (Task 4:
-    `binance_assets_seen`)."""
-    return set()
+    """Every asset the connection has shown, in a balance or a record, as committed now."""
+    async with ctx.session_factory() as session:
+        return await seen(session, ctx.connection.id)
 
 
 async def settle_reads(ctx: SyncContext, client: BinanceClient, reads: list[BalanceRead]) -> None:

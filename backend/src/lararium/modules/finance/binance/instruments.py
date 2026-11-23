@@ -1,0 +1,139 @@
+"""Finding or creating the instrument of a Binance asset code (design 5.5).
+
+An asset is the existing fiat instrument when Binance marks it as legal money, an instrument
+already known by its `binance_asset` identifier, the one existing crypto instrument with that
+symbol (which then gains the identifier), or a new crypto instrument. An `LD`-prefixed code that
+mirrors another asset is never an instrument. Every asset resolved is recorded in
+`binance_assets_seen`, which decides the trade symbols a later sync asks for.
+"""
+
+from collections.abc import Callable
+from uuid import UUID
+
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from lararium.core.commands import CommandContext
+from lararium.modules.finance import models
+from lararium.modules.finance.instruments import (
+    InstrumentIdentifier,
+    add_identifiers,
+    create_instrument,
+    find_by_identifier,
+    get_currency,
+    normalize_identifier,
+)
+
+DECIMALS = 8
+_MIRROR = "LD"
+
+
+async def assets_seen(session: AsyncSession, connection_id: UUID) -> set[str]:
+    """Every asset the connection has shown, in a balance or a record."""
+    rows = await session.scalars(
+        text("select asset from finance.binance_assets_seen where connection_id = :c"),
+        {"c": connection_id},
+    )
+    return set(rows)
+
+
+async def _see(session: AsyncSession, connection_id: UUID, code: str) -> None:
+    await session.execute(
+        text(
+            "insert into finance.binance_assets_seen (connection_id, asset) values (:c, :a)"
+            " on conflict do nothing"
+        ),
+        {"c": connection_id, "a": code},
+    )
+
+
+async def _coin(session: AsyncSession, connection_id: UUID, code: str) -> tuple[str | None, bool]:
+    """The name and legal-money flag of the newest `coin-config` row of the code; none seen is
+    (None, False)."""
+    row = (
+        await session.execute(
+            text(
+                "select name, is_legal_money from finance.binance_coin_config"
+                " where connection_id = :c and coin = :a order by snapshot_at desc limit 1"
+            ),
+            {"c": connection_id, "a": code},
+        )
+    ).first()
+    return (None, False) if row is None else (row.name, row.is_legal_money is True)
+
+
+async def _known(session: AsyncSession, connection_id: UUID, code: str) -> bool:
+    """Whether the code is an asset: seen, an instrument of its own, or listed by coin-config."""
+    if code in await assets_seen(session, connection_id):
+        return True
+    if await find_by_identifier(session, "binance_asset", code) is not None:
+        return True
+    return (
+        await session.scalar(
+            text(
+                "select exists (select 1 from finance.binance_coin_config"
+                " where connection_id = :c and coin = :a)"
+            ),
+            {"c": connection_id, "a": code},
+        )
+        is True
+    )
+
+
+async def _same_symbol(session: AsyncSession, code: str) -> list[UUID]:
+    """The crypto instruments with this symbol (any case) that are no other Binance asset."""
+    tagged = select(models.InstrumentIdentifier.instrument_id).where(
+        models.InstrumentIdentifier.scheme == "binance_asset"
+    )
+    rows = await session.scalars(
+        select(models.Instrument.id)
+        .where(
+            models.Instrument.kind == "crypto",
+            func.upper(models.Instrument.symbol) == code,
+            models.Instrument.id.not_in(tagged),
+        )
+        .order_by(models.Instrument.id)
+    )
+    return list(rows)
+
+
+async def asset(
+    ctx: CommandContext,
+    connection_id: UUID,
+    code: str,
+    *,
+    flag: Callable[[str], None] | None = None,
+) -> UUID | None:
+    """The instrument of an asset code, created if new; None for the mirror of another asset.
+
+    `flag` is told what the owner should look at (`several instruments named <code>`).
+    """
+    session = ctx.session
+    code = normalize_identifier("binance_asset", code)
+    if code.startswith(_MIRROR) and await _known(session, connection_id, code[len(_MIRROR) :]):
+        return None
+    await _see(session, connection_id, code)
+    name, legal_money = await _coin(session, connection_id, code)
+    if legal_money:
+        return (await get_currency(session, code)).id
+    identifier = InstrumentIdentifier("binance_asset", code)
+    found = await find_by_identifier(session, "binance_asset", code)
+    if found is not None:
+        return found.id
+    # Task 10 adds the step between: the instrument of the asset's `coingecko` id.
+    same = await _same_symbol(session, code)
+    if len(same) == 1:
+        await add_identifiers(ctx, same[0], [identifier])
+        return same[0]
+    if len(same) > 1 and flag is not None:
+        flag(f"several instruments named {code}")
+    created = await create_instrument(
+        ctx,
+        kind="crypto",
+        symbol=code,
+        name=name or code,
+        decimals=DECIMALS,
+        quote_instrument_id=None,
+        identifiers=[identifier],
+    )
+    return created.id
