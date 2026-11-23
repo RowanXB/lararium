@@ -98,8 +98,11 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # Decision 11a: the statement's times are UTC.
 STATEMENT_ZONE = ZoneInfo("UTC")
 FLAGGED_PREFIX = "eToro flagged: "
-# The parts flags are published under: the normalizer's, and the latest statement's reading.
+# The parts flags are published under: the normalizer's, the instruments it finds untyped or
+# of a type the ledger does not hold (found in full by every run), and the latest statement's
+# reading.
 FIELDS = "fields"
+INSTRUMENT_TYPES = "instrument_types"
 STATEMENT = "statement"
 DAILY_EVERY = timedelta(hours=24)
 # Trade history, balance history and candles are asked again from this far before the latest
@@ -570,11 +573,13 @@ class EtoroConnector:
         run = _Run(ctx, EtoroClient(ctx.http, api_key, user_key), cursor)
         after = await run.sync(datetime.now(UTC))
         report = await normalize(ctx, list(dict.fromkeys(run.ids)))
-        checked = {FIELDS} if report.replayed else set[str]()
+        checked = {FIELDS, INSTRUMENT_TYPES} if report.replayed else {INSTRUMENT_TYPES}
+        found = {(FIELDS, flag) for flag in report.flagged}
+        found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
         # Locked until the sync commits its cursor: an upload's flags published meanwhile are
         # read here, never overwritten after (the upload waits for the lock).
         await lock_connection(ctx.command, connection.id)
-        after |= await publish_flags(ctx, {(FIELDS, flag) for flag in report.flagged}, checked)
+        after |= await publish_flags(ctx, found, checked)
         return after
 
 
@@ -693,7 +698,8 @@ async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> Inge
     report = await normalize(ctx, ids)
     found = {(STATEMENT, flag) for flag in statement.flagged}
     found |= {(FIELDS, flag) for flag in report.flagged}
-    checked = {STATEMENT, FIELDS} if report.replayed else {STATEMENT}
+    found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
+    checked = {STATEMENT, INSTRUMENT_TYPES} | ({FIELDS} if report.replayed else set[str]())
     # The row stays locked until the upload commits, so the flags read here are the ones
     # replaced; only the flag keys are merged, so no other cursor key is overwritten.
     await lock_connection(ctx.command, ctx.connection.id)

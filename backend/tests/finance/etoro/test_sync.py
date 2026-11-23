@@ -140,6 +140,9 @@ def pnl_json(order_id: int = 4000000101) -> dict[str, Any]:
                     "openDateTime": f"{(today() - timedelta(days=20)).isoformat()}T09:00:00Z",
                     "units": Decimal("2"),
                     "amount": Decimal("200.00"),
+                    "leverage": 1,
+                    "mirrorID": 0,
+                    "settlementTypeID": 1,
                 }
             ],
         }
@@ -156,7 +159,9 @@ class FakeEtoro:
         self.aggregate = {
             "accountCurrency": "USD",
             "accountTotals": {"accountTotalValue": Decimal("450.75")},
-            "instrumentAggregates": [{"instrumentId": INSTRUMENT, "netUnits": Decimal("2")}],
+            "instrumentAggregates": [
+                {"instrumentId": INSTRUMENT, "assetCurrency": "USD", "netUnits": Decimal("2")}
+            ],
         }
         self.breakdown = {
             "accountCurrency": "USD",
@@ -165,6 +170,7 @@ class FakeEtoro:
         self.trades = [trade_row(3000000001, today() - timedelta(days=10))]
         self.cash = [cash_page([cash_item("80000002"), cash_item("80000001")])]
         self.orders: dict[str, dict[str, Any]] = {}
+        self.instrument_type: int | None = 5
         self.requests: list[httpx.Request] = []
         self.now = Decimal(1000)
 
@@ -193,7 +199,12 @@ class FakeEtoro:
         if path == ORDERS:
             order_id = params["orderId"]
             body = self.orders.get(
-                order_id, {"orderId": Decimal(order_id), "positionExecutions": []}
+                order_id,
+                {
+                    "orderId": Decimal(order_id),
+                    "asset": {"instrumentId": INSTRUMENT, "settlementType": "REAL", "leverage": 1},
+                    "positionExecutions": [],
+                },
             )
             return self._ok(body)
         if path == HISTORY:
@@ -220,7 +231,14 @@ class FakeEtoro:
             )
         if path == INSTRUMENTS:
             ids = params["instrumentIds"].split(",")
-            return self._ok({"instrumentDisplayDatas": [{"instrumentID": int(i)} for i in ids]})
+            return self._ok(
+                {
+                    "instrumentDisplayDatas": [
+                        {"instrumentID": int(i), "instrumentTypeID": self.instrument_type}
+                        for i in ids
+                    ]
+                }
+            )
         if path == CANDLES:
             return self._ok(candles_page([candle(today() - timedelta(days=1))]))
         bodies: dict[str, Any] = {
@@ -229,7 +247,9 @@ class FakeEtoro:
             AGGREGATE: self.aggregate,
             BREAKDOWN: self.breakdown,
             BALANCES: self.balances,
-            CLOSED_EVENTS: data_page([{"closeYear": 2026, "assetType": "Stocks"}], 1, False),
+            CLOSED_EVENTS: data_page(
+                [{"closeYear": 2026, "assetType": "Stocks", "closedPositionEvents": 2}], 1, False
+            ),
             STOCKBACK: data_page([], 1, False),
             TYPES: {"instrumentTypes": [{"instrumentTypeID": 5}]},
             EXCHANGES: {"exchangeInfo": [{"exchangeID": 4}]},
@@ -676,6 +696,26 @@ async def test_normalize_is_called_with_the_records(session, run, api, monkeypat
     assert after.warnings == ["eToro flagged: pnl.someNewField"]
     assert notifier.messages == ["eToro: eToro flagged: pnl.someNewField"]
     await _run_sync(session, connection, api, notifier)
+    assert len(notifier.messages) == 1
+
+
+async def test_instrument_type_flags_clear_once_typed(session, run, api) -> None:
+    # The market data does not type the instrument yet: it posts as `other`, flagged.
+    api.instrument_type = None
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    flag = "eToro flagged: instrument type unknown ZZQA"
+    assert after.warnings == [flag]
+    assert notifier.messages == [f"eToro: {flag}"]
+    # Every run finds these in full: typed the next day, the flag clears without a word.
+    api.instrument_type = 5
+    cursor = (await get_connection(session, connection.id)).cursor
+    assert isinstance(cursor, dict)
+    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    await _set_cursor(session, connection, {**cursor, "daily_at": stale})
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.warnings == []
     assert len(notifier.messages) == 1
 
 
