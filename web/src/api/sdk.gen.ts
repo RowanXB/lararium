@@ -91,8 +91,8 @@ export const disableConnection = <ThrowOnError extends boolean = false>(options:
 /**
  * Update Etoro Connection
  *
- * Replace the two keys (new ones after the old were rejected). The sync's gate checks
- * that they are read-only and belong to the same user.
+ * Replace the two keys. The sync's gate checks that they are read-only and belong to
+ * the same user.
  */
 export const updateEtoroConnection = <ThrowOnError extends boolean = false>(options: Options<UpdateEtoroConnectionData, ThrowOnError>): RequestResult<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections/{connection_id}/etoro',
@@ -153,7 +153,8 @@ export const uploadIbkrStatement = <ThrowOnError extends boolean = false>(option
 /**
  * List Source Reviews
  *
- * The connection's review items (design §5.7): open ones first, newest first.
+ * The connection's review items (design §5.7): open ones first, newest first. Only an
+ * eToro connection has them.
  */
 export const listSourceReviews = <ThrowOnError extends boolean = false>(options: Options<ListSourceReviewsData, ThrowOnError>): RequestResult<ListSourceReviewsResponses, ListSourceReviewsErrors, ThrowOnError> => (options.client ?? client).get<ListSourceReviewsResponses, ListSourceReviewsErrors, ThrowOnError>({ url: '/api/v1/connections/{connection_id}/reviews', ...options });
 
@@ -180,8 +181,7 @@ export const syncConnectionNow = <ThrowOnError extends boolean = false>(options:
 /**
  * Update Trading212 Connection
  *
- * Replace the key and secret (new ones after the old were rejected). The sync checks
- * that they belong to the same account.
+ * Replace the key and secret. The sync checks that they belong to the same account.
  */
 export const updateTrading212Connection = <ThrowOnError extends boolean = false>(options: Options<UpdateTrading212ConnectionData, ThrowOnError>): RequestResult<UpdateTrading212ConnectionResponses, UpdateTrading212ConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateTrading212ConnectionResponses, UpdateTrading212ConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections/{connection_id}/trading212',

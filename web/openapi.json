@@ -4459,7 +4459,7 @@
     },
     "/api/v1/connections/{connection_id}/etoro": {
       "put": {
-        "description": "Replace the two keys (new ones after the old were rejected). The sync's gate checks\nthat they are read-only and belong to the same user.",
+        "description": "Replace the two keys. The sync's gate checks that they are read-only and belong to\nthe same user.",
         "operationId": "update_etoro_connection",
         "parameters": [
           {
@@ -4675,7 +4675,7 @@
     },
     "/api/v1/connections/{connection_id}/reviews": {
       "get": {
-        "description": "The connection's review items (design \u00a75.7): open ones first, newest first.",
+        "description": "The connection's review items (design \u00a75.7): open ones first, newest first. Only an\neToro connection has them.",
         "operationId": "list_source_reviews",
         "parameters": [
           {
@@ -4823,7 +4823,7 @@
     },
     "/api/v1/connections/{connection_id}/trading212": {
       "put": {
-        "description": "Replace the key and secret (new ones after the old were rejected). The sync checks\nthat they belong to the same account.",
+        "description": "Replace the key and secret. The sync checks that they belong to the same account.",
         "operationId": "update_trading212_connection",
         "parameters": [
           {

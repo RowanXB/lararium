@@ -27,6 +27,8 @@ from lararium.core.connections import (
 )
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
+from lararium.modules.finance.etoro.client import GATE_MESSAGE
+from lararium.modules.finance.etoro.normalize import EtoroDataError
 from lararium.modules.finance.transfers import heal_transfers
 from lararium.worker.app import procrastinate_app
 
@@ -51,7 +53,6 @@ NEW_PUBLIC_KEY = "etoro-PUBLIC-KEY-TEST-second"
 NEW_USER_KEY = "etoro-USER-KEY-TEST-second"
 BODY = {"display_name": "eToro", "public_api_key": PUBLIC_KEY, "user_key": USER_KEY}
 URL = "/api/v1/connections/etoro"
-GATE = "This eToro key can trade or move money. Create a key with Read permission."
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -171,7 +172,7 @@ async def test_create_refuses_write_key_422(api, session, etoro, queue, extra) -
     response = await api.post(URL, json=BODY, headers=OWNER)
 
     assert response.status_code == 422
-    assert response.json()["detail"]["message"] == GATE
+    assert response.json()["detail"]["message"] == GATE_MESSAGE
     assert extra not in response.text
     assert PUBLIC_KEY not in response.text and USER_KEY not in response.text
     assert await session.scalar(text("select count(*) from core.connections")) == 0
@@ -390,19 +391,26 @@ async def test_upload_ingests_and_heals(api, session, tmp_path) -> None:
 
 async def test_upload_heals_in_the_upload(api, session, monkeypatch) -> None:
     created, _ = await _synced(api, session)
-    healed: list[str] = []
+    healed: list[tuple[UUID, int]] = []
     real = connections_api.transfers.heal_transfers
 
     async def spy(ctx) -> int:
-        healed.append(ctx.correlation_id.hex)
-        return await real(ctx)
+        matched = await real(ctx)
+        healed.append((ctx.correlation_id, matched))
+        return matched
 
     monkeypatch.setattr(connections_api.transfers, "heal_transfers", spy)
 
     response = await _upload(api, created["id"], trade_statement())
 
     assert response.status_code == 202, response.text
-    assert len(healed) == 1
+    # One heal, in the upload's own command, and it matched the statement's transfer leg.
+    upload = await session.scalar(
+        text("select correlation_id from core.audit_log where command = 'upload_etoro_statement'")
+    )
+    [(correlation_id, matched)] = healed
+    assert correlation_id == upload
+    assert matched >= 1
 
 
 async def test_upload_other_user_422(api, session, tmp_path) -> None:
@@ -495,6 +503,51 @@ async def test_a_failed_upload_leaves_no_file(api, session, monkeypatch, tmp_pat
 
     assert await session.scalar(text("select count(*) from core.documents")) == 0
     assert _files(tmp_path) == []
+    statement_rows = await session.scalar(
+        text("select count(*) from core.raw_records where record_type like 'etoro.statement.%'")
+    )
+    assert statement_rows == 0
+    # The statement's own events (its transfer row) are posted under `activity:` keys.
+    statement_transactions = await session.scalar(
+        text("select count(*) from finance.transactions where external_id like 'activity:%'")
+    )
+    assert statement_transactions == 0
+
+
+async def test_upload_to_disabled_connection_422(api, session, run, tmp_path) -> None:
+    created, _ = await _synced(api, session)
+    await run(set_status, created["id"], "disabled")
+
+    response = await _upload(api, created["id"], trade_statement())
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["message"] == "a disabled connection can't take a statement"
+    assert await session.scalar(text("select count(*) from core.documents")) == 0
+    assert _files(tmp_path) == []
+    assert (await get_connection(session, created["id"])).status == "disabled"
+
+
+async def test_upload_parses_before_taking_the_matching_lock(api, session, monkeypatch) -> None:
+    created, _ = await _synced(api, session)
+    order: list[str] = []
+    real_parse = connections_api.parse_etoro_upload
+    real_lock = connections_api.transfers.lock_transfers
+
+    async def parse(body):
+        order.append("parse")
+        return await real_parse(body)
+
+    async def lock(ctx):
+        order.append("lock")
+        return await real_lock(ctx)
+
+    monkeypatch.setattr(connections_api, "parse_etoro_upload", parse)
+    monkeypatch.setattr(connections_api.transfers, "lock_transfers", lock)
+
+    response = await _upload(api, created["id"], trade_statement())
+
+    assert response.status_code == 202, response.text
+    assert order[:2] == ["parse", "lock"]
 
 
 # Review items ------------------------------------------------------------------------------
@@ -613,6 +666,71 @@ async def test_a_review_of_another_connection_404(api, session, run) -> None:
     listed = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
     assert listed[0]["resolution"] is None
     assert (await api.get(f"/api/v1/connections/{other.id}/reviews", headers=OWNER)).json() == []
+
+
+async def _ibkr(api) -> str:
+    other = await api.post(
+        "/api/v1/connections/ibkr",
+        json={
+            "display_name": "I",
+            "token": "tok-TEST",
+            "token_expires_on": "2099-01-01",
+            "query_id": "1",
+        },
+        headers=OWNER,
+    )
+    assert other.status_code == 201, other.text
+    return other.json()["id"]
+
+
+async def test_review_routes_refuse_other_connectors_422(api, session, monkeypatch) -> None:
+    created, review = await _disagreeing(api, session)
+    ibkr = await _ibkr(api)
+
+    async def never(*args, **kwargs):
+        raise AssertionError("nothing runs for another connector")
+
+    monkeypatch.setattr(connections_api, "lock_connection", never)
+    monkeypatch.setattr(connections_api, "resolve_review", never)
+
+    listed = await api.get(f"/api/v1/connections/{ibkr}/reviews", headers=OWNER)
+    resolved = await api.post(
+        f"/api/v1/connections/{ibkr}/reviews/{review['id']}/resolve",
+        json={"take": "statement"},
+        headers=OWNER,
+    )
+
+    for response in (listed, resolved):
+        assert response.status_code == 422
+        assert response.json()["detail"] == {
+            "error": "not_etoro",
+            "message": "this is not an eToro connection",
+        }
+    still = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
+    assert still[0]["resolution"] is None
+
+
+async def test_a_failed_resolve_leaves_the_review_open_422(api, session, monkeypatch) -> None:
+    created, review = await _disagreeing(api, session)
+
+    async def fail(ctx, ids):
+        raise EtoroDataError("etoro.trade_history lacks units")
+
+    monkeypatch.setattr(connections_api, "etoro_normalize", fail)
+
+    response = await api.post(
+        f"/api/v1/connections/{created['id']}/reviews/{review['id']}/resolve",
+        json={"take": "statement"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["message"] == "etoro.trade_history lacks units"
+    [still] = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
+    assert (still["resolution"], still["resolved_at"]) == (None, None)
+    decisions = await session.scalar(text("select count(*) from finance.source_decisions"))
+    assert decisions == 0
+    assert (await _postings(session, f"open:{POSITION}"))[0][2] == Decimal(4)
 
 
 async def test_reviews_of_unknown_connection_404(api) -> None:

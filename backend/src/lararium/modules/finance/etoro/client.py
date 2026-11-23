@@ -83,7 +83,8 @@ _ENDPOINTS: Mapping[str, tuple[str, str]] = {
     "exchanges": ("/api/v1/market-data/exchanges", "market_data"),
     "candles": ("/api/v1/data/instruments", "market_data"),
 }
-_GATE = "This eToro key can trade or move money. Create a key with Read permission."
+# The read-only gate's refusal (Decision 13): fixed text, naming no scope.
+GATE_MESSAGE = "This eToro key can trade or move money. Create a key with Read permission."
 _NO_SCOPES = "This eToro key reports no permissions. Create a key with Read permission."
 _CLOUDFLARE = "eToro's firewall refused this client's User-Agent (403)"
 _ME_FORBIDDEN = "eToro refused the key on /me (403)"
@@ -98,7 +99,7 @@ class ReadOnlyGateError(CredentialRejectedError):
     """The key holds a scope that is not read-only, reports none, or `me()` has not cleared it
     yet. The message is fixed text and names no scope."""
 
-    def __init__(self, message: str = _GATE) -> None:
+    def __init__(self, message: str = GATE_MESSAGE) -> None:
         super().__init__(message)
 
 
@@ -177,6 +178,11 @@ class EtoroClient:
         )
         # Whether `me()` has returned only read scopes; until then only `/me` is sent.
         self._cleared = False
+
+    @property
+    def cleared(self) -> bool:
+        """Whether the last `me()` returned only read scopes: only then are other calls sent."""
+        return self._cleared
 
     async def _get(
         self, endpoint: str, *, suffix: str = "", params: Mapping[str, str] | None = None

@@ -63,6 +63,7 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance import connector_flags
 from lararium.modules.finance.etoro.client import (
     BALANCE_HISTORY_DAYS,
+    GATE_MESSAGE,
     TRADE_WINDOW_DAYS,
     EtoroClient,
     Item,
@@ -115,7 +116,6 @@ REPORTS = frozenset({"me", "balances", "pnl", "aggregate", "breakdown", "balance
 # A refused key's scopes, without the rest of its `/me` (not an endpoint's record: the
 # normalizer has nothing to map in it).
 REFUSED_KEY = "etoro.refused_key"
-_GATE = "This eToro key can trade or move money. Create a key with Read permission."
 
 
 class EtoroSyncError(DisplayableError):
@@ -331,7 +331,7 @@ class _Run:
             except Exception as error:
                 # The refusal stands whatever happens to its record; the class only is logged.
                 logger.warning("recording a refused eToro key failed (%s)", type(error).__name__)
-            raise ReadOnlyGateError(_GATE)
+            raise ReadOnlyGateError(GATE_MESSAGE)
         gcid, real_cid = me_ids(me)
         known = self.cursor.get("gcid")
         if isinstance(known, str) and known != gcid:
@@ -666,18 +666,28 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
         )
 
 
-async def ingest_statement(ctx: SyncContext, body: bytes, filename: str) -> IngestResult:
+async def parse_upload(body: bytes) -> EtoroStatement:
+    """Read an uploaded statement, off the event loop; one that cannot be read is a
+    `StatementRejected`. Needs no database: a caller may parse before it takes any lock."""
+    try:
+        return await asyncio.to_thread(_parse_alone, body)
+    except StatementError as error:
+        raise StatementRejected(str(error)) from None
+
+
+async def ingest_statement(
+    ctx: SyncContext, body: bytes, filename: str, statement: EtoroStatement | None = None
+) -> IngestResult:
     """Check an uploaded statement, record it as a document and store one raw record per row,
     then normalise those records and publish the reader's and the normalizer's flags.
+    `statement` is `body` as `parse_upload` read it, when the caller has already.
 
     The document's bytes are not written here: the caller writes them
     (`store.put(result.document_sha256, body)`) once the rest of its command is done, just
     before it commits (record_document), so a command that fails leaves no file behind."""
-    try:
-        # Parsed and checked first: a statement that is refused leaves nothing behind.
-        statement = await asyncio.to_thread(_parse_alone, body)
-    except StatementError as error:
-        raise StatementRejected(str(error)) from None
+    # Parsed and checked first: a statement that is refused leaves nothing behind.
+    if statement is None:
+        statement = await parse_upload(body)
     await _check_statement(ctx, statement)
     document = await record_document(
         ctx.command, body, filename=filename, media_type=XLSX, source=DOCUMENT_SOURCE
