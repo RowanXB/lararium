@@ -147,13 +147,84 @@ def like_frankfurter(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, text=frankfurter({str(d): {"GBP": "0.87"} for d in published}))
 
 
-async def test_a_day_before_the_range_is_skipped() -> None:
-    saturday, sunday, monday = date(2026, 11, 7), date(2026, 11, 8), date(2026, 11, 9)
+async def test_the_working_day_before_the_range_is_kept() -> None:
+    friday, saturday, sunday, monday = (date(2026, 11, d) for d in (6, 7, 8, 9))
+    rate = {"GBP": Decimal("0.87")}
     async with client(like_frankfurter) as http:
-        # Frankfurter answers a weekend with Friday's rates.
-        assert await fetch_rates(http, saturday, sunday) == {}
-        got = await fetch_rates(http, saturday, monday)
-    assert got == {monday: {"GBP": Decimal("0.87")}}
+        # Frankfurter answers a weekend with Friday's rates: the rate in force on it.
+        assert await fetch_rates(http, saturday, sunday) == {friday: rate}
+        assert await fetch_rates(http, saturday, monday) == {friday: rate, monday: rate}
+
+
+async def test_a_day_long_before_the_range_is_left_out() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text=frankfurter({"2026-10-30": {"GBP": "0.9"}, "2026-11-09": {"GBP": "0.87"}})
+        )
+
+    async with client(handler) as http:
+        got = await fetch_rates(http, date(2026, 11, 7), date(2026, 11, 9))
+    assert got == {date(2026, 11, 9): {"GBP": Decimal("0.87")}}
+
+
+async def test_a_backfill_starting_on_a_weekend_has_a_rate_for_its_first_day(
+    session, run, make_account, gbp
+) -> None:
+    """Holdings that begin on a Sunday are valued with Friday's rate, the latest on or before."""
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    friday, monday = date(2026, 11, 6), date(2026, 11, 9)
+    await post_gbp(run, make_account, gbp, at(2026, 11, 8))
+    async with client(like_frankfurter) as http:
+        await run_fetch_ecb_rates(sessions, http, monday)
+    assert [r.as_of_date for r in await rows(session, "ecb")] == [friday, monday]
+
+
+async def test_a_ledger_of_snapshots_only_starts_at_its_first_snapshot(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    account = await make_account(name="Savings", balance_mode="snapshots")
+    await run(
+        record_snapshot,
+        account_id=account.id,
+        instrument_id=gbp.id,
+        quantity=Decimal("5"),
+        as_of=at(2026, 11, 4),
+    )
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return like_frankfurter(request)
+
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY)
+    assert requested == ["/v1/2026-11-04..2026-11-10"]
+    assert len(await rows(session, "ecb")) == 5
+
+
+async def test_a_snapshot_before_the_first_posting_sets_the_start(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    account = await make_account(name="Savings", balance_mode="snapshots")
+    await run(
+        record_snapshot,
+        account_id=account.id,
+        instrument_id=gbp.id,
+        quantity=Decimal("5"),
+        as_of=at(2026, 11, 3),
+    )
+    await post_gbp(run, make_account, gbp, at(2026, 11, 9))
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return like_frankfurter(request)
+
+    async with client(handler) as http:
+        await run_fetch_ecb_rates(sessions, http, DAY)
+    assert requested == ["/v1/2026-11-03..2026-11-10"]
 
 
 async def test_a_weekend_neither_fails_nor_stalls_the_job(session, run, make_account, gbp) -> None:

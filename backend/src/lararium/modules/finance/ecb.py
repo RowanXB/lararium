@@ -39,6 +39,10 @@ FRANKFURTER_URL = "https://api.frankfurter.dev/v1"
 CHUNK_DAYS = 90
 # The ECB's first reference-rate day: nothing earlier exists to fetch.
 FIRST_ECB_DAY = date(1999, 1, 4)
+# Frankfurter answers a range that starts on a weekend or holiday with the working day before
+# it as well. That rate is the one in force on the range's first days (valuation takes the
+# latest rate on or before a day), so it is kept; the ECB is never closed this many days.
+PRECEDING_DAYS = 7
 # core.settings key: the last day a run fetched through, so a ledger whose every day is
 # covered by other sources (no `ecb` row ever stored) doesn't refetch its history each day.
 FETCHED_THROUGH_KEY = "finance.ecb.fetched_through"
@@ -47,8 +51,9 @@ FETCHED_THROUGH_KEY = "finance.ecb.fetched_through"
 async def fetch_rates(
     http: httpx.AsyncClient, start: date, end: date
 ) -> dict[date, dict[str, Decimal]]:
-    """The ECB's EUR rates for every working day from start to end, by day and currency; a day
-    before `start` in the answer is left out, one after `end` is a malformed answer."""
+    """The ECB's EUR rates for every working day from start to end, by day and currency, and
+    the working day just before a `start` that is not one (it is the rate in force on
+    `start`); a day after `end` is a malformed answer."""
     response = await http.get(
         f"{FRANKFURTER_URL}/{start.isoformat()}..{end.isoformat()}", params={"base": BASE_CURRENCY}
     )
@@ -75,9 +80,7 @@ async def fetch_rates(
         parsed_day = date.fromisoformat(day)
         if parsed_day > end:
             raise ValueError("the ECB response has a day after the range asked for")
-        if parsed_day < start:
-            # Frankfurter answers a range that starts on a weekend or holiday with the working
-            # day before it as well: that day is not in the range, so it is not this window's.
+        if parsed_day < start - timedelta(days=PRECEDING_DAYS):
             continue
         parsed[parsed_day] = {
             code: _rate(value) for code, value in cast(dict[str, object], by_currency).items()
@@ -202,7 +205,8 @@ async def _marker(session: AsyncSession) -> date | None:
 
 async def _first_needed_date(session: AsyncSession, today: date) -> date | None:
     """The day after the last day fetched through (or the latest `ecb` rate up to today),
-    else the earliest booking date of any posting; never before the ECB's first day."""
+    else the earliest day anything is held: the earliest booking date of any posting or date
+    of any balance snapshot; never before the ECB's first day."""
     r = models.FxRate
     through = await session.scalar(
         select(func.max(r.as_of_date)).where(r.source == SOURCE, r.as_of_date <= today)
@@ -212,12 +216,14 @@ async def _first_needed_date(session: AsyncSession, today: date) -> date | None:
         through = fetched if through is None else max(through, fetched)
     if through is not None:
         return max(through + timedelta(days=1), FIRST_ECB_DAY)
-    first = await session.scalar(
+    posted = await session.scalar(
         select(func.min(models.Transaction.booking_date)).where(
             exists().where(models.Posting.transaction_id == models.Transaction.id)
         )
     )
-    return None if first is None else max(first, FIRST_ECB_DAY)
+    reported = await session.scalar(select(func.min(models.BalanceSnapshot.as_of_date)))
+    held = [day for day in (posted, reported) if day is not None]
+    return max(min(held), FIRST_ECB_DAY) if held else None
 
 
 async def run_fetch_ecb_rates(
