@@ -66,6 +66,10 @@ FINANCIAL = [
 ]
 
 
+# 0-9 to Arabic-Indic digits, which Python's \d and int() also accept.
+ARABIC_INDIC = {ord(str(digit)): 0x0660 + digit for digit in range(10)}
+
+
 def parse(body: bytes) -> EtoroStatement:
     return parse_statement(body, UTC)
 
@@ -162,6 +166,45 @@ def test_key_is_decision_10() -> None:
     )
 
 
+def test_summary_rows_keyed_by_period_and_label() -> None:
+    def key(*parts: str | int) -> str:
+        text = json.dumps(list(parts), ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(text.encode()).hexdigest()[:32]
+
+    labels = summary()
+    statement = parse(build_statement(labels, [], financial=FINANCIAL))
+    period = (labels["Start Date"], labels["End Date"])
+    deposits = next(
+        row for row in rows_of(statement, ACCOUNT_SUMMARY) if row.cells["Label"] == "Deposits"
+    )
+    assert deposits.key == key(ACCOUNT_SUMMARY, *period, "Deposits", 0)
+    figure = rows_of(statement, FINANCIAL_SUMMARY)[0]
+    assert figure.key == key(FINANCIAL_SUMMARY, *period, "Synthetic figure", 0)
+
+    # A corrected statement of the same period: changed figures keep their keys.
+    corrected = parse(
+        build_statement(
+            {**labels, "Deposits": "5"},
+            [],
+            financial=[{**FINANCIAL[0], "Year to date": "99.99"}, FINANCIAL[1]],
+        )
+    )
+    assert [row.key for row in corrected.rows] == [row.key for row in statement.rows]
+    assert [row.cells for row in corrected.rows] != [row.cells for row in statement.rows]
+
+
+def test_repeated_summary_label_gets_occurrence_keys() -> None:
+    sheets = statement_sheets(summary(), [])
+    name, rows = sheets[0]
+    sheets[0] = (name, [*rows, [("shared", "Name"), ("inline", "Second Synthetic Name")]])
+    names = [
+        row
+        for row in rows_of(parse(build_workbook(sheets)), ACCOUNT_SUMMARY)
+        if row.cells["Label"] == "Name"
+    ]
+    assert len(names) == 2 and names[0].key != names[1].key
+
+
 def test_identical_rows_get_occurrence_keys() -> None:
     statement = parse(build_statement(summary(), [OVERNIGHT, OPEN, OVERNIGHT]))
     first, _, third = rows_of(statement, ACCOUNT_ACTIVITY)
@@ -249,6 +292,21 @@ def test_column_twice_refused() -> None:
     sheets[index] = (name, [[*row, row[1]] for row in rows])
     with pytest.raises(StatementError, match=r"Account Activity\.Type appears twice"):
         parse(build_workbook(sheets))
+
+
+def test_non_ascii_digits_refused() -> None:
+    # Arabic-Indic digits: a date only in another script's numerals is not eToro's format.
+    arabic = "01/10/2026 00:00:00".translate(ARABIC_INDIC)
+    with pytest.raises(StatementError, match=r"Start Date is not a date-time") as error:
+        parse(build_statement(summary(start=arabic), []))
+    assert arabic not in str(error.value)
+
+
+def test_unknown_label_with_non_ascii_digits_only_not_flagged() -> None:
+    sheets = statement_sheets(summary(), [])
+    name, rows = sheets[0]
+    sheets[0] = (name, [*rows, [("shared", "A heading"), ("inline", "12".translate(ARABIC_INDIC))]])
+    assert parse(build_workbook(sheets)).flagged == frozenset()
 
 
 def test_start_after_end_refused() -> None:

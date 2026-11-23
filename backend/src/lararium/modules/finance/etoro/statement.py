@@ -8,8 +8,10 @@ not read.
 A row's key (Decision 10) is the first 32 hex characters of the sha256 of a JSON array: the
 sheet, the sheet's key columns (`fields.STATEMENT_SHEETS`), and the row's occurrence among
 identical arrays of this statement, from 0. So the same row in two overlapping statements has
-the same key. Account Summary and Financial Summary describe their statement's period, so
-their key is the sheet, the period's Start Date and End Date as written, and every cell.
+the same key. Account Summary and Financial Summary describe their statement's period, so the
+period's Start Date and End Date as written follow the sheet in their key, then the row's label
+(Account Summary) or Name (Financial Summary): a corrected statement of the same period gives
+a changed figure the same key, so it replaces the old one.
 
 Errors and flags name sheets, columns and fixed labels only, never a cell: Account Summary
 holds the owner's name and username, and Details is free text.
@@ -28,20 +30,20 @@ from lararium.core.errors import DisplayableError
 from lararium.modules.finance.etoro.fields import (
     ACCOUNT_SUMMARY,
     GLOSSARY,
+    LABEL,
     STATEMENT_SHEETS,
+    VALUE,
     StatementSheet,
 )
 from lararium.modules.finance.etoro.xlsx import MAX_CELLS, Sheet, XlsxError, read_workbook
 
-LABEL = "Label"
-VALUE = "Value"
 # A label not in the field list has a figure: a value with a digit. A value of words only is a
 # section's heading (the owner's statement has one whose label the probe did not show). The
 # label's text is not named: it may not be eToro's.
 UNKNOWN_LABEL = f"{ACCOUNT_SUMMARY}.<unknown label>"
-_DIGIT = re.compile(r"\d")
+_DIGIT = re.compile(r"[0-9]")
 
-_MOMENT = re.compile(r"(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})")
+_MOMENT = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2})")
 
 
 class StatementError(DisplayableError, ValueError):
@@ -206,11 +208,10 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
         if spec is None:
             continue
         for cells in cells_by_sheet[sheet.name]:
-            if spec.key:
-                identity: list[str | int] = [sheet.name, *(cells[c] for c in spec.key)]
-            else:
-                identity = [sheet.name, labels["Start Date"], labels["End Date"]]
-                identity.extend(part for item in cells.items() for part in item)
+            identity: list[str | int] = [sheet.name]
+            if spec.per_period:
+                identity.extend((labels["Start Date"], labels["End Date"]))
+            identity.extend(cells[column] for column in spec.key)
             same = _key(identity)
             rows.append(StatementRow(sheet.name, _key([*identity, seen[same]]), cells))
             seen[same] += 1

@@ -1,6 +1,8 @@
 """The xlsx reader: cell values as text, and its limits against hostile files."""
 
 import time
+import tracemalloc
+from typing import Literal
 
 import pytest
 
@@ -255,3 +257,107 @@ def test_malformed_xml_names_the_part_not_its_content() -> None:
     with pytest.raises(XlsxError, match="sheet S is not well-formed XML") as error:
         read_workbook(zip_parts(parts))
     assert SECRET not in str(error.value)
+
+
+def _sheet(cells: bytes) -> bytes:
+    parts = workbook_parts([("S", [])])
+    parts["xl/worksheets/sheet1.xml"] = (
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b"<sheetData>" + cells + b"</sheetData></worksheet>"
+    )
+    return zip_parts(parts)
+
+
+def test_cells_without_references_past_the_last_column_refused() -> None:
+    body = _sheet(b"<row>" + b"<c/>" * 200_000 + b"</row>")
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(XlsxError, match="cell past the last column"):
+            read_workbook(body)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert time.monotonic() - started < 1
+    assert peak < 20 * 1024 * 1024
+
+
+def test_cells_counted_as_they_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The row never ends: the cap stops it at its 11th cell, before the parser reaches the
+    # broken rest of the part.
+    monkeypatch.setattr(xlsx, "MAX_CELLS", 10)
+    with pytest.raises(XlsxError, match="more than 10 cells"):
+        read_workbook(_sheet(b"<row>" + b"<c><v>1</v></c>" * 1000 + b"<broken"))
+
+
+def test_full_rows_of_cells_without_references_counted() -> None:
+    row = b"<row>" + b"<c><v>1</v></c>" * 16_384 + b"</row>"
+    with pytest.raises(XlsxError, match="more than 100000 cells"):
+        read_workbook(_sheet(row * 7))
+
+
+def test_shared_string_fan_out_capped() -> None:
+    # One string of Excel's longest, named by enough cells to pass 64 Mi characters.
+    count = xlsx.MAX_TEXT_CHARS // xlsx.MAX_CELL_CHARS + 1
+    parts = workbook_parts([("S", [[("shared", "x" * xlsx.MAX_CELL_CHARS)]])])
+    parts["xl/worksheets/sheet1.xml"] = (
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b"<sheetData>"
+        + b"".join(b'<row><c t="s"><v>0</v></c></row>' for _ in range(count))
+        + b"</sheetData></worksheet>"
+    )
+    with pytest.raises(XlsxError, match=f"more than {xlsx.MAX_TEXT_CHARS} characters"):
+        read_workbook(zip_parts(parts))
+    # One cell fewer reads.
+    parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+        b'<row><c t="s"><v>0</v></c></row>', b"", 1
+    )
+    assert len(read_workbook(zip_parts(parts))[0].rows) == count - 1
+
+
+@pytest.mark.parametrize("kind", ["shared", "inline", "number"])
+def test_cell_longer_than_excel_allows_refused(kind: Literal["shared", "inline", "number"]) -> None:
+    text = "7" * (xlsx.MAX_CELL_CHARS + 1)
+    with pytest.raises(XlsxError, match="longer than 32767 characters") as error:
+        read_workbook(build_workbook([("S", [[(kind, text)]])]))
+    assert text not in str(error.value)
+    assert read_workbook(build_workbook([("S", [[(kind, text[1:])]])]))[0].rows == ((text[1:],),)
+
+
+@pytest.mark.parametrize("index", ["-1", "+0", " 0", "\u0660", "9" * 5000])
+def test_shared_string_index_not_plain_digits_refused(index: str) -> None:
+    parts = workbook_parts([("S", [["shared"]])])
+    parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+        b"<v>0</v>", f"<v>{index}</v>".encode()
+    )
+    with pytest.raises(XlsxError, match="shared string"):
+        read_workbook(zip_parts(parts))
+
+
+def test_shared_string_spaces_preserved() -> None:
+    body = build_workbook([("S", [[("shared", "  padded  "), ("rich", " two  runs ")]])])
+    assert read_workbook(body)[0].rows == (("  padded  ", " two  runs "),)
+
+
+def test_too_many_entries_refused_before_the_directory_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts = workbook_parts([("S", [])])
+    for n in range(xlsx.MAX_ENTRIES):
+        parts[f"xl/media/x{n}.bin"] = b""
+    body = zip_parts(parts)
+
+    def unopened(*_: object) -> None:
+        raise AssertionError("the central directory was parsed")
+
+    monkeypatch.setattr(xlsx.zipfile, "ZipFile", unopened)
+    with pytest.raises(XlsxError, match="more than 1000 parts"):
+        read_workbook(body)
+
+
+def test_zip64_entry_count_refused() -> None:
+    body = bytearray(build_workbook([("S", [])]))
+    end = body.rfind(b"PK\x05\x06")
+    body[end + 8 : end + 12] = b"\xff\xff\xff\xff"
+    with pytest.raises(XlsxError, match="more than 1000 parts"):
+        read_workbook(bytes(body))

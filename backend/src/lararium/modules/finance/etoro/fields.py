@@ -414,9 +414,17 @@ class StatementSheet:
     # Columns (a table) or labels (labels) that must be present; a label once only.
     required: tuple[str, ...]
     known: frozenset[str]
-    # The columns of the row key (Decision 10), in order; empty: every cell and the period.
+    # The columns of the row key (Decision 10), in order.
     key: tuple[str, ...]
     open_columns: bool = False
+    # The sheet describes the statement's period, so the period leads its key: a corrected
+    # statement of the same period then replaces a figure instead of adding one.
+    per_period: bool = False
+
+
+# The cells of an Account Summary row: its label, then its values ("Value", "Value 2", …).
+LABEL = "Label"
+VALUE = "Value"
 
 
 _ACTIVITY_COLUMNS = """Date|Type|Details|Amount|Units / Contracts|Realized Equity Change|
@@ -463,7 +471,8 @@ STATEMENT_SHEETS: Mapping[str, StatementSheet] = {
         "labels",
         ("Username", "Currency", "Date Created", "Start Date", "End Date"),
         frozenset(SUMMARY_LABELS),
-        (),
+        (LABEL,),
+        per_period=True,
     ),
     CLOSED_POSITIONS: StatementSheet(
         "etoro.statement.closed_position",
@@ -475,7 +484,10 @@ STATEMENT_SHEETS: Mapping[str, StatementSheet] = {
     ACCOUNT_ACTIVITY: StatementSheet(
         "etoro.statement.account_activity",
         "table",
-        ACTIVITY_COLUMNS[:9],
+        _names(
+            "Date|Type|Details|Amount|Units / Contracts|Realized Equity Change|Realized Equity|"
+            "Balance|Position ID"
+        ),
         frozenset(ACTIVITY_COLUMNS),
         ("Date", "Type", "Details", "Amount", "Units / Contracts", "Position ID"),
     ),
@@ -492,8 +504,9 @@ STATEMENT_SHEETS: Mapping[str, StatementSheet] = {
         "table",
         ("Name",),
         frozenset({"Name"}),
-        (),
+        ("Name",),
         open_columns=True,
+        per_period=True,
     ),
 }
 

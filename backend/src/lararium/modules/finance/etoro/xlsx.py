@@ -6,9 +6,9 @@ caller types each column itself.
 
 The file is the owner's upload, so the reader assumes it may be hostile. It refuses any DOCTYPE
 or ENTITY declaration (in the raw bytes before parsing, and in the parser for other encodings),
-never follows an external relationship, and has hard limits on the file, its parts and its
-cells, each checked before the work it bounds. Errors name the problem and the part (a fixed
-xlsx part or a sheet name), never a cell's content.
+never follows an external relationship, and has hard limits on the file, its parts, its
+cells and the text they return, each checked before the work it bounds. Errors name the
+problem and the part (a fixed xlsx part or a sheet name), never a cell's content.
 """
 
 import io
@@ -28,10 +28,17 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024  # every part read, decompressed, together
 MAX_ENTRIES = 1000
 # Every cell of every row as returned, the padding of gaps included; an empty row counts as one.
 MAX_CELLS = 100_000
+# The text the reader returns, summed over every cell: a shared string is counted at each cell
+# that names it, so one long string named many times cannot fan out.
+MAX_TEXT_CHARS = 64 * 1024 * 1024
+MAX_CELL_CHARS = 32_767  # Excel's own limit on one cell's text
 _MAX_COLUMNS = 16_384  # Excel's own limit, column XFD
+_END_OF_CENTRAL_DIRECTORY = b"PK\x05\x06"
+_END_RECORD_BYTES = 22
 
 _DECLARATION = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 _REFERENCE = re.compile(r"([A-Z]{1,3})[1-9][0-9]*")
+_INDEX = re.compile(r"[0-9]{1,9}")  # more digits than any MAX_CELLS index
 # Transitional and Strict OOXML name the relationship attribute's namespace differently.
 _RELATIONSHIP_NAMESPACES = frozenset(
     {
@@ -106,6 +113,16 @@ def _parse(
         raise XlsxError(f"{what} is not well-formed XML") from None
 
 
+def _entries(body: bytes) -> int:
+    """The entry count the end-of-central-directory record states, read before the central
+    directory is parsed. A Zip64 count (0xFFFF) is more than any xlsx has."""
+    start = max(0, len(body) - _END_RECORD_BYTES - 0xFFFF)  # the record and its comment
+    end = body.rfind(_END_OF_CENTRAL_DIRECTORY, start)
+    if end < 0 or len(body) < end + _END_RECORD_BYTES:
+        raise XlsxError("the file is not an xlsx workbook")
+    return int.from_bytes(body[end + 10 : end + 12], "little")
+
+
 def _column(reference: str, what: str) -> int:
     match = _REFERENCE.fullmatch(reference)
     if match is None:
@@ -122,6 +139,8 @@ class _Workbook:
     def __init__(self, body: bytes) -> None:
         if len(body) > MAX_PART_BYTES:
             raise XlsxError("the file is larger than 16 MiB")
+        if _entries(body) > MAX_ENTRIES:
+            raise XlsxError(f"the file has more than {MAX_ENTRIES} parts")
         try:
             self._zip = zipfile.ZipFile(io.BytesIO(body))
             infos = self._zip.infolist()
@@ -132,6 +151,7 @@ class _Workbook:
         self._infos = {info.filename: info for info in infos}
         self._read = 0
         self._cells = 0
+        self._chars = 0
         self._strings: list[str] = []
 
     def part(self, name: str, what: str) -> bytes:
@@ -191,7 +211,7 @@ class _Workbook:
             if local in depth:
                 depth[local] -= 1
             if local == "si":
-                strings.append("".join(runs))
+                strings.append(_checked("".join(runs)))
                 if len(strings) > MAX_CELLS:
                     raise XlsxError(f"the workbook has more than {MAX_CELLS} shared strings")
 
@@ -223,6 +243,8 @@ class _Workbook:
             elif local == "c":
                 reference = attributes.get("r")
                 column = position if reference is None else _column(reference, what)
+                if column >= _MAX_COLUMNS:
+                    raise XlsxError(f"{what} has a cell past the last column")
                 kind = attributes.get("t", "n")
                 value.clear()
                 inline.clear()
@@ -235,11 +257,13 @@ class _Workbook:
             if local == "c" and row is not None:
                 if column in row:
                     raise XlsxError(f"{what} has two cells in one place")
+                # Counted as it closes, so a row cannot grow past the cap before it ends.
+                self.spend(1)
                 row[column] = self._value(kind, "".join(value), "".join(inline))
                 position = column + 1
             elif local == "row" and row is not None:
                 width = max(row) + 1 if row else 0
-                self.spend(max(width, 1))
+                self.spend(max(width, 1) - len(row))  # the padding, or 1 for an empty row
                 rows.append(tuple(row.get(index, "") for index in range(width)))
                 row = None
 
@@ -255,16 +279,29 @@ class _Workbook:
         return tuple(rows)
 
     def _value(self, kind: str, value: str, inline: str) -> str:
+        text = _checked(self._text(kind, value, inline))
+        self._chars += len(text)
+        if self._chars > MAX_TEXT_CHARS:
+            raise XlsxError(f"the workbook has more than {MAX_TEXT_CHARS} characters of text")
+        return text
+
+    def _text(self, kind: str, value: str, inline: str) -> str:
         if kind == "s":
-            try:
-                return self._strings[int(value)]
-            except (ValueError, IndexError):
-                raise XlsxError("a cell names a shared string the xlsx does not have") from None
+            index = int(value) if _INDEX.fullmatch(value) else len(self._strings)
+            if index >= len(self._strings):
+                raise XlsxError("a cell names a shared string the xlsx does not have")
+            return self._strings[index]
         if kind == "inlineStr":
             return inline
         if kind == "b":
             return _BOOLEANS.get(value, value)
         return value  # a number, a formula's string, an error code or an ISO date, as stored
+
+
+def _checked(text: str) -> str:
+    if len(text) > MAX_CELL_CHARS:
+        raise XlsxError(f"a cell's text is longer than {MAX_CELL_CHARS} characters")
+    return text
 
 
 def _target(base: str, relationship: _Relationship, what: str) -> str:
