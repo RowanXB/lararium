@@ -7,7 +7,7 @@ value, which may be the owner's data.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -23,7 +23,8 @@ type Value = str | Decimal | bool | None
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _NOT_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
-_DATE_END = re.compile(r"[;T ]")
+_TEXT_TYPES = frozenset({"text", "character varying", "character"})
+_TIMESTAMP_TYPES = frozenset({"timestamp with time zone", "timestamp without time zone"})
 
 
 class TypedValueError(DisplayableError, ValueError):
@@ -36,10 +37,26 @@ def column_name(path: str) -> str:
     return _NOT_ALPHANUMERIC.sub("_", _CAMEL.sub("_", path).lower()).strip("_")
 
 
-def parse_date(value: str, label: str) -> date:
-    """An ISO date (`yyyy-mm-dd` or `yyyymmdd`); a date-time keeps its date."""
+def column_map(paths: Iterable[str]) -> dict[str, str]:
+    """Path to column for a source's known fields. `column_name` is lossy, so two distinct paths
+    that give one column raise, naming both: the second would overwrite the first."""
+    owner: dict[str, str] = {}
+    columns: dict[str, str] = {}
+    for path in paths:
+        column = column_name(path)
+        if not column:
+            raise ValueError(f"{path!r} has no column name")
+        if owner.setdefault(column, path) != path:
+            raise ValueError(f"{owner[column]!r} and {path!r} are both column {column}")
+        columns[path] = column
+    return columns
+
+
+def parse_date(value: str, label: str, separators: str = ";T ") -> date:
+    """An ISO date (`yyyy-mm-dd` or `yyyymmdd`); a date-time keeps its date, the time starting at
+    any of `separators` (a caller that knows its source's one separator passes just that)."""
     try:
-        return date.fromisoformat(_DATE_END.split(value.strip())[0])
+        return date.fromisoformat(re.split(f"[{re.escape(separators)}]", value.strip())[0])
     except ValueError:
         raise TypedValueError(f"{label} is not a date") from None
 
@@ -94,14 +111,20 @@ def _convert(kind: str, value: str | Decimal | bool, label: str) -> object:
     if kind == "numeric":
         return value if isinstance(value, Decimal) else parse_decimal(value, label)
     text_value = value if isinstance(value, str) else str(value)
+    if kind in _TEXT_TYPES:
+        return text_value
     if kind == "date":
         return parse_date(text_value, label)
-    if kind.startswith("timestamp"):
+    if kind in _TIMESTAMP_TYPES:
         moment = parse_moment(text_value, label)
-        if kind == "timestamp with time zone" and moment.tzinfo is None:
-            raise TypedValueError(f"{label} has no time zone")
+        if (kind == "timestamp with time zone") != (moment.tzinfo is not None):
+            raise TypedValueError(
+                f"{label} has no time zone"
+                if kind == "timestamp with time zone"
+                else f"{label} has a time zone, its column has none"
+            )
         return moment
-    return text_value
+    raise TypedValueError(f"{label} has a column type this does not convert to")
 
 
 async def typed_values(
@@ -142,8 +165,9 @@ async def upsert_typed(ctx: CommandContext, table: str, key: Fields, values: Fie
     if overlap := key.keys() & values.keys():
         raise ValueError(f"{', '.join(sorted(overlap))} is a key of {table}, not a value")
     row = {**key, **values}
+    quoted = _quote(table)
     sql = (
-        f"insert into finance.{table} ({', '.join(_quote(name) for name in row)})"
+        f"insert into finance.{quoted} ({', '.join(_quote(name) for name in row)})"
         f" values ({', '.join(f':p{n}' for n in range(len(row)))})"
         f" on conflict ({', '.join(_quote(c) for c in key)})"
     )
@@ -151,7 +175,7 @@ async def upsert_typed(ctx: CommandContext, table: str, key: Fields, values: Fie
         assignments = [_quote(name) for name in values]
         sql += (
             f" do update set {', '.join(f'{a} = excluded.{a}' for a in assignments)}"
-            f" where ({', '.join(f'{table}.{a}' for a in assignments)})"
+            f" where ({', '.join(f'{quoted}.{a}' for a in assignments)})"
             f" is distinct from ({', '.join(f'excluded.{a}' for a in assignments)})"
         )
     else:

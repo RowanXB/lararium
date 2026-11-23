@@ -43,7 +43,7 @@ _LEDGER_ROW_TABLES = frozenset(
 
 def column_name(table: str, attribute: str) -> str:
     """The column an IBKR attribute is stored in."""
-    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", attribute).lower()
+    name = typed_tables.column_name(attribute)
     if name == "transaction_id" and table in _LEDGER_ROW_TABLES:
         return "ibkr_transaction_id"
     return name
@@ -52,7 +52,7 @@ def column_name(table: str, attribute: str) -> str:
 def parse_date(value: str, label: str) -> date:
     """A Flex date (`yyyyMMdd`, or ISO); a date-time keeps its date."""
     try:
-        return typed_tables.parse_date(value, label)
+        return typed_tables.parse_date(value, label, separators=";")
     except TypedValueError as error:
         raise FlexDataError(str(error)) from None
 

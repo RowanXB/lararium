@@ -8,8 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.db import create_engine
+from lararium.modules.finance.ibkr.parser import FlexDataError
+from lararium.modules.finance.ibkr.tables import parse_date as flex_parse_date
 from lararium.modules.finance.typed_tables import (
     TypedValueError,
+    column_map,
     column_name,
     parse_date,
     parse_decimal,
@@ -32,6 +35,33 @@ from lararium.modules.finance.typed_tables import (
 )
 def test_column_name_paths(path: str, column: str) -> None:
     assert column_name(path) == column
+
+
+def test_parse_date_separators_are_the_callers() -> None:
+    assert parse_date("2026-11-10 09:30", "d") == date(2026, 11, 10)
+    with pytest.raises(TypedValueError, match="not a date"):
+        parse_date("20261110 093000", "d", separators=";")
+    assert parse_date("20261110;093000", "d", separators=";") == date(2026, 11, 10)
+
+
+def test_column_map_rejects_colliding_paths() -> None:
+    assert column_map(["Profit(USD)", "Long / Short", "Profit(USD)"]) == {
+        "Profit(USD)": "profit_usd",
+        "Long / Short": "long_short",
+    }
+    with pytest.raises(
+        ValueError, match=r"'Profit\(USD\)' and 'Profit USD' are both column profit_usd"
+    ):
+        column_map(["Profit(USD)", "Profit USD"])
+    with pytest.raises(ValueError, match="no column name"):
+        column_map(["()"])
+
+
+def test_ibkr_dates_keep_their_exact_acceptance() -> None:
+    assert flex_parse_date("20261110;093000", "d") == date(2026, 11, 10)
+    for loose in ("20261110 093000", "2026-11-10 09:30", "2026-11-10T09:30:00"):
+        with pytest.raises(FlexDataError, match=r"^d is not a date$"):
+            flex_parse_date(loose, "d")
 
 
 def test_parsers_name_the_field_not_the_value() -> None:
@@ -68,7 +98,7 @@ async def _scratch(session) -> None:
     await session.execute(
         text(
             "create table finance.typed_scratch (id text primary key, n numeric, d date,"
-            " at timestamptz, local_at timestamp, flag boolean, note text, ref uuid)"
+            " at timestamptz, local_at timestamp, flag boolean, note text, ref uuid, count integer)"
         )
     )
 
@@ -108,6 +138,12 @@ async def test_typed_values_casts_to_column_types(owner_session) -> None:
         await typed_values(session, "typed_scratch", {"n": "x"}, {"n": "Order.n"})
     with pytest.raises(TypedValueError, match="no time zone"):
         await typed_values(session, "typed_scratch", {"at": "2026-11-10T09:30:00"})
+    with pytest.raises(TypedValueError, match=r"^flag is not true or false$"):
+        await typed_values(session, "typed_scratch", {"flag": "maybe"})
+    with pytest.raises(TypedValueError, match=r"^local_at has a time zone, its column has none$"):
+        await typed_values(session, "typed_scratch", {"local_at": "2026-11-10T09:30:00Z"})
+    with pytest.raises(TypedValueError, match=r"^count has a column type"):
+        await typed_values(session, "typed_scratch", {"count": "1"})
     with pytest.raises(ValueError, match="no table"):
         await typed_values(session, "no_such_table", {"a": "b"})
 
@@ -132,5 +168,7 @@ async def test_upsert_typed_writes_once(owner_session) -> None:
     assert await run(upsert_typed, "typed_scratch", {"id": "b"}, {}) is False
     with pytest.raises(ValueError, match="is a key"):
         await run(upsert_typed, "typed_scratch", key, {"id": "z"})
+    with pytest.raises(ValueError, match="not a column name"):
+        await run(upsert_typed, 'typed_scratch"; drop', key, {})
     with pytest.raises(ValueError, match="not a column name"):
         await run(upsert_typed, "typed_scratch", {"id; drop": "a"}, {})
