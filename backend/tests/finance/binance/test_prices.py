@@ -27,6 +27,7 @@ from lararium.modules.finance.binance.prices import (
     eur_path,
     price_assets,
     refresh_coingecko_ids,
+    refresh_ids_quietly,
     update_prices,
 )
 from lararium.modules.finance.instruments import (
@@ -1104,6 +1105,86 @@ async def test_the_id_map_is_read_when_empty_or_over_a_week_old(session, run, fa
         assert len(gecko.calls("exchanges/binance/tickers")) == 4
 
 
+async def _ids(session) -> list[tuple[str, str | None, datetime]]:
+    rows = await session.execute(
+        text(
+            "select asset, coingecko_id, fetched_at from finance.binance_coingecko_ids"
+            " order by asset"
+        )
+    )
+    return [tuple(r) for r in rows]
+
+
+async def _id_audits(session) -> int:
+    return await session.scalar(
+        text("select count(*) from core.audit_log where command = 'binance.coingecko_ids'")
+    )
+
+
+async def test_a_shorter_id_map_keeps_the_ids_it_no_longer_lists(session, run, fake, clock) -> None:
+    connection = await binance_connection(run)
+    gecko = FakeGecko(tickers=[("YYY", "yyy-coin"), ("ZZZ", "zzz-coin")])
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, _):
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        gecko.tickers = [t for t in gecko.tickers if t["base"] == "ZZZ"]
+        gecko.tickers[0]["coin_id"] = "zzz-new"
+        clock.ms += 8 * DAY_MS
+
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+
+        assert len(gecko.calls("exchanges/binance/tickers")) == 4
+        found = [(asset, coin) for asset, coin, _ in await _ids(session)]
+    assert found == [("USDT", "tether"), ("YYY", "yyy-coin"), ("ZZZ", "zzz-new")]
+
+
+async def test_an_identical_id_map_writes_nothing(session, run, fake, clock) -> None:
+    connection = await binance_connection(run)
+    gecko = FakeGecko(tickers=[("ZZZ", "zzz-coin")])
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, _):
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        rows, audits = await _ids(session), await _id_audits(session)
+        assert audits == 1
+        clock.ms += 8 * DAY_MS
+
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+
+        assert len(gecko.calls("exchanges/binance/tickers")) == 4
+        assert await _ids(session) == rows
+        assert await _id_audits(session) == audits
+        # The map was read: it is not read again for a week.
+        clock.ms += 6 * DAY_MS
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.calls("exchanges/binance/tickers")) == 4
+
+
+@pytest.mark.parametrize("answer", ["fails", "empty"])
+async def test_an_id_map_that_failed_is_asked_again_after_a_day(
+    session, run, fake, clock, answer: str
+) -> None:
+    connection = await binance_connection(run)
+    gecko = FakeGecko(tickers=[("ZZZ", "zzz-coin")])
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, _):
+        await refresh_coingecko_ids(ctx, clock=clock, sleep=clock.sleep)
+        rows = await _ids(session)
+        clock.ms += 8 * DAY_MS
+        gecko.failing = answer == "fails"
+        saved, gecko.tickers = gecko.tickers, [] if answer == "empty" else gecko.tickers
+
+        await refresh_ids_quietly(ctx, clock=clock, sleep=clock.sleep)
+        asked = len(gecko.requests)
+        assert asked > 2
+        assert await _ids(session) == rows
+
+        clock.ms += 23 * HOUR_MS
+        await refresh_ids_quietly(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.requests) == asked
+
+        gecko.failing, gecko.tickers = False, saved
+        clock.ms += 2 * HOUR_MS
+        await refresh_ids_quietly(ctx, clock=clock, sleep=clock.sleep)
+        assert len(gecko.requests) > asked
+
+
 async def _manual_noc(run, symbol: str):
     return await run(
         create_instrument,
@@ -1161,7 +1242,8 @@ async def test_a_clash_found_after_the_instrument_exists_is_flagged_once(
 
     gecko.failing = False
     for _ in range(2):
-        clock.ms += 5 * HOUR_MS
+        # A map that could not be read is asked again a day later.
+        clock.ms += 25 * HOUR_MS
         after = await run_binance_sync(
             session, connection.id, _route(fake, gecko), settings=_noc_settings()
         )

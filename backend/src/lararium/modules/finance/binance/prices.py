@@ -24,7 +24,7 @@ from decimal import Context, Decimal, localcontext
 from uuid import UUID
 
 import httpx
-from sqlalchemy import bindparam, delete, func, select, text, union_all
+from sqlalchemy import bindparam, func, select, text, union_all
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,8 +88,12 @@ RETRY_AFTER_DEFAULT = 30
 HISTORY_DAYS = 365
 # CoinGecko lists about two thousand Binance tickers, a hundred a page.
 MAX_TICKER_PAGES = 100
-# The map of Binance assets to CoinGecko ids is read again after this long.
+# The map of Binance assets to CoinGecko ids is read again this long after it was read, or after
+# an attempt that failed or found nothing.
 REFRESH_IDS_AFTER = timedelta(days=7)
+RETRY_IDS_AFTER = timedelta(hours=24)
+# config: the last attempt to read the map, {"at_ms": epoch ms, "ok": whether it found ids}.
+IDS_ASKED_KEY = "coingecko_ids_asked"
 # config: per symbol, the first and last day already asked for (a range with no bar is asked once).
 ASKED_KEY = "bars_asked"
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
@@ -620,34 +624,71 @@ async def refresh_coingecko_ids(
     sleep: Sleep = real_sleep,
 ) -> None:
     """With a CoinGecko key: read Binance's tickers into `binance_coingecko_ids`, for every asset
-    they list, when the table is empty or its newest row is over 7 days old. Raises
-    `CoinGeckoError` when CoinGecko fails; the table is then left as it was."""
+    they list, 7 days after the last read found ids (`config["coingecko_ids_asked"]`), or 24
+    hours after one that failed or found nothing. Each asset whose id is new or changed is
+    upserted; an asset the tickers no longer list keeps its row, and an identical map writes no
+    row. Raises `CoinGeckoError` when CoinGecko fails; the table is then left as it was."""
     key = ctx.coingecko_api_key
     if key is None:
         return
     now_ms = clock()
     async with ctx.session_factory() as session:
-        newest, count = (
-            await session.execute(select(func.max(CoingeckoId.fetched_at), func.count()))
-        ).one()
-    if count and newest > moment(now_ms) - REFRESH_IDS_AFTER:
+        asked = (await get_connection(session, ctx.connection.id)).config.get(IDS_ASKED_KEY)
+        known = {
+            row.asset: row.coingecko_id
+            for row in await session.execute(select(CoingeckoId.asset, CoingeckoId.coingecko_id))
+        }
+    if not _ids_due(asked, now_ms):
         return
-    found = await _id_map(client or CoinGeckoClient(ctx.http, key, clock=clock, sleep=sleep))
-    if not found:
-        return
+    try:
+        found = await _id_map(client or CoinGeckoClient(ctx.http, key, clock=clock, sleep=sleep))
+    except CoinGeckoError:
+        await _ids_asked(ctx, now_ms, {})
+        raise
+    # An asset two ids claim is mapped to None (`_id_map`), which may clear an id it had.
+    changed = {
+        code: coin for code, coin in found.items() if code not in known or known[code] != coin
+    }
+    await _ids_asked(ctx, now_ms, changed, ok=bool(found))
+
+
+def _ids_due(asked: JSONValue, now_ms: int) -> bool:
+    if not isinstance(asked, dict):
+        return True
+    at, ok = asked.get("at_ms"), asked.get("ok")
+    if not isinstance(at, int) or isinstance(at, bool):
+        return True
+    wait = REFRESH_IDS_AFTER if ok is True else RETRY_IDS_AFTER
+    return moment(now_ms) - moment(at) >= wait
+
+
+async def _ids_asked(
+    ctx: SyncContext, now_ms: int, changed: Mapping[str, str | None], *, ok: bool = False
+) -> None:
+    """Upsert the changed ids and remember the attempt, in one transaction."""
+    name = "binance.coingecko_ids" if changed else "binance.coingecko_ids_asked"
     args = {"connection_id": str(ctx.connection.id)}
     async with (
         ctx.session_factory() as session,
-        command_context(session, ctx.command.actor, "binance.coingecko_ids", args) as cmd,
+        command_context(session, ctx.command.actor, name, args) as cmd,
     ):
-        await cmd.session.execute(delete(CoingeckoId))
-        await cmd.session.execute(
-            insert(CoingeckoId),
-            [
+        if changed:
+            rows = [
                 {"asset": code, "coingecko_id": coin, "fetched_at": moment(now_ms)}
-                for code, coin in sorted(found.items())
-            ],
-        )
+                for code, coin in sorted(changed.items())
+            ]
+            upsert = insert(CoingeckoId).values(rows)
+            await cmd.session.execute(
+                upsert.on_conflict_do_update(
+                    index_elements=[CoingeckoId.asset],
+                    set_={
+                        "coingecko_id": upsert.excluded.coingecko_id,
+                        "fetched_at": upsert.excluded.fetched_at,
+                    },
+                )
+            )
+        marker: dict[str, JSONValue] = {"at_ms": now_ms, "ok": ok}
+        await update_config(cmd, ctx.connection.id, {IDS_ASKED_KEY: marker})
 
 
 async def refresh_ids_quietly(
