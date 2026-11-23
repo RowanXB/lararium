@@ -364,11 +364,16 @@ async def _walk_key(
         try:
             pages = await window_pages(client, endpoint, fixed, start, end)
         except BinanceNotPresent:
-            if backfilling and not (newest and index == 0):
+            if not backfilling:
+                # A label whose history was walked in full is served: a refusal now (a
+                # passing 404) is nothing this time, and the next walk asks from its cursor.
+                return ids
+            if not (newest and index == 0):
                 # History ends here; every newer window is stored (Decision 7).
                 state = {**cursor, "fetched_to": fetched_to, "complete": True}
                 await commit(ctx, key, cursor=state, present=True)
             else:
+                # Refused before it ever answered: the product is not present.
                 await commit(ctx, key, absent_since=now_ms)
             return ids
         low, high = endpoint.time_params

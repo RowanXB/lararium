@@ -21,7 +21,7 @@ from lararium.modules.finance.binance.fetch import (
 )
 
 from .fixtures import DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
-from .syncing import Clock, binance_connection, client_for, context
+from .syncing import Clock, binance_connection, client_for, context, later_config
 
 DEPOSITS = ENDPOINTS["deposits"]
 
@@ -176,6 +176,29 @@ async def test_absent_product_is_recorded_and_skipped(session, run, fake, clock)
     await _walk(session, connection, fake, clock, "dividends")
     assert len(fake.calls("dividends")) > 1
     assert "dividends" not in (await _config(session, connection))["not_present"]
+
+
+async def test_a_404_parks_only_a_label_that_never_answered(session, run, fake, clock) -> None:
+    # A label whose history walk is complete: a 404 is nothing this time, not "not present".
+    fake.add("deposits", _deposit(0, NOW_MS - DAY_MS))
+    config = later_config(fetched_to=NOW_MS - DAY_MS)
+    config["cursors"].pop("dividends")  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+    connection = await binance_connection(run, config=config)
+    before = (await _config(session, connection))["cursors"]["deposits"]
+    fake.fail("deposits", status=404, times=1)
+
+    assert await _walk(session, connection, fake, clock, "deposits") == []
+
+    config = await _config(session, connection)
+    assert "deposits" not in config.get("not_present", {})
+    assert config["cursors"]["deposits"] == before
+    # The next walk asks again at once and stores what the refused one missed.
+    assert len(await _walk(session, connection, fake, clock, "deposits")) == 1
+
+    # A label never walked: the same 404 parks it.
+    fake.fail("dividends", status=404, times=1)
+    assert await _walk(session, connection, fake, clock, "dividends") == []
+    assert "dividends" in (await _config(session, connection))["not_present"]
 
 
 def _rows_at(label: str, count: int, time_field: str) -> list[dict]:
