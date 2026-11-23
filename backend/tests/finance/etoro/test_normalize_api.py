@@ -391,15 +391,16 @@ async def test_open_from_api_cost_in_usd(session, ledger) -> None:
         Decimal(0),
     )
     assert execution.transaction_id == tx.id
-    # The aggregate's units are a reported snapshot on the Trading account.
+    # The aggregate's units are a reported snapshot on the Trading account, as is its cash
+    # (PnL's credit plus frozen cash).
     snapshots = await _rows(
         session,
         "select s.quantity, i.symbol from finance.balance_snapshots s"
         " join finance.instruments i on i.id = s.instrument_id"
-        " join finance.accounts a on a.id = s.account_id where a.name = :a",
+        " join finance.accounts a on a.id = s.account_id where a.name = :a order by i.symbol",
         a=TRADING,
     )
-    assert [tuple(r) for r in snapshots] == [(Decimal(4), SYMBOL)]
+    assert [tuple(r) for r in snapshots] == [(Decimal(0), "USD"), (Decimal(4), SYMBOL)]
 
 
 async def test_close_from_trade_history(session, ledger) -> None:

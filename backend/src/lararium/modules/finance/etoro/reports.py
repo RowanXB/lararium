@@ -4,8 +4,10 @@ balance history, typed per day with `reported` snapshots; and prices.
 
 A report is dated by the sync that saw it (report_sightings): each sighting of balances is a
 snapshot of eToro Money's cash and MoneyFarm's balance (the Trading account's `balance` is its
-whole value, not cash, so it has none), and each of the aggregate portfolio one of every
-instrument's units on the Trading account, at the time it arrived. A balance-history snapshot
+whole value, not cash, so it has none), each of the aggregate portfolio one of every
+instrument's units on the Trading account, and each of PnL one of the Trading account's cash
+(`credit` plus the same sync's aggregate `accountFrozenCash`, trading_cash), at the time it
+arrived. A balance-history snapshot
 is one of each account's cash at the end of its `date` (design §5.8), the latest request's for
 a day. A day's typed row is the day's latest sighting. Applied to every sighting in the order
 seen (a replay), they come out as the syncs that saw them left them; everything is written
@@ -19,6 +21,7 @@ is stored for it, so the official close wins whichever arrives first. No FX rate
 
 from collections.abc import Sequence
 from datetime import date
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -218,6 +221,31 @@ async def _aggregate_snapshots(run: Run, report: Report) -> dict[int, UUID]:
     return found
 
 
+def trading_cash(pnl: Report, aggregate: Report | None) -> Decimal:
+    """The Trading account's cash, as eToro reports it now: PnL's `credit` plus the frozen
+    cash of the same sync's aggregate portfolio (design §5.11)."""
+    credit = number_at(pnl.record, pnl.content, "clientPortfolio.credit")
+    if aggregate is None:
+        return credit
+    return credit + number_at(
+        aggregate.record, aggregate.content, "accountTotals.accountFrozenCash"
+    )
+
+
+async def _cash_snapshot(run: Run, pnl: Report, aggregate: Report | None) -> None:
+    if run.trading_id is None or not run.account_currency:
+        return
+    currency = await run.currency(run.account_currency)
+    await reported_snapshot(
+        run.command,
+        run.trading,
+        currency.id,
+        trading_cash(pnl, aggregate),
+        pnl.seen_at,
+        pnl.day,
+    )
+
+
 async def _rows(
     run: Run,
     report: Report,
@@ -368,10 +396,11 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:
-    """Every sighting, in the order seen: each balances and aggregate report its snapshots;
-    then each day's latest sighting of a report its typed rows (and current prices), the
-    latest `/me` the user's row, and the balance history's days."""
+    """Every sighting, in the order seen: each balances, aggregate and PnL report its
+    snapshots; then each day's latest sighting of a report its typed rows (and current
+    prices), the latest `/me` the user's row, and the balance history's days."""
     ordered = sorted(reports, key=lambda r: r.order)
+    aggregates = {r.sync_id: r for r in ordered if r.endpoint == "aggregate"}
     snapshots: dict[tuple[UUID, UUID], dict[int, UUID]] = {}
     latest: dict[tuple[str, date], Report] = {}
     me: Report | None = None
@@ -385,6 +414,8 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                 snapshots[(report.sync_id, report.record.id)] = await _aggregate_snapshots(
                     run, report
                 )
+            case "pnl":
+                await _cash_snapshot(run, report, aggregates.get(report.sync_id))
             case "me":
                 me = report
             case _:

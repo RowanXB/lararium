@@ -15,7 +15,8 @@ run's records name, from the API or the statement (records.py, merge.py), and eT
 transactions, as connector transactions (records.py); the statement's cash events and typed
 rows (statement_ledger.py); the order lookups, closed events, stockback and candles; the
 reports, typed per day with reported snapshots (reports.py); eToro Money's opening adjustment
-(records.py); prices; and a notification of the review items the run opened (merge.py).
+(records.py); prices; a notification of the review items the run opened (merge.py); and the
+reconciliation of the accounts against eToro's latest reports (reconcile.py).
 
 Every record's fields are checked first: a required one missing fails the run; an unknown one
 with a value is flagged, as are values and types the mapping does not know. Some flags are
@@ -35,7 +36,14 @@ from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.connector_items import lacks, leaves
-from lararium.modules.finance.etoro import accounts, merge, records, reports, statement_ledger
+from lararium.modules.finance.etoro import (
+    accounts,
+    merge,
+    reconcile,
+    records,
+    reports,
+    statement_ledger,
+)
 from lararium.modules.finance.etoro.fields import ENDPOINTS
 from lararium.modules.finance.etoro.instruments import currency_flags, reclassify, type_flags
 from lararium.modules.finance.etoro.state import (
@@ -285,6 +293,9 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     if any(connection.config.get(key) != value for key, value in values.items()):
         await update_config(ctx.command, connection.id, values)
     await merge.notify(ctx, connection.display_name, run.reviews)
+    # Reconciliation (design §5.11) against the latest reports, on the sync's path and the
+    # upload's alike: the connection is locked, so its warnings are this run's to replace.
+    await reconcile.publish(ctx, await reconcile.check(ctx, run.accounts))
     return report
 
 

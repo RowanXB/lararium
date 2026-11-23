@@ -31,6 +31,7 @@ from lararium.modules import registry
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.client import EtoroClient, ReadOnlyGateError
 from lararium.modules.finance.etoro.normalize import NORMALIZER_VERSION, NormalizeReport
+from lararium.modules.finance.etoro.reconcile import is_reconciliation
 from lararium.modules.finance.etoro.sync import (
     EtoroConnector,
     IngestResult,
@@ -88,6 +89,11 @@ DAILY = {CLOSED_EVENTS, STOCKBACK, INSTRUMENTS, TYPES, EXCHANGES, CANDLES}
 
 def today() -> date:
     return datetime.now(UTC).date()
+
+
+def _flags(warnings: list[str]) -> list[str]:
+    """The warnings other than reconciliation's: this file's data is not made to agree."""
+    return [w for w in warnings if not is_reconciliation(w)]
 
 
 def _statement_moment(day: date, at: str = "09:15:00") -> str:
@@ -706,8 +712,8 @@ async def test_instrument_type_flags_clear_once_typed(session, run, api) -> None
     notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, notifier)
     flag = "eToro flagged: instrument type unknown ZZQA"
-    assert after.warnings == [flag]
-    assert notifier.messages == [f"eToro: {flag}"]
+    assert _flags(after.warnings) == [flag]
+    assert _flags(notifier.messages) == [f"eToro: {flag}"]
     # Every run finds these in full: typed the next day, the flag clears without a word.
     api.instrument_type = 5
     cursor = (await get_connection(session, connection.id)).cursor
@@ -715,8 +721,8 @@ async def test_instrument_type_flags_clear_once_typed(session, run, api) -> None
     stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
     await _set_cursor(session, connection, {**cursor, "daily_at": stale})
     after = await _run_sync(session, connection, api, notifier)
-    assert after.warnings == []
-    assert len(notifier.messages) == 1
+    assert _flags(after.warnings) == []
+    assert len(_flags(notifier.messages)) == 1
 
 
 def test_connector_identity_and_registration() -> None:
@@ -944,14 +950,14 @@ async def test_statement_flags_published_once(session, run, api, tmp_path) -> No
     flag = "eToro flagged: Closed Positions.Brand New Column"
     assert result.flagged == frozenset({"Closed Positions.Brand New Column"})
     after = await get_connection(session, connection.id)
-    assert after.warnings == [flag]
+    assert _flags(after.warnings) == [flag]
     # The statement's close differs from the API's (a review, told on its own).
-    assert [m for m in notifier.messages if "disagree" not in m] == [f"eToro: {flag}"]
+    assert [m for m in _flags(notifier.messages) if "disagree" not in m] == [f"eToro: {flag}"]
     # A sync keeps the statement's flag, and does not tell it again.
     sync_notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, sync_notifier)
-    assert after.warnings == [flag]
-    assert sync_notifier.messages == []
+    assert _flags(after.warnings) == [flag]
+    assert _flags(sync_notifier.messages) == []
 
 
 async def test_normalization_runs_under_the_connection_lock(
@@ -1048,12 +1054,12 @@ async def test_an_upload_during_a_sync_keeps_its_flag(
         "normalize",
         "publish",
     ]
-    assert after.warnings == [flag]
+    assert _flags(after.warnings) == [flag]
     assert after.cursor["flags"] == {"statement": ["Closed Positions.Brand New Column"]}
     assert after.cursor["notified"] == ["Closed Positions.Brand New Column"]
 
     # Its cause gone (a statement without the column), the flag clears.
     await _ingest(session, connection, statement(closed_row()), tmp_path)
     after = await get_connection(session, connection.id)
-    assert after.warnings == []
+    assert _flags(after.warnings) == []
     assert isinstance(after.cursor, dict) and after.cursor["flags"] == {}
