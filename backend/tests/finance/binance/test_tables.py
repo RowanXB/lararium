@@ -583,22 +583,47 @@ async def test_a_label_without_envelope_fields_has_no_response(run) -> None:
     assert await run(store_response, connection, "deposits", body) is False
 
 
-async def test_every_decimal_column_refuses_non_finite_numbers(session) -> None:
-    constraints = (
-        await session.scalars(
-            text(
-                "select pg_get_constraintdef(oid) from pg_constraint where contype = 'c'"
-                " and conrelid::regclass::text like 'finance.binance\\_%'"
-            )
+async def _non_finite_checks(session) -> dict[str, list[str]]:
+    """Each binance table's CHECK definitions, by table."""
+    rows = await session.execute(
+        text(
+            "select conrelid::regclass::text as tbl, pg_get_constraintdef(oid) as def_"
+            " from pg_constraint where contype = 'c'"
+            " and conrelid::regclass::text like 'finance.binance\\_%' and "
+            "pg_get_constraintdef(oid) like '%NaN%'"
         )
-    ).all()
-    checks = " ".join(constraints)
-    models = [model_of(t.name) for label in layout.TABLE_LABELS for t in layout.layout(label)]
-    for model in models:
-        for column in _table(model).columns:
-            if _compile(column) in ("numeric", "numeric[]"):
-                found = [
-                    c for c in constraints if re.search(rf"\b{column.name}\b", c) and "NaN" in c
-                ]
-                assert found, (_table(model).name, column.name)
+    )
+    found: dict[str, list[str]] = {}
+    for row in rows:
+        found.setdefault(row.tbl.removeprefix("finance."), []).append(row.def_)
+    return found
+
+
+def _missing_checks(checks: dict[str, list[str]]) -> list[tuple[str, str]]:
+    missing: list[tuple[str, str]] = []
+    for label in layout.TABLE_LABELS:
+        for table in layout.layout(label):
+            for column in _table(model_of(table.name)).columns:
+                if _compile(column) not in ("numeric", "numeric[]"):
+                    continue
+                pattern = rf"\b{column.name}\b"
+                if not any(re.search(pattern, d) for d in checks.get(table.name, [])):
+                    missing.append((table.name, column.name))
+    return missing
+
+
+async def test_every_decimal_column_refuses_non_finite_numbers(session) -> None:
+    checks = await _non_finite_checks(session)
     assert checks
+    assert _missing_checks(checks) == []
+
+
+async def test_a_table_without_its_own_non_finite_check_is_found(session) -> None:
+    # `amount` is a column of several tables: another table's check must not stand in.
+    checks = await _non_finite_checks(session)
+    assert any("amount" in d for d in checks["binance_dividends"])
+    mutated = {
+        **checks,
+        "binance_deposits": [d for d in checks["binance_deposits"] if "amount" not in d],
+    }
+    assert _missing_checks(mutated) == [("binance_deposits", "amount")]
