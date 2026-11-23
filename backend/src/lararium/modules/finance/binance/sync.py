@@ -4,6 +4,7 @@ history walks into raw records (design §5.1 to §5.3).
 Nothing here logs or reports a row's values, the key, an address or a hash.
 """
 
+import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 
@@ -48,8 +49,11 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import assets_seen as seen
+from lararium.modules.finance.binance.normalize import FLAG_PREFIX, normalize
 from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
 from lararium.modules.finance.binance.tables import moment
+
+logger = logging.getLogger(__name__)
 
 # Permissions a reading key may have; any other that is true refuses the sync.
 HARMLESS_TRUE = frozenset({"enableReading", "ipRestrict"})
@@ -134,10 +138,6 @@ async def assets_seen(ctx: SyncContext) -> set[str]:
         return await seen(session, ctx.connection.id)
 
 
-async def normalize(ctx: SyncContext) -> None:
-    """Raw records into typed tables and the ledger (Task 6)."""
-
-
 async def opening(ctx: SyncContext) -> None:
     """Opening adjustments (Task 7, plan Decision 12)."""
 
@@ -198,16 +198,20 @@ class BinanceConnector:
         await walk_trades(ctx, client, TRADES_LABEL, symbols)
 
         settled = await settle_reads(ctx, client, reads, symbols=await _traded(ctx, symbols, first))
-        # Task 6 publishes these (Run.flag, publish_flags).
+        # The wallet checks' flags, published with the records' (one line, Decision 15).
         flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
-        await normalize(ctx)
+        normalized = await normalize(ctx, flags=flags)
+        lines: list[str] = []
+        if normalized.new_flags:
+            lines.append(FLAG_PREFIX + ", ".join(normalized.new_flags))
         await opening(ctx)
         await reconcile(ctx)
         await prices(ctx, client)
         if first:
             # After every walk: this transaction holds the connection's row from here on.
             await update_config(ctx.command, connection.id, {FIRST_SYNC_DONE_KEY: True})
+        await _tell(ctx, lines)
         return {"fetched_at": now_ms}
 
     async def _read_balances(self, ctx: SyncContext, client: BinanceClient) -> dict[str, Read]:
@@ -226,6 +230,17 @@ class BinanceConnector:
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
+
+
+async def _tell(ctx: SyncContext, lines: list[str]) -> None:
+    """One message for the run (Decision 15); a failure to send never fails the sync, and only
+    the exception's class is logged: its message could carry the notifier's webhook URL."""
+    if not lines:
+        return
+    try:
+        await ctx.notifier.send(f"{ctx.connection.display_name}: " + "\n".join(lines))
+    except Exception as error:
+        logger.warning("sending a Binance notification failed (%s)", type(error).__name__)
 
 
 async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:

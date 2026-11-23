@@ -795,7 +795,7 @@ Id: `id` (32-char text). Time: `applyTime` and `completeTime`, both **text** "YY
 | [].amount | decimal string | withdrawal amount (fee not included) |
 | [].transactionFee | decimal string | transaction fee |
 | [].coin | string | asset |
-| [].status | integer | 0 Email Sent, 2 Awaiting Approval, 3 Rejected, 4 Processing, 6 Completed (from the request parameter; 1 and 5 not listed) |
+| [].status | integer | 0 Email Sent, 1 Cancelled, 2 Awaiting Approval, 3 Rejected, 4 Processing, 5 Failure, 6 Completed (the request parameter lists 0, 2, 3, 4, 6; 1 and 5 come from Binance's response documentation) |
 | [].address | string | destination address |
 | [].txId | string | withdrawal transaction id (real: 0x+64 hex or bare 64 hex) |
 | [].applyTime | string | UTC time text, "2019-10-12 11:12:02" |

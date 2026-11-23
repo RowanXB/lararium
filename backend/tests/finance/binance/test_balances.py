@@ -123,7 +123,14 @@ async def _balance(session, connection_id: UUID, wallet: str, symbol: str, day: 
 
 def _deposit(seq: int, at_ms: int, amount: str) -> dict:
     return build_row(
-        "deposits", seq, coin="AAA", amount=amount, status=1, insertTime=at_ms, completeTime=at_ms
+        "deposits",
+        seq,
+        coin="AAA",
+        amount=amount,
+        status=1,
+        walletType=0,
+        insertTime=at_ms,
+        completeTime=at_ms,
     )
 
 
@@ -180,6 +187,7 @@ async def test_transfer_between_two_wallet_reads(
                 asset="AAA",
                 amount="3",
                 sourceAccount="SPOT",
+                status="SUCCESS",
             )
             fake.add("earn-flexible-subscriptions", row)
 
@@ -201,7 +209,11 @@ async def test_transfer_between_two_wallet_reads(
     earn_quantity, earn_as_of = found[("Binance Earn", "AAA")]
     assert (spot_quantity, earn_quantity) == (10, 3)
     assert spot_as_of < _at(moved[0]) < earn_as_of
-    # Task 6/7 extends: balances with postings (the subscription after Spot's cutoff, before Earn's)
+    # The subscription is after Spot's cutoff, so it is added to Spot's snapshot; it is before
+    # Earn's, so Earn's snapshot already holds it.
+    day = earn_as_of.date()
+    assert await _balance(session, connection.id, "Spot", "AAA", day) == 7
+    assert await _balance(session, connection.id, "Earn", "AAA", day) == 3
     # Task 7 adds: no reconciliation difference
 
 
@@ -236,8 +248,8 @@ async def test_read_still_ambiguous_after_three_rounds_writes_no_snapshot(
     assert [s for s in snapshots if s[0] == "Binance Spot"] == [first]
     # The other wallets are cut as usual.
     assert len([s for s in snapshots if s[0] == "Binance Funding"]) == 2
-    assert await _balance(session, connection.id, "Spot", "AAA", _at(clock.ms).date()) == 10
-    # Task 6/7 extends: balances with postings (the previous snapshot plus the deposits after it)
+    # The previous snapshot plus the four deposits after it: what Spot last said it held.
+    assert await _balance(session, connection.id, "Spot", "AAA", _at(clock.ms).date()) == 14
 
     fake.when_asked("spot-account", None)
     clock.ms += 4 * HOUR_MS
