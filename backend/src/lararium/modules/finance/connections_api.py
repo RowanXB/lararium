@@ -30,7 +30,7 @@ from sqlalchemy import func, select
 
 from lararium.config import Settings, load_master_key
 from lararium.core.actors import Actor
-from lararium.core.commands import command_context
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     AUTHORISED_AT_KEY,
     ConnectionRecord,
@@ -510,6 +510,21 @@ async def _trading212_account_id(http: httpx.AsyncClient, body: Trading212Connec
         raise _unprocessable("no_account_id", "Trading 212's answer has no account id") from None
 
 
+async def _store_trading212_keys(
+    ctx: CommandContext,
+    master_key: bytes,
+    connection_id: UUID,
+    body: Trading212ConnectionUpdate,
+) -> None:
+    for purpose, value in (
+        (T212_KEY_PURPOSE, body.api_key),
+        (T212_SECRET_PURPOSE, body.api_secret),
+    ):
+        await store_credential(
+            ctx, master_key, connection_id, purpose, value.get_secret_value(), None
+        )
+
+
 @router.post(
     "/trading212", name="create_trading212_connection", status_code=status.HTTP_201_CREATED
 )
@@ -544,17 +559,7 @@ async def create_trading212_connection(
             display_name=body.display_name,
             config={"account_kind": body.account_kind},
         )
-        await store_credential(
-            ctx, master_key, created.id, T212_KEY_PURPOSE, body.api_key.get_secret_value(), None
-        )
-        await store_credential(
-            ctx,
-            master_key,
-            created.id,
-            T212_SECRET_PURPOSE,
-            body.api_secret.get_secret_value(),
-            None,
-        )
+        await _store_trading212_keys(ctx, master_key, created.id, body)
         # Where the sync looks, so its account check works from the first run.
         await set_cursor(ctx, created.id, {"account_id": account_id})
         # There is no approval step: a key works as soon as it is created.
@@ -583,17 +588,7 @@ async def update_trading212_connection(
             raise _unprocessable("not_trading212", "this is not a Trading 212 connection")
         if connection.status == "disabled":
             raise _unprocessable("not_updatable", "a disabled connection can't be updated")
-        await store_credential(
-            ctx, master_key, connection_id, T212_KEY_PURPOSE, body.api_key.get_secret_value(), None
-        )
-        await store_credential(
-            ctx,
-            master_key,
-            connection_id,
-            T212_SECRET_PURPOSE,
-            body.api_secret.get_secret_value(),
-            None,
-        )
+        await _store_trading212_keys(ctx, master_key, connection_id, body)
         await transition_status(
             ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
         )

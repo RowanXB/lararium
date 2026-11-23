@@ -3,6 +3,7 @@
 import base64
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from lararium.config import Settings
 from lararium.core.connections import get_connection, load_credential, set_status
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
+from lararium.worker import jobs
 from lararium.worker.app import procrastinate_app
 
 KEY = bytes(range(32))
@@ -237,3 +239,83 @@ async def test_update_refuses_other_connectors_and_disabled(api, run) -> None:
         headers=OWNER,
     )
     assert response.status_code == 422
+
+
+async def test_failed_create_leaves_nothing_behind(api, session, queue, monkeypatch) -> None:
+    stored = 0
+    real = connections_api.store_credential
+
+    async def _fail_on_the_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal stored
+        stored += 1
+        if stored == 2:
+            raise RuntimeError("boom")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(connections_api, "store_credential", _fail_on_the_second)
+
+    with pytest.raises(RuntimeError):
+        await api.post(URL, json=BODY, headers=OWNER)
+
+    assert stored == 2
+    assert await session.scalar(text("select count(*) from core.connections")) == 0
+    assert await session.scalar(text("select count(*) from core.credentials")) == 0
+    assert _queued(queue) == []
+
+
+class _Notes:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
+
+
+async def test_update_with_another_accounts_keys_fails_the_next_sync(
+    api, session, sessions, trading212
+) -> None:
+    created = await _create(api)
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/trading212",
+        json={"api_key": NEW_KEY, "api_secret": NEW_SECRET},
+        headers=OWNER,
+    )
+    assert response.status_code == 200, response.text
+    # The new keys belong to another account.
+    trading212.body = '{"id": 99999999, "currency": "GBP"}'
+
+    settings = Settings(
+        database_url="postgresql+psycopg://unused@localhost/unused",
+        auth_mode="dev",
+        master_key=SecretStr(base64.b64encode(KEY).decode()),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(trading212)) as http:
+        await jobs.run_sync(
+            session,
+            UUID(created["id"]),
+            settings=settings,
+            http=http,
+            notifier=_Notes(),
+            session_factory=sessions,
+        )
+
+    record = await get_connection(session, created["id"])
+    assert record.status == "needs_reauth"
+    assert record.cursor == {"account_id": "12345678"}
+
+
+async def test_too_long_keys_are_not_echoed(api) -> None:
+    key, secret = "k" * 501, "s" * 501
+    response = await api.post(
+        URL, json=BODY | {"api_key": key, "api_secret": secret}, headers=OWNER
+    )
+    assert response.status_code == 422
+    assert key not in response.text and secret not in response.text
+
+    updated = await api.put(
+        f"/api/v1/connections/{uuid4()}/trading212",
+        json={"api_key": key, "api_secret": secret},
+        headers=OWNER,
+    )
+    assert updated.status_code == 422
+    assert key not in updated.text and secret not in updated.text
