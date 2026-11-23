@@ -193,8 +193,12 @@ async def currency_flags(session: AsyncSession, connection_id: UUID) -> set[str]
             " priced as ("
             " select instrument_id from finance.etoro_aggregate_instruments"
             " where connection_id = :c and asset_currency is not null"
-            " union select instrument_id from finance.etoro_breakdown_positions"
-            " where connection_id = :c and asset_currency is not null)"
+            # A breakdown position's instrument is its own instrumentId, else its parent's.
+            " union select coalesce(p.instrument_id, i.instrument_id)"
+            " from finance.etoro_breakdown_positions p"
+            " join finance.etoro_breakdown_instruments i on i.connection_id = p.connection_id"
+            " and i.as_of_date = p.as_of_date and i.item_index = p.instrument_index"
+            " where p.connection_id = :c and p.asset_currency is not null)"
             " select n.instrument_id::text as id,"
             " coalesce((select m.symbol_full from finance.etoro_instruments m"
             " where m.connection_id = :c and m.instrument_id = n.instrument_id),"
@@ -205,7 +209,7 @@ async def currency_flags(session: AsyncSession, connection_id: UUID) -> set[str]
             " where b.connection_id = :c and b.instrument_id = n.instrument_id"
             " and b.symbol is not null order by b.as_of_date desc limit 1)) as symbol"
             " from named n"
-            " where n.instrument_id not in (select instrument_id from priced)"
+            " where not exists (select 1 from priced where priced.instrument_id = n.instrument_id)"
             " and not exists (select 1 from finance.instrument_identifiers ii"
             " where ii.scheme = 'etoro_id' and ii.value = n.instrument_id::text)"
         ),

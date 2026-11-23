@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from lararium.core import models as core_models
 from lararium.core.actors import Actor
-from lararium.core.commands import CommandContext
+from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     ConnectionRecord,
     create_connection,
@@ -42,11 +42,18 @@ from lararium.modules.finance.instruments import (
     create_instrument,
     get_currency,
 )
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    find_unbalanced_transactions,
+    post_transaction,
+)
 from lararium.modules.finance.pricing import record_price
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
 from lararium.modules.finance.system_accounts import system_account_ids
+from lararium.modules.finance.transfers import heal_transfers, list_transfers, transfer_contra
 from lararium.modules.finance.transfers.contra import eligible_records
 from tests.finance.trading212.fixtures import isin
 
@@ -1354,3 +1361,109 @@ async def test_regenerate_the_ledger_from_raw_records(session, ledger) -> None:
     await _delete_derived(session, ledger.connection)
     await ledger.replay()
     assert await _ledger_state(session, ledger.connection) == before
+
+
+# Review fixes (Task 10, round 2) --------------------------------------------------------------
+
+
+async def test_a_breakdown_position_without_its_instrument_id(session, ledger) -> None:
+    # The breakdown's position names no instrumentId: it is its parent instrument's.
+    position = breakdown_position(POSITION)
+    del position["instrumentId"]
+    other = 9002
+    row = trade_row(POSITION + 7) | {"instrumentId": other, "orderId": POSITION + 507}
+    report = await ledger.normalize(
+        BALANCES,
+        ("pnl", pnl_body([pnl_position(POSITION)])),
+        (
+            "breakdown",
+            {
+                "accountCurrency": "USD",
+                "instruments": [
+                    {"instrumentId": INSTRUMENT_ID, "symbol": SYMBOL, "positions": [position]}
+                ],
+            },
+        ),
+        META,
+        ("trade_history", row),
+    )
+    # Its NULL instrumentId does not hide another instrument's unknown currency.
+    assert "instrument currency unknown eToro 9002" in report.flags_in_full
+    [linked] = await _rows(
+        session,
+        "select p.finance_instrument_id from finance.etoro_breakdown_positions p"
+        " where p.connection_id = :c",
+        c=ledger.connection.id,
+    )
+    assert linked.finance_instrument_id == await _etoro_instrument(session)
+    assert await _postings(session, f"open:{POSITION}") != []
+
+
+async def test_a_leveraged_close_is_not_counted_as_settlement_unknown(session, ledger) -> None:
+    # No source states its settlement, but its leverage already makes it unsupported.
+    row = trade_row(POSITION) | {"leverage": 2, "instrumentId": INSTRUMENT_ID, "orderId": ORDER}
+    report = await ledger.normalize(
+        BALANCES,
+        ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "0")])),
+        META,
+        ("trade_history", row),
+    )
+    assert await _transaction(session, f"close:{POSITION}") is None
+    assert "a CFD, leveraged or copied position" in report.flagged
+    assert not any(f.startswith("position settlement unknown") for f in report.flags_in_full)
+
+
+async def test_an_account_number_row_pairs_with_a_monzo_payment(session, run, ledger) -> None:
+    # The owner's bank (registered) pays eToro Money (registered too); eToro's row gives the
+    # bank's account number alone.
+    bank = await run(
+        lambda ctx: create_account(
+            ctx,
+            name="Synthetic Bank",
+            ledger_type="asset",
+            subtype="bank",
+            balance_mode="transactions",
+        )
+    )
+    await run(lambda ctx: assign_identifier(ctx, bank.id, "uk_bank_account", "040004:12345678"))
+    item = bank_item("80000121", "75.00", identifier=("bankAccountNumber", "12345678")) | {
+        "postedAt": "2026-06-01T10:00:00Z"
+    }
+    await ledger.normalize(BALANCES, ("cash_transactions", item))
+    assert (await _postings(session, "cash:80000121"))[1][0] == "Unassigned"
+    money = await session.scalar(
+        text("select id from finance.accounts where name = :n"), {"n": MONEY}
+    )
+    await run(lambda ctx: assign_identifier(ctx, money, "uk_bank_account", "608371:87654321"))
+    names_money = await session.scalar(
+        text("select id from finance.account_identifiers where value = '608371:87654321'")
+    )
+    gbp = await get_currency(session, "GBP")
+    contra = await transfer_contra(
+        session,
+        source=None,
+        own_account_id=bank.id,
+        counterparty_identifier_id=names_money,
+        other_postings=0,
+    )
+    await run(
+        lambda ctx: post_transaction(
+            ctx,
+            TransactionInput(
+                occurred_at=datetime(2026, 6, 1, 9, 59, tzinfo=UTC),
+                description="Faster payment",
+                postings=[
+                    PostingInput(bank.id, gbp.id, Decimal("-75.00")),
+                    PostingInput(contra, gbp.id, Decimal("75.00")),
+                ],
+                counterparty=CounterpartyFields(identifier_id=names_money, bank_transfer=True),
+            ),
+        )
+    )
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        await heal_transfers(ctx)
+    assert (await _postings(session, "cash:80000121"))[1][0] == "In transit"
+    [transfer] = await list_transfers(session)
+    assert (transfer.from_account_id, transfer.status) == (bank.id, "matched")

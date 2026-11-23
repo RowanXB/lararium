@@ -9,6 +9,7 @@ from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 
 from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import create_account
@@ -204,6 +205,57 @@ async def test_two_rows_with_different_account_numbers_name_nobody(
     await statement_row(x, "-100", complete=FULL)
     received = await statement_row(y, "100", details=RowDetails(account_number=X_NUMBER))
     await duplicate_row(received, RowDetails(account_number="99998888"))
+    await heal()
+
+    assert await list_transfers(session) == []
+
+
+async def _connector_number(session, transaction_id, number: str) -> None:
+    """What a connector gives that prints an account number alone (eToro Money, ruling
+    R28): it on the transaction itself."""
+    await session.execute(
+        text("update finance.transactions set counterparty_account_number = :n where id = :i"),
+        {"n": number, "i": transaction_id},
+    )
+
+
+async def test_a_connectors_account_number_counts_as_an_import_rows(
+    session, imported_bank, statement_row, heal
+) -> None:
+    x = await imported_bank("X", identifier=X_ID)
+    y = await imported_bank("Y", identifier=Y_ID)
+    sent = await statement_row(x, "-100", complete=FULL)
+    received = await statement_row(y, "100")
+    await _connector_number(session, received, X_NUMBER)
+    await heal()
+
+    t = await _only_transfer(session)
+    assert (t.from_account_id, t.to_account_id, t.status) == (x.id, y.id, "matched")
+    assert {t.out_transaction_id, t.in_transaction_id} == {sent, received}
+
+
+async def test_a_connectors_account_number_disagreeing_with_its_rows_names_nobody(
+    session, imported_bank, statement_row, heal
+) -> None:
+    x = await imported_bank("X", identifier=X_ID)
+    y = await imported_bank("Y", identifier=Y_ID)
+    await statement_row(x, "-100", complete=FULL)
+    received = await statement_row(y, "100", details=RowDetails(account_number="99998888"))
+    await _connector_number(session, received, X_NUMBER)
+    await heal()
+
+    assert await list_transfers(session) == []
+
+
+async def test_a_sort_code_alone_never_pairs_with_a_connectors_account_number(
+    session, imported_bank, statement_row, heal
+) -> None:
+    # The received row names an account (a stranger's number): never a weak counterpart.
+    x = await imported_bank("X")
+    h = await imported_bank("H", identifier=H_ID)
+    await statement_row(x, "-100", details=H_SORT_CODE)
+    received = await statement_row(h, "100")
+    await _connector_number(session, received, "50000001")
     await heal()
 
     assert await list_transfers(session) == []

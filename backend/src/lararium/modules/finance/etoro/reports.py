@@ -286,7 +286,9 @@ async def _breakdown(run: Run, report: Report) -> None:
             values = await run.typed(
                 "breakdown", "etoro_breakdown_positions", flat(item), "instruments[].positions[]."
             )
-            link = await _instrument_link(run, record, item, "instrumentId")
+            # A position without its own instrumentId is its parent's instrument's.
+            source = item if text_at(item, "instrumentId") else instrument
+            link = await _instrument_link(run, record, source, "instrumentId")
             await run.upsert(
                 "etoro_breakdown_positions",
                 below | {"item_index": m},

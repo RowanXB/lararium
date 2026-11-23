@@ -741,7 +741,11 @@ async def preview_match(
     posting would give it (ledger.resolve_booking_date), which the window is counted in.
     `complete`: the days the row's import lists in full, which committing it would add
     (a counterpart found by amount and date is taken only from the first day imports list
-    in full, design §5.8)."""
+    in full, design §5.8).
+
+    The row's evidence is its counterparty identifier only: `counterparty.account_number`
+    is not read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
     holder = (

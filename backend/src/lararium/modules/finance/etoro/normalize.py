@@ -155,9 +155,11 @@ async def _context(run: Run, seen: Sequence[Report], lookups: dict[str, Record])
             " select instrument_id::text as id, asset_currency as currency, as_of_date"
             " from finance.etoro_aggregate_instruments"
             " where connection_id = :c and asset_currency is not null"
-            " union all select instrument_id::text, asset_currency, as_of_date"
-            " from finance.etoro_breakdown_positions"
-            " where connection_id = :c and asset_currency is not null) found"
+            " union all select coalesce(p.instrument_id, i.instrument_id)::text,"
+            " p.asset_currency, p.as_of_date from finance.etoro_breakdown_positions p"
+            " join finance.etoro_breakdown_instruments i on i.connection_id = p.connection_id"
+            " and i.as_of_date = p.as_of_date and i.item_index = p.instrument_index"
+            " where p.connection_id = :c and p.asset_currency is not null) found"
             " order by as_of_date"
         ),
         {"c": run.connection_id},
@@ -255,7 +257,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
         run.session, run.connection_id, sorted(run.accounts.values())
     )
     report.flags_in_full |= await currency_flags(run.session, run.connection_id)
-    if unknown := await records.settlement_unknown(run):
+    if unknown := await records.settlement_unknown(run, trades, lookups):
         report.flags_in_full.add(f"{records.SETTLEMENT_UNKNOWN} ({unknown})")
 
     # Only this normaliser's keys: others stay as they are.

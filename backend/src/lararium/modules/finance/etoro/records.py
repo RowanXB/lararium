@@ -148,20 +148,57 @@ _STORED_ITEMS = {
 }
 
 
-async def _stored_item(run: Run, endpoint: str, position_id: str) -> tuple[Record, Item] | None:
-    """The position's item in the record of the latest day whose report of the endpoint
+async def _latest_items(run: Run, endpoint: str) -> dict[str, tuple[Record, Item]]:
+    """Each position's item in the record of the latest day whose report of the endpoint
     listed it (its typed rows say which)."""
     table, items = _STORED_ITEMS[endpoint]
-    raw_record_id = await run.session.scalar(
-        text(
-            f"select raw_record_id from finance.{table} where connection_id = :c"
-            " and position_id = cast(:p as numeric) order by as_of_date desc limit 1"
-        ),
-        {"c": run.connection_id, "p": position_id},
-    )
-    if raw_record_id is None:
-        return None
-    return items(await records_of(run.session, [raw_record_id])).get(position_id)
+    rows = (
+        await run.session.execute(
+            text(
+                f"select distinct on (position_id) position_id::text as position,"
+                f" raw_record_id from finance.{table} where connection_id = :c"
+                " order by position_id, as_of_date desc"
+            ),
+            {"c": run.connection_id},
+        )
+    ).all()
+    records = {r.id: r for r in await records_of(run.session, [row.raw_record_id for row in rows])}
+    found: dict[str, tuple[Record, Item]] = {}
+    for row in rows:
+        record = records.get(row.raw_record_id)
+        item = items([record]).get(row.position) if record is not None else None
+        if item is not None:
+            found[row.position] = item
+    return found
+
+
+def _by_execution(lookups: Mapping[str, Record]) -> dict[str, Record]:
+    """Each position an order lookup's executions list, with the first lookup listing it."""
+    found: dict[str, Record] = {}
+    for lookup in lookups.values():
+        for item in objects_at(lookup.content, "positionExecutions"):
+            found.setdefault(id_at(lookup, item, "positionId"), lookup)
+    return found
+
+
+def _assemble(
+    position_id: str,
+    pnl: tuple[Record, Item] | None,
+    breakdown: tuple[Record, Item] | None,
+    trades: Mapping[str, Record],
+    lookups: Mapping[str, Record],
+    by_execution: Mapping[str, Record],
+) -> Position:
+    """The position with its close and its order's lookup (by the order id its close or PnL
+    item gives, else the lookup whose executions list it)."""
+    position = Position(position_id, pnl, breakdown, trades.get(position_id))
+    order_id = ""
+    if position.trade is not None:
+        order_id = text_at(position.trade.content, "orderId")
+    elif pnl is not None:
+        order_id = text_at(pnl[1], "orderID")
+    position.lookup = lookups.get(order_id) or by_execution.get(position_id)
+    return position
 
 
 async def positions(
@@ -174,7 +211,7 @@ async def positions(
 ) -> list[Position]:
     """The positions the run applies (module doc). `trades` and `lookups` are every stored
     one (by position and by order id), `given` the position ids this run's trade history and
-    lookups name."""
+    lookups name. An item this run's reports do not give is the latest stored one."""
     ordered = [r.record for r in sorted(reports, key=lambda r: r.order)]
     pnl = _pnl_items(r for r in ordered if r.endpoint == "pnl")
     breakdown = _breakdown_items(r for r in ordered if r.endpoint == "breakdown")
@@ -186,27 +223,14 @@ async def positions(
                 id_at(lookup, item, "positionId")
                 for item in objects_at(lookup.content, "positionExecutions")
             }
-    by_execution: dict[str, Record] = {}
-    for lookup in lookups.values():
-        for item in objects_at(lookup.content, "positionExecutions"):
-            by_execution.setdefault(id_at(lookup, item, "positionId"), lookup)
-    found: list[Position] = []
-    for position_id in sorted(wanted, key=int):
-        position = Position(position_id, pnl.get(position_id), breakdown.get(position_id))
-        position.trade = trades.get(position_id)
-        if not replay:
-            if position.pnl is None:
-                position.pnl = await _stored_item(run, "pnl", position_id)
-            if position.breakdown is None:
-                position.breakdown = await _stored_item(run, "breakdown", position_id)
-        order_id = ""
-        if position.trade is not None:
-            order_id = text_at(position.trade.content, "orderId")
-        elif position.pnl is not None:
-            order_id = text_at(position.pnl[1], "orderID")
-        position.lookup = lookups.get(order_id) or by_execution.get(position_id)
-        found.append(position)
-    return found
+    else:
+        pnl = await _latest_items(run, "pnl") | pnl
+        breakdown = await _latest_items(run, "breakdown") | breakdown
+    by_execution = _by_execution(lookups)
+    return [
+        _assemble(p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution)
+        for p in sorted(wanted, key=int)
+    ]
 
 
 type Settlement = Literal["real", "unsupported", "unknown"]
@@ -417,34 +441,20 @@ async def position(run: Run, position: Position) -> None:
         await trade_row(run, position.trade, closed, instrument_id)
 
 
-async def settlement_unknown(run: Run) -> int:
-    """How many of the connection's positions (closed, or listed in PnL) no source states
-    the settlement of: their PnL and breakdown items, and their order's lookup, as
-    _settlement reads them. Found in full, so the flag clears once a source states it."""
-    found = await run.session.scalar(
-        text(
-            "with known as ("
-            " select position_id, order_id from finance.etoro_trades"
-            " where connection_id = :c and position_id is not null"
-            " union select position_id, order_id from finance.etoro_pnl_positions"
-            " where connection_id = :c),"
-            " ordered as ("
-            " select order_id from finance.etoro_orders"
-            " where connection_id = :c and asset_settlement_type is not null),"
-            " stated as ("
-            " select position_id from finance.etoro_pnl_positions"
-            " where connection_id = :c and settlement_type_id is not null"
-            " union select position_id from finance.etoro_breakdown_positions"
-            " where connection_id = :c and settlement_type is not null"
-            " union select e.position_id from finance.etoro_position_executions e"
-            " where e.connection_id = :c and e.parent_order_id in (select order_id from ordered))"
-            " select count(distinct k.position_id) from known k"
-            " where k.position_id not in (select position_id from stated)"
-            " and (k.order_id is null or k.order_id not in (select order_id from ordered))"
-        ),
-        {"c": run.connection_id},
+async def settlement_unknown(
+    run: Run, trades: Mapping[str, Record], lookups: Mapping[str, Record]
+) -> int:
+    """How many of the connection's positions (closed, or listed in PnL) are `unknown` as
+    _settlement reads them, from everything stored. Found in full, so the flag clears once a
+    source states the settlement."""
+    pnl = await _latest_items(run, "pnl")
+    breakdown = await _latest_items(run, "breakdown")
+    by_execution = _by_execution(lookups)
+    return sum(
+        _settlement(_assemble(p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution))
+        == "unknown"
+        for p in set(trades) | set(pnl)
     )
-    return int(found or 0)
 
 
 async def trade_row(
