@@ -19,6 +19,7 @@ from lararium.modules.finance.readonly_http import (
     ReadOnlyClient,
     ReadOnlyViolation,
     loads_decimal,
+    record_json,
 )
 
 BASE = "https://api.example.test"
@@ -109,6 +110,18 @@ async def test_user_agent_sent() -> None:
     assert request.headers["User-Agent"] == f"Lararium/{__version__}"
     assert request.headers["Authorization"] == KEY
     assert request.url.params["a"] == "1"
+
+
+def test_record_json_keeps_each_number_as_its_text() -> None:
+    value = loads_decimal('{"a": 0.10, "b": 12, "c": [1.5e3, -0], "d": true, "e": null, "f": "x"}')
+    assert record_json(value) == {
+        "a": "0.10",
+        "b": "12",
+        "c": ["1.5E+3", "-0"],
+        "d": True,
+        "e": None,
+        "f": "x",
+    }
 
 
 def test_numbers_are_decimal() -> None:

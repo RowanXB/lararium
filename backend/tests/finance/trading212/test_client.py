@@ -1,6 +1,7 @@
 """The Trading 212 client: Basic auth, its endpoints, and the walk over history pages."""
 
 import base64
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -14,7 +15,12 @@ from lararium.modules.finance.readonly_http import (
     HttpForbiddenError,
     HttpRetryableError,
 )
-from lararium.modules.finance.trading212.client import BASE, MAX_PAGES, Trading212Client
+from lararium.modules.finance.trading212.client import (
+    BASE,
+    MAX_PAGES,
+    HistoryNotEndedError,
+    Trading212Client,
+)
 
 from .fixtures import (
     dumps,
@@ -75,6 +81,13 @@ def orders(*fill_ids: int) -> list[dict[str, Any]]:
     return [order_item(order_id=fill_id - 1000, fill_id=fill_id) for fill_id in fill_ids]
 
 
+async def walk(
+    client: Trading212Client, kind: Any, seen: Callable[[Any], bool], start: str | None = None
+) -> list[dict[str, Any]]:
+    """Every item the walk yields, page by page."""
+    return [item async for page in client.history(kind, seen, start=start) for item in page.items]
+
+
 async def test_basic_auth_header() -> None:
     env = Env(ok(summary_json()))
     summary = await env.client().summary()
@@ -98,7 +111,7 @@ async def test_next_page_forms_and_repeat_stop() -> None:
         ok(last),
         ok(page(orders(7001))),
     )
-    items = await env.client().history("orders", lambda item: False)
+    items = await walk(env.client(), "orders", lambda item: False)
     assert len(env.requests) == 4  # the first, then three after it; the repeat is not followed
     assert {r.url.path for r in env.requests} == {ORDERS}
     assert env.params() == [
@@ -117,7 +130,7 @@ async def test_history_stops_at_seen_page() -> None:
         ok(page(orders(7005, 7004), "?limit=50&cursor=4")),
         ok(page(orders(7003))),
     )
-    items = await env.client().history("orders", lambda item: item["fill"]["id"] in stored)
+    items = await walk(env.client(), "orders", lambda item: item["fill"]["id"] in stored)
     assert len(env.requests) == 2
     assert [item["fill"]["id"] for item in items] == [7007, 7006, 7005, 7004]
 
@@ -127,7 +140,7 @@ async def test_history_ends_at_null_next_page() -> None:
         ok(page([transaction_item("t-2")], "limit=50&cursor=abc")),
         ok(page([transaction_item("t-1")])),
     )
-    items = await env.client().history("transactions", lambda item: False)
+    items = await walk(env.client(), "transactions", lambda item: False)
     assert [item["reference"] for item in items] == ["t-2", "t-1"]
     assert env.requests[1].url.path == "/api/v0/equity/history/transactions"
 
@@ -149,7 +162,7 @@ async def test_history_ends_at_null_next_page() -> None:
 async def test_unexpected_next_page_path_refused(next_page_path: str) -> None:
     env = Env(ok(page(orders(7009), next_page_path)))
     with pytest.raises(HttpRetryableError, match="unexpected next page path"):
-        await env.client().history("orders", lambda item: False)
+        await walk(env.client(), "orders", lambda item: False)
     assert len(env.requests) == 1
 
 
@@ -162,15 +175,18 @@ async def test_history_that_does_not_end_fails() -> None:
 
     env = Env()
     env.handler = handler  # type: ignore[method-assign]
-    with pytest.raises(HttpRetryableError, match="history did not end"):
-        await env.client().history("orders", lambda item: False)
+    with pytest.raises(HttpRetryableError, match="history did not end") as raised:
+        await walk(env.client(), "orders", lambda item: False)
     assert next(counter) == MAX_PAGES
+    # The page after the last one fetched, for the next sync to go on from.
+    assert isinstance(raised.value, HistoryNotEndedError)
+    assert raised.value.resume == f"?limit=50&cursor={MAX_PAGES - 1}"
 
 
 async def test_missing_scope_names_permission() -> None:
     env = Env(forbidden("history:orders"))
     with pytest.raises(HttpForbiddenError) as raised:
-        await env.client().history("orders", lambda item: False)
+        await walk(env.client(), "orders", lambda item: False)
     assert raised.value.scope == "history:orders"
 
     assert await Env(forbidden("pies:read")).client().pies() is None
@@ -227,23 +243,22 @@ async def test_wrong_shape_refused() -> None:
     with pytest.raises(HttpError, match="positions"):
         await Env(ok({"items": []})).client().positions()
     with pytest.raises(HttpError, match="history/orders"):
-        await (
-            Env(ok({"items": {}, "nextPagePath": None}))
-            .client()
-            .history("orders", lambda item: False)
-        )
+        await walk(Env(ok({"items": {}, "nextPagePath": None})).client(), "orders", lambda i: False)
 
 
 async def test_history_paced_to_its_limit() -> None:
     pages = [ok(page(orders(8000 - n), f"?limit=50&cursor={n}")) for n in range(21)]
     env = Env(*pages, ok(page(orders(1))))
-    await env.client().history("orders", lambda item: False)
+    await walk(env.client(), "orders", lambda item: False)
     assert len(env.requests) == 22
     # 20 a minute: the 21st request waited for the first to leave the window.
     assert env.now >= Decimal(1060)
 
 
-@pytest.mark.parametrize("pie_id", [Decimal("9001.5"), Decimal("NaN"), True])
+@pytest.mark.parametrize(
+    "pie_id",
+    [Decimal("9001.5"), Decimal("NaN"), True, Decimal("1E30"), Decimal("1E1000000"), 0, -5, 10**19],
+)
 async def test_pie_refuses_an_id_that_is_not_whole(pie_id: Any) -> None:
     env = Env(ok({"instruments": [], "settings": {"id": 9001}}))
     with pytest.raises(ValueError, match="whole number"):
@@ -255,3 +270,39 @@ async def test_pie_takes_the_lists_decimal_id() -> None:
     env = Env(ok({"instruments": [], "settings": {"id": 9001}}))
     await env.client().pie(Decimal("9001"))
     assert env.requests[0].url.path == "/api/v0/equity/pies/9001"
+
+
+async def test_history_yields_each_page_with_its_query() -> None:
+    env = Env(
+        ok(page(orders(7009), "?limit=50&cursor=9")),
+        ok(page(orders(7008))),
+    )
+    pages = [p async for p in env.client().history("orders", lambda item: False)]
+    assert [p.params for p in pages] == [{"limit": "50"}, {"limit": "50", "cursor": "9"}]
+    assert [[i["fill"]["id"] for i in p.items] for p in pages] == [[7009], [7008]]
+
+
+async def test_history_goes_on_from_a_next_page_path() -> None:
+    env = Env(ok(page(orders(7004), "?limit=50&cursor=3")), ok(page(orders(7003))))
+    items = await walk(env.client(), "orders", lambda item: False, start="limit=50&cursor=4")
+    assert env.params() == [{"limit": "50", "cursor": "4"}, {"limit": "50", "cursor": "3"}]
+    assert [item["fill"]["id"] for item in items] == [7004, 7003]
+
+
+async def test_history_refuses_a_bad_start_before_sending() -> None:
+    env = Env(ok(page(orders(7004))))
+    with pytest.raises(HttpRetryableError, match="unexpected next page path"):
+        await walk(env.client(), "orders", lambda item: False, start="//evil.test/x?cursor=1")
+    assert env.requests == []
+
+
+async def test_seen_is_asked_of_every_item_of_a_page() -> None:
+    asked: list[Any] = []
+
+    def seen(item: dict[str, Any]) -> bool:
+        asked.append(item["fill"]["id"])
+        return False
+
+    env = Env(ok(page(orders(7009, 7008, 7007), "?cursor=7")), ok(page(orders(7006))))
+    await walk(env.client(), "orders", seen)
+    assert asked == [7009, 7008, 7007]

@@ -21,6 +21,7 @@ import httpx
 
 from lararium import __version__
 from lararium.core.errors import CredentialRejectedError, DisplayableError
+from lararium.core.json_types import JSONValue as RecordJSON
 
 USER_AGENT = f"Lararium/{__version__}"
 
@@ -103,6 +104,18 @@ def loads_decimal(text: str) -> JSONValue:
         JSONValue,
         json.loads(text, parse_float=Decimal, parse_int=Decimal, parse_constant=_refuse_constant),
     )
+
+
+def record_json(value: JSONValue) -> RecordJSON:
+    """The value as a raw record stores it: every number its Decimal's exact text, since a
+    record's JSON takes no Decimal (lararium.core.json_types). Nothing else changes."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, list):
+        return [record_json(item) for item in value]
+    if isinstance(value, dict):
+        return {key: record_json(item) for key, item in value.items()}
+    return value
 
 
 def _refuse_constant(name: str) -> object:

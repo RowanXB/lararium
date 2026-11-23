@@ -1,0 +1,530 @@
+"""The Trading 212 sync: every item stored as a raw record, history walked newest first."""
+
+import base64
+import json
+import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from functools import partial
+from typing import Any
+
+import httpx
+import pytest
+from pydantic import SecretStr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from lararium.config import Settings
+from lararium.core.actors import Actor
+from lararium.core.commands import CommandContext
+from lararium.core.connections import (
+    ConnectionRecord,
+    create_connection,
+    get_connection,
+    store_credential,
+)
+from lararium.core.connectors import SyncContext
+from lararium.core.errors import CredentialRejectedError
+from lararium.core.json_types import JSONValue
+from lararium.modules import registry
+from lararium.modules.finance.trading212 import client as client_module
+from lararium.modules.finance.trading212 import sync as t212_sync
+from lararium.modules.finance.trading212.client import Trading212Client
+from lararium.modules.finance.trading212.normalize import NORMALIZER_VERSION, NormalizeReport
+from lararium.modules.finance.trading212.sync import Trading212Connector
+from lararium.worker import jobs
+
+from .fixtures import (
+    ACCOUNT_ID,
+    dividend_item,
+    dumps,
+    instrument_json,
+    order_item,
+    page,
+    pie_json,
+    position_json,
+    summary_json,
+    transaction_item,
+)
+
+KEY = bytes(range(32))
+API_KEY = "k" * 30 + "-synthetic-t212-key"
+API_SECRET = "s" * 30 + "-synthetic-t212-secret"
+CONNECTOR = Actor("connector", "trading212")
+SETTINGS = Settings(
+    database_url="postgresql+psycopg://x@localhost/x",
+    auth_mode="dev",
+    master_key=SecretStr(base64.b64encode(KEY).decode()),
+)
+API = "/api/v0/equity"
+HISTORY = {kind: f"{API}/history/{kind}" for kind in ("orders", "dividends", "transactions")}
+METADATA = {f"{API}/metadata/instruments", f"{API}/metadata/exchanges", f"{API}/pies"}
+
+
+class RecordingNotifier:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, text: str) -> None:
+        self.messages.append(text)
+
+
+def orders(*fill_ids: int) -> list[dict[str, Any]]:
+    return [order_item(order_id=fill_id - 200000, fill_id=fill_id) for fill_id in fill_ids]
+
+
+def dividends(*refs: str) -> list[dict[str, Any]]:
+    return [dividend_item(reference=ref) for ref in refs]
+
+
+def transactions(*refs: str) -> list[dict[str, Any]]:
+    return [transaction_item(reference=ref) for ref in refs]
+
+
+class FakeTrading212:
+    """Trading 212's API: each history a list of pages linked by `cursor`, newest first."""
+
+    def __init__(self) -> None:
+        self.summary = summary_json()
+        self.positions = [position_json()]
+        self.pending: list[dict[str, Any]] = []
+        self.history: dict[str, list[list[dict[str, Any]]]] = {
+            "orders": [orders(700004, 700003), orders(700002, 700001)],
+            "dividends": [dividends("div-0002", "div-0001")],
+            "transactions": [transactions("tx-0002", "tx-0001")],
+        }
+        self.instruments = [instrument_json()]
+        self.exchanges = [{"id": Decimal(71), "name": "NYSE", "workingSchedules": []}]
+        self.pies = [pie_json(9001)]
+        self.pie_detail = {"instruments": [], "settings": {"id": Decimal(9001), "name": "P"}}
+        self.refuse: dict[str, httpx.Response] = {}
+        self.requests: list[httpx.Request] = []
+        # A fake clock that sleeping advances: pacing waits cost no real time.
+        self.now = Decimal(1000)
+
+    async def sleep(self, seconds: int) -> None:
+        self.now += seconds
+
+    def clock(self) -> Decimal:
+        return self.now
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if path in self.refuse:
+            return self.refuse[path]
+        for kind, history_path in HISTORY.items():
+            if path == history_path:
+                pages = self.history[kind]
+                n = int(request.url.params.get("cursor", "0"))
+                next_path = f"limit=50&cursor={n + 1}" if n + 1 < len(pages) else None
+                return self._ok(page(pages[n], next_path))
+        bodies: dict[str, Any] = {
+            f"{API}/account/summary": self.summary,
+            f"{API}/positions": self.positions,
+            f"{API}/orders": self.pending,
+            f"{API}/metadata/instruments": self.instruments,
+            f"{API}/metadata/exchanges": self.exchanges,
+            f"{API}/pies": self.pies,
+            f"{API}/pies/9001": self.pie_detail,
+        }
+        if path not in bodies:
+            raise AssertionError(f"unexpected request to {path}")
+        return self._ok(bodies[path])
+
+    @staticmethod
+    def _ok(body: Any) -> httpx.Response:
+        return httpx.Response(200, text=dumps(body))
+
+    def paths(self) -> list[str]:
+        return [r.url.path for r in self.requests]
+
+    def cursors(self, kind: str) -> list[int]:
+        """The page numbers asked of a history, in order."""
+        return [
+            int(r.url.params.get("cursor", "0"))
+            for r in self.requests
+            if r.url.path == HISTORY[kind]
+        ]
+
+
+@pytest.fixture
+def api(monkeypatch) -> FakeTrading212:
+    fake = FakeTrading212()
+    monkeypatch.setattr(
+        t212_sync,
+        "Trading212Client",
+        partial(Trading212Client, sleep=fake.sleep, clock=fake.clock, wall_clock=fake.clock),
+    )
+    return fake
+
+
+async def _connection(run, *, cursor: JSONValue = None, credentials: bool = True):
+    async def setup(ctx: CommandContext) -> ConnectionRecord:
+        connection = await create_connection(
+            ctx,
+            connector="trading212",
+            display_name="Trading 212 Invest",
+            config={"account_kind": "invest"},
+        )
+        if credentials:
+            await store_credential(ctx, KEY, connection.id, "api_key", API_KEY, None)
+            await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
+        await ctx.session.execute(
+            text(
+                "update core.connections set status = 'healthy', cursor = cast(:c as jsonb)"
+                " where id = :id"
+            ),
+            {"c": json.dumps(cursor), "id": connection.id},
+        )
+        return connection
+
+    return await run(setup)
+
+
+async def _set_cursor(session, connection, cursor: JSONValue) -> None:
+    await session.execute(
+        text("update core.connections set cursor = cast(:c as jsonb) where id = :id"),
+        {"c": json.dumps(cursor), "id": connection.id},
+    )
+
+
+async def _sync(session, connection, api: FakeTrading212) -> JSONValue:
+    """One sync, called directly, as the worker would in its command."""
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
+        ctx = SyncContext(
+            command=CommandContext(session, CONNECTOR, uuid.uuid4()),
+            connection=await get_connection(session, connection.id),
+            sync_id=uuid.uuid4(),
+            master_key=KEY,
+            http=http,
+            notifier=RecordingNotifier(),
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+        cursor = await Trading212Connector().sync(ctx)
+    await _set_cursor(session, connection, cursor)
+    return cursor
+
+
+async def _run_sync(session, connection, api: FakeTrading212, notifier=None) -> ConnectionRecord:
+    """One sync through the worker job, which records its outcome."""
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
+        await jobs.run_sync(
+            session,
+            connection.id,
+            settings=SETTINGS,
+            http=http,
+            notifier=notifier or RecordingNotifier(),
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+    return await get_connection(session, connection.id)
+
+
+async def _records(session, connection, record_type: str | None = None) -> list[Any]:
+    sql = (
+        "select record_type, request, content from core.raw_records where connection_id = :c"
+        + (" and record_type = :t" if record_type else "")
+        + " order by record_type, fetched_at, id"
+    )
+    params: dict[str, Any] = {"c": connection.id}
+    if record_type:
+        params["t"] = record_type
+    return list((await session.execute(text(sql), params)).all())
+
+
+def _fill_ids(rows: list[Any]) -> list[str]:
+    return [row.content["fill"]["id"] for row in rows]
+
+
+def _ago(**delta: float) -> str:
+    return (datetime.now(UTC) - timedelta(**delta)).isoformat()
+
+
+def _later_cursor(**overrides: Any) -> dict[str, Any]:
+    """A cursor of a sync that has seen the fake API's default history."""
+    return {
+        "account_id": str(ACCOUNT_ID),
+        "metadata_at": _ago(hours=1),
+        "rewalk_at": _ago(days=1),
+        "seen": {"orders": "700004", "dividends": "div-0002", "transactions": "tx-0002"},
+        "resume": {},
+        **overrides,
+    }
+
+
+async def test_first_sync_walks_everything_and_stores_raw(session, run, api) -> None:
+    api.pending = [{"id": Decimal(55), "ticker": "ZZQA_US_EQ", "side": "BUY", "status": "NEW"}]
+    connection = await _connection(run)
+    before = datetime.now(UTC)
+    cursor = await _sync(session, connection, api)
+
+    rows = await _records(session, connection)
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.record_type] = counts.get(row.record_type, 0) + 1
+    assert counts == {
+        "trading212.summary": 1,
+        "trading212.position": 1,
+        "trading212.pending_order": 1,
+        "trading212.order": 4,
+        "trading212.dividend": 2,
+        "trading212.transaction": 2,
+        "trading212.instrument": 1,
+        "trading212.exchange": 1,
+        "trading212.pie": 1,
+        "trading212.pie_detail": 1,
+    }
+    # The first sync reads every page.
+    assert api.cursors("orders") == [0, 1]
+
+    # The item as sent; every number its exact text (the raw record's JSON takes no Decimal).
+    [summary] = await _records(session, connection, "trading212.summary")
+    assert summary.content["id"] == str(ACCOUNT_ID)
+    assert summary.content["totalValue"] == "1250.75"
+    assert summary.content["cash"]["reservedForOrders"] == "0"
+    assert summary.request == {"endpoint": f"{API}/account/summary", "params": {}}
+    order_rows = await _records(session, connection, "trading212.order")
+    assert sorted(_fill_ids(order_rows)) == ["700001", "700002", "700003", "700004"]
+    second_page = next(r for r in order_rows if r.content["fill"]["id"] == "700001")
+    assert second_page.request == {
+        "endpoint": HISTORY["orders"],
+        "params": {"limit": "50", "cursor": "1"},
+    }
+    assert second_page.content["fill"]["walletImpact"]["fxRate"] == "0.8"
+    assert second_page.content["order"]["extendedHours"] is False
+    [detail] = await _records(session, connection, "trading212.pie_detail")
+    assert detail.request == {"endpoint": f"{API}/pies/9001", "params": {}}
+
+    # Never a key in what is stored.
+    stored = json.dumps([[r.request, r.content] for r in rows])
+    assert API_KEY not in stored and API_SECRET not in stored
+
+    assert isinstance(cursor, dict)
+    assert cursor["account_id"] == str(ACCOUNT_ID)
+    assert cursor["seen"] == {
+        "orders": "700004",
+        "dividends": "div-0002",
+        "transactions": "tx-0002",
+    }
+    assert cursor["resume"] == {}
+    for key in ("metadata_at", "rewalk_at"):
+        assert isinstance(cursor[key], str)
+        assert datetime.fromisoformat(cursor[key]) >= before
+
+
+async def test_later_sync_stops_at_seen(session, run, api) -> None:
+    api.history["orders"] = [
+        orders(700006, 700005),
+        orders(700004, 700003),
+        orders(700002, 700001),
+    ]
+    api.history["dividends"] = [dividends("div-0003", "div-0002"), dividends("div-0001")]
+    connection = await _connection(run, cursor=_later_cursor())
+    cursor = await _sync(session, connection, api)
+
+    # The page holding the newest item seen before is not all seen; the one after it is.
+    assert api.cursors("orders") == [0, 1]
+    assert api.cursors("dividends") == [0, 1]
+    assert api.cursors("transactions") == [0]
+    assert sorted(_fill_ids(await _records(session, connection, "trading212.order"))) == [
+        "700003",
+        "700004",
+        "700005",
+        "700006",
+    ]
+    # Metadata and pies are a day's, and fetched an hour ago.
+    assert not METADATA & set(api.paths())
+    assert isinstance(cursor, dict)
+    assert cursor["seen"] == {
+        "orders": "700006",
+        "dividends": "div-0003",
+        "transactions": "tx-0002",
+    }
+
+
+async def test_newest_order_without_a_fill_keeps_the_newest_fill(session, run, api) -> None:
+    cancelled = order_item(order_id=500099, fill_id=None)
+    api.history["orders"] = [[cancelled, *orders(700005, 700004)], orders(700003)]
+    connection = await _connection(run, cursor=_later_cursor())
+    cursor = await _sync(session, connection, api)
+    assert isinstance(cursor, dict)
+    assert cursor["seen"]["orders"] == "700005"
+    assert api.cursors("orders") == [0, 1]
+
+
+async def test_weekly_rewalk(session, run, api) -> None:
+    api.history["orders"] = [orders(700004), orders(700003), orders(700002), orders(700001)]
+    old = _ago(days=8)
+    connection = await _connection(run, cursor=_later_cursor(rewalk_at=old))
+    before = datetime.now(UTC)
+    cursor = await _sync(session, connection, api)
+    # Every page again, though the first holds only what was seen.
+    assert api.cursors("orders") == [0, 1, 2, 3]
+    assert api.cursors("dividends") == [0]
+    assert isinstance(cursor, dict)
+    assert isinstance(cursor["rewalk_at"], str)
+    assert datetime.fromisoformat(cursor["rewalk_at"]) >= before
+
+    # Six days on, the walk stops at what was seen again.
+    api.requests.clear()
+    connection = await _connection(run, cursor=_later_cursor(rewalk_at=_ago(days=6)))
+    await _sync(session, connection, api)
+    assert api.cursors("orders") == [0]
+
+
+async def test_metadata_and_pies_daily(session, run, api) -> None:
+    connection = await _connection(run, cursor=_later_cursor(metadata_at=_ago(hours=25)))
+    before = datetime.now(UTC)
+    cursor = await _sync(session, connection, api)
+    assert METADATA | {f"{API}/pies/9001"} <= set(api.paths())
+    assert isinstance(cursor, dict)
+    assert isinstance(cursor["metadata_at"], str)
+    assert datetime.fromisoformat(cursor["metadata_at"]) >= before
+
+    api.requests.clear()
+    await _sync(session, connection, api)
+    assert not METADATA & set(api.paths())
+
+
+async def test_a_key_without_optional_permissions_skips_them(session, run, api) -> None:
+    for path, scope in ((f"{API}/orders", "orders:read"), (f"{API}/pies", "pies:read")):
+        api.refuse[path] = httpx.Response(403, text=f"Scope( {scope} ) missing for API key")
+    connection = await _connection(run)
+    after = await _run_sync(session, connection, api)
+    assert after.status == "healthy"
+    types = {row.record_type for row in await _records(session, connection)}
+    assert "trading212.pending_order" not in types
+    assert "trading212.pie" not in types
+    assert "trading212.instrument" in types
+
+
+async def test_401_needs_reauth(session, run, api) -> None:
+    api.refuse[f"{API}/account/summary"] = httpx.Response(401, text="Unauthorized")
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.status == "needs_reauth"
+    assert len(notifier.messages) == 1
+    for secret in (API_KEY, API_SECRET):
+        assert secret not in notifier.messages[0]
+        assert secret not in (after.last_error or "")
+
+
+async def test_missing_required_scope_fails_naming_it(session, run, api) -> None:
+    api.refuse[HISTORY["orders"]] = httpx.Response(
+        403, text="Scope( history:orders ) missing for API key"
+    )
+    connection = await _connection(run)
+    after = await _run_sync(session, connection, api)
+    assert after.status == "failing"
+    assert after.last_error == "Trading 212 key lacks the history:orders permission"
+    # The sync rolled back: nothing it stored before the refusal is kept.
+    assert await _records(session, connection) == []
+
+
+async def test_account_id_mismatch_refused(session, run, api) -> None:
+    connection = await _connection(run, cursor=_later_cursor(account_id="10000002"))
+    after = await _run_sync(session, connection, api)
+    assert after.last_error == "this key belongs to another Trading 212 account"
+    assert after.status == "needs_reauth"
+    # Nothing past the summary is asked, and nothing stored.
+    assert api.paths() == [f"{API}/account/summary"]
+    assert await _records(session, connection) == []
+
+
+async def test_missing_credentials_are_rejected(session, run, api) -> None:
+    connection = await _connection(run, credentials=False)
+    with pytest.raises(CredentialRejectedError, match="Trading 212 API key or secret"):
+        await _sync(session, connection, api)
+    assert api.requests == []
+
+
+async def test_history_longer_than_the_cap_finishes_over_two_syncs(
+    session, run, api, monkeypatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_PAGES", 3)
+    api.history["orders"] = [orders(700000 + 2 * n, 700000 + 2 * n - 1) for n in range(5, 0, -1)]
+    every = sorted(str(item["fill"]["id"]) for p in api.history["orders"] for item in p)
+    connection = await _connection(run)
+
+    first = await _sync(session, connection, api)
+    assert api.cursors("orders") == [0, 1, 2]
+    assert isinstance(first, dict)
+    # What was fetched is kept, and the walk goes on next time from the page after it.
+    assert len(await _records(session, connection, "trading212.order")) == 6
+    assert first["resume"] == {"orders": "limit=50&cursor=3"}
+    assert first["seen"]["orders"] == "700010"
+
+    api.requests.clear()
+    second = await _sync(session, connection, api)
+    # Newest first, stopping at what was seen; then on from where the first sync stopped.
+    assert api.cursors("orders") == [0, 3, 4]
+    assert isinstance(second, dict)
+    assert second["resume"] == {}
+    assert second["seen"]["orders"] == "700010"
+    assert sorted(_fill_ids(await _records(session, connection, "trading212.order"))) == every
+
+    api.requests.clear()
+    await _sync(session, connection, api)
+    assert api.cursors("orders") == [0]
+
+
+async def test_a_rewalk_that_reaches_the_end_drops_the_resume(session, run, api) -> None:
+    api.history["orders"] = [orders(700004), orders(700003)]
+    cursor = _later_cursor(rewalk_at=_ago(days=8), resume={"orders": "limit=50&cursor=1"})
+    connection = await _connection(run, cursor=cursor)
+    after = await _sync(session, connection, api)
+    assert api.cursors("orders") == [0, 1]
+    assert isinstance(after, dict)
+    assert after["resume"] == {}
+
+
+async def test_a_repeated_item_is_stored_once(session, run, api) -> None:
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    first = await _records(session, connection)
+    # A re-walk a week on, metadata and pies due again: the same items, nothing new.
+    await _set_cursor(
+        session, connection, _later_cursor(rewalk_at=_ago(days=8), metadata_at=_ago(days=2))
+    )
+    api.requests.clear()
+    await _sync(session, connection, api)
+    assert api.cursors("orders") == [0, 1]
+    assert await _records(session, connection) == first
+
+
+def test_connector_identity_and_registration() -> None:
+    connector = Trading212Connector()
+    assert (connector.name, connector.version) == ("trading212", "trading212-sync-1")
+    assert connector.capabilities == {"balances", "holdings", "transactions"}
+    assert isinstance(registry.connector("trading212"), Trading212Connector)
+
+
+async def test_check_access_is_true(session, run, api) -> None:
+    connection = await _connection(run)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api.handler)) as http:
+        ctx = SyncContext(
+            command=CommandContext(session, CONNECTOR, uuid.uuid4()),
+            connection=await get_connection(session, connection.id),
+            sync_id=uuid.uuid4(),
+            master_key=KEY,
+            http=http,
+            notifier=RecordingNotifier(),
+            session_factory=async_sessionmaker(bind=session.bind),
+        )
+        assert await Trading212Connector().check_access(ctx) is True
+    assert api.requests == []
+
+
+async def test_normalize_is_called_and_reports_nothing_yet(session, run, api, monkeypatch) -> None:
+    called: list[int] = []
+
+    async def spy(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        called.append(len(raw_record_ids))
+        return NormalizeReport()
+
+    monkeypatch.setattr(t212_sync, "normalize", spy)
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    assert called == [len(await _records(session, connection))]
+    assert NORMALIZER_VERSION == "trading212-norm-1"

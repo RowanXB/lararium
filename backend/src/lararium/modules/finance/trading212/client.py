@@ -2,12 +2,14 @@
 
 Every call goes through `ReadOnlyClient`: GET only, to live.trading212.com only, no
 redirects, paced per endpoint. The key and secret are sent as HTTP Basic and never kept
-revealed. History endpoints are walked newest first by following `nextPagePath`.
+revealed. History endpoints are walked newest first by following `nextPagePath`, one page at
+a time, so a caller stores each page as it arrives.
 """
 
 import asyncio
 import base64
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, cast
 from urllib.parse import parse_qsl
@@ -64,6 +66,30 @@ LIMITS: Mapping[str, RateLimit] = {
     "pie": RateLimit(1, 5),
 }
 _NEXT_PAGE = "unexpected next page path"
+_PIE_ID = "a Trading 212 pie id is a whole number"
+# A pie id is below this, as the migration's ids are (at most 19 digits).
+_ID_BOUND = 10**19
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    items: list[Item]
+    # The query this page was fetched with.
+    params: dict[str, str]
+
+
+class HistoryNotEndedError(HttpRetryableError):
+    """A walk reached MAX_PAGES. Every page before was yielded; `resume` is the next page's
+    path (already checked), to go on from in a later walk."""
+
+    def __init__(self, resume: str) -> None:
+        super().__init__("history did not end")
+        self.resume = resume
+
+
+def endpoint_path(endpoint: str) -> str:
+    """An endpoint's path (`summary` → `/api/v0/equity/account/summary`)."""
+    return _ENDPOINTS[endpoint][0]
 
 
 def _basic(key: Secret, secret: Secret) -> str:
@@ -174,35 +200,49 @@ class Trading212Client:
         return None if found is None else _objects(found, "pies")
 
     async def pie(self, pie_id: int | Decimal) -> Item | None:
-        """One pie's detail. `pie_id` is the list's `id`, a whole number (a Decimal as
-        parsed); any other value raises `ValueError` rather than asking for another pie."""
+        """One pie's detail. `pie_id` is the list's `id`, a whole number from 1 to 19 digits (a
+        Decimal as parsed); any other value raises `ValueError` rather than asking for another
+        pie. The size is checked before converting: a huge exponent would build a huge int."""
         if isinstance(pie_id, bool) or (
             isinstance(pie_id, Decimal)
-            and (not pie_id.is_finite() or pie_id != pie_id.to_integral_value())
+            and (
+                not pie_id.is_finite()
+                or pie_id.adjusted() >= 19
+                or pie_id != pie_id.to_integral_value()
+            )
         ):
-            raise ValueError("a Trading 212 pie id is a whole number")
-        found = await self._optional("pie", f"/{int(pie_id)}")
+            raise ValueError(_PIE_ID)
+        whole = int(pie_id)
+        if not 0 < whole < _ID_BOUND:
+            raise ValueError(_PIE_ID)
+        found = await self._optional("pie", f"/{whole}")
         return None if found is None else _object(found, "pies/{id}")
 
-    async def history(self, kind: HistoryKind, seen: Callable[[Item], bool]) -> list[Item]:
-        """Every item of a history endpoint, newest first, until `nextPagePath` is null, a
-        page holds only `seen` items (or none), or a page repeats the one before it."""
+    async def history(
+        self, kind: HistoryKind, seen: Callable[[Item], bool], *, start: str | None = None
+    ) -> AsyncIterator[HistoryPage]:
+        """A history endpoint's pages, newest first, from the first page or from `start` (a
+        `nextPagePath` given before), until `nextPagePath` is null, a page holds only `seen`
+        items (or none), or a page repeats the one before it. `seen` is asked of every item of
+        a page, in order. After MAX_PAGES pages it raises `HistoryNotEndedError`."""
         path, _ = _ENDPOINTS[kind]
         endpoint = f"history/{kind}"
-        params: dict[str, str] = {"limit": str(PAGE_LIMIT)}
-        items: list[Item] = []
+        params = {"limit": str(PAGE_LIMIT)} if start is None else _next_params(path, start)
         previous: list[Item] | None = None
+        resume = ""
         for _ in range(MAX_PAGES):
             body = _object(await self._get(kind, params=params), endpoint)
             page = _objects(body.get("items"), endpoint)
             next_page_path = body.get("nextPagePath")
             if page == previous:
-                return items
-            items.extend(page)
-            if next_page_path is None or all(seen(item) for item in page):
-                return items
+                return
+            yield HistoryPage(page, params)
+            # A list, not a generator: `all` would stop asking at the first unseen item.
+            if next_page_path is None or all([seen(item) for item in page]):
+                return
             if not isinstance(next_page_path, str):
                 raise HttpError(f"Trading 212's {endpoint} answer has an unexpected shape")
             params = _next_params(path, next_page_path)
             previous = page
-        raise HttpRetryableError("history did not end")
+            resume = next_page_path
+        raise HistoryNotEndedError(resume)
