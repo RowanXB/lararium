@@ -417,6 +417,27 @@ async def test_a_new_asset_with_no_record_is_a_difference_not_an_opening(
     assert len(_told(notifier)) == 1
 
 
+async def test_a_trade_of_assets_first_seen_in_its_sync_is_fetched_by_it(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # The Spot account is first reported by the sync that first sees AAA and BBB: its read and
+    # its deposit record name them, so that sync walks their symbol too.
+    _pairs(fake, ("AAA", "BBB"))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    fake.add("deposits", _deposit(0, clock.ms + HOUR_MS, "10", coin="BBB"))
+    fake.add(
+        "my-trades", _trade(0, clock.ms + 2 * HOUR_MS, "AAABBB", buyer=True, qty="3", price="2")
+    )
+    fake.set_rows("spot-account", _spot(("AAA", "3"), ("BBB", "4")))
+
+    await _later(session, connection, fake, clock)
+
+    assert await _openings_of(session, connection.id, "AAA") == []
+    assert await _openings_of(session, connection.id, "BBB") == []
+    assert await _differences(session, connection.id) == []
+
+
 async def test_a_new_asset_bought_is_neither_a_difference_nor_an_opening(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:

@@ -371,6 +371,11 @@ class BinanceConnector:
         flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
         touched = set((await normalize(ctx, flags=flags, reads=settled, daily=first)).touched)
+        # This sync's reads and records are seen only once reported and normalised: a symbol
+        # they complete is walked now, not a sync later (Decision 7: every asset ever seen).
+        if not first and (more := await _completed(ctx, info, symbols)):
+            await walk_trades(ctx, client, TRADES_LABEL, more)
+            touched |= (await normalize(ctx, reads=settled)).touched
         touched |= await opening(ctx)
         # The first sync asked every symbol from its first trade: a sweep finds nothing more.
         if not first and await sweep(ctx, client, info, await differences(ctx, touched)):
@@ -398,6 +403,11 @@ class BinanceConnector:
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
+
+
+async def _completed(ctx: SyncContext, info: ApiValue, walked: list[str]) -> list[str]:
+    """The symbols both of whose assets are seen now and that this sync has not walked."""
+    return [s for s in trade_symbols(info, await assets_seen(ctx)) if s not in walked]
 
 
 async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:
