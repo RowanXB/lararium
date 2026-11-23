@@ -52,8 +52,16 @@ def _integer(label: str, path: str | None, value: ApiValue) -> int:
     return int(number)
 
 
+def moment(ms: int) -> datetime:
+    """An epoch-millisecond time as a UTC datetime."""
+    return _EPOCH + timedelta(milliseconds=ms)
+
+
 def _moment_ms(label: str, path: str | None, value: ApiValue) -> datetime:
-    return _EPOCH + timedelta(milliseconds=_integer(label, path, value))
+    try:
+        return moment(_integer(label, path, value))
+    except OverflowError:
+        raise _fail(label, path) from None
 
 
 def _moment_text(label: str, path: str | None, value: ApiValue) -> datetime:
@@ -63,6 +71,18 @@ def _moment_text(label: str, path: str | None, value: ApiValue) -> datetime:
         except ValueError:
             raise _fail(label, path) from None
     return _moment_ms(label, path, value)
+
+
+def time_value(label: str, path: str, value: ApiValue) -> datetime:
+    """A catalogue time field (epoch ms, as a number or digits, or Binance's UTC
+    `YYYY-MM-DD HH:MM:SS`) as a UTC datetime; anything else is a `BinanceDataError` naming the
+    label and field, never the value."""
+    return _moment_text(label, path, value)
+
+
+def decimal_value(label: str, path: str, value: ApiValue) -> Decimal:
+    """A catalogue amount as a finite `Decimal`; anything else is a `BinanceDataError`."""
+    return _decimal(label, path, value)
 
 
 def _text(label: str, path: str | None, value: ApiValue) -> str:

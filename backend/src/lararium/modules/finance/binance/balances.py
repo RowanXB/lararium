@@ -14,7 +14,7 @@ Nothing here logs or reports an amount, an address or a hash: a flag names a wal
 import hashlib
 import json
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -51,14 +51,14 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import asset
-from lararium.modules.finance.binance.parse import ApiValue, Row, parse
+from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Row, as_api, parse
+from lararium.modules.finance.binance.tables import moment
 from lararium.modules.finance.errors import AccountNotFoundError
 from lararium.modules.finance.snapshots import record_snapshot
 
 type Flag = Callable[[str], None]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-_TEXT_TIME = "%Y-%m-%d %H:%M:%S"
 # Times Binance gives to the second may be up to a second early (plan Decision 9).
 MARGIN = timedelta(seconds=2)
 ROUNDS = 3
@@ -83,10 +83,6 @@ _DAILY = "snapshot"
 _DAILY_SPOT = "SPOT"
 
 
-def moment(ms: int) -> datetime:
-    return _EPOCH + timedelta(milliseconds=ms)
-
-
 def millis(at: datetime) -> int:
     return (at - _EPOCH) // timedelta(milliseconds=1)
 
@@ -94,16 +90,16 @@ def millis(at: datetime) -> int:
 @dataclass(frozen=True)
 class Read:
     """One balance request (all its pages) and its bracket on Binance's clock: `read_from` just
-    before it was sent, `read_to` just after its answer (plan Decision 9)."""
+    before it was sent, `read_to` just after its answer (plan Decision 9).
+
+    `unclear`: a movement still fell into it after every round (`settle_reads`); its report is
+    stored, but no snapshot is cut from it."""
 
     label: str
     body: JSONValue
     read_from: datetime
     read_to: datetime
-
-
-def _api(body: JSONValue) -> ApiValue:
-    return cast(ApiValue, body)
+    unclear: bool = False
 
 
 def _merge(label: str, pages: list[ApiValue]) -> ApiValue:
@@ -172,11 +168,12 @@ def ambiguous(read: Read, record_times: Collection[datetime]) -> bool:
     return any(low <= at <= high for at in record_times)
 
 
-def _time_paths(label: str) -> list[list[str]]:
-    """Every time field of a label's record (a deposit's `insertTime` and `completeTime`), as
-    the keys from the record to it: each is a moment the balance may have moved."""
+def _time_paths(label: str) -> list[tuple[str, list[str]]]:
+    """Every time field of a label's record (a deposit's `insertTime` and `completeTime`): its
+    catalogue path and the keys from the record to it. Each is a moment the balance may have
+    moved."""
     root = layout.root_scope(label)
-    paths: list[list[str]] = []
+    paths: list[tuple[str, list[str]]] = []
     for field in FIELDS[label]:
         if field.type not in ("time_ms", "time_text"):
             continue
@@ -184,20 +181,8 @@ def _time_paths(label: str) -> list[list[str]]:
         rest = tokens[len(root) :]
         if tokens[: len(root)] != root or any(t == "[]" or t.startswith("<") for t in rest):
             continue
-        paths.append(list(rest))
+        paths.append((field.path, list(rest)))
     return paths
-
-
-def _parse_time(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    value = value.strip()
-    if value.lstrip("-").isdigit():
-        return moment(int(value))
-    try:
-        return datetime.strptime(value, _TEXT_TIME).replace(tzinfo=UTC)
-    except ValueError:
-        return None
 
 
 async def record_times(ctx: SyncContext) -> list[datetime]:
@@ -221,11 +206,15 @@ async def record_times(ctx: SyncContext) -> list[datetime]:
                     "c": ctx.connection.id,
                     "s": ctx.sync_id,
                     "t": record_type(label),
-                    **{f"p{i}": path for i, path in enumerate(paths)},
+                    **{f"p{i}": keys for i, (_, keys) in enumerate(paths)},
                 },
             )
             for times in result:
-                found += [at for value in times if (at := _parse_time(value)) is not None]
+                for (path, _), value in zip(paths, times, strict=True):
+                    # An absent time (a deposit not yet complete) is no time; one that cannot
+                    # be read fails the sync, naming the field, rather than drop out unseen.
+                    if value is not None:
+                        found.append(tables.time_value(label, path, value))
     return found
 
 
@@ -237,7 +226,8 @@ async def settle_reads(
     symbols: Sequence[str] = (),
 ) -> dict[str, Read | None]:
     """Make the ambiguous reads again, then walk the history labels forwards again (and the
-    trades of `symbols`), at most 3 rounds; a read still ambiguous after them maps to None.
+    trades of `symbols`), at most 3 rounds; a read still ambiguous after them is the last one
+    made, marked `unclear`.
 
     Only the reads a snapshot comes from are made again; every other read is kept as it is.
     Each read made again is stored as a raw record, as the first one was.
@@ -262,29 +252,55 @@ async def settle_reads(
         settled.update(again)
         pending = [label for label in pending if ambiguous(again[label], times)]
     for label in pending:
-        settled[label] = None
+        read = settled[label]
+        if read is not None:
+            settled[label] = replace(read, unclear=True)
     return settled
 
 
 # Each wallet's balance per asset.
 
 
-def _number(value: ApiValue) -> Decimal:
-    if value is None or isinstance(value, bool):
+def _amount(label: str, path: str, value: ApiValue) -> Decimal:
+    """An amount field: absent is 0 only where the catalogue says it may be absent; a value
+    that is not a finite number is a `BinanceDataError` naming the field."""
+    if value is None:
+        if _REQUIRED[label].get(path, False):
+            raise BinanceDataError(label, path)
         return Decimal(0)
-    return Decimal(str(value))
+    return tables.decimal_value(label, path, value)
 
 
-def _sum(row: Mapping[str, ApiValue], names: Sequence[str]) -> Decimal:
-    return sum((_number(row.get(name)) for name in names), Decimal(0))
-
-
-def _per_asset(entries: Sequence[ApiValue | Row], names: Sequence[str]) -> dict[str, Decimal]:
+def _per_asset(
+    label: str, prefix: str, entries: Sequence[ApiValue | Row], names: Sequence[str]
+) -> dict[str, Decimal]:
+    """Quantity per asset code of the entries at `prefix` (`balances[].`): the sum of `names`."""
     held: dict[str, Decimal] = {}
     for entry in entries:
-        if isinstance(entry, dict) and isinstance(code := entry.get("asset"), str):
-            held[code] = held.get(code, Decimal(0)) + _sum(entry, names)
+        if not isinstance(entry, dict):
+            raise BinanceDataError(label, prefix.rstrip("."))
+        code = entry.get("asset")
+        if not isinstance(code, str):
+            raise BinanceDataError(label, f"{prefix}asset")
+        total = sum((_amount(label, prefix + name, entry.get(name)) for name in names), Decimal(0))
+        held[code] = held.get(code, Decimal(0)) + total
     return held
+
+
+_REQUIRED = {label: {f.path: f.required for f in fields} for label, fields in FIELDS.items()}
+_WALLET_NAME = "[].walletName"
+_NAME_MAX = 64
+
+
+def wallet_name_of(row: Row) -> str:
+    """A wallet list row's `walletName`, bounded before it names a wallet key, an account and
+    a flag: stripped, 1 to 64 printable characters; anything else is a `BinanceDataError`
+    naming the field, never the value."""
+    name = row.get("walletName")
+    name = name.strip() if isinstance(name, str) else ""
+    if not 0 < len(name) <= _NAME_MAX or not name.isprintable():
+        raise BinanceDataError(WALLET_LIST, _WALLET_NAME)
+    return name
 
 
 def _listed(row: Row) -> list[ApiValue]:
@@ -301,29 +317,37 @@ class _Wallet:
 
 
 def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
-    """Each wallet whose source read is clear, with its quantity per asset (design 5.6)."""
+    """Each wallet whose source read is clear (not None, not `unclear`), with its quantity per
+    asset (design 5.6)."""
     wallets: list[_Wallet] = []
+    reads = {label: read for label, read in reads.items() if read is not None and not read.unclear}
     spot = reads.get("spot-account")
     if spot is not None:
-        rows = parse(spot.label, _api(spot.body)).rows
-        wallets.append(_Wallet("spot", spot, _per_asset(list(rows), _SPOT_FIELDS)))
+        rows = parse(spot.label, as_api(spot.body)).rows
+        held = _per_asset(spot.label, "balances[].", list(rows), _SPOT_FIELDS)
+        wallets.append(_Wallet("spot", spot, held))
     funding = reads.get("funding-asset")
     if funding is not None:
-        rows = parse(funding.label, _api(funding.body)).rows
-        wallets.append(_Wallet("funding", funding, _per_asset(list(rows), _HELD_FIELDS)))
+        rows = parse(funding.label, as_api(funding.body)).rows
+        held = _per_asset(funding.label, "[].", list(rows), _HELD_FIELDS)
+        wallets.append(_Wallet("funding", funding, held))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
-        for row in parse(listed.label, _api(listed.body)).rows:
-            key = wallet_key(str(row["walletName"]))
+        for row in parse(listed.label, as_api(listed.body)).rows:
+            key = wallet_key(wallet_name_of(row))
             if key not in OWN_SOURCES:
-                wallets.append(_Wallet(key, listed, _per_asset(_listed(row), _HELD_FIELDS)))
+                wallets.append(_Wallet(key, listed, _listed_held(row)))
     return wallets
 
 
+def _listed_held(row: Row) -> dict[str, Decimal]:
+    return _per_asset(WALLET_LIST, "[].assetBalances[].", _listed(row), _HELD_FIELDS)
+
+
 def _listed_non_zero(row: Row) -> bool:
-    if _number(row.get("balance")) != 0:
+    if _amount(WALLET_LIST, "[].balance", row.get("balance")) != 0:
         return True
-    return any(quantity != 0 for quantity in _per_asset(_listed(row), _HELD_FIELDS).values())
+    return any(quantity != 0 for quantity in _listed_held(row).values())
 
 
 def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> list[str]:
@@ -332,7 +356,7 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
     disagrees with its own source."""
     flags: list[str] = []
     for row in wallet_balance:
-        name = str(row["walletName"])
+        name = wallet_name_of(row)
         if name not in WALLETS:
             flags.append(f"unknown wallet {name}")
         key = wallet_key(name)
@@ -371,7 +395,7 @@ async def store_reports(
         digest = _digest(label, read.body)
         if digests.get(label) == digest:
             continue
-        body = _api(read.body)
+        body = as_api(read.body)
         key = {"connection_id": connection.id, "snapshot_at": read.read_from}
         for record in tables.records(label, parse(label, body)):
             await tables.store(ctx, label, key, record, {"read_to": read.read_to})
@@ -463,14 +487,21 @@ async def report_balances(
     """The typed report tables, then one `reported` snapshot per wallet and asset held, at the
     `read_from` of the read its balance came from; what it wrote, by (wallet key, instrument).
 
-    A wallet whose source read is None is skipped. An instrument whose latest snapshot is not
-    zero and that the wallet no longer holds gets a snapshot of 0. An asset never held gets
-    none, and a wallet that holds nothing gets no account. `flag` is told about the wallet list
+    A wallet whose source read is None or `unclear` gets no snapshot (an unclear read's report
+    is stored). An instrument whose latest snapshot is not zero and that the wallet no longer
+    holds gets a snapshot of 0. An asset never held gets none, and a wallet that holds nothing
+    gets no account. `flag` is told about the wallet list
     (`wallet_flags`) and what `asset` flags.
     """
     flag = flag or (lambda _: None)
-    await store_reports(ctx, connection, reads)
+    listed = reads.get(WALLET_LIST)
+    if listed is not None:
+        # A wallet's name becomes a key, an account and a flag: it is checked before anything
+        # of the read is written.
+        for row in parse(listed.label, as_api(listed.body)).rows:
+            wallet_name_of(row)
     wallets = _wallets(reads)
+    await store_reports(ctx, connection, reads)
     assets = _Assets(ctx, connection, flag)
     await assets.resolve({code for w in wallets for code, q in w.held.items() if q != 0})
 
@@ -492,9 +523,8 @@ async def report_balances(
             await _snapshot(ctx, account, instrument, quantity, wallet.read.read_from)
             written[(wallet.key, instrument)] = quantity
 
-    listed = reads.get(WALLET_LIST)
-    if listed is not None:
-        for name in wallet_flags(parse(listed.label, _api(listed.body)).rows, derived):
+    if listed is not None and not listed.unclear:
+        for name in wallet_flags(parse(listed.label, as_api(listed.body)).rows, derived):
             flag(name)
     return written
 
@@ -547,7 +577,9 @@ async def backfill_daily_snapshots(
         data = row.get("data")
         balances = data.get("balances") if isinstance(data, dict) else None
         entries = balances if isinstance(balances, list) else []
-        days.append((moment(int(str(row["updateTime"]))), _per_asset(entries, _SPOT_FIELDS)))
+        at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
+        held = _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
+        days.append((at, held))
     days.sort(key=lambda day: day[0])
     assets = _Assets(ctx, connection, flag)
     await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})

@@ -5,8 +5,7 @@ Nothing here logs or reports a row's values, the key, an address or a hash.
 """
 
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
-from typing import cast
+from datetime import datetime, timedelta
 
 from lararium.core.commands import command_context
 from lararium.core.connections import load_credential, update_config
@@ -49,22 +48,18 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import assets_seen as seen
-from lararium.modules.finance.binance.parse import ApiValue, parse
+from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
+from lararium.modules.finance.binance.tables import moment
 
 # Permissions a reading key may have; any other that is true refuses the sync.
 HARMLESS_TRUE = frozenset({"enableReading", "ipRestrict"})
 DUE_AFTER = timedelta(hours=4)
 FIRST_SYNC_DONE_KEY = "first_sync_done"
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 GATE_LABEL = "api-restrictions"
 ACCOUNT_LABEL = "spot-account"
 COIN_CONFIG_LABEL = "coin-config"
 EXCHANGE_INFO_LABEL = "exchange-info"
-
-
-def _at(ms: int) -> datetime:
-    return _EPOCH + timedelta(milliseconds=ms)
 
 
 def due(cursor: JSONValue, now: datetime, requested: bool) -> bool:
@@ -75,7 +70,7 @@ def due(cursor: JSONValue, now: datetime, requested: bool) -> bool:
     fetched_at = cursor.get("fetched_at") if isinstance(cursor, dict) else None
     if not isinstance(fetched_at, int) or isinstance(fetched_at, bool):
         return True
-    return now - _at(fetched_at) >= DUE_AFTER
+    return now - moment(fetched_at) >= DUE_AFTER
 
 
 def _first_true(value: ApiValue) -> str | None:
@@ -168,7 +163,7 @@ class BinanceConnector:
         client = await open_client(ctx, clock=self._clock, sleep=self._sleep)
         await client.sync_clock()
         gate = (await read_balances(client, [GATE_LABEL]))[GATE_LABEL]
-        problem = gate_problem(_api(gate.body))
+        problem = gate_problem(as_api(gate.body))
         if problem is not None:
             raise CredentialRejectedError(f"this key can do more than read: {problem}")
         return client, gate
@@ -181,11 +176,11 @@ class BinanceConnector:
     async def sync(self, ctx: SyncContext) -> JSONValue:
         connection = ctx.connection
         now_ms = self._clock()
-        if not due(connection.cursor, _at(now_ms), ctx.requested):
+        if not due(connection.cursor, moment(now_ms), ctx.requested):
             return connection.cursor
         client, gate = await self._gated_client(ctx)
         account = (await read_balances(client, [ACCOUNT_LABEL]))[ACCOUNT_LABEL]
-        uid = parse(ACCOUNT_LABEL, _api(account.body)).body
+        uid = parse(ACCOUNT_LABEL, as_api(account.body)).body
         uid = uid.get("uid") if isinstance(uid, dict) else None
         if uid is None or str(uid) != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
@@ -198,7 +193,7 @@ class BinanceConnector:
             await walk(ctx, client, label)
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
-        info = _api(reference[EXCHANGE_INFO_LABEL].body)
+        info = as_api(reference[EXCHANGE_INFO_LABEL].body)
         symbols = trade_symbols(info, await assets_seen(ctx), everything=first)
         await walk_trades(ctx, client, TRADES_LABEL, symbols)
 
@@ -231,10 +226,6 @@ class BinanceConnector:
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
-
-
-def _api(body: JSONValue) -> ApiValue:
-    return cast(ApiValue, body)
 
 
 async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:

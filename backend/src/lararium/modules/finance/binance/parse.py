@@ -14,8 +14,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import cache
+from typing import cast
 
 from lararium.core.errors import DisplayableError
+from lararium.core.json_types import JSONValue
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS, Field
 
 # What `BinanceClient.call` returns: JSON, with every number that has a fraction a Decimal.
@@ -86,6 +88,11 @@ def schema(label: str) -> Node:
         assert node.path == spec.path, spec.path
         node.field = spec
     return root
+
+
+def as_api(value: JSONValue) -> ApiValue:
+    """A stored answer (decimals as strings) as the parser takes it: every JSON value is one."""
+    return cast(ApiValue, value)
 
 
 @dataclass

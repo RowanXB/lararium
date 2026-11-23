@@ -17,7 +17,6 @@ import json
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
@@ -31,7 +30,7 @@ from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import ApiValue, Row, parse
-from lararium.modules.finance.binance.tables import store_response
+from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
@@ -50,7 +49,6 @@ LOOKBACK_MARGIN_MS = 60_000
 FIRST_SYNC_ONLY = frozenset({"snapshot"})
 RECORD_NAMES = {"my-trades": "spot_trade"}
 TRADES_LABEL = "my-trades"
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The phases built so far: what a sync reads (kind account, balance or position) and walks.
 BALANCE_LABELS = [
@@ -199,7 +197,7 @@ async def commit(
         ]
         for page in responses:
             if page.label in layout.TABLE_LABELS:
-                window = (_moment(page.start), _moment(page.end))
+                window = (moment(page.start), moment(page.end))
                 await store_response(
                     cmd, connection_id, page.label, page.body, window=window, page=page.index
                 )
@@ -233,10 +231,6 @@ def _contents(endpoint: Endpoint, rows: Sequence[Row]) -> list[JSONValue]:
         seen[canonical] += 1
         contents.append({"row": row, "occurrence": seen[canonical]})
     return contents
-
-
-def _moment(ms: int) -> datetime:
-    return _EPOCH + timedelta(milliseconds=ms)
 
 
 async def _ask(

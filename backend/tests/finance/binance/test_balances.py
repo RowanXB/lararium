@@ -21,7 +21,7 @@ from lararium.modules.finance.binance.balances import (
     wallet_flags,
 )
 from lararium.modules.finance.binance.fetch import to_json, walk
-from lararium.modules.finance.binance.parse import ApiValue
+from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError
 
 from .fixtures import HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
 from .syncing import (
@@ -217,6 +217,7 @@ async def test_read_still_ambiguous_after_three_rounds_writes_no_snapshot(
     def busy(asked: int) -> None:
         # A deposit inside every Spot read, and none near the other reads.
         fake.add("deposits", _deposit(100 + asked, clock.ms, "1"))
+        fake.set_rows("spot-account", _spot(("AAA", str(11 + asked), "0")))
         clock.ms += 10_000
 
     fake.when_asked("spot-account", busy)
@@ -225,6 +226,12 @@ async def test_read_still_ambiguous_after_three_rounds_writes_no_snapshot(
     await run_binance_sync(session, connection.id, fake.handler)
 
     assert len(fake.calls("spot-account")) == 4
+    # The unclear read's report is still stored typed; only its snapshot is held back.
+    reported = await session.scalar(
+        text("select max(snapshot_at) from finance.binance_spot_account where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert reported > first[3]
     snapshots = await _snapshots(session, connection.id)
     assert [s for s in snapshots if s[0] == "Binance Spot"] == [first]
     # The other wallets are cut as usual.
@@ -256,15 +263,17 @@ async def test_second_precision_times_use_the_margin(
         shown = before.strftime("%Y-%m-%d %H:%M:%S")
         fake.add("withdrawals", build_row("withdrawals", applyTime=shown, completeTime=shown))
         await walk(ctx, client, "withdrawals")
+        # The read made again starts more than 2 s after the withdrawal: one round settles it.
+        clock.ms += 1_000
 
         settled = await settle_reads(ctx, client, reads)
 
     # The withdrawal is 1.5 s before the read, inside the 2 s margin.
     assert read.read_from - before == timedelta(milliseconds=1500)
     assert ambiguous(read, [before])
-    assert len(fake.calls("spot-account")) >= 2
+    assert len(fake.calls("spot-account")) == 2
     again = settled["spot-account"]
-    assert again is not None and again.read_from > read.read_from
+    assert again is not None and again.read_from > read.read_from and not again.unclear
 
 
 def test_ambiguous_is_the_bracket_widened_by_two_seconds() -> None:
@@ -578,3 +587,118 @@ async def test_a_sync_stores_the_reference_reports_once(
         {"c": connection.id},
     )
     assert set(kinds) == {"fiat"}
+
+
+async def test_an_unclear_read_stores_its_report_but_no_snapshot(session, run) -> None:
+    connection = await binance_connection(run)
+    read = _read("spot-account", _spot(("AAA", "1", "0")))
+    unclear = Read(read.label, read.body, read.read_from, read.read_to, unclear=True)
+
+    assert await _report(run, connection, {"spot-account": unclear}) == {}
+
+    assert await _snapshots(session, connection.id) == []
+    assert await _count(session, "binance_spot_account_balances", connection.id) == 1
+
+
+# Unreadable data fails closed, naming the field and never the value.
+
+
+async def _settle_after(session, run, fake: FakeBinance, clock: Clock, label: str, row: dict):
+    connection = await binance_connection(run, config=later_config())
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        reads = await read_balances(client, ["spot-account"])
+        fake.add(label, row)
+        await walk(ctx, client, label)
+        return await settle_reads(ctx, client, reads)
+
+
+@pytest.mark.parametrize(
+    ("label", "field", "overrides"),
+    [
+        ("withdrawals", "[].completeTime", {"completeTime": "23/11/2026 10:00"}),
+        ("deposits", "[].completeTime", {"completeTime": 10**20}),
+    ],
+)
+async def test_an_unreadable_record_time_fails_naming_the_field(
+    session, run, fake: FakeBinance, clock: Clock, label: str, field: str, overrides: dict
+) -> None:
+    at = NOW_MS - HOUR_MS
+    times = {"applyTime": _text_time(at)} if label == "withdrawals" else {"insertTime": at}
+    row = build_row(label, 0, **times, **overrides)
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _settle_after(session, run, fake, clock, label, row)
+
+    assert (caught.value.label, caught.value.field) == (label, field)
+    assert str(next(iter(overrides.values()))) not in str(caught.value)
+
+
+async def test_an_absent_optional_time_is_no_time(session, run, fake: FakeBinance, clock) -> None:
+    row = build_row("deposits", 0, insertTime=NOW_MS - HOUR_MS, completeTime=None)
+
+    settled = await _settle_after(session, run, fake, clock, "deposits", row)
+
+    assert settled["spot-account"] is not None and not settled["spot-account"].unclear
+
+
+def _text_time(ms: int) -> str:
+    return _at(ms).strftime("%Y-%m-%d %H:%M:%S")
+
+
+@pytest.mark.parametrize(
+    ("change", "field"),
+    [
+        ({"updateTime": 10**20}, "snapshotVos[].updateTime"),
+        ({"free": "abc"}, "snapshotVos[].data.balances[].free"),
+    ],
+)
+async def test_an_unreadable_daily_snapshot_fails_naming_the_field(
+    run, change: dict, field: str
+) -> None:
+    connection = await binance_connection(run)
+    row = _daily("SPOT", NOW_MS - 1_000, ("AAA", "1"))
+    if "free" in change:
+        row["data"]["balances"][0]["free"] = change["free"]
+    else:
+        row.update(change)
+
+    with pytest.raises(BinanceDataError) as caught:
+        await run(backfill_daily_snapshots, connection, [row], flag=lambda _: None)
+
+    assert (caught.value.label, caught.value.field) == ("snapshot", field)
+    assert "abc" not in str(caught.value) and str(10**20) not in str(caught.value)
+
+
+async def test_a_spot_amount_that_is_no_number_fails(run) -> None:
+    connection = await binance_connection(run)
+    read = _read("spot-account", [build_row("spot-account", asset="AAA", free=True, locked="0")])
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _report(run, connection, {"spot-account": read})
+
+    assert caught.value.label == "spot-account"
+
+
+async def test_an_unknown_wallet_name_is_stripped(session, run) -> None:
+    connection = await binance_connection(run)
+    flags: list[str] = []
+    wallets = _read("wallet-balance", [_wallet("  Lucky Box  ", ("AAA", "4"))])
+
+    await _report(run, connection, {"wallet-balance": wallets}, flags)
+
+    assert flags == ["unknown wallet Lucky Box"]
+    assert [w for w, *_ in await _snapshots(session, connection.id)] == ["Binance Lucky Box"]
+
+
+@pytest.mark.parametrize("name", ["x" * 65, "Lucky\nBox", "Lucky\x00Box", "   "])
+async def test_a_wallet_name_that_cannot_name_an_account_fails(session, run, name: str) -> None:
+    connection = await binance_connection(run)
+    wallets = _read("wallet-balance", [_wallet(name, ("AAA", "4"))])
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _report(run, connection, {"wallet-balance": wallets})
+
+    assert (caught.value.label, caught.value.field) == ("wallet-balance", "[].walletName")
+    assert not name.strip() or name.strip() not in str(caught.value)
