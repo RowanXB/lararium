@@ -165,7 +165,7 @@ async def publish_flags(
         checked,
         cursor=cursor,
         prefix=FLAGGED_PREFIX,
-        label="Trading 212",
+        label="a Trading 212",
         own=_own,
     )
 

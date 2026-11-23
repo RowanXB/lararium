@@ -911,3 +911,61 @@ async def test_statement_flags_published_once(session, run, api, tmp_path) -> No
     after = await _run_sync(session, connection, api, sync_notifier)
     assert after.warnings == [flag]
     assert sync_notifier.messages == []
+
+
+async def test_an_upload_during_a_sync_keeps_its_flag(
+    session, run, api, tmp_path, monkeypatch
+) -> None:
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    created = today() - timedelta(days=30)
+
+    def statement(closed: dict[str, str]) -> bytes:
+        return build_statement(
+            summary(
+                start=_statement_moment(created, "00:00:00"),
+                end=_statement_moment(today(), "23:59:59"),
+                created=_statement_moment(created),
+            ),
+            [],
+            [closed],
+        )
+
+    events: list[str] = []
+    lock, publish = etoro_sync.lock_connection, etoro_sync.publish_flags
+
+    async def locking(ctx: Any, connection_id: uuid.UUID) -> Any:
+        events.append("lock")
+        return await lock(ctx, connection_id)
+
+    async def publishing(ctx: SyncContext, found: Any, checked: Any) -> dict[str, JSONValue]:
+        events.append("publish")
+        return await publish(ctx, found, checked)
+
+    async def normalize(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        # The owner uploads a statement while the sync runs, after it read its cursor.
+        if not events:
+            events.append("upload")
+            await _ingest(
+                session, connection, statement({**closed_row(), "Brand New Column": "7"}), tmp_path
+            )
+        return NormalizeReport()
+
+    monkeypatch.setattr(etoro_sync, "lock_connection", locking)
+    monkeypatch.setattr(etoro_sync, "publish_flags", publishing)
+    monkeypatch.setattr(etoro_sync, "normalize", normalize)
+    flag = "eToro flagged: Closed Positions.Brand New Column"
+    after = await _run_sync(session, connection, api)
+    # The sync locks the row before it reads the flags it publishes, and its cursor keeps the
+    # upload's flag rather than the one it began with.
+    assert events == ["upload", "lock", "publish", "lock", "publish"]
+    assert after.warnings == [flag]
+    assert after.cursor["flags"] == {"statement": ["Closed Positions.Brand New Column"]}
+    assert after.cursor["notified"] == ["Closed Positions.Brand New Column"]
+
+    # Its cause gone (a statement without the column), the flag clears.
+    await _ingest(session, connection, statement(closed_row()), tmp_path)
+    after = await get_connection(session, connection.id)
+    assert after.warnings == []
+    assert isinstance(after.cursor, dict) and after.cursor["flags"] == {}

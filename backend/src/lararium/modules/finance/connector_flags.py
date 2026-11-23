@@ -51,8 +51,8 @@ async def publish_flags(
     every other warning as the connection stands now. `found`: (part, reason) of this run;
     `checked`: the parts it decided. `cursor`: the flags and notifications as the run began, or
     None to read them as the connection stands now (a run that is not a sync, or one that must
-    see what an upload published meanwhile). `label` names the connector in a failed send's log
-    line. Returns the cursor's `flags` and `notified`."""
+    see what an upload published meanwhile). `label` names the connector with its article ("an
+    eToro"), for a failed send's log line. Returns the cursor's `flags` and `notified`."""
     connection = await get_connection(ctx.command.session, ctx.connection.id)
     if cursor is None:
         cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
@@ -74,7 +74,7 @@ async def publish_flags(
             notified = reasons
         except Exception as error:
             # The class only: the message could carry the notifier's webhook URL.
-            logger.warning("sending a %s notification failed (%s)", label, type(error).__name__)
+            logger.warning("sending %s notification failed (%s)", label, type(error).__name__)
     kept = {reason for old in before.values() for reason in old}
     previous = connection.warnings
     warnings = [

@@ -228,7 +228,7 @@ async def publish_flags(
     not `checked` keeps its flags (a sync keeps the statement's, an upload the normalizer's
     unless it replayed). Returns the cursor's `flags` and `notified`."""
     return await connector_flags.publish_flags(
-        ctx, found, checked, cursor=None, prefix=FLAGGED_PREFIX, label="eToro"
+        ctx, found, checked, cursor=None, prefix=FLAGGED_PREFIX, label="an eToro"
     )
 
 
@@ -571,6 +571,9 @@ class EtoroConnector:
         after = await run.sync(datetime.now(UTC))
         report = await normalize(ctx, list(dict.fromkeys(run.ids)))
         checked = {FIELDS} if report.replayed else set[str]()
+        # Locked until the sync commits its cursor: an upload's flags published meanwhile are
+        # read here, never overwritten after (the upload waits for the lock).
+        await lock_connection(ctx.command, connection.id)
         after |= await publish_flags(ctx, {(FIELDS, flag) for flag in report.flagged}, checked)
         return after
 
@@ -586,8 +589,8 @@ def _parse_alone(body: bytes) -> EtoroStatement:
 
 
 async def _latest_report(ctx: SyncContext, record_type: str) -> Mapping[str, JSONValue] | None:
-    """The content of the report record of this type a sync saw last (a refused key's `/me`,
-    never sighted, does not count)."""
+    """The content of the report record of this type a sync saw last: only sighted records
+    count, so a refused key (stored as `etoro.refused_key`, never sighted) has no say."""
     content = await ctx.command.session.scalar(
         text(
             "select r.content from core.raw_records r"
