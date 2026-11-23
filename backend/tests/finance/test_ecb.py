@@ -125,7 +125,6 @@ async def test_a_failed_or_malformed_response_raises() -> None:
     "body",
     [
         '{"base": "EUR", "rates": {"2026-11-11": {"GBP": 0.87}}}',  # after the range
-        '{"base": "EUR", "rates": {"2026-11-09": {"GBP": 0.87}}}',  # before the range
         '{"base": "USD", "rates": {"2026-11-10": {"GBP": 0.87}}}',
         '{"rates": {"2026-11-10": {"GBP": 0.87}}}',
         '{"amount": 100, "base": "EUR", "rates": {"2026-11-10": {"GBP": 0.87}}}',
@@ -135,6 +134,72 @@ async def test_a_response_that_is_not_what_was_asked_for_raises(body: str) -> No
     async with client(lambda _: httpx.Response(200, text=body)) as http:
         with pytest.raises(ValueError):
             await fetch_rates(http, DAY, DAY)
+
+
+def like_frankfurter(request: httpx.Request) -> httpx.Response:
+    """What Frankfurter answers: a GBP rate for every working day of the range and, for a range
+    that starts on a weekend, the working day before it first."""
+    first, last = (date.fromisoformat(d) for d in request.url.path.removeprefix("/v1/").split(".."))
+    days = [first + timedelta(days=n) for n in range((last - first).days + 1)]
+    published = [d for d in days if d.weekday() < 5]
+    if first.weekday() >= 5:
+        published.insert(0, first - timedelta(days=first.weekday() - 4))
+    return httpx.Response(200, text=frankfurter({str(d): {"GBP": "0.87"} for d in published}))
+
+
+async def test_a_day_before_the_range_is_skipped() -> None:
+    saturday, sunday, monday = date(2026, 11, 7), date(2026, 11, 8), date(2026, 11, 9)
+    async with client(like_frankfurter) as http:
+        # Frankfurter answers a weekend with Friday's rates.
+        assert await fetch_rates(http, saturday, sunday) == {}
+        got = await fetch_rates(http, saturday, monday)
+    assert got == {monday: {"GBP": Decimal("0.87")}}
+
+
+async def test_a_weekend_neither_fails_nor_stalls_the_job(session, run, make_account, gbp) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    friday, monday, tuesday = date(2026, 11, 6), date(2026, 11, 9), date(2026, 11, 10)
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return like_frankfurter(request)
+
+    await post_gbp(run, make_account, gbp, at(2026, 11, 6))
+    for today in (friday, date(2026, 11, 7), date(2026, 11, 8), monday, tuesday):
+        async with client(handler) as http:
+            await run_fetch_ecb_rates(sessions, http, today)
+    assert requested == [
+        "/v1/2026-11-06..2026-11-06",
+        "/v1/2026-11-07..2026-11-07",
+        "/v1/2026-11-07..2026-11-08",
+        "/v1/2026-11-07..2026-11-09",
+        "/v1/2026-11-10..2026-11-10",
+    ]
+    assert [r.as_of_date for r in await rows(session, "ecb")] == [friday, monday, tuesday]
+
+
+async def test_a_backfill_window_starting_on_a_weekend_is_stored(
+    session, run, make_account, gbp
+) -> None:
+    sessions = async_sessionmaker(bind=session.bind, join_transaction_mode="create_savepoint")
+    first = date(2025, 12, 29)
+    # The 90-day windows from this Monday start on a Sunday, then on a Saturday.
+    await post_gbp(run, make_account, gbp, at(first.year, first.month, first.day))
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return like_frankfurter(request)
+
+    async with client(handler) as http:
+        written = await run_fetch_ecb_rates(sessions, http, DAY)
+
+    assert requested[1:3] == ["/v1/2026-03-29..2026-06-26", "/v1/2026-06-27..2026-09-24"]
+    stored = [r.as_of_date for r in await rows(session, "ecb")]
+    days = [first + timedelta(days=n) for n in range((DAY - first).days + 1)]
+    assert stored == [d for d in days if d.weekday() < 5]
+    assert written == len(stored)
 
 
 async def test_a_404_means_no_rates_in_the_range() -> None:

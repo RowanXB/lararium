@@ -47,7 +47,8 @@ FETCHED_THROUGH_KEY = "finance.ecb.fetched_through"
 async def fetch_rates(
     http: httpx.AsyncClient, start: date, end: date
 ) -> dict[date, dict[str, Decimal]]:
-    """The ECB's EUR rates for every working day from start to end, by day and currency."""
+    """The ECB's EUR rates for every working day from start to end, by day and currency; a day
+    before `start` in the answer is left out, one after `end` is a malformed answer."""
     response = await http.get(
         f"{FRANKFURTER_URL}/{start.isoformat()}..{end.isoformat()}", params={"base": BASE_CURRENCY}
     )
@@ -72,8 +73,12 @@ async def fetch_rates(
         if not isinstance(by_currency, dict):
             raise ValueError("the ECB response has a malformed day")
         parsed_day = date.fromisoformat(day)
-        if not start <= parsed_day <= end:
-            raise ValueError("the ECB response has a day outside the range asked for")
+        if parsed_day > end:
+            raise ValueError("the ECB response has a day after the range asked for")
+        if parsed_day < start:
+            # Frankfurter answers a range that starts on a weekend or holiday with the working
+            # day before it as well: that day is not in the range, so it is not this window's.
+            continue
         parsed[parsed_day] = {
             code: _rate(value) for code, value in cast(dict[str, object], by_currency).items()
         }
