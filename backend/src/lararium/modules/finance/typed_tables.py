@@ -7,7 +7,7 @@ value, which may be the owner's data.
 """
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -37,13 +37,14 @@ def column_name(path: str) -> str:
     return _NOT_ALPHANUMERIC.sub("_", _CAMEL.sub("_", path).lower()).strip("_")
 
 
-def column_map(paths: Iterable[str]) -> dict[str, str]:
+def column_map(paths: Iterable[str], name: Callable[[str], str] = column_name) -> dict[str, str]:
     """Path to column for a source's known fields. `column_name` is lossy, so two distinct paths
-    that give one column raise, naming both: the second would overwrite the first."""
+    that give one column raise, naming both: the second would overwrite the first. `name` is the
+    caller's own rule when it has one."""
     owner: dict[str, str] = {}
     columns: dict[str, str] = {}
     for path in paths:
-        column = column_name(path)
+        column = name(path)
         if not column:
             raise ValueError(f"{path!r} has no column name")
         if owner.setdefault(column, path) != path:

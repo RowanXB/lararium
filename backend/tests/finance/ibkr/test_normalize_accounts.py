@@ -446,7 +446,26 @@ def test_known_attributes_map_to_distinct_columns() -> None:
 
 
 async def test_typed_values_refuses_attributes_that_alias_one_column(session) -> None:
-    with pytest.raises(FlexDataError, match=r"^Section: 'fxRate' and 'fx_rate' are both column"):
+    with pytest.raises(FlexDataError) as error:
         await typed_values(
-            session, "ibkr_nav", "Section", {"fxRate": "1", "fx_rate": "2", "total": "3"}
+            session, "ibkr_nav", "Section", {"fxRate": "111", "fx_rate": "222", "total": "333"}
+        )
+    assert str(error.value) == "Section: 'fxRate' and 'fx_rate' are both column fx_rate"
+
+
+async def test_typed_values_collisions_use_the_table_aware_names(session) -> None:
+    # On a ledger-row table IBKR's transactionID is the column ibkr_transaction_id, so an
+    # attribute that is literally that name collides with it; on another table they differ.
+    row = {"transactionID": "1", "ibkrTransactionId": "2"}
+    with pytest.raises(FlexDataError) as error:
+        await typed_values(session, "ibkr_trades", "Trade", row)
+    assert (
+        str(error.value)
+        == "Trade: 'transactionID' and 'ibkrTransactionId' are both column ibkr_transaction_id"
+    )
+    assert column_name("ibkr_nav", "transactionID") == "transaction_id"
+    assert column_name("ibkr_trades", "transaction_id") == "ibkr_transaction_id"
+    with pytest.raises(FlexDataError, match="both column ibkr_transaction_id"):
+        await typed_values(
+            session, "ibkr_trades", "Trade", {"transactionID": "1", "transaction_id": "2"}
         )

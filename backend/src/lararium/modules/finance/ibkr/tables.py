@@ -95,7 +95,7 @@ async def typed_values(
     types = await typed_tables.column_types(session, table)
     try:
         # Two attributes of a row giving one column would overwrite each other.
-        typed_tables.column_map(attributes)
+        typed_tables.column_map(attributes, lambda attribute: column_name(table, attribute))
     except ValueError as error:
         raise FlexDataError(f"{section}: {error}") from None
     values: dict[str, object] = {}
