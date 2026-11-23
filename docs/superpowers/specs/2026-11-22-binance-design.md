@@ -140,15 +140,16 @@ The probe sent only queries, with a key that had only "Enable Reading", and prin
 
 **Order of a sync:**
 1. The gate (§5.1), then server time (`/api/v3/time`) for the clock offset.
-2. Balances of every wallet (§5.6). The moment before this step is the report's `as_of`.
-3. Records, oldest window first, each endpoint from its own cursor (below).
-4. Prices (§5.10), then normalising, opening adjustments (§5.8), reconciliation (§5.11) and `heal_transfers`.
+2. Balances of every wallet (§5.6), each request with its own cutoff.
+3. Records, each endpoint from its own cursor (below).
+4. Any balance read that a record's time falls into is repeated (§5.6).
+5. Prices (§5.10), then normalising, opening adjustments (§5.8), reconciliation (§5.11) and `heal_transfers`.
 
-**When a sync is due.** When the last successful one is at least 4 hours old. "Sync now" always runs.
+**When a sync is due.** When the last successful one is at least 4 hours old. "Sync now" always runs: the owner's request is carried to the sync, which the connector framework does not do today (it queues the same job as the scheduler), so M7 adds that. Monzo and IBKR ignore it and behave as before.
 
 **Cursors.** One per endpoint (and per symbol for trades): `fetched_to`. A later sync asks from `fetched_to − 7 days`, in windows of the endpoint's maximum span; rows repeated by the overlap are written once (§5.3). The 7 days catch a status that changes later (a deposit confirming, a withdrawal failing).
 
-**First sync.** Each history endpoint is walked back in its maximum windows to the earlier of July 2017 (Binance's launch) and its documented lookback. A refused window (older than the endpoint allows) ends that endpoint's walk and is not an error. The daily Spot, Margin and Futures snapshots of the last 30 days are fetched once. The first sync is resumable: cursors are saved per endpoint, so an interrupted backfill continues where it stopped.
+**First sync.** Each history endpoint is walked backwards, newest window first, in its maximum windows, to the earlier of July 2017 (Binance's launch) and its documented lookback. A refused window older than one that was answered means the endpoint's history ends there: it ends that endpoint's walk and is not an error. Walking backwards is what makes that safe, since everything newer is already stored. An empty window never ends a walk. The daily Spot, Margin and Futures snapshots of the last 30 days are fetched once. The first sync is resumable: cursors are saved per endpoint, so an interrupted backfill continues where it stopped.
 
 **Trades, which need a symbol:**
 - **First sync:** every symbol in `exchangeInfo`, halted ones included (about 3,750 requests, roughly 15 minutes at the `/api` limit).
@@ -192,7 +193,11 @@ The probe sent only queries, with a key that had only "Enable Reading", and prin
 
 ### 5.6 Reported balances
 
-Each sync writes one `reported` snapshot per account and asset, `as_of` the moment before the balances were read (Binance's clock).
+Each sync writes one `reported` snapshot per account and asset.
+
+- **Each balance request has its own cutoff.** A snapshot's `as_of` is the moment (Binance's clock) just before the request its balance came from; the moment just after the response is stored with it.
+- **A read a movement falls into is repeated.** A balance read while a movement was happening may or may not contain it, and the `hybrid` rule would then count it twice or not at all. So after the records are fetched, a read with any record's time between its two moments (widened by 2 seconds, for times Binance gives to the second) is made again, up to three times. A wallet whose read is still unclear gets no snapshot in that sync; its previous one and the records after it stand.
+- A transfer between two wallets read one after the other needs nothing more: it is after the first wallet's cutoff and before the second's.
 
 | Wallet | Balance per asset | Checked on real data |
 |---|---|---|
@@ -349,7 +354,8 @@ Holdings and net worth need no new page.
 | Case | What happens |
 |---|---|
 | A record arrives after the snapshot that already contains it | Its `occurred_at` is before the snapshot's `as_of`, so the `hybrid` rule does not add it again. |
-| A record occurs while the balances are being read | It may be counted in the report and again as a later posting until the next sync, at most 4 hours. |
+| A record occurs while the balances are being read | That wallet's balance is read again, so its snapshot is cut on one side of the record (§5.6). |
+| Binance lists a record only later, with a time inside an old read | Known limit: the balance may be off by that record until the next report, and the two intervals around that read show equal and opposite differences, which stay open. The read's two moments are stored, so the cause is visible. |
 | A withdrawal fails after being posted | The next sync within the 7-day overlap sees the status; the withdrawal stops being a transfer and a refund is posted at the time the amount came back (§5.7). |
 | A deposit is credited but still locked (`status` 6) | Posted: Binance counts it in the balance. |
 | An asset bought and sold between two syncs, never seen before | The quote asset's change is unexplained; the symbol sweep finds both trades. |
@@ -409,9 +415,9 @@ Holdings and net worth need no new page.
 **Tests**, with synthetic responses only (invented ids, addresses, hashes, assets and amounts, shaped like the catalogue):
 - **Gate and client.** A key with any other permission, known or unknown, is refused after one request; the client refuses another host, another method and an unlisted path; both signers against known vectors; pacing under each limit; 429 and 418.
 - **Parsing.** Every record type in the catalogue; an unknown field, an unknown enum value and a missing required field.
-- **Fetching.** Windows, cursors, the 7-day overlap, a refused window, a product that is not present, the symbol sets for trades, the sweep after an unexplained change, and a first sync interrupted and resumed.
+- **Fetching.** Windows walked newest first on the first sync, cursors, the 7-day overlap, a refused old window, empty old windows, a product that is not present, the symbol sets for trades, the sweep after an unexplained change, a first sync interrupted and resumed, and "Sync now" inside the four hours.
 - **Ledger mapping.** Every row of §5.7's table balances; re-normalising writes nothing; the three rules (one transaction for two wallets, a movement listed twice, a reward and its dividend in either arrival order).
-- **Balances.** LD-prefixed assets dropped; an asset that disappears; an unknown wallet; the opening adjustment.
+- **Balances.** LD-prefixed assets dropped; an asset that disappears; an unknown wallet; the opening adjustment; a movement during a balance read; a transfer between two wallets' reads.
 - **Reconciliation.** A consistent history gives no difference; a missing record gives one difference once, closed when the record arrives; the accruing-reward allowance; futures on wallet balance.
 - **Transfers.** A withdrawal to a registered address and the wallet's placeholder; the fee as its own transaction; a withdrawal that fails after posting; a fiat deposit paired with a bank row naming the registered account; an internal Binance transfer left unidentified.
 - **Prices.** A direct EUR pair, a USDT pair, a two-step path, a stablecoin, a halted pair, an asset with no market and no CoinGecko key, the ECB rates filling only gaps, and an IBKR-valued account unchanged by them.
