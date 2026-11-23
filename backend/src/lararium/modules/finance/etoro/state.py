@@ -69,6 +69,8 @@ class NormalizeReport:
     # one the ledger does not hold, or whose currency it has not given; positions whose
     # settlement no source states.
     flags_in_full: set[str] = field(default_factory=set[str])
+    # The cursor's reconciliation keys (connector_flags.RECONCILIATION_KEYS), as written.
+    cursor: dict[str, JSONValue] = field(default_factory=dict[str, JSONValue])
 
 
 @dataclass(frozen=True)

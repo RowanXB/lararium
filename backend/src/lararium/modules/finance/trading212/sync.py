@@ -312,6 +312,8 @@ class Trading212Connector:
         found = run.found | run.client.skipped | {(FIELDS, flag) for flag in report.flagged}
         found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
         after |= await publish_flags(ctx, found, run.checked, cursor)
+        # Its cursor replaces the row's: it keeps what reconciliation recorded.
+        after |= report.cursor
         return after
 
     async def _sync(

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
-from lararium.core.connections import get_connection, update_config
+from lararium.core.connections import get_connection, merge_cursor, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.accounts import get_account
@@ -165,6 +165,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
 
     # Reconciliation (design §5.11), at the time this sync's summary arrived: only a run with
     # one has what Trading 212 reports now; another keeps the warnings the last check left.
+    mismatches: list[reconcile.Mismatch] | None = None
     if summary is not None:
         positions = [r.record for r in own if r.endpoint == "positions"]
         account = await get_account(run.session, run.account)
@@ -177,7 +178,12 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
             await reports.reported(run, summary.record, positions),
         )
         report.mismatches = [m.warning for m in mismatches]
-        await reconcile.publish(ctx, mismatches)
+    # The cursor records what was published; the sync also returns it (its cursor replaces
+    # the row's).
+    report.cursor = await reconcile.publish(ctx, mismatches)
+    kept = connection.cursor if isinstance(connection.cursor, dict) else {}
+    if any(kept.get(key) != value for key, value in report.cursor.items()):
+        await merge_cursor(ctx.command, connection.id, report.cursor)
     report.instrument_flags = await type_flags(run.session, run.connection_id, run.account)
 
     # Only this normaliser's keys: others (the account kind) stay as they are.

@@ -31,8 +31,8 @@ from lararium.modules import registry
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.client import EtoroClient, ReadOnlyGateError
 from lararium.modules.finance.etoro.normalize import NORMALIZER_VERSION, NormalizeReport
-from lararium.modules.finance.etoro.reconcile import is_reconciliation
 from lararium.modules.finance.etoro.sync import (
+    FLAGGED_PREFIX,
     EtoroConnector,
     IngestResult,
     StatementRejected,
@@ -91,9 +91,9 @@ def today() -> date:
     return datetime.now(UTC).date()
 
 
-def _flags(warnings: list[str]) -> list[str]:
-    """The warnings other than reconciliation's: this file's data is not made to agree."""
-    return [w for w in warnings if not is_reconciliation(w)]
+def _flags(texts: list[str]) -> list[str]:
+    """The warnings or messages that are flags: this file's data is not made to reconcile."""
+    return [t for t in texts if FLAGGED_PREFIX in t]
 
 
 def _statement_moment(day: date, at: str = "09:15:00") -> str:

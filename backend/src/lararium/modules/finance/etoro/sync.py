@@ -582,6 +582,8 @@ class EtoroConnector:
         found = {(FIELDS, flag) for flag in report.flagged}
         found |= {(IN_FULL, flag) for flag in report.flags_in_full}
         after |= await publish_flags(ctx, found, checked)
+        # Its cursor replaces the row's: it keeps what reconciliation recorded.
+        after |= report.cursor
         return after
 
 

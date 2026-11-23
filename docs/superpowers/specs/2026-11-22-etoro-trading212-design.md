@@ -329,7 +329,7 @@ After every sync and every statement upload, per account, as M5 §5.11 (warnings
 - **eToro Trading**: each instrument's units against the open positions; USD cash against balance history's Trading `cash` on each snapshot day since the latest statement's start, and against PnL `credit` plus frozen cash now.
 - **eToro Money**: each currency against its Balances `balance`.
 - **MoneyFarm**: none (snapshots).
-- **"Upload a statement" instead of a difference.** When eToro Trading's cash differs and eToro Money has internal transfers to or from Trading after the latest statement's end, or the difference appears after an Open/Close's day while the API shows fees or dividends on a position (`overnightFeesAndDividends`, `totalFees` changing), the warning reads "upload an eToro statement covering <dates>" and is notified once. Otherwise it is an ordinary difference.
+- **"Upload a statement" instead of a difference.** When eToro Trading's cash differs and eToro Money has internal transfers to or from Trading after the latest statement's end, or the difference appears after an Open/Close's day while the API shows fees or dividends on a position (`overnightFeesAndDividends`, `totalFees` changing), the warning reads "upload an eToro statement covering <date> onward" and is notified once: it names no end date (ruling R34), so its text changes only when a new statement moves its start (the day after the latest statement's end, or the account's earliest record before the first). Otherwise it is an ordinary difference.
 
 ### 5.12 Transfers
 
@@ -368,7 +368,7 @@ Through the existing notifier, never with keys, ids beyond last four characters,
 - a key rejected (`needs_reauth`), or an eToro key with write scopes (§5.1);
 - a missing Trading 212 permission (which one to tick);
 - 3 failed syncs in a row, and the recovery (M3);
-- a reconciliation difference, or "upload an eToro statement covering <dates>", once per new warning text (§5.11);
+- a reconciliation difference, or "upload an eToro statement covering <date> onward", once per new warning text (§5.11);
 - an API/statement disagreement on a trade (§5.7), once;
 - flagged fields, enum values, sheets, columns, instrument types or settlement types, once per new set.
 

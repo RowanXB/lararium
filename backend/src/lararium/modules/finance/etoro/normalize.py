@@ -32,7 +32,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
-from lararium.core.connections import get_connection, update_config
+from lararium.core.connections import get_connection, merge_cursor, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.connector_items import lacks, leaves
@@ -294,8 +294,12 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
         await update_config(ctx.command, connection.id, values)
     await merge.notify(ctx, connection.display_name, run.reviews)
     # Reconciliation (design §5.11) against the latest reports, on the sync's path and the
-    # upload's alike: the connection is locked, so its warnings are this run's to replace.
-    await reconcile.publish(ctx, await reconcile.check(ctx, run.accounts))
+    # upload's alike: the connection is locked, so its warnings are this run's to replace. The
+    # cursor records what it published; a sync also returns it, as its cursor replaces the row's.
+    report.cursor = await reconcile.publish(ctx, await reconcile.check(ctx, run.accounts))
+    kept = connection.cursor if isinstance(connection.cursor, dict) else {}
+    if any(kept.get(key) != value for key, value in report.cursor.items()):
+        await merge_cursor(ctx.command, connection.id, report.cursor)
     return report
 
 

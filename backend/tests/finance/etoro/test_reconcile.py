@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from lararium.core.connections import get_connection, set_warnings
 from lararium.modules.finance.etoro import sync as etoro_sync
+from lararium.modules.finance.etoro.reconcile import UNRECONCILED
 
 from .fixtures import (
     INSTRUMENT_ID,
@@ -27,7 +28,7 @@ from .fixtures import (
     pnl_position,
 )
 from .statement_fixtures import activity_row, build_statement, summary
-from .test_normalize_api import Ledger, _connection
+from .test_normalize_api import Ledger, Notifier, _connection
 from .test_normalize_statement import StatementLedger, transfer_in
 
 USERNAME = me_json()["username"]
@@ -134,7 +135,7 @@ async def test_unmatched_internal_transfer_prompts_statement_once(session, run, 
     await run(lambda ctx: set_warnings(ctx, ledger.connection.id, [OTHER]))
     history = [_trading(date(2026, 10, 30), "1260.00"), _trading(date(2026, 10, 31), "1260.00")]
     await ledger.normalize(*_sync("1260.00", history), now=FIRST)
-    first = "eToro Trading: upload an eToro statement covering 2026-10-30 to 2026-11-01"
+    first = "eToro Trading: upload an eToro statement covering 2026-10-30 onward"
     assert await _warnings(session, ledger) == [OTHER, first]
     assert ledger.notifier.messages == [f"eToro: {first}"]
     # The October statement explains it: the prompt clears, with nothing said.
@@ -159,13 +160,14 @@ async def test_unmatched_internal_transfer_prompts_statement_once(session, run, 
         ("cash_transactions", out),
     ]
     await ledger.normalize(*entries, now=LATER)
-    prompt = "eToro Trading: upload an eToro statement covering 2026-11-01 to 2026-11-06"
+    prompt = "eToro Trading: upload an eToro statement covering 2026-11-01 onward"
     assert await _warnings(session, ledger) == [OTHER, prompt]
     assert ledger.notifier.messages[1:] == [f"eToro: {prompt}"]
 
-    # Two more syncs the same day: the prompt stands, and nothing more is said.
-    for hours in (1, 2):
-        await ledger.normalize(*entries, now=LATER + timedelta(hours=hours))
+    # Two more syncs on later days, the cause unchanged: the prompt's text stands (R34), and
+    # nothing more is said.
+    for days in (1, 2):
+        await ledger.normalize(*entries, now=LATER + timedelta(days=days))
     assert await _warnings(session, ledger) == [OTHER, prompt]
     assert len(ledger.notifier.messages) == 2
 
@@ -225,7 +227,7 @@ async def test_api_fees_after_the_statement_prompt_statement(session, run, ledge
         ),
         now=now,
     )
-    prompt = "eToro Trading: upload an eToro statement covering 2026-11-01 to 2026-11-02"
+    prompt = "eToro Trading: upload an eToro statement covering 2026-11-01 onward"
     assert await _warnings(session, ledger) == [OTHER, prompt]
 
 
@@ -255,3 +257,88 @@ async def test_moneyfarm_not_reconciled(session, run) -> None:
     await ledger.normalize(("balances", balances_body(moneyfarm="900.50")))
     assert await _warnings(session, ledger) == []
     assert ledger.notifier.messages == []
+
+
+async def test_prompt_notified_once_across_days(session, run, ledger) -> None:
+    """R34: the prompt names no end, so the same cause on three days is told once."""
+    await _after_october(run, ledger)
+    out = cash_item("80000301", "1000.00") | {
+        "direction": "debit",
+        "transactionSubtype": "transferSent",
+        "postedAt": "2026-11-03T10:00:00Z",
+    }
+    deposit = bank_item("80000302", "1000.00") | {"postedAt": "2026-11-03T09:00:00Z"}
+    for day in (4, 5, 6):
+        entries = _sync("2510.00", [_trading(date(2026, 11, day - 1), "2510.00")])
+        await ledger.normalize(
+            *entries,
+            ("cash_transactions", deposit),
+            ("cash_transactions", out),
+            now=datetime(2026, 11, day, 12, 0, tzinfo=UTC),
+        )
+    prompt = "eToro Trading: upload an eToro statement covering 2026-11-01 onward"
+    assert await _warnings(session, ledger) == [OTHER, prompt]
+    assert ledger.notifier.messages == [f"eToro: {prompt}"]
+
+
+class FailingOnce(Notifier):
+    """A notifier whose first send fails."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def send(self, text: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("the notifier is down")
+        await super().send(text)
+
+
+async def test_a_failed_notification_is_sent_next_run(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    ledger.notifier = FailingOnce()
+    credit = cash_item("80000401", "10.00") | {"postedAt": "2026-06-01T10:00:00Z"}
+    entries = [("balances", balances_body(money="25.00")), ("cash_transactions", credit)]
+    await ledger.normalize(*entries)
+    warning = "eToro Money GBP GBP differs from eToro's report on 2026-06-02 by -15.00"
+    # The warning stands, but the owner was not told: the next run tells, once.
+    assert await _warnings(session, ledger) == [warning]
+    assert ledger.notifier.messages == []
+    await ledger.normalize(*entries, now=datetime(2026, 6, 2, 13, 0, tzinfo=UTC))
+    assert ledger.notifier.messages == [f"eToro: {warning}"]
+    await ledger.normalize(*entries, now=datetime(2026, 6, 2, 14, 0, tzinfo=UTC))
+    assert len(ledger.notifier.messages) == 1
+
+
+async def test_no_balances_yet_cannot_reconcile(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await run(lambda ctx: set_warnings(ctx, ledger.connection.id, [OTHER]))
+    for hours in (0, 1):
+        await ledger.normalize(("me", me_json()), now=FIRST + timedelta(hours=hours))
+    assert await _warnings(session, ledger) == [OTHER, UNRECONCILED]
+    assert ledger.notifier.messages == [f"eToro: {UNRECONCILED}"]
+
+
+async def test_no_trading_account_keeps_the_last_check(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    credit = cash_item("80000501", "10.00") | {"postedAt": "2026-06-01T10:00:00Z"}
+    await ledger.normalize(
+        ("balances", balances_body(money="25.00")), ("cash_transactions", credit)
+    )
+    warning = "eToro Money GBP GBP differs from eToro's report on 2026-06-02 by -15.00"
+    assert await _warnings(session, ledger) == [warning]
+    # The balances stop listing a Trading account: the last check's warning stands, and the
+    # owner is told the check could not run, once.
+    without = balances_body(money="25.00")
+    without["balances"] = [b for b in without["balances"] if b["accountType"] != "Trading"]
+    for hours in (1, 2):
+        await ledger.normalize(("balances", without), now=FIRST + timedelta(hours=hours))
+    assert await _warnings(session, ledger) == [warning, UNRECONCILED]
+    assert ledger.notifier.messages == [f"eToro: {warning}", f"eToro: {UNRECONCILED}"]
+    # Once it can check again, the fixed warning clears without a word.
+    await ledger.normalize(
+        ("balances", balances_body(money="10.00")), now=FIRST + timedelta(hours=3)
+    )
+    assert await _warnings(session, ledger) == []
+    assert len(ledger.notifier.messages) == 2

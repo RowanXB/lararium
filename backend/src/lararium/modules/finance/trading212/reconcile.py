@@ -10,13 +10,13 @@ counts as reported 0. Each reported figure is a `reported` snapshot at its sight
 sighting saying what the day's snapshot before it says reuses that one.
 
 The warnings are what the latest check found: each run that has the account's summary
-replaces the connection's reconciliation warnings in full, whatever the account is called
-now, and keeps every other warning. The owner is told of each warning text once, when it is
-new; a difference is never corrected. Warnings name the account, the instrument's symbol, the
-day and the difference, never another value.
+replaces in full the reconciliation warnings the connection's cursor records it published
+last (connector_flags, never matched by their text), whatever the account is called now, and
+keeps every other warning. The owner is told of each warning text once, counted only when a
+send succeeds; a difference is never corrected. Warnings name the account, the instrument's
+symbol, the day and the difference, never another value.
 """
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -26,13 +26,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.connections import get_connection, set_warnings
 from lararium.core.connectors import SyncContext
-from lararium.modules.finance import models
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance import connector_flags, models
 from lararium.modules.finance.connector_run import holdings
 from lararium.modules.finance.money import to_plain_str, tolerance
-
-logger = logging.getLogger(__name__)
 
 PLATFORM = "Trading 212"
 # What every reconciliation warning holds, after the account's name (Decision 12).
@@ -82,24 +80,13 @@ async def check(
     return sorted(found, key=lambda m: m.symbol)
 
 
-def is_reconciliation(warning: str) -> bool:
-    """A warning this module writes, under any name the account has had."""
-    return DIFFERS in warning
-
-
-async def publish(ctx: SyncContext, mismatches: list[Mismatch]) -> None:
-    """Replace the connection's reconciliation warnings with these, keeping every other
-    warning; tell the owner, in one message, of each whose text is not there yet."""
-    connection = await get_connection(ctx.command.session, ctx.connection.id)
-    previous = connection.warnings
-    texts = list(dict.fromkeys(m.warning for m in mismatches))
-    warnings = [w for w in previous if not is_reconciliation(w)] + texts
-    new = [text for text in texts if text not in previous]
-    if new:
-        try:
-            await ctx.notifier.send(f"{connection.display_name}: " + "\n".join(new))
-        except Exception as error:
-            # The class only: the message could carry the notifier's webhook URL.
-            logger.warning("sending a Trading 212 notification failed (%s)", type(error).__name__)
-    if warnings != previous:
-        await set_warnings(ctx.command, connection.id, warnings)
+async def publish(ctx: SyncContext, mismatches: list[Mismatch] | None) -> dict[str, JSONValue]:
+    """Replace the reconciliation warnings the connection last published (by its cursor,
+    connector_flags) with these, keeping every other warning; tell the owner, in one message,
+    of each not told yet. None: no summary this run, so the last check's warnings stand.
+    Returns the cursor's keys to write."""
+    return await connector_flags.publish_reconciliation(
+        ctx,
+        None if mismatches is None else [m.warning for m in mismatches],
+        label="a Trading 212",
+    )

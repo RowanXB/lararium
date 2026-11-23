@@ -17,21 +17,24 @@ cut-off (connector_run.holdings), within the instrument's tolerance:
 with eToro Money and its fees, taxes and dividends (ruling R30). So the differences in
 Trading's cash whose cut-off is after the latest statement's end become one prompt, "<Trading's
 name>: upload an eToro statement covering <the day after that end, else the account's earliest
-record> to <today>", when a statement would explain them: none has been uploaded; or eToro
+record> onward", when a statement would explain them: none has been uploaded; or eToro
 Money has an internal transfer with Trading after that end (only a statement brings Trading's
 leg, so it has none yet); or the API states fees, taxes or dividends after that end (an
 execution's or a close's fees or taxes, or a position's `totalFees` or
 `overnightFeesAndDividends` changed since the end's day). Any other difference is an ordinary
-one. Today is the day of the latest report compared, so syncs the same day give one text.
+one. The prompt names no end (ruling R34): its text, and so its one notification, changes only
+when a new statement moves its start.
 
-The warnings are what the latest check found: each run replaces the connection's
-reconciliation warnings in full, whatever its accounts are called now, and keeps every other
-warning (the flags among them). The owner is told of each warning text once, when it is new;
-a difference is never corrected. Warnings name the account, the symbol or currency, the day
-and the amount, never another value.
+The warnings are what the latest check found: each run replaces in full the reconciliation
+warnings the connection's cursor records it published last (connector_flags, never matched by
+their text, which holds names the owner may change), and keeps every other warning (the flags
+among them). The owner is told of each warning text once, counted only when a send succeeds,
+so a failed one is retried next run; a difference is never corrected. A run with no balances
+yet, or whose balances do not list exactly one Trading account, cannot check: the last
+check's warnings stand, with UNRECONCILED. Warnings name the account, the symbol or currency,
+the day and the amount, never another value.
 """
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -41,9 +44,9 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.core.connections import get_connection, set_warnings
 from lararium.core.connectors import SyncContext
-from lararium.modules.finance import models
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance import connector_flags, models
 from lararium.modules.finance.connector_run import holdings
 from lararium.modules.finance.etoro.fields import STATEMENT_SHEETS
 from lararium.modules.finance.etoro.records import end_of
@@ -64,12 +67,12 @@ from lararium.modules.finance.instruments import find_by_identifier, get_currenc
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import list_sightings
 
-logger = logging.getLogger(__name__)
-
 PLATFORM = "eToro"
 # What every reconciliation warning holds, after the account's name (Decision 12).
 DIFFERS = f" differs from {PLATFORM}'s report on "
 PROMPT = f": upload an {PLATFORM} statement covering "
+# A run that could not check (a fixed text: it names no account the owner may have renamed).
+UNRECONCILED = "eToro Trading could not be reconciled"
 # eToro's units, for an instrument the books do not hold (design §5.6).
 _UNIT_DECIMALS = 6
 
@@ -104,13 +107,8 @@ class Period:
     end: datetime
 
 
-def prompt(account_name: str, start: date, end: date) -> str:
-    return f"{account_name}{PROMPT}{start.isoformat()} to {end.isoformat()}"
-
-
-def is_reconciliation(warning: str) -> bool:
-    """A warning this module writes, under any name the account has had."""
-    return DIFFERS in warning or PROMPT in warning
+def prompt(account_name: str, start: date) -> str:
+    return f"{account_name}{PROMPT}{start.isoformat()} onward"
 
 
 async def latest_statement(session: AsyncSession, connection_id: UUID) -> Period | None:
@@ -140,8 +138,6 @@ class _Check:
         self.session = session
         self.connection_id = connection_id
         self.found: list[Difference] = []
-        # The days of the reports compared: the latest is today.
-        self.days: list[date] = []
 
     async def compare(
         self,
@@ -320,14 +316,15 @@ class _Check:
         return min(days) if days else None
 
 
-async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked:
+async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked | None:
     """Compare the connection's accounts (eToro account id → finance account) with the latest
-    reports eToro gave, as the module doc says."""
+    reports eToro gave, as the module doc says; None when they cannot be (no balances yet, or
+    not exactly one Trading account among them)."""
     session = ctx.command.session
     connection_id = ctx.connection.id
     balances = await latest_sighted(session, connection_id, "balances")
     if balances is None:
-        return Checked([])
+        return None
     run = _Check(session, connection_id)
     names = await _names(session, set(accounts.values()))
     kinds: dict[str, tuple[str, str, Decimal]] = {}
@@ -336,13 +333,19 @@ async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked:
         balance = number_at(balances.record, entry, "balance")
         kinds[etoro_id] = (text_at(entry, "accountType"), text_at(entry, "currency"), balance)
 
+    trading_ids = [i for i, (kind, _, _) in kinds.items() if kind == "Trading" and i in accounts]
+    if len(trading_ids) != 1:
+        return None
+    [trading_etoro_id] = trading_ids
+    trading = accounts[trading_etoro_id]
+    trading_name = names[trading]
+
     # eToro Money: each account's currency against its balance.
     for etoro_id, (kind, code, balance) in sorted(kinds.items()):
         account_id = accounts.get(etoro_id)
         if kind != "Cash" or account_id is None or not code:
             continue
         currency = await get_currency(session, code.upper())
-        run.days.append(balances.day)
         await run.compare(
             account_id,
             names[account_id],
@@ -352,54 +355,46 @@ async def check(ctx: SyncContext, accounts: Mapping[str, UUID]) -> Checked:
             only={currency.id},
         )
 
-    trading_ids = [i for i, (kind, _, _) in kinds.items() if kind == "Trading" and i in accounts]
-    trading_name = ""
+    # eToro Trading: units, cash now, and cash on each snapshot day.
     statement = await latest_statement(session, connection_id)
-    if len(trading_ids) == 1:
-        [trading_etoro_id] = trading_ids
-        trading = accounts[trading_etoro_id]
-        trading_name = names[trading]
-        aggregate = await latest_sighted(session, connection_id, "aggregate")
-        code = text_at(aggregate.content, "accountCurrency") if aggregate else ""
-        code = (code or kinds[trading_etoro_id][1]).upper()
-        if aggregate is not None:
-            run.days.append(aggregate.day)
-            await run.units(trading, trading_name, aggregate)
-        pnl = await latest_sighted(session, connection_id, "pnl")
-        if pnl is not None and code:
-            currency = await get_currency(session, code)
-            run.days.append(pnl.day)
-            await run.compare(
-                trading,
-                trading_name,
-                pnl.seen_at,
-                pnl.day,
-                {currency.id: trading_cash(pnl, await run.sighted_with(pnl, "aggregate"))},
-                only={currency.id},
-                explainable=statement is None or pnl.seen_at > statement.end,
-            )
-        await run.history(
+    aggregate = await latest_sighted(session, connection_id, "aggregate")
+    code = text_at(aggregate.content, "accountCurrency") if aggregate else ""
+    code = (code or kinds[trading_etoro_id][1]).upper()
+    if aggregate is not None:
+        await run.units(trading, trading_name, aggregate)
+    pnl = await latest_sighted(session, connection_id, "pnl")
+    if pnl is not None and code:
+        currency = await get_currency(session, code)
+        await run.compare(
             trading,
             trading_name,
-            statement.start.astimezone(UTC).date() if statement else None,
-            statement.end if statement else None,
+            pnl.seen_at,
+            pnl.day,
+            {currency.id: trading_cash(pnl, await run.sighted_with(pnl, "aggregate"))},
+            only={currency.id},
+            explainable=statement is None or pnl.seen_at > statement.end,
         )
-        explainable = [d for d in run.found if d.explainable]
-        if explainable and (
-            statement is None or await run.explained(trading, trading_etoro_id, statement.end)
-        ):
-            today = max([*run.days, *(d.day for d in explainable)])
-            if statement is not None:
-                start = statement.end.astimezone(UTC).date() + timedelta(days=1)
-            else:
-                start = await run.earliest(trading) or today
-            run.found = [d for d in run.found if not d.explainable]
-            ordinary = sorted(run.found, key=lambda d: (d.account_name, d.symbol, d.day))
-            return Checked(
-                [*(d.warning for d in ordinary), prompt(trading_name, start, max(start, today))]
-            )
-    ordered = sorted(run.found, key=lambda d: (d.account_name, d.symbol, d.day))
-    return Checked([d.warning for d in ordered])
+    await run.history(
+        trading,
+        trading_name,
+        statement.start.astimezone(UTC).date() if statement else None,
+        statement.end if statement else None,
+    )
+
+    explainable = [d for d in run.found if d.explainable]
+    found = run.found
+    asked: list[str] = []
+    if explainable and (
+        statement is None or await run.explained(trading, trading_etoro_id, statement.end)
+    ):
+        if statement is not None:
+            start = statement.end.astimezone(UTC).date() + timedelta(days=1)
+        else:
+            start = await run.earliest(trading) or min(d.day for d in explainable)
+        found = [d for d in found if not d.explainable]
+        asked = [prompt(trading_name, start)]
+    ordered = sorted(found, key=lambda d: (d.account_name, d.symbol, d.day))
+    return Checked([*(d.warning for d in ordered), *asked])
 
 
 async def _names(session: AsyncSession, ids: set[UUID]) -> dict[UUID, str]:
@@ -408,19 +403,14 @@ async def _names(session: AsyncSession, ids: set[UUID]) -> dict[UUID, str]:
     return {row.id: row.name for row in rows}
 
 
-async def publish(ctx: SyncContext, checked: Checked) -> None:
-    """Replace the connection's reconciliation warnings with these, keeping every other
-    warning; tell the owner, in one message, of each whose text is not there yet."""
-    connection = await get_connection(ctx.command.session, ctx.connection.id)
-    previous = connection.warnings
-    texts = list(dict.fromkeys(checked.warnings))
-    warnings = [w for w in previous if not is_reconciliation(w)] + texts
-    new = [text for text in texts if text not in previous]
-    if new:
-        try:
-            await ctx.notifier.send(f"{connection.display_name}: " + "\n".join(new))
-        except Exception as error:
-            # The class only: the message could carry the notifier's webhook URL.
-            logger.warning("sending an eToro notification failed (%s)", type(error).__name__)
-    if warnings != previous:
-        await set_warnings(ctx.command, connection.id, warnings)
+async def publish(ctx: SyncContext, checked: Checked | None) -> dict[str, JSONValue]:
+    """Replace the reconciliation warnings this connection last published with these, keeping
+    every other warning, and tell the owner of each not told yet (connector_flags). None: the
+    check could not run, so the last check's warnings stand, with UNRECONCILED. Returns the
+    cursor's keys to write."""
+    return await connector_flags.publish_reconciliation(
+        ctx,
+        None if checked is None else checked.warnings,
+        label="an eToro",
+        unchecked=UNRECONCILED,
+    )
