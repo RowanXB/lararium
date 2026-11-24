@@ -671,8 +671,8 @@ make restore-rehearsal CONTEXT=<docker context> \
 
 1. `restore.sh` 把转储恢复到一个新数据库，然后交换数据库名；
 2. 每张表的行数与转储里该表的行数一致（行数直接从转储本身统计）；
-3. 文档 tar 解压到一个一次性卷里，数据库引用的每个文档都在，且内容与其哈希一致（转储没有引用的
-   文件，即在转储与 tar 之间上传的，只做提示）；
+3. 文档 tar 解压到一个一次性卷里，数据库引用的每个文档都在，API 能读取（同一镜像、用户和路径），
+   且内容与其哈希一致；
 4. 像正式服务的 `migrate` 一样运行 `alembic upgrade head`（较旧的备份会被升级），然后
    `python -m lararium.restore_check` 检查迁移版本是代码的 head、每笔交易都平衡、转账不变量成立。
 

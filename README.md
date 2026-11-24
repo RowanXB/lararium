@@ -795,8 +795,8 @@ as the stack, then follows the steps above and checks each one:
 1. `restore.sh` restores the dump into a new database, and the names are swapped;
 2. every table holds as many rows as the dump has for it, counted from the dump itself;
 3. the documents tar is unpacked into a throwaway volume, and every document the database
-   refers to is there, with the content its hash names (files the dump doesn't refer to, uploaded
-   between the dump and the tar, are only noted);
+   refers to is there, readable by the api (same image, user and path), with the content its
+   hash names;
 4. `alembic upgrade head` runs as the stack's `migrate` service would (an older backup is
    upgraded), then `python -m lararium.restore_check` checks the revision is the code's head,
    every transaction balances and the transfer invariant holds.

@@ -7,7 +7,8 @@
 #      README does it;
 #   2. every table holds as many rows as the dump has for it (counted from the dump itself);
 #   3. the documents tar is unpacked into a throwaway volume as the README does it, and every
-#      document the database refers to is there, with the content its hash names;
+#      document the database refers to is there, readable by the api, with the content its
+#      hash names;
 #   4. `alembic upgrade head` runs as the stack's migrate service does, then
 #      lararium.restore_check checks the revision is the code's head and the ledger invariants
 #      hold (every transaction balances, the transfer invariant).
@@ -115,39 +116,37 @@ else
   fail "row counts differ from the dump (above)"
 fi
 
+# Run by its id: the tag is shared, and a rehearsal of another commit could move it meanwhile.
+image_id="$(docker build -q -t "$image" "$root/backend")"
+
 echo "== 3. documents from $(basename "$documents")"
 docker volume create --label lararium.rehearsal "$volume" >/dev/null
 docker run --rm -v "$volume:/d" -i alpine tar -C /d -xf - <"$documents"
-sql -c 'SELECT sha256 FROM core.documents' | sort >"$work/referenced"
-# A stored file is good when it sits at its hash's path (LocalDocumentStore) and its content
-# has that hash. Read as the api reads them (uid 10001, backend/Dockerfile): a file it can't
-# open is left out, so it is reported missing. A bad file is reported by its content's hash,
-# never its name, which could be a statement's original file name.
-docker run --rm --user 10001 -v "$volume:/d:ro" alpine \
-  sh -c 'cd /d && find . -type f -exec sha256sum {} + 2>/dev/null; true' |
-  awk -v bad="$work/bad" '{
-    if ($2 == "./" substr($1, 1, 2) "/" substr($1, 3, 2) "/" $1) print $1; else print $1 > bad
-  }' | sort >"$work/stored"
+# Each document the database refers to, read as the api reads it: its image and user, its
+# volume path, through LocalDocumentStore; one it can't open, or whose content has another
+# hash, is printed by its hash.
+sql -c 'SELECT sha256 FROM core.documents' >"$work/referenced"
+docker run --rm -i -v "$volume:/var/lib/lararium/documents:ro" "$image_id" python -c '
+import hashlib, sys
+from pathlib import Path
+from lararium.core.documents import LocalDocumentStore
+store = LocalDocumentStore(Path("/var/lib/lararium/documents"))
+for sha in sys.stdin.read().split():
+    try:
+        intact = hashlib.sha256(store.get(sha)).hexdigest() == sha
+    except OSError:
+        intact = False
+    if not intact:
+        print(sha)
+' <"$work/referenced" >"$work/bad"
 if [ -s "$work/bad" ]; then
-  fail "$(wc -l <"$work/bad" | tr -d ' ') files not at their content's hash path; their hashes:"
+  fail "$(wc -l <"$work/bad" | tr -d ' ') referenced documents missing, unreadable by the api or not intact:"
   cat "$work/bad"
-fi
-missing="$(comm -23 "$work/referenced" "$work/stored")"
-if [ -n "$missing" ]; then
-  fail "$(echo "$missing" | wc -l | tr -d ' ') referenced documents missing from the tar or unreadable by the api:"
-  echo "$missing"
 else
   echo "ok: all $(wc -l <"$work/referenced" | tr -d ' ') referenced documents are there and intact"
 fi
-# Uploads that landed between the dump and the tar (backup.sh takes the dump first).
-extra="$(comm -13 "$work/referenced" "$work/stored" | wc -l | tr -d ' ')"
-if [ "$extra" -gt 0 ]; then
-  echo "note: $extra files in the tar that the dump doesn't refer to (uploaded after the dump)"
-fi
 
 echo "== 4. migrating to head and checking the ledger"
-# Run by its id: the tag is shared, and a rehearsal of another commit could move it meanwhile.
-image_id="$(docker build -q -t "$image" "$root/backend")"
 url="postgresql+psycopg://lararium_owner:$owner_password@$db:5432/lararium"
 if ! docker run --rm --network "$network" -e LARARIUM_MIGRATION_DATABASE_URL="$url" "$image_id" \
   sh -c 'alembic upgrade head && python -m lararium.restore_check'; then
