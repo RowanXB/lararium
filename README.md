@@ -17,8 +17,9 @@ Tailscale. Licensed under AGPL-3.0-or-later.
 Requirements: Docker (with buildx, daemon running), uv, Python 3.13, Node 24, pnpm 11, git.
 
 Run every check (lint, format, types, import contracts, backend tests against a throwaway
-PostgreSQL container, the OpenAPI/client drift check, web typecheck and tests). It installs
-strictly from `backend/uv.lock` and `web/pnpm-lock.yaml` and fails if either is stale:
+PostgreSQL container, the dependency licence check, the OpenAPI/client drift check, web
+typecheck and tests). It installs strictly from `backend/uv.lock` and `web/pnpm-lock.yaml`
+and fails if either is stale:
 
 ```bash
 make check
@@ -803,6 +804,47 @@ the dump came from (from your separate key backup, or `infra/.env.sops`), not a 
 stored credentials in the dump were encrypted with it, and under any other key every
 connection would have to be added again. Then run `make up` (it creates the roles and an
 empty, migrated database), and restore and swap as above.
+
+### Restore rehearsal
+
+Rehearse a restore now and then, on a Docker host that is not the production one (from any
+machine with the repository and access to that host through a docker context):
+
+```bash
+make restore-rehearsal CONTEXT=<docker context> \
+  DUMP=backups/lararium-20260101T030000Z.dump DOCUMENTS=backups/documents-20260101T030000Z.tar
+```
+
+`infra/backup/rehearse-restore.sh` starts a throwaway PostgreSQL 18 there with the same roles
+as the stack, then follows the steps above and checks each one:
+
+1. `restore.sh` restores the dump into a new database, and the names are swapped;
+2. every table holds as many rows as the dump has for it, counted from the dump itself;
+3. the documents tar is unpacked into a throwaway volume, and every document the database
+   refers to is there, readable by the api (same image, user and path), with the content its
+   hash names;
+4. `alembic upgrade head` runs as the stack's `migrate` service would (an older backup is
+   upgraded), then `python -m lararium.restore_check` checks the revision is the code's head,
+   every transaction balances and the transfer invariant holds.
+
+It prints table names, row counts, document hashes and transaction ids, never amounts or
+descriptions, and exits non-zero if any check fails. The database gets no published port: it
+sits on an internal Docker network that only the check container joins. The backend image is
+built on that host from your working tree. The container, volume and network are removed when
+the run ends, however it ends; the `postgres:18`, `alpine` and `lararium-rehearsal` images stay
+cached. The backup is real data on that host while the run lasts, so use a host you trust with it.
+
+## Dependency licences
+
+`make check` runs `make license-check`: every production dependency (the backend's `uv.lock`
+without the dev group, which is what the image installs, and the web app's dependencies without
+devDependencies) must declare an SPDX licence compatible with AGPL-3.0-or-later. The allowed
+licences, and the reviewed exceptions for packages whose metadata isn't a clear SPDX
+expression, are in [`tools/licenses.toml`](tools/licenses.toml). An unknown or incompatible
+licence fails the check. To accept one, review the package's licence files and add an
+`[[exception]]` with the declared string exactly as the check prints it, what you concluded, and
+why. An exception that no longer matches (the package left, or its declared licence changed)
+fails the check too.
 
 ## License
 
