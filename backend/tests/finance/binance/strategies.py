@@ -55,8 +55,8 @@ WALLET_KEYS = ("spot", "funding", "earn")
 ACCOUNT_NAMES = {"spot": "Binance Spot", "funding": "Binance Funding", "earn": "Binance Earn"}
 _WALLET_TYPE = {"spot": 0, "funding": 1}
 _EARN_SOURCE = {"spot": "SPOT", "funding": "FUNDING"}
-# Amounts are k / 10^4. Rule 3 links a reward to a dividend of the same asset and amount
-# within 26 hours, whatever its type: each kind of income keeps its own last digit, so only a
+# Amounts are k / 10^4. Rule 3 links a reward that is not REALTIME to a dividend of the same
+# asset and amount within 26 hours: each kind of income keeps its own last digit, so only a
 # BONUS payout's two rows can ever be linked.
 _UNIT = Decimal("0.0001")
 _REALTIME_DIGIT, _DIVIDEND_DIGIT, _PAYOUT_DIGIT = 3, 7, 5

@@ -181,7 +181,9 @@ async def _records(run: Run, after: UUID | None) -> list[RawRecord]:
 async def link_payouts(run: Run) -> None:
     """Rule 3: a reward and an asset dividend of the same asset and amount within 26 hours of
     each other are one payout, posted where it landed (the dividend, on Spot): the reward is
-    linked to the dividend and its own posting removed.
+    linked to the dividend and its own posting removed. Only a reward of a kind that is paid
+    out can be: a `REALTIME` one accrues inside the Earn position (design 5.7) and is never
+    linked.
 
     The links are worked out afresh from every reward and dividend the connection has, so
     they do not depend on how the records were split across runs: candidate pairs are taken
@@ -197,11 +199,11 @@ async def link_payouts(run: Run) -> None:
             "  and coalesce(d.direction, 1) = 1"
             "  and d.div_time between r.time - make_interval(hours => :h)"
             "   and r.time + make_interval(hours => :h)"
-            " where r.connection_id = :c"
+            " where r.connection_id = :c and r.type is distinct from :accrued"
             " order by abs(extract(epoch from d.div_time - r.time)), r.time, r.content_hash,"
             "  r.occurrence, d.div_time, d.id"
         ),
-        {"c": run.connection.id, "h": PAYOUT_WINDOW_HOURS},
+        {"c": run.connection.id, "h": PAYOUT_WINDOW_HOURS, "accrued": earn.ACCRUED},
     )
     wanted: dict[tuple[str, int], str] = {}
     paid: set[str] = set()

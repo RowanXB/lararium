@@ -28,6 +28,8 @@ from lararium.modules.finance.ledger import PostingInput
 SUBSCRIPTIONS = "earn-flexible-subscriptions"
 REDEMPTIONS = "earn-flexible-redemptions"
 REWARDS = "earn-flexible-rewards"
+# The reward type that accrues inside the Earn position and is never paid out (rule 3).
+ACCRUED = "REALTIME"
 _WALLETS = {"SPOT": "spot", "FUNDING": "funding"}
 _BOTH = "SPOTANDFUNDING"
 _SUBSCRIBED = "SUCCESS"

@@ -221,6 +221,28 @@ async def test_reward_with_no_dividend_of_its_amount_stays_posted(session, run) 
     assert row.dividend_id is None and row.transaction_id is not None
 
 
+async def test_a_realtime_reward_is_never_a_dividend(session, run) -> None:
+    # A REALTIME reward accrues inside the Earn position and is never paid out: a dividend of
+    # the same asset and amount an hour later is another income.
+    connection = await binance_connection(run)
+    reward = _reward(rewards="0.7", time=BASE_TIME_MS)
+    dividend = build_row(
+        "dividends", asset="AAA", amount="0.7", direction=1, divTime=BASE_TIME_MS + HOUR_MS
+    )
+
+    await normalize_rows(session, connection.id, (REWARDS, [reward]), ("dividends", [dividend]))
+
+    [row] = await typed(session, "binance_earn_flexible_rewards", connection.id)
+    assert row.dividend_id is None and row.transaction_id is not None
+    assert (await holdings(session, connection.id))[("Binance Earn", "AAA")] == Decimal("0.7")
+    assert plain(await postings(session, f"dividend:{dividend['id']}"))[0] == (
+        "Binance Spot",
+        "AAA",
+        Decimal("0.7"),
+    )
+    await assert_balanced_and_quiet(session, connection.id)
+
+
 def _bonus(seq: int, hours: int) -> dict:
     return _reward(seq, type="BONUS", rewards="0.7", time=BASE_TIME_MS + hours * HOUR_MS)
 
