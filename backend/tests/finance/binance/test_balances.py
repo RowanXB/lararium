@@ -980,6 +980,20 @@ async def test_a_listed_asset_without_its_quantity_fails_and_writes_nothing(sess
     assert await _count(session, "binance_wallet_balance", connection.id) == 0
 
 
+@pytest.mark.parametrize("name", ["free", "locked", "freeze", "withdrawing"])
+async def test_a_listed_asset_must_state_every_quantity_it_sums(session, run, name: str) -> None:
+    connection = await binance_connection(run)
+    entry = _asset("AAA", "1")
+    del entry[name]
+    row = build_row("wallet-balance", walletName="Earn", balance="5", assetBalances=[entry])
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _report(run, connection, {"wallet-balance": _read("wallet-balance", [row])})
+
+    assert caught.value.field == f"[].assetBalances[].{name}"
+    assert await _snapshots(session, connection.id) == []
+
+
 @pytest.mark.parametrize(
     ("missing", "field"),
     [

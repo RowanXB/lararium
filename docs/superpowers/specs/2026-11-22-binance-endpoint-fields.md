@@ -218,7 +218,7 @@ Id: `[].asset`. Time: none. Seen: yes — same 7 fields. Does not list LD-prefix
 ### `wallet-balance` — GET /sapi/v1/asset/wallet/balance
 Weight 60 (IP) · signed · doc `core-trading-wallet/api/rest-api/asset#query-user-wallet-balance`
 Request: `quoteAsset` (default BTC), `needBalanceDetail` (boolean, default false).
-Id: `[].walletName`. Time: none. Seen: yes — same fields; with `needBalanceDetail=true` every wallet carried `assetBalances`. An element of `assetBalances` always carries `asset`, `free` and `locked`: the connector requires them. Real `walletName` values (not listed in the docs): Spot, Funding, Cross Margin, Isolated Margin, USDⓈ-M Futures, COIN-M Futures, Earn, Options, Trading Bots, Copy Trading.
+Id: `[].walletName`. Time: none. Seen: yes — same fields; with `needBalanceDetail=true` every wallet carried `assetBalances`. An element of `assetBalances` always carries `asset`, `free`, `locked`, `freeze` and `withdrawing` (the four quantities a wallet counted from the list sums): the connector requires them. Real `walletName` values (not listed in the docs): Spot, Funding, Cross Margin, Isolated Margin, USDⓈ-M Futures, COIN-M Futures, Earn, Options, Trading Bots, Copy Trading.
 
 | Field | Type | Meaning |
 |---|---|---|

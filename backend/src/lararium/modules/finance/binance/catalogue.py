@@ -2938,8 +2938,8 @@ total integer
 [].assetBalances[].assetName text
 [].assetBalances[].free decimal!
 [].assetBalances[].locked decimal!
-[].assetBalances[].freeze decimal
-[].assetBalances[].withdrawing decimal
+[].assetBalances[].freeze decimal!
+[].assetBalances[].withdrawing decimal!
 [].assetBalances[].btcValuation decimal
 """,
     "wbeth-rewards": """
