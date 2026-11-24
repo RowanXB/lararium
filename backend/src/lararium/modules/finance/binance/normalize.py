@@ -34,11 +34,9 @@ from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import record_type
 from lararium.modules.finance.binance.parse import (
     ApiValue,
-    BinanceDataError,
     Row,
     as_api,
     parse,
-    row_prefix,
     unknown_flags,
 )
 from lararium.modules.finance.binance.reconcile import queue_touched
@@ -54,7 +52,6 @@ from lararium.modules.finance.binance.records import (
     remove,
     spot,
 )
-from lararium.modules.finance.binance.records import text as field_text
 
 __all__ = [
     "HANDLERS",
@@ -108,15 +105,6 @@ def _body(label: str, row: Row) -> ApiValue:
     return body
 
 
-def _key_part(label: str, row: Row, field: str) -> str:
-    """An id field as part of a ledger key: one that is blank or holds the key's separator
-    could make two records share a key (or forge a derived one), so it is a data error."""
-    value = field_text(row, field)
-    if value is None or ":" in value:
-        raise BinanceDataError(label, f"{row_prefix(label)}{field}")
-    return value
-
-
 async def _apply(run: Run, record: RawRecord) -> None:
     label = _LABEL_OF[record.record_type]
     content = as_api(record.content)
@@ -136,7 +124,7 @@ async def _apply(run: Run, record: RawRecord) -> None:
     root = layout.layout(label)[0]
     key: dict[str, object] = {"connection_id": run.connection.id}
     if occurrence is None:
-        ids = [_key_part(label, row, field) for field in ENDPOINTS[label].id_fields]
+        ids = [tables.key_part(label, row, field) for field in ENDPOINTS[label].id_fields]
     else:
         digest = tables.content_hash(row)
         key |= {layout.CONTENT_HASH: digest, layout.OCCURRENCE: occurrence}

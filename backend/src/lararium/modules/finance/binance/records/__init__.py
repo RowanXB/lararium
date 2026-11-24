@@ -209,17 +209,8 @@ type Handler = Callable[[Run, Row], Awaitable[None]]
 # Reading a row.
 
 
-def text(row: Row, name: str) -> str | None:
-    """A text field; absent or blank is None."""
-    value = row.get(name)
-    if value is None or isinstance(value, bool | list | dict):
-        return None
-    shown = (
-        str(int(value))
-        if isinstance(value, Decimal) and value == value.to_integral()
-        else str(value)
-    )
-    return shown.strip() or None
+# A text field; absent or blank is None (the rule the fetch's key check uses too).
+text = tables.field_text
 
 
 def code(value: str | None) -> str:

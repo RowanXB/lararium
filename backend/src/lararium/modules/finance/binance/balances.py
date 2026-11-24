@@ -337,12 +337,11 @@ async def settle_reads(
 
 
 def _amount(label: str, path: str, value: ApiValue) -> Decimal:
-    """An amount field: absent is 0 only where the catalogue says it may be absent; a value
-    that is not a finite number is a `BinanceDataError` naming the field."""
+    """An amount the code sums or compares: absent, or not a finite number, is a
+    `BinanceDataError` naming the field, whatever the catalogue's flag. A quantity left out
+    is never read as 0."""
     if value is None:
-        if _REQUIRED[label].get(path, False):
-            raise BinanceDataError(label, path)
-        return Decimal(0)
+        raise BinanceDataError(label, path)
     return tables.decimal_value(label, path, value)
 
 
@@ -362,7 +361,6 @@ def _per_asset(
     return held
 
 
-_REQUIRED = {label: {f.path: f.required for f in fields} for label, fields in FIELDS.items()}
 _WALLET_NAME = "[].walletName"
 _NAME_MAX = 64
 

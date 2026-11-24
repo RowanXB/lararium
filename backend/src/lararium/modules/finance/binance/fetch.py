@@ -244,12 +244,18 @@ def _contents(endpoint: Endpoint, rows: Sequence[Row]) -> list[JSONValue]:
 
 def typed(label: str, body: ApiValue) -> Parsed:
     """An answer parsed, and each of its rows and what it says beside them converted as the
-    typed tables will convert them: a row that cannot be typed is never stored raw, so every
-    stored record can be normalised. The `BinanceDataError` names the field."""
+    typed tables will convert them, and a history record's ledger key checked: a row that
+    cannot be typed or keyed is never stored raw, so every stored record can be normalised.
+    The `BinanceDataError` names the field."""
     parsed = parse(label, body)
+    endpoint = ENDPOINTS[label]
     if label in layout.TABLE_LABELS:
         for row in tables.records(label, parsed):
             tables.check(label, row)
+            if endpoint.kind == "history":
+                # The record's ledger key, as the normaliser makes it.
+                for field in endpoint.id_fields:
+                    tables.key_part(label, row, field)
         tables.check_response(label, body)
     return parsed
 

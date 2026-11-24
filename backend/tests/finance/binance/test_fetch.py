@@ -531,3 +531,45 @@ async def test_an_integer_its_column_cannot_hold_fails_the_walk(session, run, fa
         await _walk(session, connection, fake, clock, "deposits")
 
     assert (caught.value.label, caught.value.field) == ("deposits", "[].transferType")
+
+
+@pytest.mark.parametrize("record_id", ["a:b", " "])
+async def test_an_id_that_could_share_a_key_fails_its_page_and_stores_nothing(
+    session, run, fake, clock, record_id: str
+) -> None:
+    fake.add("deposits", build_row("deposits", insertTime=NOW_MS - DAY_MS, id=record_id))
+    connection = await binance_connection(run, config=later_config())
+    before = (await get_connection(session, connection.id)).config.get(CURSORS_KEY)
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _walk(session, connection, fake, clock, "deposits")
+
+    assert (caught.value.label, caught.value.field) == ("deposits", "[].id")
+    stored = await session.scalar(
+        text("select count(*) from core.raw_records where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert stored == 0
+    assert (await get_connection(session, connection.id)).config.get(CURSORS_KEY) == before
+
+
+@pytest.mark.parametrize(
+    ("value", "fits"),
+    [("1e-16383", True), ("0E-16383", True), ("1e-16384", False), ("0E-99999", False)],
+)
+async def test_the_numeric_scale_bound_is_the_columns(session, value: str, fits: bool) -> None:
+    from lararium.modules.finance.binance.tables import check
+
+    row = build_row("funding-asset", asset="AAA", free=value)
+    if fits:
+        check("funding-asset", row)
+        # The database holds it.
+        assert await session.scalar(text("select cast(:v as numeric) = 0 or true"), {"v": value})
+        return
+    with pytest.raises(BinanceDataError) as caught:
+        check("funding-asset", row)
+    assert caught.value.field == "[].free"
+    # The database would refuse it.
+    with pytest.raises(Exception, match=r"out of range|overflow"):
+        async with session.begin_nested():
+            await session.scalar(text("select cast(:v as numeric)"), {"v": value})

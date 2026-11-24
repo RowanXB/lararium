@@ -22,7 +22,13 @@ from lararium.core.commands import CommandContext
 from lararium.core.models import Base
 from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance.models import model_of
-from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Parsed, Row
+from lararium.modules.finance.binance.parse import (
+    ApiValue,
+    BinanceDataError,
+    Parsed,
+    Row,
+    row_prefix,
+)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Binance's text times: `2019-10-12 11:12:02` (UTC), or milliseconds since the epoch as text.
@@ -109,7 +115,7 @@ def _convert(label: str, column: layout.Column, value: ApiValue) -> object:
             # What Postgres' `numeric` holds: 131072 digits before the point, 16383 after.
             exponent = number.as_tuple().exponent
             assert isinstance(exponent, int)
-            if number and (number.adjusted() >= 131072 or exponent < -16383):
+            if (number and number.adjusted() >= 131072) or exponent < -16383:
                 raise _fail(label, path)
             return number
         case "integer":
@@ -181,6 +187,29 @@ def check(label: str, row: Row) -> None:
                     convert(child, item)
 
     convert(tables[0], dict(row))
+
+
+def field_text(row: Row, name: str) -> str | None:
+    """A text field; absent or blank is None."""
+    value = row.get(name)
+    if value is None or isinstance(value, bool | list | dict):
+        return None
+    shown = (
+        str(int(value))
+        if isinstance(value, Decimal) and value == value.to_integral()
+        else str(value)
+    )
+    return shown.strip() or None
+
+
+def key_part(label: str, row: Row, field: str) -> str:
+    """An id field as part of a ledger key: one that is blank or holds the key's separator
+    could make two records share a key (or forge a derived one), so it is a data error. The
+    fetch checks it before a record is stored, and the normaliser again."""
+    value = field_text(row, field)
+    if value is None or ":" in value:
+        raise BinanceDataError(label, f"{row_prefix(label)}{field}")
+    return value
 
 
 def check_response(label: str, body: ApiValue) -> None:

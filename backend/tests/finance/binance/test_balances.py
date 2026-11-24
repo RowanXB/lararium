@@ -1038,3 +1038,19 @@ async def test_a_daily_snapshot_with_an_empty_list_is_an_empty_day(session, run)
         ("AAA", 1, _at(one)),
         ("AAA", 0, _at(two)),
     ]
+
+
+@pytest.mark.parametrize("name", ["freeze", "withdrawing"])
+async def test_a_summed_quantity_left_out_of_a_funding_entry_fails(session, run, name: str) -> None:
+    # Every quantity summed for a wallet must be stated, whatever the catalogue's flag.
+    connection = await binance_connection(run)
+    entry = {"asset": "AAA", "free": "0", "locked": "0", "freeze": "5", "withdrawing": "0"}
+    del entry[name]
+    read = Read("funding-asset", [entry], _at(NOW_MS), _at(NOW_MS + 200))
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _report(run, connection, {"funding-asset": read})
+
+    assert (caught.value.label, caught.value.field) == ("funding-asset", f"[].{name}")
+    assert await _snapshots(session, connection.id) == []
+    assert await _count(session, "binance_funding_asset", connection.id) == 0
