@@ -127,7 +127,12 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     when they don't pair: on different accounts, both identified, each naming the other's
     account, of opposite sign, and in two different currencies. Amounts are not compared
     (the rate isn't known in advance), which is why both must name the other; time and
-    uniqueness are the caller's (_cross_currency_edges). Decisions are not considered."""
+    uniqueness are the caller's (_cross_currency_edges). Decisions are not considered.
+
+    It is not eToro's alone: any two own accounts in currencies whose records name each
+    other's account pair this way. A row imported from a file giving dates only is stamped
+    00:00, so for two such rows the near window (minutes) amounts to the same booking
+    date."""
     if c.account_id == r.account_id or not (r.identified and c.identified):
         return None
     if r.holder != c.account_id or c.holder != r.account_id or r.sends == c.sends:
@@ -135,6 +140,11 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     if not (r.fiat and c.fiat) or r.instrument_id == c.instrument_id:
         return None
     return MUTUAL
+
+
+def leg_fees(*records: Pairable) -> list[LegFee]:
+    """The conversion fees the records' connectors give (Pairable.fee), those that have one."""
+    return [x.fee for x in records if x.fee is not None]
 
 
 def _conversion_fee(
@@ -642,6 +652,9 @@ async def pair_relation(
     }
     alone: set[UUID] = set()
     converts: dict[UUID, UUID] = {}
+    # A neighbour already paired in its own currency (in `exact`) still counts as a
+    # candidate across: the record then has several, and is left for review rather than
+    # paired around the neighbour, which is the safe side.
     for r, found in across.items():
         if len(found) != 1 or r in exact:
             continue
@@ -653,7 +666,7 @@ async def pair_relation(
         fits, _ = _conversion_fee(
             (s.instrument_id, -s.quantity),
             (other.instrument_id, other.quantity),
-            [x.fee for x in (s, other) if x.fee is not None],
+            leg_fees(s, other),
         )
         if not fits:
             differing.add(r, c, MUTUAL)  # for review, as a counterpart of another amount

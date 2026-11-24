@@ -64,6 +64,7 @@ from lararium.modules.finance.transfers.pairs import (
     Pairable,
     PairRelation,
     conversion_postings,
+    leg_fees,
     pair_relation,
 )
 from lararium.modules.finance.transfers.queries import (
@@ -218,18 +219,13 @@ async def _link_records(
     ctx: CommandContext,
     record: OwnRecord,
     partner: OwnRecord,
-    system: _System,
-    conversion_fees: Sequence[LegFee] | None,
+    conversion: list[PostingInput] | None,
 ) -> None:
     """A matched transfer of two own records neither of which was a leg, in the sent
-    instrument and amount. Of two in different currencies (`conversion_fees` not None: the
-    legs' fees), its settlement is the conversion between them (_post_conversion)."""
+    instrument and amount. Of two in different currencies, `conversion` holds the postings
+    of the conversion between them (_conversion), which is its settlement."""
     sent, received = (record, partner) if record.role == "out" else (partner, record)
-    settlement_id = (
-        None
-        if conversion_fees is None
-        else await _post_conversion(ctx, sent, received, conversion_fees, system)
-    )
+    settlement_id = None if conversion is None else await _post_conversion(ctx, sent, conversion)
     tr = models.Transfer
     transfer_id = await ctx.session.scalar(
         insert(tr)
@@ -318,25 +314,32 @@ async def _post_settlement(
     )
 
 
-async def _post_conversion(
-    ctx: CommandContext,
-    sending: OwnRecord,
-    receiving: OwnRecord,
-    fees: Sequence[LegFee],
-    system: _System,
-) -> UUID:
-    """Post the conversion of a transfer between two currencies (eToro design §5.12,
-    pairs.conversion_postings) on In transit, dated as the sending record, booked by rule:
-    derived, like a placeholder, so it goes when the transfer does and is posted again
-    when it is matched again. The pair relation took the pair only if its fee fits."""
-    postings = conversion_postings(
-        (sending.instrument_id, sending.amount),
-        (receiving.instrument_id, receiving.amount),
+def _conversion(
+    record: OwnRecord, partner: OwnRecord, fees: Sequence[LegFee], system: _System
+) -> list[PostingInput] | None:
+    """The postings of the conversion between two own records in different currencies
+    (pairs.conversion_postings), as loaded now; None when they no longer fit one (both in
+    one currency, or the fee not less than the amount: changed since the pair relation
+    took them)."""
+    sent, received = (record, partner) if record.role == "out" else (partner, record)
+    if sent.instrument_id == received.instrument_id:
+        return None
+    return conversion_postings(
+        (sent.instrument_id, sent.amount),
+        (received.instrument_id, received.amount),
         fees,
         in_transit=system.in_transit,
         unassigned=system.unassigned,
     )
-    assert postings is not None  # PairRelation.converts holds only pairs whose fee fits
+
+
+async def _post_conversion(
+    ctx: CommandContext, sending: OwnRecord, postings: list[PostingInput]
+) -> UUID:
+    """Post a transfer's conversion between two currencies (eToro design §5.12,
+    _conversion) on In transit, dated as the sending record, booked by rule: derived, like
+    a placeholder, so it goes when the transfer does and is posted again when it is
+    matched again."""
     derived = await post_transaction(
         ctx,
         TransactionInput(
@@ -497,6 +500,18 @@ async def _link_pair(
             record.id,
         )
         return [], set()
+    conversion = None
+    if conversion_fees is not None:
+        conversion = _conversion(record, partner, conversion_fees, system)
+        if conversion is None:
+            # The pass's relation found the pair's fee fits, but a concurrent sync has since
+            # re-posted a leg so it doesn't; the heal after that sync decides again.
+            logger.warning(
+                "transaction %s or %s changed while they were matched; left for the next heal",
+                record.id,
+                partner_id,
+            )
+            return [], set()
     others: list[UUID] = []
     waiting = await _waiting_transfer(session, partner.id)
     if (
@@ -513,7 +528,7 @@ async def _link_pair(
     if waiting is not None:
         await _link(ctx, waiting.id, record)
     else:
-        await _link_records(ctx, record, partner, system, conversion_fees)
+        await _link_records(ctx, record, partner, conversion)
     return others, {partner.id}
 
 
@@ -552,8 +567,7 @@ async def _match_one(
     if partner is not None:
         fees = None
         if relation.converts.get(record.id) == partner:
-            pair = (relation.records[record.id], relation.records[partner])
-            fees = [x.fee for x in pair if x.fee is not None]
+            fees = leg_fees(relation.records[record.id], relation.records[partner])
         more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved, fees)
         return others + more, linked
     counterpart_id = _registry_counterpart(record)

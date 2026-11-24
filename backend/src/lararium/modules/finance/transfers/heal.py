@@ -19,7 +19,7 @@ from lararium.modules.finance.transfers.contra import (
     rejoins,
     snapshot_own_records,
 )
-from lararium.modules.finance.transfers.pairs import PairRelation, conversion_postings
+from lararium.modules.finance.transfers.pairs import PairRelation, conversion_postings, leg_fees
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
@@ -53,7 +53,7 @@ async def _conversions(
 ) -> dict[UUID, Counter[_Posting]]:
     """The postings of these matched transfers' settlements (their conversions), by id."""
     p = models.Posting
-    found: defaultdict[UUID, Counter[_Posting]] = defaultdict(Counter)
+    found: defaultdict[UUID, list[PostingInput]] = defaultdict(list)
     for row in await session.execute(
         select(
             p.transaction_id,
@@ -65,17 +65,17 @@ async def _conversions(
             p.is_fee,
         ).where(p.transaction_id.in_(settlements))
     ):
-        found[row.transaction_id][
-            (
+        found[row.transaction_id].append(
+            PostingInput(
                 row.account_id,
                 row.instrument_id,
                 row.quantity,
-                row.price_per_unit,
-                row.price_instrument_id,
-                row.is_fee,
+                price_per_unit=row.price_per_unit,
+                price_instrument_id=row.price_instrument_id,
+                is_fee=row.is_fee,
             )
-        ] += 1
-    return dict(found)
+        )
+    return {transaction_id: _shape(postings) for transaction_id, postings in found.items()}
 
 
 def _expected_conversion(
@@ -92,7 +92,7 @@ def _expected_conversion(
     postings = conversion_postings(
         (sent.instrument_id, -sent.quantity),
         (received.instrument_id, received.quantity),
-        [x.fee for x in (sent, received) if x.fee is not None],
+        leg_fees(sent, received),
         in_transit=system["in_transit"],
         unassigned=system["unassigned"],
     )

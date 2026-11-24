@@ -24,12 +24,17 @@ from lararium.modules.finance.ledger import (
     upsert_connector_transaction,
 )
 from lararium.modules.finance.pricing import record_fx_rate
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import (
     TransferRecord,
     list_transfers,
+    load_transfer_settings,
+    reject,
     transfer_contra,
     unpair,
 )
+from lararium.modules.finance.transfers import engine as transfer_engine
+from lararium.modules.finance.transfers.pairs import pair_relation
 from lararium.modules.finance.transfers.settings import DEFAULTS
 
 from .conftest import (
@@ -413,7 +418,7 @@ async def test_same_direction_or_one_sided_not_paired(
     await assert_consistent(session)
 
 
-async def test_unpair_voids_conversion(session, run, ids, etoro, leg, heal, gbp, usd) -> None:
+async def test_unpair_removes_conversion(session, run, ids, etoro, leg, heal, gbp, usd) -> None:
     await histories(leg, etoro, gbp, usd)
     await leg(
         etoro.money, gbp, "-1000.00", external_id="cash:1", identifier_id=etoro.trading_identifier
@@ -516,6 +521,133 @@ async def test_a_fee_that_cannot_be_the_conversions_is_left_for_review(
     await heal()
     transfers = await list_transfers(session)
     assert len(transfers) == 2
+    assert {(t.status, t.review_reason) for t in transfers} == {("awaiting", "amount_differs")}
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def rule_transactions(session: AsyncSession) -> int:
+    """How many derived transactions booked by rule (conversions, settlements) remain."""
+    return await session.scalar(
+        text("select count(*) from finance.transactions where origin = 'rule'")
+    )
+
+
+async def test_same_currency_candidate_takes_precedence(
+    session, ids, etoro, leg, heal, gbp, usd
+) -> None:
+    """A record with a candidate of the same amount in its own currency and one in another
+    pairs with the former; the one across is left alone, for review (several_candidates:
+    its only candidate is paired elsewhere, the safe side)."""
+    await histories(leg, etoro, gbp, usd)
+    sent = await leg(
+        etoro.money, gbp, "-1000.00", external_id="cash:1", identifier_id=etoro.trading_identifier
+    )
+    same = await leg(
+        etoro.trading,
+        gbp,
+        "1000.00",
+        external_id="activity:gbp",
+        identifier_id=etoro.money_identifier,
+    )
+    across = await leg(
+        etoro.trading,
+        usd,
+        "1260.00",
+        external_id="activity:usd",
+        identifier_id=etoro.money_identifier,
+        fee=(usd, "6.30"),
+    )
+    await heal()
+    transfers = {
+        (t.out_transaction_id, t.in_transaction_id): t for t in await list_transfers(session)
+    }
+    matched = transfers[(sent.id, same.id)]
+    assert (matched.status, matched.settlement_transaction_id) == ("matched", None)
+    alone = transfers[(None, across.id)]
+    assert (alone.status, alone.review_reason) == ("awaiting", "several_candidates")
+    assert await rule_transactions(session) == 0
+    assert await in_transit(session, ids) == {usd.id: Decimal("-1260.00")}
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_reject_removes_conversion_and_keeps_the_pair_apart(
+    session, run, ids, etoro, leg, heal, gbp, usd
+) -> None:
+    await histories(leg, etoro, gbp, usd)
+    await leg(
+        etoro.money, gbp, "-1000.00", external_id="cash:1", identifier_id=etoro.trading_identifier
+    )
+    await leg(
+        etoro.trading,
+        usd,
+        "1260.00",
+        external_id="activity:1",
+        identifier_id=etoro.money_identifier,
+        fee=(usd, "6.30"),
+    )
+    await heal()
+    [transfer] = await list_transfers(session)
+    assert transfer.settlement_transaction_id is not None
+    await run(reject, transfer.id)
+    assert await heal() == 0
+    [rejected] = await list_transfers(session)
+    assert (rejected.id, rejected.status, rejected.settlement_transaction_id) == (
+        transfer.id,
+        "rejected",
+        None,
+    )
+    assert await rule_transactions(session) == 0
+    assert await in_transit(session, ids) == {}
+    await assert_consistent(session)
+
+
+async def test_a_leg_changed_under_matching_is_left_for_the_next_heal(
+    session, run, ids, etoro, leg, heal, gbp, usd
+) -> None:
+    """The pass's relation took the pair, but a sync then re-posts the sending leg below
+    its fee: matching with that relation links nothing and posts no conversion, and the
+    next heal leaves the pair for review."""
+    await histories(leg, etoro, gbp, usd)
+    sent = await leg(
+        etoro.trading,
+        usd,
+        "-1000.00",
+        external_id="activity:1",
+        identifier_id=etoro.money_identifier,
+        fee=(usd, "5.00"),
+    )
+    received = await leg(
+        etoro.money, gbp, "790.00", external_id="cash:1", identifier_id=etoro.trading_identifier
+    )
+
+    async def relation_now(ctx):
+        settings = await load_transfer_settings(ctx.session)
+        return await pair_relation(ctx.session, await system_account_ids(ctx.session), settings)
+
+    relation = await run(relation_now)
+    assert relation.partner(sent.id) == received.id
+    await leg(
+        etoro.trading,
+        usd,
+        "-4.00",
+        external_id="activity:1",
+        identifier_id=etoro.money_identifier,
+        fee=(usd, "5.00"),
+    )
+
+    async def match_with_the_stale_relation(ctx) -> None:
+        settings = await load_transfer_settings(ctx.session)
+        system = await transfer_engine._system(ctx)
+        await transfer_engine._match(ctx, received.id, settings, system, relation, {})
+
+    await run(match_with_the_stale_relation)  # does not raise
+    assert not [t for t in await list_transfers(session) if t.status == "matched"]
+    assert await rule_transactions(session) == 0
+
+    await heal()
+    transfers = await list_transfers(session)
     assert {(t.status, t.review_reason) for t in transfers} == {("awaiting", "amount_differs")}
     await assert_consistent(session)
     assert await heal() == 0
