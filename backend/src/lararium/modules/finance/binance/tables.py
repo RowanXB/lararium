@@ -105,9 +105,18 @@ def _convert(label: str, column: layout.Column, value: ApiValue) -> object:
         return _moment_text(label, path, value)
     match kind:
         case "decimal":
-            return _decimal(label, path, value)
+            number = _decimal(label, path, value)
+            # What Postgres' `numeric` holds: 131072 digits before the point, 16383 after.
+            exponent = number.as_tuple().exponent
+            assert isinstance(exponent, int)
+            if number and (number.adjusted() >= 131072 or exponent < -16383):
+                raise _fail(label, path)
+            return number
         case "integer":
-            return _integer(label, path, value)
+            number = _integer(label, path, value)
+            if not -(2**63) <= number < 2**63:  # a `bigint`
+                raise _fail(label, path)
+            return number
         case "boolean":
             if not isinstance(value, bool):
                 raise _fail(label, path)
@@ -156,6 +165,33 @@ def columns_for(label: str, row: Row) -> dict[str, object]:
     the response says beside its records is `store_response`'s.
     """
     return _values(label, layout.layout(label)[0], dict(row))
+
+
+def check(label: str, row: Row) -> None:
+    """Convert a record and its child rows as `store` does, writing nothing: a value that
+    cannot be typed is the `BinanceDataError` naming the field. Run before a row is stored
+    raw, so that every stored record can be normalised."""
+    tables = layout.layout(label)
+
+    def convert(table: layout.Table, element: ApiValue) -> None:
+        _values(label, table, element)
+        for child in tables:
+            if child.parent is table:
+                for _, item in _pairs(element, child.scope[len(table.scope) :]):
+                    convert(child, item)
+
+    convert(tables[0], dict(row))
+
+
+def check_response(label: str, body: ApiValue) -> None:
+    """Convert what an answer says beside its records as `store_response` does, writing
+    nothing."""
+    found = [t for t in layout.layout(label) if t.response]
+    if not found:
+        return
+    if not isinstance(body, dict):
+        raise _fail(label, "")
+    _values(label, found[0], body)
 
 
 def content_hash(row: Row) -> str:

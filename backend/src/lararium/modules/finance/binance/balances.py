@@ -48,6 +48,7 @@ from lararium.modules.finance.binance.fetch import (
     VERSION,
     record_type,
     to_json,
+    typed,
     walk,
     walk_trades,
 )
@@ -138,12 +139,12 @@ async def read_balances(client: BinanceClient, labels: Sequence[str]) -> dict[st
                 params = {**fixed, cursor_name: position, size_name: endpoint.page_size}
                 body = await client.call(endpoint, params)
                 pages.append(body)
-                if len(parse(label, body).rows) < endpoint.page_size:
+                if len(typed(label, body).rows) < endpoint.page_size:
                     break
                 position += 1
         else:
             body = await client.call(endpoint, fixed)
-            parse(label, body)
+            typed(label, body)
             pages.append(body)
         body = to_json(_merge(label, pages))
         reads[label] = Read(label, body, moment(read_from), moment(client.now_ms()))

@@ -781,42 +781,6 @@ def _text_time(ms: int) -> str:
     return _at(ms).strftime("%Y-%m-%d %H:%M:%S")
 
 
-@pytest.mark.parametrize(
-    ("change", "field"),
-    [
-        ({"updateTime": 10**20}, "snapshotVos[].updateTime"),
-        ({"free": "abc"}, "snapshotVos[].data.balances[].free"),
-    ],
-)
-async def test_an_unreadable_daily_snapshot_is_left_out_naming_the_field(
-    session, run, change: dict, field: str
-) -> None:
-    # Stored once and never fetched again: a day that cannot be read is left out and flagged,
-    # never failing every later sync.
-    connection = await binance_connection(run)
-    good_at = NOW_MS - 24 * HOUR_MS - 1_000
-    row = _daily("spot", NOW_MS - 1_000, ("AAA", "1"))
-    if "free" in change:
-        row["data"]["balances"][0]["free"] = change["free"]
-    else:
-        row.update(change)
-    flags: list[str] = []
-
-    await run(
-        backfill_daily_snapshots,
-        connection,
-        [_daily("spot", good_at, ("AAA", "2")), row],
-        flag=flags.append,
-    )
-
-    assert flags == [f"a daily Spot snapshot was not written: snapshot.{field} is unreadable"]
-    assert "abc" not in flags[0] and str(10**20) not in flags[0]
-    assert [(s, q, at) for _, s, q, at in await _snapshots(session, connection.id)] == [
-        ("AAA", 2, _at(good_at))
-    ]
-    assert await _reports_of(session, connection.id, "Spot") == [_at(good_at)]
-
-
 async def test_a_spot_amount_that_is_no_number_fails(run) -> None:
     connection = await binance_connection(run)
     read = _read("spot-account", [build_row("spot-account", asset="AAA", free=True, locked="0")])
@@ -1000,8 +964,6 @@ async def test_a_listed_asset_must_state_every_quantity_it_sums(session, run, na
         ("absent", "snapshotVos[].data.balances"),
         ("null", "snapshotVos[].data.balances"),
         ("no data", "snapshotVos[].data.balances"),
-        ("no free", "snapshotVos[].data.balances[].free"),
-        ("no asset", "snapshotVos[].data.balances[].asset"),
     ],
 )
 async def test_a_daily_snapshot_that_does_not_state_its_balances_is_left_out(
@@ -1015,10 +977,8 @@ async def test_a_daily_snapshot_that_does_not_state_its_balances_is_left_out(
     row = _daily("spot", two, ("AAA", "1"))
     if missing == "no data":
         del row["data"]
-    elif missing in ("absent", "null"):
-        row["data"] = _without(row["data"], "balances", missing)
     else:
-        row["data"]["balances"][0].pop(field.rpartition(".")[2])
+        row["data"] = _without(row["data"], "balances", missing)
     good = _daily("spot", one, ("AAA", "2"))
     flags: list[str] = []
 
@@ -1034,10 +994,14 @@ async def test_a_daily_snapshot_that_does_not_state_its_balances_is_left_out(
 async def test_a_first_sync_with_a_daily_row_without_balances_completes(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    one, two = (NOW_MS - n * 24 * HOUR_MS - 1_000 for n in (2, 1))
+    # Days that type correctly but do not state what Spot held: one without its list, one
+    # without `data` at all.
+    one, two, three = (NOW_MS - n * 24 * HOUR_MS - 1_000 for n in (3, 2, 1))
     broken = _daily("spot", two, ("AAA", "2"))
     del broken["data"]["balances"]
-    fake.add("snapshot", _daily("spot", one, ("AAA", "2")), broken)
+    no_data = _daily("spot", three, ("AAA", "2"))
+    del no_data["data"]
+    fake.add("snapshot", _daily("spot", one, ("AAA", "2")), broken, no_data)
     fake.set_rows("spot-account", _spot(("AAA", "2", "0")))
     config = later_config()
     del config["first_sync_done"]
@@ -1052,8 +1016,8 @@ async def test_a_first_sync_with_a_daily_row_without_balances_completes(
         "a daily Spot snapshot was not written: snapshot.snapshotVos[].data.balances is unreadable"
     )
     assert flag in after.config["flags"]  # pyright: ignore[reportOperatorIssue]
-    assert _at(one) in await _reports_of(session, connection.id, "Spot")
-    assert _at(two) not in await _reports_of(session, connection.id, "Spot")
+    reports = await _reports_of(session, connection.id, "Spot")
+    assert _at(one) in reports and _at(two) not in reports and _at(three) not in reports
 
     clock.ms += 4 * HOUR_MS
     again = await run_binance_sync(session, connection.id, fake.handler)

@@ -680,3 +680,72 @@ async def test_a_first_sync_asks_every_phase_a_label(
         text("select count(*) from finance.binance_asset_detail where connection_id = :c"),
         {"c": connection.id},
     )
+
+
+# A row that cannot be typed is never stored: every stored raw record can be normalised.
+
+
+async def _raw(session, connection_id, label: str) -> int:
+    return await session.scalar(
+        text("select count(*) from core.raw_records where connection_id = :c and record_type = :t"),
+        {"c": connection_id, "t": record_type(label)},
+    )
+
+
+async def test_a_history_row_that_cannot_be_typed_is_not_stored(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    moment = NOW_MS - 2 * HOUR_MS
+    row = build_row("deposits", coin="AAA", status=1, walletType=0, insertTime=moment)
+    fake.add("deposits", {**row, "completeTime": 10**20})
+    fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="1.5", locked="0")])
+    connection = await binance_connection(run, config=later_config())
+    before = connection.config[CURSORS_KEY]["deposits"]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "failing"
+    assert "deposits" in (after.last_error or "") and "[].completeTime" in (after.last_error or "")
+    assert str(10**20) not in (after.last_error or "")
+    assert await _raw(session, connection.id, "deposits") == 0
+    assert after.config[CURSORS_KEY]["deposits"] == before  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    # Binance answers a readable row: the next sync stores it and normalises cleanly.
+    fake.set_rows("deposits", [{**row, "completeTime": moment}])
+    clock.ms += 4 * HOUR_MS
+    again = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert again.status == "healthy", again.last_error
+    assert await _raw(session, connection.id, "deposits") == 1
+    posted = await session.scalar(
+        text("select count(*) from finance.transactions where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert posted >= 1
+
+
+async def test_a_balance_answer_that_cannot_be_typed_is_not_stored(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    connection = await binance_connection(run, config=later_config())
+    broken = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        if request.url.path != "/api/v3/account" or not broken["on"]:
+            return answer
+        body = json.loads(answer.content)
+        return httpx.Response(200, content=json.dumps({**body, "updateTime": 10**20}).encode())
+
+    after = await run_binance_sync(session, connection.id, handler)
+
+    assert after.status == "failing"
+    assert "spot-account" in (after.last_error or "") and "updateTime" in (after.last_error or "")
+    assert await _raw(session, connection.id, "spot-account") == 0
+
+    broken["on"] = False
+    clock.ms += 4 * HOUR_MS
+    again = await run_binance_sync(session, connection.id, handler)
+
+    assert again.status == "healthy", again.last_error
+    assert await _raw(session, connection.id, "spot-account") >= 1

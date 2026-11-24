@@ -3,15 +3,19 @@ paging, products that are not present, and the trade symbol sets."""
 
 import dataclasses
 import itertools
+import json
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 from sqlalchemy import text
 
 from lararium.core.connections import get_connection
 from lararium.core.errors import DisplayableError
+from lararium.modules.finance.binance.balances import read_balances
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import (
+    CURSORS_KEY,
     LAUNCH_MS,
     record_type,
     trade_symbols,
@@ -19,6 +23,7 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
     windows,
 )
+from lararium.modules.finance.binance.parse import BinanceDataError
 
 from .fixtures import DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
 from .syncing import Clock, binance_connection, client_for, context, later_config
@@ -449,3 +454,80 @@ async def test_a_full_page_in_one_millisecond_fails_the_sweep(session, run, fake
             await walk_trades(
                 ctx, client_for(clock, http), "my-trades", ["AAABBB"], since_ms=at, until_ms=at
             )
+
+
+# A row that cannot be typed is never stored: every stored raw record can be normalised.
+
+
+@pytest.mark.parametrize("trades", [False, True])
+async def test_a_row_that_cannot_be_typed_fails_its_page_and_stores_nothing(
+    session, run, fake, clock, trades: bool
+) -> None:
+    connection = await binance_connection(run, config=later_config())
+    label = "my-trades" if trades else "deposits"
+    if trades:
+        fake.add(label, build_row(label, symbol="AAABBB", time=10**20))
+    else:
+        fake.add(label, build_row(label, insertTime=NOW_MS - DAY_MS, completeTime=10**20))
+    before = (await get_connection(session, connection.id)).config.get(CURSORS_KEY)
+
+    with pytest.raises(BinanceDataError) as caught:
+        async with fake.http() as http:
+            ctx = await context(session, connection.id, http)
+            client = client_for(clock, http)
+            if trades:
+                await walk_trades(ctx, client, label, ["AAABBB"])
+            else:
+                await walk(ctx, client, label)
+
+    field = "[].time" if trades else "[].completeTime"
+    assert (caught.value.label, caught.value.field) == (label, field)
+    stored = await session.scalar(
+        text("select count(*) from core.raw_records where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert stored == 0
+    assert (await get_connection(session, connection.id)).config.get(CURSORS_KEY) == before
+
+
+async def test_a_balance_read_that_cannot_be_typed_fails(fake, clock) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        if request.url.path != "/api/v3/account":
+            return answer
+        body = json.loads(answer.content)
+        return httpx.Response(200, content=json.dumps({**body, "updateTime": 10**20}).encode())
+
+    with pytest.raises(BinanceDataError) as caught:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await read_balances(client_for(clock, http), ["spot-account"])
+
+    assert (caught.value.label, caught.value.field) == ("spot-account", "updateTime")
+
+
+@pytest.mark.parametrize(
+    ("row", "field"),
+    [
+        ({"free": "1e999999999"}, "[].free"),
+        ({"free": "1e-99999"}, "[].free"),
+    ],
+)
+async def test_a_value_its_column_cannot_hold_fails_the_read(fake, clock, row, field) -> None:
+    # Postgres' numeric holds at most 131072 digits before the point and 16383 after it.
+    fake.set_rows("funding-asset", [build_row("funding-asset", asset="AAA", **row)])
+
+    with pytest.raises(BinanceDataError) as caught:
+        async with fake.http() as http:
+            await read_balances(client_for(clock, http), ["funding-asset"])
+
+    assert (caught.value.label, caught.value.field) == ("funding-asset", field)
+
+
+async def test_an_integer_its_column_cannot_hold_fails_the_walk(session, run, fake, clock) -> None:
+    fake.add("deposits", build_row("deposits", insertTime=NOW_MS - DAY_MS, transferType=2**63))
+    connection = await binance_connection(run, config=later_config())
+
+    with pytest.raises(BinanceDataError) as caught:
+        await _walk(session, connection, fake, clock, "deposits")
+
+    assert (caught.value.label, caught.value.field) == ("deposits", "[].transferType")

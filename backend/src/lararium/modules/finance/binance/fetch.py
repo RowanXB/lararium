@@ -27,10 +27,10 @@ from lararium.core.connectors import SyncContext
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
-from lararium.modules.finance.binance import layout, notices
+from lararium.modules.finance.binance import layout, notices, tables
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
-from lararium.modules.finance.binance.parse import ApiValue, Row, parse, unknown_flags
+from lararium.modules.finance.binance.parse import ApiValue, Parsed, Row, parse, unknown_flags
 from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
@@ -242,10 +242,22 @@ def _contents(endpoint: Endpoint, rows: Sequence[Row]) -> list[JSONValue]:
     return contents
 
 
+def typed(label: str, body: ApiValue) -> Parsed:
+    """An answer parsed, and each of its rows and what it says beside them converted as the
+    typed tables will convert them: a row that cannot be typed is never stored raw, so every
+    stored record can be normalised. The `BinanceDataError` names the field."""
+    parsed = parse(label, body)
+    if label in layout.TABLE_LABELS:
+        for row in tables.records(label, parsed):
+            tables.check(label, row)
+        tables.check_response(label, body)
+    return parsed
+
+
 async def _ask(
     client: BinanceClient, endpoint: Endpoint, params: Mapping[str, str | int]
 ) -> list[Row]:
-    return parse(endpoint.label, await client.call(endpoint, params)).rows
+    return typed(endpoint.label, await client.call(endpoint, params)).rows
 
 
 async def window_pages(
@@ -267,7 +279,7 @@ async def window_pages(
 
     async def ask(index: int, asked: Mapping[str, str | int]) -> Page:
         body = await client.call(endpoint, asked)
-        parsed = parse(endpoint.label, body)
+        parsed = typed(endpoint.label, body)
         unknown = tuple(unknown_flags(endpoint.label, parsed))
         return Page(endpoint.label, start, end, index, body, parsed.rows, unknown)
 
