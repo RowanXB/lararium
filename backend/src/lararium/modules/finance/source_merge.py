@@ -14,7 +14,8 @@ state it); `together` names fields that follow one taken (a booking date takes i
 Values are compared as values (500.0 is 500) and kept as text; no message here names one.
 """
 
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -25,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
+from lararium.core.connectors import SyncContext
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.source_reviews import (
     AGREED,
@@ -37,8 +39,15 @@ from lararium.modules.finance.source_reviews import (
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
+logger = logging.getLogger(__name__)
+
 # (field, the API's value, the other source's value).
 type Disagreement = tuple[str, str, str]
+
+
+def ending(value: str) -> str:
+    """An id as messages name it: its last four characters (design §5.13)."""
+    return f"···{value[-4:]}"
 
 
 def review_text(value: object) -> str:
@@ -183,3 +192,27 @@ async def record_reviews[E](
         if await open_review(ctx, connection_id, transaction_id, key, field, theirs, ours):
             opened.append(field)
     return opened
+
+
+async def notify_reviews(
+    ctx: SyncContext,
+    display_name: str,
+    opened: Sequence[tuple[str, str]],
+    *,
+    sources: str,
+    name: Callable[[str], str],
+    label: str,
+) -> None:
+    """Tell the owner, in one message, of the review items (event key, field) a run opened:
+    `sources` names the two ("eToro's API and statement"), `name` an event by its key, never
+    a value; `label` the connector with its article, for a failed send's log line, which names
+    the error's class only (its message could carry the notifier's address)."""
+    if not opened:
+        return
+    named = ", ".join(f"{name(key)} ({field})" for key, field in opened)
+    try:
+        await ctx.notifier.send(
+            f"{display_name}: {sources} disagree on {named}; review them on the connection"
+        )
+    except Exception as error:
+        logger.warning("sending %s review notification failed (%s)", label, type(error).__name__)

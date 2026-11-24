@@ -24,7 +24,7 @@ from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
-from lararium.modules.finance import connector_items
+from lararium.modules.finance import connector_items, source_merge
 from lararium.modules.finance.connector_items import (
     Item,
     flat,
@@ -218,7 +218,7 @@ def decimal_text(record: Record, value: str, path: str) -> Decimal:
 
 def ending(position_id: str) -> str:
     """A position as messages name it: its last four digits (design §5.13)."""
-    return f"···{position_id[-4:]}"
+    return source_merge.ending(position_id)
 
 
 def record_key(record: Record) -> str:

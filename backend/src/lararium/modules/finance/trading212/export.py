@@ -101,13 +101,14 @@ def _cell(value: str) -> str:
 
 
 def _header(names: list[str]) -> list[str]:
+    """The header's names. The required columns are checked first, and a refusal names only
+    a known column: a file without a header has a data row here, whose cells are values."""
     header = [_cell(name).strip() or f"(column {n + 1})" for n, name in enumerate(names)]
-    for name in header:
-        if header.count(name) > 1:
-            raise ExportError(f"the export lists its {name} column twice")
     for name in EXPORT_REQUIRED:
         if name not in header:
             raise ExportError(f"the export lacks its {name} column")
+    if len(set(header)) != len(header):
+        raise ExportError("the export lists a column twice")
     return header
 
 
@@ -190,8 +191,9 @@ async def parse_upload(body: bytes) -> tuple[tuple[ExportRow, ...], frozenset[st
 
 async def _check(ctx: SyncContext, rows: Sequence[ExportRow]) -> None:
     """The first sync has finished, and no `ID` is one the API's records place on another
-    Trading 212 account (design §5.3a). An export whose IDs no record knows is accepted: it
-    may predate the API's history."""
+    Trading 212 account only (design §5.3a): one this connection's records also hold is its
+    own, as a transfer between the owner's Invest and ISA accounts may share a reference. An
+    export whose IDs no record knows is accepted: it may predate the API's history."""
     session = ctx.command.session
     summary = ENDPOINTS["summary"].record_type
     if await first_sighting(session, ctx.connection.id, summary) is None:
@@ -207,7 +209,11 @@ async def _check(ctx: SyncContext, rows: Sequence[ExportRow]) -> None:
             " union all select connection_id, reference from finance.trading212_dividends) r"
             " join core.connections c on c.id = r.connection_id"
             " where r.connection_id <> :c and r.reference = any(cast(:refs as text[]))"
-            " and not coalesce(jsonb_exists(c.config -> 'account_map', :mine), false))"
+            " and not coalesce(jsonb_exists(c.config -> 'account_map', :mine), false)"
+            " and not exists (select 1 from finance.trading212_transactions o"
+            " where o.connection_id = :c and o.reference = r.reference)"
+            " and not exists (select 1 from finance.trading212_dividends o"
+            " where o.connection_id = :c and o.reference = r.reference))"
         ),
         {"c": ctx.connection.id, "refs": references, "mine": mapped_id(connection.config)},
     )
@@ -223,7 +229,8 @@ async def ingest_export(
 ) -> IngestResult:
     """Check an uploaded export, record it as a document and store one raw record per row,
     then normalise those records and publish the reader's and the normalizer's flags.
-    `parsed` is `body` as `parse_upload` read it, when the caller has already.
+    `parsed` is `body` as `parse_upload` read it, when the caller has already. Each upload
+    replaces the export column flags: they name the unknown columns of the latest upload.
 
     The document's bytes are not written here: the caller writes them
     (`store.put(result.document_sha256, body)`) once the rest of its command is done, just

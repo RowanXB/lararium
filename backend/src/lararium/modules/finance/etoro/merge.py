@@ -23,7 +23,6 @@ settles the item.
 Messages name a position by its last four digits and the field, never a value.
 """
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -35,8 +34,6 @@ from lararium.modules.finance import source_merge
 from lararium.modules.finance.etoro.state import Run, ending
 from lararium.modules.finance.source_merge import Choice, Disagreement
 from lararium.modules.finance.source_reviews import Take
-
-logger = logging.getLogger(__name__)
 
 # The fields a disagreement is about, in the order reviews name them.
 FIELDS = ("units", "cash", "profit", "booking_date")
@@ -118,16 +115,11 @@ async def decided_positions(run: Run) -> set[str]:
 async def notify(ctx: SyncContext, display_name: str, opened: Sequence[tuple[str, str]]) -> None:
     """Tell the owner of the review items this run opened, once; a failed send is logged by
     its class (its message could carry the notifier's address)."""
-    if not opened:
-        return
-    named = ", ".join(
-        f"{key.split(':', 1)[0]} of position {ending(key.split(':', 1)[1])} ({field})"
-        for key, field in opened
+    await source_merge.notify_reviews(
+        ctx,
+        display_name,
+        opened,
+        sources="eToro's API and statement",
+        name=lambda key: f"{key.split(':', 1)[0]} of position {ending(key.split(':', 1)[1])}",
+        label="an eToro",
     )
-    try:
-        await ctx.notifier.send(
-            f"{display_name}: eToro's API and statement disagree on {named}; review them"
-            " on the connection"
-        )
-    except Exception as error:
-        logger.warning("sending an eToro review notification failed (%s)", type(error).__name__)

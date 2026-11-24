@@ -319,6 +319,42 @@ async def test_reviews_list_and_resolve(api, session, monkeypatch) -> None:
     assert (resolved["resolution"], resolved["resolved_by"]) == ("statement", "user")
 
 
+async def test_a_review_of_another_connection_404(api, session, run) -> None:
+    created, review = await _disagreeing(api, session)
+    other = await run(
+        lambda ctx: create_connection(
+            ctx, connector="trading212", display_name="B", config={"account_kind": "isa"}
+        )
+    )
+
+    response = await api.post(
+        f"/api/v1/connections/{other.id}/reviews/{review['id']}/resolve",
+        json={"take": "statement"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 404
+    [still] = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
+    assert still["resolution"] is None
+    assert (await _postings(session, f"transaction:{REF}"))[0][2] == Decimal("250.00")
+
+
+async def test_a_headerless_file_422_names_no_cell(api, session, tmp_path) -> None:
+    created, _ = await _synced(api, session)
+    body = b"Deposit,2026-03-01 09:15:00+00:00,777.77,ref-h,777.77,GBP\r\n"
+
+    response = await _upload(api, created["id"], body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error": "export_invalid",
+        "message": "the export lacks its Action column",
+    }
+    for value in ("777.77", "ref-h", "Deposit"):
+        assert value not in response.text
+    assert _files(tmp_path) == []
+
+
 async def test_a_failed_resolve_leaves_the_review_open_422(api, session, monkeypatch) -> None:
     created, review = await _disagreeing(api, session)
 

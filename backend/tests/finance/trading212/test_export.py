@@ -24,6 +24,7 @@ from .test_normalize import (
     META,
     SUMMARY,
     Ledger,
+    Notifier,
     _api,
     _connection,
     _postings,
@@ -132,6 +133,41 @@ def test_a_bad_file_is_refused_naming_no_value(body: bytes, message: str) -> Non
         assert value not in str(refused.value)
 
 
+def test_quoted_commas_and_newlines_stay_in_their_cell() -> None:
+    notes = 'Card, "main"\nsecond line'
+    body = (
+        b"Action,Time (UTC),Notes,ID,Total,Currency (Total)\r\n"
+        b'Deposit,2026-03-01 09:15:00+00:00,"Card, ""main""\nsecond line",ref-q,250.00,GBP\r\n'
+    )
+    [only], flagged = parse_export(body)
+    assert (only.key, only.cells["Notes"], only.cells["Total"]) == ("ref-q", notes, "250.00")
+    assert flagged == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("spelt", "named"),
+    [("action", "Action"), ("Time(UTC)", "Time (UTC)"), ("Currency  (Total)", "Currency (Total)")],
+)
+def test_a_header_spelt_otherwise_is_refused(spelt: str, named: str) -> None:
+    header = tuple(spelt if h == named else h for h in HEADER)
+    with pytest.raises(ExportError) as refused:
+        parse_export(export_csv(row(), header=header))
+    assert str(refused.value) == f"the export lacks its {named} column"
+
+
+def test_a_file_without_a_header_names_no_cell() -> None:
+    # Its first data row stands where the header should, two of its cells equal.
+    body = b"Deposit,2026-03-01 09:15:00+00:00,250.00,ref-h,250.00,GBP\r\n"
+    with pytest.raises(ExportError) as refused:
+        parse_export(body)
+    assert str(refused.value) == "the export lacks its Action column"
+    for value in ("250.00", "ref-h", "Deposit"):
+        assert value not in str(refused.value)
+    # A real header listing a column twice is refused without naming it.
+    with pytest.raises(ExportError, match=r"^the export lists a column twice$"):
+        parse_export(export_csv(row(), header=(*HEADER, "Notes")))
+
+
 def test_rows_and_cells_are_capped() -> None:
     assert (MAX_ROWS, MAX_CELL) == (200_000, 32_767)
     long_note = row(notes="x" * (MAX_CELL + 1))
@@ -155,7 +191,7 @@ async def test_notes_transaction_id_typed(session, run) -> None:
     ledger = Ledger(session, connection)
     await ledger.normalize(SUMMARY)
     other = row(reference="ref-2", notes="Bank transfer")
-    await _ingest(ledger, export_csv(row(), other))
+    await _ingest(ledger, export_csv(row(currency=" GBP "), other))
 
     typed = await _export_row(session)
     assert (typed.notes, typed.notes_transaction_id) == (f"Transaction ID: {CARD_TX}", CARD_TX)
@@ -177,7 +213,7 @@ async def test_notes_transaction_id_typed(session, run) -> None:
             {"i": REF},
         )
     ).one()
-    assert record.content == {"cells": row()}
+    assert record.content == {"cells": row(currency=" GBP ")}
     document = (
         await session.execute(text("select source, original_filename, sha256 from core.documents"))
     ).one()
@@ -333,6 +369,30 @@ async def test_other_accounts_ids_refused(session, run) -> None:
     await _ingest(ledger, export_csv(row(reference="ref-unknown")))
 
 
+async def test_a_reference_both_accounts_hold_is_accepted(session, run) -> None:
+    # A transfer between the owner's Invest and ISA accounts may share its reference.
+    mine = await _connection(run)
+    theirs = await _connection(run, "isa")
+    shared = transaction_item(reference="shared-1", kind="TRANSFER", amount="-20.00")
+    # The ISA's side of the same transfer, under the same reference.
+    await Ledger(session, theirs).normalize(
+        ("summary", summary_json(account_id=20000002)),
+        ("transactions", transaction_item(reference="shared-1", kind="TRANSFER")),
+    )
+    ledger = Ledger(session, mine)
+    await ledger.normalize(SUMMARY, ("transactions", shared))
+
+    await _ingest(ledger, export_csv(row(reference="shared-1", action="Transfer", total="-20")))
+
+    linked = await session.scalar(
+        text(
+            "select t.connection_id from finance.trading212_export_rows e"
+            " join finance.transactions t on t.id = e.transaction_id where e.id = 'shared-1'"
+        )
+    )
+    assert linked == mine.id
+
+
 # Precedence and reviews (design §5.7) -------------------------------------------------------
 
 
@@ -461,8 +521,9 @@ async def test_works_without_export(session, run, monkeypatch) -> None:
     }
     api.pies = []
     connection = await _synced_connection(run)
+    notifier = Notifier()
 
-    after = await _run_sync(session, connection, api)
+    after = await _run_sync(session, connection, api, notifier)
 
     assert after.status == "healthy"
     assert after.warnings == []
@@ -483,3 +544,4 @@ async def test_works_without_export(session, run, monkeypatch) -> None:
     assert opening == 0
     exported = await session.scalar(text("select count(*) from finance.trading212_export_rows"))
     assert exported == 0
+    assert not [m for m in notifier.messages if "export" in m.lower()]
