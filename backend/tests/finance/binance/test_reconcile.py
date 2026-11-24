@@ -820,10 +820,12 @@ async def test_an_unclear_read_writes_no_report_time(
     await run_binance_sync(session, connection.id, fake.handler)
 
     def busy(asked: int) -> None:
-        # A deposit inside every Spot read, and none near the other reads.
+        # A deposit inside every Spot read, and none near the other reads (each is read 5 s
+        # or more away from it).
+        clock.ms += 5_000
         fake.add("deposits", _deposit(100 + asked, clock.ms, "1"))
         fake.set_rows("spot-account", _spot(("AAA", str(11 + asked))))
-        clock.ms += 10_000
+        clock.ms += 5_000
 
     fake.when_asked("spot-account", busy)
     await _later(session, connection, fake, clock)
