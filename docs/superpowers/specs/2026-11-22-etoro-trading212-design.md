@@ -412,6 +412,7 @@ Audit arguments never include keys.
 | An eToro key that gains write scopes | Sync refused (§5.1). |
 | eToro balance history older than 12 months | Not available; the earliest snapshot stands (opening, §5.5). |
 | Unknown enum values, fields, sheets, columns | Stored raw, flagged by name, not posted when they would change postings. |
+| A statement position Lararium cannot place (no Closed Positions row to say it is real, or no ISIN, type or currency) | Not posted, flagged "a statement position Lararium cannot place" (ruling R40): the flag is found in full every run, so it clears on the next sync or upload after which the position can be placed, and it is not raised for an open the statement does not close made after the latest sync's fetch, which the next sync is expected to bring. |
 
 ## 7. Left for later milestones
 

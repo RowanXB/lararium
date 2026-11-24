@@ -72,6 +72,7 @@ from lararium.modules.finance.etoro.state import (
     ending,
     flat,
     id_at,
+    latest_sighted,
     moment_at,
     number_at,
     objects_at,
@@ -469,8 +470,6 @@ async def _instrument(run: Run, position: Position) -> UUID | None:
         return None
     if settlement == "unsupported":
         run.flag(UNSUPPORTED_POSITION)
-    elif settlement == "unknown" and not position.from_api:
-        run.flag(statement_ledger.UNPLACED)
     elif settlement == "real":
         if position.from_api:
             return await run.instrument(etoro_instrument(position))
@@ -501,6 +500,41 @@ async def position(run: Run, position: Position) -> None:
         await trade_row(run, position.trade, closed, instrument_id)
     if statement is not None and statement.closed is not None:
         await statement_ledger.closed_row(run, statement.closed, key, closed, instrument_id)
+
+
+async def unplaced(
+    run: Run, trades: Mapping[str, Record], statement: statement_ledger.Statement
+) -> int:
+    """How many positions only the statement has cannot be placed (ruling R40): no Closed
+    Positions row to say they are real (an open the statement does not close), or one that
+    does not say which instrument. Found in full from everything stored, so the flag clears
+    once the API or a later statement places them. An open the statement does not close,
+    after the latest sync's fetch, is not counted: that sync could not have brought it, the
+    next is expected to."""
+    pnl = await _latest_items(run, "pnl")
+    latest = await latest_sighted(run.session, run.connection_id, "balances")
+    fetched = latest.seen_at if latest is not None else None
+    count = 0
+    for position_id, trade in statement.trades.items():
+        if position_id in trades or position_id in pnl:
+            continue  # the API has it
+        if (trade.open, trade.close, trade.closed) == (None, None, None):
+            continue
+        settlement = statement_ledger.settlement(trade)
+        if settlement == "unsupported":
+            continue  # flagged as such
+        if settlement == "real":
+            if (
+                not statement_ledger.placeable(trade)
+                and await statement_ledger.posted_instrument(run, position_id) is None
+            ):
+                count += 1
+            continue
+        opened = statement_ledger.moment(trade.open, "Date") if trade.open else None
+        if trade.close is None and opened is not None and (fetched is None or opened > fetched):
+            continue  # the API is expected to bring it
+        count += 1
+    return count
 
 
 async def settlement_unknown(

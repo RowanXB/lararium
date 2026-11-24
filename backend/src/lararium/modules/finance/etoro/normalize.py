@@ -21,8 +21,8 @@ reconciliation of the accounts against eToro's latest reports (reconcile.py).
 Every record's fields are checked first: a required one missing fails the run; an unknown one
 with a value is flagged, as are values and types the mapping does not know. Some flags are
 found in full every run, so they clear once their cause is gone: instruments still without a
-type, of one the ledger does not hold, or of no known currency, and positions no source
-states the settlement of.
+type, of one the ledger does not hold, or of no known currency, positions no source states
+the settlement of, and statement positions Lararium cannot place (records.unplaced, R40).
 """
 
 from collections import defaultdict
@@ -284,6 +284,8 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     report.flags_in_full |= await currency_flags(run.session, run.connection_id)
     if unknown := await records.settlement_unknown(run, trades, lookups):
         report.flags_in_full.add(f"{records.SETTLEMENT_UNKNOWN} ({unknown})")
+    if await records.unplaced(run, trades, statement):
+        report.flags_in_full.add(statement_ledger.UNPLACED)
 
     # Only this normaliser's keys: others stay as they are.
     values: dict[str, JSONValue] = {

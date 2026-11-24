@@ -430,10 +430,21 @@ async def instrument(run: Run, position_id: str, trade: Trade) -> UUID | None:
     details = _details(run, trade)
     kind = _KINDS.get(closed.type.casefold()) if closed is not None else None
     if isin is None or details is None or kind is None:
-        run.flag(UNPLACED)
-        return None
+        return None  # flagged in full (records.unplaced)
     symbol, currency = details
     return await statement_listing(run.command, isin, currency, symbol, kind)
+
+
+def placeable(trade: Trade) -> bool:
+    """Whether the statement says which instrument a real position only it has is on: its
+    Closed Positions row's ISIN and Type, and the currency its activity names (instrument)."""
+    closed = trade.closed
+    return (
+        closed is not None
+        and _isin(closed) is not None
+        and closed.type.casefold() in _KINDS
+        and bool(_stated(trade))
+    )
 
 
 def _stated(trade: Trade) -> list[tuple[str, str]]:

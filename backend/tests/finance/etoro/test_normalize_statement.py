@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import text
 
 from lararium.core import models as core_models
+from lararium.core.connections import get_connection
 from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance.connector_run import holdings
 from lararium.modules.finance.etoro import statement_ledger
@@ -1376,3 +1377,36 @@ async def test_a_partial_close_the_sources_disagree_on_is_reviewed(session, ledg
         "5",
     )
     assert len(ledger.disagreement_messages()) == 1
+
+
+# R40: the unplaceable-position flag lives only as long as its cause ---------------------------
+
+UNPLACED_FLAG = f"eToro flagged: {statement_ledger.UNPLACED}"
+OPEN_ONLY = [transfer_in(), open_row()]
+
+
+async def _warnings(session, ledger: Ledger) -> list[str]:
+    return (await get_connection(session, ledger.connection.id)).warnings
+
+
+async def test_a_statement_open_after_the_last_sync_is_not_flagged(session, ledger) -> None:
+    # The last sync fetched before the position opened: the API is expected to bring it.
+    await ledger.normalize(*BASE, now=datetime(2026, 10, 2, 9, 0, tzinfo=UTC))
+    report = await ledger.upload(build_statement(summary(username=USERNAME), OPEN_ONLY))
+    assert statement_ledger.UNPLACED not in report.flagged | report.flags_in_full
+    assert UNPLACED_FLAG not in await _warnings(session, ledger)
+
+
+async def test_the_unplaceable_flag_stands_then_clears_once_placed(session, ledger) -> None:
+    # A sync after the open did not bring the position: the flag stands.
+    await ledger.normalize(*BASE, now=NOW)
+    await ledger.upload(build_statement(summary(username=USERNAME), OPEN_ONLY))
+    assert UNPLACED_FLAG in await _warnings(session, ledger)
+    # The next sync's PnL lists it: placed, and the flag clears without a replay.
+    pnl = ("pnl", pnl_body([pnl_position(POSITION, units="4", amount="500.00")]))
+    report = await ledger.normalize(*BASE, pnl, now=NOW + timedelta(days=1))
+    assert not report.replayed
+    assert statement_ledger.UNPLACED not in report.flagged | report.flags_in_full
+    # The next upload publishes the flags in full: it is gone.
+    await ledger.upload(build_statement(summary(username=USERNAME), OPEN_ONLY))
+    assert UNPLACED_FLAG not in await _warnings(session, ledger)
