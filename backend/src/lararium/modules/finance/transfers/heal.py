@@ -1,6 +1,10 @@
 """Which records heal (engine.heal_transfers) has to match again: those whose ledger state
 disagrees with the rule."""
 
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
+from decimal import Decimal
+from itertools import chain
 from uuid import UUID
 
 from sqlalchemy import and_, exists, func, or_, select, union
@@ -8,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
-from lararium.modules.finance.system_accounts import system_account_ids
+from lararium.modules.finance.ledger import PostingInput
+from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
 from lararium.modules.finance.transfers.contra import (
     record_columns,
     rejoins,
     snapshot_own_records,
 )
-from lararium.modules.finance.transfers.pairs import PairRelation
+from lararium.modules.finance.transfers.pairs import PairRelation, conversion_postings
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
@@ -25,33 +30,126 @@ from lararium.modules.finance.transfers.queries import (
 )
 from lararium.modules.finance.transfers.settings import TransferSettings
 
+type _Posting = tuple[UUID, UUID, Decimal, Decimal | None, UUID | None, bool]
 
-async def _pair_states(session: AsyncSession, relation: PairRelation) -> set[UUID]:
+
+def _shape(postings: Iterable[PostingInput]) -> Counter[_Posting]:
+    """What a conversion's postings are, to compare one posted with one derived."""
+    return Counter(
+        (
+            p.account_id,
+            p.instrument_id,
+            p.quantity,
+            p.price_per_unit,
+            p.price_instrument_id,
+            p.is_fee,
+        )
+        for p in postings
+    )
+
+
+async def _conversions(
+    session: AsyncSession, settlements: list[UUID]
+) -> dict[UUID, Counter[_Posting]]:
+    """The postings of these matched transfers' settlements (their conversions), by id."""
+    p = models.Posting
+    found: defaultdict[UUID, Counter[_Posting]] = defaultdict(Counter)
+    for row in await session.execute(
+        select(
+            p.transaction_id,
+            p.account_id,
+            p.instrument_id,
+            p.quantity,
+            p.price_per_unit,
+            p.price_instrument_id,
+            p.is_fee,
+        ).where(p.transaction_id.in_(settlements))
+    ):
+        found[row.transaction_id][
+            (
+                row.account_id,
+                row.instrument_id,
+                row.quantity,
+                row.price_per_unit,
+                row.price_instrument_id,
+                row.is_fee,
+            )
+        ] += 1
+    return dict(found)
+
+
+def _expected_conversion(
+    relation: PairRelation,
+    sent_id: UUID,
+    received_id: UUID,
+    system: Mapping[SystemAccountKey, UUID],
+) -> Counter[_Posting] | None:
+    """The conversion a matched transfer of these two records should have: none for two in
+    one instrument (or a record the relation no longer holds, which is due anyway)."""
+    sent, received = relation.records.get(sent_id), relation.records.get(received_id)
+    if sent is None or received is None or sent.instrument_id == received.instrument_id:
+        return None
+    postings = conversion_postings(
+        (sent.instrument_id, -sent.quantity),
+        (received.instrument_id, received.quantity),
+        [x.fee for x in (sent, received) if x.fee is not None],
+        in_transit=system["in_transit"],
+        unassigned=system["unassigned"],
+    )
+    return None if postings is None else _shape(postings)
+
+
+async def _pair_states(
+    session: AsyncSession, relation: PairRelation, system: Mapping[SystemAccountKey, UUID]
+) -> set[UUID]:
     """Records whose transfer disagrees with the pair relation, which matching decides by:
     a unique pair (each the other's only candidate) not yet matched; a matched pair that
-    is no longer unique; and an open transfer whose review reason is not the one its own
-    record's candidates give (several_candidates if it has any of the same amount, else
-    amount_differs if it has any of another, else none)."""
+    is no longer unique, or whose conversion (its settlement, for two currencies) is not
+    the one its records and their fees give now; and an open transfer whose review reason
+    is not the one its own record's candidates give (several_candidates if it has several,
+    PairRelation.several, else amount_differs if it has any of another amount, else
+    none)."""
     tr = models.Transfer
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
-    rows = await session.execute(
-        select(tr.status, tr.out_transaction_id, tr.in_transaction_id, tr.review_reason).where(
-            tr.status.in_(("matched", *OPEN_STATUSES))
+    rows = list(
+        await session.execute(
+            select(
+                tr.status,
+                tr.out_transaction_id,
+                tr.in_transaction_id,
+                tr.review_reason,
+                tr.settlement_transaction_id,
+            ).where(tr.status.in_(("matched", *OPEN_STATUSES)))
         )
     )
+    settled = [
+        row.settlement_transaction_id
+        for row in rows
+        if row.status == "matched" and row.settlement_transaction_id is not None
+    ]
+    conversions = await _conversions(session, settled) if settled else {}
     for row in rows:
         if row.status == "matched":
             matched.add((row.out_transaction_id, row.in_transaction_id))
             # (e) a matched transfer whose two records are no longer a unique pair.
             if relation.partner(row.out_transaction_id) != row.in_transaction_id:
                 due.add(row.out_transaction_id)
+            # (d) a matched transfer whose conversion is missing, stale or not due.
+            elif (
+                None
+                if row.settlement_transaction_id is None
+                else conversions.get(row.settlement_transaction_id, Counter())
+            ) != _expected_conversion(
+                relation, row.out_transaction_id, row.in_transaction_id, system
+            ):
+                due.add(row.out_transaction_id)
             continue
         present = row.out_transaction_id or row.in_transaction_id
         if present is None or (row.out_transaction_id and row.in_transaction_id):
             continue
         expected: ReviewReason | None = None
-        if relation.candidates(present):
+        if relation.several(present):
             expected = "several_candidates"
         elif relation.candidates(present, exact=False):
             expected = "amount_differs"
@@ -59,7 +157,7 @@ async def _pair_states(session: AsyncSession, relation: PairRelation) -> set[UUI
         if row.review_reason != expected:
             due.add(present)
     # (c) a unique pair not yet a matched transfer.
-    for record_id in relation.exact:
+    for record_id in chain(relation.exact, relation.converts):
         partner = relation.partner(record_id)
         if (
             partner is not None
@@ -126,6 +224,14 @@ async def records_to_heal(
                 else (tr.to_account_id, tr.from_account_id)
             )
             quantity = -tr.amount if side == "out" else tr.amount
+            # A transfer is in the sent instrument and amount; its receiving record in
+            # another currency is checked against its conversion instead (_pair_states).
+            fits = and_(own.c.instrument_id == tr.instrument_id, own.c.quantity == quantity)
+            if side == "in":
+                fits = or_(
+                    fits,
+                    and_(tr.status == "matched", tr.settlement_transaction_id.is_not(None)),
+                )
             # (d) legs that no longer fit their transfer. A leg that is no own record any
             # more (void, say) has no snapshot row: its time is looked up by id.
             occurred_at = select(t.occurred_at).where(t.id == leg).scalar_subquery()
@@ -139,8 +245,7 @@ async def records_to_heal(
                     or_(
                         own.c.transaction_id.is_(None),  # void, or no longer shaped like a leg
                         own.c.account_id != own_account,
-                        own.c.instrument_id != tr.instrument_id,
-                        own.c.quantity != quantity,
+                        ~fits,
                         own.c.contra_account_id != in_transit,
                         # A transfer with one own record stands on that record naming the
                         # other account; it no longer does once the identifier moves.
@@ -213,7 +318,7 @@ async def records_to_heal(
             )
         )
     # (c) and (e): pairs, and review reasons, that disagree with the pair relation.
-    paired = await _pair_states(session, relation)
+    paired = await _pair_states(session, relation, system)
     if paired:
         queries.append(select(t.id.label("id"), t.occurred_at).where(t.id.in_(paired)))
     due = union(*queries).subquery()

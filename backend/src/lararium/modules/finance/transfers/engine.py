@@ -3,7 +3,7 @@ identified record, and keeping placeholders and settlements in step with the rec
 mirror."""
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -50,6 +50,7 @@ from lararium.modules.finance.system_accounts import (
 )
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
+    LegFee,
     OwnRecord,
     SourceRef,
     bound_id,
@@ -62,6 +63,7 @@ from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.pairs import (
     Pairable,
     PairRelation,
+    conversion_postings,
     pair_relation,
 )
 from lararium.modules.finance.transfers.queries import (
@@ -212,20 +214,34 @@ async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> No
     )
 
 
-async def _link_records(ctx: CommandContext, record: OwnRecord, partner: OwnRecord) -> None:
-    """A matched transfer of two own records neither of which was a leg."""
+async def _link_records(
+    ctx: CommandContext,
+    record: OwnRecord,
+    partner: OwnRecord,
+    system: _System,
+    conversion_fees: Sequence[LegFee] | None,
+) -> None:
+    """A matched transfer of two own records neither of which was a leg, in the sent
+    instrument and amount. Of two in different currencies (`conversion_fees` not None: the
+    legs' fees), its settlement is the conversion between them (_post_conversion)."""
     sent, received = (record, partner) if record.role == "out" else (partner, record)
+    settlement_id = (
+        None
+        if conversion_fees is None
+        else await _post_conversion(ctx, sent, received, conversion_fees, system)
+    )
     tr = models.Transfer
     transfer_id = await ctx.session.scalar(
         insert(tr)
         .values(
             from_account_id=sent.account_id,
             to_account_id=received.account_id,
-            instrument_id=record.instrument_id,
-            amount=record.amount,
+            instrument_id=sent.instrument_id,
+            amount=sent.amount,
             status="matched",
             out_transaction_id=sent.id,
             in_transaction_id=received.id,
+            settlement_transaction_id=settlement_id,
             opened_at=min(sent.occurred_at, received.occurred_at),
             matched_at=func.now(),
         )
@@ -300,6 +316,39 @@ async def _post_settlement(
         status="booked",
         origin="rule",
     )
+
+
+async def _post_conversion(
+    ctx: CommandContext,
+    sending: OwnRecord,
+    receiving: OwnRecord,
+    fees: Sequence[LegFee],
+    system: _System,
+) -> UUID:
+    """Post the conversion of a transfer between two currencies (eToro design §5.12,
+    pairs.conversion_postings) on In transit, dated as the sending record, booked by rule:
+    derived, like a placeholder, so it goes when the transfer does and is posted again
+    when it is matched again. The pair relation took the pair only if its fee fits."""
+    postings = conversion_postings(
+        (sending.instrument_id, sending.amount),
+        (receiving.instrument_id, receiving.amount),
+        fees,
+        in_transit=system.in_transit,
+        unassigned=system.unassigned,
+    )
+    assert postings is not None  # PairRelation.converts holds only pairs whose fee fits
+    derived = await post_transaction(
+        ctx,
+        TransactionInput(
+            occurred_at=sending.occurred_at,
+            booking_date=sending.booking_date,
+            description="Currency conversion",
+            status="booked",
+            origin="rule",
+            postings=postings,
+        ),
+    )
+    return derived.id
 
 
 async def _open(
@@ -429,12 +478,14 @@ async def _link_pair(
     partner_id: UUID,
     system: _System,
     dissolved: _Dissolved,
+    conversion_fees: Sequence[LegFee] | None = None,
 ) -> tuple[list[UUID], set[UUID]]:
     """Link the record with its unique partner: into the partner's open transfer when it
     has one between the same accounts (so that transfer's placeholder or settlement goes),
-    else as a new matched transfer after dissolving whatever the partner was in. Returns
-    the records left without their transfer, and the partner (none linked when the partner
-    changed under us)."""
+    else as a new matched transfer after dissolving whatever the partner was in. A partner
+    in another currency (`conversion_fees` not None: the legs' fees) always makes a new
+    one, in the sent currency, settled by the conversion. Returns the records left without
+    their transfer, and the partner (none linked when the partner changed under us)."""
     session = ctx.session
     partner = await load_own_record(session, ids, partner_id)
     if partner is None:
@@ -448,8 +499,10 @@ async def _link_pair(
         return [], set()
     others: list[UUID] = []
     waiting = await _waiting_transfer(session, partner.id)
-    if waiting is None or (waiting.from_account_id, waiting.to_account_id) != _accounts(
-        record, partner.account_id
+    if (
+        waiting is None
+        or conversion_fees is not None
+        or (waiting.from_account_id, waiting.to_account_id) != _accounts(record, partner.account_id)
     ):
         others = await _dissolve(ctx, partner.id, dissolved)
         waiting = None
@@ -460,7 +513,7 @@ async def _link_pair(
     if waiting is not None:
         await _link(ctx, waiting.id, record)
     else:
-        await _link_records(ctx, record, partner)
+        await _link_records(ctx, record, partner, system, conversion_fees)
     return others, {partner.id}
 
 
@@ -497,7 +550,11 @@ async def _match_one(
     # unique pair.
     partner = relation.partner(record.id)
     if partner is not None:
-        more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved)
+        fees = None
+        if relation.converts.get(record.id) == partner:
+            pair = (relation.records[record.id], relation.records[partner])
+            fees = [x.fee for x in pair if x.fee is not None]
+        more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved, fees)
         return others + more, linked
     counterpart_id = _registry_counterpart(record)
     if counterpart_id is None:
@@ -508,7 +565,7 @@ async def _match_one(
     if not await _set_contra(ctx, record, system.in_transit):
         return others, set()
     review_reason: ReviewReason | None = None
-    if relation.candidates(record.id):
+    if relation.several(record.id):
         review_reason = "several_candidates"
     elif relation.candidates(record.id, exact=False):
         review_reason = "amount_differs"

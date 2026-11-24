@@ -428,6 +428,28 @@ async def snapshot_own_records(
     return _OWN_RECORDS
 
 
+@dataclass(frozen=True)
+class LegFee:
+    """A transfer leg's conversion fee, as its connector gives it (finance.transfer_leg_fees,
+    eToro design §5.12): only connectors write it, and the engine reads it into the
+    conversion it posts."""
+
+    instrument_id: UUID
+    amount: Decimal  # not negative
+
+
+def leg_fee_columns(
+    transaction_id: SQLColumnExpression[UUID],
+) -> tuple[ColumnElement[UUID], ColumnElement[Decimal]]:
+    """The (instrument_id, amount) of the transaction's leg fee, NULL when it has none: a
+    lookup by its primary key for each record."""
+    f = aliased(models.TransferLegFee, name="leg_fee")
+    return (
+        select(f.instrument_id).where(f.transaction_id == transaction_id).scalar_subquery(),
+        select(f.amount).where(f.transaction_id == transaction_id).scalar_subquery(),
+    )
+
+
 def bound_id(value: UUID) -> SQLColumnExpression[UUID]:
     """An id as a bound SQL value, for the queries that also take columns."""
     return literal(value, Uuid())

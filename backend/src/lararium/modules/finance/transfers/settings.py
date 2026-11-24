@@ -19,6 +19,10 @@ class TransferSettings:
     window_before: timedelta
     window_after: timedelta
     overdue: timedelta  # an awaiting transfer is overdue after this long
+    # The tiers that pair by time rather than by booking date (pairs.cross_currency_tier)
+    # take two records whose occurred_at are at most this far apart: eToro stamps both
+    # sides of an internal transfer with one clock (eToro design §5.12, Task 0 check 5).
+    near_window: timedelta = timedelta(minutes=2)
 
 
 # A Faster Payment arrives the same day; BACS takes 3 working days, up to 5 calendar days

@@ -9,7 +9,7 @@ for a whole heal pass."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -18,16 +18,26 @@ from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
+from lararium.modules.finance.ledger import PostingInput
 from lararium.modules.finance.system_accounts import SystemAccountKey
-from lararium.modules.finance.transfers.contra import SourceRef, eligible_records, names_source
+from lararium.modules.finance.transfers.contra import (
+    LegFee,
+    SourceRef,
+    eligible_records,
+    leg_fee_columns,
+    names_source,
+)
 from lararium.modules.finance.transfers.settings import TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
 # owner paired them; each names the other's account; only one names the other's account
 # (the other is a bank transfer naming nobody); only one prints the sort code of the other's
-# account, and nothing else of it (the other names no bank account at all).
+# account, and nothing else of it (the other names no bank account at all). Two records in
+# different currencies that name each other's accounts are MUTUAL too
+# (cross_currency_tier).
 type Tier = Literal[1, 2, 3, 4]
 DECIDED: Tier = 1
 MUTUAL: Tier = 2
@@ -50,6 +60,8 @@ class Pairable:
     bank_transfer: bool
     weak_holder: UUID | None = None  # the account its sort code alone names (weak_tier)
     names_account: bool = False  # it names a bank account, or prints part of one
+    fiat: bool = False  # its instrument is a currency (cross_currency_tier)
+    fee: LegFee | None = None  # the conversion fee its connector gives (conversion_postings)
 
     @property
     def sends(self) -> bool:
@@ -108,6 +120,86 @@ def weak_tier(r: Pairable, c: Pairable) -> Tier | None:
     if not (r.bank_transfer and c.bank_transfer):
         return None
     return WEAK if _names_weakly(r, c) or _names_weakly(c, r) else None
+
+
+def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
+    """The tier two records in different currencies get (eToro design §5.12), or None
+    when they don't pair: on different accounts, both identified, each naming the other's
+    account, of opposite sign, and in two different currencies. Amounts are not compared
+    (the rate isn't known in advance), which is why both must name the other; time and
+    uniqueness are the caller's (_cross_currency_edges). Decisions are not considered."""
+    if c.account_id == r.account_id or not (r.identified and c.identified):
+        return None
+    if r.holder != c.account_id or c.holder != r.account_id or r.sends == c.sends:
+        return None
+    if not (r.fiat and c.fiat) or r.instrument_id == c.instrument_id:
+        return None
+    return MUTUAL
+
+
+def _conversion_fee(
+    sent: tuple[UUID, Decimal], received: tuple[UUID, Decimal], fees: Sequence[LegFee]
+) -> tuple[bool, LegFee | None]:
+    """(fits, fee): the fee a conversion of `sent` (instrument, amount) into `received`
+    takes, None for none (no leg has one, or it is 0); fits is False when none can be (both
+    legs have one, or it is in a third currency, or not less than the leg's amount in its
+    currency: a data error)."""
+    charged = [fee for fee in fees if fee.amount != 0]
+    if not charged:
+        return True, None
+    if len(charged) > 1:
+        return False, None
+    [fee] = charged
+    amounts = dict((sent, received))
+    if fee.instrument_id not in amounts or fee.amount >= amounts[fee.instrument_id]:
+        return False, None
+    return True, fee
+
+
+def conversion_postings(
+    sent: tuple[UUID, Decimal],
+    received: tuple[UUID, Decimal],
+    fees: Sequence[LegFee],
+    *,
+    in_transit: UUID,
+    unassigned: UUID,
+) -> list[PostingInput] | None:
+    """The postings of the conversion of a cross-currency transfer (eToro design §5.12):
+    `sent` (instrument, amount) left one own account and `received` arrived on the other,
+    both through In transit, and the legs' fees (`fees`) give its fee F, if any. On In
+    transit, so it nets to zero there in each currency: the sent amount converted into the
+    received one at their rate, the price carried by the sent currency's posting (which
+    ledger._weight weighs in the received one), and F, flagged as a fee, against
+    Unassigned. A fee in the received currency was taken after the conversion, so the sent
+    amount bought the received one plus F; one in the sent currency, before it, so only
+    the sent amount less F was converted. None when no fee can be the conversion's
+    (_conversion_fee)."""
+    (sent_id, sent_amount), (received_id, received_amount) = sent, received
+    fits, fee = _conversion_fee(sent, received, fees)
+    if not fits:
+        return None
+    converted, bought = sent_amount, received_amount
+    if fee is not None:
+        if fee.instrument_id == received_id:
+            bought += fee.amount
+        else:
+            converted -= fee.amount
+    postings = [
+        PostingInput(
+            in_transit,
+            sent_id,
+            -converted,
+            price_per_unit=bought / converted,
+            price_instrument_id=received_id,
+        ),
+        PostingInput(in_transit, received_id, bought),
+    ]
+    if fee is not None:
+        postings += [
+            PostingInput(in_transit, fee.instrument_id, -fee.amount, is_fee=True),
+            PostingInput(unassigned, fee.instrument_id, fee.amount),
+        ]
+    return postings
 
 
 @dataclass(frozen=True)
@@ -221,6 +313,9 @@ async def _load_records(
         if decided
         else None
     )
+    fee_instrument_id, fee_amount = leg_fee_columns(e.c.transaction_id)
+    i = aliased(models.Instrument, name="record_instrument")
+    fiat = select(i.kind == "fiat").where(i.id == e.c.instrument_id).scalar_subquery()
     can_pair = [
         e.c.bank_transfer,
         e.c.counterparty_identifier_id.is_not(None),
@@ -241,6 +336,9 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.weak_holder,
         e.c.names_account,
+        fiat.label("fiat"),
+        fee_instrument_id.label("fee_instrument_id"),
+        fee_amount.label("fee_amount"),
     ).where(or_(*can_pair))
     if excluding:
         query = query.where(e.c.transaction_id.not_in(list(excluding)))
@@ -257,6 +355,12 @@ async def _load_records(
             bank_transfer=row.bank_transfer,
             weak_holder=row.weak_holder,
             names_account=row.names_account,
+            fiat=bool(row.fiat),
+            fee=(
+                None
+                if row.fee_instrument_id is None
+                else LegFee(row.fee_instrument_id, row.fee_amount)
+            ),
         )
         for row in await session.execute(query)
     ]
@@ -368,6 +472,38 @@ def _decided_edges(records: list[Pairable], decisions: _Decisions, edges: _Edges
             edges.add(r.id, c.id, DECIDED)
 
 
+def _cross_currency_edges(
+    records: list[Pairable], settings: TransferSettings, decisions: _Decisions
+) -> _Edges:
+    """The pairs cross_currency_tier gives whose occurred_at are at most the near window
+    apart (settings.near_window), and which no decision keeps apart. A sender naming
+    account H meets the receivers on H naming its account, sorted by time."""
+    edges = _Edges()
+    named: dict[tuple[UUID, UUID], list[Pairable]] = defaultdict(list)
+    for x in records:
+        if not x.sends and x.fiat and x.identified and x.holder is not None:
+            named[(x.account_id, x.holder)].append(x)
+    by_time = {
+        key: sorted(found, key=lambda x: (x.occurred_at, x.id)) for key, found in named.items()
+    }
+    moments = {key: [x.occurred_at for x in found] for key, found in by_time.items()}
+    for s in records:
+        if not s.sends or not s.fiat or not s.identified or s.holder is None:
+            continue
+        key = (s.holder, s.account_id)
+        found, times = by_time.get(key), moments.get(key)
+        if found is None or times is None:
+            continue
+        earliest, latest = (
+            s.occurred_at - settings.near_window,
+            s.occurred_at + settings.near_window,
+        )
+        for c in found[bisect_left(times, earliest) : bisect_right(times, latest)]:
+            if cross_currency_tier(s, c) is not None and not decisions.apart(s, c):
+                edges.add(s.id, c.id, MUTUAL)
+    return edges
+
+
 @dataclass(frozen=True)
 class PairRelation:
     """The pair relation over the ledger's own records."""
@@ -383,6 +519,13 @@ class PairRelation:
     differing: Mapping[UUID, frozenset[UUID]]
     # Partners within groups of interchangeable candidates (_twins).
     twins: Mapping[UUID, UUID]
+    # A record's candidates in another currency (_cross_currency_edges).
+    across: Mapping[UUID, frozenset[UUID]]
+    # The records whose only candidate is one in another currency, and whose only
+    # candidate they are, with no candidate of the same amount either: matched with it when
+    # the conversion's fee fits (`converts`, both ways round), else of another amount.
+    alone_across: frozenset[UUID]
+    converts: Mapping[UUID, UUID]
 
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
@@ -393,10 +536,20 @@ class PairRelation:
         """The record's unique partner: its only candidate, whose only candidate it is; or,
         among interchangeable candidates, the one a fixed order gives it (_twins)."""
         found = self.exact.get(record_id, frozenset())
+        if not found:
+            return self.converts.get(record_id)
         if len(found) != 1:
             return self.twins.get(record_id)
         [partner] = found
         return partner if len(self.exact.get(partner, frozenset())) == 1 else None
+
+    def several(self, record_id: UUID) -> bool:
+        """Whether the record has candidates the rule can't choose between: any of the same
+        amount, or in another currency when it and one of them aren't each other's only
+        one (several_candidates)."""
+        if self.exact.get(record_id):
+            return True
+        return bool(self.across.get(record_id)) and record_id not in self.alone_across
 
 
 def _twins(
@@ -461,7 +614,11 @@ async def pair_relation(
     least one is identified through the registry; each identified one names the other's
     account; each other one is a bank transfer; and neither is rejected nor decided never
     to pair with the other. Where the registry doesn't pair two records, a sort code alone
-    may, as the weakest tier (weak_tier). The owner pairs two records with a pair decision.
+    may, as the weakest tier (weak_tier). Two records in different currencies pair when
+    cross_currency_tier takes them, within the near window, each the other's only such
+    candidate and neither with one of the same amount; their conversion's fee must fit
+    (conversion_postings), else they are for review as of another amount. The owner pairs
+    two records with a pair decision.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
@@ -477,11 +634,39 @@ async def pair_relation(
         r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])
         for r, found in same.tiers.items()
     }
+    exact = {r: found for r, found in exact.items() if found}
+    by_id = {x.id: x for x in records}
+    across = {
+        r: frozenset(found)
+        for r, found in _cross_currency_edges(records, settings, decisions).tiers.items()
+    }
+    alone: set[UUID] = set()
+    converts: dict[UUID, UUID] = {}
+    for r, found in across.items():
+        if len(found) != 1 or r in exact:
+            continue
+        [c] = found
+        if across.get(c) != frozenset({r}) or c in exact:
+            continue
+        alone.add(r)
+        s, other = (by_id[r], by_id[c]) if by_id[r].sends else (by_id[c], by_id[r])
+        fits, _ = _conversion_fee(
+            (s.instrument_id, -s.quantity),
+            (other.instrument_id, other.quantity),
+            [x.fee for x in (s, other) if x.fee is not None],
+        )
+        if not fits:
+            differing.add(r, c, MUTUAL)  # for review, as a counterpart of another amount
+        else:
+            converts[r] = c
     return PairRelation(
         records={x.id: x for x in records},
         rejected=frozenset(x.id for x in records if x.source in decisions.rejected),
         tiers={r: dict(found) for r, found in same.tiers.items()},
-        exact={r: found for r, found in exact.items() if found},
+        exact=exact,
         differing={r: frozenset(found) for r, found in differing.tiers.items()},
-        twins=_twins({x.id: x for x in records}, exact),
+        twins=_twins(by_id, exact),
+        across=across,
+        alone_across=frozenset(alone),
+        converts=converts,
     )
