@@ -788,21 +788,33 @@ def _text_time(ms: int) -> str:
         ({"free": "abc"}, "snapshotVos[].data.balances[].free"),
     ],
 )
-async def test_an_unreadable_daily_snapshot_fails_naming_the_field(
-    run, change: dict, field: str
+async def test_an_unreadable_daily_snapshot_is_left_out_naming_the_field(
+    session, run, change: dict, field: str
 ) -> None:
+    # Stored once and never fetched again: a day that cannot be read is left out and flagged,
+    # never failing every later sync.
     connection = await binance_connection(run)
+    good_at = NOW_MS - 24 * HOUR_MS - 1_000
     row = _daily("spot", NOW_MS - 1_000, ("AAA", "1"))
     if "free" in change:
         row["data"]["balances"][0]["free"] = change["free"]
     else:
         row.update(change)
+    flags: list[str] = []
 
-    with pytest.raises(BinanceDataError) as caught:
-        await run(backfill_daily_snapshots, connection, [row], flag=lambda _: None)
+    await run(
+        backfill_daily_snapshots,
+        connection,
+        [_daily("spot", good_at, ("AAA", "2")), row],
+        flag=flags.append,
+    )
 
-    assert (caught.value.label, caught.value.field) == ("snapshot", field)
-    assert "abc" not in str(caught.value) and str(10**20) not in str(caught.value)
+    assert flags == [f"a daily Spot snapshot was not written: snapshot.{field} is unreadable"]
+    assert "abc" not in flags[0] and str(10**20) not in flags[0]
+    assert [(s, q, at) for _, s, q, at in await _snapshots(session, connection.id)] == [
+        ("AAA", 2, _at(good_at))
+    ]
+    assert await _reports_of(session, connection.id, "Spot") == [_at(good_at)]
 
 
 async def test_a_spot_amount_that_is_no_number_fails(run) -> None:
@@ -998,7 +1010,7 @@ async def test_a_daily_snapshot_that_does_not_state_its_balances_is_left_out(
 
     await run(backfill_daily_snapshots, connection, [good, row], flag=flags.append)
 
-    assert flags == [f"a daily Spot snapshot was not written: snapshot.{field} is missing"]
+    assert flags == [f"a daily Spot snapshot was not written: snapshot.{field} is unreadable"]
     assert [(s, q, at) for _, s, q, at in await _snapshots(session, connection.id)] == [
         ("AAA", 2, _at(one))
     ]
@@ -1022,7 +1034,9 @@ async def test_a_first_sync_with_a_daily_row_without_balances_completes(
 
     assert after.status == "healthy", after.last_error
     assert after.config.get("first_sync_done") is True
-    flag = "a daily Spot snapshot was not written: snapshot.snapshotVos[].data.balances is missing"
+    flag = (
+        "a daily Spot snapshot was not written: snapshot.snapshotVos[].data.balances is unreadable"
+    )
     assert flag in after.config["flags"]  # pyright: ignore[reportOperatorIssue]
     assert _at(one) in await _reports_of(session, connection.id, "Spot")
     assert _at(two) not in await _reports_of(session, connection.id, "Spot")

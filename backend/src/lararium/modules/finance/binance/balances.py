@@ -782,18 +782,14 @@ async def _reported_at(
     return found is not None
 
 
-def _daily_unstated(entries: ApiValue) -> str | None:
-    """The field by which a daily Spot snapshot's balances do not state what Spot held: the
-    list missing, null or not a list, or an entry without its asset or an amount."""
-    where = "snapshotVos[].data.balances"
-    if not isinstance(entries, list):
-        return where
-    for entry in entries:
-        if isinstance(entry, dict):
-            for name in ("asset", *_SPOT_FIELDS):
-                if entry.get(name) is None:
-                    return f"{where}[].{name}"
-    return None
+def _daily_day(row: Row) -> tuple[datetime, dict[str, Decimal]]:
+    """A daily Spot snapshot's time and quantity per asset; a `BinanceDataError` naming the
+    field when it cannot be read in full (its list not stated, an entry, an amount, its time)."""
+    data = row.get("data")
+    balances = data.get("balances") if isinstance(data, dict) else None
+    entries = _stated(_DAILY, "snapshotVos[].data.balances", balances)
+    at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
+    return at, _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
 
 
 async def backfill_daily_snapshots(
@@ -811,26 +807,22 @@ async def backfill_daily_snapshots(
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
     Spot account exists and every quantity of the day has its instrument. A day with a code
-    that has none (other than an `LD` mirror), or whose balances do not state what Spot held
-    (`_daily_unstated`), is not written at all and is flagged."""
+    that has none (other than an `LD` mirror), or that cannot be read in full (any
+    `BinanceDataError`: its list, an entry, an amount, its `updateTime`), is not written at all
+    and is flagged: the rows are fetched on the first sync only, so a failure raised from one
+    could never be healed by a later sync."""
     flag = flag or (lambda _: None)
     days: list[tuple[datetime, dict[str, Decimal]]] = []
     for row in rows:
         kind = row.get("type")
         if not isinstance(kind, str) or kind.upper() != _DAILY_SPOT:
             continue
-        data = row.get("data")
-        entries = data.get("balances") if isinstance(data, dict) else None
-        # Fetched on the first sync only, so never read again: a day that does not state what
-        # Spot held is left out and flagged, neither read as an empty day nor failing the sync.
-        unstated = _daily_unstated(entries)
-        if unstated is not None:
-            flag(f"a daily Spot snapshot was not written: {_DAILY}.{unstated} is missing")
-            continue
-        assert isinstance(entries, list)
-        at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
-        held = _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
-        days.append((at, held))
+        try:
+            days.append(_daily_day(row))
+        except BinanceDataError as error:
+            flag(
+                f"a daily Spot snapshot was not written: {error.label}.{error.field} is unreadable"
+            )
     days.sort(key=lambda day: day[0])
     assets = _Assets(ctx, connection, flag)
     await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
