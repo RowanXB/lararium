@@ -221,11 +221,17 @@ async def test_reward_with_no_dividend_of_its_amount_stays_posted(session, run) 
     assert row.dividend_id is None and row.transaction_id is not None
 
 
-async def test_a_realtime_reward_is_never_a_dividend(session, run) -> None:
-    # A REALTIME reward accrues inside the Earn position and is never paid out: a dividend of
-    # the same asset and amount an hour later is another income.
+@pytest.mark.parametrize("kind", ["REALTIME", "REWARDS", "NEWKIND", None])
+async def test_only_a_reward_known_to_be_paid_out_is_a_dividend(
+    session, run, kind: str | None
+) -> None:
+    # A REALTIME reward accrues inside the Earn position; a reward of any other type than
+    # BONUS (or of none) is not known to be paid out: a dividend of the same asset and amount
+    # an hour later is another income.
     connection = await binance_connection(run)
-    reward = _reward(rewards="0.7", time=BASE_TIME_MS)
+    reward = _reward(rewards="0.7", time=BASE_TIME_MS, type=kind)
+    if kind is None:
+        del reward["type"]
     dividend = build_row(
         "dividends", asset="AAA", amount="0.7", direction=1, divTime=BASE_TIME_MS + HOUR_MS
     )

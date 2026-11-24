@@ -28,8 +28,6 @@ from lararium.modules.finance.ledger import PostingInput
 SUBSCRIPTIONS = "earn-flexible-subscriptions"
 REDEMPTIONS = "earn-flexible-redemptions"
 REWARDS = "earn-flexible-rewards"
-# The reward type that accrues inside the Earn position and is never paid out (rule 3).
-ACCRUED = "REALTIME"
 _WALLETS = {"SPOT": "spot", "FUNDING": "funding"}
 _BOTH = "SPOTANDFUNDING"
 _SUBSCRIBED = "SUCCESS"
@@ -134,6 +132,11 @@ async def post_reward(
             PostingInput(run.unassigned, instrument_id, -quantity),
         ],
     )
+
+
+# The reward types known to be paid out as an asset dividend (rule 3); any other type posts on
+# Earn, and a payout of one would show as a reconciliation difference.
+PAID_OUT = ("BONUS",)
 
 
 async def flexible_reward(run: Run, row: Row) -> None:
