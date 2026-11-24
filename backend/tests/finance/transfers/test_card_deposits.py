@@ -10,10 +10,12 @@ from uuid import UUID, uuid4
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
+from lararium.modules.finance import models
 from lararium.modules.finance.accounts import close_account
 from lararium.modules.finance.identifiers import assign_identifier, register_card_merchant
 from lararium.modules.finance.system_accounts import system_account_ids
@@ -57,21 +59,18 @@ WINDOW = DEFAULTS.near_window
 
 
 @pytest.fixture
-async def platform(run: Run, connected_bank: MakeConnected) -> tuple[Connected, ...]:
-    """Monzo, and Trading 212's Invest and ISA, each on a connection of its own, with the
-    merchant registered as paying into Invest and ISA."""
+async def platform(
+    run: Run, connected_bank: MakeConnected
+) -> tuple[Connected, Connected, Connected, UUID]:
+    """Monzo, and Trading 212's Invest and ISA, each on a connection of its own, and the
+    merchant's identifier, registered as paying into Invest and ISA."""
     monzo, invest, isa = (
         await connected_bank("Monzo"),
         await connected_bank("Invest"),
         await connected_bank("ISA"),
     )
-    await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
-    return monzo, invest, isa
-
-
-async def merchant_id(run: Run, platform: tuple[Connected, ...]) -> UUID:
-    _, invest, isa = platform
-    return (await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])).id
+    record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
+    return monzo, invest, isa, record.id
 
 
 async def payment(connector_tx: ConnectorTx, monzo: Connected, merchant: UUID, at: datetime, **kw):
@@ -114,8 +113,7 @@ async def test_two_card_deposits_paired_by_time(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, isa = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, isa, merchant = platform
     first = await payment(connector_tx, monzo, merchant, TEN)
     second = await payment(connector_tx, monzo, merchant, TEN + timedelta(minutes=8, seconds=32))
     into_invest = await deposit(connector_tx, invest, TEN + timedelta(seconds=20))
@@ -146,6 +144,85 @@ async def test_two_card_deposits_paired_by_time(
     assert await heal() == 0
 
 
+REAL_GAP = timedelta(seconds=512)  # between the owner's two deposits (Task 0, check 5)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param([["invest", "p1", "p2"], ["isa"]], id="invest-deposit-first"),
+        pytest.param([["isa", "p1", "p2"], ["invest"]], id="isa-deposit-first"),
+        pytest.param([["invest", "isa"], ["p1", "p2"]], id="trading212-first"),
+    ],
+)
+async def test_owners_case_in_each_arrival_order(
+    session: AsyncSession,
+    platform,
+    ids: SystemIds,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+    steps: list[list[str]],
+) -> None:
+    """The owner's real case: two equal payments 512 s apart, each deposit 0 s from its
+    payment, Invest's first. The records arrive in syncs (each step, then a heal); after
+    each, a payment whose deposit is there is matched with it, and one whose deposit isn't
+    stays on Unassigned (the other deposit is 512 s away, outside the window)."""
+    monzo, invest, isa, merchant = platform
+    post = {
+        "p1": lambda: payment(connector_tx, monzo, merchant, TEN, external_id="p1"),
+        "p2": lambda: payment(connector_tx, monzo, merchant, TEN + REAL_GAP, external_id="p2"),
+        "invest": lambda: deposit(connector_tx, invest, TEN, external_id="transaction:invest"),
+        "isa": lambda: deposit(connector_tx, isa, TEN + REAL_GAP, external_id="transaction:isa"),
+    }
+    accounts = {"p1": monzo, "p2": monzo, "invest": invest, "isa": isa}
+    posted: dict[str, UUID] = {}
+    for step in steps:
+        for key in step:
+            posted[key] = (await post[key]()).id
+        await heal()
+
+        expected = {
+            (posted[p], posted[d], "matched")
+            for p, d in (("p1", "invest"), ("p2", "isa"))
+            if p in posted and d in posted
+        }
+        assert pairs_of(await list_transfers(session)) == expected
+        paired = {x for pair in expected for x in pair[:2]}
+        for key, record_id in posted.items():
+            contra = await contra_account(session, record_id, accounts[key].account.id)
+            assert contra == (ids.in_transit if record_id in paired else ids.unassigned), key
+        await assert_consistent(session)
+    assert await in_transit_balance(session, ids) == Decimal(0)
+    assert await heal() == 0
+
+
+async def test_one_payment_deposits_on_both_holders_not_paired(
+    session: AsyncSession,
+    platform,
+    ids: SystemIds,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+) -> None:
+    """One payment, and a deposit of its amount on each holder account within the window:
+    uniqueness is across all the merchant's holders, so nothing pairs."""
+    monzo, invest, isa, merchant = platform
+    paid = await payment(connector_tx, monzo, merchant, TEN)
+    into_invest = await deposit(connector_tx, invest, TEN + timedelta(seconds=10))
+    into_isa = await deposit(connector_tx, isa, TEN - timedelta(seconds=30))
+    await heal()
+
+    assert await list_transfers(session) == []
+    for record, account in ((paid, monzo), (into_invest, invest), (into_isa, isa)):
+        assert await contra_account(session, record.id, account.account.id) == ids.unassigned
+    relation = await pair_relation(
+        session, await system_account_ids(session), await load_transfer_settings(session)
+    )
+    assert relation.several(paid.id)
+    assert relation.cards[paid.id] == frozenset({into_invest.id, into_isa.id})
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
 async def test_card_deposits_too_close_left_to_owner(
     session: AsyncSession,
     run: Run,
@@ -158,8 +235,7 @@ async def test_card_deposits_too_close_left_to_owner(
     a transfer to carry several_candidates (no awaiting transfer is opened for a card
     payment, Task 15's ruling D), so the relation says so, and both stay on Unassigned for
     the owner to pair."""
-    monzo, invest, isa = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, isa, merchant = platform
     first = await payment(connector_tx, monzo, merchant, TEN)
     second = await payment(connector_tx, monzo, merchant, TEN + timedelta(minutes=1))
     into_invest = await deposit(connector_tx, invest, TEN + timedelta(seconds=20))
@@ -194,8 +270,7 @@ async def test_amount_differs_not_paired(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     await deposit(connector_tx, invest, TEN, quantity="49.99")
     await heal()
@@ -213,8 +288,7 @@ async def test_refund_pairs_in_reverse(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     withdraw = await deposit(connector_tx, invest, TEN, quantity="-50.00")
     refund = await payment(
         connector_tx, monzo, merchant, TEN + timedelta(seconds=5), quantity="50.00"
@@ -249,8 +323,7 @@ async def test_outside_window_not_paired(
 ) -> None:
     """The window is inclusive: 2 minutes apart pairs, a second more doesn't, whichever came
     first."""
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     await payment(connector_tx, monzo, merchant, TEN + gap)
     await deposit(connector_tx, invest, TEN)
     await heal()
@@ -267,8 +340,7 @@ async def test_unpair_keeps_them_apart_and_reject_works(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into = await deposit(connector_tx, invest, TEN)
     await heal()
@@ -301,8 +373,7 @@ async def test_exact_tier_takes_precedence(
     """A deposit an exact tier pairs (a bank transfer naming nobody, which a record
     identified as Invest's takes, ONE_SIDED) is not the card's: the card payment, whose only
     candidate it is, stays for the owner."""
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     invest_identifier = await run(
         assign_identifier, invest.account.id, "uk_bank_account", MONZO_IDENTIFIER
     )
@@ -332,24 +403,35 @@ async def test_owner_pair_takes_precedence(
     session: AsyncSession,
     run: Run,
     platform,
+    ids: SystemIds,
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    """The owner pairs the card payment with ISA's deposit (outside the window): Invest's,
-    which the tier would have taken, stays alone."""
-    monzo, invest, isa = platform
-    merchant = await merchant_id(run, platform)
+    """The card tier would pair the payment with Invest's deposit; before any heal, the
+    owner pairs it with ISA's (outside the window) instead. The pair decision alone, with
+    no never_pair anywhere, holds: the owner's pair stands, and the tier takes neither
+    record, Invest's deposit staying alone on Unassigned."""
+    monzo, invest, isa, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into_invest = await deposit(connector_tx, invest, TEN)
     into_isa = await deposit(connector_tx, isa, TEN + timedelta(hours=1))
-    await heal()
-    [auto] = await list_transfers(session)
-    assert (auto.out_transaction_id, auto.in_transaction_id) == (paid.id, into_invest.id)
+    before = await pair_relation(
+        session, await system_account_ids(session), await load_transfer_settings(session)
+    )
+    assert before.partner(paid.id) == into_invest.id  # the tier's pair, were it healed
 
-    await run(unpair, auto.id)
     await run(pair_records, paid.id, into_isa.id)
-    assert await heal() == 0
+
+    d = models.TransferDecision
+    assert set(await session.scalars(select(d.kind))) == {"pair"}
     assert pairs_of(await list_transfers(session)) == {(paid.id, into_isa.id, "matched")}
+    assert await contra_account(session, into_invest.id, invest.account.id) == ids.unassigned
+    after = await pair_relation(
+        session, await system_account_ids(session), await load_transfer_settings(session)
+    )
+    assert after.by_card == {}
+    assert after.partner(into_invest.id) is None
+    assert await heal() == 0
     await assert_consistent(session)
 
 
@@ -365,7 +447,7 @@ async def test_day_granular_import_row_not_paired(
 ) -> None:
     """A holder account whose rows are imported from a file giving dates only (stamped
     00:00): a card payment a minute after midnight doesn't pair with one by coincidence.
-    The tier takes connectors' records only, which carry the time of day."""
+    The tier takes connectors' records only, assumed to carry the time of day."""
     monzo = await connected_bank("Monzo")
     imported = await imported_bank("Imported broker")
     merchant = (await run(register_card_merchant, MERCHANT, [imported.id])).id
@@ -392,8 +474,7 @@ async def test_resync_keeps_the_pair(
 ) -> None:
     """Regeneration: both records posted again as a replay would, the pair stays, and a
     heal after it writes nothing."""
-    monzo, invest, _ = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, _, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into = await deposit(connector_tx, invest, TEN)
     await heal()
@@ -422,8 +503,7 @@ async def test_card_pair_dissolved_when_holder_removed(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, isa = platform
-    merchant = await merchant_id(run, platform)
+    monzo, invest, isa, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into = await deposit(connector_tx, invest, TEN)
     await heal()
@@ -453,8 +533,7 @@ async def test_card_pair_dissolved_when_sync_closes_holder(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, _, isa = platform
-    merchant = await merchant_id(run, platform)
+    monzo, _, isa, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into = await deposit(connector_tx, isa, TEN)
     await heal()
@@ -478,12 +557,19 @@ async def test_owner_pair_stays_when_holder_removed(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
-    monzo, invest, isa = platform
-    merchant = await merchant_id(run, platform)
+    """A pair the card tier formed, which the owner then pairs again by hand (unpair, then
+    pair_records, which withdraws the never_pair): once Invest leaves the merchant's
+    holders, the owner's pair decision still holds it."""
+    monzo, invest, isa, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
-    into = await deposit(connector_tx, invest, TEN + timedelta(hours=1))  # outside the window
+    into = await deposit(connector_tx, invest, TEN)
     await heal()
+    [auto] = await list_transfers(session)
+    assert (auto.out_transaction_id, auto.in_transaction_id) == (paid.id, into.id)
+    await run(unpair, auto.id)
     await run(pair_records, paid.id, into.id)
+    d = models.TransferDecision
+    assert set(await session.scalars(select(d.kind))) == {"pair"}
 
     await run(register_card_merchant_and_rematch, MERCHANT, [isa.account.id])
     assert pairs_of(await list_transfers(session)) == {(paid.id, into.id, "matched")}

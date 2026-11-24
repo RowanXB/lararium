@@ -176,10 +176,13 @@ def card_tier(r: Pairable, c: Pairable, window: timedelta) -> Tier | None:
     tiers' (pair_relation keeps these pairs apart, as it does cross-currency ones), so it
     sets no precedence: a record any of those tiers pairs is never this one's.
 
-    Both must be connectors' records, which carry the time of day: an imported row from a
-    file giving dates only is stamped 00:00 (its time_unit is display only, never read in
-    matching), and a payment just after midnight would otherwise pair with it by
-    coincidence. Such a row is paired by hand."""
+    Both must be connectors' records. This rests on an assumption, not a check: that a
+    connector's record carries a real time of day (Monzo's and Trading 212's do, to the
+    second). An imported row from a file giving dates only is stamped 00:00 (its time_unit
+    is display only, never read in matching), and a payment just after midnight would
+    otherwise pair with it by coincidence, so such rows are paired by hand. An account
+    whose connector posts date-only times (00:00), registered as a holder, could still
+    pair by that coincidence at midnight."""
     if r.account_id == c.account_id or r.instrument_id != c.instrument_id:
         return None
     if r.sends == c.sends or r.quantity != -c.quantity:
