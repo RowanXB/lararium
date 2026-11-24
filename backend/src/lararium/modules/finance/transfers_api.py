@@ -300,8 +300,10 @@ async def unpair_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDe
 async def pair_transfer(
     transfer_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
 ) -> TransferOut:
-    """The owner picks the transfer's missing side among its candidates of the same amount,
-    or one they unpaired from it."""
+    """The owner picks the transfer's missing side among its candidates, or one they
+    unpaired from it. Two currencies may differ in currency or in amount (settled by a
+    conversion, or the difference a fee); anything else must be of the same instrument and
+    amount."""
     args = _args(body.model_dump(mode="json"), transfer_id=transfer_id)
     async with healing_command(session, actor, "pair_transfer", args) as ctx:
         record = await transfers.pair(ctx, transfer_id, body.transaction_id)
@@ -315,8 +317,10 @@ async def pair_transfer(
 async def list_transaction_pair_candidates(
     transaction_id: UUID, session: SessionDep
 ) -> list[PairCandidateOut]:
-    """The own records the record could be paired with as one transfer: on another account,
-    of the opposite and equal amount, nearest booking date first."""
+    """The own records the record could be paired with as one transfer, on another account:
+    those of the opposite and equal amount first, then those in a currency whose side
+    differs (`differs`: in currency or in amount) booked within 7 days; each part nearest
+    booking date first, at most 20 in all."""
     found = await transfers.pair_candidates(session, transaction_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
     return [
@@ -328,6 +332,7 @@ async def list_transaction_pair_candidates(
             occurred_at=c.occurred_at,
             booking_date=c.booking_date,
             description=c.description,
+            differs=c.differs,
         )
         for c in found
     ]
@@ -337,8 +342,10 @@ async def list_transaction_pair_candidates(
 async def pair_transactions(
     transaction_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
 ) -> TransferOut:
-    """The owner says two own records are one transfer, whether or not either is in one.
-    Undone by unpairing the resulting transfer."""
+    """The owner says two own records are one transfer, whether or not either is in one:
+    in one instrument of opposite, equal amounts, or two currencies of opposite sign that
+    differ in currency or in amount (the receiving side not larger). Undone by unpairing
+    the resulting transfer."""
     # _args merges the body over the path, so its own transaction_id would hide the path's.
     args: dict[str, JSONValue] = {
         "transaction_id": str(transaction_id),

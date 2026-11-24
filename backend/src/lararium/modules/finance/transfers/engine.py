@@ -67,6 +67,7 @@ from lararium.modules.finance.transfers.pairs import (
     conversion_postings,
     leg_fees,
     pair_relation,
+    settles,
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
@@ -223,10 +224,18 @@ async def _link_records(
     conversion: list[PostingInput] | None,
 ) -> None:
     """A matched transfer of two own records neither of which was a leg, in the sent
-    instrument and amount. Of two in different currencies, `conversion` holds the postings
-    of the conversion between them (_conversion), which is its settlement."""
+    instrument and amount. Of two whose sides differ (in currency, or in amount: only the
+    owner pairs those), `conversion` holds the postings between them (_conversion), which
+    are its settlement."""
     sent, received = (record, partner) if record.role == "out" else (partner, record)
-    settlement_id = None if conversion is None else await _post_conversion(ctx, sent, conversion)
+    settlement_id = None
+    if conversion is not None:
+        description = (
+            "Currency conversion"
+            if sent.instrument_id != received.instrument_id
+            else "Transfer fee"
+        )
+        settlement_id = await _post_conversion(ctx, sent, conversion, description)
     tr = models.Transfer
     transfer_id = await ctx.session.scalar(
         insert(tr)
@@ -318,12 +327,12 @@ async def _post_settlement(
 def _conversion(
     record: OwnRecord, partner: OwnRecord, fees: Sequence[LegFee], system: _System
 ) -> list[PostingInput] | None:
-    """The postings of the conversion between two own records in different currencies
-    (pairs.conversion_postings), as loaded now; None when they no longer fit one (both in
-    one currency, or the fee not less than the amount: changed since the pair relation
-    took them)."""
+    """The postings of the settlement between two own records whose sides differ
+    (pairs.conversion_postings), as loaded now; None when they no longer fit one (one
+    instrument and equal amounts, a larger receiving side, or a fee that doesn't fit:
+    changed since the pair relation took them)."""
     sent, received = (record, partner) if record.role == "out" else (partner, record)
-    if sent.instrument_id == received.instrument_id:
+    if sent.instrument_id == received.instrument_id and sent.amount == received.amount:
         return None
     return conversion_postings(
         (sent.instrument_id, sent.amount),
@@ -335,18 +344,18 @@ def _conversion(
 
 
 async def _post_conversion(
-    ctx: CommandContext, sending: OwnRecord, postings: list[PostingInput]
+    ctx: CommandContext, sending: OwnRecord, postings: list[PostingInput], description: str
 ) -> UUID:
-    """Post a transfer's conversion between two currencies (eToro design §5.12,
-    _conversion) on In transit, dated as the sending record, booked by rule: derived, like
-    a placeholder, so it goes when the transfer does and is posted again when it is
-    matched again."""
+    """Post a transfer's settlement between sides that differ (eToro design §5.12,
+    _conversion: a conversion between two currencies, or a fee in one) on In transit, dated
+    as the sending record, booked by rule: derived, like a placeholder, so it goes when the
+    transfer does and is posted again when it is matched again."""
     derived = await post_transaction(
         ctx,
         TransactionInput(
             occurred_at=sending.occurred_at,
             booking_date=sending.booking_date,
-            description="Currency conversion",
+            description=description,
             status="booked",
             origin="rule",
             postings=postings,
@@ -487,9 +496,10 @@ async def _link_pair(
     """Link the record with its unique partner: into the partner's open transfer when it
     has one between the same accounts (so that transfer's placeholder or settlement goes),
     else as a new matched transfer after dissolving whatever the partner was in. A partner
-    in another currency (`conversion_fees` not None: the legs' fees) always makes a new
-    one, in the sent currency, settled by the conversion. Returns the records left without
-    their transfer, and the partner (none linked when the partner changed under us)."""
+    whose side differs, in currency or amount (`conversion_fees` not None: the legs' fees),
+    always makes a new one, in the sent instrument and amount, settled by _conversion.
+    Returns the records left without their transfer, and the partner (none linked when the
+    partner changed under us)."""
     session = ctx.session
     partner = await load_own_record(session, ids, partner_id)
     if partner is None:
@@ -567,8 +577,10 @@ async def _match_one(
     partner = relation.partner(record.id)
     if partner is not None:
         fees = None
-        if relation.converts.get(record.id) == partner:
-            fees = leg_fees(relation.records[record.id], relation.records[partner])
+        mine, theirs = relation.records[record.id], relation.records[partner]
+        if settles(mine, theirs):
+            # Across currencies (converts, or the owner's), or of another amount (the owner's).
+            fees = leg_fees(mine, theirs)
         more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved, fees)
         return others + more, linked
     counterpart_id = _registry_counterpart(record)

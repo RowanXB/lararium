@@ -3187,6 +3187,21 @@
             "title": "Description",
             "type": "string"
           },
+          "differs": {
+            "anyOf": [
+              {
+                "enum": [
+                  "currency",
+                  "amount"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Differs"
+          },
           "occurred_at": {
             "format": "date-time",
             "title": "Occurred At",
@@ -6401,7 +6416,7 @@
     },
     "/api/v1/finance/transactions/{transaction_id}/pair": {
       "post": {
-        "description": "The owner says two own records are one transfer, whether or not either is in one.\nUndone by unpairing the resulting transfer.",
+        "description": "The owner says two own records are one transfer, whether or not either is in one:\nin one instrument of opposite, equal amounts, or two currencies of opposite sign that\ndiffer in currency or in amount (the receiving side not larger). Undone by unpairing\nthe resulting transfer.",
         "operationId": "pair_transactions",
         "parameters": [
           {
@@ -6455,7 +6470,7 @@
     },
     "/api/v1/finance/transactions/{transaction_id}/pair-candidates": {
       "get": {
-        "description": "The own records the record could be paired with as one transfer: on another account,\nof the opposite and equal amount, nearest booking date first.",
+        "description": "The own records the record could be paired with as one transfer, on another account:\nthose of the opposite and equal amount first, then those in a currency whose side\ndiffers (`differs`: in currency or in amount) booked within 7 days; each part nearest\nbooking date first, at most 20 in all.",
         "operationId": "list_transaction_pair_candidates",
         "parameters": [
           {
@@ -6764,7 +6779,7 @@
     },
     "/api/v1/finance/transfers/{transfer_id}/pair": {
       "post": {
-        "description": "The owner picks the transfer's missing side among its candidates of the same amount,\nor one they unpaired from it.",
+        "description": "The owner picks the transfer's missing side among its candidates, or one they\nunpaired from it. Two currencies may differ in currency or in amount (settled by a\nconversion, or the difference a fee); anything else must be of the same instrument and\namount.",
         "operationId": "pair_transfer",
         "parameters": [
           {

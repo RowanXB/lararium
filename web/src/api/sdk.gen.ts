@@ -513,8 +513,10 @@ export const postTransaction = <ThrowOnError extends boolean = false>(options: O
 /**
  * Pair Transactions
  *
- * The owner says two own records are one transfer, whether or not either is in one.
- * Undone by unpairing the resulting transfer.
+ * The owner says two own records are one transfer, whether or not either is in one:
+ * in one instrument of opposite, equal amounts, or two currencies of opposite sign that
+ * differ in currency or in amount (the receiving side not larger). Undone by unpairing
+ * the resulting transfer.
  */
 export const pairTransactions = <ThrowOnError extends boolean = false>(options: Options<PairTransactionsData, ThrowOnError>): RequestResult<PairTransactionsResponses, PairTransactionsErrors, ThrowOnError> => (options.client ?? client).post<PairTransactionsResponses, PairTransactionsErrors, ThrowOnError>({
     url: '/api/v1/finance/transactions/{transaction_id}/pair',
@@ -528,8 +530,10 @@ export const pairTransactions = <ThrowOnError extends boolean = false>(options: 
 /**
  * List Transaction Pair Candidates
  *
- * The own records the record could be paired with as one transfer: on another account,
- * of the opposite and equal amount, nearest booking date first.
+ * The own records the record could be paired with as one transfer, on another account:
+ * those of the opposite and equal amount first, then those in a currency whose side
+ * differs (`differs`: in currency or in amount) booked within 7 days; each part nearest
+ * booking date first, at most 20 in all.
  */
 export const listTransactionPairCandidates = <ThrowOnError extends boolean = false>(options: Options<ListTransactionPairCandidatesData, ThrowOnError>): RequestResult<ListTransactionPairCandidatesResponses, ListTransactionPairCandidatesErrors, ThrowOnError> => (options.client ?? client).get<ListTransactionPairCandidatesResponses, ListTransactionPairCandidatesErrors, ThrowOnError>({ url: '/api/v1/finance/transactions/{transaction_id}/pair-candidates', ...options });
 
@@ -590,8 +594,10 @@ export const listTransferCandidates = <ThrowOnError extends boolean = false>(opt
 /**
  * Pair Transfer
  *
- * The owner picks the transfer's missing side among its candidates of the same amount,
- * or one they unpaired from it.
+ * The owner picks the transfer's missing side among its candidates, or one they
+ * unpaired from it. Two currencies may differ in currency or in amount (settled by a
+ * conversion, or the difference a fee); anything else must be of the same instrument and
+ * amount.
  */
 export const pairTransfer = <ThrowOnError extends boolean = false>(options: Options<PairTransferData, ThrowOnError>): RequestResult<PairTransferResponses, PairTransferErrors, ThrowOnError> => (options.client ?? client).post<PairTransferResponses, PairTransferErrors, ThrowOnError>({
     url: '/api/v1/finance/transfers/{transfer_id}/pair',

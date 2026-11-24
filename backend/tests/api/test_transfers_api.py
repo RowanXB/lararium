@@ -431,11 +431,44 @@ async def test_pair_transactions_audit_row_names_both_records(client, session, r
     assert args == {"transaction_id": str(out.id), "other_transaction_id": in_id}
 
 
+async def test_pair_records_that_differ_through_the_api(client, session, run) -> None:
+    """A deposit net of a fee is listed after the equal candidates, marked, and pairs; a
+    larger one is neither listed nor paired (422)."""
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out_id = str((await _connector_tx(session, run, a, "-100.00", bank_transfer=False)).id)
+    equal_id = await _hand_post(client, session, run, b_id, "100.00")
+    net_id = await _hand_post(client, session, run, b_id, "99.30")
+    larger_id = await _hand_post(client, session, run, b_id, "100.70")
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["differs"]) for x in found] == [
+        (equal_id, None),
+        (net_id, "amount"),
+    ]
+    larger = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
+    )
+    assert larger.status_code == 422
+    assert "larger" in larger.json()["detail"]["message"]
+
+    paired = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": net_id}
+    )
+    assert paired.status_code == 200
+    body = paired.json()
+    assert (body["status"], body["amount"], body["in_transaction_id"]) == (
+        "matched",
+        "100.00",
+        net_id,
+    )
+
+
 async def test_pair_transactions_refusals(client, session, run) -> None:
     a = await _connected(run, "A")
     b_id = await _manual(client, "B")
     out_id = str((await _connector_tx(session, run, a, "-100", bank_transfer=False)).id)
-    short_id = await _hand_post(client, session, run, b_id, "90")
+    larger_id = await _hand_post(client, session, run, b_id, "110")
     unknown = str(uuid4())
 
     same = await client.post(
@@ -445,7 +478,7 @@ async def test_pair_transactions_refusals(client, session, run) -> None:
     assert same.json()["detail"]["error"] == "invalid_input"
 
     differs = await client.post(
-        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": short_id}
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
     )
     assert differs.status_code == 422
     assert differs.json()["detail"]["error"] == "invalid_input"

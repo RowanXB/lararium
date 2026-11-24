@@ -2,7 +2,7 @@
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -46,15 +46,17 @@ from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
+    LegFee,
     RecordColumns,
     SourceRef,
     eligible_records,
     is_rejected,
+    leg_fee_columns,
     load_own_record,
     names_source,
     source_ref,
 )
-from lararium.modules.finance.transfers.pairs import pair_relation
+from lararium.modules.finance.transfers.pairs import owner_pair_refusal, pair_relation
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
 # What the ledger holds for the transfer: one own record waiting for the connected other
@@ -408,14 +410,75 @@ class CandidateRecord:
     reason: CandidateReason
 
 
+@dataclass(frozen=True)
+class PairSideRecord:
+    """An own record as the owner pairs it (pairs.PairSide, pairs.owner_pair_refusal)."""
+
+    id: UUID
+    account_id: UUID
+    instrument_id: UUID
+    quantity: Decimal  # signed: negative on the sending side
+    booking_date: date
+    fiat: bool  # its instrument is a currency
+    fee: LegFee | None  # the leg fee its connector gives (finance.transfer_leg_fees)
+
+
+def _pair_side_select(e: Any, *extra: Any) -> Select[*tuple[Any, ...]]:
+    """The PairSideRecord columns of eligible_records `e`, then `extra`."""
+    fee_instrument_id, fee_amount = leg_fee_columns(e.c.transaction_id)
+    i = aliased(models.Instrument, name="side_instrument")
+    fiat = select(i.kind == "fiat").where(i.id == e.c.instrument_id).scalar_subquery()
+    return select(
+        e.c.transaction_id,
+        e.c.account_id,
+        e.c.instrument_id,
+        e.c.quantity,
+        e.c.booking_date,
+        fiat.label("fiat"),
+        fee_instrument_id.label("fee_instrument_id"),
+        fee_amount.label("fee_amount"),
+        *extra,
+    )
+
+
+def _pair_side(row: Any) -> PairSideRecord:
+    return PairSideRecord(
+        id=row.transaction_id,
+        account_id=row.account_id,
+        instrument_id=row.instrument_id,
+        quantity=row.quantity,
+        booking_date=row.booking_date,
+        fiat=bool(row.fiat),
+        fee=None
+        if row.fee_instrument_id is None
+        else LegFee(row.fee_instrument_id, row.fee_amount),
+    )
+
+
+async def load_pair_side(session: AsyncSession, transaction_id: UUID) -> PairSideRecord | None:
+    """The record as the owner pairs it, or None when it can't be a transfer's leg."""
+    e = eligible_records(await system_account_ids(session))
+    row = (
+        await session.execute(_pair_side_select(e).where(e.c.transaction_id == transaction_id))
+    ).one_or_none()
+    return None if row is None else _pair_side(row)
+
+
 async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
     """The own records the owner unpaired from this one (a never_pair decision either way
-    round) that a pair decision would link with it again: on another account, in the same
-    instrument, of opposite sign and the same amount, and neither rejected. The way back
-    from a mistaken unpair."""
+    round) that a pair decision would link with it again: a pair the owner could make
+    (pairs.owner_pair_refusal: in one instrument of opposite, equal amounts, or two
+    currencies whose sides differ and settle), neither rejected. The way back from a
+    mistaken unpair."""
     system = await system_account_ids(session)
     e = eligible_records(system)
-    record = (await session.execute(select(e).where(e.c.transaction_id == record_id))).one_or_none()
+    record = (
+        await session.execute(
+            _pair_side_select(e, e.c.source_kind, e.c.source_ref).where(
+                e.c.transaction_id == record_id
+            )
+        )
+    ).one_or_none()
     if record is None:
         return []
     source = (record.source_kind, record.source_ref)
@@ -437,13 +500,11 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
     if not others:
         return []
     t = models.Transaction
-    found = await session.scalars(
-        select(e.c.transaction_id)
+    subject_side = _pair_side(record)
+    rows = await session.execute(
+        _pair_side_select(e)
         .where(
             e.c.transaction_id.in_(select(t.id).where(or_(*(names_source(t, x) for x in others)))),
-            e.c.account_id != record.account_id,
-            e.c.instrument_id == record.instrument_id,
-            e.c.quantity == -record.quantity,
             ~exists().where(
                 d.kind == "reject",
                 d.subject_kind == e.c.source_kind,
@@ -452,10 +513,18 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
         )
         .order_by(e.c.transaction_id)
     )
-    return list(found)
+    return [
+        row.transaction_id
+        for row in rows
+        if owner_pair_refusal(subject_side, _pair_side(row)) is None
+    ]
 
 
 PAIR_CANDIDATES_LIMIT = 20
+# How far from the record's booking date a candidate whose side differs may be booked.
+DIFFERING_CANDIDATES_WINDOW = timedelta(days=7)
+# How a candidate's side differs from the record's: in currency, or in amount in one.
+type Differs = Literal["currency", "amount"]
 
 
 def in_matched_transfer(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
@@ -491,18 +560,22 @@ class PairCandidateRecord:
     occurred_at: datetime
     booking_date: date
     description: str
+    differs: Differs | None = None  # None for one in the same instrument, of equal amount
 
 
 async def pair_candidates(
     session: AsyncSession, transaction_id: UUID, limit: int = PAIR_CANDIDATES_LIMIT
 ) -> list[PairCandidateRecord]:
-    """The own records the owner could pair this one with (pair_records): on another
-    account, in the same instrument, of the opposite and equal amount, and not a leg of a
-    matched transfer nor rejected. One the owner unpaired from this record (a never_pair
-    decision) is still listed: pair_records withdraws that decision, which is the way back
-    from a mistaken unpair. Nearest booking date first (then the earlier occurred_at); no
-    window applies, as for any pair decision. Refuses a record that can't be a transfer's leg,
-    and one pair_records would refuse (require_pairable)."""
+    """The own records the owner could pair this one with (pair_records), on another
+    account and neither a leg of a matched transfer nor rejected: first those in the same
+    instrument, of the opposite and equal amount (no window applies, as for any pair
+    decision); then, for a record in a currency, those in a currency whose side differs
+    (in currency, or in amount: eToro design §5.12) that pair_records would accept, booked
+    within DIFFERING_CANDIDATES_WINDOW of it. Each part nearest booking date first (then
+    the earlier occurred_at), at most `limit` in all. One the owner unpaired from this
+    record (a never_pair decision) is still listed: pair_records withdraws that decision,
+    which is the way back from a mistaken unpair. Refuses a record that can't be a
+    transfer's leg, and one pair_records would refuse (require_pairable)."""
     await source_ref(session, transaction_id)  # an unknown id raises here
     system = await system_account_ids(session)
     subject = await load_own_record(session, system, transaction_id)
@@ -513,6 +586,17 @@ async def pair_candidates(
     t, d = models.Transaction, models.TransferDecision
     rejected = exists().where(
         d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
+    )
+    nearest = (
+        func.abs(e.c.booking_date - sql_cast(subject.booking_date, Date)),
+        e.c.occurred_at,
+        e.c.transaction_id,
+    )
+    choosable = (
+        e.c.transaction_id != transaction_id,
+        e.c.account_id != subject.account_id,
+        ~in_matched_transfer(e.c.transaction_id),
+        ~rejected,
     )
     rows = await session.execute(
         select(
@@ -525,21 +609,14 @@ async def pair_candidates(
         )
         .join(t, t.id == e.c.transaction_id)
         .where(
-            e.c.transaction_id != transaction_id,
-            e.c.account_id != subject.account_id,
+            *choosable,
             e.c.instrument_id == subject.instrument_id,
             e.c.quantity == -subject.quantity,
-            ~in_matched_transfer(e.c.transaction_id),
-            ~rejected,
         )
-        .order_by(
-            func.abs(e.c.booking_date - sql_cast(subject.booking_date, Date)),
-            e.c.occurred_at,
-            e.c.transaction_id,
-        )
+        .order_by(*nearest)
         .limit(limit)
     )
-    return [
+    found = [
         PairCandidateRecord(
             transaction_id=row.transaction_id,
             account_id=row.account_id,
@@ -550,6 +627,44 @@ async def pair_candidates(
         )
         for row in rows
     ]
+    side = await load_pair_side(session, transaction_id)
+    if len(found) >= limit or side is None or not side.fiat:
+        return found
+    i = aliased(models.Instrument, name="candidate_instrument")
+    opposite = e.c.quantity > 0 if subject.quantity < 0 else e.c.quantity < 0
+    differing = await session.execute(
+        _pair_side_select(e, e.c.occurred_at, t.description)
+        .join(t, t.id == e.c.transaction_id)
+        .join(i, and_(i.id == e.c.instrument_id, i.kind == "fiat"))
+        .where(
+            *choosable,
+            opposite,
+            or_(e.c.instrument_id != subject.instrument_id, e.c.quantity != -subject.quantity),
+            e.c.booking_date.between(
+                subject.booking_date - DIFFERING_CANDIDATES_WINDOW,
+                subject.booking_date + DIFFERING_CANDIDATES_WINDOW,
+            ),
+        )
+        .order_by(*nearest)
+    )
+    for row in differing:
+        other = _pair_side(row)
+        if owner_pair_refusal(side, other) is not None:
+            continue  # its receiving side is larger, or its fee doesn't fit
+        found.append(
+            PairCandidateRecord(
+                transaction_id=row.transaction_id,
+                account_id=row.account_id,
+                quantity=row.quantity,
+                occurred_at=row.occurred_at,
+                booking_date=row.booking_date,
+                description=row.description,
+                differs="currency" if other.instrument_id != side.instrument_id else "amount",
+            )
+        )
+        if len(found) >= limit:
+            break
+    return found
 
 
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:

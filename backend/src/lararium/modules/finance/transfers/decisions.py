@@ -17,7 +17,7 @@ from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import delete_derived_transaction
-from lararium.modules.finance.transfers.contra import OwnLeg, own_leg, source_ref
+from lararium.modules.finance.transfers.contra import source_ref
 from lararium.modules.finance.transfers.engine import (
     decision_change_key,
     forget_decisions,
@@ -26,11 +26,14 @@ from lararium.modules.finance.transfers.engine import (
     match_transaction,
     publish_transfer,
 )
+from lararium.modules.finance.transfers.pairs import owner_pair_refusal
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
+    PairSideRecord,
     TransferRecord,
     candidates,
     get_transfer,
+    load_pair_side,
     load_transfers,
     require_pairable,
 )
@@ -199,53 +202,54 @@ async def _store_pair(ctx: CommandContext, present: UUID, chosen: UUID) -> Trans
     return paired[0]
 
 
+async def _pair_side(ctx: CommandContext, record_id: UUID) -> PairSideRecord:
+    await source_ref(ctx.session, record_id)  # unknown ids raise here
+    side = await load_pair_side(ctx.session, record_id)
+    if side is None:
+        raise FinanceValidationError(f"transaction {record_id} cannot be a transfer's leg")
+    return side
+
+
 async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> TransferRecord:
     """The owner says the open transfer's missing side is this record: one of its
-    candidates of the same amount, or one the owner unpaired from it (whose never_pair
-    decisions this withdraws). Pairing them outranks any other candidate; when it still
-    can't link them (another pair decision makes one of them ambiguous), nothing is
-    stored."""
+    candidates (of the same amount, or of another, or one the owner unpaired from it, whose
+    never_pair decisions this withdraws) that pair_records would accept too
+    (pairs.owner_pair_refusal: two currencies may differ in currency or amount). Pairing
+    them outranks any other candidate; when it still can't link them (another pair
+    decision makes one of them ambiguous), nothing is stored."""
     await lock_transfers(ctx)
     session = ctx.session
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         raise FinanceValidationError("only a transfer missing one side can be paired")
-    found = {
-        c.reason
-        for c in await candidates(session, transfer_id)
-        if c.transaction_id == transaction_id
-    }
-    if not found & {"exact", "unpaired"}:
+    if not any(c.transaction_id == transaction_id for c in await candidates(session, transfer_id)):
         raise FinanceValidationError(
-            f"transaction {transaction_id} is not a candidate of the same amount for this transfer"
+            f"transaction {transaction_id} is not a candidate for this transfer"
         )
     [present] = _records(transfer)
+    refusal = owner_pair_refusal(
+        await _pair_side(ctx, present), await _pair_side(ctx, transaction_id)
+    )
+    if refusal is not None:
+        raise FinanceValidationError(refusal)
     return await _store_pair(ctx, present, transaction_id)
 
 
 async def pair_records(ctx: CommandContext, transaction_id: UUID, other_id: UUID) -> TransferRecord:
     """The owner says these two records are one transfer, whether or not either is in
-    one: own records on different accounts, in one instrument, of opposite and equal
-    amounts. Neither may be a leg of a matched transfer (unpair it first) nor rejected
-    (undo the rejection first: a pair never silently overrides one). Otherwise as pair."""
+    one: own records on different accounts, either in one instrument of opposite and equal
+    amounts, or both in currencies of opposite sign differing in currency or in amount, the
+    receiving side not larger (pairs.owner_pair_refusal; their settlement is
+    pairs.conversion_postings). Neither may be a leg of a matched transfer (unpair it first)
+    nor rejected (undo the rejection first: a pair never silently overrides one). Otherwise
+    as pair."""
     await lock_transfers(ctx)
-    session = ctx.session
     if transaction_id == other_id:
         raise FinanceValidationError("a record cannot be paired with itself")
-    legs: list[OwnLeg] = []
+    first, second = [await _pair_side(ctx, record_id) for record_id in (transaction_id, other_id)]
+    refusal = owner_pair_refusal(first, second)
+    if refusal is not None:
+        raise FinanceValidationError(refusal)
     for record_id in (transaction_id, other_id):
-        await source_ref(session, record_id)  # unknown ids raise here
-        leg = await own_leg(session, record_id)
-        if leg is None:
-            raise FinanceValidationError(f"transaction {record_id} cannot be a transfer's leg")
-        legs.append(leg)
-    first, second = legs
-    if first.account_id == second.account_id:
-        raise FinanceValidationError("the two records are on the same account")
-    if first.instrument_id != second.instrument_id:
-        raise FinanceValidationError("the two records are in different instruments")
-    if first.quantity != -second.quantity:
-        raise FinanceValidationError("the two records are not of opposite and equal amounts")
-    for record_id in (transaction_id, other_id):
-        await require_pairable(session, record_id)
+        await require_pairable(ctx.session, record_id)
     return await _store_pair(ctx, transaction_id, other_id)

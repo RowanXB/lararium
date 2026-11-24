@@ -518,10 +518,14 @@ class PairCandidateOut(BaseModel):
     occurred_at: AwareDatetime
     booking_date: date
     description: str
+    # How its side differs from the record's (two currencies), or None for one in the same
+    # instrument of the opposite and equal amount.
+    differs: Literal["currency", "amount"] | None = None
 
 
 class TransferPair(BaseModel):
-    # One of the transfer's candidates of the same amount, or one unpaired from it.
+    # One of the transfer's candidates, or one unpaired from it; or, pairing two records,
+    # the other record.
     transaction_id: UUID
 
 

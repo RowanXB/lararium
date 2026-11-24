@@ -19,7 +19,12 @@ from lararium.modules.finance.transfers.contra import (
     rejoins,
     snapshot_own_records,
 )
-from lararium.modules.finance.transfers.pairs import PairRelation, conversion_postings, leg_fees
+from lararium.modules.finance.transfers.pairs import (
+    PairRelation,
+    conversion_postings,
+    leg_fees,
+    settles,
+)
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
     ReviewReason,
@@ -84,10 +89,11 @@ def _expected_conversion(
     received_id: UUID,
     system: Mapping[SystemAccountKey, UUID],
 ) -> Counter[_Posting] | None:
-    """The conversion a matched transfer of these two records should have: none for two in
-    one instrument (or a record the relation no longer holds, which is due anyway)."""
+    """The settlement a matched transfer of these two records should have: none for two in
+    one instrument of equal amounts (or a record the relation no longer holds, which is due
+    anyway)."""
     sent, received = relation.records.get(sent_id), relation.records.get(received_id)
-    if sent is None or received is None or sent.instrument_id == received.instrument_id:
+    if sent is None or received is None or not settles(sent, received):
         return None
     postings = conversion_postings(
         (sent.instrument_id, -sent.quantity),
@@ -224,8 +230,9 @@ async def records_to_heal(
                 else (tr.to_account_id, tr.from_account_id)
             )
             quantity = -tr.amount if side == "out" else tr.amount
-            # A transfer is in the sent instrument and amount; its receiving record in
-            # another currency is checked against its conversion instead (_pair_states).
+            # A transfer is in the sent instrument and amount; a receiving record that
+            # differs (in currency, or in amount) is checked against its settlement instead
+            # (_pair_states).
             fits = and_(own.c.instrument_id == tr.instrument_id, own.c.quantity == quantity)
             if side == "in":
                 fits = or_(

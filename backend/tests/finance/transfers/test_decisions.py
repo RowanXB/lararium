@@ -481,7 +481,7 @@ async def test_pair_records_refusals_store_nothing(
     session,
     run,
     gbp,
-    usd,
+    btc,
     ids,
     manual_bank,
     manual_tx,
@@ -491,8 +491,10 @@ async def test_pair_records_refusals_store_nothing(
     a, _b, out_record, in_record = unnamed_pair
     c = await manual_bank("C", identifier=None, snapshot=None)
     other_on_a = await manual_tx(a.account, "100")
-    wrong_amount = await manual_tx(c, "90")
-    in_usd = await manual_tx(c, "100", instrument=usd)
+    # Two currencies may differ only with the receiving side not larger (Task 17); a
+    # non-fiat instrument may not differ at all (test_owner_pair_differs).
+    wrong_amount = await manual_tx(c, "110")
+    in_btc = await manual_tx(c, "100", instrument=btc)
     voided = await manual_tx(c, "100")
     await run(void_transaction, voided.id)
     with_fee = await run(
@@ -514,8 +516,8 @@ async def test_pair_records_refusals_store_nothing(
     refusals = [
         (out_record.id, out_record.id, "itself"),
         (out_record.id, other_on_a.id, "same account"),
-        (out_record.id, wrong_amount.id, "opposite and equal"),  # -100 against +90
-        (out_record.id, in_usd.id, "different instruments"),  # GBP against USD
+        (out_record.id, wrong_amount.id, "receiving side is larger"),  # -100 against +110
+        (out_record.id, in_btc.id, "different instruments"),  # GBP against BTC
         (out_record.id, voided.id, "cannot be a transfer's leg"),
         (out_record.id, with_fee.id, "cannot be a transfer's leg"),
         (out_record.id, rejected.id, "undo the rejection"),  # -100 against the rejected +100
@@ -581,7 +583,7 @@ async def test_pair_candidates_order_and_exclusions(
     minus1 = await manual_tx(m2, "100", occurred_at=at(-1))
     # Excluded ones.
     await manual_tx(a.account, "100")  # the same account
-    await manual_tx(m1, "90")
+    await manual_tx(m1, "110")  # larger than sent (one smaller is listed as differing)
     voided = await manual_tx(m1, "100")
     await run(void_transaction, voided.id)
     matched_leg = await manual_tx(m1, "100", occurred_at=at(0, 1))

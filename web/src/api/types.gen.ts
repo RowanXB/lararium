@@ -1478,6 +1478,10 @@ export type PairCandidateOut = {
      */
     description: string;
     /**
+     * Differs
+     */
+    differs?: 'currency' | 'amount' | null;
+    /**
      * Occurred At
      */
     occurred_at: string;

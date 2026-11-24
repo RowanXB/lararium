@@ -14,7 +14,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -239,7 +239,23 @@ def card_partners(
     return candidates, partners
 
 
-def leg_fees(*records: Pairable) -> list[LegFee]:
+class PairSide(Protocol):
+    """What deciding a settlement reads of a record (Pairable, or a record the owner pairs:
+    queries.load_pair_side)."""
+
+    @property
+    def account_id(self) -> UUID: ...
+    @property
+    def instrument_id(self) -> UUID: ...
+    @property
+    def quantity(self) -> Decimal: ...  # signed: negative on the sending side
+    @property
+    def fiat(self) -> bool: ...
+    @property
+    def fee(self) -> LegFee | None: ...
+
+
+def leg_fees(*records: PairSide) -> list[LegFee]:
     """The conversion fees the records' connectors give (Pairable.fee), those that have one."""
     return [x.fee for x in records if x.fee is not None]
 
@@ -263,6 +279,30 @@ def _conversion_fee(
     return True, fee
 
 
+def _difference_fits(
+    sent: tuple[UUID, Decimal], received: tuple[UUID, Decimal], fees: Sequence[LegFee]
+) -> bool:
+    """Whether the difference between `sent` and `received`, in one instrument, can be a
+    fee: the receiving side is smaller, and the legs' fees, if any, are in that instrument
+    and come to no more than the difference (the whole difference is the fee either way)."""
+    (instrument_id, sent_amount), (_, received_amount) = sent, received
+    charged = [fee for fee in fees if fee.amount != 0]
+    return (
+        received_amount < sent_amount
+        and all(fee.instrument_id == instrument_id for fee in charged)
+        and sum((fee.amount for fee in charged), Decimal(0)) <= sent_amount - received_amount
+    )
+
+
+def settlement_fits(
+    sent: tuple[UUID, Decimal], received: tuple[UUID, Decimal], fees: Sequence[LegFee]
+) -> bool:
+    """Whether conversion_postings gives a settlement of `sent` into `received`."""
+    if sent[0] == received[0]:
+        return _difference_fits(sent, received, fees)
+    return _conversion_fee(sent, received, fees)[0]
+
+
 def conversion_postings(
     sent: tuple[UUID, Decimal],
     received: tuple[UUID, Decimal],
@@ -271,20 +311,30 @@ def conversion_postings(
     in_transit: UUID,
     unassigned: UUID,
 ) -> list[PostingInput] | None:
-    """The postings of the conversion of a cross-currency transfer (eToro design §5.12):
-    `sent` (instrument, amount) left one own account and `received` arrived on the other,
-    both through In transit, and the legs' fees (`fees`) give its fee F, if any. On In
-    transit, so it nets to zero there in each currency: the sent amount converted into the
-    received one at their rate, the price carried by the sent currency's posting (which
-    ledger._weight weighs in the received one), and F, flagged as a fee, against
+    """The postings of the settlement of a transfer whose sides differ: `sent` (instrument,
+    amount) left one own account and `received` arrived on the other, both through In
+    transit, and the legs' fees (`fees`) give its fee, if any. On In transit, so it nets to
+    zero there in each currency. None when no settlement fits (settlement_fits).
+
+    In two currencies, the conversion (eToro design §5.12): the sent amount converted into
+    the received one at their rate, the price carried by the sent currency's posting (which
+    ledger._weight weighs in the received one), and the fee F, flagged as a fee, against
     Unassigned. A fee in the received currency was taken after the conversion, so the sent
-    amount bought the received one plus F; one in the sent currency, before it, so only
-    the sent amount less F was converted. None when no fee can be the conversion's
-    (_conversion_fee)."""
+    amount bought the received one plus F; one in the sent currency, before it, so only the
+    sent amount less F was converted.
+
+    In one currency, of a smaller received amount (a deposit net of a platform fee, which
+    only the owner pairs): the difference, flagged as a fee, against Unassigned."""
     (sent_id, sent_amount), (received_id, received_amount) = sent, received
-    fits, fee = _conversion_fee(sent, received, fees)
-    if not fits:
+    if not settlement_fits(sent, received, fees):
         return None
+    if sent_id == received_id:
+        difference = sent_amount - received_amount
+        return [
+            PostingInput(in_transit, sent_id, -difference, is_fee=True),
+            PostingInput(unassigned, sent_id, difference),
+        ]
+    _, fee = _conversion_fee(sent, received, fees)
     converted, bought = sent_amount, received_amount
     if fee is not None:
         if fee.instrument_id == received_id:
@@ -307,6 +357,38 @@ def conversion_postings(
             PostingInput(unassigned, fee.instrument_id, fee.amount),
         ]
     return postings
+
+
+def settles(r: PairSide, c: PairSide) -> bool:
+    """Whether a transfer of the two records needs a settlement (conversion_postings): they
+    differ in instrument or amount."""
+    return r.instrument_id != c.instrument_id or r.quantity != -c.quantity
+
+
+def owner_pair_refusal(r: PairSide, c: PairSide) -> str | None:
+    """Why the owner can't pair the two records as one transfer, or None when they can
+    (eToro design §5.12): on different accounts, and either in one instrument of opposite,
+    equal amounts, or both in currencies, of opposite sign, differing in currency or in
+    amount with a settlement that fits (the receiving side not larger, a leg's fee no more
+    than the difference or a conversion's)."""
+    if r.account_id == c.account_id:
+        return "the two records are on the same account"
+    if not settles(r, c):
+        return None
+    if (r.quantity < 0) == (c.quantity < 0):
+        return "the two records are in the same direction"
+    if not (r.fiat and c.fiat):
+        if r.instrument_id != c.instrument_id:
+            return "the two records are in different instruments, not both currencies"
+        return "the two records are not of opposite and equal amounts, and not in a currency"
+    sent, received = (r, c) if r.quantity < 0 else (c, r)
+    sent_side = (sent.instrument_id, -sent.quantity)
+    received_side = (received.instrument_id, received.quantity)
+    if sent.instrument_id == received.instrument_id and received.quantity > -sent.quantity:
+        return "the receiving side is larger than the sending side"
+    if not settlement_fits(sent_side, received_side, leg_fees(r, c)):
+        return "the fee its connector gives does not fit the two records' amounts"
+    return None
 
 
 @dataclass(frozen=True)
@@ -567,20 +649,17 @@ def _registry_edges(
 
 
 def _decided_edges(records: list[Pairable], decisions: _Decisions, edges: _Edges) -> None:
-    """The pairs the owner made (Decision 6 step 2), added to `edges`: still on different
-    accounts, in the same instrument and of opposite sign and the same amount; the window
-    does not apply."""
+    """The pairs the owner made (Decision 6 step 2), added to `edges`: still pairs the
+    owner could make (owner_pair_refusal: in one instrument of opposite, equal amounts, or
+    two currencies differing in currency or amount whose settlement fits); the window does
+    not apply. They outrank every other tier, those across currencies and of cards
+    included."""
     by_source = {x.source: x for x in records}
     for subject, other in decisions.paired:
         r, c = by_source.get(subject), by_source.get(other)
         if r is None or c is None:
             continue
-        if (
-            r.account_id != c.account_id
-            and r.instrument_id == c.instrument_id
-            and c.quantity == -r.quantity
-            and not decisions.apart(r, c)
-        ):
+        if owner_pair_refusal(r, c) is None and not decisions.apart(r, c):
             edges.add(r.id, c.id, DECIDED)
 
 
@@ -622,10 +701,11 @@ class PairRelation:
 
     records: Mapping[UUID, Pairable]  # those that can pair at all
     rejected: frozenset[UUID]  # those of them the owner said are not a transfer
-    # Every pair of the same amount, both ways round, with its strongest tier.
+    # Every pair of the same amount, and every pair the owner made (DECIDED, whose sides
+    # may differ: _decided_edges), both ways round, with its strongest tier.
     tiers: Mapping[UUID, Mapping[UUID, Tier]]
-    # A record's candidates of the same amount: those in the strongest tier it has any in,
-    # for which that is also their own strongest (Ruling 7).
+    # A record's candidates of the same amount, or the owner's: those in the strongest tier
+    # it has any in, for which that is also their own strongest (Ruling 7).
     exact: Mapping[UUID, frozenset[UUID]]
     # A record's candidates of another amount: mutually identified ones.
     differing: Mapping[UUID, frozenset[UUID]]
