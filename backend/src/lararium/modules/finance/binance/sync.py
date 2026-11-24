@@ -124,6 +124,7 @@ SWEPT_WALLETS = frozenset({"spot"})
 GATE_LABEL = "api-restrictions"
 ACCOUNT_LABEL = "spot-account"
 COIN_CONFIG_LABEL = "coin-config"
+ASSET_DETAIL_LABEL = "asset-detail"
 EXCHANGE_INFO_LABEL = "exchange-info"
 
 
@@ -385,7 +386,7 @@ class BinanceConnector:
         await refresh_ids_quietly(ctx, clock=client.now_ms, sleep=self._sleep)
         for read in reads.values():
             await store_read(ctx, read)
-        reference = await read_balances(client, [COIN_CONFIG_LABEL])
+        reference = await read_balances(client, [COIN_CONFIG_LABEL, ASSET_DETAIL_LABEL])
 
         for label in HISTORY_LABELS:
             await walk(ctx, client, label)

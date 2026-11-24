@@ -73,7 +73,7 @@ ROUNDS = 3
 SOURCE_LABELS = ("spot-account", "funding-asset", "wallet-balance")
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
-REFERENCE_LABELS = ("coin-config", "exchange-info")
+REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
 # Request parameters a read sends.
 READ_PARAMS: dict[str, dict[str, str | int | bool]] = {WALLET_LIST: {"needBalanceDetail": True}}
 # The digest of each report label's last stored answer: an unchanged answer is not stored again.

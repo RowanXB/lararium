@@ -705,8 +705,10 @@ async def test_a_sync_stores_the_reference_reports_once(
     await run_binance_sync(session, connection.id, fake.handler)
 
     assert len(fake.calls("coin-config")) == len(fake.calls("exchange-info")) == 2
+    assert len(fake.calls("asset-detail")) == 2
     assert await _count(session, "binance_coin_config", connection.id) == 1
     assert await _count(session, "binance_exchange_info", connection.id) == 1
+    assert await _count(session, "binance_asset_detail", connection.id) == 1
     # coin-config was stored before the asset was resolved: EUR is the currency.
     kinds = await session.scalars(
         text(

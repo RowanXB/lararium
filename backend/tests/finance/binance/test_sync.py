@@ -649,3 +649,34 @@ async def test_an_unknown_field_in_any_answer_is_flagged_once(
     told = [m for m in notifier.messages if "flagged" in m]
     assert all(sum(flag in m for m in told) == 1 for flag in expected)
 
+
+# Every Phase A label is fetched by a sync.
+
+
+async def test_a_first_sync_asks_every_phase_a_label(
+    session, run, fake: FakeBinance, connector
+) -> None:
+    # Enough for every step to ask: an asset held since a daily snapshot two days ago, with a
+    # EUR market (bars) and a symbol of its own (trades).
+    day = NOW_MS - 2 * DAY_MS - 1_000
+    snapshot = build_row("snapshot", type="spot", updateTime=day)
+    data = dict(snapshot["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["balances"] = [{"asset": "AAA", "free": "2", "locked": "0"}]
+    fake.add("snapshot", {**snapshot, "data": data})
+    fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="2", locked="0")])
+    fake.add(
+        "exchange-info",
+        build_row("exchange-info", symbol="AAAEUR", baseAsset="AAA", quoteAsset="EUR"),
+    )
+    connection = await binance_connection(run)
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    phase_a = {label for label, endpoint in ENDPOINTS.items() if endpoint.phase == "A"}
+    asked = {seen.label for seen in fake.requests}
+    assert sorted(phase_a - asked) == []
+    assert await session.scalar(
+        text("select count(*) from finance.binance_asset_detail where connection_id = :c"),
+        {"c": connection.id},
+    )
