@@ -221,7 +221,8 @@ def _field_columns(
         name = "_".join(snake(n) for n in place.reads) or "value"
         if name in taken:
             name = f"{prefix}_{name}"
-        # Required only when every object above it is: `data.isLocked` of an optional `data`.
+        # Required only when every object or listed array above it is: `data.isLocked` of an
+        # optional `data`.
         parents = [field.path[:i] for i, c in enumerate(field.path) if c == "."]
         required = (
             field.required and not place.envelope and all(objects.get(p, True) for p in parents)
@@ -262,7 +263,9 @@ def layout(label: str) -> tuple[Table, ...]:
     endpoint = ENDPOINTS[label]
     record = endpoint.kind == "history"
     root = root_scope(label)
-    objects = {f.path: f.required for f in FIELDS[label] if f.type == "object"}
+    # The objects and listed arrays above a field: a field required in an optional one (an
+    # entry of `assetBalances[]`) is still a nullable column.
+    objects = {f.path: f.required for f in FIELDS[label] if f.type in ("object", "array")}
     places = [_place(f, root) for f in FIELDS[label] if f.type not in ("object", "array")]
 
     scopes = {root}

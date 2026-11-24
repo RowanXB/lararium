@@ -419,8 +419,9 @@ class _Wallet:
 def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     """Each wallet whose source read is clear (not None, not `unclear`) and states what it
     holds, with its quantity per asset (design 5.6). A source whose list is not stated fails
-    (`_stated`); a wallet the list shows with a balance but no quantity is left out: it gets
-    no snapshot and no report time from this read, and its earlier balance stands."""
+    (`_stated`); a wallet the list shows with no asset detail, or with a balance but no
+    quantity, is left out (and flagged, `wallet_flags`): it gets no snapshot and no report time
+    from this read, and its earlier balance stands."""
     wallets: list[_Wallet] = []
     reads = {label: read for label, read in reads.items() if read is not None and not read.unclear}
     spot = reads.get("spot-account")
@@ -437,7 +438,10 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
             key = wallet_key(wallet_name_of(row))
             if key in OWN_SOURCES:
                 continue
-            entries = _stated(WALLET_LIST, "[].assetBalances", row.get("assetBalances"))
+            entries = row.get("assetBalances")
+            if not isinstance(entries, list):
+                # No detail: the list is read again next sync (flagged, `wallet_flags`).
+                continue
             held = _per_asset(WALLET_LIST, "[].assetBalances[].", entries, _HELD_FIELDS)
             if _list_states_holdings(row, held):
                 wallets.append(_Wallet(key, listed, held))
@@ -469,7 +473,11 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
             flags.append(f"wallet {name} disagrees with its own report")
         balance = _amount(WALLET_LIST, "[].balance", row.get("balance"))
         listed = any(quantity != 0 for quantity in _listed_held(row).values())
-        if key not in OWN_SOURCES and balance != 0 and not listed:
+        if key in OWN_SOURCES:
+            continue
+        if not isinstance(row.get("assetBalances"), list):
+            flags.append(f"wallet {name} lists no asset detail")
+        elif balance != 0 and not listed:
             flags.append(f"wallet {name} has a balance but lists no asset")
     return flags
 
@@ -769,6 +777,20 @@ async def _reported_at(
     return found is not None
 
 
+def _daily_unstated(entries: ApiValue) -> str | None:
+    """The field by which a daily Spot snapshot's balances do not state what Spot held: the
+    list missing, null or not a list, or an entry without its asset or an amount."""
+    where = "snapshotVos[].data.balances"
+    if not isinstance(entries, list):
+        return where
+    for entry in entries:
+        if isinstance(entry, dict):
+            for name in ("asset", *_SPOT_FIELDS):
+                if entry.get(name) is None:
+                    return f"{where}[].{name}"
+    return None
+
+
 async def backfill_daily_snapshots(
     ctx: CommandContext,
     connection: ConnectionRecord,
@@ -784,7 +806,8 @@ async def backfill_daily_snapshots(
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
     Spot account exists and every quantity of the day has its instrument. A day with a code
-    that has none (other than an `LD` mirror) is not written at all and is flagged."""
+    that has none (other than an `LD` mirror), or whose balances do not state what Spot held
+    (`_daily_unstated`), is not written at all and is flagged."""
     flag = flag or (lambda _: None)
     days: list[tuple[datetime, dict[str, Decimal]]] = []
     for row in rows:
@@ -792,8 +815,14 @@ async def backfill_daily_snapshots(
         if not isinstance(kind, str) or kind.upper() != _DAILY_SPOT:
             continue
         data = row.get("data")
-        balances = data.get("balances") if isinstance(data, dict) else None
-        entries = _stated(_DAILY, "snapshotVos[].data.balances", balances)
+        entries = data.get("balances") if isinstance(data, dict) else None
+        # Fetched on the first sync only, so never read again: a day that does not state what
+        # Spot held is left out and flagged, neither read as an empty day nor failing the sync.
+        unstated = _daily_unstated(entries)
+        if unstated is not None:
+            flag(f"a daily Spot snapshot was not written: {_DAILY}.{unstated} is missing")
+            continue
+        assert isinstance(entries, list)
         at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
         held = _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
         days.append((at, held))

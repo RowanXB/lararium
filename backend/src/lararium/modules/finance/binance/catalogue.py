@@ -2609,9 +2609,9 @@ msg text
 snapshotVos[].type text!
 snapshotVos[].updateTime time_ms!
 snapshotVos[].data object
-snapshotVos[].data.balances[].asset text
-snapshotVos[].data.balances[].free decimal
-snapshotVos[].data.balances[].locked decimal
+snapshotVos[].data.balances[].asset text!
+snapshotVos[].data.balances[].free decimal!
+snapshotVos[].data.balances[].locked decimal!
 snapshotVos[].data.totalAssetOfBtc decimal
 snapshotVos[].data.marginLevel decimal
 snapshotVos[].data.totalLiabilityOfBtc decimal
@@ -2934,10 +2934,10 @@ total integer
 [].balance decimal!
 [].walletName text!
 [].assetBalances[] array
-[].assetBalances[].asset text
+[].assetBalances[].asset text!
 [].assetBalances[].assetName text
-[].assetBalances[].free decimal
-[].assetBalances[].locked decimal
+[].assetBalances[].free decimal!
+[].assetBalances[].locked decimal!
 [].assetBalances[].freeze decimal
 [].assetBalances[].withdrawing decimal
 [].assetBalances[].btcValuation decimal

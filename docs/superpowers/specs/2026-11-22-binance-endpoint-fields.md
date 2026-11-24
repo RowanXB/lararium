@@ -218,7 +218,7 @@ Id: `[].asset`. Time: none. Seen: yes — same 7 fields. Does not list LD-prefix
 ### `wallet-balance` — GET /sapi/v1/asset/wallet/balance
 Weight 60 (IP) · signed · doc `core-trading-wallet/api/rest-api/asset#query-user-wallet-balance`
 Request: `quoteAsset` (default BTC), `needBalanceDetail` (boolean, default false).
-Id: `[].walletName`. Time: none. Seen: yes — same fields; with `needBalanceDetail=true` every wallet carried `assetBalances`. Real `walletName` values (not listed in the docs): Spot, Funding, Cross Margin, Isolated Margin, USDⓈ-M Futures, COIN-M Futures, Earn, Options, Trading Bots, Copy Trading.
+Id: `[].walletName`. Time: none. Seen: yes — same fields; with `needBalanceDetail=true` every wallet carried `assetBalances`. An element of `assetBalances` always carries `asset`, `free` and `locked`: the connector requires them. Real `walletName` values (not listed in the docs): Spot, Funding, Cross Margin, Isolated Margin, USDⓈ-M Futures, COIN-M Futures, Earn, Options, Trading Bots, Copy Trading.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -727,7 +727,7 @@ Weight 2400 (IP) · signed · doc `core-trading-wallet/api/rest-api/account#dail
 Request: **`type` required** (SPOT, MARGIN, FUTURES); `startTime`, `endTime` optional; `limit` default 7, min 7, max 30. Documented: "The query time period must be less then 30 days", "Support query within the last one month only", default last 7 days when no time is sent. Real: 30 days returned, each at 23:59:59 UTC.
 Id: `snapshotVos[].type` + `snapshotVos[].updateTime`. Time: `snapshotVos[].updateTime`.
 Seen: SPOT yes (30 days); FUTURES empty (HTTP 200, code 200, 0 days); MARGIN refused (-3003).
-Doc and real agree: the response `type` is lower-case (`spot`) although the request enum is upper-case; `code` 200 at top level; SPOT rows carry only `balances` and `totalAssetOfBtc`.
+Doc and real agree: the response `type` is lower-case (`spot`) although the request enum is upper-case; `code` 200 at top level; SPOT rows carry only `balances` and `totalAssetOfBtc`. An element of `data.balances` always carries `asset`, `free` and `locked`: the connector requires them.
 
 | Field | Type | Meaning |
 |---|---|---|
