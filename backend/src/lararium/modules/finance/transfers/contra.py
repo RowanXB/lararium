@@ -160,8 +160,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
-    bank account, or its import rows print part of one), bank_transfer, source_kind,
-    source_ref.
+    bank account, or its import rows print part of one), holders (the own accounts the card
+    merchant it names pays into, NULL for any other record: such evidence never identifies
+    it, so holder stays NULL and it pairs only with a record that is there, Task 16's tier),
+    bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -353,6 +355,21 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         ),
         else_=None,
     )
+    # A card merchant's holders (finance.account_identifier_holders), by its primary key.
+    h = aliased(models.AccountIdentifierHolder, name="merchant_holder")
+    holders = case(
+        (
+            t.counterparty_identifier_id.is_not(None),
+            type_coerce(
+                select(func.array_agg(h.account_id))
+                .where(h.identifier_id == t.counterparty_identifier_id)
+                .correlate_except(h)
+                .scalar_subquery(),
+                ARRAY(Uuid()),
+            ),
+        ),
+        else_=None,
+    )
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
@@ -371,6 +388,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 own_number.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
+            holders.label("holders"),
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
@@ -401,6 +419,7 @@ _OWN_RECORDS = Table(
     Column("holder", Uuid),
     Column("weak_holder", Uuid),
     Column("names_account", Boolean, nullable=False),
+    Column("holders", ARRAY(Uuid)),
     Column("bank_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
@@ -654,7 +673,9 @@ async def transfer_contra(
     with `other_postings` (postings besides its own and the contra, a fee say) can't be a
     leg (LEG_POSTINGS), so Unassigned; a leg of a transfer that is not rejected stays In
     transit; a counterparty bank account registered to another own account makes it In
-    transit. `source` is None for a transaction not yet posted, which has neither. Both
+    transit. A card merchant (registered with holders, not to one account) never does: its
+    record stays on Unassigned until it is paired (eToro design §5.12, as amended in Task
+    15). `source` is None for a transaction not yet posted, which has neither. Both
     system accounts must exist already (get_or_create_system_account).
     """
     system = await system_account_ids(session)

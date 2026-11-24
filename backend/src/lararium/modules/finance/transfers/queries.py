@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import (
@@ -32,6 +33,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from lararium.core import models as core_models
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
@@ -644,6 +646,132 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
                 outgoing=row.outgoing,
                 incoming=row.incoming,
                 latest=row.latest,
+            )
+        )
+    return found
+
+
+# The platforms whose card merchants are suggested: a merchant website's host on the domain
+# (or a subdomain of it) offers the accounts of the connector's connections (§5.12).
+CARD_MERCHANT_PLATFORMS = {"trading212.com": "trading212", "etoro.com": "etoro"}
+
+
+@dataclass(frozen=True)
+class CardMerchantSuggestion:
+    """A Monzo card merchant own records pay, neither registered nor dismissed, whose website
+    is on a connected platform's domain: maybe paying into these of the owner's accounts."""
+
+    merchant_id: str
+    name: str | None  # the merchant's name, as its place has it
+    host: str  # its website's host
+    outgoing: int  # own records paying it
+    incoming: int  # own records it refunded
+    latest: date  # the latest booking date of those records
+    account_ids: tuple[UUID, ...]  # the platform's accounts a registration may name, sorted
+    kind: Literal["card_merchant"] = "card_merchant"  # as GET /transfer-suggestions tells it
+
+
+def website_host(website: str) -> str | None:
+    """The host of a website as Monzo gives it (with or without a scheme), lower case; None
+    when it has none."""
+    parsed = urlsplit(website.strip() if "//" in website else f"//{website.strip()}")
+    try:
+        host = parsed.hostname
+    except ValueError:
+        return None
+    return host.rstrip(".") if host else None
+
+
+def platform_of(host: str) -> str | None:
+    """The connector whose domain the host is, or a subdomain of: by its labels, never as a
+    substring (nottrading212.com is no Trading 212 host)."""
+    for domain, connector in CARD_MERCHANT_PLATFORMS.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return connector
+    return None
+
+
+async def card_merchant_suggestions(session: AsyncSession) -> list[CardMerchantSuggestion]:
+    """Card merchants (Monzo merchant ids) that at least one own record pays, neither
+    registered to an account nor dismissed, whose website's host is on a connected
+    platform's domain (CARD_MERCHANT_PLATFORMS), each offering the accounts of that
+    platform's connections a registration may name (open, own, asset, not snapshots-only).
+    Most paid first, then the most recently paid. None without such a connection."""
+    a, c = models.Account, core_models.Connection
+    system = await system_account_ids(session)
+    offered: dict[str, list[UUID]] = {}
+    for connector, account_id in await session.execute(
+        select(c.connector, a.id)
+        .join(a, a.source_connection_id == c.id)
+        .where(
+            c.connector.in_(list(CARD_MERCHANT_PLATFORMS.values())),
+            a.id.not_in(list(system.values())),
+            a.ledger_type == "asset",
+            a.status == "open",
+            a.balance_mode != "snapshots",
+        )
+        .order_by(a.id)
+    ):
+        offered.setdefault(connector, []).append(account_id)
+    if not offered:
+        return []
+    e = eligible_records(system)
+    t, place = models.Transaction, aliased(core_models.Entity, name="merchant_place")
+    i, h = models.AccountIdentifier, models.AccountIdentifierHolder
+    merchant_id = place.external_ids["monzo_merchant"].astext
+    settled = (
+        select(i.id)
+        .where(
+            i.kind == "card_merchant",
+            i.value == merchant_id,
+            or_(
+                i.dismissed_at.is_not(None),
+                exists().where(h.identifier_id == i.id),
+            ),
+        )
+        .exists()
+    )
+    outgoing = func.count().filter(e.c.quantity < 0)
+    incoming = func.count().filter(e.c.quantity > 0)
+    latest = func.max(e.c.booking_date)
+    rows = await session.execute(
+        select(
+            merchant_id.label("merchant_id"),
+            place.name,
+            place.website,
+            outgoing.label("outgoing"),
+            incoming.label("incoming"),
+            latest.label("latest"),
+        )
+        .select_from(e)
+        .join(t, t.id == e.c.transaction_id)
+        .join(place, place.id == t.place_entity_id)
+        .where(
+            place.kind == "place",
+            merchant_id.is_not(None),
+            place.website.is_not(None),
+            ~t.bank_transfer,
+            ~settled,
+        )
+        .group_by(merchant_id, place.name, place.website)
+        .having(outgoing > 0)
+        .order_by((outgoing + incoming).desc(), latest.desc(), merchant_id)
+    )
+    found: list[CardMerchantSuggestion] = []
+    for row in rows:
+        host = website_host(row.website)
+        connector = None if host is None else platform_of(host)
+        if host is None or connector is None or connector not in offered:
+            continue
+        found.append(
+            CardMerchantSuggestion(
+                merchant_id=row.merchant_id,
+                name=row.name,
+                host=host,
+                outgoing=row.outgoing,
+                incoming=row.incoming,
+                latest=row.latest,
+                account_ids=tuple(offered[connector]),
             )
         )
     return found

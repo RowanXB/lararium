@@ -378,6 +378,11 @@ export function TransfersPage() {
     queryFn: async () => (await listAccounts({ throwOnError: true })).data,
   });
   const error = transfers.error ?? suggestions.error ?? accounts.error;
+  // Bank accounts only: card merchants (kind "card_merchant") are registered through the API
+  // for now, as the design adds no screen for them.
+  const bankSuggestions = suggestions.data?.filter(
+    (suggestion): suggestion is SuggestionOut => !("kind" in suggestion),
+  );
 
   const all = transfers.data ?? [];
   const attention = all.filter(needsAttention);
@@ -419,15 +424,15 @@ export function TransfersPage() {
         </ul>
       </Section>
       <Section title="Suggestions">
-        {suggestions.data?.length === 0 && <Empty>No suggestions</Empty>}
-        {!!suggestions.data?.length && snapshotsOnly.length > 0 && (
+        {bankSuggestions?.length === 0 && <Empty>No suggestions</Empty>}
+        {!!bankSuggestions?.length && snapshotsOnly.length > 0 && (
           <p className="mb-3 text-sm text-muted-foreground">
             {`Not listed: ${snapshotsOnly.map((a) => a.name).join(", ")}. ` +
               "Snapshots-only accounts can't have identifiers; switch them to hybrid on Accounts."}
           </p>
         )}
         <ul className="divide-y">
-          {suggestions.data?.map((suggestion) => (
+          {bankSuggestions?.map((suggestion) => (
             <SuggestionItem
               key={suggestion.identifier_id}
               suggestion={suggestion}

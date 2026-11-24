@@ -248,6 +248,73 @@ export type CandidateOut = {
     transaction_id: string;
 };
 
+/**
+ * CardMerchantDismiss
+ */
+export type CardMerchantDismiss = {
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+};
+
+/**
+ * CardMerchantRegister
+ *
+ * The own accounts card payments to a Monzo merchant go into; none removes it.
+ */
+export type CardMerchantRegister = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+};
+
+/**
+ * CardMerchantSuggestionOut
+ *
+ * A card merchant whose website is on a connected platform's domain, offering the
+ * platform's accounts; registering it is register_card_merchant.
+ */
+export type CardMerchantSuggestionOut = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Host
+     */
+    host: string;
+    /**
+     * Incoming
+     */
+    incoming: number;
+    /**
+     * Kind
+     */
+    kind: 'card_merchant';
+    /**
+     * Latest
+     */
+    latest: string;
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+    /**
+     * Name
+     */
+    name: string | null;
+    /**
+     * Outgoing
+     */
+    outgoing: number;
+};
+
 export type CardTypes = Array<string>;
 
 /**
@@ -698,13 +765,17 @@ export type IdentifierOut = {
      */
     dismissed_at: string | null;
     /**
+     * Holder Account Ids
+     */
+    holder_account_ids: Array<string>;
+    /**
      * Id
      */
     id: string;
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant';
     /**
      * Sort Code
      */
@@ -2598,6 +2669,31 @@ export type CreateAccountResponses = {
 
 export type CreateAccountResponse = CreateAccountResponses[keyof CreateAccountResponses];
 
+export type RegisterCardMerchantData = {
+    body: CardMerchantRegister;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/accounts/identifiers/card-merchants';
+};
+
+export type RegisterCardMerchantErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegisterCardMerchantError = RegisterCardMerchantErrors[keyof RegisterCardMerchantErrors];
+
+export type RegisterCardMerchantResponses = {
+    /**
+     * Successful Response
+     */
+    200: IdentifierOut;
+};
+
+export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
+
 export type RenameAccountData = {
     body: AccountRename;
     path: {
@@ -3474,10 +3570,35 @@ export type ListTransferSuggestionsResponses = {
      *
      * Successful Response
      */
-    200: Array<SuggestionOut>;
+    200: Array<SuggestionOut | CardMerchantSuggestionOut>;
 };
 
 export type ListTransferSuggestionsResponse = ListTransferSuggestionsResponses[keyof ListTransferSuggestionsResponses];
+
+export type DismissCardMerchantSuggestionData = {
+    body: CardMerchantDismiss;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/transfer-suggestions/card-merchants/dismiss';
+};
+
+export type DismissCardMerchantSuggestionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DismissCardMerchantSuggestionError = DismissCardMerchantSuggestionErrors[keyof DismissCardMerchantSuggestionErrors];
+
+export type DismissCardMerchantSuggestionResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DismissCardMerchantSuggestionResponse = DismissCardMerchantSuggestionResponses[keyof DismissCardMerchantSuggestionResponses];
 
 export type DismissTransferSuggestionData = {
     body?: never;

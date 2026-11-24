@@ -478,6 +478,104 @@
         "title": "CandidateOut",
         "type": "object"
       },
+      "CardMerchantDismiss": {
+        "properties": {
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "merchant_id"
+        ],
+        "title": "CardMerchantDismiss",
+        "type": "object"
+      },
+      "CardMerchantRegister": {
+        "description": "The own accounts card payments to a Monzo merchant go into; none removes it.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "merchant_id",
+          "account_ids"
+        ],
+        "title": "CardMerchantRegister",
+        "type": "object"
+      },
+      "CardMerchantSuggestionOut": {
+        "description": "A card merchant whose website is on a connected platform's domain, offering the\nplatform's accounts; registering it is register_card_merchant.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "incoming": {
+            "title": "Incoming",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "card_merchant",
+            "title": "Kind",
+            "type": "string"
+          },
+          "latest": {
+            "format": "date",
+            "title": "Latest",
+            "type": "string"
+          },
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "outgoing": {
+            "title": "Outgoing",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "merchant_id",
+          "name",
+          "host",
+          "outgoing",
+          "incoming",
+          "latest",
+          "account_ids"
+        ],
+        "title": "CardMerchantSuggestionOut",
+        "type": "object"
+      },
       "CardTypes": {
         "items": {
           "maxLength": 60,
@@ -1423,6 +1521,14 @@
             ],
             "title": "Dismissed At"
           },
+          "holder_account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Holder Account Ids",
+            "type": "array"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1433,7 +1539,8 @@
               "uk_bank_account",
               "ibkr_account",
               "trading212_account",
-              "etoro_account"
+              "etoro_account",
+              "card_merchant"
             ],
             "title": "Kind",
             "type": "string"
@@ -1461,6 +1568,7 @@
           "sort_code",
           "account_number",
           "account_id",
+          "holder_account_ids",
           "dismissed_at",
           "created_by",
           "created_at"
@@ -5020,6 +5128,48 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/identifiers/card-merchants": {
+      "post": {
+        "description": "Register a Monzo card merchant as paying into these own accounts (a suggestion, too),\nreplacing the accounts it had; none removes the registration. Every record naming it is\nmatched again; Monzo's next sync names it on the payments made before.",
+        "operationId": "register_card_merchant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardMerchantRegister"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Card Merchant",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}": {
       "patch": {
         "operationId": "rename_account",
@@ -6396,7 +6546,7 @@
     },
     "/api/v1/finance/transfer-suggestions": {
       "get": {
-        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first. Registering one is add_account_identifier.",
+        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first (registering one is add_account_identifier); then card merchants on a\nconnected platform's domain (kind card_merchant; registering one is\nregister_card_merchant).",
         "operationId": "list_transfer_suggestions",
         "responses": {
           "200": {
@@ -6404,7 +6554,14 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/SuggestionOut"
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/SuggestionOut"
+                      },
+                      {
+                        "$ref": "#/components/schemas/CardMerchantSuggestionOut"
+                      }
+                    ]
                   },
                   "title": "Response List Transfer Suggestions",
                   "type": "array"
@@ -6415,6 +6572,41 @@
           }
         },
         "summary": "List Transfer Suggestions",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfer-suggestions/card-merchants/dismiss": {
+      "post": {
+        "description": "The owner says the card merchant pays into none of their accounts.",
+        "operationId": "dismiss_card_merchant_suggestion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardMerchantDismiss"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Card Merchant Suggestion",
         "tags": [
           "finance"
         ]

@@ -62,6 +62,9 @@ class Pairable:
     names_account: bool = False  # it names a bank account, or prints part of one
     fiat: bool = False  # its instrument is a currency (cross_currency_tier)
     fee: LegFee | None = None  # the conversion fee its connector gives (conversion_postings)
+    # The own accounts the card merchant it names pays into (contra.eligible_records'
+    # holders); empty for any other record. Never `holder`: it doesn't identify the record.
+    holders: frozenset[UUID] = frozenset()
 
     @property
     def sends(self) -> bool:
@@ -90,8 +93,11 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     """The tier the registry gives two records of opposite sign, in the same instrument,
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
-    other's account and each other one a bank transfer. Decisions are not considered."""
+    other's account and each other one a bank transfer. A record naming a card merchant
+    (holders) is none of these tiers' (Task 16 pairs it). Decisions are not considered."""
     if c.account_id == r.account_id or not (r.identified or c.identified):
+        return None
+    if r.holders or c.holders:
         return None
     for x, other in ((r, c), (c, r)):
         if x.identified and x.holder != other.account_id:
@@ -117,7 +123,7 @@ def weak_tier(r: Pairable, c: Pairable) -> Tier | None:
     that are both there. Decisions are not considered."""
     if c.account_id == r.account_id or r.identified or c.identified:
         return None
-    if not (r.bank_transfer and c.bank_transfer):
+    if not (r.bank_transfer and c.bank_transfer) or r.holders or c.holders:
         return None
     return WEAK if _names_weakly(r, c) or _names_weakly(c, r) else None
 
@@ -134,6 +140,8 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     00:00, so for two such rows the near window (minutes) amounts to the same booking
     date."""
     if c.account_id == r.account_id or not (r.identified and c.identified):
+        return None
+    if r.holders or c.holders:
         return None
     if r.holder != c.account_id or c.holder != r.account_id or r.sends == c.sends:
         return None
@@ -346,6 +354,7 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.weak_holder,
         e.c.names_account,
+        e.c.holders,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -365,6 +374,7 @@ async def _load_records(
             bank_transfer=row.bank_transfer,
             weak_holder=row.weak_holder,
             names_account=row.names_account,
+            holders=frozenset(row.holders or ()),
             fiat=bool(row.fiat),
             fee=(
                 None

@@ -423,9 +423,22 @@ class IdentifierOut(BaseModel):
     sort_code: str | None  # a UK bank account's only
     account_number: str | None
     account_id: UUID | None
+    # A card merchant's own accounts (it has no account_id); empty for every other kind.
+    holder_account_ids: list[UUID]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
+
+
+class CardMerchantRegister(BaseModel):
+    """The own accounts card payments to a Monzo merchant go into; none removes it."""
+
+    merchant_id: str  # Monzo's merchant id, merch_…
+    account_ids: list[UUID]
+
+
+class CardMerchantDismiss(BaseModel):
+    merchant_id: str
 
 
 class BalanceModeUpdate(BaseModel):
@@ -510,6 +523,20 @@ class PairCandidateOut(BaseModel):
 class TransferPair(BaseModel):
     # One of the transfer's candidates of the same amount, or one unpaired from it.
     transaction_id: UUID
+
+
+class CardMerchantSuggestionOut(_Out):
+    """A card merchant whose website is on a connected platform's domain, offering the
+    platform's accounts; registering it is register_card_merchant."""
+
+    kind: Literal["card_merchant"]
+    merchant_id: str
+    name: str | None
+    host: str
+    outgoing: int
+    incoming: int
+    latest: date
+    account_ids: list[UUID]
 
 
 class SuggestionOut(_Out):

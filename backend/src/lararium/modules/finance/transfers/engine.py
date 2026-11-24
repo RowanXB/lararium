@@ -30,6 +30,7 @@ from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
     identifier_account,
+    register_card_merchant,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -844,12 +845,8 @@ async def preview_match(
     return relation.partner(row.id)
 
 
-async def unassign_identifier_and_rematch(
-    ctx: CommandContext, identifier_id: UUID
-) -> IdentifierRecord:
-    """unassign_identifier, then match again every record naming that bank account, which
-    no longer identifies one of the owner's accounts."""
-    record = await unassign_identifier(ctx, identifier_id)
+async def _rematch_naming(ctx: CommandContext, identifier_id: UUID) -> None:
+    """Match again every record naming the identifier, then heal."""
     await lock_transfers(ctx)
     t = models.Transaction
     naming = await ctx.session.scalars(
@@ -859,4 +856,24 @@ async def unassign_identifier_and_rematch(
     )
     await _match_all(ctx, list(naming))
     await heal_transfers(ctx)
+
+
+async def unassign_identifier_and_rematch(
+    ctx: CommandContext, identifier_id: UUID
+) -> IdentifierRecord:
+    """unassign_identifier, then match again every record naming that bank account, which
+    no longer identifies one of the owner's accounts."""
+    record = await unassign_identifier(ctx, identifier_id)
+    await _rematch_naming(ctx, identifier_id)
+    return record
+
+
+async def register_card_merchant_and_rematch(
+    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID]
+) -> IdentifierRecord:
+    """register_card_merchant, then match again every record naming the merchant, so the
+    new holders take effect at once. Records that don't name it yet (posted before it was
+    registered) are named by their connector's next normalize (Monzo's replays them)."""
+    record = await register_card_merchant(ctx, merchant_id, account_ids)
+    await _rematch_naming(ctx, record.id)
     return record

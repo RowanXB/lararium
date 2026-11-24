@@ -81,6 +81,19 @@ class AccountIdentifier(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AccountIdentifierHolder(Base):
+    """An own account a card merchant pays into: a card_merchant identifier names its holders
+    here (it may have several), every other kind its one account in account_id."""
+
+    __tablename__ = "account_identifier_holders"
+    __table_args__ = FINANCE_SCHEMA
+
+    identifier_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.account_identifiers.id"), primary_key=True
+    )
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = FINANCE_SCHEMA
