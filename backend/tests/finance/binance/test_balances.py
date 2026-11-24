@@ -208,6 +208,8 @@ async def test_transfer_between_two_wallet_reads(
     assert after.status == "healthy", after.last_error
     assert len(fake.calls("spot-account")) == len(fake.calls("wallet-balance")) == 1
     assert fake.calls("wallet-balance")[0].params["needBalanceDetail"] == "true"
+    for label in ("funding-asset", "user-asset"):
+        assert fake.calls(label)[0].params["needBtcValuation"] == "true"
     found = {(w, s): (q, at) for w, s, q, at in await _snapshots(session, connection.id)}
     spot_quantity, spot_as_of = found[("Binance Spot", "AAA")]
     earn_quantity, earn_as_of = found[("Binance Earn", "AAA")]

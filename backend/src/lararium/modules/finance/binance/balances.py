@@ -75,7 +75,12 @@ WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
 REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
 # Request parameters a read sends.
-READ_PARAMS: dict[str, dict[str, str | int | bool]] = {WALLET_LIST: {"needBalanceDetail": True}}
+READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
+    WALLET_LIST: {"needBalanceDetail": True},
+    # `btcValuation` does not rest on a default the documents do not give.
+    "funding-asset": {"needBtcValuation": True},
+    "user-asset": {"needBtcValuation": True},
+}
 # The digest of each report label's last stored answer: an unchanged answer is not stored again.
 DIGESTS_KEY = "report_digests"
 # Fields that change with every answer without the report changing.
