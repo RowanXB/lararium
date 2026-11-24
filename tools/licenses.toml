@@ -78,8 +78,8 @@ package = "pypdfium2"
 version = "5.15.2"
 license = "BSD-3-Clause, Apache-2.0, dependency licenses"
 concluded = """
-(BSD-3-Clause OR Apache-2.0) AND CC-BY-4.0 AND MIT AND FTL AND IJG AND libpng-2.0
-AND Unicode-3.0 AND Zlib AND Apache-2.0 WITH LLVM-exception
+(BSD-3-Clause OR Apache-2.0) AND CC-BY-4.0 AND MIT AND BSD-2-Clause AND FTL AND IJG
+AND libpng-2.0 AND libtiff AND Unicode-3.0 AND Zlib AND Apache-2.0 WITH LLVM-exception
 """
 reason = """
 Free text, and the bundled PDFium build changes from release to release, so this covers
@@ -88,7 +88,7 @@ source build). licenses/LICENSES: pypdfium2's own BSD-3-Clause/Apache-2.0, and C
 data files. licenses/BUILD_LICENSES: pdfium-binaries (MIT); PDFium, V8, libyuv and brotli
 (BSD-3-Clause or MIT); abseil and highway (Apache-2.0); llvm-libc (Apache-2.0 WITH
 LLVM-exception); FreeType (FTL); ICU (Unicode-3.0); libjpeg-turbo (IJG and BSD-3-Clause);
-libpng (libpng-2.0); zlib, lcms, libtiff and OpenJPEG (permissive). The FSF lists all of these
+libpng (libpng-2.0); libtiff (libtiff); OpenJPEG (BSD-2-Clause); zlib and lcms (permissive). The FSF lists all of these
 as GPLv3-compatible. libpdfium.so links the system libgcc_s.so.1 dynamically (the image's
 Debian copy, under the GCC Runtime Library Exception); the libgcc/libstdc++ and musl notices
 are for the musl wheels, which bundle them and which Lararium doesn't use.
