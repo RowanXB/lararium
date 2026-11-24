@@ -322,6 +322,8 @@ Each of these is flagged once, by name, in the connection's warnings and one not
 - **Trading Bots or Copy Trading with a balance**: counted from the report; Binance has no record endpoint for them, so their changes show as reconciliation differences against transfers in and out;
 - an asset no source can price.
 
+Not inspected for unknown fields: the envelope of a later page of a paged balance read (only the first page's is kept), and an answer replaced by a read made again.
+
 ### 5.14 Notifications
 
 Through the existing notifier, never with the key, an address, a hash or an amount:
@@ -335,7 +337,7 @@ Through the existing notifier, never with the key, an address, a hash or an amou
 
 **API**, under `/api/v1`, owner-only:
 - `POST /connections/binance` (`create_binance_connection`): display name, key type, key material → 201 `ConnectionOut`; 422 with the permission's name when the key can do more than read; 409 for a `uid` already connected;
-- `PUT /connections/{id}/binance` (`update_binance_connection`): new key material → `ConnectionOut`; `needs_reauth` → `healthy`, and queues a sync;
+- `PUT /connections/{id}/binance` (`update_binance_connection`): new key material → `ConnectionOut`; `needs_reauth`, `failing` or `disabled` → `healthy` (a new key is how a disabled connection comes back), and queues a sync;
 - the existing list, sync-now and disable routes;
 - open reconciliation differences and the flags of §5.13 are returned with each Binance connection in the existing connections list.
 
@@ -355,7 +357,7 @@ Holdings and net worth need no new page.
 |---|---|
 | A record arrives after the snapshot that already contains it | Its `occurred_at` is before the snapshot's `as_of`, so the `hybrid` rule does not add it again. |
 | A record occurs while the balances are being read | That wallet's balance is read again, so its snapshot is cut on one side of the record (§5.6). |
-| Binance lists a record only later, with a time inside an old read | Known limit: the balance may be off by that record until the next report, and the two intervals around that read show equal and opposite differences, which stay open. The read's two moments are stored, so the cause is visible. |
+| Binance lists a record only later, with a time inside an old read | Known limit: the balance may be off by that record until the next report, and the two intervals around that read show equal and opposite differences, which stay open. The read's two moments are stored, so the cause is visible. The same holds for a trade fetched after the snapshots of its sync were cut: by the trade sweep, or in a symbol that only a read made again first showed (it is fetched by the next sync). |
 | A withdrawal fails after being posted | The next sync within the 7-day overlap sees the status; the withdrawal stops being a transfer and a refund is posted at the time the amount came back (§5.7). |
 | A deposit is credited but still locked (`status` 6) | Posted: Binance counts it in the balance. |
 | An asset bought and sold between two syncs, never seen before | The quote asset's change is unexplained; the symbol sweep finds both trades. |
