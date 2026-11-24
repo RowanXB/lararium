@@ -121,7 +121,7 @@ async def test_malformed_website_leaves_the_other_suggestions(client, session, r
     await platform_accounts(run)
     connection = await monzo_connection(run)
     payments = [
-        card_payment(-100, tx_id="tx_CARD0001", merchant="merch_BAD", website="//[abc"),
+        card_payment(-100, tx_id="tx_CARD0001", merchant="merch_BAD", website="https://[abc"),
         card_payment(-100, tx_id="tx_CARD0002", website="https://www.trading212.com"),
     ]
     await sync_monzo(session, connection, transactions={ACCOUNT_ID: payments})

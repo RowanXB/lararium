@@ -12,6 +12,8 @@ from sqlalchemy import insert, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import close_account, create_account
 from lararium.modules.finance.errors import FinanceValidationError
@@ -428,3 +430,49 @@ async def test_no_existing_tier_pairs_it_in_the_ledger(
     transfers = await list_transfers(session)
     assert all(payment.id not in (t.out_transaction_id, t.in_transaction_id) for t in transfers)
     await assert_consistent(session)
+
+
+@pytest.mark.parametrize("paired", [True, False])
+async def test_sync_closing_a_holder_then_heal_is_consistent(
+    session: AsyncSession,
+    run: Run,
+    platform,
+    ids: SystemIds,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+    paired: bool,
+) -> None:
+    """A connector's sync closes a holder (Monzo a deleted pot, IBKR a closed account): the
+    holder leaves the merchant in the sync's command, and the heal the worker runs after the
+    sync, reading the holders as they now are, leaves the ledger consistent."""
+    monzo, invest, isa = platform
+    record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
+    payment = await _card_payment(connector_tx, monzo, record.id)
+    deposit = await _deposit(connector_tx, isa)
+    if paired:
+        await run(pair_records, payment.id, deposit.id)
+    await heal()
+
+    async with command_context(session, Actor("connector", "monzo"), "connection.sync", {}) as ctx:
+        _, left = await close_account(ctx, isa.account.id, DAY)
+    assert left == [record.id]
+    await heal()
+
+    # Nothing names the closed account as a holder any more.
+    assert await holders_of(session, record.id) == {invest.account.id}
+    assert set((await _eligible_row(session, payment.id)).holders) == {invest.account.id}
+    relation = await pair_relation(
+        session, await system_account_ids(session), await load_transfer_settings(session)
+    )
+    assert relation.records[payment.id].holders == frozenset({invest.account.id})
+    transfers = await list_transfers(session)
+    if paired:
+        # The owner's pair stands: the deposit is on the closed account, as it was.
+        [transfer] = transfers
+        assert (transfer.status, transfer.to_account_id) == ("matched", isa.account.id)
+    else:
+        assert transfers == []
+        assert await contra_account(session, payment.id, monzo.account.id) == ids.unassigned
+    await assert_consistent(session)
+    # And the heal after it has nothing left to do.
+    assert await heal() == 0

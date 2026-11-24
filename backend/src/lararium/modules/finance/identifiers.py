@@ -154,6 +154,11 @@ async def _get(session: AsyncSession, identifier_id: UUID) -> IdentifierRecord:
     return found[0]
 
 
+async def get_identifier(session: AsyncSession, identifier_id: UUID) -> IdentifierRecord:
+    """The registry row, with its holders; AccountIdentifierNotFoundError when missing."""
+    return await _get(session, identifier_id)
+
+
 def _optional_str(value: object | None) -> str | None:
     return None if value is None else str(value)
 

@@ -29,7 +29,7 @@ from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
-    identifier_account,
+    get_identifier,
     register_card_merchant,
     unassign_identifier,
 )
@@ -820,11 +820,15 @@ async def preview_match(
     post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
-    holder = (
+    named = (
         None
         if counterparty.identifier_id is None
-        else await identifier_account(session, counterparty.identifier_id)
+        else await get_identifier(session, counterparty.identifier_id)
     )
+    # As eligible_records reads it: a card merchant names no bank account and identifies no
+    # account (no holder), only its holders. (The importers that preview give bank accounts
+    # only; this keeps the two definitions one should a card merchant reach it.)
+    merchant = named is not None and named.kind == "card_merchant"
     row = Pairable(
         id=_UNPOSTED,
         source=("unposted", "") if source is None else source,
@@ -833,10 +837,11 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        holder=holder,
+        holder=None if named is None else named.account_id,
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
-        names_account=counterparty.identifier_id is not None,
+        names_account=named is not None and not merchant,
+        holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
@@ -845,8 +850,11 @@ async def preview_match(
     return relation.partner(row.id)
 
 
-async def rematch_identifiers(ctx: CommandContext, identifier_ids: Collection[UUID]) -> None:
-    """Match again every record naming one of the identifiers, then heal."""
+async def rematch_identifiers(
+    ctx: CommandContext, identifier_ids: Collection[UUID], *, heal: bool = True
+) -> None:
+    """Match again every record naming one of the identifiers, then heal (unless `heal` is
+    False: a caller that heals at its end anyway, healing_command)."""
     await lock_transfers(ctx)
     t = models.Transaction
     naming = await ctx.session.scalars(
@@ -855,7 +863,8 @@ async def rematch_identifiers(ctx: CommandContext, identifier_ids: Collection[UU
         .order_by(t.occurred_at, t.id)
     )
     await _match_all(ctx, list(naming))
-    await heal_transfers(ctx)
+    if heal:
+        await heal_transfers(ctx)
 
 
 async def _rematch_naming(ctx: CommandContext, identifier_id: UUID) -> None:

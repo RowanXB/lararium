@@ -351,7 +351,16 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
     return True
 
 
-async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
+async def close_account(
+    ctx: CommandContext, account_id: UUID, closed_on: date
+) -> tuple[AccountRecord, list[UUID]]:
+    """Close the account: (the closed account, the card merchants it left).
+
+    A card merchant's holders are open accounts, so the account leaves those it held
+    (_drop_card_merchant_holder). The records naming them are matched again by the heal
+    after the command: every route that writes heals (the API's close re-matches them first,
+    engine.rematch_identifiers), and so does the worker after each sync (worker.jobs), whose
+    pair relation reads the holders as they now are."""
     # Closing In transit would drop the transfers it holds from net worth.
     require_owner_account(await get_account(ctx.session, account_id), "closed")
     # Conditional update, so two concurrent closes can't both succeed.
@@ -366,15 +375,13 @@ async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) 
         raise AccountAlreadyClosedError(str(account_id))
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.closed", record)
-    await _drop_card_merchant_holder(ctx, account_id)
-    return record
+    return record, await _drop_card_merchant_holder(ctx, account_id)
 
 
 async def _drop_card_merchant_holder(ctx: CommandContext, account_id: UUID) -> list[UUID]:
     """Take a closed account out of the card merchants it held (a card merchant's holders
     are open accounts, identifiers.register_card_merchant), audited as a change of their
-    holders; returns those merchants' identifier ids. The records naming them are matched
-    again by the heal after the command (engine.rematch_identifiers, for the owner's)."""
+    holders; returns those merchants' identifier ids, sorted."""
     h = models.AccountIdentifierHolder
     dropped = sorted(
         await ctx.session.scalars(

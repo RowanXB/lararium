@@ -184,7 +184,7 @@ async def test_suggestion_offers_only_accounts_that_can_be_registered(
         "https://evil.example/trading212.com",
         "not a url",
         "https://[trading212.com",
-        "//a]b.com",
+        "https://a]b.com",
     ],
 )
 async def test_suggestion_matches_the_host_only(session: AsyncSession, run, website: str) -> None:

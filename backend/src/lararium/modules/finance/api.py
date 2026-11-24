@@ -30,7 +30,6 @@ from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
     accounts,
     errors,
-    identifiers,
     instruments,
     ledger,
     pricing,
@@ -258,14 +257,10 @@ async def close_account(
     again."""
     args = _args(body, account_id=account_id)
     async with healing_command(session, actor, "close_account", args) as ctx:
-        held = [
-            record.id
-            for record in await identifiers.list_identifiers(session, account_id=account_id)
-            if account_id in record.holders
-        ]
-        record = await accounts.close_account(ctx, account_id, body.closed_on)
-        if held:
-            await transfers.rematch_identifiers(ctx, held)
+        record, left = await accounts.close_account(ctx, account_id, body.closed_on)
+        if left:
+            # healing_command heals once, at the end.
+            await transfers.rematch_identifiers(ctx, left, heal=False)
     return AccountOut.model_validate(record)
 
 
