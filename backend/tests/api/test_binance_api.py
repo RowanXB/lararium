@@ -475,8 +475,7 @@ async def test_a_rate_limited_check_answers_at_once(api, session, fake, label) -
     assert await _count(session, "core.connections") == 0
 
 
-async def test_update_refuses_other_connectors_and_disabled_connections(api, session, run) -> None:
-    created = await _create(api)
+async def test_update_refuses_other_connectors(api, session, run) -> None:
     other = await run(
         connections_api.create_connection,
         connector="monzo",
@@ -484,13 +483,53 @@ async def test_update_refuses_other_connectors_and_disabled_connections(api, ses
         config={},
     )
     not_binance = await api.put(f"/api/v1/connections/{other.id}/binance", json=BODY, headers=OWNER)
+
+    assert not_binance.status_code == 422
+
+
+async def test_update_brings_a_disabled_connection_back(api, session, run, queue) -> None:
+    # Adding the account again is refused (its uid is taken): a new key is the way back.
+    created = await _create(api)
+    for _ in range(3):
+        await run(record_sync_failure, created["id"], "Binance request failed")
     await run(set_status, created["id"], "disabled")
-    disabled = await api.put(
+    queue.jobs.clear()
+
+    response = await api.put(
         f"/api/v1/connections/{created['id']}/binance", json=BODY, headers=OWNER
     )
 
-    assert not_binance.status_code == 422
-    assert disabled.status_code == 422
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["consecutive_failures"]) == ("healthy", 0)
+    assert _queued(queue) == ["sync_connection"]
+    record = await get_connection(session, created["id"])
+    assert record.config.get("sync_requested") is not None
+
+
+@pytest.mark.parametrize("refusal", ["another account", "more than read"])
+async def test_a_refused_update_leaves_a_disabled_connection_disabled(
+    api, session, run, fake, queue, refusal: str
+) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], "disabled")
+    queue.jobs.clear()
+    if refusal == "another account":
+        await run(update_config, created["id"], {"uid": "999999"})
+    else:
+        fake.permissions["enableSpotAndMarginTrading"] = True
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance",
+        json=HMAC | {"api_key": "ak-TEST-new-5555", "api_secret": OTHER_SECRET},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert (await get_connection(session, created["id"])).status == "disabled"
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    assert key is not None and key.reveal() == API_KEY
+    assert _queued(queue) == []
 
 
 async def test_list_shows_differences_and_flags(api, session, run, sessions) -> None:

@@ -739,11 +739,9 @@ async def create_binance_connection(
     return await _out_with_state(session, record, settings)
 
 
-def _require_binance_updatable(connection: ConnectionRecord) -> None:
+def _require_binance(connection: ConnectionRecord) -> None:
     if connection.connector != "binance":
         raise _invalid("not_binance", "this is not a Binance connection")
-    if connection.status == "disabled":
-        raise _invalid("not_updatable", "a disabled connection can't be updated")
 
 
 @router.put("/{connection_id}/binance", name="update_binance_connection")
@@ -756,19 +754,19 @@ async def update_binance_connection(
     http: HttpDep,
 ) -> ConnectionOut:
     """Replace the key (a new one after the old was rejected). It must belong to the account
-    already connected."""
+    already connected. It is also how a disabled connection is brought back (adding the account
+    again is refused as a duplicate): the ledger, cursors and config are kept."""
     settings = _settings(request)
     master_key = _require_master_key(settings)
     material = _material(body)
-    _require_binance_updatable(await get_connection(session, connection_id))
+    _require_binance(await get_connection(session, connection_id))
     uid = await _checked_uid(http, body, material)
     args = body.model_dump(mode="json", include={"key_type"}) | {
         "connection_id": str(connection_id)
     }
     async with command_context(session, actor, "update_binance_connection", args) as ctx:
-        # Checked under the row lock: a disable made meanwhile can't slip in before the write.
         connection = await lock_connection(ctx, connection_id)
-        _require_binance_updatable(connection)
+        _require_binance(connection)
         if uid != connection.config.get("uid"):
             raise _invalid(
                 "another_account",
@@ -777,7 +775,11 @@ async def update_binance_connection(
         await _store_key(ctx, master_key, connection_id, material)
         await update_config(ctx, connection_id, {"key_type": body.key_type})
         moved = await transition_status(
-            ctx, connection_id, "healthy", only_from=("needs_reauth", "failing"), clear_error=True
+            ctx,
+            connection_id,
+            "healthy",
+            only_from=("needs_reauth", "failing", "disabled"),
+            clear_error=True,
         )
         if moved is not None:
             await reset_failures(ctx, connection_id)
