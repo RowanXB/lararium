@@ -91,6 +91,9 @@ class AccountIdentifierHolder(Base):
     identifier_id: Mapped[UUID] = mapped_column(
         ForeignKey("finance.account_identifiers.id"), primary_key=True
     )
+    # Its identifier's kind, always card_merchant: with the identifier id, a foreign key to
+    # (id, kind), so no other kind's row can have holders.
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'card_merchant'"))
     account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
 
 

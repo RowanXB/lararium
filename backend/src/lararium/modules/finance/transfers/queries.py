@@ -674,9 +674,11 @@ class CardMerchantSuggestion:
 def website_host(website: str) -> str | None:
     """The host of a website as Monzo gives it (with or without a scheme), lower case; None
     when it has none."""
-    parsed = urlsplit(website.strip() if "//" in website else f"//{website.strip()}")
+    website = website.strip()
     try:
-        host = parsed.hostname
+        # Both the split (a bracket opening an IPv6 literal it doesn't close) and the host
+        # (a malformed port, say) refuse some values Monzo may hold.
+        host = urlsplit(website if "://" in website else f"//{website}").hostname
     except ValueError:
         return None
     return host.rstrip(".") if host else None

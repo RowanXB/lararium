@@ -30,10 +30,12 @@ from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
     accounts,
     errors,
+    identifiers,
     instruments,
     ledger,
     pricing,
     snapshots,
+    transfers,
     valuation,
 )
 from lararium.modules.finance.importing import catalog, commit, parsed, profiles, staging
@@ -252,9 +254,18 @@ async def rename_account(
 async def close_account(
     account_id: UUID, body: AccountClose, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
+    """Close the account; it leaves the card merchants it held, whose records are matched
+    again."""
     args = _args(body, account_id=account_id)
-    async with command_context(session, actor, "close_account", args) as ctx:
+    async with healing_command(session, actor, "close_account", args) as ctx:
+        held = [
+            record.id
+            for record in await identifiers.list_identifiers(session, account_id=account_id)
+            if account_id in record.holders
+        ]
         record = await accounts.close_account(ctx, account_id, body.closed_on)
+        if held:
+            await transfers.rematch_identifiers(ctx, held)
     return AccountOut.model_validate(record)
 
 

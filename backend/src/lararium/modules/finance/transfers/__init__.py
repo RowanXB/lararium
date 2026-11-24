@@ -20,6 +20,7 @@ from lararium.modules.finance.transfers.engine import (
     match_transaction,
     preview_match,
     register_card_merchant_and_rematch,
+    rematch_identifiers,
     unassign_identifier_and_rematch,
     unlink_transaction,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "preview_match",
     "register_card_merchant_and_rematch",
     "reject",
+    "rematch_identifiers",
     "source_ref",
     "suggestions",
     "transfer_contra",

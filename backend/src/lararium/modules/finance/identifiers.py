@@ -241,6 +241,12 @@ def _require_single_holder(kind: IdentifierKind) -> None:
         )
 
 
+_SNAPSHOTS_ONLY = (
+    "switch the account to hybrid before registering its identifiers:"
+    " a snapshots-only account ignores postings"
+)
+
+
 async def _require_can_carry_identifiers(session: AsyncSession, account_id: UUID) -> None:
     account = await get_account(session, account_id)  # raises AccountNotFoundError if missing
     if account.system:
@@ -252,10 +258,7 @@ async def _require_can_carry_identifiers(session: AsyncSession, account_id: UUID
     if account.balance_mode == "snapshots":
         # Valuation ignores a snapshots account's postings, so a transfer to it would dip
         # net worth until the next snapshot.
-        raise FinanceValidationError(
-            "switch the account to hybrid before registering its identifiers:"
-            " a snapshots-only account ignores postings"
-        )
+        raise FinanceValidationError(_SNAPSHOTS_ONLY)
 
 
 async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) -> bool:
@@ -360,16 +363,20 @@ async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> Identi
 
 
 async def _require_can_hold_card_merchant(session: AsyncSession, account_id: UUID) -> None:
-    """The refusals of the other kinds (_require_can_carry_identifiers), and a card merchant
-    pays only into an open asset account. An unknown account is refused like the others (a
-    422 on the request's body), not as a missing resource."""
+    """The refusals of the other kinds (_require_can_carry_identifiers), narrowed: a card
+    merchant pays only into an open asset account (close_account drops a holder it closes).
+    An unknown account is refused like the others (a 422 on the request's body), not as a
+    missing resource."""
     try:
         account = await get_account(session, account_id)
     except AccountNotFoundError:
         raise FinanceValidationError(f"account {account_id} does not exist") from None
-    await _require_can_carry_identifiers(session, account_id)
+    if account.system:
+        raise FinanceValidationError("a system account can't have identifiers")
     if account.ledger_type != "asset":
         raise FinanceValidationError("a card merchant pays only into an asset account")
+    if account.balance_mode == "snapshots":
+        raise FinanceValidationError(_SNAPSHOTS_ONLY)
     if account.status != "open":
         raise FinanceValidationError("a card merchant can't pay into a closed account")
 

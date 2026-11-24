@@ -115,3 +115,31 @@ async def test_unknown_account_refused_422(client, run) -> None:
         json={"merchant_id": MERCHANT, "account_ids": ["0190a0b0-0000-7000-8000-000000000099"]},
     )
     assert response.status_code == 422
+
+
+async def test_malformed_website_leaves_the_other_suggestions(client, session, run) -> None:
+    await platform_accounts(run)
+    connection = await monzo_connection(run)
+    payments = [
+        card_payment(-100, tx_id="tx_CARD0001", merchant="merch_BAD", website="//[abc"),
+        card_payment(-100, tx_id="tx_CARD0002", website="https://www.trading212.com"),
+    ]
+    await sync_monzo(session, connection, transactions={ACCOUNT_ID: payments})
+
+    assert [s["merchant_id"] for s in await _suggestions(client)] == [MERCHANT]
+
+
+async def test_closing_a_holder_through_the_api(client, run) -> None:
+    invest, isa = await platform_accounts(run)
+    body = {"merchant_id": MERCHANT, "account_ids": [str(invest.id), str(isa.id)]}
+    assert (await client.post(REGISTER, json=body)).status_code == 200
+
+    closed = await client.post(
+        f"{FINANCE}/accounts/{isa.id}/close", json={"closed_on": "2026-03-02"}
+    )
+
+    assert closed.status_code == 200
+    [kept] = (await client.get(f"{FINANCE}/accounts/{invest.id}/identifiers")).json()
+    assert kept["holder_account_ids"] == [str(invest.id)]
+    edited = await client.post(REGISTER, json={"merchant_id": MERCHANT, "account_ids": []})
+    assert (edited.status_code, edited.json()["holder_account_ids"]) == (200, [])

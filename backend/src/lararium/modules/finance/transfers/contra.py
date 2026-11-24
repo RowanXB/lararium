@@ -160,9 +160,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
-    bank account, or its import rows print part of one), holders (the own accounts the card
-    merchant it names pays into, NULL for any other record: such evidence never identifies
-    it, so holder stays NULL and it pairs only with a record that is there, Task 16's tier),
+    bank account, or its import rows print part of one; a card merchant is none), holders
+    (the own accounts the card merchant it names pays into, NULL for any other record: such
+    evidence never identifies it, so holder stays NULL and it pairs only with a record that
+    is there, Task 16's tier),
     bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
@@ -355,20 +356,23 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         ),
         else_=None,
     )
-    # A card merchant's holders (finance.account_identifier_holders), by its primary key.
+    # The card merchants, each with its holders (NULL for none), aggregated once and joined:
+    # a handful of rows, where a lookup per record would run for every record naming any
+    # identifier.
+    m = aliased(models.AccountIdentifier, name="merchant")
     h = aliased(models.AccountIdentifierHolder, name="merchant_holder")
-    holders = case(
-        (
-            t.counterparty_identifier_id.is_not(None),
+    merchants = (
+        select(
+            m.id.label("identifier_id"),
             type_coerce(
-                select(func.array_agg(h.account_id))
-                .where(h.identifier_id == t.counterparty_identifier_id)
-                .correlate_except(h)
-                .scalar_subquery(),
-                ARRAY(Uuid()),
-            ),
-        ),
-        else_=None,
+                func.array_agg(h.account_id).filter(h.account_id.is_not(None)), ARRAY(Uuid())
+            ).label("holders"),
+        )
+        .select_from(m)
+        .outerjoin(h, h.identifier_id == m.id)
+        .where(m.kind == "card_merchant")
+        .group_by(m.id)
+        .subquery("card_merchants")
     )
     source_kind, source_ref_ = source_columns(t)
     return (
@@ -384,18 +388,23 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             holder.label("holder"),
             weak_holder.label("weak_holder"),
             or_(
-                t.counterparty_identifier_id.is_not(None),
+                # A card merchant is no bank account.
+                and_(
+                    t.counterparty_identifier_id.is_not(None), merchants.c.identifier_id.is_(None)
+                ),
                 own_number.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
-            holders.label("holders"),
+            merchants.c.holders,
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
+        .select_from(t)
         .join(legs, true())
         .join(evidence, true())
         .join(own_account, true())
+        .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )

@@ -179,12 +179,21 @@ async def test_suggestion_offers_only_accounts_that_can_be_registered(
 
 @pytest.mark.parametrize(
     "website",
-    ["https://trading212.com.evil.example", "https://evil.example/trading212.com", "not a url"],
+    [
+        "https://trading212.com.evil.example",
+        "https://evil.example/trading212.com",
+        "not a url",
+        "https://[trading212.com",
+        "//a]b.com",
+    ],
 )
 async def test_suggestion_matches_the_host_only(session: AsyncSession, run, website: str) -> None:
     await platform_accounts(run)
     connection = await monzo_connection(run)
-    await sync_monzo(
-        session, connection, transactions={ACCOUNT_ID: [card_payment(-100, website=website)]}
-    )
-    assert await card_merchant_suggestions(session) == []
+    # The hostile website on one merchant; another merchant is still suggested.
+    payments = [
+        card_payment(-100, website=website),
+        card_payment(-100, tx_id="tx_CARD0002", merchant="merch_GOOD", website="trading212.com"),
+    ]
+    await sync_monzo(session, connection, transactions={ACCOUNT_ID: payments})
+    assert [s.merchant_id for s in await card_merchant_suggestions(session)] == ["merch_GOOD"]

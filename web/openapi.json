@@ -5279,6 +5279,7 @@
     },
     "/api/v1/finance/accounts/{account_id}/close": {
       "post": {
+        "description": "Close the account; it leaves the card merchants it held, whose records are matched\nagain.",
         "operationId": "close_account",
         "parameters": [
           {

@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, exists, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, Text, delete, exists, func, insert, or_, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -366,7 +366,36 @@ async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) 
         raise AccountAlreadyClosedError(str(account_id))
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.closed", record)
+    await _drop_card_merchant_holder(ctx, account_id)
     return record
+
+
+async def _drop_card_merchant_holder(ctx: CommandContext, account_id: UUID) -> list[UUID]:
+    """Take a closed account out of the card merchants it held (a card merchant's holders
+    are open accounts, identifiers.register_card_merchant), audited as a change of their
+    holders; returns those merchants' identifier ids. The records naming them are matched
+    again by the heal after the command (engine.rematch_identifiers, for the owner's)."""
+    h = models.AccountIdentifierHolder
+    dropped = sorted(
+        await ctx.session.scalars(
+            delete(h).where(h.account_id == account_id).returning(h.identifier_id)
+        )
+    )
+    for identifier_id in dropped:
+        remaining = sorted(
+            await ctx.session.scalars(select(h.account_id).where(h.identifier_id == identifier_id))
+        )
+        holders: list[JSONValue] = [str(a) for a in remaining]
+        ctx.emit(
+            "finance.account_identifier.holders_changed",
+            identifier_id,
+            {"identifier_id": str(identifier_id), "account_ids": holders},
+        )
+        ctx.record_change(
+            f"account_identifier:{identifier_id}",
+            {"id": str(identifier_id), "holders": holders, "closed_holder": str(account_id)},
+        )
+    return dropped
 
 
 async def set_balance_mode(

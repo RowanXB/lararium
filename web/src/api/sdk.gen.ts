@@ -271,6 +271,9 @@ export const setAccountBalanceMode = <ThrowOnError extends boolean = false>(opti
 
 /**
  * Close Account
+ *
+ * Close the account; it leaves the card merchants it held, whose records are matched
+ * again.
  */
 export const closeAccount = <ThrowOnError extends boolean = false>(options: Options<CloseAccountData, ThrowOnError>): RequestResult<CloseAccountResponses, CloseAccountErrors, ThrowOnError> => (options.client ?? client).post<CloseAccountResponses, CloseAccountErrors, ThrowOnError>({
     url: '/api/v1/finance/accounts/{account_id}/close',

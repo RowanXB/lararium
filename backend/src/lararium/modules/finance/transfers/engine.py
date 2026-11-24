@@ -845,17 +845,21 @@ async def preview_match(
     return relation.partner(row.id)
 
 
-async def _rematch_naming(ctx: CommandContext, identifier_id: UUID) -> None:
-    """Match again every record naming the identifier, then heal."""
+async def rematch_identifiers(ctx: CommandContext, identifier_ids: Collection[UUID]) -> None:
+    """Match again every record naming one of the identifiers, then heal."""
     await lock_transfers(ctx)
     t = models.Transaction
     naming = await ctx.session.scalars(
         select(t.id)
-        .where(t.counterparty_identifier_id == identifier_id)
+        .where(t.counterparty_identifier_id.in_(list(identifier_ids)))
         .order_by(t.occurred_at, t.id)
     )
     await _match_all(ctx, list(naming))
     await heal_transfers(ctx)
+
+
+async def _rematch_naming(ctx: CommandContext, identifier_id: UUID) -> None:
+    await rematch_identifiers(ctx, [identifier_id])
 
 
 async def unassign_identifier_and_rematch(

@@ -8,7 +8,8 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
@@ -167,7 +168,9 @@ async def test_register_refusals(
         assert await holders_of(session, found) == set()
 
 
-async def test_other_kinds_still_single_holder(session: AsyncSession, run: Run, platform) -> None:
+async def test_other_kinds_still_single_holder(
+    session: AsyncSession, run: Run, platform, ids: SystemIds, connector_tx: ConnectorTx
+) -> None:
     monzo, invest, _ = platform
     bank = await run(assign_identifier, monzo.account.id, "uk_bank_account", MONZO_IDENTIFIER)
     assert (bank.account_id, bank.holders) == (monzo.account.id, ())
@@ -184,9 +187,67 @@ async def test_other_kinds_still_single_holder(session: AsyncSession, run: Run, 
     # Registering it again takes it back from dismissed.
     back = await run(register_card_merchant, MERCHANT, [invest.account.id])
     assert back.dismissed_at is None
-    # eligible_records: a bank account's holder is its one account, with no holders.
-    other = await run(get_or_create_identifier, "uk_bank_account", "112233:12345678")
-    assert other != bank.id
+    # eligible_records: a record naming a bank account has that account as its holder, no
+    # holders, and names an account; one naming the card merchant has holders, no holder,
+    # and names no bank account.
+    paying_monzo = await connector_tx(invest, "-20", external_id="to_monzo", identifier_id=bank.id)
+    row = await _eligible_row(session, paying_monzo.id)
+    assert (row.holder, row.holders, row.names_account) == (monzo.account.id, None, True)
+    card = await _card_payment(connector_tx, monzo, record.id)
+    row = await _eligible_row(session, card.id)
+    assert (row.holder, row.holders, row.names_account) == (None, [invest.account.id], False)
+    # A bank account no own account holds: no holder, no holders, names an account.
+    stranger = await run(get_or_create_identifier, "uk_bank_account", "112233:12345678")
+    paying_stranger = await connector_tx(
+        monzo, "-30", external_id="to_stranger", identifier_id=stranger
+    )
+    row = await _eligible_row(session, paying_stranger.id)
+    assert (row.holder, row.holders, row.names_account) == (None, None, True)
+
+
+async def test_only_card_merchants_have_holder_rows(
+    session: AsyncSession, run: Run, platform
+) -> None:
+    monzo, invest, _ = platform
+    bank = await run(assign_identifier, monzo.account.id, "uk_bank_account", MONZO_IDENTIFIER)
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await session.execute(
+                insert(models.AccountIdentifierHolder).values(
+                    identifier_id=bank.id, account_id=invest.account.id
+                )
+            )
+
+
+async def test_closing_a_holder_removes_it(
+    session: AsyncSession, run: Run, platform, connector_tx: ConnectorTx, heal: Heal
+) -> None:
+    monzo, invest, isa = platform
+    record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
+    payment = await _card_payment(connector_tx, monzo, record.id)
+
+    await run(close_account, isa.account.id, DAY)
+
+    assert await holders_of(session, record.id) == {invest.account.id}
+    audited = await session.scalar(
+        text(
+            "select count(*) from core.events"
+            " where type = 'finance.account_identifier.holders_changed' and subject_id = :i"
+        ),
+        {"i": record.id},
+    )
+    assert audited == 2  # the registration, and the close
+    assert set((await _eligible_row(session, payment.id)).holders) == {invest.account.id}
+    # The remaining holders can still be edited; the closed account can't come back.
+    again = await run(register_card_merchant, MERCHANT, [invest.account.id, monzo.account.id])
+    assert set(again.holders) == {invest.account.id, monzo.account.id}
+    with pytest.raises(FinanceValidationError):
+        await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
+    # Closing the last holder leaves the merchant unregistered.
+    await run(close_account, invest.account.id, DAY)
+    await run(register_card_merchant, MERCHANT, [monzo.account.id])
+    await heal()
+    await assert_consistent(session)
 
 
 async def _card_payment(
@@ -218,9 +279,9 @@ async def _eligible_row(session: AsyncSession, transaction_id: UUID):
     e = eligible_records(await system_account_ids(session))
     return (
         await session.execute(
-            select(e.c.holder, e.c.holders, e.c.counterparty_identifier_id).where(
-                e.c.transaction_id == transaction_id
-            )
+            select(
+                e.c.holder, e.c.holders, e.c.names_account, e.c.counterparty_identifier_id
+            ).where(e.c.transaction_id == transaction_id)
         )
     ).one()
 
