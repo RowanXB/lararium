@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.connections import create_connection
@@ -14,15 +15,23 @@ from lararium.modules.finance.identifiers import (
     dismiss_card_merchant,
     register_card_merchant,
 )
+from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.system_accounts import get_or_create_system_account
-from lararium.modules.finance.transfers import card_merchant_suggestions, list_transfers
+from lararium.modules.finance.transfers import (
+    card_merchant_suggestions,
+    find_transfer_violations,
+    list_transfers,
+    reject,
+)
 from tests.finance.monzo.fixtures import ACCOUNT_ID, make_merchant, make_transaction
 from tests.finance.monzo.test_normalize_transfers import (
+    B_IDENTIFIER,
     account_map,
     contra,
     faster_payment,
     heal,
     identifier_row,
+    manual_bank,
     monzo_connection,
     sync_monzo,
     transaction_row,
@@ -89,6 +98,99 @@ async def test_monzo_card_payment_identified_after_register(session: AsyncSessio
     await run(register_card_merchant, MERCHANT, [])
     await sync_monzo(session, connection, transactions={})
     assert (await transaction_row(session, "tx_CARD0001")).counterparty_identifier_id is None
+
+
+async def _replay_state(session: AsyncSession) -> dict[str, Any]:
+    """What a replay must leave as it was: each Monzo transaction's category, labels, place,
+    category splits and contra; every transfer; every owner decision on transfers."""
+    rows = await session.execute(
+        text(
+            "select t.external_id, t.status, t.category, t.labels, t.include_in_spending,"
+            " t.payment_scheme, t.place_entity_id, t.bank_transfer,"
+            " (select array_agg(s.category || '=' || s.quantity::text order by s.position)"
+            "  from finance.transaction_category_splits s where s.transaction_id = t.id)"
+            " as splits,"
+            " (select array_agg(p.account_id::text || ' ' || p.quantity::text"
+            "  order by p.position) from finance.postings p where p.transaction_id = t.id)"
+            " as postings"
+            " from finance.transactions t join core.connections c on c.id = t.connection_id"
+            " where c.connector = 'monzo' order by t.external_id"
+        )
+    )
+    transfers = sorted(
+        (
+            t.id,
+            t.status,
+            t.review_reason,
+            t.out_transaction_id,
+            t.in_transaction_id,
+            t.settlement_transaction_id,
+        )
+        for t in await list_transfers(session)
+    )
+    decisions = await session.execute(
+        text(
+            "select kind, subject_kind, subject_ref, other_kind, other_ref"
+            " from finance.transfer_decisions order by 1, 2, 3, 4, 5"
+        )
+    )
+    return {
+        "transactions": [tuple(r) for r in rows],
+        "transfers": transfers,
+        "decisions": [tuple(r) for r in decisions],
+    }
+
+
+async def test_registration_replay_leaves_categories_places_transfers_and_decisions(
+    session: AsyncSession, run
+) -> None:
+    """Registering a card merchant makes the next sync replay Monzo's history (Task 15): the
+    replay names the merchant's card payments, and changes nothing else the history made or
+    the owner decided."""
+    gbp = await get_currency(session, "GBP")
+    invest, isa = await platform_accounts(run)
+    await manual_bank(run, gbp.id, identifier=B_IDENTIFIER)
+    await manual_bank(run, gbp.id, identifier="445566:87654321", name="Bank C")
+    connection = await monzo_connection(run)
+    history = [
+        card_payment(-5000, website="https://www.trading212.com"),
+        # Another merchant's card payment, with a category split and a place of its own.
+        make_transaction(
+            id="tx_GROCER",
+            amount=-1234,
+            local_amount=-1234,
+            scheme="mastercard",
+            labels=["weekly"],
+            categories={"groceries": -1000, "eating_out": -234},
+            merchant=make_merchant(),
+        ),
+        # A Faster Payment to Bank B: a transfer, left as the engine made it.
+        faster_payment(-10000),
+        # One to Bank C, which the owner rejects.
+        faster_payment(-2500, tx_id="tx_FPS0002", sort_code="44-55-66", account_number="87654321"),
+    ]
+    await sync_monzo(session, connection, transactions={ACCOUNT_ID: history})
+    await heal(session)
+    to_c = (await transaction_row(session, "tx_FPS0002")).id
+    [rejected] = [t for t in await list_transfers(session) if t.out_transaction_id == to_c]
+    await run(reject, rejected.id)
+    await heal(session)
+    before = await _replay_state(session)
+    assert len(before["transfers"]) == 2 and before["decisions"]
+    places = {r[0]: r[6] for r in before["transactions"]}
+    assert places["tx_CARD0001"] is not None and places["tx_GROCER"] is not None
+
+    record = await run(register_card_merchant, MERCHANT, [invest.id, isa.id])
+    report = await sync_monzo(session, connection, transactions={})
+    await heal(session)
+
+    # The replay ran and named the merchant's payment, and only that changed.
+    assert report.updated >= 1
+    card = await transaction_row(session, "tx_CARD0001")
+    assert card.counterparty_identifier_id == record.id
+    assert await _replay_state(session) == before
+    assert await find_transfer_violations(session) == []
+    assert await heal(session) == 0
 
 
 async def test_bank_payment_still_names_its_bank_account(session: AsyncSession, run) -> None:
