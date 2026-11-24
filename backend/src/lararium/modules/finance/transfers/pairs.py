@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import FromClause, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
@@ -209,11 +209,13 @@ async def _load_records(
     system: Mapping[SystemAccountKey, UUID],
     decisions: _Decisions,
     excluding: Collection[UUID],
+    own: FromClause | None,
 ) -> list[Pairable]:
     """The own records that can pair at all: those a bank transfer, naming a bank
     account or naming an own account by its number (the registry's), and those the owner
-    paired. A card payment is none of these."""
-    e = eligible_records(system)
+    paired. A card payment is none of these. Read from `own` (a snapshot of
+    eligible_records) when given."""
+    e = eligible_records(system) if own is None else own
     t = models.Transaction
     decided = {source for pair in decisions.paired for source in pair}
     decided_ids = (
@@ -452,6 +454,7 @@ async def pair_relation(
     excluding: Collection[UUID] = (),
     adding: Collection[Pairable] = (),
     listing: Collection[Listing] = (),
+    own: FromClause | None = None,
 ) -> PairRelation:
     """The pair relation as the ledger stands: the single definition matching, heal and
     review all use.
@@ -465,9 +468,10 @@ async def pair_relation(
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
-    their references included; `listing`, the days their import would list in full."""
+    their references included; `listing`, the days their import would list in full; `own`,
+    a snapshot of eligible_records (contra.snapshot_own_records) to read the records from."""
     decisions = await _load_decisions(session)
-    records = await _load_records(session, system, decisions, excluding) + list(adding)
+    records = await _load_records(session, system, decisions, excluding, own) + list(adding)
     same, differing = _registry_edges(
         records, settings, decisions, await _load_known(session, listing)
     )
