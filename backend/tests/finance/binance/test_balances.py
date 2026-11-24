@@ -2,11 +2,13 @@
 reads a movement falls into made again, each wallet's balance from its source, the typed report
 tables, the daily snapshots of the first sync and the wallet checks."""
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import text
 
@@ -798,3 +800,146 @@ async def test_a_wallet_name_that_cannot_name_an_account_fails(session, run, nam
 
     assert (caught.value.label, caught.value.field) == ("wallet-balance", "[].walletName")
     assert not name.strip() or name.strip() not in str(caught.value)
+
+
+# An answer that does not state a wallet's holdings is never read as an empty report.
+
+
+def _without(body: Any, field: str, missing: str) -> Any:
+    """`body` with `field` left out (`missing == "absent"`) or null."""
+    changed = dict(body)
+    if missing == "absent":
+        del changed[field]
+    else:
+        changed[field] = None
+    return changed
+
+
+async def _reports_of(session, connection_id: UUID, wallet: str) -> list[datetime]:
+    found = await session.scalars(
+        text(
+            "select r.as_of from finance.binance_account_reports r"
+            " join finance.accounts a on a.id = r.account_id"
+            " where r.connection_id = :c and a.name = :w order by r.as_of"
+        ),
+        {"c": connection_id, "w": f"Binance {wallet}"},
+    )
+    return list(found)
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+async def test_a_spot_answer_without_its_balances_fails_the_sync(
+    session, run, fake: FakeBinance, connector, clock: Clock, missing: str
+) -> None:
+    fake.set_rows("spot-account", _spot(("AAA", "10", "0")))
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    before = await _snapshots(session, connection.id)
+    reports = await _reports_of(session, connection.id, "Spot")
+    typed = await _count(session, "binance_spot_account", connection.id)
+
+    def handler(request):
+        answer = fake.handler(request)
+        if request.url.path != "/api/v3/account":
+            return answer
+        body = _without(json.loads(answer.content), "balances", missing)
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    clock.ms += 4 * HOUR_MS
+    after = await run_binance_sync(session, connection.id, handler)
+
+    assert after.status == "failing"
+    assert "spot-account" in (after.last_error or "") and "balances" in (after.last_error or "")
+    assert await _snapshots(session, connection.id) == before
+    assert await _reports_of(session, connection.id, "Spot") == reports
+    assert await _count(session, "binance_spot_account", connection.id) == typed
+    day = _at(clock.ms).date()
+    assert await _balance(session, connection.id, "Spot", "AAA", day) == 10
+
+
+async def test_an_empty_spot_list_is_an_empty_wallet(session, run) -> None:
+    connection = await binance_connection(run)
+    await _report(
+        run, connection, {"spot-account": _read("spot-account", _spot(("AAA", "1", "0")))}
+    )
+    later = NOW_MS + HOUR_MS
+
+    await _report(run, connection, {"spot-account": _read("spot-account", [], later)})
+
+    assert [(s, q, at) for _, s, q, at in await _snapshots(session, connection.id)] == [
+        ("AAA", 1, _at(NOW_MS)),
+        ("AAA", 0, _at(later)),
+    ]
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+async def test_a_funding_or_wallet_list_answer_that_is_no_list_fails(
+    session, run, missing: str
+) -> None:
+    connection = await binance_connection(run)
+    for label in ("funding-asset", "wallet-balance"):
+        read = Read(label, None if missing == "null" else {}, _at(NOW_MS), _at(NOW_MS + 200))
+
+        with pytest.raises(BinanceDataError) as caught:
+            await _report(run, connection, {label: read})
+
+        assert caught.value.label == label
+    assert await _snapshots(session, connection.id) == []
+
+
+@pytest.mark.parametrize("missing", ["absent", "null", "empty"])
+async def test_a_listed_wallet_with_a_balance_and_no_detail_keeps_its_balance(
+    session, run, missing: str
+) -> None:
+    connection = await binance_connection(run)
+    first = _read("wallet-balance", [_wallet("Earn", ("AAA", "3"))])
+    await _report(run, connection, {"wallet-balance": first})
+    reports = await _reports_of(session, connection.id, "Earn")
+    row = _wallet("Earn", balance="2")
+    if missing != "empty":
+        row = _without(row, "assetBalances", missing)
+    later = _read("wallet-balance", [row], NOW_MS + HOUR_MS)
+    flags: list[str] = []
+
+    if missing == "empty":
+        await _report(run, connection, {"wallet-balance": later}, flags)
+        assert flags == ["wallet Earn has a balance but lists no asset"]
+    else:
+        with pytest.raises(BinanceDataError) as caught:
+            await _report(run, connection, {"wallet-balance": later}, flags)
+        assert (caught.value.label, caught.value.field) == ("wallet-balance", "[].assetBalances")
+
+    assert [(s, q) for _, s, q, _ in await _snapshots(session, connection.id)] == [("AAA", 3)]
+    assert await _reports_of(session, connection.id, "Earn") == reports
+
+
+@pytest.mark.parametrize("missing", ["absent", "null", "no data"])
+async def test_a_daily_snapshot_without_its_balances_fails(session, run, missing: str) -> None:
+    connection = await binance_connection(run)
+    row = _daily("spot", NOW_MS - 1_000, ("AAA", "1"))
+    if missing == "no data":
+        del row["data"]
+    else:
+        row["data"] = _without(row["data"], "balances", missing)
+    good = _daily("spot", NOW_MS - 24 * HOUR_MS - 1_000, ("AAA", "1"))
+
+    with pytest.raises(BinanceDataError) as caught:
+        await run(backfill_daily_snapshots, connection, [good, row], flag=lambda _: None)
+
+    assert (caught.value.label, caught.value.field) == ("snapshot", "snapshotVos[].data.balances")
+    assert await _snapshots(session, connection.id) == []
+    assert await _reports_of(session, connection.id, "Spot") == []
+
+
+async def test_a_daily_snapshot_with_an_empty_list_is_an_empty_day(session, run) -> None:
+    connection = await binance_connection(run)
+    one = NOW_MS - 2 * 24 * HOUR_MS - 1_000
+    two = one + 24 * HOUR_MS
+    rows = [_daily("spot", one, ("AAA", "1")), _daily("spot", two)]
+
+    await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
+
+    assert [(s, q, at) for _, s, q, at in await _snapshots(session, connection.id)] == [
+        ("AAA", 1, _at(one)),
+        ("AAA", 0, _at(two)),
+    ]

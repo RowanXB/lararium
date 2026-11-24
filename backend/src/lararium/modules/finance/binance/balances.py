@@ -363,6 +363,37 @@ def _listed(row: Row) -> list[ApiValue]:
     return found if isinstance(found, list) else []
 
 
+def _stated(label: str, where: str, found: ApiValue) -> list[ApiValue]:
+    """The list an answer states a wallet's holdings in. A wallet's report is complete (what it
+    does not list is 0), so an answer whose list is missing, null or not a list does not state
+    them and is never read as an empty report: it is a `BinanceDataError` naming the field.
+    An empty list is an empty wallet."""
+    if not isinstance(found, list):
+        raise BinanceDataError(label, where)
+    return found
+
+
+def _source_rows(read: Read) -> list[Row]:
+    """A source read's rows, its list checked by `_stated` first."""
+    body = as_api(read.body)
+    where = ENDPOINTS[read.label].rows
+    _stated(read.label, where, body if where == "." else _at_path(body, where))
+    return parse(read.label, body).rows
+
+
+def _at_path(body: ApiValue, where: str) -> ApiValue:
+    for step in where.split("."):
+        body = body.get(step) if isinstance(body, dict) else None
+    return body
+
+
+def _list_states_holdings(row: Row, held: Mapping[str, Decimal]) -> bool:
+    """Whether a wallet list row states what the wallet holds: a `balance` that is not 0 with
+    no quantity listed does not (the wallet is flagged, `wallet_flags`)."""
+    balance = _amount(WALLET_LIST, "[].balance", row.get("balance"))
+    return balance == 0 or any(quantity != 0 for quantity in held.values())
+
+
 @dataclass(frozen=True)
 class _Wallet:
     key: str
@@ -372,26 +403,30 @@ class _Wallet:
 
 
 def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
-    """Each wallet whose source read is clear (not None, not `unclear`), with its quantity per
-    asset (design 5.6)."""
+    """Each wallet whose source read is clear (not None, not `unclear`) and states what it
+    holds, with its quantity per asset (design 5.6). A source whose list is not stated fails
+    (`_stated`); a wallet the list shows with a balance but no quantity is left out: it gets
+    no snapshot and no report time from this read, and its earlier balance stands."""
     wallets: list[_Wallet] = []
     reads = {label: read for label, read in reads.items() if read is not None and not read.unclear}
     spot = reads.get("spot-account")
     if spot is not None:
-        rows = parse(spot.label, as_api(spot.body)).rows
-        held = _per_asset(spot.label, "balances[].", list(rows), _SPOT_FIELDS)
+        held = _per_asset(spot.label, "balances[].", _source_rows(spot), _SPOT_FIELDS)
         wallets.append(_Wallet("spot", spot, held))
     funding = reads.get("funding-asset")
     if funding is not None:
-        rows = parse(funding.label, as_api(funding.body)).rows
-        held = _per_asset(funding.label, "[].", list(rows), _HELD_FIELDS)
+        held = _per_asset(funding.label, "[].", _source_rows(funding), _HELD_FIELDS)
         wallets.append(_Wallet("funding", funding, held))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
-        for row in parse(listed.label, as_api(listed.body)).rows:
+        for row in _source_rows(listed):
             key = wallet_key(wallet_name_of(row))
-            if key not in OWN_SOURCES:
-                wallets.append(_Wallet(key, listed, _listed_held(row)))
+            if key in OWN_SOURCES:
+                continue
+            entries = _stated(WALLET_LIST, "[].assetBalances", row.get("assetBalances"))
+            held = _per_asset(WALLET_LIST, "[].assetBalances[].", entries, _HELD_FIELDS)
+            if _list_states_holdings(row, held):
+                wallets.append(_Wallet(key, listed, held))
     return wallets
 
 
@@ -733,7 +768,7 @@ async def backfill_daily_snapshots(
             continue
         data = row.get("data")
         balances = data.get("balances") if isinstance(data, dict) else None
-        entries = balances if isinstance(balances, list) else []
+        entries = _stated(_DAILY, "snapshotVos[].data.balances", balances)
         at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
         held = _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
         days.append((at, held))
