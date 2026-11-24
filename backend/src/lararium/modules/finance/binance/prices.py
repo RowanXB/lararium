@@ -36,7 +36,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.core.settings_store import get_setting
 from lararium.modules.finance import models
-from lararium.modules.finance.binance import layout
+from lararium.modules.finance.binance import layout, notices
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import (
     MAX_RETRIES,
@@ -53,7 +53,7 @@ from lararium.modules.finance.binance.client import (
 from lararium.modules.finance.binance.fetch import DAY_MS
 from lararium.modules.finance.binance.instruments import clash_flag
 from lararium.modules.finance.binance.models import CoingeckoId
-from lararium.modules.finance.binance.normalize import FLAGS_KEY, Run, publish_flags
+from lararium.modules.finance.binance.notices import FLAGS_KEY
 from lararium.modules.finance.binance.parse import ApiValue, parse, unknown_flags
 from lararium.modules.finance.binance.reconcile import wallets
 from lararium.modules.finance.binance.tables import millis, moment, records, store, time_value
@@ -850,7 +850,7 @@ async def coingecko_prices(
 
 async def _flag(ctx: SyncContext, flags: Sequence[str]) -> None:
     """Name each flag once: the flags are kept in the connection's config, shown in its warnings
-    and queued for the sync's one message (`publish_flags`). A flag stays once raised, also
+    and queued for the sync's one message (`notices.publish`). A flag stays once raised, also
     when its cause is gone. A run that has none new writes nothing."""
     if not flags:
         return
@@ -864,10 +864,7 @@ async def _flag(ctx: SyncContext, flags: Sequence[str]) -> None:
         ctx.session_factory() as session,
         command_context(session, ctx.command.actor, "binance.flags", args) as cmd,
     ):
-        run = await Run.start(ctx, cmd, await get_connection(session, ctx.connection.id))
-        for flag in flags:
-            run.flag(flag)
-        await publish_flags(run)
+        await notices.publish(cmd, ctx.connection.id, flags)
 
 
 async def update_prices(

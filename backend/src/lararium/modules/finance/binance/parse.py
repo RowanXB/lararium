@@ -258,21 +258,16 @@ def row_prefix(label: str) -> str:
     return "[]." if where == "." else f"{where}[]."
 
 
-def unknown_flags(label: str, parsed: Parsed, *, rows: bool = True) -> list[str]:
+def unknown_flags(label: str, parsed: Parsed) -> list[str]:
     """The flags for what the parser found unknown in an answer of the label: a field by its
     path from the record (Binance chose the name, so only a plain one is shown) and a value by
-    its field and code. Never a value of a field. `rows=False` leaves out what is inside the
-    records (the normaliser flags those)."""
+    its field and code. Never a value of a field."""
     prefix = row_prefix(label)
     flags: list[str] = []
     for path in sorted(parsed.unknown_fields):
-        if not rows and path.startswith(prefix):
-            continue
         shown = path.removeprefix(prefix)
         shown = shown if _FLAG_PATH.fullmatch(shown) else "<other field>"
         flags.append(f"{label}.{shown} (a field the catalogue does not list)")
     for path, value in sorted(parsed.unknown_enums):
-        if not rows and path.startswith(prefix):
-            continue
         flags.append(f"{label}.{path.removeprefix(prefix)}={value}")
     return flags

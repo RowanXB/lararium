@@ -158,7 +158,7 @@ class Page:
     index: int
     body: ApiValue
     rows: list[Row]
-    # The flags for what is unknown beside its records (the normaliser flags what is inside).
+    # The flags for what the parser found unknown in it (`unknown_flags`).
     unknown: tuple[str, ...] = ()
 
 
@@ -268,7 +268,7 @@ async def window_pages(
     async def ask(index: int, asked: Mapping[str, str | int]) -> Page:
         body = await client.call(endpoint, asked)
         parsed = parse(endpoint.label, body)
-        unknown = tuple(unknown_flags(endpoint.label, parsed, rows=False))
+        unknown = tuple(unknown_flags(endpoint.label, parsed))
         return Page(endpoint.label, start, end, index, body, parsed.rows, unknown)
 
     if endpoint.paging == "none":
