@@ -277,6 +277,13 @@ async def _existing(run: Run, key: str) -> tuple[UUID, str, datetime] | None:
     return None if row is None else (row.id, row.status, row.occurred_at)
 
 
+async def posted_at(run: Run, key: str) -> datetime | None:
+    """When the connection's transaction `key` happened, if it has one: a time derived from a
+    sighting (a refund Binance gives no time for) is fixed by the first."""
+    found = await _existing(run, key)
+    return None if found is None else found[2]
+
+
 async def live(run: Run, key: str) -> bool:
     """Whether the connection has a transaction `key` that is not void."""
     found = await _existing(run, key)

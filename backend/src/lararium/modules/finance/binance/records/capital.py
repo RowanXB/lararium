@@ -24,6 +24,7 @@ from lararium.modules.finance.binance.records import (
     integer,
     live,
     post,
+    posted_at,
     text,
     when,
 )
@@ -188,10 +189,17 @@ async def withdrawal(run: Run, row: Row) -> None:
     )
     if not ended:
         return
-    refunded_at = when(WITHDRAWALS, row, "completeTime") or await run.report_time()
+    # With no time from Binance, the refund keeps the time it was first given: a later edit of
+    # the record (its `info`, say) comes with a later sync's reads.
+    refund = f"{key}:refund"
+    refunded_at = (
+        when(WITHDRAWALS, row, "completeTime")
+        or await posted_at(run, refund)
+        or await run.report_time()
+    )
     await post(
         run,
-        f"{key}:refund",
+        refund,
         occurred_at=refunded_at,
         description=f"Withdrawal refund {coin}",
         postings=[

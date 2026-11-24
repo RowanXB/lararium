@@ -293,6 +293,37 @@ async def test_refund_with_no_time_is_dated_when_the_sync_read_the_balances(sess
     await assert_balanced_and_quiet(session, connection.id)
 
 
+async def test_a_later_edit_of_a_failed_withdrawal_keeps_its_refund_time(session, run) -> None:
+    connection = await binance_connection(run)
+    await normalize_rows(session, connection.id, ("withdrawals", [_withdrawal(4, info="first")]))
+    failed = _withdrawal(5, completeTime=None, info="first")
+    read_ms = NOW_MS - 2 * HOUR_MS
+    first = await _balance_read(session, connection.id, read_ms)
+    await ingest(session, connection.id, "withdrawals", [failed], sync_id=first)
+    await run_normalize(session, connection.id)
+    key = f"withdrawal:{failed['id']}:refund"
+    assert (await transaction(session, key)).occurred_at == at(read_ms)
+
+    # A later sync sees the same withdrawal with another field changed, still with no time.
+    later = await _balance_read(session, connection.id, NOW_MS - HOUR_MS)
+    edited = {**failed, "info": "second"}
+    await ingest(session, connection.id, "withdrawals", [edited], sync_id=later)
+    await run_normalize(session, connection.id)
+
+    assert (await transaction(session, key)).occurred_at == at(read_ms)
+    assert (await run_normalize(session, connection.id)).touched == set()
+    await run_normalize(session, connection.id, again=True)
+    assert (await transaction(session, key)).occurred_at == at(read_ms)
+
+    # A time Binance gives later still wins.
+    done_ms = NOW_MS - 90 * 60_000
+    timed = {**edited, "completeTime": _text_time(done_ms)}
+    await ingest(session, connection.id, "withdrawals", [timed], sync_id=later)
+    await run_normalize(session, connection.id)
+    assert (await transaction(session, key)).occurred_at == at(done_ms)
+    await assert_balanced_and_quiet(session, connection.id)
+
+
 async def _balance_read(session, connection_id, read_from_ms: int):
     """A balance read of a sync, stored as the sync stores it; that sync's id."""
     sync_id = uuid.uuid4()
