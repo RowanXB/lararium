@@ -287,13 +287,21 @@ async def settle_reads(
     made, marked `unclear`.
 
     Only the reads a snapshot comes from are made again; every other read is kept as it is.
-    Each read made again is stored as a raw record, as the first one was.
+    Each read made again is stored as a raw record, as the first one was. After each round
+    every source read is checked again against every record this sync fetched, so a record a
+    round's walk finds inside a read that was clear until then has that read made again too.
     """
     settled = dict(reads)
-    times = await record_times(ctx)
-    pending = [
-        label for label in SOURCE_LABELS if label in reads and ambiguous(reads[label], times)
-    ]
+
+    async def unsettled() -> list[str]:
+        times = await record_times(ctx)
+        return [
+            label
+            for label in SOURCE_LABELS
+            if label in settled and ambiguous(settled[label], times)
+        ]
+
+    pending = await unsettled()
     for _ in range(ROUNDS):
         if not pending:
             break
@@ -305,9 +313,8 @@ async def settle_reads(
             await walk(ctx, client, label)
         if symbols:
             await walk_trades(ctx, client, TRADES_LABEL, symbols)
-        times = await record_times(ctx)
         settled.update(again)
-        pending = [label for label in pending if ambiguous(again[label], times)]
+        pending = await unsettled()
     for label in pending:
         settled[label] = replace(settled[label], unclear=True)
     return settled

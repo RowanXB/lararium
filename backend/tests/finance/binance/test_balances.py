@@ -231,10 +231,12 @@ async def test_read_still_ambiguous_after_three_rounds_writes_no_snapshot(
     [first] = [s for s in await _snapshots(session, connection.id) if s[0] == "Binance Spot"]
 
     def busy(asked: int) -> None:
-        # A deposit inside every Spot read, and none near the other reads.
+        # A deposit inside every Spot read, and none near the other reads (each is read 5 s
+        # or more away from it).
+        clock.ms += 5_000
         fake.add("deposits", _deposit(100 + asked, clock.ms, "1"))
         fake.set_rows("spot-account", _spot(("AAA", str(11 + asked), "0")))
-        clock.ms += 10_000
+        clock.ms += 5_000
 
     fake.when_asked("spot-account", busy)
     fake.requests.clear()
@@ -290,6 +292,36 @@ async def test_second_precision_times_use_the_margin(
     assert len(fake.calls("spot-account")) == 2
     again = settled["spot-account"]
     assert again is not None and again.read_from > read.read_from and not again.unclear
+
+
+async def test_a_record_a_round_finds_inside_another_read_has_it_read_again(
+    session, run, fake: FakeBinance, clock: Clock
+) -> None:
+    connection = await binance_connection(run, config=later_config())
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        await client.sync_clock()
+        start = clock.ms
+        spot = _read("spot-account", _spot(("AAA", "1", "0")), start + 1_000)
+        funding = _read("funding-asset", [_funding("BBB", "1", "0", "0", "0")], start + 10_000)
+        # Inside the Spot read only: Spot is made again, Funding is not, at first.
+        fake.add("deposits", _deposit(0, start + 1_100, "1"))
+        clock.ms = start + 20_000
+        await walk(ctx, client, "deposits")
+
+        def credited(asked: int) -> None:
+            if asked == 0:
+                # Found by the round's walk, inside the original Funding read.
+                fake.add("deposits", _deposit(1, start + 10_100, "1"))
+
+        fake.when_asked("spot-account", credited)
+        settled = await settle_reads(ctx, client, {"spot-account": spot, "funding-asset": funding})
+
+    assert len(fake.calls("spot-account")) == 1
+    assert len(fake.calls("funding-asset")) == 1
+    again = settled["funding-asset"]
+    assert again is not None and again.read_from > funding.read_to and not again.unclear
 
 
 def test_ambiguous_is_the_bracket_widened_by_two_seconds() -> None:
