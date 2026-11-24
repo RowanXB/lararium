@@ -27,10 +27,10 @@ from lararium.core.connectors import SyncContext
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
-from lararium.modules.finance.binance import layout
+from lararium.modules.finance.binance import layout, notices
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
-from lararium.modules.finance.binance.parse import ApiValue, Row, parse
+from lararium.modules.finance.binance.parse import ApiValue, Row, parse, unknown_flags
 from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
@@ -158,6 +158,8 @@ class Page:
     index: int
     body: ApiValue
     rows: list[Row]
+    # The flags for what is unknown beside its records (the normaliser flags what is inside).
+    unknown: tuple[str, ...] = ()
 
 
 async def commit(
@@ -205,6 +207,9 @@ async def commit(
                 await store_response(
                     cmd, connection_id, page.label, page.body, window=window, page=page.index
                 )
+        unknown = [flag for page in responses for flag in page.unknown]
+        if unknown:
+            await notices.publish(cmd, connection_id, unknown)
         values: dict[str, JSONValue] = {}
         if cursor is not None:
             cursors = _mapping(config.get(CURSORS_KEY))
@@ -262,13 +267,15 @@ async def window_pages(
 
     async def ask(index: int, asked: Mapping[str, str | int]) -> Page:
         body = await client.call(endpoint, asked)
-        return Page(endpoint.label, start, end, index, body, parse(endpoint.label, body).rows)
+        parsed = parse(endpoint.label, body)
+        unknown = tuple(unknown_flags(endpoint.label, parsed, rows=False))
+        return Page(endpoint.label, start, end, index, body, parsed.rows, unknown)
 
     if endpoint.paging == "none":
         answer = await ask(0, params)
         if size and len(answer.rows) >= size and end > start:
             middle = start + (end - start) // 2
-            full = Page(answer.label, start, end, 0, answer.body, [])
+            full = Page(answer.label, start, end, 0, answer.body, [], answer.unknown)
             return [
                 full,
                 *await window_pages(client, endpoint, fixed, middle + 1, end),

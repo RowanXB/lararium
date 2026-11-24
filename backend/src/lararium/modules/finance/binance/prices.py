@@ -54,7 +54,7 @@ from lararium.modules.finance.binance.fetch import DAY_MS
 from lararium.modules.finance.binance.instruments import clash_flag
 from lararium.modules.finance.binance.models import CoingeckoId
 from lararium.modules.finance.binance.normalize import FLAGS_KEY, Run, publish_flags
-from lararium.modules.finance.binance.parse import ApiValue, parse
+from lararium.modules.finance.binance.parse import ApiValue, parse, unknown_flags
 from lararium.modules.finance.binance.reconcile import wallets
 from lararium.modules.finance.binance.tables import millis, moment, records, store, time_value
 from lararium.modules.finance.errors import FinanceValidationError
@@ -433,6 +433,7 @@ async def _fetch_bars(
         except BinanceNotPresent:
             return
         parsed = parse(layout.BARS_LABEL, body)
+        await _flag(ctx, unknown_flags(layout.BARS_LABEL, parsed))
         bars = [
             row
             for row in records(layout.BARS_LABEL, parsed)

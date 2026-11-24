@@ -52,7 +52,14 @@ from lararium.modules.finance.binance.fetch import (
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import MIRROR, asset
-from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Row, as_api, parse
+from lararium.modules.finance.binance.parse import (
+    ApiValue,
+    BinanceDataError,
+    Row,
+    as_api,
+    parse,
+    unknown_flags,
+)
 from lararium.modules.finance.binance.tables import millis, moment
 from lararium.modules.finance.errors import AccountNotFoundError
 from lararium.modules.finance.snapshots import record_snapshot
@@ -478,28 +485,39 @@ def _digest(label: str, body: JSONValue) -> str:
 
 
 async def store_reports(
-    ctx: CommandContext, connection: ConnectionRecord, reads: Mapping[str, Read | None]
+    ctx: CommandContext,
+    connection: ConnectionRecord,
+    reads: Mapping[str, Read | None],
+    *,
+    flag: Flag | None = None,
 ) -> list[str]:
     """Upsert each read's typed report tables, keyed by its `read_from` with its `read_to`,
     when its answer differs from the label's last stored one; the labels stored.
 
     What a report's answer says beside its records goes to its response table with it.
-    Reference labels are stored first: `asset` reads `coin-config`.
+    Reference labels are stored first: `asset` reads `coin-config`. `flag` is told what the
+    parser finds unknown in every read, stored or not (a flag is published once).
     """
+    flag = flag or (lambda _: None)
     config = (await get_connection(ctx.session, connection.id)).config
     stored = config.get(DIGESTS_KEY)
     digests: dict[str, JSONValue] = dict(stored) if isinstance(stored, dict) else {}
     written: list[str] = []
     ordered = sorted(reads.items(), key=lambda item: item[0] not in REFERENCE_LABELS)
     for label, read in ordered:
-        if read is None or label not in layout.TABLE_LABELS:
+        if read is None:
+            continue
+        body = as_api(read.body)
+        parsed = parse(label, body)
+        for name in unknown_flags(label, parsed):
+            flag(name)
+        if label not in layout.TABLE_LABELS:
             continue
         digest = _digest(label, read.body)
         if digests.get(label) == digest:
             continue
-        body = as_api(read.body)
         key = {"connection_id": connection.id, "snapshot_at": read.read_from}
-        for record in tables.records(label, parse(label, body)):
+        for record in tables.records(label, parsed):
             await tables.store(ctx, label, key, record, {"read_to": read.read_to})
         await tables.store_response(
             ctx, connection.id, label, body, read=(read.read_from, read.read_to)
@@ -660,7 +678,7 @@ async def report_balances(
         for row in parse(listed.label, as_api(listed.body)).rows:
             wallet_name_of(row)
     wallets = _wallets(reads)
-    await store_reports(ctx, connection, reads)
+    await store_reports(ctx, connection, reads, flag=flag)
     assets = _Assets(ctx, connection, flag)
     await assets.resolve({code for w in wallets for code, q in w.held.items() if q != 0})
 

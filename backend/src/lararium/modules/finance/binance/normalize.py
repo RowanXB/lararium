@@ -16,7 +16,6 @@ without the report times of the reads made before it. Its arithmetic is exact, a
 balance check is.
 """
 
-import re
 from collections.abc import Iterable, Mapping
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
@@ -25,7 +24,7 @@ from sqlalchemy import select, text
 
 from lararium.core import models as core_models
 from lararium.core.commands import command_context
-from lararium.core.connections import get_connection, set_warnings, update_config
+from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
@@ -33,7 +32,15 @@ from lararium.modules.finance.binance import layout, notices, tables
 from lararium.modules.finance.binance.balances import Read, record_reads
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import record_type
-from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, Row, as_api, parse
+from lararium.modules.finance.binance.parse import (
+    ApiValue,
+    BinanceDataError,
+    Row,
+    as_api,
+    parse,
+    row_prefix,
+    unknown_flags,
+)
 from lararium.modules.finance.binance.reconcile import queue_touched
 from lararium.modules.finance.binance.records import (
     BinanceRecordError,
@@ -67,12 +74,10 @@ __all__ = [
 NORMALIZER_VERSION = "binance-norm-1"
 VERSION_KEY = "normalizer_version"
 NORMALIZED_THROUGH_KEY = "normalized_through"
-FLAGS_KEY = "flags"
+FLAGS_KEY = notices.FLAGS_KEY
 FLAG_PREFIX = notices.FLAG_PREFIX
 # Rule 3: a reward and the dividend that paid it are at most this far apart.
 PAYOUT_WINDOW_HOURS = 26
-# What an unknown field's name may be to appear in a flag.
-_FLAG_PATH = re.compile(r"[A-Za-z0-9_.\[\]]{1,64}")
 
 # A label with no handler is typed only.
 HANDLERS: dict[str, Handler] = {
@@ -103,29 +108,12 @@ def _body(label: str, row: Row) -> ApiValue:
     return body
 
 
-def _row_prefix(label: str) -> str:
-    where = ENDPOINTS[label].rows
-    return "[]." if where == "." else f"{where}[]."
-
-
-def _row_path(label: str, path: str) -> str:
-    """A path of the parser's relative to the row (`rows[].status` is `status`)."""
-    return path.removeprefix(_row_prefix(label))
-
-
-def _flag_path(label: str, path: str) -> str:
-    """An unknown field's path as a flag may show it: Binance chose the name, so only a plain
-    one is shown."""
-    shown = _row_path(label, path)
-    return shown if _FLAG_PATH.fullmatch(shown) else "<other field>"
-
-
 def _key_part(label: str, row: Row, field: str) -> str:
     """An id field as part of a ledger key: one that is blank or holds the key's separator
     could make two records share a key (or forge a derived one), so it is a data error."""
     value = field_text(row, field)
     if value is None or ":" in value:
-        raise BinanceDataError(label, f"{_row_prefix(label)}{field}")
+        raise BinanceDataError(label, f"{row_prefix(label)}{field}")
     return value
 
 
@@ -140,10 +128,8 @@ async def _apply(run: Run, record: RawRecord) -> None:
         content, occurrence = held, number
     assert isinstance(content, dict)
     parsed = parse(label, _body(label, content))
-    for path in sorted(parsed.unknown_fields):
-        run.flag(f"{label}.{_flag_path(label, path)} (a field the catalogue does not list)")
-    for path, value in sorted(parsed.unknown_enums):
-        run.flag(f"{label}.{_row_path(label, path)}={value}")
+    for flag in unknown_flags(label, parsed):
+        run.flag(flag)
     [row] = parsed.rows
 
     name = record_type(label).removeprefix("binance.")
@@ -257,19 +243,7 @@ async def publish_flags(run: Run) -> list[str]:
     """Add this run's flags that `config["flags"]` does not hold yet to it and queue them for
     the sync's message (`notices`), in the same transaction, so a flag known is a flag told;
     keep every flag in the connection's warnings; return the new ones."""
-    connection = await get_connection(run.session, run.connection.id)
-    stored = connection.config.get(FLAGS_KEY)
-    known = [f for f in stored if isinstance(f, str)] if isinstance(stored, list) else []
-    new = sorted(set(run.report.flagged) - set(known))
-    if new:
-        flags: list[JSONValue] = [*known, *new]
-        await update_config(run.command, connection.id, {FLAGS_KEY: flags})
-        await notices.queue(run.command, connection.id, flags=new)
-    warnings = [w for w in connection.warnings if not w.startswith(FLAG_PREFIX)]
-    warnings += [FLAG_PREFIX + flag for flag in sorted({*known, *new})]
-    if warnings != connection.warnings:
-        await set_warnings(run.command, connection.id, warnings)
-    return new
+    return await notices.publish(run.command, run.connection.id, run.report.flagged)
 
 
 async def normalize(

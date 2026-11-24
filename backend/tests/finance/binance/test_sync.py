@@ -598,3 +598,54 @@ async def _delete(
                 await conn.execute(text("delete from core.settings where key = :key"), made)
     finally:
         await owner.dispose()
+
+
+# Whatever the parser finds unknown in any answer the sync reads is flagged.
+
+
+async def test_an_unknown_field_in_any_answer_is_flagged_once(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="5", locked="0")])
+    fake.add(
+        "exchange-info",
+        build_row("exchange-info", symbol="AAAEUR", baseAsset="AAA", quoteAsset="EUR"),
+    )
+    fake.add(
+        "coin-config", {**build_row("coin-config", coin="AAA", isLegalMoney=False), "rowExtra": "v"}
+    )
+    bar = build_row("klines", **{"0": NOW_MS // DAY_MS * DAY_MS})
+    fake.add("klines", {**bar, str(len(bar)): "v"}, when={"symbol": "AAAEUR"})
+    # Beside the records or the balances: the answer's own top-level fields.
+    extra = {"/api/v3/account": "accountExtra", "/sapi/v1/convert/tradeFlow": "pageExtra"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        name = extra.get(request.url.path)
+        if name is None or answer.status_code != 200:
+            return answer
+        body = json.loads(answer.content)
+        return httpx.Response(200, content=json.dumps({**body, name: "v"}).encode())
+
+    connection = await binance_connection(run, config=later_config())
+    notifier = RecordingNotifier()
+
+    # Bars are asked once the asset was held a whole day; the last sync sees it all again.
+    for step in (0, DAY_MS, 5 * HOUR_MS):
+        clock.ms += step
+        after = await run_binance_sync(session, connection.id, handler, notifier=notifier)
+
+    assert after.status == "healthy", after.last_error
+    assert fake.calls("klines")
+    unknown = "(a field the catalogue does not list)"
+    expected = {
+        f"spot-account.accountExtra {unknown}",
+        f"convert.pageExtra {unknown}",
+        f"coin-config.rowExtra {unknown}",
+        f"klines.[][{len(bar)}] {unknown}",
+    }
+    assert expected <= set(after.config["flags"])  # pyright: ignore[reportArgumentType]
+    # Each told once.
+    told = [m for m in notifier.messages if "flagged" in m]
+    assert all(sum(flag in m for m in told) == 1 for flag in expected)
+

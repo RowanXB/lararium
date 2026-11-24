@@ -485,7 +485,7 @@ async def _report(
         ctx.session_factory() as session,
         command_context(session, ctx.command.actor, "binance.report", args) as cmd,
     ):
-        await store_reports(cmd, connection, reference)
+        await store_reports(cmd, connection, reference, flag=flag)
         if first:
             rows = await daily_rows(session, connection.id)
             await backfill_daily_snapshots(cmd, connection, rows, flag=flag)

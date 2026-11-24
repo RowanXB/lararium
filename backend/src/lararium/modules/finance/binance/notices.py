@@ -13,13 +13,15 @@ from collections.abc import Iterable
 from uuid import UUID
 
 from lararium.core.commands import CommandContext
-from lararium.core.connections import get_connection, update_config
+from lararium.core.connections import get_connection, set_warnings, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 
 logger = logging.getLogger(__name__)
 
 FLAG_PREFIX = "Binance flagged: "
+# Every flag already published.
+FLAGS_KEY = "flags"
 # The new flags not told yet (they share one line), and the other lines not told yet.
 PENDING_FLAGS_KEY = "pending_flags"
 PENDING_LINES_KEY = "pending_lines"
@@ -46,6 +48,25 @@ async def queue(
             values[key] = list[JSONValue](merged)
     if values:
         await update_config(ctx, connection_id, values)
+
+
+async def publish(ctx: CommandContext, connection_id: UUID, flags: Iterable[str]) -> list[str]:
+    """Add the flags `config["flags"]` does not hold yet to it and queue them for the sync's
+    message, in the caller's transaction, so a flag known is a flag told; keep every flag in
+    the connection's warnings; return the new ones."""
+    connection = await get_connection(ctx.session, connection_id)
+    stored = connection.config.get(FLAGS_KEY)
+    known = [f for f in stored if isinstance(f, str)] if isinstance(stored, list) else []
+    new = sorted(set(flags) - set(known))
+    if new:
+        held: list[JSONValue] = [*known, *new]
+        await update_config(ctx, connection_id, {FLAGS_KEY: held})
+        await queue(ctx, connection_id, flags=new)
+    warnings = [w for w in connection.warnings if not w.startswith(FLAG_PREFIX)]
+    warnings += [FLAG_PREFIX + flag for flag in sorted({*known, *new})]
+    if warnings != connection.warnings:
+        await set_warnings(ctx, connection_id, warnings)
+    return new
 
 
 def message(display_name: str, config: dict[str, JSONValue]) -> str | None:
