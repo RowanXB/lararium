@@ -83,11 +83,19 @@ async def test_the_time_window_is_honoured_and_inclusive() -> None:
     low = BASE_TIME_MS + HOUR_MS
     high = BASE_TIME_MS + 3 * HOUR_MS
 
-    parsed = parse("deposits", await ask(fake, "deposits", {"startTime": low, "endTime": high}))
+    parsed = parse(
+        "deposits",
+        await ask(fake, "deposits", {"includeSource": "true", "startTime": low, "endTime": high}),
+    )
     assert [r["id"] for r in parsed.rows] == ["1001", "1002", "1003"]
-    only_from = parse("deposits", await ask(fake, "deposits", {"startTime": high}))
+    only_from = parse(
+        "deposits", await ask(fake, "deposits", {"includeSource": "true", "startTime": high})
+    )
     assert [r["id"] for r in only_from.rows] == ["1003", "1004"]
-    nothing = parse("deposits", await ask(fake, "deposits", {"startTime": 1, "endTime": 2}))
+    nothing = parse(
+        "deposits",
+        await ask(fake, "deposits", {"includeSource": "true", "startTime": 1, "endTime": 2}),
+    )
     assert nothing.rows == []
 
 
@@ -110,9 +118,17 @@ async def test_a_window_wider_than_the_endpoint_allows_is_an_error_not_a_refusal
     window = ENDPOINTS["deposits"].window_days
     assert window == 89
     start = BASE_TIME_MS
-    await ask(fake, "deposits", {"startTime": start, "endTime": start + 89 * DAY_MS})
+    await ask(
+        fake,
+        "deposits",
+        {"includeSource": "true", "startTime": start, "endTime": start + 89 * DAY_MS},
+    )
     with pytest.raises(BinanceError) as caught:
-        await ask(fake, "deposits", {"startTime": start, "endTime": start + 90 * DAY_MS})
+        await ask(
+            fake,
+            "deposits",
+            {"includeSource": "true", "startTime": start, "endTime": start + 90 * DAY_MS},
+        )
     # Not the code a walk reads as "this window is not available".
     assert not isinstance(caught.value, BinanceNotPresent) and caught.value.code == -1127
 
@@ -121,9 +137,15 @@ async def test_offset_paging() -> None:
     fake = FakeBinance()
     fake.add("deposits", *[build_row("deposits", seq) for seq in range(5)])
 
-    first = parse("deposits", await ask(fake, "deposits", {"limit": 2, "offset": 0}))
-    second = parse("deposits", await ask(fake, "deposits", {"limit": 2, "offset": 2}))
-    last = parse("deposits", await ask(fake, "deposits", {"limit": 2, "offset": 4}))
+    first = parse(
+        "deposits", await ask(fake, "deposits", {"includeSource": "true", "limit": 2, "offset": 0})
+    )
+    second = parse(
+        "deposits", await ask(fake, "deposits", {"includeSource": "true", "limit": 2, "offset": 2})
+    )
+    last = parse(
+        "deposits", await ask(fake, "deposits", {"includeSource": "true", "limit": 2, "offset": 4})
+    )
     assert [len(p.rows) for p in (first, second, last)] == [2, 2, 1]
     assert [r["id"] for p in (first, second, last) for r in p.rows] == [
         "1000",
@@ -300,7 +322,7 @@ async def test_a_429_carries_retry_after_and_the_client_waits_then_succeeds() ->
 
 async def test_every_request_is_recorded_without_the_signing_parameters() -> None:
     fake = FakeBinance()
-    await ask(fake, "deposits", {"startTime": 5, "endTime": 9, "limit": 1})
+    await ask(fake, "deposits", {"includeSource": "true", "startTime": 5, "endTime": 9, "limit": 1})
     await ask(fake, "funding-asset", {"asset": "AAA"})
     await ask(fake, "time")
 
@@ -309,7 +331,12 @@ async def test_every_request_is_recorded_without_the_signing_parameters() -> Non
         ("funding-asset", "POST"),
         ("time", "GET"),
     ]
-    assert fake.calls("deposits")[0].params == {"startTime": "5", "endTime": "9", "limit": "1"}
+    assert fake.calls("deposits")[0].params == {
+        "includeSource": "true",
+        "startTime": "5",
+        "endTime": "9",
+        "limit": "1",
+    }
     assert fake.calls("funding-asset")[0].params == {"asset": "AAA"}
 
 

@@ -31,7 +31,7 @@ from lararium.modules.finance.transfers import (
 from lararium.modules.finance.transfers.queries import list_transfers
 from lararium.modules.finance.valuation import balances_asof
 
-from .fixtures import BASE_TIME_MS, HOUR_MS
+from .fixtures import BASE_TIME_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
@@ -41,7 +41,7 @@ from .normalizing import (
     postings,
     transaction,
 )
-from .syncing import binance_connection
+from .syncing import binance_connection, later_config, run_binance_sync
 from .test_records_capital import _deposit, _text_time, _withdrawal
 
 WALLET_ADDRESS = "0x" + "a" * 40
@@ -182,6 +182,26 @@ async def test_deposit_from_a_registered_address(session, run) -> None:
     held = await _holdings(session, _day())
     assert held == {"Binance Spot": Decimal(5), "Own wallet": Decimal(-5)}
     assert await find_transfer_violations(session) == []
+
+
+async def test_a_synced_deposit_from_a_registered_address_is_a_transfer(
+    session, run, fake: FakeBinance, connector
+) -> None:
+    # Through the sync: the address comes back only because the walk asks for it.
+    wallet = await _wallet(run)
+    moment = NOW_MS - 2 * HOUR_MS
+    row = _deposit(1, sourceAddress=WALLET_ADDRESS, insertTime=moment, completeTime=moment)
+    fake.add("deposits", row)
+    fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="5", locked="0")])
+    connection = await binance_connection(run, config=later_config())
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+    await _heal(session)
+
+    assert after.status == "healthy", after.last_error
+    assert plain(await postings(session, f"deposit:{row['id']}"))[1][0] == "In transit"
+    [transfer] = await list_transfers(session)
+    assert (transfer.from_account_id, transfer.to_account_id) == (wallet.id, await _spot(session))
 
 
 async def _spot(session):

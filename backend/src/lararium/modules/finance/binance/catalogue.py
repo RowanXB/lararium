@@ -342,6 +342,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         window=89,
         paging="offset",
         page=1000,
+        # `sourceAddress` comes back only with it (the catalogue document).
+        variants=(("includeSource", ("true",)),),
         kind="history",
         phase="A",
     ),

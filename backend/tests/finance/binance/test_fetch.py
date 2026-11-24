@@ -168,6 +168,21 @@ async def test_flexible_rewards_are_asked_with_their_type(session, run, fake, cl
     assert {s.params["type"] for s in fake.calls("earn-flexible-rewards")} == {"ALL"}
 
 
+async def test_deposits_are_asked_with_their_source(session, run, fake, clock) -> None:
+    """`sourceAddress` comes back only with `includeSource=true`, as the fake answers too."""
+    fake.add("deposits", build_row("deposits", insertTime=NOW_MS - DAY_MS))
+    connection = await binance_connection(run)
+
+    stored = await _walk(session, connection, fake, clock, "deposits")
+
+    assert len(stored) == 1
+    assert {s.params["includeSource"] for s in fake.calls("deposits")} == {"true"}
+    content = await session.scalar(
+        text("select content from core.raw_records where id = :i"), {"i": stored[0]}
+    )
+    assert content["sourceAddress"]
+
+
 async def test_absent_product_is_recorded_and_skipped(session, run, fake, clock) -> None:
     fake.fail("dividends", code=-3003)
     connection = await binance_connection(run)

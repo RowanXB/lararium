@@ -410,6 +410,9 @@ class FakeBinance:
         chosen = self._select(endpoint, own)
         if not chosen and endpoint.rows == "" and not self._stored.get(label):
             return _json(build_response(label, [build_row(label)]))
+        if label == "deposits" and own.get("includeSource") != "true":
+            # The catalogue document: `sourceAddress` is returned only with `includeSource=true`.
+            chosen = [{k: v for k, v in row.items() if k != "sourceAddress"} for row in chosen]
         page, total, more = self._page(endpoint, own, chosen)
         body = build_response(label, page)
         if isinstance(body, dict):
