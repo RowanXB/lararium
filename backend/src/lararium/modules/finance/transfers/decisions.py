@@ -176,8 +176,9 @@ async def unpair(ctx: CommandContext, transfer_id: UUID) -> None:
 
 async def _store_pair(ctx: CommandContext, present: UUID, chosen: UUID) -> TransferRecord:
     """Store the owner's pair decision for the two records (withdrawing any never_pair
-    between them), match, and return the matched transfer. When it still can't link them,
-    raise, which rolls the decision back."""
+    between them), match, and return the matched transfer. Its callers check the pair first
+    (_require_owner_pair). When it still can't link them, raise, which rolls the decision
+    back."""
     session = ctx.session
     present_ref, chosen_ref = await source_ref(session, present), await source_ref(session, chosen)
     await forget_decisions(ctx, "never_pair", present_ref, chosen_ref)
@@ -210,6 +211,21 @@ async def _pair_side(ctx: CommandContext, record_id: UUID) -> PairSideRecord:
     return side
 
 
+async def _require_owner_pair(ctx: CommandContext, first_id: UUID, second_id: UUID) -> None:
+    """Refuse two records the owner can't pair, for pair and pair_records alike: not
+    shaped as one transfer (pairs.owner_pair_refusal), or either a leg of a matched
+    transfer or rejected (require_pairable: a pair never takes a record from a match, nor
+    silently overrides a rejection)."""
+    if first_id == second_id:
+        raise FinanceValidationError("a record cannot be paired with itself")
+    first, second = [await _pair_side(ctx, record_id) for record_id in (first_id, second_id)]
+    refusal = owner_pair_refusal(first, second)
+    if refusal is not None:
+        raise FinanceValidationError(refusal)
+    for record_id in (first_id, second_id):
+        await require_pairable(ctx.session, record_id)
+
+
 async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> TransferRecord:
     """The owner says the open transfer's missing side is this record: one of its
     candidates (of the same amount, or of another, or one the owner unpaired from it, whose
@@ -222,16 +238,16 @@ async def pair(ctx: CommandContext, transfer_id: UUID, transaction_id: UUID) -> 
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         raise FinanceValidationError("only a transfer missing one side can be paired")
+    [present] = _records(transfer)
+    if await session.get(models.Transaction, transaction_id) is None:
+        raise FinanceValidationError(
+            f"transaction {transaction_id} is not a candidate for this transfer"
+        )
+    await _require_owner_pair(ctx, present, transaction_id)
     if not any(c.transaction_id == transaction_id for c in await candidates(session, transfer_id)):
         raise FinanceValidationError(
             f"transaction {transaction_id} is not a candidate for this transfer"
         )
-    [present] = _records(transfer)
-    refusal = owner_pair_refusal(
-        await _pair_side(ctx, present), await _pair_side(ctx, transaction_id)
-    )
-    if refusal is not None:
-        raise FinanceValidationError(refusal)
     return await _store_pair(ctx, present, transaction_id)
 
 
@@ -244,12 +260,5 @@ async def pair_records(ctx: CommandContext, transaction_id: UUID, other_id: UUID
     nor rejected (undo the rejection first: a pair never silently overrides one). Otherwise
     as pair."""
     await lock_transfers(ctx)
-    if transaction_id == other_id:
-        raise FinanceValidationError("a record cannot be paired with itself")
-    first, second = [await _pair_side(ctx, record_id) for record_id in (transaction_id, other_id)]
-    refusal = owner_pair_refusal(first, second)
-    if refusal is not None:
-        raise FinanceValidationError(refusal)
-    for record_id in (transaction_id, other_id):
-        await require_pairable(ctx.session, record_id)
+    await _require_owner_pair(ctx, transaction_id, other_id)
     return await _store_pair(ctx, transaction_id, other_id)

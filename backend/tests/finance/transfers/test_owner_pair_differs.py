@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance.errors import FinanceValidationError
-from lararium.modules.finance.identifiers import assign_identifier
+from lararium.modules.finance.identifiers import assign_identifier, register_card_merchant
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
@@ -532,3 +532,234 @@ async def test_a_decided_pair_outranks_the_cross_currency_tier(
     assert transfers[(None, across.id)].status == "awaiting"
     await assert_consistent(session)
     assert await heal() == 0
+
+
+# Fix round 1.
+
+
+async def test_pair_from_an_open_transfer_refuses_a_matched_leg(
+    session, run, ids, a_and_c, connector_tx, heal
+) -> None:
+    """A's -100.00 is matched with C's +100.00. A later -100.70 naming C opens a transfer
+    for review whose differing candidate would be C's +100.00: not offered, and pairing it
+    is refused, so the match stays."""
+    a, a_id, c, c_id = a_and_c
+    out_record = await connector_tx(a, "-100.00", external_id="out_1", identifier_id=c_id)
+    in_record = await connector_tx(c, "100.00", external_id="in_1", identifier_id=a_id)
+    await heal()
+    [matched] = await list_transfers(session)
+    assert matched.status == "matched"
+    later = await connector_tx(
+        a, "-100.70", external_id="out_2", occurred_at=WHEN + timedelta(hours=1), identifier_id=c_id
+    )
+    await heal()
+    [waiting] = [t for t in await list_transfers(session) if t.out_transaction_id == later.id]
+    assert in_record.id not in {x.transaction_id for x in await candidates(session, waiting.id)}
+
+    with pytest.raises(FinanceValidationError, match="unpair it first"):
+        await run(pair, waiting.id, in_record.id)
+
+    assert await decisions(session) == []
+    still = {t.id: t for t in await list_transfers(session)}[matched.id]
+    assert (still.status, still.out_transaction_id, still.in_transaction_id) == (
+        "matched",
+        out_record.id,
+        in_record.id,
+    )
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_pair_from_an_open_transfer_refuses_a_rejected_record(
+    session, run, a_and_c, connector_tx, heal
+) -> None:
+    a, a_id, c, c_id = a_and_c
+    rejected = await connector_tx(c, "100.00", external_id="in_1", identifier_id=a_id)
+    await heal()
+    [own] = await list_transfers(session)
+    await run(reject, own.id)
+    later = await connector_tx(a, "-100.70", external_id="out_2", identifier_id=c_id)
+    await heal()
+    [waiting] = [t for t in await list_transfers(session) if t.out_transaction_id == later.id]
+    assert rejected.id not in {x.transaction_id for x in await candidates(session, waiting.id)}
+    stored = await decisions(session)
+
+    with pytest.raises(FinanceValidationError):
+        await run(pair, waiting.id, rejected.id)
+
+    assert await decisions(session) == stored
+    assert {t.status for t in await list_transfers(session) if t.id == own.id} == {"rejected"}
+
+
+async def test_a_conversion_whose_fee_cannot_fit_is_not_offered(
+    session, ids, run, connected_bank: MakeConnected, leg, heal, gbp, usd, eur
+) -> None:
+    """Two mutually identified legs across currencies whose fee is in a third currency:
+    each transfer is for review, but neither offers the other, which pair would refuse."""
+    money = await connected_bank("eToro Money")
+    trading = await connected_bank("eToro Trading")
+    money_id = (await run(assign_identifier, money.account.id, "etoro_account", "1234567")).id
+    trading_id = (await run(assign_identifier, trading.account.id, "etoro_account", "7654321")).id
+    sent = await leg(
+        trading,
+        usd,
+        "-1000.00",
+        external_id="activity:1",
+        identifier_id=money_id,
+        fee=(eur, "5.00"),
+    )
+    received = await leg(money, gbp, "790.00", external_id="cash:1", identifier_id=trading_id)
+    await heal()
+    transfers = {
+        (t.out_transaction_id, t.in_transaction_id): t for t in await list_transfers(session)
+    }
+    waiting = transfers[(sent.id, None)]
+    assert waiting.review_reason == "amount_differs"
+    assert await candidates(session, waiting.id) == []
+    with pytest.raises(FinanceValidationError):
+        await run(pair, waiting.id, received.id)
+
+
+async def insert_pair(session: AsyncSession, subject: str, other: str) -> None:
+    await session.execute(
+        text(
+            "insert into finance.transfer_decisions"
+            " (kind, subject_kind, subject_ref, other_kind, other_ref)"
+            " values ('pair', 'connection', :s, 'connection', :o)"
+        ),
+        {"s": subject, "o": other},
+    )
+
+
+async def test_a_decided_differing_pair_outranks_an_exact_candidate(
+    session, ids, a_and_c, connected_bank: MakeConnected, connector_tx, heal
+) -> None:
+    """A's -100.00 and C's +100.00 name each other (an exact, mutual candidate); the
+    owner's pair of A's payment with D's +99.30 holds."""
+    a, a_id, c, c_id = a_and_c
+    d = await connected_bank("D")
+    sent = await connector_tx(a, "-100.00", external_id="out_1", identifier_id=c_id)
+    exact = await connector_tx(c, "100.00", external_id="in_1", identifier_id=a_id)
+    chosen = await connector_tx(d, "99.30", external_id="in_2", bank_transfer=False)
+    await insert_pair(session, f"{a.connection_id}:out_1", f"{d.connection_id}:in_2")
+    await heal()
+
+    transfers = {
+        (t.out_transaction_id, t.in_transaction_id): t for t in await list_transfers(session)
+    }
+    assert transfers[(sent.id, chosen.id)].status == "matched"
+    assert transfers[(None, exact.id)].status == "awaiting"
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_decided_differing_pair_outranks_the_card_tier(
+    session, ids, run, connected_bank: MakeConnected, connector_tx, heal
+) -> None:
+    """A card payment and a deposit of its amount, seconds apart on the merchant's holder
+    account, would pair by themselves; the owner's pair of the payment with a deposit net
+    of a fee on the other holder account holds."""
+    monzo, invest, isa = (
+        await connected_bank("Monzo"),
+        await connected_bank("Invest"),
+        await connected_bank("ISA"),
+    )
+    merchant = (
+        await run(register_card_merchant, "merch_TEST212", [invest.account.id, isa.account.id])
+    ).id
+    payment = await connector_tx(
+        monzo,
+        "-50.00",
+        external_id="card_1",
+        identifier_id=merchant,
+        bank_transfer=False,
+    )
+    by_card = await connector_tx(
+        invest,
+        "50.00",
+        external_id="transaction:1",
+        occurred_at=WHEN + timedelta(seconds=20),
+        bank_transfer=False,
+    )
+    chosen = await connector_tx(
+        isa,
+        "49.50",
+        external_id="transaction:2",
+        occurred_at=WHEN + timedelta(days=1),
+        bank_transfer=False,
+    )
+    await insert_pair(
+        session, f"{monzo.connection_id}:card_1", f"{isa.connection_id}:transaction:2"
+    )
+    await heal()
+
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        payment.id,
+        chosen.id,
+    )
+    assert (ids.in_transit, transfer.instrument_id, Decimal("-0.50"), None, None, True) in (
+        await settlement_of(session, transfer)
+    )
+    assert by_card.id not in (transfer.out_transaction_id, transfer.in_transaction_id)
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+@pytest.mark.parametrize(("fees", "fits"), [(("0.30", "0.40"), True), (("0.40", "0.40"), False)])
+async def test_same_currency_fees_on_both_legs_are_summed(
+    session, run, ids, connected_bank: MakeConnected, leg, gbp, fees, fits
+) -> None:
+    """Ruling: fee rows on both legs of a same-currency pair are summed, the total at most
+    the difference (0.70 here)."""
+    a = await connected_bank("A")
+    b = await connected_bank("B")
+    sent = await leg(a, gbp, "-100.00", external_id="out:1", fee=(gbp, fees[0]))
+    received = await leg(b, gbp, "99.30", external_id="in:1", fee=(gbp, fees[1]))
+    if fits:
+        transfer = await run(pair_records, sent.id, received.id)
+        assert (ids.in_transit, gbp.id, Decimal("-0.70"), None, None, True) in (
+            await settlement_of(session, transfer)
+        )
+    else:
+        with pytest.raises(FinanceValidationError, match="fee"):
+            await run(pair_records, sent.id, received.id)
+        assert await decisions(session) == []
+
+
+async def test_cross_currency_fees_on_both_legs_refused(
+    session, run, ids, connected_bank: MakeConnected, leg, gbp, usd
+) -> None:
+    """Ruling: a conversion takes one fee; with a fee row on both legs it is refused."""
+    a = await connected_bank("A")
+    b = await connected_bank("B")
+    sent = await leg(a, usd, "-1000.00", external_id="out:1", fee=(usd, "5.00"))
+    received = await leg(b, gbp, "790.00", external_id="in:1", fee=(gbp, "1.00"))
+    with pytest.raises(FinanceValidationError, match="fee"):
+        await run(pair_records, sent.id, received.id)
+    assert await decisions(session) == []
+
+
+async def test_two_differing_pair_decisions_label_their_candidates_differing(
+    session, a_and_c, connected_bank: MakeConnected, connector_tx, heal
+) -> None:
+    """Two pair decisions leave A's payment ambiguous: its transfer stays open and lists
+    both, labelled by how they differ (never `exact` for a record of another amount)."""
+    a, _, c, c_id = a_and_c
+    d = await connected_bank("D")
+    sent = await connector_tx(a, "-100.00", external_id="out_1", identifier_id=c_id)
+    first = await connector_tx(c, "99.30", external_id="in_1", bank_transfer=False)
+    second = await connector_tx(
+        d, "99.50", external_id="in_2", occurred_at=WHEN + timedelta(hours=1), bank_transfer=False
+    )
+    await insert_pair(session, f"{a.connection_id}:out_1", f"{c.connection_id}:in_1")
+    await insert_pair(session, f"{a.connection_id}:out_1", f"{d.connection_id}:in_2")
+    await heal()
+
+    [waiting] = await list_transfers(session)
+    assert waiting.out_transaction_id == sent.id
+    assert [(x.transaction_id, x.reason) for x in await candidates(session, waiting.id)] == [
+        (first.id, "amount_differs"),
+        (second.id, "amount_differs"),
+    ]

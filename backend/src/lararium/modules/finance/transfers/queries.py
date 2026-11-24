@@ -671,12 +671,19 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     """The own records that could complete a transfer missing one side, for the owner's
     review: its own record's candidates in the pair relation, those of the same amount
     first, then those whose amount differs, then those the owner unpaired from it (which
-    pair can link again), each oldest first. Empty for a transfer with both sides."""
+    pair can link again), each oldest first, each once. Only those pair would accept: not
+    a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
+    make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
+    (the owner paired it, so its side differs) is labelled amount_differs. Empty for a
+    transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
     present_id = transfer.out_transaction_id or transfer.in_transaction_id
     if present_id is None:
+        return []
+    present = await load_pair_side(session, present_id)
+    if present is None:
         return []
     system = await system_account_ids(session)
     relation = await pair_relation(session, system, await load_transfer_settings(session))
@@ -686,29 +693,42 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
         ("unpaired", await unpaired_from(session, present_id)),
     ]
     e = eligible_records(system)
-    t = models.Transaction
-    found: list[CandidateRecord] = []
+    t, d = models.Transaction, models.TransferDecision
+    rejected = exists().where(
+        d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
+    )
+    found: dict[UUID, CandidateRecord] = {}
     for reason, ids in reasons:
         if not ids:
             continue
         rows = await session.execute(
-            select(e.c.transaction_id, e.c.account_id, e.c.quantity, e.c.occurred_at, t.description)
+            _pair_side_select(e, e.c.occurred_at, t.description)
             .join(t, t.id == e.c.transaction_id)
-            .where(e.c.transaction_id.in_(ids))
+            .where(
+                e.c.transaction_id.in_(ids),
+                ~in_matched_transfer(e.c.transaction_id),
+                ~rejected,
+            )
             .order_by(e.c.occurred_at, e.c.transaction_id)
         )
-        found += [
-            CandidateRecord(
+        for row in rows:
+            side = _pair_side(row)
+            if side.id in found or owner_pair_refusal(present, side) is not None:
+                continue
+            label: CandidateReason = reason
+            if reason == "exact" and (
+                side.instrument_id != present.instrument_id or side.quantity != -present.quantity
+            ):
+                label = "amount_differs"
+            found[side.id] = CandidateRecord(
                 transaction_id=row.transaction_id,
                 account_id=row.account_id,
                 quantity=row.quantity,
                 occurred_at=row.occurred_at,
                 description=row.description,
-                reason=reason,
+                reason=label,
             )
-            for row in rows
-        ]
-    return found
+    return list(found.values())
 
 
 @dataclass(frozen=True)

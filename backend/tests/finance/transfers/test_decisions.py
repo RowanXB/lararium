@@ -233,29 +233,42 @@ async def test_pair_undoes_an_unpair(session, run, ids, a_and_c, connector_tx, h
 async def test_pair_that_does_not_take_effect_is_refused(
     session, run, a_and_c, connector_tx, heal
 ) -> None:
-    """The owner already paired the deposit with another payment: pairing it with this one
-    too leaves both ambiguous, so it is refused and nothing is stored."""
+    """The owner already paired the deposit with two other payments, so it is in no matched
+    transfer: pairing it with this one too leaves it ambiguous, so it is refused and nothing
+    is stored. (With one other pair decision the deposit would be matched, and pair refuses
+    taking a record from a matched transfer: test_owner_pair_differs.)"""
     a, a_id, c, c_id = a_and_c
     out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
     in_record = await connector_tx(
         c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=2), identifier_id=a_id
     )
-    await connector_tx(
-        a, "-100", external_id="out_2", occurred_at=WHEN + timedelta(days=30), bank_transfer=False
-    )
+    for n in (2, 3):
+        await connector_tx(
+            a,
+            "-100",
+            external_id=f"out_{n}",
+            occurred_at=WHEN + timedelta(days=30 * n),
+            bank_transfer=False,
+        )
     out_ref, in_ref = f"{a.connection_id}:out_1", f"{c.connection_id}:in_1"
     await session.execute(
         text(
             "insert into finance.transfer_decisions"
             " (kind, subject_kind, subject_ref, other_kind, other_ref) values"
             " ('pair', 'connection', :out_2, 'connection', :in_1),"
+            " ('pair', 'connection', :out_3, 'connection', :in_1),"
             " ('never_pair', 'connection', :out_1, 'connection', :in_1)"
         ),
-        {"out_2": f"{a.connection_id}:out_2", "out_1": out_ref, "in_1": in_ref},
+        {
+            "out_2": f"{a.connection_id}:out_2",
+            "out_3": f"{a.connection_id}:out_3",
+            "out_1": out_ref,
+            "in_1": in_ref,
+        },
     )
     await heal()
-    [waiting] = [t for t in await list_transfers(session) if t.status == "awaiting"]
-    assert waiting.out_transaction_id == out_record.id
+    [waiting] = [t for t in await list_transfers(session) if t.out_transaction_id == out_record.id]
+    assert waiting.status == "awaiting"
     before = await _decisions(session)
     assert [(x.transaction_id, x.reason) for x in await candidates(session, waiting.id)] == [
         (in_record.id, "unpaired")
