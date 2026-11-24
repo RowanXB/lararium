@@ -45,6 +45,8 @@ from .fixtures import (
     instrument_meta,
     lookup_body,
     me_json,
+    pnl_body,
+    pnl_position,
     trade_row,
 )
 from .statement_fixtures import (
@@ -1307,3 +1309,70 @@ async def _transaction_id(session, external_id: str) -> uuid.UUID:
             text("select id from finance.transactions where external_id = :e"), {"e": external_id}
         )
     ).scalar_one()
+
+
+# R39: an open is compared only when both sources describe the same part ----------------------
+
+
+def _partial_statement(*, closed: bool, closed_units: str = "4") -> bytes:
+    """Ten units opened; with `closed`, four of them closed (Closed Positions has them)."""
+    open_ten = open_row() | {"Amount": "1000", "Units / Contracts": "10", "Balance": "260.00"}
+    if not closed:
+        return build_statement(summary(username=USERNAME), [transfer_in(), open_ten])
+    return build_statement(
+        summary(username=USERNAME),
+        [transfer_in(), open_ten, close_row(balance="680.00") | {"Amount": "420.00"}],
+        [closed_row() | {"Amount": "400", "Units / Contracts": closed_units}],
+    )
+
+
+PARTIAL = api_trade(investment=Decimal("400.00"), initialInvestment=Decimal("1000.00"))
+
+
+async def test_a_statement_behind_a_partial_close_opens_no_review(session, ledger) -> None:
+    # The API has the partial close (trade history: the four units closed); the statement
+    # ends before it (the whole position's "Open Position" row): different facts.
+    await ledger.normalize(
+        *BASE, ("trade_history", PARTIAL), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    before = await _ledger(session, ledger)
+    await ledger.upload(_partial_statement(closed=False))
+    assert await list_reviews(session, ledger.connection.id) == []
+    assert ledger.disagreement_messages() == []
+    # The API's postings stand; the statement adds only its transfer.
+    found = await _ledger(session, ledger)
+    assert {k: v for k, v in found.items() if not k.startswith("activity:")} == before
+    # The next statement holds the close: like for like, and they agree.
+    await ledger.upload(_partial_statement(closed=True))
+    assert await list_reviews(session, ledger.connection.id) == []
+
+
+async def test_a_statement_ahead_of_a_partial_close_opens_no_review(session, ledger) -> None:
+    # The API's latest PnL still lists the whole position; the statement already has the
+    # four units closed. Compared once trade history brings the close.
+    await ledger.normalize(
+        *BASE,
+        ("pnl", pnl_body([pnl_position(POSITION, units="10", amount="1000.00")])),
+        ("order_lookup", lookup_body(ORDER, POSITION)),
+    )
+    await ledger.upload(_partial_statement(closed=True))
+    assert await list_reviews(session, ledger.connection.id) == []
+    assert ledger.disagreement_messages() == []
+    await ledger.normalize(*BASE, ("trade_history", PARTIAL), now=NOW + timedelta(days=1))
+    assert await list_reviews(session, ledger.connection.id) == []
+
+
+async def test_a_partial_close_the_sources_disagree_on_is_reviewed(session, ledger) -> None:
+    # Both describe the part closed, and differ: a review, told once.
+    await ledger.normalize(
+        *BASE, ("trade_history", PARTIAL), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    await ledger.upload(_partial_statement(closed=True, closed_units="5"))
+    [review] = await list_reviews(session, ledger.connection.id)
+    assert (review.event_key, review.field, review.api_value, review.statement_value) == (
+        f"open:{POSITION}",
+        "units",
+        "4",
+        "5",
+    )
+    assert len(ledger.disagreement_messages()) == 1

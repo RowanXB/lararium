@@ -71,7 +71,7 @@ from lararium.modules.finance.etoro.fields import (
     VALUE,
 )
 from lararium.modules.finance.etoro.instruments import merge_instruments, statement_listing
-from lararium.modules.finance.etoro.merge import TradeEvent
+from lararium.modules.finance.etoro.merge import Describes, TradeEvent
 from lararium.modules.finance.etoro.state import LONDON, EtoroDataError, Run, ending
 from lararium.modules.finance.etoro.statement import (
     STATEMENT_ZONE,
@@ -315,22 +315,28 @@ def _event(
     at: datetime | None,
     row: Row,
     position_id: str,
+    describes: Describes = "closed",
 ) -> TradeEvent:
     if units is None or cash is None or at is None:
         raise EtoroDataError(
             f"{row.sheet}: position {ending(position_id)} lacks its units, amount or date"
         )
-    return TradeEvent(units.copy_abs(), cash, profit, local_date(at, LONDON), at)
+    return TradeEvent(units.copy_abs(), cash, profit, local_date(at, LONDON), at, describes)
 
 
 def open_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
     """The statement's open of the position: Closed Positions' amount, units and open date
     once it has closed (what closed is what was opened: a partial close's "Open Position" row
     is the whole position's, its remainder a position of its own, design §6), else its "Open
-    Position" row."""
+    Position" row. Which of the two it describes (merge.TradeEvent.describes): the part
+    closed, or the position as opened."""
     if trade is None:
         return None
-    for row, at in ((trade.closed, "Open Date"), (trade.open, "Date")):
+    rows: tuple[tuple[Row | None, str, Describes], ...] = (
+        (trade.closed, "Open Date", "closed"),
+        (trade.open, "Date", "opened"),
+    )
+    for row, at, describes in rows:
         if row is not None:
             amount = number(row, "Amount")
             return _event(
@@ -340,6 +346,7 @@ def open_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
                 moment(row, at),
                 row,
                 position_id,
+                describes,
             )
     return None
 

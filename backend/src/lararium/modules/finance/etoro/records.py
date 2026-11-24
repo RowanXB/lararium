@@ -60,7 +60,7 @@ from lararium.modules.finance.connector_run import (
 )
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro import accounts, merge, statement_ledger
-from lararium.modules.finance.etoro.merge import TradeEvent
+from lararium.modules.finance.etoro.merge import Describes, TradeEvent
 from lararium.modules.finance.etoro.state import (
     LONDON,
     EtoroDataError,
@@ -322,19 +322,28 @@ async def _account_currency(run: Run) -> InstrumentRecord:
 
 
 def _api_open(position: Position) -> TradeEvent | None:
-    """The API's open: trade history's once the position closed, else PnL's."""
+    """The API's open: trade history's once the position closed (the part closed), else
+    PnL's (the position as opened)."""
+    describes: Describes
     if position.trade is not None:
         record, item = position.trade, position.trade.content
         occurred_at = moment_at(record, item, "openTimestamp")
         units, amount = number_at(record, item, "units"), number_at(record, item, "investment")
+        describes = "closed"
     elif position.pnl is not None:
         record, item = position.pnl
         occurred_at = moment_at(record, item, "openDateTime")
         units, amount = number_at(record, item, "units"), number_at(record, item, "amount")
+        describes = "opened"
     else:
         return None
     return TradeEvent(
-        units.copy_abs(), amount.copy_abs(), None, local_date(occurred_at, LONDON), occurred_at
+        units.copy_abs(),
+        amount.copy_abs(),
+        None,
+        local_date(occurred_at, LONDON),
+        occurred_at,
+        describes,
     )
 
 

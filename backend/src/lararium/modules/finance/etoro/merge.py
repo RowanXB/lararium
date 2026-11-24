@@ -8,6 +8,10 @@ later arrival re-posts the same transaction in place.
 
 A **disagreement** is a difference between the two in a value that makes a posting or its date:
 the units, the cash amount, the profit, or the booking date (after the UTC rule, design §5.8).
+Only two descriptions of the same thing are compared (ruling R39): an open described as the
+position as opened (PnL, the "Open Position" row) and one described as the part closed (trade
+history, Closed Positions) are different facts while a partial close is known to one source
+only, so neither opens a review nor closes one; they are compared once both describe the same.
 Each opens one review item on the transaction, both values kept, and is told to the owner once
 (`notify`). Other shared fields (names, rates, spreads) are kept from both without review.
 
@@ -27,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from lararium.core.connectors import SyncContext
@@ -41,17 +46,23 @@ FIELDS = ("units", "cash", "profit", "booking_date")
 _TOGETHER = {"booking_date": ("occurred_at",)}
 
 
+# What an open's figures describe: the part of the position closed, or the position as
+# opened. A close's describe the part closed.
+type Describes = Literal["closed", "opened"]
+
+
 @dataclass(frozen=True)
 class TradeEvent:
     """What one source says of an open or a close: its units and cash (magnitudes; the
-    posting gives the signs), the profit a close made (None for an open, or unstated), and
-    when it happened."""
+    posting gives the signs), the profit a close made (None for an open, or unstated), when
+    it happened, and what it describes (comparable: R39)."""
 
     units: Decimal
     cash: Decimal
     profit: Decimal | None
     booking_date: date
     occurred_at: datetime
+    describes: Describes = "closed"
 
 
 def disagreements(api: TradeEvent, statement: TradeEvent) -> list[Disagreement]:
@@ -85,9 +96,21 @@ async def takes(run: Run, key: str, found: Sequence[Disagreement]) -> dict[str, 
     return await source_merge.decided_takes(run.session, run.connection_id, key, found)
 
 
+def comparable(api: TradeEvent, statement: TradeEvent) -> bool:
+    """Whether the two describe the same thing (R39), so their differences are
+    disagreements and their agreements close reviews."""
+    return api.describes == statement.describes
+
+
 async def choose(
     run: Run, key: str, api: TradeEvent | None, statement: TradeEvent | None
 ) -> Choice[TradeEvent]:
+    """The values the event posts, and what the two sources disagree and agree on. Two that
+    are not comparable post as the API's alone would, and are compared later."""
+    if api is not None and statement is not None and not comparable(api, statement):
+        return await source_merge.choose(
+            run.session, run.connection_id, key, api, None, FIELDS, _TOGETHER
+        )
     return await source_merge.choose(
         run.session, run.connection_id, key, api, statement, FIELDS, _TOGETHER
     )
