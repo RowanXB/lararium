@@ -157,7 +157,7 @@ async def _pair_states(
         if row.review_reason != expected:
             due.add(present)
     # (c) a unique pair not yet a matched transfer.
-    for record_id in chain(relation.exact, relation.converts):
+    for record_id in chain(relation.exact, relation.converts, relation.by_card):
         partner = relation.partner(record_id)
         if (
             partner is not None

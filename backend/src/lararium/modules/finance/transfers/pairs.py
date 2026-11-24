@@ -1,7 +1,8 @@
 """The pair relation (design §5.7): which own records could be one transfer's two sides.
 
 It is computed once, set-wise, from the own records that can pair at all (a bank transfer,
-or one naming a bank account, or one the owner paired) and the owner's decisions, and then
+or one naming a bank account or a card merchant, or one on an account a card merchant pays
+into, or one the owner paired) and the owner's decisions, and then
 read by matching, heal and review alike. It depends only on the records and the decisions,
 never on which transfers exist, and nothing matching writes changes it (re-pointing a
 contra, opening or dissolving a transfer, posting a placeholder), so one computation holds
@@ -9,7 +10,7 @@ for a whole heal pass."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -148,6 +149,91 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     if not (r.fiat and c.fiat) or r.instrument_id == c.instrument_id:
         return None
     return MUTUAL
+
+
+def _card_payer(x: Pairable) -> bool:
+    """A connector's record naming a card merchant that pays into own accounts."""
+    return bool(x.holders) and x.holder is None and x.source[0] == "connection"
+
+
+def _card_receiver(x: Pairable) -> bool:
+    """A connector's record that could be a card payment's other side: naming no own
+    account, no card merchant and no bank account (a Trading 212 DEPOSIT or WITHDRAW)."""
+    return (
+        x.source[0] == "connection" and x.holder is None and not x.holders and not x.names_account
+    )
+
+
+def card_tier(r: Pairable, c: Pairable, window: timedelta) -> Tier | None:
+    """The tier a card payment and a deposit get (eToro design §5.12, Monzo card deposits),
+    or None when they don't pair: one (the payer) names a card merchant whose holders
+    include the other's account; the other names nobody; same instrument, opposite signs and
+    equal amounts; occurred_at at most `window` apart. Uniqueness is the caller's
+    (card_partners). Decisions are not considered.
+
+    ONE_SIDED, for the shape of its evidence: one side names the other's account (as one of
+    the merchant's), the other names nobody. The value never competes with the same-amount
+    tiers' (pair_relation keeps these pairs apart, as it does cross-currency ones), so it
+    sets no precedence: a record any of those tiers pairs is never this one's.
+
+    Both must be connectors' records, which carry the time of day: an imported row from a
+    file giving dates only is stamped 00:00 (its time_unit is display only, never read in
+    matching), and a payment just after midnight would otherwise pair with it by
+    coincidence. Such a row is paired by hand."""
+    if r.account_id == c.account_id or r.instrument_id != c.instrument_id:
+        return None
+    if r.sends == c.sends or r.quantity != -c.quantity:
+        return None
+    if abs(r.occurred_at - c.occurred_at) > window:
+        return None
+    for payer, other in ((r, c), (c, r)):
+        if _card_payer(payer) and other.account_id in payer.holders and _card_receiver(other):
+            return ONE_SIDED
+    return None
+
+
+def card_partners(
+    records: Sequence[Pairable],
+    window: timedelta,
+    apart: Callable[[Pairable, Pairable], bool],
+    taken: Collection[UUID],
+) -> tuple[dict[UUID, frozenset[UUID]], dict[UUID, UUID]]:
+    """(candidates, partners) of card_tier: each record's candidates no decision keeps
+    `apart`, both ways round; and the pairs (both ways round) of records that are each
+    other's only candidate, neither `taken` (paired, or a candidate, in another tier: an
+    exact tier's or across currencies). Uniqueness is across all of a payer's holder
+    accounts, and across all card payments for a deposit. A payer meets the receivers on
+    each holder account in its instrument of its opposite amount, sorted by time."""
+    edges = _Edges()
+    receivers: dict[tuple[UUID, UUID, Decimal], list[Pairable]] = defaultdict(list)
+    for x in records:
+        if _card_receiver(x):
+            receivers[(x.account_id, x.instrument_id, x.quantity)].append(x)
+    by_time = {
+        key: sorted(found, key=lambda x: (x.occurred_at, x.id)) for key, found in receivers.items()
+    }
+    moments = {key: [x.occurred_at for x in found] for key, found in by_time.items()}
+    for s in records:
+        if not _card_payer(s):
+            continue
+        for holder in s.holders:
+            key = (holder, s.instrument_id, -s.quantity)
+            found, times = by_time.get(key), moments.get(key)
+            if found is None or times is None:
+                continue
+            earliest, latest = s.occurred_at - window, s.occurred_at + window
+            for c in found[bisect_left(times, earliest) : bisect_right(times, latest)]:
+                if card_tier(s, c, window) is not None and not apart(s, c):
+                    edges.add(s.id, c.id, ONE_SIDED)
+    candidates = {r: frozenset(found) for r, found in edges.tiers.items()}
+    partners: dict[UUID, UUID] = {}
+    for r, found in candidates.items():
+        if len(found) != 1 or r in taken:
+            continue
+        [c] = found
+        if candidates.get(c) == frozenset({r}) and c not in taken:
+            partners[r] = c
+    return candidates, partners
 
 
 def leg_fees(*records: Pairable) -> list[LegFee]:
@@ -321,10 +407,12 @@ async def _load_records(
     excluding: Collection[UUID],
 ) -> list[Pairable]:
     """The own records that can pair at all: those a bank transfer, naming a bank
-    account or naming an own account by its number (the registry's), and those the owner
-    paired. A card payment is none of these."""
+    account, a card merchant or an own account by its number (the registry's), those on an
+    account a card merchant pays into (card_tier's other side), and those the owner
+    paired."""
     e = eligible_records(system)
     t = models.Transaction
+    h = models.AccountIdentifierHolder
     decided = {source for pair in decisions.paired for source in pair}
     decided_ids = (
         select(t.id).where(or_(*(names_source(t, source) for source in decided)))
@@ -338,6 +426,7 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.counterparty_identifier_id.is_not(None),
         e.c.holder.is_not(None),
+        e.c.account_id.in_(select(h.account_id)),
     ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
@@ -546,6 +635,11 @@ class PairRelation:
     # the conversion's fee fits (`converts`, both ways round), else of another amount.
     alone_across: frozenset[UUID]
     converts: Mapping[UUID, UUID]
+    # A record's candidates as a card payment or the deposit it paid (card_partners), and
+    # the pairs, both ways round, of those each the other's only one, with no candidate in
+    # another tier either.
+    cards: Mapping[UUID, frozenset[UUID]]
+    by_card: Mapping[UUID, UUID]
 
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
@@ -557,7 +651,8 @@ class PairRelation:
         among interchangeable candidates, the one a fixed order gives it (_twins)."""
         found = self.exact.get(record_id, frozenset())
         if not found:
-            return self.converts.get(record_id)
+            across = self.converts.get(record_id)
+            return across if across is not None else self.by_card.get(record_id)
         if len(found) != 1:
             return self.twins.get(record_id)
         [partner] = found
@@ -565,11 +660,16 @@ class PairRelation:
 
     def several(self, record_id: UUID) -> bool:
         """Whether the record has candidates the rule can't choose between: any of the same
-        amount, or in another currency when it and one of them aren't each other's only
-        one (several_candidates)."""
+        amount, or in another currency or as a card payment's other side when it and one of
+        them aren't each other's only one (several_candidates). Only a record with a
+        transfer carries the reason: an unpaired card payment and its deposits have none
+        (no awaiting transfer is opened for either), so for them it is the relation's word
+        alone, and they stay on Unassigned for the owner to pair."""
         if self.exact.get(record_id):
             return True
-        return bool(self.across.get(record_id)) and record_id not in self.alone_across
+        if self.across.get(record_id) and record_id not in self.alone_across:
+            return True
+        return bool(self.cards.get(record_id)) and record_id not in self.by_card
 
 
 def _twins(
@@ -637,8 +737,10 @@ async def pair_relation(
     may, as the weakest tier (weak_tier). Two records in different currencies pair when
     cross_currency_tier takes them, within the near window, each the other's only such
     candidate and neither with one of the same amount; their conversion's fee must fit
-    (conversion_postings), else they are for review as of another amount. The owner pairs
-    two records with a pair decision.
+    (conversion_postings), else they are for review as of another amount. A card payment
+    and a deposit on one of its merchant's holder accounts pair when card_tier takes them,
+    each the other's only such candidate and neither with a candidate in another tier
+    (card_partners). The owner pairs two records with a pair decision.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
@@ -682,6 +784,11 @@ async def pair_relation(
             differing.add(r, c, MUTUAL)  # for review, as a counterpart of another amount
         else:
             converts[r] = c
+    # As across: a record any other tier gives a candidate never pairs as a card's, and a
+    # card candidate that has one leaves the record for the owner.
+    cards, by_card = card_partners(
+        records, settings.near_window, decisions.apart, exact.keys() | across.keys()
+    )
     return PairRelation(
         records={x.id: x for x in records},
         rejected=frozenset(x.id for x in records if x.source in decisions.rejected),
@@ -692,4 +799,6 @@ async def pair_relation(
         across=across,
         alone_across=frozenset(alone),
         converts=converts,
+        cards=cards,
+        by_card=by_card,
     )

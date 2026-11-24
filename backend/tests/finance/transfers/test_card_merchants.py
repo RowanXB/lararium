@@ -33,12 +33,15 @@ from lararium.modules.finance.transfers import (
 )
 from lararium.modules.finance.transfers.contra import eligible_records
 from lararium.modules.finance.transfers.pairs import (
+    ONE_SIDED,
     Pairable,
+    card_tier,
     cross_currency_tier,
     pair_relation,
     registry_tier,
     weak_tier,
 )
+from lararium.modules.finance.transfers.settings import DEFAULTS
 
 from .conftest import (
     DAY,
@@ -56,6 +59,7 @@ from .conftest import (
 
 MERCHANT = "merch_TEST212"
 MONZO_IDENTIFIER = "998877:87654321"
+NEAR = DEFAULTS.near_window
 
 
 @pytest.fixture
@@ -299,7 +303,8 @@ async def test_card_payment_stays_unassigned_until_paired(
     monzo, invest, isa = platform
     record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
     payment = await _card_payment(connector_tx, monzo, record.id)
-    deposit = await _deposit(connector_tx, invest)
+    # An hour later: outside the near window, so Task 16's card tier doesn't pair them.
+    deposit = await _deposit(connector_tx, invest, occurred_at=WHEN + timedelta(hours=1))
     await heal()
 
     row = await _eligible_row(session, payment.id)
@@ -346,7 +351,8 @@ async def test_registering_rematches_and_stays_unassigned(
     monzo, invest, isa = platform
     record = await run(register_card_merchant, MERCHANT, [invest.account.id])
     payment = await _card_payment(connector_tx, monzo, record.id)
-    await _deposit(connector_tx, invest, bank_transfer=True)
+    # Outside the near window, so Task 16's card tier doesn't pair them.
+    await _deposit(connector_tx, invest, bank_transfer=True, occurred_at=WHEN + timedelta(hours=1))
     await heal()
 
     # One holder or two, a card merchant never identifies the record (no `holder`).
@@ -373,6 +379,8 @@ def _pairable(account: UUID, quantity: str, **kw) -> Pairable:
 
 
 def test_no_existing_tier_pairs_a_multi_holder_record() -> None:
+    """None of the earlier tiers pairs a card payment; Task 16's card_tier is the one that
+    does, and only with a connector's record naming nobody (test_card_deposits)."""
     monzo, invest, isa = UUID(int=10), UUID(int=11), UUID(int=12)
     for bank_transfer in (False, True):
         card = _pairable(
@@ -397,6 +405,18 @@ def test_no_existing_tier_pairs_a_multi_holder_record() -> None:
         across = _pairable(invest, "60", holder=monzo, instrument_id=UUID(int=2))
         assert cross_currency_tier(card, across) is None
         assert cross_currency_tier(across, card) is None
+    # The qualification: card_tier pairs a connector's card payment with a connector's
+    # deposit naming nobody, a bank transfer or not, and with none of the others above.
+    connector = ("connection", "c:card")
+    card = _pairable(monzo, "-50", holders=frozenset({invest, isa}), source=connector)
+    for bank_transfer in (False, True):
+        plain = _pairable(invest, "50", bank_transfer=bank_transfer, source=("connection", "c:d"))
+        assert card_tier(card, plain, NEAR) == card_tier(plain, card, NEAR) == ONE_SIDED
+    for named in (
+        _pairable(invest, "50", bank_transfer=True, holder=monzo, names_account=True),
+        _pairable(invest, "50", bank_transfer=True, weak_holder=monzo, names_account=True),
+    ):
+        assert card_tier(card, named, NEAR) is None
 
 
 async def test_no_existing_tier_pairs_it_in_the_ledger(
@@ -414,14 +434,15 @@ async def test_no_existing_tier_pairs_it_in_the_ledger(
     record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
     payment = await _card_payment(connector_tx, monzo, record.id)
     # A bank transfer into Invest naming Monzo, and one into ISA naming nobody, same amount
-    # and day: ONE_SIDED would take either for a record identified as theirs.
+    # and day: ONE_SIDED would take either for a record identified as theirs. ISA's is an
+    # hour later, outside the near window, so Task 16's card tier doesn't take it either.
     await _deposit(connector_tx, invest, bank_transfer=True, identifier_id=monzo_identifier.id)
     await _deposit(
         connector_tx,
         isa,
         external_id="deposit_2",
         bank_transfer=True,
-        occurred_at=WHEN + timedelta(minutes=1),
+        occurred_at=WHEN + timedelta(hours=1),
     )
     await heal()
 
