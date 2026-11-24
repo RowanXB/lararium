@@ -686,7 +686,7 @@ async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ..
             )
             if delta == 0:
                 continue
-            if wallet == "earn" and 0 < delta <= _accruing(history, removed, asset, high):
+            if wallet == "earn" and abs(delta) <= _accruing(history, removed, asset, high):
                 continue
             zero = Decimal(0)
             change = history.balance(high).get((wallet, asset), zero) - history.balance(low).get(

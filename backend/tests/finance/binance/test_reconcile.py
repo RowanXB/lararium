@@ -302,7 +302,7 @@ async def test_changed_old_record_reopens_its_interval(
 
 @pytest.mark.parametrize(
     ("held", "differs"),
-    [("100.8", False), ("100.5", False), ("101.1", True), ("100.4", True)],
+    [("100.8", False), ("100.5", False), ("101.1", True), ("100.4", False), ("99.9", True)],
 )
 async def test_earn_allowance(
     session, run, fake: FakeBinance, connector, clock: Clock, held: str, differs: bool
@@ -318,8 +318,10 @@ async def test_earn_allowance(
         time=clock.ms + HOUR_MS,
     )
     fake.add("earn-flexible-rewards", reward)
-    # The position runs ahead of its records by the reward still accruing: 0.3 is less than
-    # the last REALTIME reward (0.5), 0.6 is more; behind is never the reward.
+    # The position accrues the reward all day and the record is dated at the day's end, so
+    # it is ahead of its records by what is still accruing, or behind them by what the
+    # earlier report already held: 0.3 ahead and 0.1 behind are within the last REALTIME
+    # reward (0.5), 0.6 either way is more.
     fake.set_rows("wallet-balance", _earn(("STB", held)))
 
     await _later(session, connection, fake, clock)

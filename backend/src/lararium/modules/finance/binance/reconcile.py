@@ -56,7 +56,9 @@ RECONCILED_KEY = "reconciled_through"
 # Per "<account id>:<instrument id>", the earliest and latest `occurred_at` (epoch ms) of the
 # postings committed runs touched that no reconciliation has checked yet.
 TOUCHED_KEY = "touched_pending"
-# Earn's flexible position runs ahead of its records by the reward still accruing.
+# Earn's flexible position grows all day with the real-time reward, whose record is dated at
+# the day's end: between two reports it is ahead of its records by the reward still accruing
+# at the later one, or behind them by what had already accrued at the earlier one.
 _EARN = "earn"
 _REALTIME = "REALTIME"
 _ACCRUING = timedelta(hours=48)
@@ -167,7 +169,7 @@ async def _accruing(
     session: AsyncSession, connection_id: UUID, instrument_id: UUID, at: datetime
 ) -> Decimal:
     """The largest `REALTIME` reward of the asset in the 48 hours before `at`: how far Earn's
-    position may run ahead of its records (design 5.11)."""
+    position may be from its records, either way (design 5.11)."""
     largest = await session.scalar(
         text(
             "select max(rewards) from finance.binance_earn_flexible_rewards"
@@ -273,7 +275,7 @@ async def check(
                         ).decimals
                     if ahead.copy_abs() <= tolerance(decimals[instrument_id]):
                         continue
-                    if account_id in earn and 0 < ahead <= await _accruing(
+                    if account_id in earn and ahead.copy_abs() <= await _accruing(
                         session, connection_id, instrument_id, to_at
                     ):
                         continue
