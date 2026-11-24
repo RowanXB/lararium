@@ -823,3 +823,56 @@ async def test_reconciliation_record_survives_the_worker(session, run, api, monk
     assert isinstance(second.cursor, dict)
     assert second.cursor["reconciliation"] == found
     assert len(notifier.messages) == told
+
+
+async def test_normalization_runs_under_the_connection_lock(session, run, api, monkeypatch) -> None:
+    # A sync and an export upload of one connection normalize one at a time: the sync takes
+    # the connection's lock before it normalizes, and publishes its flags under it.
+    connection = await _connection(run)
+    events: list[str] = []
+    lock, publish = t212_sync.lock_connection, t212_sync.publish_flags
+
+    async def locking(ctx: Any, connection_id: uuid.UUID) -> Any:
+        events.append("lock")
+        return await lock(ctx, connection_id)
+
+    async def publishing(ctx: SyncContext, *args: Any, **kwargs: Any) -> dict[str, JSONValue]:
+        events.append("publish")
+        return await publish(ctx, *args, **kwargs)
+
+    async def normalizing(ctx: SyncContext, raw_record_ids: list[uuid.UUID]) -> NormalizeReport:
+        events.append("normalize")
+        return NormalizeReport()
+
+    monkeypatch.setattr(t212_sync, "lock_connection", locking)
+    monkeypatch.setattr(t212_sync, "publish_flags", publishing)
+    monkeypatch.setattr(t212_sync, "normalize", normalizing)
+    await _run_sync(session, connection, api)
+    assert events == ["lock", "normalize", "publish"]
+
+
+async def test_an_upload_during_a_sync_keeps_its_flag(session, run, api, monkeypatch) -> None:
+    connection = await _connection(run)
+    flag = "export column Brand New Column"
+    lock = t212_sync.lock_connection
+    uploaded: list[bool] = []
+
+    async def locking(ctx: Any, connection_id: uuid.UUID) -> Any:
+        # The owner uploads an export while the sync fetches, after it read its cursor and
+        # before it takes the lock: the upload commits its flag first.
+        if not uploaded:
+            uploaded.append(True)
+            current = (await get_connection(session, connection_id)).cursor
+            await _set_warnings(session, connection, [f"Trading 212 flagged: {flag}"])
+            await _set_cursor(
+                session,
+                connection,
+                (current if isinstance(current, dict) else {})
+                | {"flags": {"export": [flag]}, "notified": [flag]},
+            )
+        return await lock(ctx, connection_id)
+
+    monkeypatch.setattr(t212_sync, "lock_connection", locking)
+    after = await _run_sync(session, connection, api)
+    assert f"Trading 212 flagged: {flag}" in after.warnings
+    assert isinstance(after.cursor, dict) and after.cursor["flags"]["export"] == [flag]

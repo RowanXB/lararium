@@ -412,6 +412,20 @@
         "title": "Body_upload_ibkr_statement",
         "type": "object"
       },
+      "Body_upload_trading212_export": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_trading212_export",
+        "type": "object"
+      },
       "CandidateOut": {
         "properties": {
           "account_id": {
@@ -3797,6 +3811,19 @@
         "title": "Trading212ConnectionUpdate",
         "type": "object"
       },
+      "Trading212UploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "Trading212UploadOut",
+        "type": "object"
+      },
       "TransactionCreate": {
         "properties": {
           "booking_date": {
@@ -4675,7 +4702,7 @@
     },
     "/api/v1/connections/{connection_id}/reviews": {
       "get": {
-        "description": "The connection's review items (design \u00a75.7): open ones first, newest first. Only an\neToro connection has them.",
+        "description": "The connection's review items (design \u00a75.7): open ones first, newest first. Only an\neToro or a Trading 212 connection has them.",
         "operationId": "list_source_reviews",
         "parameters": [
           {
@@ -4870,6 +4897,60 @@
           }
         },
         "summary": "Update Trading212 Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/trading212-export": {
+      "post": {
+        "description": "Ingest a Trading 212 CSV export the owner downloaded, normalise it with the API's\nrecords and heal the transfers, in one command. Optional: it adds what the API lacks.\nIts file is written last, just before the commit: a refused or failed upload leaves none\nbehind.",
+        "operationId": "upload_trading212_export",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_trading212_export"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trading212UploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Trading212 Export",
         "tags": [
           "connections"
         ]

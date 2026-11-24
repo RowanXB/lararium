@@ -216,6 +216,8 @@ class Run(ConnectorRun):
         self.position_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self.fill_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self._instruments: dict[tuple[str, bool], UUID | None] = {}
+        # (event key, field) of each review item this run opened (merge), to tell.
+        self.reviews: list[tuple[str, str]] = []
 
     @property
     def account(self) -> UUID:

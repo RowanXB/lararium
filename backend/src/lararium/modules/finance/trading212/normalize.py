@@ -8,10 +8,11 @@ saw, dated as it was then. A run otherwise applies the records it was given and 
 sync's sightings.
 
 In order: the account (accounts.py); instrument and exchange metadata (reports.py); order
-fills, dividends and cash movements as connector transactions, then the opening adjustments
-(records.py); the summaries, positions, pending orders and pies, typed per day, with reported
-snapshots, and prices (reports.py); reconciliation of this sync's report, at the time its
-summary arrived (reconcile.py).
+fills, dividends and cash movements as connector transactions, with the optional CSV export's
+rows (merge.py: they enrich the API's movements, and post a deposit or withdrawal the API
+lacks), then the opening adjustments (records.py); the summaries, positions, pending orders
+and pies, typed per day, with reported snapshots, and prices (reports.py); reconciliation of
+this sync's report, at the time its summary arrived (reconcile.py).
 
 Every record's fields are checked first: a required one missing fails the run; an unknown one
 with a value is flagged. Flags (unknown fields, unknown values of the enums that decide
@@ -24,15 +25,18 @@ from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
 from uuid import UUID
 
+from lararium.core import models as core_models
 from lararium.core.connections import get_connection, merge_cursor, update_config
 from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
+from lararium.modules.finance import source_merge
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.connector_items import lacks, leaves
 from lararium.modules.finance.report_sightings import list_sightings
-from lararium.modules.finance.trading212 import accounts, reconcile, records, reports
+from lararium.modules.finance.trading212 import accounts, merge, reconcile, records, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS, MAP_ENTRIES
 from lararium.modules.finance.trading212.instruments import type_flags
+from lararium.modules.finance.trading212.merge import ExportRecord
 from lararium.modules.finance.trading212.state import (
     NormalizeReport,
     Record,
@@ -104,6 +108,44 @@ async def _records(
     return list(keyed.values()), await reports_of(session, sightings)
 
 
+async def _movements(
+    run: Run, given: list[Record], raw_record_ids: Sequence[UUID], replay: bool
+) -> tuple[list[Record], dict[str, ExportRecord]]:
+    """The API's cash movements to apply, and the export's rows (merge), by reference.
+
+    The movements given, the TRANSFERs to name their sibling in, and the latest stored copy
+    of each one an export row given (or an owner's decision) concerns; the export rows given,
+    and the stored one of each movement applied. A replay has every stored record of both."""
+    keys = {record_key(r) for r in given}
+    movements = given + [
+        r for r in await records.unidentified_transfers(run) if record_key(r) not in keys
+    ]
+    if replay:
+        return movements, await merge.stored(run, None)
+    exports = await merge.given(run, raw_record_ids)
+    references = {text_at(r.content, "reference") for r in movements}
+    decided = {
+        key.removeprefix(merge.TRANSACTION)
+        for key in await source_merge.decided_keys(
+            run.session, run.connection_id, merge.TRANSACTION
+        )
+    }
+    wanted = (set(exports) | decided) - references
+    if wanted:
+        latest: dict[str, Record] = {}
+        for record in await stored(
+            run.session,
+            run.connection_id,
+            ["transactions"],
+            core_models.RawRecord.content["reference"].astext.in_(sorted(wanted)),
+        ):
+            latest[text_at(record.content, "reference")] = record
+        movements += list(latest.values())
+        references |= set(latest)
+    exports |= await merge.stored(run, (references | decided) - set(exports))
+    return movements, exports
+
+
 def _tickers(by_endpoint: dict[str, list[Record]], reports_: Sequence[Report]) -> set[str]:
     found = {text_at(r.content, "order.instrument.ticker") for r in by_endpoint["orders"]}
     found |= {text_at(r.content, "instrument.ticker") for r in by_endpoint["dividends"]}
@@ -152,12 +194,14 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
         by_endpoint["dividends"], key=lambda r: (text_at(r.content, "paidOn"), record_key(r))
     ):
         await records.dividend(run, record)
-    given = {record_key(r) for r in by_endpoint["transactions"]}
-    movements = by_endpoint["transactions"] + [
-        r for r in await records.unidentified_transfers(run) if record_key(r) not in given
-    ]
+    movements, exports = await _movements(run, by_endpoint["transactions"], raw_record_ids, replay)
     for record in sorted(movements, key=lambda r: (text_at(r.content, "dateTime"), record_key(r))):
-        await records.cash_movement(run, record)
+        await records.cash_movement(run, record, exports.get(text_at(record.content, "reference")))
+    by_api = {text_at(r.content, "reference") for r in movements}
+    alone = [e for reference, e in exports.items() if reference not in by_api]
+    for export in sorted(alone, key=lambda e: (e.cells.get("Time (UTC)", ""), e.reference)):
+        await records.export_movement(run, export)
+    await records.export_rows(run, sorted(exports.values(), key=lambda e: e.reference))
     await records.openings(run)
 
     await reports.apply(run, seen)
@@ -185,6 +229,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     if any(kept.get(key) != value for key, value in report.cursor.items()):
         await merge_cursor(ctx.command, connection.id, report.cursor)
     report.instrument_flags = await type_flags(run.session, run.connection_id, run.account)
+    await merge.notify(ctx, connection.display_name, run.reviews)
 
     # Only this normaliser's keys: others (the account kind) stay as they are.
     values: dict[str, JSONValue] = {

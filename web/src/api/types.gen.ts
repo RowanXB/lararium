@@ -205,6 +205,16 @@ export type BodyUploadIbkrStatement = {
 };
 
 /**
+ * Body_upload_trading212_export
+ */
+export type BodyUploadTrading212Export = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * CandidateOut
  */
 export type CandidateOut = {
@@ -1784,6 +1794,16 @@ export type Trading212ConnectionUpdate = {
 };
 
 /**
+ * Trading212UploadOut
+ */
+export type Trading212UploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
+
+/**
  * TransactionCreate
  */
 export type TransactionCreate = {
@@ -2504,6 +2524,36 @@ export type UpdateTrading212ConnectionResponses = {
 };
 
 export type UpdateTrading212ConnectionResponse = UpdateTrading212ConnectionResponses[keyof UpdateTrading212ConnectionResponses];
+
+export type UploadTrading212ExportData = {
+    body: BodyUploadTrading212Export;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/trading212-export';
+};
+
+export type UploadTrading212ExportErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadTrading212ExportError = UploadTrading212ExportErrors[keyof UploadTrading212ExportErrors];
+
+export type UploadTrading212ExportResponses = {
+    /**
+     * Successful Response
+     */
+    202: Trading212UploadOut;
+};
+
+export type UploadTrading212ExportResponse = UploadTrading212ExportResponses[keyof UploadTrading212ExportResponses];
 
 export type ListAccountsData = {
     body?: never;

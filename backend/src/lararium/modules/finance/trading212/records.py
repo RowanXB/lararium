@@ -28,7 +28,7 @@ from sqlalchemy import func, select, text
 
 from lararium.core import models as core_models
 from lararium.core.timeutil import local_date
-from lararium.modules.finance import models
+from lararium.modules.finance import models, source_merge
 from lararium.modules.finance.connector_run import (
     holdings,
     not_opening,
@@ -39,8 +39,9 @@ from lararium.modules.finance.instruments import InstrumentRecord, get_instrumen
 from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import first_sighting, list_sightings
-from lararium.modules.finance.trading212 import accounts, reports
+from lararium.modules.finance.trading212 import accounts, merge, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS
+from lararium.modules.finance.trading212.merge import CashEvent, ExportRecord
 from lararium.modules.finance.trading212.state import (
     LONDON,
     Item,
@@ -306,7 +307,33 @@ async def dividend(run: Run, record: Record) -> None:
     )
 
 
-async def cash_movement(run: Run, record: Record) -> None:
+async def _post_movement(
+    run: Run, key: str, kind: str, description: str, values: CashEvent
+) -> UUID:
+    currency = await run.currency(values.currency)
+    # A TRANSFER is with the sibling account when there is one (accounts.sibling); a deposit
+    # or withdrawal names nothing: the card payment pairs with it.
+    identifier = await accounts.sibling(run) if kind == TRANSFER else None
+    contra = (
+        await run.contra(key, 0, identifier)
+        if kind in _THROUGH_CONTRA
+        else await run.system_account("unassigned")
+    )
+    return await run.post(
+        key,
+        values.occurred_at,
+        description,
+        [
+            PostingInput(run.account, currency.id, values.amount),
+            PostingInput(contra, currency.id, -values.amount),
+        ],
+        CounterpartyFields(identifier_id=identifier),
+    )
+
+
+async def cash_movement(run: Run, record: Record, export: ExportRecord | None = None) -> None:
+    """The API's cash movement, with the export's row for it when one is stored: the API's
+    values post, but for a field the owner took from the export (merge)."""
     content = record.content
     key = record_key(record)
     kind = text_at(content, "type")
@@ -320,26 +347,23 @@ async def cash_movement(run: Run, record: Record) -> None:
             run.flag(TRANSFER_FLAG)
         else:
             amount = amount.copy_abs() * sign
-        if amount != 0:
-            currency = await run.currency(text_at(content, "currency"))
-            # A TRANSFER is with the sibling account when there is one (accounts.sibling);
-            # a deposit or withdrawal names nothing: the card payment pairs with it.
-            identifier = await accounts.sibling(run) if kind == TRANSFER else None
-            contra = (
-                await run.contra(key, 0, identifier)
-                if kind in _THROUGH_CONTRA
-                else await run.system_account("unassigned")
-            )
-            transaction_id = await run.post(
-                key,
-                moment_at(record, content, "dateTime"),
-                description,
-                [
-                    PostingInput(run.account, currency.id, amount),
-                    PostingInput(contra, currency.id, -amount),
-                ],
-                CounterpartyFields(identifier_id=identifier),
-            )
+        occurred_at = moment_at(record, content, "dateTime")
+        api = CashEvent(
+            amount,
+            text_at(content, "currency"),
+            local_date(occurred_at, LONDON),
+            occurred_at,
+        )
+        other = merge.event(export) if export is not None and kind in merge.COMPARED else None
+        choice = await source_merge.choose(
+            run.session, run.connection_id, key, api, other, merge.FIELDS, merge.TOGETHER
+        )
+        if choice.values.amount != 0:
+            transaction_id = await _post_movement(run, key, kind, description, choice.values)
+        opened = await source_merge.record_reviews(
+            run.command, run.connection_id, key, transaction_id, choice
+        )
+        run.reviews.extend((key, field) for field in opened)
     if transaction_id is None:
         await run.void(key)
     values = await run.typed("transactions", "trading212_transactions", flat(content))
@@ -349,6 +373,25 @@ async def cash_movement(run: Run, record: Record) -> None:
         {"connection_id": run.connection_id, "reference": reference},
         values | {"transaction_id": transaction_id, "raw_record_id": record.id},
     )
+
+
+async def export_movement(run: Run, export: ExportRecord) -> None:
+    """A deposit or withdrawal only the export has (a page the API skipped): posted from the
+    export under the key the API would use. A row of another action posts nothing."""
+    found = merge.event(export)
+    if found is None or found.amount == 0:
+        await run.void(export.key)
+        return
+    _, kind = merge.ACTIONS[export.action]
+    await _post_movement(run, export.key, kind, TRANSACTIONS[kind][1], found)
+
+
+async def export_rows(run: Run, exports: Sequence[ExportRecord]) -> None:
+    """Each export row typed, linking the transaction under its key (the API's, or the one it
+    posted alone), and flagged when its action posts nothing."""
+    for export in exports:
+        merge.flag(run, export)
+        await merge.write(run, export, await run.live(export.key))
 
 
 async def unidentified_transfers(run: Run) -> list[Record]:

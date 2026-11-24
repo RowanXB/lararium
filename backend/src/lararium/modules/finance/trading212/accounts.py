@@ -42,7 +42,7 @@ KINDS: Mapping[str, tuple[str, TaxWrapper]] = {
 }
 
 
-def _mapped_id(config: Mapping[str, JSONValue]) -> str | None:
+def mapped_id(config: Mapping[str, JSONValue]) -> str | None:
     """The Trading 212 account id a connection's account map holds, when it holds one."""
     stored = config.get(ACCOUNT_MAP_KEY)
     if isinstance(stored, dict) and len(stored) == 1:
@@ -57,7 +57,7 @@ async def account(run: Run, summary: Record | None) -> None:
     run.account_map = dict(stored) if isinstance(stored, dict) else {}
     if summary is not None:
         trading212_id = normalize_identifier("trading212_account", text_at(summary.content, "id"))
-    elif (mapped := _mapped_id(run.config)) is not None:
+    elif (mapped := mapped_id(run.config)) is not None:
         trading212_id = mapped
     else:
         raise Trading212DataError("Trading 212's account summary is missing")
@@ -118,7 +118,7 @@ async def sibling(run: Run) -> UUID | None:
     if kinds != ["invest", "isa"]:
         return None
     [other] = [c for c in connections if c.id != run.connection_id]
-    trading212_id = _mapped_id(other.config)
+    trading212_id = mapped_id(other.config)
     if trading212_id is None:
         return None
     try:

@@ -30,23 +30,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import text
-
 from lararium.core.connectors import SyncContext
+from lararium.modules.finance import source_merge
 from lararium.modules.finance.etoro.state import Run, ending
-from lararium.modules.finance.money import to_plain_str
-from lararium.modules.finance.source_reviews import (
-    AGREED,
-    Take,
-    close_agreed,
-    link_reviews,
-    open_review,
-)
+from lararium.modules.finance.source_merge import Choice, Disagreement
+from lararium.modules.finance.source_reviews import Take
 
 logger = logging.getLogger(__name__)
 
 # The fields a disagreement is about, in the order reviews name them.
 FIELDS = ("units", "cash", "profit", "booking_date")
+# Taking the statement's booking date takes its moment too.
+_TOGETHER = {"booking_date": ("occurred_at",)}
 
 
 @dataclass(frozen=True)
@@ -62,37 +57,17 @@ class TradeEvent:
     occurred_at: datetime
 
 
-def _text(value: Decimal | date | None) -> str:
-    """A value as a review keeps it: a number without trailing zeros, a date in ISO."""
-    if isinstance(value, Decimal):
-        plain = to_plain_str(value.normalize())
-        return "0" if plain in ("-0", "0") else plain
-    return "" if value is None else value.isoformat()
-
-
-def disagreements(api: TradeEvent, statement: TradeEvent) -> list[tuple[str, str, str]]:
+def disagreements(api: TradeEvent, statement: TradeEvent) -> list[Disagreement]:
     """(field, the API's value, the statement's value) for each field they differ in. Numbers
     are compared as numbers (500.0 is 500); a profit only one source states is no
     disagreement."""
-    found: list[tuple[str, str, str]] = []
-    for field in FIELDS:
-        theirs, ours = getattr(api, field), getattr(statement, field)
-        if theirs is None or ours is None or theirs == ours:
-            continue
-        found.append((field, _text(theirs), _text(ours)))
-    return found
+    return source_merge.disagreements(FIELDS, api, statement)
 
 
 def agreements(api: TradeEvent, statement: TradeEvent) -> list[str]:
     """The fields both sources state and agree on: a field one of them leaves out agrees on
     nothing, so an open review of it stays open."""
-    return [
-        field
-        for field in FIELDS
-        if (theirs := getattr(api, field)) is not None
-        and (ours := getattr(statement, field)) is not None
-        and theirs == ours
-    ]
+    return source_merge.agreements(FIELDS, api, statement)
 
 
 def posting_values(
@@ -101,97 +76,42 @@ def posting_values(
     """The values the event posts: the API's, but for each field the owner took from the
     statement; the statement's when the API has none. Taking the statement's booking date
     takes its moment too."""
-    if api is None:
-        if statement is None:
-            raise ValueError("an event needs a source")
-        return statement
-    if statement is None:
-        return api
-
-    def pick[T](field: str, theirs: T, ours: T) -> T:
-        return ours if takes.get(field) == "statement" else theirs
-
-    return TradeEvent(
-        units=pick("units", api.units, statement.units),
-        cash=pick("cash", api.cash, statement.cash),
-        profit=pick("profit", api.profit, statement.profit),
-        booking_date=pick("booking_date", api.booking_date, statement.booking_date),
-        occurred_at=pick("booking_date", api.occurred_at, statement.occurred_at),
-    )
+    return source_merge.posting_values(api, statement, FIELDS, takes, _TOGETHER)
 
 
 # Against the ledger --------------------------------------------------------------------------
 
 
-async def takes(run: Run, key: str, found: Sequence[tuple[str, str, str]]) -> dict[str, Take]:
+async def takes(run: Run, key: str, found: Sequence[Disagreement]) -> dict[str, Take]:
     """The owner's take on each disagreeing field, where the latest item they resolved for it
     had these very values; a field whose values changed since has none (its review reopens)."""
-    if not found:
-        return {}
-    rows = await run.session.execute(
-        text(
-            "select d.field, d.take, r.api_value, r.statement_value"
-            " from finance.source_decisions d"
-            " join lateral (select api_value, statement_value from finance.source_reviews r"
-            " where r.connection_id = d.connection_id and r.event_key = d.event_key"
-            " and r.field = d.field and r.resolved_at is not null and r.resolved_by <> :agreed"
-            " order by r.resolved_at desc, r.opened_at desc limit 1) r on true"
-            " where d.connection_id = :c and d.event_key = :e"
-        ),
-        {"c": run.connection_id, "e": key, "agreed": AGREED},
-    )
-    decided = {row.field: (row.take, row.api_value, row.statement_value) for row in rows}
-    result: dict[str, Take] = {}
-    for field, theirs, ours in found:
-        decision = decided.get(field)
-        if decision is not None and decision[1:] == (theirs, ours) and decision[0] == "statement":
-            result[field] = "statement"
-    return result
-
-
-@dataclass(frozen=True)
-class Choice:
-    """The values an event posts; its disagreements, to review once posted; and the fields
-    both sources state and agree on, whose open items close."""
-
-    values: TradeEvent
-    found: list[tuple[str, str, str]]
-    agreed: list[str]
+    return await source_merge.decided_takes(run.session, run.connection_id, key, found)
 
 
 async def choose(
     run: Run, key: str, api: TradeEvent | None, statement: TradeEvent | None
-) -> Choice:
-    found: list[tuple[str, str, str]] = []
-    agreed: list[str] = []
-    if api is not None and statement is not None:
-        found, agreed = disagreements(api, statement), agreements(api, statement)
-    return Choice(posting_values(api, statement, await takes(run, key, found)), found, agreed)
+) -> Choice[TradeEvent]:
+    return await source_merge.choose(
+        run.session, run.connection_id, key, api, statement, FIELDS, _TOGETHER
+    )
 
 
-async def review(run: Run, key: str, transaction_id: UUID, choice: Choice) -> None:
+async def review(run: Run, key: str, transaction_id: UUID, choice: Choice[TradeEvent]) -> None:
     """Link the event's review items to its transaction, close the open ones on fields the
     two sources now agree on, and open one for each disagreement the owner has not seen with
     these values."""
-    await link_reviews(run.command, run.connection_id, key, transaction_id)
-    await close_agreed(run.command, run.connection_id, key, choice.agreed)
-    for field, theirs, ours in choice.found:
-        if await open_review(
-            run.command, run.connection_id, transaction_id, key, field, theirs, ours
-        ):
-            run.reviews.append((key, field))
+    opened = await source_merge.record_reviews(
+        run.command, run.connection_id, key, transaction_id, choice
+    )
+    run.reviews.extend((key, field) for field in opened)
 
 
 async def decided_positions(run: Run) -> set[str]:
     """The positions whose events the owner has decided on: each run applies them, so a
     decision posts at the next sync."""
-    keys = await run.session.scalars(
-        text(
-            "select distinct event_key from finance.source_decisions where connection_id = :c"
-            " and (event_key like 'open:%' or event_key like 'close:%')"
-        ),
-        {"c": run.connection_id},
-    )
+    keys: set[str] = set()
+    for prefix in ("open:", "close:"):
+        keys |= await source_merge.decided_keys(run.session, run.connection_id, prefix)
     return {key.split(":", 1)[1] for key in keys}
 
 

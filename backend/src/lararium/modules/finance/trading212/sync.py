@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from lararium.core.connections import load_credential
+from lararium.core.connections import load_credential, lock_connection
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
@@ -55,6 +55,8 @@ KINDS: tuple[HistoryKind, ...] = ("orders", "dividends", "transactions")
 FLAGGED_PREFIX = "Trading 212 flagged: "
 # The part the normalizer's flags are published under.
 FIELDS = "fields"
+# The part the latest export upload's unknown columns are published under (export.py).
+EXPORT = "export"
 INSTRUMENT_TYPES = "instrument_types"
 _STOPPED = "history stopped early (404)"
 # What Trading 212 reports now, rather than records: each storing is sighted.
@@ -153,12 +155,14 @@ async def publish_flags(
     ctx: SyncContext,
     found: Iterable[tuple[str, str]],
     checked: Collection[str],
-    cursor: Mapping[str, JSONValue],
+    cursor: Mapping[str, JSONValue] | None = None,
 ) -> dict[str, JSONValue]:
     """Replace the sync's own flags among the connection's warnings with this run's, keeping
     every other warning, as it stands now (normalize, say, may have written some); the shared
-    rules of connector_flags. A part not `checked` this run (the pies, but on metadata days)
-    keeps the flags the cursor holds for it. Returns the cursor's `flags` and `notified`."""
+    rules of connector_flags. A part not `checked` this run (the pies, but on metadata days;
+    the export's columns, but on an upload) keeps the flags the cursor holds for it: by
+    default the cursor as the connection stands now, so a sync sees what an upload published
+    meanwhile. Returns the cursor's `flags` and `notified`."""
     return await connector_flags.publish_flags(
         ctx,
         found,
@@ -305,13 +309,17 @@ class Trading212Connector:
             raise MissingPermissionError(
                 f"Trading 212 key lacks the {error.scope} permission"
             ) from None
+        # Locked from here until the sync commits: an export upload normalizes the same
+        # connection one at a time with it, and its flags published meanwhile are read here
+        # (publish_flags reads the cursor as it stands now), never overwritten after.
+        await lock_connection(ctx.command, connection.id)
         report = await normalize(ctx, list(dict.fromkeys(run.ids)))
         if report.replayed:
             run.checked.add(FIELDS)
         run.checked.add(INSTRUMENT_TYPES)
         found = run.found | run.client.skipped | {(FIELDS, flag) for flag in report.flagged}
         found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
-        after |= await publish_flags(ctx, found, run.checked, cursor)
+        after |= await publish_flags(ctx, found, run.checked)
         # Its cursor replaces the row's: it keeps what reconciliation recorded.
         after |= report.cursor
         return after

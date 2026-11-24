@@ -1,5 +1,5 @@
 """Trading 212's endpoints and fields: the single source for the sync, the normalizer and the
-typed tables of migration 0030.
+typed tables of migrations 0030 and 0034 (the CSV export's, `EXPORT_*`).
 
 Known paths are every path of the OpenAPI bundle of 2026-10-17 for the endpoints the
 connector reads. A path is dotted, below one item (a page's item, an array's item, or the
@@ -195,7 +195,28 @@ KINDS: Mapping[str, Mapping[str, Kind]] = {name: kinds for name, (_, kinds) in _
 # Stored typed, but never put in a log, warning or message. Trading 212 returns none.
 PERSONAL: frozenset[str] = frozenset()
 
-# Each table's row key, as migration 0030 declares it.
+# The CSV export (design §5.3a): one raw record per row, its cells as text, typed in
+# finance.trading212_export_rows (migration 0034). Its columns are those the owner's export
+# showed (Task 0); each is the column Decision 3 names from its header. The key is `ID`.
+EXPORT_RECORD_TYPE = "trading212.export_row"
+EXPORT_TABLE = "trading212_export_rows"
+EXPORT_KEY = "ID"
+EXPORT_KINDS: Mapping[str, Kind] = {
+    "Action": "text",
+    "Time (UTC)": "timestamptz",
+    "Notes": "text",
+    "ID": "text",
+    "Total": "numeric",
+    "Currency (Total)": "text",
+}
+EXPORT_KNOWN: frozenset[str] = frozenset(EXPORT_KINDS)
+EXPORT_REQUIRED: tuple[str, ...] = ("Action", "Time (UTC)", "ID", "Total", "Currency (Total)")
+# Header → column.
+EXPORT_COLUMNS: Mapping[str, str] = column_map(EXPORT_KINDS)
+# The card's "Transaction ID: <id>" in Notes, typed on its own.
+NOTES_TRANSACTION_ID = "notes_transaction_id"
+
+# Each table's row key, as migrations 0030 and 0034 declare it.
 KEYS: Mapping[str, tuple[str, ...]] = {
     "trading212_accounts": ("connection_id", "as_of_date"),
     "trading212_positions": ("connection_id", "as_of_date", "instrument_ticker"),
@@ -223,6 +244,7 @@ KEYS: Mapping[str, tuple[str, ...]] = {
         "item_index",
     ),
     "trading212_pie_instrument_shares": ("connection_id", "pie_id", "as_of_date", "ticker"),
+    EXPORT_TABLE: ("connection_id", "id"),
 }
 
 # Columns of the tables that are not a field: references, keys and links. A field whose

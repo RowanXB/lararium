@@ -16,9 +16,15 @@ from lararium.modules.finance.instruments import (
 from lararium.modules.finance.trading212.fields import (
     COLUMNS,
     ENDPOINTS,
+    EXPORT_COLUMNS,
+    EXPORT_KINDS,
+    EXPORT_KNOWN,
+    EXPORT_REQUIRED,
+    EXPORT_TABLE,
     KEYS,
     KINDS,
     MAP_ENTRIES,
+    NOTES_TRANSACTION_ID,
     OWN_COLUMNS,
     PERSONAL,
     split,
@@ -38,6 +44,7 @@ _LEDGER_LINKS = {
     ("trading212_orders", "transaction_id"): "finance.transactions",
     ("trading212_dividends", "transaction_id"): "finance.transactions",
     ("trading212_transactions", "transaction_id"): "finance.transactions",
+    (EXPORT_TABLE, "transaction_id"): "finance.transactions",
 }
 
 
@@ -92,7 +99,7 @@ async def test_every_table_has_its_key_and_references(session) -> None:
     tables = {
         table for spec in ENDPOINTS.values() for table in (spec.table, *spec.children.values())
     }
-    assert set(found) == tables == set(KEYS)
+    assert set(found) == tables | {EXPORT_TABLE} == set(KEYS)
     for table, columns in found.items():
         assert {"connection_id", "raw_record_id"} <= set(columns), table
     keys = await session.execute(
@@ -153,6 +160,7 @@ async def test_every_column_is_a_field_or_its_own(session) -> None:
     for tables in COLUMNS.values():
         for table, paths in tables.items():
             fields.setdefault(table, set()).update(paths.values())
+    fields[EXPORT_TABLE] = {*EXPORT_COLUMNS.values(), NOTES_TRANSACTION_ID}
     stray = {
         table: sorted(set(columns) - fields.get(table, set()) - OWN_COLUMNS)
         for table, columns in found.items()
@@ -241,3 +249,19 @@ async def test_trading212_ticker_scheme(run, session, usd) -> None:
     # Trading 212's tickers keep their case (LSE listings end in a lower-case l).
     found = await find_by_identifier(session, "trading212_ticker", "VZZQl_EQ")
     assert found is not None and found.id == created.id
+
+
+async def test_export_table_has_every_known_column(session) -> None:
+    """Migration 0034 against the export's columns (Decision 3): one typed column each, NOT
+    NULL when required, plus the Notes' card transaction id."""
+    found = (await _catalog(session))[EXPORT_TABLE]
+    assert EXPORT_KNOWN == set(EXPORT_COLUMNS) and set(EXPORT_REQUIRED) <= EXPORT_KNOWN
+    for header, column in EXPORT_COLUMNS.items():
+        assert column == column_name(header)
+        kind, nullable = found[column]
+        assert kind == _DATA_TYPES[EXPORT_KINDS[header]], header
+        assert nullable == (header not in EXPORT_REQUIRED), header
+    assert found[NOTES_TRANSACTION_ID] == ("text", True)
+    assert found["transaction_id"] == ("uuid", True)
+    assert EXPORT_COLUMNS["Time (UTC)"] == "time_utc"
+    assert EXPORT_COLUMNS["Currency (Total)"] == "currency_total"

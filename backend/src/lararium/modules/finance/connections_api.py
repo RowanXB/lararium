@@ -107,6 +107,15 @@ from lararium.modules.finance.readonly_http import HttpAuthError, HttpError
 from lararium.modules.finance.schemas import ReviewOut, ReviewResolve
 from lararium.modules.finance.source_reviews import list_reviews, resolve_review
 from lararium.modules.finance.trading212.client import Trading212Client
+from lararium.modules.finance.trading212.export import ExportError, ExportTooEarly
+from lararium.modules.finance.trading212.export import (
+    ingest_export as ingest_trading212_export,
+)
+from lararium.modules.finance.trading212.export import (
+    parse_upload as parse_trading212_upload,
+)
+from lararium.modules.finance.trading212.normalize import Trading212DataError
+from lararium.modules.finance.trading212.normalize import normalize as trading212_normalize
 from lararium.modules.finance.trading212.sync import (
     KEY_PURPOSE as T212_KEY_PURPOSE,
 )
@@ -139,6 +148,8 @@ AUTHORISABLE: tuple[ConnectionStatus, ...] = ("created", "needs_reauth", "author
 MAX_IBKR_UPLOAD_BYTES = 64 * 1024 * 1024
 # An eToro account statement of several years is well under 1 MiB.
 MAX_ETORO_UPLOAD_BYTES = 16 * 1024 * 1024
+# A Trading 212 export is a line per event: years of them are well under 1 MiB.
+MAX_TRADING212_UPLOAD_BYTES = 16 * 1024 * 1024
 XML_TYPES = ("application/xml", "text/xml")
 GENERIC_TYPE = "application/octet-stream"
 QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
@@ -207,6 +218,11 @@ class EtoroConnectionIn(EtoroConnectionUpdate):
 
 class EtoroUploadOut(BaseModel):
     # The statement rows the upload stored, once each.
+    raw_records: int
+
+
+class Trading212UploadOut(BaseModel):
+    # The export rows the upload stored, once each.
     raw_records: int
 
 
@@ -851,7 +867,7 @@ async def _lock_for_normalizing(ctx: CommandContext, connection_id: UUID) -> Con
     return connection
 
 
-def _etoro_sync_context(
+def _upload_sync_context(
     ctx: CommandContext,
     connection: ConnectionRecord,
     sync_id: UUID,
@@ -870,12 +886,14 @@ def _etoro_sync_context(
     )
 
 
-def _no_upload(connection: ConnectionRecord) -> HTTPException | None:
-    """422 unless the connection is an eToro one that is not disabled."""
-    if (refusal := _not_connector(connection, "etoro")) is not None:
+def _no_upload(
+    connection: ConnectionRecord, connector: str = "etoro", upload: str = "a statement"
+) -> HTTPException | None:
+    """422 unless the connection is the connector's and not disabled."""
+    if (refusal := _not_connector(connection, connector)) is not None:
         return refusal
     if connection.status == "disabled":
-        return _unprocessable("not_updatable", "a disabled connection can't take a statement")
+        return _unprocessable("not_updatable", f"a disabled connection can't take {upload}")
     return None
 
 
@@ -911,7 +929,7 @@ async def upload_etoro_statement(
             if (refusal := _no_upload(connection)) is not None:
                 raise refusal
             sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
-            sync_ctx = _etoro_sync_context(
+            sync_ctx = _upload_sync_context(
                 ctx, connection, sync_id, settings, http, session_factory
             )
             result = await ingest_etoro_statement(sync_ctx, body, filename, statement)
@@ -929,12 +947,84 @@ async def upload_etoro_statement(
     return EtoroUploadOut(raw_records=len(result.raw_record_ids))
 
 
+# Trading 212's optional export (design §5.3a) ------------------------------------------------
+
+
+def _no_export(connection: ConnectionRecord) -> HTTPException | None:
+    return _no_upload(connection, "trading212", "an export")
+
+
+@router.post(
+    "/{connection_id}/trading212-export",
+    name="upload_trading212_export",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_trading212_export(
+    connection_id: UUID,
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+    store: DocumentStoreDep,
+    session_factory: SessionFactoryDep,
+) -> Trading212UploadOut:
+    """Ingest a Trading 212 CSV export the owner downloaded, normalise it with the API's
+    records and heal the transfers, in one command. Optional: it adds what the API lacks.
+    Its file is written last, just before the commit: a refused or failed upload leaves none
+    behind."""
+    settings = _settings(request)
+    connection = await get_connection(session, connection_id)
+    if (refusal := _no_export(connection)) is not None:
+        raise refusal
+    body = await read_upload(file, MAX_TRADING212_UPLOAD_BYTES)
+    filename, args = _upload_args(connection_id, file, body, "export.csv")
+    try:
+        # Read before any lock is taken: a large file holds no one up.
+        parsed = await parse_trading212_upload(body)
+        async with command_context(session, actor, "upload_trading212_export", args) as ctx:
+            connection = await _lock_for_normalizing(ctx, connection_id)
+            if (refusal := _no_export(connection)) is not None:
+                raise refusal
+            sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
+            sync_ctx = _upload_sync_context(
+                ctx, connection, sync_id, settings, http, session_factory
+            )
+            result = await ingest_trading212_export(sync_ctx, body, filename, parsed)
+            await transfers.heal_transfers(ctx)
+            # The bytes last, once nothing in the command can fail but its commit.
+            store.put(result.document_sha256, body)
+    except ExportTooEarly as error:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, {"error": "first_sync_pending", "message": str(error)}
+        ) from None
+    except (ExportError, Trading212DataError) as error:
+        # The message names a column, a field or a rule, never a value.
+        raise _unprocessable("export_invalid", str(error)) from None
+    return Trading212UploadOut(raw_records=len(result.raw_record_ids))
+
+
+# Review items (design §5.7): eToro's API and statement, Trading 212's API and export ---------
+
+# The connectors with two sources of an event, and the normalizer that posts a decision.
+_REVIEWED = ("etoro", "trading212")
+
+
+def _no_reviews(connection: ConnectionRecord) -> HTTPException | None:
+    """422 unless the connection's connector has review items."""
+    if connection.connector not in _REVIEWED:
+        return _unprocessable(
+            "no_reviews", "only eToro and Trading 212 connections have review items"
+        )
+    return None
+
+
 @router.get("/{connection_id}/reviews", name="list_source_reviews")
 async def list_source_reviews(connection_id: UUID, session: SessionDep) -> list[ReviewOut]:
     """The connection's review items (design §5.7): open ones first, newest first. Only an
-    eToro connection has them."""
+    eToro or a Trading 212 connection has them."""
     connection = await get_connection(session, connection_id)
-    if (refusal := _not_connector(connection, "etoro")) is not None:
+    if (refusal := _no_reviews(connection)) is not None:
         raise refusal
     return await list_reviews(session, connection_id)
 
@@ -957,9 +1047,9 @@ async def resolve_source_review(
     """Take one source's value, recorded as the owner's decision, and normalise at once so the
     decision posts now, then heal the transfers the new postings touch."""
     settings = _settings(request)
-    # Before anything else: only an eToro connection has review items.
+    # Before anything else: only an eToro or a Trading 212 connection has review items.
     found = await get_connection(session, connection_id)
-    if (refusal := _not_connector(found, "etoro")) is not None:
+    if (refusal := _no_reviews(found)) is not None:
         raise refusal
     args: dict[str, JSONValue] = {
         "connection_id": str(connection_id),
@@ -976,11 +1066,14 @@ async def resolve_source_review(
             raise ReviewNotFoundError(str(review_id))
         await resolve_review(ctx, review_id, body.take)
         sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
-        sync_ctx = _etoro_sync_context(ctx, connection, sync_id, settings, http, session_factory)
+        sync_ctx = _upload_sync_context(ctx, connection, sync_id, settings, http, session_factory)
         try:
-            # Nothing new to apply: each run applies the positions decided on.
-            await etoro_normalize(sync_ctx, [])
-        except EtoroDataError as error:
+            # Nothing new to apply: each run applies the events decided on.
+            if connection.connector == "trading212":
+                await trading212_normalize(sync_ctx, [])
+            else:
+                await etoro_normalize(sync_ctx, [])
+        except (EtoroDataError, Trading212DataError) as error:
             # What is stored cannot be posted; the message names no value.
             raise _unprocessable("not_postable", str(error)) from None
         await transfers.heal_transfers(ctx)

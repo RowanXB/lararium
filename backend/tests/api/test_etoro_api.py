@@ -703,8 +703,8 @@ async def test_review_routes_refuse_other_connectors_422(api, session, monkeypat
     for response in (listed, resolved):
         assert response.status_code == 422
         assert response.json()["detail"] == {
-            "error": "not_etoro",
-            "message": "this is not an eToro connection",
+            "error": "no_reviews",
+            "message": "only eToro and Trading 212 connections have review items",
         }
     still = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
     assert still[0]["resolution"] is None

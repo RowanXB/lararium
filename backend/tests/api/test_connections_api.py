@@ -866,6 +866,10 @@ def test_connection_operation_ids() -> None:
             "post",
             "/api/v1/connections/{connection_id}/etoro-statement",
         ): "upload_etoro_statement",
+        (
+            "post",
+            "/api/v1/connections/{connection_id}/trading212-export",
+        ): "upload_trading212_export",
         ("get", "/api/v1/connections/{connection_id}/reviews"): "list_source_reviews",
         (
             "post",

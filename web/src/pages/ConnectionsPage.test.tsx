@@ -15,6 +15,7 @@ import {
   updateTrading212Connection,
   uploadEtoroStatement,
   uploadIbkrStatement,
+  uploadTrading212Export,
 } from "../api";
 import { ConnectionsPage } from "./ConnectionsPage";
 
@@ -43,6 +44,7 @@ vi.mock("../api", () => ({
   createEtoroConnection: vi.fn(async () => ({ data: {} })),
   updateEtoroConnection: vi.fn(async () => ({ data: {} })),
   uploadEtoroStatement: vi.fn(async () => ({ data: { raw_records: 7 } })),
+  uploadTrading212Export: vi.fn(async () => ({ data: { raw_records: 2 } })),
   authorizeConnection: vi.fn(async () => ({ data: { url: "https://auth.monzo.example/?x=1" } })),
   syncConnectionNow: vi.fn(async () => ({ data: {} })),
   disableConnection: vi.fn(async () => ({ data: {} })),
@@ -391,6 +393,29 @@ it("adds a Trading 212 connection and clears the keys", async () => {
     expect(kept).not.toContain("key-123");
     expect(kept).not.toContain("secret-456");
   });
+});
+
+it("uploads a Trading 212 export", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [{ ...TRADING212, status: "healthy" }],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  expect(
+    await screen.findByText(
+      "Optional: adds details the API doesn't give. Export it in the Trading 212 app under History.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText("Upload eToro statement (xlsx)")).not.toBeInTheDocument();
+  const file = new File(["Action,ID"], "export.csv", { type: "text/csv" });
+  await user.upload(screen.getByLabelText("Upload Trading 212 export (CSV, optional)"), file);
+
+  await waitFor(() =>
+    expect(uploadTrading212Export).toHaveBeenCalledWith(
+      expect.objectContaining({ path: { connection_id: TRADING212.id }, body: { file } }),
+    ),
+  );
+  expect(await screen.findByText("Uploaded export.csv: 2 records ingested.")).toBeInTheDocument();
 });
 
 it("shows why Trading 212 refused the key", async () => {

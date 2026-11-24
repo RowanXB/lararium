@@ -16,6 +16,7 @@ import {
   updateTrading212Connection,
   uploadEtoroStatement,
   uploadIbkrStatement,
+  uploadTrading212Export,
 } from "../api";
 import { TextField } from "../components/TextField";
 import { Button } from "../components/ui/button";
@@ -299,6 +300,25 @@ function UploadEtoroStatement({ connection }: { connection: ConnectionOut }) {
   );
 }
 
+function UploadTrading212Export({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload Trading 212 export (CSV, optional)"
+      accept=".csv,text/csv"
+      help="Optional: adds details the API doesn't give. Export it in the Trading 212 app under History."
+      send={async (file) =>
+        (
+          await uploadTrading212Export({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
 function UploadStatement({
   label,
   accept,
@@ -447,6 +467,7 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
         {isEtoro && <UpdateEtoroKeysForm connection={connection} />}
         {isIbkr && <UploadFlexStatement connection={connection} />}
         {isEtoro && <UploadEtoroStatement connection={connection} />}
+        {isTrading212 && <UploadTrading212Export connection={connection} />}
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" disabled={sync.isPending} onClick={() => sync.mutate()}>
             Sync now
