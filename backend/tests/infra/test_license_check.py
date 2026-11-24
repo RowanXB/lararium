@@ -71,8 +71,11 @@ def _policy(*exceptions: Any) -> Any:
     return lc.Policy(ALLOWED, tuple(exceptions))
 
 
-def _exception(package: str, license: str, ecosystem: str = "python") -> Any:
-    return lc.Reviewed(ecosystem, lc.normalize(package), license, "MIT", "checked by hand")
+def _exception(
+    package: str, license: str, ecosystem: str = "python", version: str | None = None
+) -> Any:
+    key = lc.package_key(ecosystem, package)
+    return lc.Reviewed(ecosystem, key, license, "MIT", "checked by hand", version)
 
 
 def test_an_unknown_licence_fails_without_an_exception() -> None:
@@ -91,6 +94,50 @@ def test_an_exception_covers_its_package_and_licence_only() -> None:
     # Another ecosystem's package of the same name isn't covered.
     problems = lc.check([lc.Dependency("npm", "foo-bar", "1.0", "BSD")], policy)
     assert problems[0].startswith("npm foo-bar 1.0:")
+
+
+def test_npm_names_match_exactly() -> None:
+    # Only Python names are normalized (PEP 503); in npm these are two packages.
+    policy = _policy(_exception("@fontsource-variable/geist", "OFL-1.1", "npm"))
+    look_alike = lc.Dependency("npm", "@fontsource_variable/geist", "5.0.0", "OFL-1.1")
+    assert lc.check([look_alike], policy)[0].startswith("npm @fontsource_variable/geist 5.0.0:")
+
+
+def test_an_exception_with_a_version_covers_that_version_only() -> None:
+    # A bundling package's declared string can stay the same while what it bundles changes.
+    policy = _policy(_exception("pypdfium2", "dependency licenses", version="5.15.2"))
+    reviewed = lc.Dependency("python", "pypdfium2", "5.15.2", "dependency licenses")
+    assert lc.check([reviewed], policy) == []
+    bumped = lc.Dependency("python", "pypdfium2", "5.16.0", "dependency licenses")
+    problems = lc.check([bumped], policy)
+    assert problems[0].startswith("python pypdfium2 5.16.0: licence 'dependency licenses'")
+    assert problems[1].startswith("exception for python pypdfium2 5.15.2 (")
+
+
+def test_a_missing_package_is_skipped_only_when_its_marker_excludes_this_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export = (
+        "cffi==2.1.1 ; platform_python_implementation != 'PyPy'\n"
+        "pywin32==311 ; sys_platform == 'win32' and sys_platform != 'win32'\n"
+        "plain==1.0\n"
+    )
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        return type("Completed", (), {"stdout": export})()
+
+    def missing(name: str) -> Any:
+        raise lc.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(lc.subprocess, "run", run)
+    monkeypatch.setattr(lc.importlib.metadata, "distribution", missing)
+    dependencies, problems, other_platforms = lc.python_dependencies(Path("."))
+    assert dependencies == []
+    assert problems == [
+        "python cffi 2.1.1 is not installed: run make backend-sync",
+        "python plain 1.0 is not installed: run make backend-sync",
+    ]
+    assert [p.split(" (")[0] for p in other_platforms] == ["python pywin32 311"]
 
 
 def test_an_unused_exception_fails() -> None:

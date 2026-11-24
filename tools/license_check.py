@@ -11,9 +11,11 @@ An expression passes when it holds with the allowed identifiers true, so `MIT OR
 passes and `MIT AND GPL-2.0-only` doesn't. Anything else, an unknown or free-text licence
 included, fails unless an exception names that package with exactly that licence string: when
 upstream changes its licence, the exception stops matching and the package is reviewed again.
-An exception that matches nothing fails too, so the file never vouches for what isn't there.
+An exception may also name the version reviewed, for a package whose declared string can stay
+the same while what it bundles changes. An exception that matches nothing fails too, so the
+file never vouches for what isn't there.
 
-Standard library only; uv and pnpm do the dependency resolution.
+Standard library and `packaging` (a backend dependency); uv and pnpm resolve the dependencies.
 """
 
 import importlib.metadata
@@ -25,6 +27,8 @@ import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from packaging.markers import Marker
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "tools" / "licenses.toml"
@@ -132,6 +136,14 @@ class Reviewed:
     license: str  # the declared string this review applies to, exactly
     concluded: str  # the SPDX expression the review found
     reason: str
+    version: str | None = None  # the version reviewed; None for any version
+
+    def covers(self, d: Dependency) -> bool:
+        return (self.ecosystem, self.package, self.license) == (
+            d.ecosystem,
+            package_key(d.ecosystem, d.name),
+            d.license,
+        ) and self.version in (None, d.version)
 
 
 @dataclass(frozen=True)
@@ -140,9 +152,9 @@ class Policy:
     exceptions: tuple[Reviewed, ...]
 
 
-def normalize(name: str) -> str:
-    """PEP 503 for Python names; npm names are lower case already."""
-    return re.sub(r"[-_.]+", "-", name).lower()
+def package_key(ecosystem: str, name: str) -> str:
+    """A Python name normalized (PEP 503: Foo_Bar is foo-bar); an npm name as it is."""
+    return re.sub(r"[-_.]+", "-", name).lower() if ecosystem == "python" else name
 
 
 def load_policy(path: Path) -> Policy:
@@ -151,10 +163,11 @@ def load_policy(path: Path) -> Policy:
     for entry in data.get("exception", []):
         exception = Reviewed(
             ecosystem=entry["ecosystem"],
-            package=normalize(entry["package"]),
+            package=package_key(entry["ecosystem"], entry["package"]),
             license=entry["license"],
             concluded=entry["concluded"],
             reason=entry["reason"].strip(),
+            version=entry.get("version"),
         )
         if exception.ecosystem not in {"python", "npm"}:
             raise ValueError(f"{exception.package}: ecosystem must be python or npm")
@@ -169,13 +182,12 @@ def load_policy(path: Path) -> Policy:
 def check(dependencies: Iterable[Dependency], policy: Policy) -> list[str]:
     """What fails the check: dependencies whose licence isn't allowed and has no exception,
     and exceptions no dependency uses."""
-    by_key = {(e.ecosystem, e.package, e.license): e for e in policy.exceptions}
     used: set[Reviewed] = set()
     problems: list[str] = []
     for d in dependencies:
         if is_allowed(d.license, policy.allowed):
             continue
-        exception = by_key.get((d.ecosystem, normalize(d.name), d.license))
+        exception = next((e for e in policy.exceptions if e.covers(d)), None)
         if exception is not None:
             used.add(exception)
             continue
@@ -186,8 +198,9 @@ def check(dependencies: Iterable[Dependency], policy: Policy) -> list[str]:
         )
     for e in policy.exceptions:
         if e not in used:
+            reviewed = f" {e.version}" if e.version else ""
             problems.append(
-                f"exception for {e.ecosystem} {e.package} ({e.license!r}) matches no"
+                f"exception for {e.ecosystem} {e.package}{reviewed} ({e.license!r}) matches no"
                 " production dependency: remove it, or review the package again"
             )
     return problems
@@ -208,7 +221,7 @@ def python_license(metadata: importlib.metadata.PackageMetadata) -> str:
 def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str], list[str]]:
     """The backend's production dependencies, as installed here; the problems found (one
     that should be installed and isn't, or at another version than uv.lock pins); and those
-    not checked because their marker leaves them out of this platform. CI runs on Linux,
+    not checked because their marker excludes this platform. CI runs on Linux,
     as the image does, so there every dependency the image ships is checked."""
     export = subprocess.run(
         [
@@ -240,7 +253,7 @@ def python_dependencies(backend: Path) -> tuple[list[Dependency], list[str], lis
         try:
             distribution = importlib.metadata.distribution(name)
         except importlib.metadata.PackageNotFoundError:
-            if marker.strip():
+            if marker.strip() and not Marker(marker).evaluate():
                 other_platforms.append(f"python {name} {version} ({marker.strip()})")
             else:
                 problems.append(f"python {name} {version} is not installed: run make backend-sync")
