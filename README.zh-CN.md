@@ -15,7 +15,7 @@ lares。
 环境要求：Docker（含 buildx，守护进程已启动）、uv、Python 3.13、Node 24、pnpm 11、git。
 
 运行全部检查（lint、格式、类型、导入约束、在一次性 PostgreSQL 容器上跑的后端测试、
-OpenAPI/客户端漂移检查、前端类型检查与测试）。它严格按 `backend/uv.lock` 和
+依赖许可证检查、OpenAPI/客户端漂移检查、前端类型检查与测试）。它严格按 `backend/uv.lock` 和
 `web/pnpm-lock.yaml` 安装依赖，任一锁文件过期都会失败：
 
 ```bash
@@ -674,6 +674,40 @@ docker run --rm -v lararium_documents:/d -i alpine tar -C /d -xf - < backups/doc
 在全新服务器上，先把 `infra/.env` 里的 `LARARIUM_MASTER_KEY` 设成转储来源那台服务器的主密钥（从你单独
 备份的密钥或 `infra/.env.sops` 里取），不要新生成：转储里存的凭据是用它加密的，换了密钥，每个连接都得
 重新添加。然后运行 `make up`（它会创建角色和一个已迁移的空数据库），再按上面的步骤恢复并交换。
+
+### 恢复演练
+
+不时演练一次恢复，在一台不是生产环境的 Docker 主机上进行（任何有本仓库、并能通过 docker context
+访问那台主机的机器都可以运行）：
+
+```bash
+make restore-rehearsal CONTEXT=<docker context> \
+  DUMP=backups/lararium-20260101T030000Z.dump DOCUMENTS=backups/documents-20260101T030000Z.tar
+```
+
+`infra/backup/rehearse-restore.sh` 会在那台主机上启动一个一次性的 PostgreSQL 18，角色与正式服务相同，
+然后按上面的步骤操作并逐步检查：
+
+1. `restore.sh` 把转储恢复到一个新数据库，然后交换数据库名；
+2. 每张表的行数与转储里该表的行数一致（行数直接从转储本身统计）；
+3. 文档 tar 解压到一个一次性卷里，数据库引用的每个文档都在，API 能读取（同一镜像、用户和路径），
+   且内容与其哈希一致；
+4. 像正式服务的 `migrate` 一样运行 `alembic upgrade head`（较旧的备份会被升级），然后
+   `python -m lararium.restore_check` 检查迁移版本是代码的 head、每笔交易都平衡、转账不变量成立。
+
+它只输出表名、行数、文档哈希和交易 id，从不输出金额或描述；任一检查失败时以非零状态退出。数据库
+不发布任何端口：它在一个内部 Docker 网络上，只有检查容器加入。后端镜像在那台主机上用你的工作区
+构建。容器、卷和网络在运行结束时删除，无论以何种方式结束；`postgres:18`、`alpine` 和
+`lararium-rehearsal` 镜像会保留缓存。运行期间那台主机上有真实的备份数据，所以请用你信得过的主机。
+
+## 依赖许可证
+
+`make check` 会运行 `make license-check`：每个生产依赖（后端 `uv.lock` 中除 dev 组以外的依赖，即镜像
+所安装的；以及前端除 devDependencies 以外的依赖）都必须声明一个与 AGPL-3.0-or-later 兼容的 SPDX
+许可证。允许的许可证，以及元数据不是清晰 SPDX 表达式的包的已审核例外，都在
+[`tools/licenses.toml`](tools/licenses.toml) 中。未知或不兼容的许可证会让检查失败。要接受一个，先审核
+该包的许可证文件，再添加一条 `[[exception]]`：写上检查输出的原样声明字符串、你的结论和理由。不再
+匹配的例外（包已移除，或其声明的许可证变了）同样会让检查失败。
 
 ## 许可证
 

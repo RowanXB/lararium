@@ -1,8 +1,8 @@
-.PHONY: check backend-sync backend-check real-check openapi openapi-check web-install web-check up down backup
+.PHONY: check backend-sync backend-check license-check real-check openapi openapi-check web-install web-check up down backup restore-rehearsal
 
 COMPOSE = docker compose -f infra/compose.yaml --env-file infra/.env
 
-check: backend-check openapi-check web-check
+check: backend-check license-check openapi-check web-check
 
 # Install exactly what the lockfiles pin; fail if a lockfile is out of date.
 backend-sync:
@@ -14,9 +14,16 @@ web-install:
 backend-check: backend-sync
 	cd backend && uv run --locked ruff check .
 	cd backend && uv run --locked ruff format --check .
+	cd backend && uv run --locked ruff check --config pyproject.toml ../tools
+	cd backend && uv run --locked ruff format --check --config pyproject.toml ../tools
 	cd backend && uv run --locked pyright
 	cd backend && uv run --locked lint-imports
 	cd backend && uv run --locked pytest -q
+
+# Every production dependency's licence must be compatible with AGPL-3.0-or-later, or have a
+# reviewed exception (tools/licenses.toml; README, "Dependency licences").
+license-check: backend-sync web-install
+	cd backend && uv run --locked python ../tools/license_check.py
 
 # Your own bank statements, end to end on the throwaway test database (README, "Verifying
 # against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC/Revolut/Tembo/LemF folders>.
@@ -55,3 +62,9 @@ down:
 
 backup:
 	infra/backup/backup.sh
+
+# Restore a backup into a throwaway PostgreSQL on another Docker host and check it (README,
+# "Restore rehearsal"): make restore-rehearsal CONTEXT=<docker context> DUMP=<.dump> DOCUMENTS=<.tar>
+restore-rehearsal:
+	$(if $(and $(CONTEXT),$(DUMP),$(DOCUMENTS)),,$(error set CONTEXT, DUMP and DOCUMENTS))
+	infra/backup/rehearse-restore.sh "$(CONTEXT)" "$(DUMP)" "$(DOCUMENTS)"
