@@ -33,7 +33,11 @@ A schedule is how the history reaches Lararium:
 Deliberately not generated: CFDs, leverage, copy trading (flagged, not posted); other
 instruments or currencies; Withdraw Fee rows; eToro Money's bank or card rows (pinned by
 test_normalize_api); Financial Summary rows (typed per statement only); a statement uploaded
-before the first sync (refused); a dividend's Dividends row without its activity row."""
+before the first sync (refused); a dividend's Dividends row without its activity row.
+
+Generated on purpose: statements behind or ahead of a partial close (ruling R39), and ones
+opening a position before any sync has seen it (R40). Neither may open a review or leave a
+flag once the API has caught up."""
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -372,37 +376,6 @@ class History:
             "Close Rate": str(((e.closed_amount + e.profit) / e.units).quantize(Decimal("0.01"))),
         }
 
-    # Narrowings pending the controller's rulings (task-18 report, F1 and F2) --------------
-
-    def past_partial_closes(self, end: datetime) -> datetime:
-        """F1: a statement ending between a position's open and its partial close lists the
-        whole position's "Open Position" row and no Closed Positions row, which the merge
-        compares with the API's trade history of the part closed (a review on units and
-        cash). Until that is ruled on, such an end moves to just after the partial close."""
-        for e in self.events:
-            if e.kind == "partial" and e.position is not None and e.position.opened <= end < e.at:
-                end = e.at + timedelta(seconds=1)
-        return end
-
-    def api_first(self, piece: Piece) -> datetime | None:
-        """The moment a sync must follow before the piece is uploaded. F1, the other way: a
-        statement holding a partial close's Closed Positions row while the API's latest PnL
-        still lists the whole position is compared with it. F2: a statement holding the
-        open of a position it does not close, before any sync has seen the position, flags
-        "a statement position Lararium cannot place", a flag that stays until a replay."""
-        start = datetime.combine(piece.start, time(), UTC)
-        inside = [e for e in self.events if start <= e.at <= piece.end]
-        closed = {
-            e.position.position_id for e in inside if e.position and e.kind in ("close", "partial")
-        }
-        moments: list[datetime] = []
-        for e in inside:
-            if e.kind == "partial":
-                moments.append(e.at)
-            elif e.kind == "open" and e.position and e.position.position_id not in closed:
-                moments.append(e.at)
-        return max(moments, default=None)
-
     def describe(self) -> str:
         lines = []
         for e in self.events:
@@ -587,7 +560,6 @@ def schedules(draw: st.DrawFn, history: History) -> Schedule:
         end = _piece_end(draw, end_day)
         if end < datetime.combine(start, time(), UTC):
             end = _end(start)
-        end = history.past_partial_closes(end)
         pieces.append(Piece(start, end))
         if end >= last:
             break
@@ -603,10 +575,7 @@ def schedules(draw: st.DrawFn, history: History) -> Schedule:
     # Each uploaded after a sync no earlier than its end (the next sync comes after the
     # upload); the first upload is one starting on DAY0, as sync.py refuses another.
     def earliest(piece: Piece) -> int:
-        found = max(1, sum(1 for s in syncs if s <= piece.end))
-        if (seen := history.api_first(piece)) is not None:
-            found = max(found, 1 + sum(1 for s in syncs if s <= seen))
-        return found
+        return max(1, sum(1 for s in syncs if s <= piece.end))
 
     first = draw(st.sampled_from([i for i, p in enumerate(pieces) if p.start == DAY0]))
     after = {first: draw(st.integers(earliest(pieces[first]), len(syncs)))}
