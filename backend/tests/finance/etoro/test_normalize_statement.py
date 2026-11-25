@@ -683,13 +683,16 @@ async def test_statement_enriches_api_trade(session, ledger) -> None:
     # Account Summary and Financial Summary are typed too.
     [statement] = await _rows(
         session,
-        "select username, currency, start_date, transfer_to_trading_from_e_toro_money"
+        "select username, currency, account_currency, second_currency, start_date,"
+        " transfer_to_trading_from_e_toro_money"
         " from finance.etoro_statements where connection_id = :c",
         c=ledger.connection.id,
     )
     assert tuple(statement) == (
         USERNAME,
+        "USD/GBP",
         "USD",
+        "GBP",
         datetime(2026, 10, 1, tzinfo=UTC),
         Decimal("1250.00"),
     )

@@ -44,6 +44,7 @@ UNKNOWN_LABEL = f"{ACCOUNT_SUMMARY}.<unknown label>"
 _DIGIT = re.compile(r"[0-9]")
 
 _MOMENT = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2})")
+_CURRENCIES = re.compile(r"([A-Z]{3})(?:/([A-Z]{3}))?")
 _DAY = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})(?:$| )")
 # Decision 11a: the statement's times are UTC.
 STATEMENT_ZONE = ZoneInfo("UTC")
@@ -67,7 +68,10 @@ class EtoroStatement:
     period_to: datetime
     created: datetime
     username: str
-    currency: str
+    # Account Summary's "Currency" (ruling R41): `<account currency>` or
+    # `<account currency>/<second currency>`, the second the one eToro also reports figures in.
+    account_currency: str
+    second_currency: str | None
     rows: tuple[StatementRow, ...]
     # "<sheet>.<column>", "<sheet>" for an unknown sheet with cells, or UNKNOWN_LABEL.
     flagged: frozenset[str]
@@ -156,6 +160,18 @@ def read_moment(value: str, label: str, zone: ZoneInfo, sheet: str = ACCOUNT_SUM
     raise StatementError(f"{sheet}.{label} is not a date-time (dd/mm/yyyy HH:MM:SS)")
 
 
+def read_currencies(value: str) -> tuple[str, str | None]:
+    """Account Summary's "Currency" (ruling R41): the Trading account's currency, and the
+    second one eToro reports figures in, when the label names two (`USD/GBP`). Any other shape
+    is refused, naming the label, never its value."""
+    match = _CURRENCIES.fullmatch(value.strip().upper())
+    if match is None:
+        raise StatementError(
+            f"{ACCOUNT_SUMMARY}.Currency is not a currency code, or two joined by a slash"
+        )
+    return match.group(1), match.group(2)
+
+
 def read_day(value: str, label: str, sheet: str) -> date:
     """A statement date (`dd/mm/yyyy`, a time after it ignored)."""
     match = _DAY.match(value.strip())
@@ -217,6 +233,7 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
     if period_from > period_to:
         raise StatementError(f"{ACCOUNT_SUMMARY}'s Start Date is after its End Date")
     created = read_moment(labels["Date Created"], "Date Created", zone)
+    account_currency, second_currency = read_currencies(labels["Currency"])
 
     rows: list[StatementRow] = []
     seen: Counter[str] = Counter()
@@ -242,7 +259,8 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
         period_to=period_to,
         created=created,
         username=labels["Username"],
-        currency=labels["Currency"],
+        account_currency=account_currency,
+        second_currency=second_currency,
         rows=tuple(rows),
         flagged=frozenset(flagged),
     )

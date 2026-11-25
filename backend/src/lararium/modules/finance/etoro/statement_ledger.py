@@ -76,6 +76,7 @@ from lararium.modules.finance.etoro.state import LONDON, EtoroDataError, Run, en
 from lararium.modules.finance.etoro.statement import (
     STATEMENT_ZONE,
     StatementError,
+    read_currencies,
     read_day,
     read_moment,
 )
@@ -947,9 +948,18 @@ async def _summaries(run: Run, statement: Statement) -> None:
                     )
                     by_column[columns[f"{name}{SECOND_VALUE}"]] = row.cells.get(f"{VALUE} 2")
                     labels[columns[name]] = f"{ACCOUNT_SUMMARY}.{label}"
-            values = await typed_values(run.session, "etoro_statements", by_column, labels)
+            values = dict(await typed_values(run.session, "etoro_statements", by_column, labels))
+            # "Currency" is kept as given, and its two codes typed beside it (ruling R41).
+            label = by_label.get("Currency")
+            account, second = (None, None)
+            if label:
+                try:
+                    account, second = read_currencies(label[0].cells.get(VALUE, ""))
+                except StatementError as error:
+                    raise EtoroDataError(str(error)) from None
+            values |= {"account_currency": account, "second_currency": second}
             await run.upsert(
                 "etoro_statements",
                 {"connection_id": run.connection_id, "document_id": document_id},
-                dict(values),
+                values,
             )

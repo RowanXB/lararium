@@ -91,7 +91,8 @@ def test_parses_every_sheet() -> None:
     assert statement.period_to == datetime(2026, 10, 31, 23, 59, 59, tzinfo=UTC)
     assert statement.created == datetime(2026, 10, 1, 9, 15, tzinfo=UTC)
     assert statement.username == USERNAME
-    assert statement.currency == "USD"
+    # Account Summary's "Currency" as real statements give it (ruling R41).
+    assert (statement.account_currency, statement.second_currency) == ("USD", "GBP")
     assert statement.flagged == frozenset()
     # The Glossary is not a data sheet; the others keep the workbook's order.
     assert [row.sheet for row in statement.rows] == (
@@ -442,3 +443,17 @@ def test_errors_never_contain_cell_values(case: str) -> None:
     for value in [*PERSONAL, *labels.values(), *row.values()]:
         if len(value) >= 4:
             assert value not in message, (case, value)
+
+
+def test_a_single_currency_label_has_no_second() -> None:
+    statement = parse(build_statement(summary(currency="USD"), [TRANSFER_IN]))
+    assert (statement.account_currency, statement.second_currency) == ("USD", None)
+
+
+@pytest.mark.parametrize("label", ["USD-GBP", "US Dollar", "USD/GBP/EUR", "USD/", "/GBP"])
+def test_a_malformed_currency_label_is_refused_naming_no_value(label: str) -> None:
+    with pytest.raises(StatementError) as refused:
+        parse(build_statement(summary(currency=label), [TRANSFER_IN]))
+    assert str(refused.value) == (
+        "Account Summary.Currency is not a currency code, or two joined by a slash"
+    )

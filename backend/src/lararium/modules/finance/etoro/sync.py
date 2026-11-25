@@ -643,7 +643,7 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
     ):
         raise StatementRejected("this statement is for another eToro user")
     currencies = _trading_currencies(balances)
-    currency = statement.currency.strip().upper()
+    currency = statement.account_currency  # the first code (R41): the second is GBP's figures
     if not currencies or any(
         not isinstance(c, str) or c.strip().upper() != currency for c in currencies
     ):

@@ -790,12 +790,37 @@ async def test_statement_other_user_refused(session, run, api, tmp_path) -> None
     assert (await session.scalar(text("select count(*) from core.documents"))) == 0
 
 
-async def test_statement_other_currency_refused(session, run, api, tmp_path) -> None:
+@pytest.mark.parametrize("currency", ["GBP", "GBP/USD", "EUR/GBP"])
+async def test_statement_other_currency_refused(session, run, api, tmp_path, currency) -> None:
+    # Refused whenever the first code is not the Trading account's (USD), even when the
+    # second is (ruling R41).
     api.me["username"] = USERNAME
     connection = await _connection(run)
     await _sync(session, connection, api)
     with pytest.raises(StatementRejected, match="currency"):
-        await _ingest(session, connection, _statement(currency="GBP"), tmp_path)
+        await _ingest(session, connection, _statement(currency=currency), tmp_path)
+
+
+@pytest.mark.parametrize("currency", ["USD/GBP", "USD"])
+async def test_statement_account_currency_first_accepted(
+    session, run, api, tmp_path, currency
+) -> None:
+    api.me["username"] = USERNAME
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    result = await _ingest(session, connection, _statement(currency=currency), tmp_path)
+    assert result.raw_record_ids
+    [stored] = (
+        await session.execute(
+            text(
+                "select currency, account_currency, second_currency"
+                " from finance.etoro_statements where connection_id = :c"
+            ),
+            {"c": connection.id},
+        )
+    ).all()
+    # The label kept as it is, and its two codes typed beside it.
+    assert tuple(stored) == (currency, "USD", "GBP" if "/" in currency else None)
 
 
 async def test_statement_before_the_first_sync_refused(session, run, api, tmp_path) -> None:

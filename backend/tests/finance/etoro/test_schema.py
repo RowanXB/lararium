@@ -15,6 +15,7 @@ from lararium.core.connections import create_connection
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro.fields import (
     COLUMNS,
+    DERIVED_COLUMNS,
     ENDPOINTS,
     KEYS,
     KINDS,
@@ -173,6 +174,8 @@ async def test_every_column_is_a_field_or_its_own(session) -> None:
         fields.setdefault(table, set()).update(mapping.values())
     fields.setdefault("etoro_financial_summary", set()).add("name")
     fields.setdefault("etoro_order_positions_to_close", set()).add("position_id")
+    for table, columns in DERIVED_COLUMNS.items():
+        fields.setdefault(table, set()).update(columns)
     stray = {
         table: sorted(set(columns) - fields.get(table, set()) - OWN_COLUMNS)
         for table, columns in found.items()

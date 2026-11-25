@@ -190,7 +190,7 @@ def summary(
     end: str = "31/10/2026 23:59:59",
     created: str = "01/10/2026 09:15:00",
     username: str = USERNAME,
-    currency: str = "USD",
+    currency: str = "USD/GBP",
 ) -> dict[str, str]:
     return {
         "Name": "Synthetic Trader",

@@ -370,6 +370,11 @@ OWN_COLUMNS = frozenset(
         "figure",
     }
 )
+# Columns read from one cell beside the cell's own (ruling R41): Account Summary's "Currency",
+# `<account currency>/<second currency>`, as its two codes.
+DERIVED_COLUMNS: Mapping[str, frozenset[str]] = {
+    "etoro_statements": frozenset({"account_currency", "second_currency"})
+}
 
 # Each table's primary key (migration 0031). A report is kept per sync day (`as_of_date`);
 # a ledger row by its external id or its source's id; a statement row by its key.

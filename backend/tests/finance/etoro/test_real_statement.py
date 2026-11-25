@@ -162,7 +162,7 @@ async def check_statement(session, run, monkeypatch, documents: Path, body: byte
         failures.append(f"{unread} activity rows have no time, cash or balance")
 
     ledger = Ledger(session, await _connection(run))
-    currency = statement.currency.strip().upper()
+    currency = statement.account_currency
     balances = balances_body() | {
         "balances": [
             balance_entry(TRADING_ACCOUNT, "Trading", currency, "0"),
