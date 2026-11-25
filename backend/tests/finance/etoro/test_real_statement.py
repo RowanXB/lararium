@@ -10,14 +10,18 @@ for the statement's username and currency), must refuse nothing, type every row 
 transactions that balance. The only flag allowed is the one that waits for the API: an open
 position no source can place (the API's portfolio places it).
 
-Nothing of the file is printed or kept: only counts and pass or fail. Error text has its digits
-masked, and the stored document lives in pytest's temporary directory.
+Nothing of the file is printed or kept: only counts and pass or fail. Only Lararium's own
+displayable errors are shown by their text, its digits masked; any other error by its class
+(real_check.shown). The whole check runs inside one guard, and the test fails with a fixed
+message and no traceback, so pytest prints no locals. The stored document lives in pytest's
+temporary directory.
 """
 
 import asyncio
 import dataclasses
 import os
 import re
+import sys
 import uuid
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
@@ -26,6 +30,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DataError
 
 from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance.etoro import statement_ledger
@@ -47,6 +52,7 @@ from lararium.modules.finance.etoro.statement import (
 )
 from lararium.modules.finance.ledger import find_unbalanced_transactions
 
+from ..real_check import shown
 from .fixtures import CASH_ACCOUNT, TRADING_ACCOUNT, balance_entry, balances_body, me_json
 from .statement_fixtures import (
     ISIN,
@@ -140,15 +146,26 @@ async def _counts(session, sql: str, connection_id: uuid.UUID) -> Counter[str]:
 
 async def check_statement(session, run, monkeypatch, documents: Path, body: bytes) -> list[str]:
     """Run the check on one statement; print its counts and return its failures (counts and
-    fixed text only)."""
+    fixed text only). Any error the steps do not report themselves stops it, shown as
+    real_check.shown shows it."""
     failures: list[str] = []
     try:
+        await _check(session, run, monkeypatch, documents, body, failures)
+    except Exception as error:  # reported, as a failure
+        failures.append(f"the check stopped ({shown(error, _mask)})")
+        print("\neToro statement: fail")
+    return failures
+
+
+async def _check(
+    session, run, monkeypatch, documents: Path, body: bytes, failures: list[str]
+) -> None:
+    try:
         statement = parse_statement(body, STATEMENT_ZONE)
-    except Exception as error:  # reported, masked, as a failure
-        kind = f"{type(error).__name__}: {_mask(str(error))}"
-        failures.append(f"the statement doesn't parse ({kind})")
+    except Exception as error:  # reported, as a failure
+        failures.append(f"the statement doesn't parse ({shown(error, _mask)})")
         print("\neToro statement: not read\neToro statement: fail")
-        return failures
+        return
     read = Counter(row.sheet for row in statement.rows)
     if statement.flagged:
         failures.append(f"the reader flagged {len(statement.flagged)} columns, labels or sheets")
@@ -184,11 +201,11 @@ async def check_statement(session, run, monkeypatch, documents: Path, body: byte
     ctx = dataclasses.replace(await ledger.context(), documents=LocalDocumentStore(documents))
     try:
         await etoro_sync.ingest_statement(ctx, body, "statement.xlsx", statement)
-    except Exception as error:  # reported, masked, as a failure
-        failures.append(f"the upload is refused ({type(error).__name__}: {_mask(str(error))})")
+    except Exception as error:  # reported, as a failure
+        failures.append(f"the upload is refused ({shown(error, _mask)})")
         print(f"\neToro statement: rows read {dict(sorted(read.items()))}; upload refused")
         print("eToro statement: fail")
-        return failures
+        return
     [report] = reports
 
     connection_id = ledger.connection.id
@@ -245,15 +262,20 @@ async def check_statement(session, run, monkeypatch, documents: Path, body: byte
         f"instruments or positions {len(other)}, waiting for the API {len(waiting)}"
     )
     print(f"eToro statement: {'fail' if failures else 'pass'}")
-    return failures
 
 
 @pytest.mark.skipif(not PATH, reason="set LARARIUM_ETORO_STATEMENT (make real-check)")
 async def test_real_statement(session, run, monkeypatch, tmp_path) -> None:
     assert PATH is not None
-    body = await asyncio.to_thread(Path(PATH).read_bytes)
+    try:
+        body = await asyncio.to_thread(Path(PATH).read_bytes)
+    except OSError:
+        body = None
+    if body is None:
+        pytest.fail("the eToro statement can't be read", pytrace=False)
     failures = await check_statement(session, run, monkeypatch, tmp_path, body)
-    assert not failures, "\n".join(failures)
+    if failures:
+        pytest.fail("\n".join(failures), pytrace=False)
 
 
 # The same check on synthetic statements ------------------------------------------------------
@@ -416,3 +438,42 @@ async def test_refused_upload_fails_with_counts_only(
     assert len(failures) == 1 and "the upload is refused (StatementRejected" in failures[0]
     assert "eToro statement: fail" in output
     _assert_counts_only(output)
+
+
+# A value an error could carry, which nothing printed may show.
+_SECRET = "SECRET-VALUE-4242"
+
+
+async def test_a_database_error_is_shown_by_its_class_only(
+    session, run, monkeypatch, tmp_path, capsys
+) -> None:
+    async def failing(*args, **kwargs):
+        raise DataError(
+            "insert into finance.etoro_activity values (%(v)s)",
+            {"v": _SECRET},
+            ValueError(f'invalid input syntax for type numeric: "{_SECRET}"'),
+        )
+
+    monkeypatch.setattr(etoro_sync, "ingest_statement", failing)
+    failures = await check_statement(
+        session, run, monkeypatch, tmp_path, _statement(_activity_rows())
+    )
+    output = capsys.readouterr().out + "\n".join(failures)
+    assert failures == ["the upload is refused (ValueError)"]
+    assert _SECRET not in output and "4242" not in output
+
+
+async def test_an_error_outside_the_steps_stops_the_check_by_its_class(
+    session, run, monkeypatch, tmp_path, capsys
+) -> None:
+    def failing(*args, **kwargs):
+        raise KeyError(_SECRET)
+
+    monkeypatch.setattr(sys.modules[__name__], "balances_body", failing)
+    failures = await check_statement(
+        session, run, monkeypatch, tmp_path, _statement(_activity_rows())
+    )
+    output = capsys.readouterr().out + "\n".join(failures)
+    assert failures == ["the check stopped (KeyError)"]
+    assert "eToro statement: fail" in output
+    assert _SECRET not in output

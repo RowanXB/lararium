@@ -418,6 +418,18 @@ it("uploads a Trading 212 export", async () => {
   expect(await screen.findByText("Uploaded export.csv: 2 records ingested.")).toBeInTheDocument();
 });
 
+it.each([
+  ["Trading 212", () => TRADING212],
+  ["eToro", () => ETORO],
+])("offers Update keys on a disabled %s connection, which brings it back", async (_, made) => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [{ ...made(), status: "disabled" }],
+  } as never);
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update keys" });
+  expect(within(form).getByRole("button", { name: "Update keys" })).toBeEnabled();
+});
+
 it("shows why Trading 212 refused the key", async () => {
   vi.mocked(createTrading212Connection).mockRejectedValueOnce({
     detail: { error: "key_rejected", message: "Trading 212 rejected this key" },

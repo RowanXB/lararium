@@ -275,13 +275,42 @@ async def test_update_from_needs_reauth(api, session, run, queue, etoro) -> None
     assert _queued(queue) == ["sync_connection"]
 
 
-async def test_update_refuses_other_connectors_and_disabled(api, run) -> None:
+async def test_update_takes_a_disabled_connection_back_once_its_keys_pass(
+    api, session, run, etoro, queue
+) -> None:
+    """Update keys is how a disabled connection comes back: the new keys pass the checks of
+    a create (the read-only gate, and the same user), and it is healthy again."""
     created = await _create(api)
     await run(set_status, created["id"], "disabled")
+    etoro.requests.clear()
     keys = {"public_api_key": NEW_PUBLIC_KEY, "user_key": NEW_USER_KEY}
-    response = await api.put(f"/api/v1/connections/{created['id']}/etoro", json=keys, headers=OWNER)
-    assert response.status_code == 422
-    assert response.json()["detail"]["message"] == "a disabled connection can't be updated"
+    url = f"/api/v1/connections/{created['id']}/etoro"
+
+    etoro.body = dumps(me_json([*READ_SCOPES, "etoro-public:trade.real:write"]))
+    refused = await api.put(url, json=keys, headers=OWNER)
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["message"] == GATE_MESSAGE
+    assert (await get_connection(session, created["id"])).status == "disabled"
+    public = await load_credential(session, KEY, created["id"], "public_api_key")
+    assert public is not None and public.reveal() == PUBLIC_KEY
+
+    etoro.body = dumps(me_json() | {"realCid": REAL_CID + 1})
+    other = await api.put(url, json=keys, headers=OWNER)
+    assert other.status_code == 422
+    assert other.json()["detail"]["message"] == "these keys are another eToro user's"
+
+    etoro.body = dumps(me_json())
+    queue.jobs.clear()
+    response = await api.put(url, json=keys, headers=OWNER)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "healthy"
+    public = await load_credential(session, KEY, created["id"], "public_api_key")
+    assert public is not None and public.reveal() == NEW_PUBLIC_KEY
+    assert _queued(queue) == ["sync_connection"]
+
+
+async def test_update_refuses_other_connectors(api, run) -> None:
+    keys = {"public_api_key": NEW_PUBLIC_KEY, "user_key": NEW_USER_KEY}
 
     other = await api.post(
         "/api/v1/connections/ibkr",
@@ -730,6 +759,24 @@ async def test_a_failed_resolve_leaves_the_review_open_422(api, session, monkeyp
     assert (still["resolution"], still["resolved_at"]) == (None, None)
     decisions = await session.scalar(text("select count(*) from finance.source_decisions"))
     assert decisions == 0
+    assert (await _postings(session, f"open:{POSITION}"))[0][2] == Decimal(4)
+
+
+async def test_a_disabled_connection_refuses_a_resolve_422(api, session, run) -> None:
+    """As it refuses an upload: a resolve normalizes, which a disabled connection does not."""
+    created, review = await _disagreeing(api, session)
+    await run(set_status, created["id"], "disabled")
+
+    response = await api.post(
+        f"/api/v1/connections/{created['id']}/reviews/{review['id']}/resolve",
+        json={"take": "statement"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["message"] == "a disabled connection can't take a decision"
+    [still] = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
+    assert still["resolution"] is None
     assert (await _postings(session, f"open:{POSITION}"))[0][2] == Decimal(4)
 
 

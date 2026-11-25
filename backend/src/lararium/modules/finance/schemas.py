@@ -457,7 +457,8 @@ class ReviewOut(BaseModel):
     connection_id: UUID
     transaction_id: UUID | None
     event_key: str  # e.g. "close:<positionId>"
-    field: str  # units | cash | profit | booking_date
+    # eToro: units | cash | profit | booking_date; Trading 212: amount | currency | booking_date
+    field: str
     api_value: str
     statement_value: str
     opened_at: AwareDatetime

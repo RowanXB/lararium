@@ -212,15 +212,41 @@ async def test_update_from_needs_reauth(api, session, run, queue) -> None:
     assert _queued(queue) == ["sync_connection"]
 
 
-async def test_update_refuses_other_connectors_and_disabled(api, run) -> None:
+async def test_update_takes_a_disabled_connection_back_once_its_keys_pass(
+    api, session, run, trading212, queue
+) -> None:
+    """Update keys is how a disabled connection comes back: the new keys pass the checks of
+    a create (Trading 212 accepts them, for the same account), and it is healthy again."""
     created = await _create(api)
     await run(set_status, created["id"], "disabled")
-    response = await api.put(
-        f"/api/v1/connections/{created['id']}/trading212",
-        json={"api_key": NEW_KEY, "api_secret": NEW_SECRET},
-        headers=OWNER,
-    )
-    assert response.status_code == 422
+    keys = {"api_key": NEW_KEY, "api_secret": NEW_SECRET}
+    url = f"/api/v1/connections/{created['id']}/trading212"
+
+    trading212.status = 401
+    refused = await api.put(url, json=keys, headers=OWNER)
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["message"] == "Trading 212 rejected this key"
+    assert (await get_connection(session, created["id"])).status == "disabled"
+
+    trading212.status = 200
+    trading212.body = SUMMARY.replace("12345678", "12345679")
+    other = await api.put(url, json=keys, headers=OWNER)
+    assert other.status_code == 422
+    assert other.json()["detail"]["message"] == "these keys are another Trading 212 account's"
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    assert key is not None and key.reveal() != NEW_KEY
+
+    trading212.body = SUMMARY
+    queue.jobs.clear()
+    response = await api.put(url, json=keys, headers=OWNER)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "healthy"
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    assert key is not None and key.reveal() == NEW_KEY
+    assert _queued(queue) == ["sync_connection"]
+
+
+async def test_update_refuses_other_connectors(api, run) -> None:
 
     other = await api.post(
         "/api/v1/connections/ibkr",

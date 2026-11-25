@@ -92,7 +92,8 @@ export const disableConnection = <ThrowOnError extends boolean = false>(options:
  * Update Etoro Connection
  *
  * Replace the two keys. The sync's gate checks that they are read-only and belong to
- * the same user.
+ * the same user; a disabled connection is checked first, as a create is (the read-only
+ * gate), and is healthy again.
  */
 export const updateEtoroConnection = <ThrowOnError extends boolean = false>(options: Options<UpdateEtoroConnectionData, ThrowOnError>): RequestResult<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateEtoroConnectionResponses, UpdateEtoroConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections/{connection_id}/etoro',
@@ -181,7 +182,8 @@ export const syncConnectionNow = <ThrowOnError extends boolean = false>(options:
 /**
  * Update Trading212 Connection
  *
- * Replace the key and secret. The sync checks that they belong to the same account.
+ * Replace the key and secret. The sync checks that they belong to the same account; a
+ * disabled connection is checked first, as a create is, and is healthy again.
  */
 export const updateTrading212Connection = <ThrowOnError extends boolean = false>(options: Options<UpdateTrading212ConnectionData, ThrowOnError>): RequestResult<UpdateTrading212ConnectionResponses, UpdateTrading212ConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateTrading212ConnectionResponses, UpdateTrading212ConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections/{connection_id}/trading212',
@@ -272,8 +274,7 @@ export const setAccountBalanceMode = <ThrowOnError extends boolean = false>(opti
 /**
  * Close Account
  *
- * Close the account; it leaves the card merchants it held, whose records are matched
- * again.
+ * Close the account; it stays a holder of the card merchants it held.
  */
 export const closeAccount = <ThrowOnError extends boolean = false>(options: Options<CloseAccountData, ThrowOnError>): RequestResult<CloseAccountResponses, CloseAccountErrors, ThrowOnError> => (options.client ?? client).post<CloseAccountResponses, CloseAccountErrors, ThrowOnError>({
     url: '/api/v1/finance/accounts/{account_id}/close',

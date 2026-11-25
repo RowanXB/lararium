@@ -4619,7 +4619,7 @@
     },
     "/api/v1/connections/{connection_id}/etoro": {
       "put": {
-        "description": "Replace the two keys. The sync's gate checks that they are read-only and belong to\nthe same user.",
+        "description": "Replace the two keys. The sync's gate checks that they are read-only and belong to\nthe same user; a disabled connection is checked first, as a create is (the read-only\ngate), and is healthy again.",
         "operationId": "update_etoro_connection",
         "parameters": [
           {
@@ -4983,7 +4983,7 @@
     },
     "/api/v1/connections/{connection_id}/trading212": {
       "put": {
-        "description": "Replace the key and secret. The sync checks that they belong to the same account.",
+        "description": "Replace the key and secret. The sync checks that they belong to the same account; a\ndisabled connection is checked first, as a create is, and is healthy again.",
         "operationId": "update_trading212_connection",
         "parameters": [
           {
@@ -5304,7 +5304,7 @@
     },
     "/api/v1/finance/accounts/{account_id}/close": {
       "post": {
-        "description": "Close the account; it leaves the card merchants it held, whose records are matched\nagain.",
+        "description": "Close the account; it stays a holder of the card merchants it held.",
         "operationId": "close_account",
         "parameters": [
           {

@@ -7,7 +7,7 @@ the OAuth code and state never reach a response, the audit log or the logs.
 import hashlib
 import logging
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Literal, cast
 from uuid import UUID
@@ -637,10 +637,20 @@ async def _update_keys(
     connection_id: UUID,
     connector: str,
     keys: Mapping[str, SecretStr],
+    *,
+    check: Callable[[], Awaitable[dict[str, JSONValue]]],
+    identity: str,
+    other: str,
 ) -> ConnectionOut:
     """Replace the connection's keys (new ones after the old were rejected): a needs_reauth
-    connection is healthy again, and a sync is queued, whose own checks try the new keys."""
+    connection is healthy again, and a sync is queued, whose own checks try the new keys.
+
+    A disabled connection comes back this way only: its new keys first pass the checks of a
+    create (`check`, which returns the identity the keys belong to, as the cursor keeps it),
+    and must be the same account or user (`cursor[identity]`; else 422 with `other`)."""
     master_key = _require_master_key(settings)
+    before = await get_connection(session, connection_id)
+    checked = await check() if before.status == "disabled" else None
     args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
     async with command_context(session, actor, f"update_{connector}_connection", args) as ctx:
         # Checked under the row lock: a disable made meanwhile can't slip in before the write.
@@ -648,10 +658,20 @@ async def _update_keys(
         if (refusal := _not_connector(connection, connector)) is not None:
             raise refusal
         if connection.status == "disabled":
-            raise _unprocessable("not_updatable", "a disabled connection can't be updated")
+            if checked is None:
+                raise _unprocessable(
+                    "not_updatable", "the connection was disabled meanwhile: try again"
+                )
+            cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
+            if cursor.get(identity) != checked[identity]:
+                raise _unprocessable("other_identity", other)
         await _store_keys(ctx, master_key, connection_id, keys)
         await transition_status(
-            ctx, connection_id, "healthy", only_from=("needs_reauth",), clear_error=True
+            ctx,
+            connection_id,
+            "healthy",
+            only_from=("needs_reauth", "disabled") if checked is not None else ("needs_reauth",),
+            clear_error=True,
         )
         record = await get_connection(session, connection_id)
     await defer_sync(connection_id)
@@ -693,10 +713,24 @@ async def update_trading212_connection(
     request: Request,
     session: SessionDep,
     actor: ActorDep,
+    http: HttpDep,
 ) -> ConnectionOut:
-    """Replace the key and secret. The sync checks that they belong to the same account."""
+    """Replace the key and secret. The sync checks that they belong to the same account; a
+    disabled connection is checked first, as a create is, and is healthy again."""
+
+    async def check() -> dict[str, JSONValue]:
+        return {"account_id": await _trading212_account_id(http, body)}
+
     return await _update_keys(
-        session, actor, _settings(request), connection_id, "trading212", _trading212_keys(body)
+        session,
+        actor,
+        _settings(request),
+        connection_id,
+        "trading212",
+        _trading212_keys(body),
+        check=check,
+        identity="account_id",
+        other="these keys are another Trading 212 account's",
     )
 
 
@@ -849,11 +883,26 @@ async def update_etoro_connection(
     request: Request,
     session: SessionDep,
     actor: ActorDep,
+    http: HttpDep,
 ) -> ConnectionOut:
     """Replace the two keys. The sync's gate checks that they are read-only and belong to
-    the same user."""
+    the same user; a disabled connection is checked first, as a create is (the read-only
+    gate), and is healthy again."""
+
+    async def check() -> dict[str, JSONValue]:
+        gcid, real_cid = await _etoro_user(http, body)
+        return {"gcid": gcid, "real_cid": real_cid}
+
     return await _update_keys(
-        session, actor, _settings(request), connection_id, "etoro", _etoro_keys(body)
+        session,
+        actor,
+        _settings(request),
+        connection_id,
+        "etoro",
+        _etoro_keys(body),
+        check=check,
+        identity="real_cid",
+        other="these keys are another eToro user's",
     )
 
 
@@ -886,9 +935,7 @@ def _upload_sync_context(
     )
 
 
-def _no_upload(
-    connection: ConnectionRecord, connector: str = "etoro", upload: str = "a statement"
-) -> HTTPException | None:
+def _no_upload(connection: ConnectionRecord, connector: str, upload: str) -> HTTPException | None:
     """422 unless the connection is the connector's and not disabled."""
     if (refusal := _not_connector(connection, connector)) is not None:
         return refusal
@@ -917,7 +964,7 @@ async def upload_etoro_statement(
     last, just before the commit: a refused or failed upload leaves none behind."""
     settings = _settings(request)
     connection = await get_connection(session, connection_id)
-    if (refusal := _no_upload(connection)) is not None:
+    if (refusal := _no_upload(connection, "etoro", "a statement")) is not None:
         raise refusal
     body = await read_upload(file, MAX_ETORO_UPLOAD_BYTES)
     filename, args = _upload_args(connection_id, file, body, "statement.xlsx")
@@ -926,7 +973,7 @@ async def upload_etoro_statement(
         statement = await parse_etoro_upload(body)
         async with command_context(session, actor, "upload_etoro_statement", args) as ctx:
             connection = await _lock_for_normalizing(ctx, connection_id)
-            if (refusal := _no_upload(connection)) is not None:
+            if (refusal := _no_upload(connection, "etoro", "a statement")) is not None:
                 raise refusal
             sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
             sync_ctx = _upload_sync_context(
@@ -1006,7 +1053,7 @@ async def upload_trading212_export(
 
 # Review items (design §5.7): eToro's API and statement, Trading 212's API and export ---------
 
-# The connectors with two sources of an event, and the normalizer that posts a decision.
+# The connectors with two sources of an event; each one's normalizer posts a decision.
 _REVIEWED = ("etoro", "trading212")
 
 
@@ -1058,6 +1105,9 @@ async def resolve_source_review(
     }
     async with command_context(session, actor, "resolve_source_review", args) as ctx:
         connection = await _lock_for_normalizing(ctx, connection_id)
+        # A disabled connection normalizes nothing, as its uploads refuse.
+        if connection.status == "disabled":
+            raise _unprocessable("not_updatable", "a disabled connection can't take a decision")
         owner = await session.scalar(
             select(models.SourceReview.connection_id).where(models.SourceReview.id == review_id)
         )

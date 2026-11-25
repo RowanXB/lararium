@@ -29,18 +29,26 @@ license-check: backend-sync web-install
 # against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC/Revolut/Tembo/LemF folders>,
 # and/or ETORO_STATEMENT=<an eToro account statement, xlsx> (at least one of the two).
 # Prints counts and pass or fail only.
+# With both set, both run even when the first fails; the target fails at the end.
 real-check: backend-sync
 	$(if $(REAL_ROOT)$(ETORO_STATEMENT),,$(error set REAL_ROOT to the folder holding one folder per bank or ETORO_STATEMENT to an eToro statement (xlsx) or both))
-ifneq ($(REAL_ROOT),)
-	root="$$(cd "$(REAL_ROOT)" && pwd)" && cd backend && LARARIUM_REAL_ROOT="$$root" \
-		uv run --locked pytest -q -s -p no:cacheprovider tests/finance/importing/test_real_files.py
-endif
-ifneq ($(ETORO_STATEMENT),)
-	test -f "$(ETORO_STATEMENT)"
-	statement="$$(cd "$$(dirname "$(ETORO_STATEMENT)")" && pwd)/$$(basename "$(ETORO_STATEMENT)")" \
-		&& cd backend && LARARIUM_ETORO_STATEMENT="$$statement" \
-		uv run --locked pytest -q -s -p no:cacheprovider tests/finance/etoro/test_real_statement.py::test_real_statement
-endif
+	@failed=0; \
+	if [ -n "$(REAL_ROOT)" ]; then \
+		if root="$$(cd "$(REAL_ROOT)" && pwd)"; then \
+			(cd backend && LARARIUM_REAL_ROOT="$$root" \
+				uv run --locked pytest -q -s -p no:cacheprovider tests/finance/importing/test_real_files.py) \
+				|| failed=1; \
+		else echo "REAL_ROOT is not a folder"; failed=1; fi; \
+	fi; \
+	if [ -n "$(ETORO_STATEMENT)" ]; then \
+		if [ -f "$(ETORO_STATEMENT)" ]; then \
+			statement="$$(cd "$$(dirname "$(ETORO_STATEMENT)")" && pwd)/$$(basename "$(ETORO_STATEMENT)")"; \
+			(cd backend && LARARIUM_ETORO_STATEMENT="$$statement" \
+				uv run --locked pytest -q -s -p no:cacheprovider tests/finance/etoro/test_real_statement.py::test_real_statement) \
+				|| failed=1; \
+		else echo "ETORO_STATEMENT is not a file: give the path of an eToro account statement (xlsx)"; failed=1; fi; \
+	fi; \
+	exit $$failed
 
 # Regenerate web/openapi.json from the backend, then the typed client from it.
 # The export goes to a temporary file first, so a failed export can't truncate the spec.
