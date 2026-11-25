@@ -1,9 +1,9 @@
 """Finding or creating the instrument of a Binance asset code (design 5.5).
 
-An asset is the existing fiat instrument when Binance marks it as legal money (none, and
-flagged, when Lararium has no currency of that code: its decimals cannot be guessed), an
-instrument
-already known by its `binance_asset` identifier, the one existing crypto instrument with that
+An asset is an instrument already known by its `binance_asset` identifier (whatever
+`coin-config` says later), the existing fiat instrument when Binance marks it as legal money
+(none, and flagged, when Lararium has no currency of that code: its decimals cannot be
+guessed), the one existing crypto instrument with that
 symbol (which then gains the identifier), or a new crypto instrument. An `LD`-prefixed code that
 mirrors another asset is never an instrument. Every asset resolved is recorded in
 `binance_assets_seen`, which decides the trade symbols a later sync asks for.
@@ -104,11 +104,28 @@ def uncounted_flag(code: str) -> str:
     return f"{code} is a currency Lararium does not have: it is not counted"
 
 
+async def _settled(
+    session: AsyncSession, connection_id: UUID, code: str
+) -> tuple[UUID | None, bool]:
+    """What already decides a code: the instrument it resolves to, and whether it is legal
+    money Lararium has no currency of. A code with a `binance_asset` instrument keeps it,
+    whatever `coin-config` says now (a holding never drops out of a report); only a code with
+    none is the fiat of its ISO code when Binance marks it legal money, or not counted."""
+    found = await find_by_identifier(session, "binance_asset", code)
+    if found is not None:
+        return found.id, False
+    _, legal_money = await _coin(session, connection_id, code)
+    if not legal_money:
+        return None, False
+    currency = await find_by_identifier(session, "iso4217", code)
+    return (None, True) if currency is None else (currency.id, False)
+
+
 async def uncounted(session: AsyncSession, connection_id: UUID, code: str) -> bool:
     """Whether the code is legal money Lararium has no currency of: no instrument, and not
-    counted."""
-    _, legal_money = await _coin(session, connection_id, code)
-    return legal_money and await find_by_identifier(session, "iso4217", code) is None
+    counted (`asset` gives it none)."""
+    code = normalize_identifier("binance_asset", code)
+    return (await _settled(session, connection_id, code))[1]
 
 
 def clash_flag(code: str) -> str:
@@ -146,18 +163,15 @@ async def asset(
     if code.startswith(MIRROR) and await _known(session, connection_id, code[len(MIRROR) :]):
         return None
     await _see(session, connection_id, code)
-    name, legal_money = await _coin(session, connection_id, code)
-    if legal_money:
-        currency = await find_by_identifier(session, "iso4217", code)
-        if currency is None:
-            if flag is not None:
-                flag(uncounted_flag(code))
-            return None
-        return currency.id
-    identifier = InstrumentIdentifier("binance_asset", code)
-    found = await find_by_identifier(session, "binance_asset", code)
+    found, missing = await _settled(session, connection_id, code)
     if found is not None:
-        return found.id
+        return found
+    if missing:
+        if flag is not None:
+            flag(uncounted_flag(code))
+        return None
+    name, _ = await _coin(session, connection_id, code)
+    identifier = InstrumentIdentifier("binance_asset", code)
     by_id, clash = await _by_coingecko_id(session, code)
     if clash and flag is not None:
         flag(clash_flag(code))

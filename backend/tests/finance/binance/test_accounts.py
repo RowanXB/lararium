@@ -257,6 +257,17 @@ async def test_legal_money_lararium_does_not_have_is_left_out_and_flagged(run, s
     assert len(await list_instruments(session, include_hidden=True)) == before
 
 
+async def test_a_code_with_an_instrument_keeps_it_when_marked_legal_money(run) -> None:
+    connection = await _connection(run)
+    found = await _asset(run, connection.id, "AAA")
+    await _coin_config(run, connection.id, coin="AAA", isLegalMoney=True)
+    flags: list[str] = []
+
+    assert await _asset(run, connection.id, "AAA", flags) == found
+    assert flags == []
+    assert not await run(lambda ctx: instruments.uncounted(ctx.session, connection.id, "aaa"))
+
+
 async def test_ld_mirror_is_not_an_instrument(run, session) -> None:
     connection = await _connection(run)
     assert await _asset(run, connection.id, "AAA") is not None
