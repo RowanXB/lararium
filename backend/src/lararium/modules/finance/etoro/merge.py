@@ -8,10 +8,14 @@ later arrival re-posts the same transaction in place.
 
 A **disagreement** is a difference between the two in a value that makes a posting or its date:
 the units, the cash amount, the profit, or the booking date (after the UTC rule, design §5.8).
-Only two descriptions of the same thing are compared (ruling R39): an open described as the
-position as opened (PnL, the "Open Position" row) and one described as the part closed (trade
-history, Closed Positions) are different facts while a partial close is known to one source
-only, so neither opens a review nor closes one; they are compared once both describe the same.
+Only like facts are reviewed (ruling R39): an open's units and cash as the position was
+opened (PnL, the "Open Position" row) and as a partial close left them (the part closed:
+trade history, Closed Positions) are different facts, so while the sources are at those
+different stages their units and cash open and close no review and tell nobody; they are
+reviewed once both describe the same. What closed is the whole position unless a source
+shows a partial close, so a full close's trade history is compared with the "Open Position"
+row at once. The booking date is the same fact at every stage and always compared. What posts,
+an owner's decision included, does not depend on the stage.
 Each opens one review item on the transaction, both values kept, and is told to the owner once
 (`notify`). Other shared fields (names, rates, spreads) are kept from both without review.
 
@@ -46,9 +50,11 @@ FIELDS = ("units", "cash", "profit", "booking_date")
 _TOGETHER = {"booking_date": ("occurred_at",)}
 
 
-# What an open's figures describe: the part of the position closed, or the position as
-# opened. A close's describe the part closed.
-type Describes = Literal["closed", "opened"]
+# What an open's or close's figures describe (R39): the position as opened; what closed, being
+# the whole position; or what closed, a part (a partial close) or not known to be the whole.
+type Describes = Literal["opened", "closed_whole", "closed_part"]
+# The fields whose figures depend on that; the booking date does not.
+_STAGED = frozenset({"units", "cash"})
 
 
 @dataclass(frozen=True)
@@ -62,7 +68,7 @@ class TradeEvent:
     profit: Decimal | None
     booking_date: date
     occurred_at: datetime
-    describes: Describes = "closed"
+    describes: Describes
 
 
 def disagreements(api: TradeEvent, statement: TradeEvent) -> list[Disagreement]:
@@ -97,22 +103,31 @@ async def takes(run: Run, key: str, found: Sequence[Disagreement]) -> dict[str, 
 
 
 def comparable(api: TradeEvent, statement: TradeEvent) -> bool:
-    """Whether the two describe the same thing (R39), so their differences are
-    disagreements and their agreements close reviews."""
-    return api.describes == statement.describes
+    """Whether the two describe the same fact (R39): both the position as opened, both what
+    closed, or one of each when what closed is the whole position."""
+    kinds = {api.describes, statement.describes}
+    return (
+        len(kinds) == 1
+        or kinds == {"closed_whole", "closed_part"}
+        or (kinds == {"opened", "closed_whole"})
+    )
 
 
 async def choose(
     run: Run, key: str, api: TradeEvent | None, statement: TradeEvent | None
 ) -> Choice[TradeEvent]:
-    """The values the event posts, and what the two sources disagree and agree on. Two that
-    are not comparable post as the API's alone would, and are compared later."""
-    if api is not None and statement is not None and not comparable(api, statement):
-        return await source_merge.choose(
-            run.session, run.connection_id, key, api, None, FIELDS, _TOGETHER
-        )
-    return await source_merge.choose(
+    """The values the event posts (an owner's decision applied as at every stage), and what
+    the two sources disagree and agree on. Two that describe unlike facts leave units and
+    cash unreviewed: no review on them is opened or closed until both describe the same."""
+    choice = await source_merge.choose(
         run.session, run.connection_id, key, api, statement, FIELDS, _TOGETHER
+    )
+    if api is None or statement is None or comparable(api, statement):
+        return choice
+    return Choice(
+        choice.values,
+        [d for d in choice.found if d[0] not in _STAGED],
+        [f for f in choice.agreed if f not in _STAGED],
     )
 
 

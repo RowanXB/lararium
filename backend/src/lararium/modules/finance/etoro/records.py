@@ -75,6 +75,7 @@ from lararium.modules.finance.etoro.state import (
     latest_sighted,
     moment_at,
     number_at,
+    number_or_none,
     objects_at,
     record_key,
     records_of,
@@ -323,14 +324,16 @@ async def _account_currency(run: Run) -> InstrumentRecord:
 
 
 def _api_open(position: Position) -> TradeEvent | None:
-    """The API's open: trade history's once the position closed (the part closed), else
-    PnL's (the position as opened)."""
+    """The API's open: trade history's once the position closed (what closed: the whole
+    position when its `investment` is its `initialInvestment`, else a part), else PnL's (the
+    position as opened)."""
     describes: Describes
     if position.trade is not None:
         record, item = position.trade, position.trade.content
         occurred_at = moment_at(record, item, "openTimestamp")
         units, amount = number_at(record, item, "units"), number_at(record, item, "investment")
-        describes = "closed"
+        initial = number_or_none(record, item, "initialInvestment")
+        describes = "closed_whole" if initial is not None and initial == amount else "closed_part"
     elif position.pnl is not None:
         record, item = position.pnl
         occurred_at = moment_at(record, item, "openDateTime")
@@ -362,6 +365,7 @@ def _api_close(position: Position) -> TradeEvent | None:
         profit,
         local_date(occurred_at, LONDON),
         occurred_at,
+        statement_ledger.CLOSE,
     )
 
 

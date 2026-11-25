@@ -315,7 +315,7 @@ def _event(
     at: datetime | None,
     row: Row,
     position_id: str,
-    describes: Describes = "closed",
+    describes: Describes,
 ) -> TradeEvent:
     if units is None or cash is None or at is None:
         raise EtoroDataError(
@@ -328,27 +328,34 @@ def open_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
     """The statement's open of the position: Closed Positions' amount, units and open date
     once it has closed (what closed is what was opened: a partial close's "Open Position" row
     is the whole position's, its remainder a position of its own, design §6), else its "Open
-    Position" row. Which of the two it describes (merge.TradeEvent.describes): the part
-    closed, or the position as opened."""
+    Position" row. What it describes (merge.TradeEvent.describes): the position as opened;
+    or what closed, the whole position when it closed as many units as the "Open Position"
+    row opened, else a part (or not known to be the whole)."""
     if trade is None:
         return None
-    rows: tuple[tuple[Row | None, str, Describes], ...] = (
-        (trade.closed, "Open Date", "closed"),
-        (trade.open, "Date", "opened"),
+    if trade.closed is not None:
+        whole = trade.open is not None and number(trade.open, "Units / Contracts") == number(
+            trade.closed, "Units / Contracts"
+        )
+        row, at, describes = trade.closed, "Open Date", "closed_whole" if whole else "closed_part"
+    elif trade.open is not None:
+        row, at, describes = trade.open, "Date", "opened"
+    else:
+        return None
+    amount = number(row, "Amount")
+    return _event(
+        number(row, "Units / Contracts"),
+        None if amount is None else amount.copy_abs(),
+        None,
+        moment(row, at),
+        row,
+        position_id,
+        describes,
     )
-    for row, at, describes in rows:
-        if row is not None:
-            amount = number(row, "Amount")
-            return _event(
-                number(row, "Units / Contracts"),
-                None if amount is None else amount.copy_abs(),
-                None,
-                moment(row, at),
-                row,
-                position_id,
-                describes,
-            )
-    return None
+
+
+# What a close describes, from either source: what closed (the two are always comparable).
+CLOSE: Describes = "closed_part"
 
 
 def close_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
@@ -368,6 +375,7 @@ def close_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
             moment(row, "Date"),
             row,
             position_id,
+            CLOSE,
         )
     if (row := trade.closed) is not None:
         amount = number(row, "Amount")
@@ -379,6 +387,7 @@ def close_event(trade: Trade | None, position_id: str) -> TradeEvent | None:
             moment(row, "Close Date"),
             row,
             position_id,
+            CLOSE,
         )
     return None
 

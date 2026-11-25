@@ -334,6 +334,7 @@ def _event(**overrides: Any) -> TradeEvent:
         "profit": None,
         "booking_date": date(2026, 10, 2),
         "occurred_at": datetime(2026, 10, 2, 14, 30, 5, tzinfo=UTC),
+        "describes": "opened",
     } | overrides
     return TradeEvent(**values)
 
@@ -1327,6 +1328,7 @@ def _partial_statement(*, closed: bool, closed_units: str = "4") -> bytes:
     )
 
 
+API_OPENED = "2026-10-02T14:30:05.120Z"
 PARTIAL = api_trade(investment=Decimal("400.00"), initialInvestment=Decimal("1000.00"))
 
 
@@ -1353,7 +1355,10 @@ async def test_a_statement_ahead_of_a_partial_close_opens_no_review(session, led
     # four units closed. Compared once trade history brings the close.
     await ledger.normalize(
         *BASE,
-        ("pnl", pnl_body([pnl_position(POSITION, units="10", amount="1000.00")])),
+        (
+            "pnl",
+            pnl_body([pnl_position(POSITION, units="10", amount="1000.00", opened=API_OPENED)]),
+        ),
         ("order_lookup", lookup_body(ORDER, POSITION)),
     )
     await ledger.upload(_partial_statement(closed=True))
@@ -1410,3 +1415,54 @@ async def test_the_unplaceable_flag_stands_then_clears_once_placed(session, ledg
     # The next upload publishes the flags in full: it is gone.
     await ledger.upload(build_statement(summary(username=USERNAME), OPEN_ONLY))
     assert UNPLACED_FLAG not in await _warnings(session, ledger)
+
+
+async def _open_units(session) -> Decimal:
+    return (await _postings(session, f"open:{POSITION}"))[0][2]
+
+
+async def test_a_decision_holds_through_a_full_close(session, run, ledger) -> None:
+    # PnL says two units, the statement's "Open Position" row three: the owner takes three.
+    pnl = ("pnl", pnl_body([pnl_position(POSITION, units="2", amount="500.00", opened=API_OPENED)]))
+    await ledger.normalize(*BASE, pnl, ("order_lookup", lookup_body(ORDER, POSITION)))
+    three = open_row(units="3")
+    await ledger.upload(build_statement(summary(username=USERNAME), [transfer_in(), three]))
+    [review] = await list_reviews(session, ledger.connection.id)
+    assert (review.field, review.api_value, review.statement_value) == ("units", "2", "3")
+    await run(lambda ctx: resolve_review(ctx, review.id, "statement"))
+    await ledger.normalize(*BASE, pnl, now=NOW + timedelta(days=1))
+    assert await _open_units(session) == 3
+    # It closes in full: trade history describes the whole position, like the row.
+    whole = api_trade(units=Decimal(2))
+    await ledger.normalize(*BASE, ("trade_history", whole), now=NOW + timedelta(days=2))
+    assert await _open_units(session) == 3
+    # A statement with its Closed Positions row: still three, nothing new to review.
+    await ledger.upload(
+        build_statement(
+            summary(username=USERNAME),
+            [transfer_in(), three, close_row() | {"Units / Contracts": "3"}],
+            [closed_row() | {"Units / Contracts": "3"}],
+        )
+    )
+    assert await _open_units(session) == 3
+    reviews = await list_reviews(session, ledger.connection.id)
+    # The open's item stays decided; the close, three units against two, is a new fact.
+    assert sorted((r.event_key, r.field, r.resolution) for r in reviews) == [
+        (f"close:{POSITION}", "units", None),
+        (f"open:{POSITION}", "units", "statement"),
+    ]
+    assert len(ledger.disagreement_messages()) == 2
+
+
+async def test_a_full_close_disagreeing_with_the_open_row_is_reviewed(session, ledger) -> None:
+    # Trade history closed the whole position (four units); the statement, still before the
+    # close, opened five: the same fact, stated differently.
+    await ledger.normalize(
+        *BASE, ("trade_history", api_trade()), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    await ledger.upload(
+        build_statement(summary(username=USERNAME), [transfer_in(), open_row(units="5")])
+    )
+    [review] = await list_reviews(session, ledger.connection.id)
+    assert (review.field, review.api_value, review.statement_value) == ("units", "4", "5")
+    assert len(ledger.disagreement_messages()) == 1
