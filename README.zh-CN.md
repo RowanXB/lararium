@@ -270,8 +270,9 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
     （同一天、同样两个账户之间、金额相同的两笔转出和两笔转入），按固定顺序配上，怎么配余额都一样。
     如果一侧的记录没有写明对方账户，就和单笔一样按金额和日期认：同一天别人转来的同额款项，可能在你
     自己那笔到账前被一起认进来，等你那笔到了，它们会转到这里让你处理。
-  - *Amount differs*（金额不同）：两条记录互相指向对方的账户，但金额不同。它们不能配对；如果它不是
-    转账，就 Reject。
+  - *Amount differs*（金额不同）：两条记录互相指向对方的账户，但金额不同。页面上没有 **Pair**：
+    两条都是资金记录时，通过 API 配对（`POST /api/v1/finance/transfers/{id}/pair`，请求体
+    `{"transaction_id": "<另一条>"}`；见下文“没有写明对方账户的记录”），否则如果它不是转账，就 Reject。
   - *Overdue*（逾期）：另一个账户有自己的连接，但 7 天内还没报告它那一侧。
 
   在你决定之前什么都不会变：余额和净资产保持原样。
@@ -299,13 +300,14 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
   （其中一条记录应该和另一条配对），就通过 API 取消配对（`POST /api/v1/finance/transfers/{id}/unpair`），
   再按下面“没有写明对方账户的记录”所说，把它和正确的那条配对：Reject 会把两条都标成不是转账，而被拒绝的
   记录不能配对。
-- **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额不同的候选没有这个按钮）：这两条记录是
-  同一笔转账。你的选择优先于其他任何候选。
+- **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额或币种不同的候选在页面上没有这个按钮，
+  改用 API 配对）：这两条记录是同一笔转账。你的选择优先于其他任何候选。候选按它自己的币种显示。
 
 **没有写明对方账户的记录。** 两条记录都没有写明对方账户时（比如银行流水只印着你的名字和一个
 参考号），不会自动生成转账。先在手动账户上手动录入另一侧，再通过 API 把这两条记录配对：
-`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录（另一个账户、
-金额相反且相等、日期最近的在前），`POST /api/v1/finance/transactions/{id}/pair`，请求体
+`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录：先是另一个账户上
+金额相反且相等的；对资金记录，再是 7 天内币种或金额不同的资金记录，标为 `differs`（`currency` 或
+`amount`）；每部分日期最近的在前。`POST /api/v1/finance/transactions/{id}/pair`，请求体
 `{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。手动录入的那一侧必须是恰好两条分录的交易（该账户和 Unassigned），
 否则配对会被拒绝。点 Unpair 即可撤销；撤销后，两条没有写明对方账户的记录不再有转账，要恢复只能
 再通过同一个接口把它们重新配对（另一条记录仍会出现在候选列表里）。
@@ -417,8 +419,9 @@ Stocks ISA），粘贴 API key 和 API secret，点 **Add Trading 212**。Larari
 这个连接会创建一个账户，名为 `Trading 212 Invest ···1234` 或 `Trading 212 ISA ···1234`（Trading 212
 账户 ID 的后四位；可以改名），税务账户类型为 GIA 或 ISA。你的订单（每笔成交及其税费）、分红、入金、
 出金、费用和利息都记进这个账户，每次同步还会记下所持每个标的的价格。首次同步读取全部历史；之后只读
-新的部分，每周再完整读一遍。如果之后 Trading 212 拒绝了 key，连接上会提示：用 **Update keys**
-换一对新的。
+新的部分，每周再完整读一遍。很长的历史分几次同步读完，每次同步每类历史最多 50 页。如果之后
+Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对新的。已停用的连接也这样恢复：
+**Update keys** 像添加时一样用 Trading 212 核验新的一对（必须是同一个账户），再把连接恢复为正常。
 
 ### CSV 导出（可选）
 
@@ -466,7 +469,9 @@ eToro 是一个连接器：`worker` 通过 eToro 的公开 API 每 30 分钟同�
 在 eToro 打开 Settings，再进入 Trading，再进入 API Key Management，创建一个 Environment 为
 **Real**、Permission 为 **Read** 的 key。记下 Public API Key 和 User Key。Lararium 在你添加它时以及
 每次同步开始时都会读取 key 的 scopes：只要有一个不是读取 scope，这个 key 就会被拒绝（“This eToro
-key can trade or move money. Create a key with Read permission.”），其他什么都不拉取。
+key can trade or move money. Create a key with Read permission.”），其他什么都不拉取。一个完全
+没有 scope 的 key 也会被拒绝，提示是“This eToro key reports no permissions. Create a key with Read
+permission.”。
 
 ### 2. 添加连接
 
@@ -481,7 +486,8 @@ key can trade or move money. Create a key with Read permission.”），其他�
 - **MoneyFarm ISA**（snapshots）：每次同步记下 eToro 报告的余额。eToro 的 API 不提供 MoneyFarm 的
   持仓或交易。
 
-如果之后 eToro 拒绝了 key，连接上会提示：用 **Update keys** 换一对新的。
+如果之后 eToro 拒绝了 key，连接上会提示：用 **Update keys** 换一对新的。已停用的连接也这样恢复：
+**Update keys** 像添加时一样核验新的一对（只读、同一个 eToro 用户），再把连接恢复为正常。
 
 ### 3. 上传报表
 
@@ -492,7 +498,7 @@ statement）。没有报表，这些就缺失，Trading 的现金也对不上 eT
 1. 在 eToro 网页版打开 Portfolio，再进入 History，再进入 Account Statement，选择时间段，下载为
    Excel（xlsx）。
 2. 等该连接的首次同步完成后，在 eToro 连接上选择 **Upload eToro statement (xlsx)** 上传
-   （最大 16 MiB）。
+   （最大 16 MiB，最多 100,000 个单元格：太大的报表会被拒绝，改为下载更短的时间段）。
 
 - **第一份报表必须在你开户当天或更早开始**（报表里的 Date Created）。开始得更晚会被拒绝，并指明
   那一天，这样 API 和你的报表合起来才能覆盖账户的整个存续期。
@@ -517,6 +523,8 @@ statement）。没有报表，这些就缺失，Trading 的现金也对不上 eT
   通过 API 配对，做法同 [Transfers 页面](#transfers-页面) 里“不带账户信息的记录”：
   `POST /api/v1/finance/transactions/{id}/pair` 加 `{"transaction_id": "<other>"}`，接受两笔方向
   相反、币种不同（差额是汇率）或同一币种下金额不同（差额记为手续费）的资金记录。
+  `GET /api/v1/finance/transactions/{id}/pair-candidates` 会列出它们，标为 `differs`。两笔币种不同的
+  记录，如果其连接器给出的手续费放不进这次换汇，就不能配对：唯一的选择是 Reject。
 
 ### 警告
 
@@ -530,7 +538,8 @@ statement）。没有报表，这些就缺失，Trading 的现金也对不上 eT
 
 当 eToro 的 API 和报表，或 Trading 212 的 API 和导出文件，对同一件事说法不一时，Lararium 会开一个
 待复核项（review item），两个值都保留，按 API 的值入账，并发一条通知，比如 “eToro: eToro's API and
-statement disagree on close of position ···1234 (cash); review them on the connection”。对 eToro，
+statement disagree on close of position ···1234 (cash); they are resolved through the API (README:
+Review items)”。发送失败的通知会在下一次同步时再发。对 eToro，
 这件事是一次开仓或平仓的数量、现金、盈亏或记账日期；对 Trading 212，是一笔入金或出金的金额、币种或
 记账日期。
 
@@ -552,6 +561,10 @@ statement disagree on close of position ···1234 (cash); review them on the co
 - Trading 212 的正负号（出金、费用、转账、订单的税费和净额）以及导出文件里的交易行，还没有用真实交易
   核对过。
 - 卡入金只与连接器账户的记录配对，绝不与手动账户或导入账户的配对。
+- 关闭一个 Trading 212 账户后，它仍登记在它的卡商户下，所以过去的卡入金保持配对；不会再有新的配进来。
+  把它从该商户的账户里移除，才会取消这些配对。
+- 很长的历史分几次同步读完：Trading 212 每次同步每类历史最多 50 页，eToro 每次同步最多查询 50 个订单
+  （已平仓的交易会等它的订单查询，或等一份覆盖它的报表）。
 - 在 Monzo 同步和 Trading 212 同步之间，一笔卡入金会显示为记在 Unassigned 上的支出，净资产会因此
   下跌，直到两侧都同步进来。
 

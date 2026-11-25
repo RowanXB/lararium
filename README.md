@@ -313,7 +313,9 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     they are found by amount and date, like a single one: a payment from someone else of that
     amount on that day can be taken among them until your own arrives, and then they go here.
   - *Amount differs*: the two records name each other's accounts but their amounts differ.
-    They can't be paired; Reject the transfer if it isn't one.
+    The page has no **Pair** for them: when both are money records, pair them through the API
+    (`POST /api/v1/finance/transfers/{id}/pair` with `{"transaction_id": "<other>"}`; see
+    *Records that name no account* below), else Reject the transfer if it isn't one.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
     days.
 
@@ -345,16 +347,19 @@ What the buttons do (each decision is kept across re-syncs):
   with the right one, as *Records that name no account* below describes: Reject would mark both
   records as no transfer, and a rejected record can't be paired.
 - **Pair** (on a candidate of the same amount, or an *Unpaired* one; a candidate whose amount
-  differs has none): these two records are one transfer. Your choice outranks any other
-  candidate.
+  or currency differs has none on the page, and is paired through the API instead): these two
+  records are one transfer. Your choice outranks any other candidate. A candidate is shown in
+  its own currency.
 
 **Records that name no account.** When neither record names the other's account (a bank row that
 prints only your name and a reference, say), no transfer opens by itself. Enter the other side
 by hand on a manual account, then pair the two records through the API:
 `GET /api/v1/finance/transactions/{id}/pair-candidates` lists the records that could be its
-other side (another account, the opposite and equal amount, nearest date first), and
-`POST /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` pairs them
-as one matched transfer. The hand-entered side must be a transaction of exactly two postings,
+other side: first those on another account of the opposite and equal amount, then, for a money
+record, those in money that differ in currency or in amount within 7 days, marked `differs`
+(`currency` or `amount`); each part nearest date first. `POST
+/api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` pairs them as one
+matched transfer. The hand-entered side must be a transaction of exactly two postings,
 the account and Unassigned; otherwise pairing is refused. Unpair undoes it; after that, two records that name no
 account have no transfer left, so the way back is pairing them again through this same endpoint
 (the other record stays listed as a candidate).
@@ -489,8 +494,10 @@ The connection creates one account, `Trading 212 Invest ···1234` or `Trading 
 (GIA or ISA). Into it go your orders (each fill, with its taxes and fees), dividends,
 deposits, withdrawals, fees and interest, and each held instrument's price on every sync. The
 first sync reads the whole history; later syncs read what is new, and once a week the whole
-history again. If Trading 212 rejects the key later, the connection says so: **Update keys**
-takes a new pair.
+history again. A long history is read over several syncs, at most 50 pages of each history
+a sync. If Trading 212 rejects the key later, the connection says so: **Update keys** takes a
+new pair. A disabled connection comes back the same way: **Update keys** checks the new pair
+with Trading 212 as adding does (the same account) and makes it healthy again.
 
 ### The CSV export (optional)
 
@@ -550,7 +557,8 @@ In eToro open Settings, then Trading, then API Key Management, and create a key 
 Environment **Real** and Permission **Read**. Note the Public API Key and the User Key.
 Lararium reads the key's scopes when you add it and at the start of every sync: if any of them
 is not a read scope, the key is refused ("This eToro key can trade or move money. Create a key
-with Read permission.") and nothing else is fetched.
+with Read permission.") and nothing else is fetched. A key that reports no scopes at all is
+refused too, with "This eToro key reports no permissions. Create a key with Read permission."
 
 ### 2. Add the connection
 
@@ -566,6 +574,8 @@ connection for the same user is refused. The first sync creates a separate accou
   gives no MoneyFarm holdings or transactions.
 
 If eToro rejects the keys later, the connection says so: **Update keys** takes a new pair.
+A disabled connection comes back the same way: **Update keys** checks the new pair as adding
+does (read-only, the same eToro user) and makes it healthy again.
 
 ### 3. Upload your statements
 
@@ -577,7 +587,8 @@ missing, and Trading's cash won't match eToro's.
 1. In eToro's web app open Portfolio, then History, then Account Statement, choose the
    period, and download it as Excel (xlsx).
 2. Once the connection's first sync has finished, choose **Upload eToro statement (xlsx)** on
-   the eToro connection and upload it (up to 16 MiB).
+   the eToro connection and upload it (up to 16 MiB, and at most 100,000 cells: a statement
+   too large is refused; download a shorter period instead).
 
 - **The first statement must start on or before the day you opened the account** (the
   statement's Date Created). A later start is refused, naming that day, so that the API and
@@ -611,6 +622,9 @@ and upload it.
   /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` accepts two
   money records of opposite directions that differ in currency (the difference is the
   exchange rate) or, in one currency, in amount (the difference is posted as a fee).
+  `GET /api/v1/finance/transactions/{id}/pair-candidates` lists them, marked `differs`. Two
+  records in different currencies whose connector states a fee that can't fit the conversion
+  can't be paired: the only choice is Reject.
 
 ### Warnings
 
@@ -627,7 +641,8 @@ and upload it.
 When eToro's API and a statement, or Trading 212's API and its export, state one fact
 differently, Lararium opens a review item, keeps both values, posts the API's value, and
 sends one notification, such as "eToro: eToro's API and statement disagree on close of position
-···1234 (cash); review them on the connection". For eToro the fact is the units, the cash, the
+···1234 (cash); they are resolved through the API (README: Review items)". A notification that
+fails to send is sent with the next sync. For eToro the fact is the units, the cash, the
 profit or the booking date of an open or a close; for Trading 212, the amount, the currency or
 the booking date of a deposit or withdrawal.
 
@@ -653,6 +668,12 @@ itself.
   its export's trade rows haven't been checked against a real trade yet.
 - Card deposits pair only with records of connector accounts, never with a manual or imported
   one.
+- Closing a Trading 212 account keeps it registered to its card merchant, so its past card
+  deposits stay paired; no new one pairs into it. Removing it from the merchant's accounts
+  unpairs them.
+- A long history is read over several syncs: Trading 212 at most 50 pages of each history a
+  sync, eToro at most 50 order lookups a sync (a closed trade waits for its lookup, or for a
+  statement that covers it).
 - Between Monzo's sync and Trading 212's, a card deposit shows as spending on Unassigned and
   net worth dips by it, until both sides are in.
 
