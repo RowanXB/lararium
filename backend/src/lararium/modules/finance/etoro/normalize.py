@@ -282,9 +282,10 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
         run.session, run.connection_id, sorted(run.accounts.values())
     )
     report.flags_in_full |= await currency_flags(run.session, run.connection_id)
-    if unknown := await records.settlement_unknown(run, trades, lookups):
+    pnl = await records.latest_pnl(run)
+    if unknown := await records.settlement_unknown(run, trades, lookups, pnl):
         report.flags_in_full.add(f"{records.SETTLEMENT_UNKNOWN} ({unknown})")
-    if await records.unplaced(run, trades, statement):
+    if await records.unplaced(run, trades, pnl, statement):
         report.flags_in_full.add(statement_ledger.UNPLACED)
 
     # Only this normaliser's keys: others stay as they are.

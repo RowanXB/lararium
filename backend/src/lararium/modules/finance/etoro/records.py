@@ -507,15 +507,17 @@ async def position(run: Run, position: Position) -> None:
 
 
 async def unplaced(
-    run: Run, trades: Mapping[str, Record], statement: statement_ledger.Statement
+    run: Run,
+    trades: Mapping[str, Record],
+    pnl: Mapping[str, tuple[Record, Item]],
+    statement: statement_ledger.Statement,
 ) -> int:
     """How many positions only the statement has cannot be placed (ruling R40): no Closed
     Positions row to say they are real (an open the statement does not close), or one that
     does not say which instrument. Found in full from everything stored, so the flag clears
     once the API or a later statement places them. An open the statement does not close,
     after the latest sync's fetch, is not counted: that sync could not have brought it, the
-    next is expected to."""
-    pnl = await _latest_items(run, "pnl")
+    next is expected to. `pnl`: each position's latest stored PnL item (latest_pnl)."""
     latest = await latest_sighted(run.session, run.connection_id, "balances")
     fetched = latest.seen_at if latest is not None else None
     count = 0
@@ -541,13 +543,20 @@ async def unplaced(
     return count
 
 
+async def latest_pnl(run: Run) -> dict[str, tuple[Record, Item]]:
+    """Each position's item in the latest PnL report that listed it."""
+    return await _latest_items(run, "pnl")
+
+
 async def settlement_unknown(
-    run: Run, trades: Mapping[str, Record], lookups: Mapping[str, Record]
+    run: Run,
+    trades: Mapping[str, Record],
+    lookups: Mapping[str, Record],
+    pnl: Mapping[str, tuple[Record, Item]],
 ) -> int:
     """How many of the connection's positions (closed, or listed in PnL) are `unknown` as
     _settlement reads them, from everything stored. Found in full, so the flag clears once a
-    source states the settlement."""
-    pnl = await _latest_items(run, "pnl")
+    source states the settlement. `pnl`: as latest_pnl."""
     breakdown = await _latest_items(run, "breakdown")
     by_execution = _by_execution(lookups)
     return sum(
