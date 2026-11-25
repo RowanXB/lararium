@@ -225,16 +225,18 @@ async def test_only_card_merchants_have_holder_rows(
             )
 
 
-async def test_closing_a_holder_removes_it(
+async def test_closing_a_holder_keeps_it(
     session: AsyncSession, run: Run, platform, connector_tx: ConnectorTx, heal: Heal
 ) -> None:
+    """A closed account stays a holder (its card-deposit history stands, as a bank
+    identifier stays assigned); a registration keeps it, but can't newly add one."""
     monzo, invest, isa = platform
     record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
     payment = await _card_payment(connector_tx, monzo, record.id)
 
     await run(close_account, isa.account.id, DAY)
 
-    assert await holders_of(session, record.id) == {invest.account.id}
+    assert await holders_of(session, record.id) == {invest.account.id, isa.account.id}
     audited = await session.scalar(
         text(
             "select count(*) from core.events"
@@ -242,16 +244,20 @@ async def test_closing_a_holder_removes_it(
         ),
         {"i": record.id},
     )
-    assert audited == 2  # the registration, and the close
-    assert set((await _eligible_row(session, payment.id)).holders) == {invest.account.id}
-    # The remaining holders can still be edited; the closed account can't come back.
-    again = await run(register_card_merchant, MERCHANT, [invest.account.id, monzo.account.id])
-    assert set(again.holders) == {invest.account.id, monzo.account.id}
+    assert audited == 1  # the registration only
+    assert set((await _eligible_row(session, payment.id)).holders) == {
+        invest.account.id,
+        isa.account.id,
+    }
+    # The holders can still be edited with the closed one kept...
+    again = await run(
+        register_card_merchant, MERCHANT, [invest.account.id, isa.account.id, monzo.account.id]
+    )
+    assert set(again.holders) == {invest.account.id, isa.account.id, monzo.account.id}
+    # ...or removed (an explicit owner action), after which it can't come back.
+    await run(register_card_merchant, MERCHANT, [invest.account.id])
     with pytest.raises(FinanceValidationError):
         await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
-    # Closing the last holder leaves the merchant unregistered.
-    await run(close_account, invest.account.id, DAY)
-    await run(register_card_merchant, MERCHANT, [monzo.account.id])
     await heal()
     await assert_consistent(session)
 
@@ -458,14 +464,13 @@ async def test_sync_closing_a_holder_then_heal_is_consistent(
     session: AsyncSession,
     run: Run,
     platform,
-    ids: SystemIds,
     connector_tx: ConnectorTx,
     heal: Heal,
     paired: bool,
 ) -> None:
     """A connector's sync closes a holder (Monzo a deleted pot, IBKR a closed account): the
-    holder leaves the merchant in the sync's command, and the heal the worker runs after the
-    sync, reading the holders as they now are, leaves the ledger consistent."""
+    account stays the merchant's holder, so the heal the worker runs after the sync has
+    nothing to undo, whether the card tier or the owner made the pair."""
     monzo, invest, isa = platform
     record = await run(register_card_merchant, MERCHANT, [invest.account.id, isa.account.id])
     payment = await _card_payment(connector_tx, monzo, record.id)
@@ -473,27 +478,18 @@ async def test_sync_closing_a_holder_then_heal_is_consistent(
     if paired:
         await run(pair_records, payment.id, deposit.id)
     await heal()
+    before = await list_transfers(session)
 
     async with command_context(session, Actor("connector", "monzo"), "connection.sync", {}) as ctx:
-        _, left = await close_account(ctx, isa.account.id, DAY)
-    assert left == [record.id]
-    await heal()
+        await close_account(ctx, isa.account.id, DAY)
+    assert await heal() == 0
 
-    # Nothing names the closed account as a holder any more.
-    assert await holders_of(session, record.id) == {invest.account.id}
-    assert set((await _eligible_row(session, payment.id)).holders) == {invest.account.id}
+    assert await holders_of(session, record.id) == {invest.account.id, isa.account.id}
     relation = await pair_relation(
         session, await system_account_ids(session), await load_transfer_settings(session)
     )
-    assert relation.records[payment.id].holders == frozenset({invest.account.id})
-    transfers = await list_transfers(session)
-    if paired:
-        # The owner's pair stands: the deposit is on the closed account, as it was.
-        [transfer] = transfers
-        assert (transfer.status, transfer.to_account_id) == ("matched", isa.account.id)
-    else:
-        assert transfers == []
-        assert await contra_account(session, payment.id, monzo.account.id) == ids.unassigned
+    assert relation.records[payment.id].holders == frozenset({invest.account.id, isa.account.id})
+    [transfer] = await list_transfers(session)
+    assert transfer == before[0]
+    assert (transfer.status, transfer.to_account_id) == ("matched", isa.account.id)
     await assert_consistent(session)
-    # And the heal after it has nothing left to do.
-    assert await heal() == 0

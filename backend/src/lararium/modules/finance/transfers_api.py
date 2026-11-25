@@ -139,7 +139,10 @@ async def remove_account_identifier(
             # A card merchant: the account leaves its holders, the others stay.
             [merchant] = held
             await transfers.register_card_merchant_and_rematch(
-                ctx, merchant.value, [a for a in merchant.holders if a != account_id]
+                ctx,
+                merchant.value,
+                [a for a in merchant.holders if a != account_id],
+                heal=False,  # healing_command heals once, at the end
             )
             return
         if await identifiers.identifier_account(session, identifier_id) != account_id:
@@ -157,7 +160,7 @@ async def register_card_merchant(
     args = _args(body.model_dump(mode="json"))
     async with healing_command(session, actor, "register_card_merchant", args) as ctx:
         record = await transfers.register_card_merchant_and_rematch(
-            ctx, body.merchant_id, body.account_ids
+            ctx, body.merchant_id, body.account_ids, heal=False
         )
     return _identifier_out(record)
 
@@ -187,16 +190,20 @@ async def set_main_account(
 # Transfers
 
 
+async def _symbols(session: AsyncSession) -> dict[UUID, str]:
+    return {
+        instrument.id: instrument.symbol
+        for instrument in await instruments.list_instruments(session, include_hidden=True)
+    }
+
+
 async def _transfers_out(
     session: AsyncSession, found: Collection[transfers.TransferRecord]
 ) -> list[TransferOut]:
     # Loaded even for no transfers, so a malformed setting shows on the Transfers page.
     settings = await transfers.load_transfer_settings(session)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
-    symbols = {
-        instrument.id: instrument.symbol
-        for instrument in await instruments.list_instruments(session, include_hidden=True)
-    }
+    symbols = await _symbols(session)
     now = datetime.now(UTC)
     timezone = await get_timezone(session)
     today = now.astimezone(timezone).date()
@@ -247,12 +254,14 @@ async def list_transfer_candidates(transfer_id: UUID, session: SessionDep) -> li
     link again); empty for a transfer with both sides."""
     found = await transfers.candidates(session, transfer_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    symbols = await _symbols(session)
     return [
         CandidateOut(
             transaction_id=c.transaction_id,
             account_id=c.account_id,
             account_name=names[c.account_id],
             quantity=c.quantity,
+            currency=symbols[c.instrument_id],
             occurred_at=c.occurred_at,
             description=c.description,
             reason=c.reason,
@@ -323,12 +332,14 @@ async def list_transaction_pair_candidates(
     booking date first, at most 20 in all."""
     found = await transfers.pair_candidates(session, transaction_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    symbols = await _symbols(session)
     return [
         PairCandidateOut(
             transaction_id=c.transaction_id,
             account_id=c.account_id,
             account_name=names[c.account_id],
             quantity=c.quantity,
+            currency=symbols[c.instrument_id],
             occurred_at=c.occurred_at,
             booking_date=c.booking_date,
             description=c.description,

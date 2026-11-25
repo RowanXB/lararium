@@ -525,7 +525,7 @@ async def test_card_pair_dissolved_when_holder_removed(
     assert await heal() == 0
 
 
-async def test_card_pair_dissolved_when_sync_closes_holder(
+async def test_card_pair_stands_when_sync_closes_holder(
     session: AsyncSession,
     run: Run,
     platform,
@@ -533,19 +533,39 @@ async def test_card_pair_dissolved_when_sync_closes_holder(
     connector_tx: ConnectorTx,
     heal: Heal,
 ) -> None:
+    """A closed account stays a holder of its card merchant, as a bank identifier stays
+    assigned: its card-deposit history stands."""
     monzo, _, isa, merchant = platform
     paid = await payment(connector_tx, monzo, merchant, TEN)
     into = await deposit(connector_tx, isa, TEN)
     await heal()
-    assert len(await list_transfers(session)) == 1
+    [before] = await list_transfers(session)
 
     async with command_context(session, Actor("connector", "monzo"), "connection.sync", {}) as ctx:
         await close_account(ctx, isa.account.id, DAY)
-    await heal()
+    assert await heal() == 0
 
-    assert await list_transfers(session) == []
-    assert await contra_account(session, paid.id, monzo.account.id) == ids.unassigned
-    assert await contra_account(session, into.id, isa.account.id) == ids.unassigned
+    assert await list_transfers(session) == [before]
+    assert pairs_of([before]) == {(paid.id, into.id, "matched")}
+    await assert_consistent(session)
+
+
+async def test_payment_after_a_holder_closes_pairs_into_the_open_one(
+    session: AsyncSession,
+    run: Run,
+    platform,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+) -> None:
+    """The closed holder takes no new deposits, so a payment after its close date pairs
+    with the deposit on the open holder, the closed one being no rival."""
+    monzo, invest, isa, merchant = platform
+    await run(close_account, isa.account.id, DAY)
+    later = TEN + timedelta(days=3)
+    paid = await payment(connector_tx, monzo, merchant, later)
+    into = await deposit(connector_tx, invest, later)
+    await heal()
+    assert pairs_of(await list_transfers(session)) == {(paid.id, into.id, "matched")}
     await assert_consistent(session)
     assert await heal() == 0
 

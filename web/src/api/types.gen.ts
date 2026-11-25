@@ -227,6 +227,10 @@ export type CandidateOut = {
      */
     account_name: string;
     /**
+     * Currency
+     */
+    currency: string;
+    /**
      * Description
      */
     description: string;
@@ -1473,6 +1477,10 @@ export type PairCandidateOut = {
      * Booking Date
      */
     booking_date: string;
+    /**
+     * Currency
+     */
+    currency: string;
     /**
      * Description
      */

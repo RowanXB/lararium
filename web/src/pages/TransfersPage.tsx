@@ -126,12 +126,10 @@ function usePair(transferId: string) {
 }
 
 function CandidateList({
-  transfer,
   candidates,
   busy,
   onPair,
 }: {
-  transfer: TransferOut;
   candidates: CandidateOut[];
   busy: boolean;
   onPair: (transactionId: string) => void;
@@ -148,11 +146,12 @@ function CandidateList({
             {[
               candidate.account_name,
               new Date(candidate.occurred_at).toLocaleDateString("en-GB"),
-              `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${transfer.currency}`,
+              `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${candidate.currency}`,
               candidate.description,
             ].join(" · ")}
           </span>
-          {/* The API pairs a candidate of the same amount, or one the owner unpaired. */}
+          {/* The API pairs any candidate listed; the page offers Pair for one of the same
+              amount, or one the owner unpaired, and leaves one that differs to the API. */}
           {candidate.reason === "amount_differs" ? (
             <span className="text-muted-foreground">Different amount</span>
           ) : (
@@ -212,7 +211,6 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
       </div>
       {candidates.data && (
         <CandidateList
-          transfer={transfer}
           candidates={candidates.data}
           busy={busy}
           onPair={(transactionId) => {
@@ -241,7 +239,6 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
       <div className="mt-2 space-y-2">
         {candidates.data && (
           <CandidateList
-            transfer={transfer}
             candidates={candidates.data}
             busy={busy}
             onPair={(transactionId) => pair.mutate(transactionId)}

@@ -139,7 +139,35 @@ async def test_closing_a_holder_through_the_api(client, run) -> None:
     )
 
     assert closed.status_code == 200
+    # The closed account stays a holder, so its card-deposit history stands.
     [kept] = (await client.get(f"{FINANCE}/accounts/{invest.id}/identifiers")).json()
-    assert kept["holder_account_ids"] == [str(invest.id)]
+    assert kept["holder_account_ids"] == sorted([str(invest.id), str(isa.id)])
     edited = await client.post(REGISTER, json={"merchant_id": MERCHANT, "account_ids": []})
     assert (edited.status_code, edited.json()["holder_account_ids"]) == (200, [])
+
+
+async def test_register_and_remove_heal_once(client, run, monkeypatch) -> None:
+    """healing_command heals at the end of the command, so the routes don't heal again."""
+    from lararium.modules.finance import transfers
+    from lararium.modules.finance.transfers import engine
+
+    heals: list[object] = []
+    real = engine.heal_transfers
+
+    async def counted(ctx: Any) -> int:
+        heals.append(ctx)
+        return await real(ctx)
+
+    monkeypatch.setattr(engine, "heal_transfers", counted)
+    monkeypatch.setattr(transfers, "heal_transfers", counted)
+    invest, isa = await platform_accounts(run)
+    body = {"merchant_id": MERCHANT, "account_ids": [str(invest.id), str(isa.id)]}
+    registered = await client.post(REGISTER, json=body)
+    assert registered.status_code == 200
+    assert len(heals) == 1
+
+    removed = await client.delete(
+        f"{FINANCE}/accounts/{invest.id}/identifiers/{registered.json()['id']}"
+    )
+    assert removed.status_code == 204
+    assert len(heals) == 2

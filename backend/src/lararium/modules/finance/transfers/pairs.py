@@ -731,7 +731,9 @@ class PairRelation:
 
     def partner(self, record_id: UUID) -> UUID | None:
         """The record's unique partner: its only candidate, whose only candidate it is; or,
-        among interchangeable candidates, the one a fixed order gives it (_twins)."""
+        among interchangeable candidates, the one a fixed order gives it (_twins). With no
+        candidate of the same amount, the one it converts with across currencies
+        (`converts`), else the card payment or deposit it pairs with (`by_card`)."""
         found = self.exact.get(record_id, frozenset())
         if not found:
             across = self.converts.get(record_id)

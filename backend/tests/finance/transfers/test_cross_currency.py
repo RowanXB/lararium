@@ -27,8 +27,10 @@ from lararium.modules.finance.pricing import record_fx_rate
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import (
     TransferRecord,
+    candidates,
     list_transfers,
     load_transfer_settings,
+    pair,
     reject,
     transfer_contra,
     unpair,
@@ -371,6 +373,39 @@ async def test_two_candidates_left_to_owner(session, ids, etoro, leg, heal, gbp,
     assert len(transfers) == 3
     assert {(t.status, t.review_reason) for t in transfers} == {("awaiting", "several_candidates")}
     assert all(t.settlement_transaction_id is None for t in transfers)
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_two_candidates_across_listed_and_pairable(
+    session, run, ids, etoro, leg, heal, gbp, usd
+) -> None:
+    """The owner's review of a cross-currency several_candidates transfer lists the
+    candidates in the other currency, and pair takes one of them."""
+    await histories(leg, etoro, gbp, usd)
+    sent = await leg(
+        etoro.money, gbp, "-1000.00", external_id="cash:1", identifier_id=etoro.trading_identifier
+    )
+    received = [
+        await leg(
+            etoro.trading,
+            usd,
+            amount,
+            external_id=f"activity:{n}",
+            identifier_id=etoro.money_identifier,
+            occurred_at=WHEN + timedelta(seconds=n),
+        )
+        for n, amount in enumerate(("1260.00", "1255.00"))
+    ]
+    await heal()
+    [transfer] = [t for t in await list_transfers(session) if t.out_transaction_id == sent.id]
+    found = await candidates(session, transfer.id)
+    assert {(c.transaction_id, c.reason) for c in found} == {
+        (r.id, "amount_differs") for r in received
+    }
+    paired = await run(pair, transfer.id, received[0].id)
+    assert paired.status == "matched"
+    assert paired.settlement_transaction_id is not None
     await assert_consistent(session)
     assert await heal() == 0
 

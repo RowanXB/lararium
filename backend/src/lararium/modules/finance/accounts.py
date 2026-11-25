@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, delete, exists, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, Text, exists, func, insert, or_, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -351,16 +351,10 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
     return True
 
 
-async def close_account(
-    ctx: CommandContext, account_id: UUID, closed_on: date
-) -> tuple[AccountRecord, list[UUID]]:
-    """Close the account: (the closed account, the card merchants it left).
-
-    A card merchant's holders are open accounts, so the account leaves those it held
-    (_drop_card_merchant_holder). The records naming them are matched again by the heal
-    after the command: every route that writes heals (the API's close re-matches them first,
-    engine.rematch_identifiers), and so does the worker after each sync (worker.jobs), whose
-    pair relation reads the holders as they now are."""
+async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
+    """Close the account. It stays a holder of the card merchants it held, so its
+    card-deposit history stands, as a bank identifier stays assigned after a close; it
+    takes no new records, so the card tier pairs nothing new into it."""
     # Closing In transit would drop the transfers it holds from net worth.
     require_owner_account(await get_account(ctx.session, account_id), "closed")
     # Conditional update, so two concurrent closes can't both succeed.
@@ -375,34 +369,7 @@ async def close_account(
         raise AccountAlreadyClosedError(str(account_id))
     record = await get_account(ctx.session, account_id)
     _publish(ctx, "finance.account.closed", record)
-    return record, await _drop_card_merchant_holder(ctx, account_id)
-
-
-async def _drop_card_merchant_holder(ctx: CommandContext, account_id: UUID) -> list[UUID]:
-    """Take a closed account out of the card merchants it held (a card merchant's holders
-    are open accounts, identifiers.register_card_merchant), audited as a change of their
-    holders; returns those merchants' identifier ids, sorted."""
-    h = models.AccountIdentifierHolder
-    dropped = sorted(
-        await ctx.session.scalars(
-            delete(h).where(h.account_id == account_id).returning(h.identifier_id)
-        )
-    )
-    for identifier_id in dropped:
-        remaining = sorted(
-            await ctx.session.scalars(select(h.account_id).where(h.identifier_id == identifier_id))
-        )
-        holders: list[JSONValue] = [str(a) for a in remaining]
-        ctx.emit(
-            "finance.account_identifier.holders_changed",
-            identifier_id,
-            {"identifier_id": str(identifier_id), "account_ids": holders},
-        )
-        ctx.record_change(
-            f"account_identifier:{identifier_id}",
-            {"id": str(identifier_id), "holders": holders, "closed_holder": str(account_id)},
-        )
-    return dropped
+    return record
 
 
 async def set_balance_mode(

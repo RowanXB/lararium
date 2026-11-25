@@ -57,8 +57,7 @@ async def test_unknown_parent_rejected(make_account) -> None:
 
 async def test_close_account(run, make_account) -> None:
     acc = await make_account()
-    closed, left = await run(close_account, acc.id, date(2026, 6, 30))
-    assert left == []
+    closed = await run(close_account, acc.id, date(2026, 6, 30))
     assert (closed.status, closed.closed_on) == ("closed", date(2026, 6, 30))
     with pytest.raises(AccountAlreadyClosedError):
         await run(close_account, acc.id, date(2026, 7, 1))

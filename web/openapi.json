@@ -437,6 +437,10 @@
             "title": "Account Name",
             "type": "string"
           },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -471,6 +475,7 @@
           "account_id",
           "account_name",
           "quantity",
+          "currency",
           "occurred_at",
           "description",
           "reason"
@@ -3183,6 +3188,10 @@
             "title": "Booking Date",
             "type": "string"
           },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -3223,6 +3232,7 @@
           "account_id",
           "account_name",
           "quantity",
+          "currency",
           "occurred_at",
           "booking_date",
           "description"

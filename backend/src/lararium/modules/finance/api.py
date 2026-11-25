@@ -34,7 +34,6 @@ from lararium.modules.finance import (
     ledger,
     pricing,
     snapshots,
-    transfers,
     valuation,
 )
 from lararium.modules.finance.importing import catalog, commit, parsed, profiles, staging
@@ -253,14 +252,10 @@ async def rename_account(
 async def close_account(
     account_id: UUID, body: AccountClose, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
-    """Close the account; it leaves the card merchants it held, whose records are matched
-    again."""
+    """Close the account; it stays a holder of the card merchants it held."""
     args = _args(body, account_id=account_id)
-    async with healing_command(session, actor, "close_account", args) as ctx:
-        record, left = await accounts.close_account(ctx, account_id, body.closed_on)
-        if left:
-            # healing_command heals once, at the end.
-            await transfers.rematch_identifiers(ctx, left, heal=False)
+    async with command_context(session, actor, "close_account", args) as ctx:
+        record = await accounts.close_account(ctx, account_id, body.closed_on)
     return AccountOut.model_validate(record)
 
 

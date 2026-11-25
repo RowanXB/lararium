@@ -894,11 +894,12 @@ async def unassign_identifier_and_rematch(
 
 
 async def register_card_merchant_and_rematch(
-    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID]
+    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID], *, heal: bool = True
 ) -> IdentifierRecord:
     """register_card_merchant, then match again every record naming the merchant, so the
-    new holders take effect at once. Records that don't name it yet (posted before it was
-    registered) are named by their connector's next normalize (Monzo's replays them)."""
+    new holders take effect at once (healing unless `heal` is False, as in
+    rematch_identifiers). Records that don't name it yet (posted before it was registered)
+    are named by their connector's next normalize (Monzo's replays them)."""
     record = await register_card_merchant(ctx, merchant_id, account_ids)
-    await _rematch_naming(ctx, record.id)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
     return record

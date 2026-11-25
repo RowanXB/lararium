@@ -369,9 +369,9 @@ async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> Identi
 
 async def _require_can_hold_card_merchant(session: AsyncSession, account_id: UUID) -> None:
     """The refusals of the other kinds (_require_can_carry_identifiers), narrowed: a card
-    merchant pays only into an open asset account (close_account drops a holder it closes).
-    An unknown account is refused like the others (a 422 on the request's body), not as a
-    missing resource."""
+    merchant pays only into an open asset account. Asked only of an account a registration
+    adds: a holder that has closed since stays (close_account keeps it). An unknown account
+    is refused like the others (a 422 on the request's body), not as a missing resource."""
     try:
         account = await get_account(session, account_id)
     except AccountNotFoundError:
@@ -394,19 +394,19 @@ async def register_card_merchant(
     row stays, as transactions reference it). Registering takes it back from dismissed."""
     normalized = normalize_identifier("card_merchant", merchant_id)
     wanted = sorted(set(account_ids))
-    for account_id in wanted:
-        await _require_can_hold_card_merchant(ctx.session, account_id)
     identifier_id = await _get_or_create(ctx, "card_merchant", normalized)
     i, h = models.AccountIdentifier, models.AccountIdentifierHolder
     # Serialised on the row, so two registrations can't interleave their holder sets.
     await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
     before = await _get(ctx.session, identifier_id)
+    added = [account_id for account_id in wanted if account_id not in before.holders]
+    for account_id in added:
+        await _require_can_hold_card_merchant(ctx.session, account_id)
     if list(before.holders) == wanted and not (wanted and before.dismissed_at is not None):
         return before
     await ctx.session.execute(
         delete(h).where(h.identifier_id == identifier_id, h.account_id.not_in(wanted))
     )
-    added = [account_id for account_id in wanted if account_id not in before.holders]
     if added:
         await ctx.session.execute(
             insert(h).values([{"identifier_id": identifier_id, "account_id": a} for a in added])

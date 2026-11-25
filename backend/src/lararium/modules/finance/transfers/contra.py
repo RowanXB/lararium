@@ -52,14 +52,6 @@ from lararium.modules.finance.system_accounts import SystemAccountKey, system_ac
 DERIVED_ORIGINS = ("inference", "rule")
 
 
-@dataclass(frozen=True)
-class OwnLeg:
-    account_id: UUID  # the own account the record moves money in or out of
-    instrument_id: UUID
-    quantity: Decimal  # signed: negative on the sending side
-    contra_account_id: UUID  # Unassigned or In transit
-
-
 # A transaction's stable reference, which the owner's decisions are keyed by (design §5.9):
 # (kind, ref). Every kind is defined here once: when it applies to a transaction, its ref,
 # and which transaction a ref names. The last kind applies to every transaction the others
@@ -572,21 +564,6 @@ async def load_own_record(
         source=(row.source_kind, row.source_ref),
         holder=row.holder,
     )
-
-
-async def own_leg(session: AsyncSession, transaction_id: UUID) -> OwnLeg | None:
-    """The transaction's own posting and contra, or None when it can't be a transfer's leg."""
-    e = eligible_records(await system_account_ids(session))
-    row = (
-        await session.execute(
-            select(e.c.account_id, e.c.instrument_id, e.c.quantity, e.c.contra_account_id).where(
-                e.c.transaction_id == transaction_id
-            )
-        )
-    ).one_or_none()
-    if row is None:
-        return None
-    return OwnLeg(row.account_id, row.instrument_id, row.quantity, row.contra_account_id)
 
 
 async def source_ref(session: AsyncSession, transaction_id: UUID) -> SourceRef:

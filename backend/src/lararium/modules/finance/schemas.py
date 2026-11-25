@@ -503,6 +503,7 @@ class CandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the transfer's
     occurred_at: AwareDatetime
     description: str
     reason: Literal["exact", "amount_differs", "unpaired"]
@@ -515,6 +516,7 @@ class PairCandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the record's
     occurred_at: AwareDatetime
     booking_date: date
     description: str

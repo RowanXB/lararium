@@ -2,8 +2,6 @@
 the sending and the receiving record, and keeping the ledger's In transit account right."""
 
 from lararium.modules.finance.transfers.contra import (
-    OwnLeg,
-    own_leg,
     source_ref,
     transfer_contra,
 )
@@ -49,7 +47,6 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 __all__ = [
     "CandidateRecord",
     "CardMerchantSuggestion",
-    "OwnLeg",
     "PairCandidateRecord",
     "ReviewReason",
     "SuggestionRecord",
@@ -68,7 +65,6 @@ __all__ = [
     "lock_transfers",
     "mark_notified",
     "match_transaction",
-    "own_leg",
     "pair",
     "pair_candidates",
     "pair_records",

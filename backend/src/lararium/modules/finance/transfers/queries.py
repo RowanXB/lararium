@@ -404,6 +404,7 @@ class CandidateRecord:
 
     transaction_id: UUID
     account_id: UUID
+    instrument_id: UUID  # its own, which may be another currency than the transfer's
     quantity: Decimal  # signed, as posted on account_id
     occurred_at: datetime
     description: str
@@ -556,6 +557,7 @@ class PairCandidateRecord:
 
     transaction_id: UUID
     account_id: UUID
+    instrument_id: UUID  # its own, which may be another currency than the record's
     quantity: Decimal  # signed, as posted on account_id
     occurred_at: datetime
     booking_date: date
@@ -602,6 +604,7 @@ async def pair_candidates(
         select(
             e.c.transaction_id,
             e.c.account_id,
+            e.c.instrument_id,
             e.c.quantity,
             e.c.occurred_at,
             e.c.booking_date,
@@ -620,6 +623,7 @@ async def pair_candidates(
         PairCandidateRecord(
             transaction_id=row.transaction_id,
             account_id=row.account_id,
+            instrument_id=row.instrument_id,
             quantity=row.quantity,
             occurred_at=row.occurred_at,
             booking_date=row.booking_date,
@@ -655,6 +659,7 @@ async def pair_candidates(
             PairCandidateRecord(
                 transaction_id=row.transaction_id,
                 account_id=row.account_id,
+                instrument_id=row.instrument_id,
                 quantity=row.quantity,
                 occurred_at=row.occurred_at,
                 booking_date=row.booking_date,
@@ -670,7 +675,8 @@ async def pair_candidates(
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:
     """The own records that could complete a transfer missing one side, for the owner's
     review: its own record's candidates in the pair relation, those of the same amount
-    first, then those whose amount differs, then those the owner unpaired from it (which
+    first, then those whose amount differs, then those in another currency (labelled
+    amount_differs as well), then those the owner unpaired from it (which
     pair can link again), each oldest first, each once. Only those pair would accept: not
     a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
     make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
@@ -690,6 +696,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
         ("exact", relation.candidates(present_id)),
         ("amount_differs", relation.candidates(present_id, exact=False)),
+        ("amount_differs", sorted(relation.across.get(present_id, frozenset()))),
         ("unpaired", await unpaired_from(session, present_id)),
     ]
     e = eligible_records(system)
@@ -723,6 +730,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
             found[side.id] = CandidateRecord(
                 transaction_id=row.transaction_id,
                 account_id=row.account_id,
+                instrument_id=row.instrument_id,
                 quantity=row.quantity,
                 occurred_at=row.occurred_at,
                 description=row.description,
