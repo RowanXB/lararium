@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from lararium.core import models as core_models
 from lararium.core.connectors import SyncContext
+from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import source_merge
@@ -112,18 +113,18 @@ def _latest(raws: Sequence[RawRecord]) -> dict[str, ExportRecord]:
     return found
 
 
-async def given(run: Run, raw_record_ids: Sequence[UUID]) -> dict[str, ExportRecord]:
-    """The export rows among the records a run was given, by reference: only those are read,
-    not the sync's other records."""
+async def given(run: Run, raw_record_ids: Sequence[UUID]) -> set[str]:
+    """The references of the export rows among the records a run was given: only those are
+    read, not the sync's other records. `stored` resolves them."""
     if not raw_record_ids:
-        return {}
+        return set()
     r = core_models.RawRecord
     ids = list(
         await run.session.scalars(
             select(r.id).where(r.id.in_(list(raw_record_ids)), r.record_type == EXPORT_RECORD_TYPE)
         )
     )
-    return _latest(await get_raw_records(run.session, ids))
+    return set(_latest(await get_raw_records(run.session, ids)))
 
 
 async def stored(run: Run, references: Collection[str] | None) -> dict[str, ExportRecord]:
@@ -214,12 +215,12 @@ async def write(run: Run, record: ExportRecord, transaction_id: UUID | None) -> 
     )
 
 
-async def notify(ctx: SyncContext, display_name: str, opened: Sequence[tuple[str, str]]) -> None:
-    """Tell the owner of the review items this run opened, once (source_merge)."""
-    await source_merge.notify_reviews(
+async def notify(ctx: SyncContext, display_name: str) -> dict[str, JSONValue]:
+    """Tell the owner of the open review items not told yet, once (source_merge); returns
+    the cursor's record of those told."""
+    return await source_merge.notify_reviews(
         ctx,
         display_name,
-        opened,
         sources="Trading 212's API and export",
         name=lambda key: f"transaction {source_merge.ending(key.removeprefix(TRANSACTION))}",
         label="a Trading 212",

@@ -31,7 +31,7 @@ from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import source_merge
 from lararium.modules.finance.accounts import get_account
-from lararium.modules.finance.connector_items import lacks, leaves
+from lararium.modules.finance.connector_items import lacks, leaves, shown_path
 from lararium.modules.finance.report_sightings import list_sightings
 from lararium.modules.finance.trading212 import accounts, merge, reconcile, records, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS, MAP_ENTRIES
@@ -71,7 +71,7 @@ def _check(run: Run, record: Record) -> None:
         if lacks(record.content, path.split("."), MAP_ENTRIES):
             raise Trading212DataError(f"{spec.record_type} lacks {path}")
     for path in sorted(set(leaves(record.content, "", MAP_ENTRIES)) - spec.known):
-        run.flag(f"{record.endpoint}.{path}")
+        run.flag(f"{record.endpoint}.{shown_path(path)}")
 
 
 async def _records(
@@ -114,15 +114,18 @@ async def _movements(
     """The API's cash movements to apply, and the export's rows (merge), by reference.
 
     The movements given, the TRANSFERs to name their sibling in, and the latest stored copy
-    of each one an export row given (or an owner's decision) concerns; the export rows given,
-    and the stored one of each movement applied. A replay has every stored record of both."""
+    of each one an export row given (or an owner's decision) concerns; the latest stored copy
+    of each export row given, and the stored one of each movement applied. A replay has
+    every stored record of both."""
     keys = {record_key(r) for r in given}
     movements = given + [
         r for r in await records.unidentified_transfers(run) if record_key(r) not in keys
     ]
     if replay:
         return movements, await merge.stored(run, None)
-    exports = await merge.given(run, raw_record_ids)
+    # The rows given name the references; each resolves to its latest stored copy, as a
+    # replay reads it (a row uploaded again keeps its first raw record and fetch).
+    exports = await merge.stored(run, await merge.given(run, raw_record_ids))
     references = {text_at(r.content, "reference") for r in movements}
     decided = {
         key.removeprefix(merge.TRANSACTION)
@@ -179,6 +182,9 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
         _check(run, record)
 
     own = [r for r in seen if r.sync_id == ctx.sync_id]
+    run.held = frozenset(
+        text_at(r.content, "instrument.ticker") for r in own if r.endpoint == "positions"
+    ) - {""}
     summaries = [r for r in own if r.endpoint == "summary"]
     summary = summaries[-1] if summaries else None
     latest = [r for r in seen if r.endpoint == "summary"]
@@ -225,11 +231,11 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     # The cursor records what was published; the sync also returns it (its cursor replaces
     # the row's).
     report.cursor = await reconcile.publish(ctx, mismatches)
+    report.cursor |= await merge.notify(ctx, connection.display_name)
     kept = connection.cursor if isinstance(connection.cursor, dict) else {}
     if any(kept.get(key) != value for key, value in report.cursor.items()):
         await merge_cursor(ctx.command, connection.id, report.cursor)
     report.instrument_flags = await type_flags(run.session, run.connection_id, run.account)
-    await merge.notify(ctx, connection.display_name, run.reviews)
 
     # Only this normaliser's keys: others (the account kind) stay as they are.
     values: dict[str, JSONValue] = {

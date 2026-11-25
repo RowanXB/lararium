@@ -774,6 +774,33 @@ async def test_disagreement_opens_one_review(session, ledger) -> None:
     assert len(ledger.disagreement_messages()) == 1
 
 
+class _FailingOnce:
+    """A notifier whose first send fails, as an unreachable webhook would."""
+
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = messages
+        self.failed = False
+
+    async def send(self, text: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("unreachable")
+        self.messages.append(text)
+
+
+async def test_a_failed_review_notification_is_sent_next_run(session, ledger) -> None:
+    await ledger.normalize(*BASE, *TRADES)
+    ledger.notifier = _FailingOnce(ledger.notifier.messages)
+    await ledger.upload(trade_statement(closed_units="5"))
+    assert ledger.disagreement_messages() == []
+
+    await ledger.normalize(*BASE, *TRADES, now=NOW + timedelta(days=1))
+    [message] = ledger.disagreement_messages()
+    assert "···0001" in message and "resolved through the API" in message
+    await ledger.normalize(*BASE, *TRADES, now=NOW + timedelta(days=2))
+    assert len(ledger.disagreement_messages()) == 1
+
+
 async def test_review_closes_when_the_sources_agree(session, ledger) -> None:
     await ledger.normalize(*BASE, *TRADES)
     await ledger.upload(trade_statement(closed_units="5"))

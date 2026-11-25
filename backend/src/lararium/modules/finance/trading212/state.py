@@ -36,7 +36,6 @@ from lararium.modules.finance.connector_run import LONDON, ConnectorRun
 from lararium.modules.finance.report_sightings import Sighting
 from lararium.modules.finance.trading212.fields import COLUMNS, ENDPOINTS
 from lararium.modules.finance.trading212.instruments import listing
-from lararium.modules.finance.typed_tables import Fields, upsert_typed
 
 __all__ = ["LONDON", "Item", "flat", "object_at", "objects_at", "text_at", "value_at"]
 
@@ -216,8 +215,9 @@ class Run(ConnectorRun):
         self.position_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self.fill_prices: dict[tuple[UUID, UUID, date], Decimal] = {}
         self._instruments: dict[tuple[str, bool], UUID | None] = {}
+        # The tickers of this sync's positions (instruments.listing keeps theirs).
+        self.held: frozenset[str] = frozenset()
         # (event key, field) of each review item this run opened (merge), to tell.
-        self.reviews: list[tuple[str, str]] = []
 
     @property
     def account(self) -> UUID:
@@ -253,7 +253,7 @@ class Run(ConnectorRun):
         await self.load_metadata({ticker})
         if (metadata := self.metadata[ticker]) is not None:
             fields["type"], fields["shortName"] = metadata
-        found = await listing(self.command, fields, current=current)
+        found = await listing(self.command, fields, current=current, held=self.held)
         if found is None:
             self.flag_value("instruments", "type", fields["type"])
         else:
@@ -267,10 +267,6 @@ class Run(ConnectorRun):
             )
         self._instruments[(ticker, current)] = found
         return found
-
-    async def upsert(self, table: str, key: Fields, values: Fields) -> None:
-        # This module's name for the write, which a test can watch.
-        await upsert_typed(self.command, table, key, values)
 
     async def stored_records(self, table: str, column: str) -> dict[str, UUID]:
         """The raw record each of the connection's rows was last written from."""

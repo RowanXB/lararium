@@ -284,7 +284,6 @@ class Run(ConnectorRun):
         # eToro instrument id → the ISIN a statement's Closed Positions gave a position of it.
         self.isins: dict[str, str] = {}
         # (event key, field) of each review item this run opened (merge.review), to tell.
-        self.reviews: list[tuple[str, str]] = []
         self._instruments: dict[str, UUID | None] = {}
 
     @property

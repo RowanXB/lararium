@@ -828,6 +828,13 @@ async def test_unknown_field_flagged(ledger) -> None:
     assert "pnl.clientPortfolio.positions[].brandNewField" in report.flagged
 
 
+async def test_an_unknown_field_is_named_only_by_plain_names(ledger) -> None:
+    pnl = pnl_body([pnl_position(POSITION, **{"see https://x.test/": 1, "n" * 65: 1})])
+    report = await ledger.normalize(BALANCES, ("pnl", pnl), META)
+    shown = {flag for flag in report.flagged if flag.startswith("pnl.clientPortfolio.")}
+    assert shown == {"pnl.clientPortfolio.positions[].{}"}
+
+
 # Merging instruments (design §5.6) ----------------------------------------------------------
 
 

@@ -33,9 +33,11 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance import connector_flags
 from lararium.modules.finance.readonly_http import HttpForbiddenError, record_json
 from lararium.modules.finance.report_sightings import record_sighting
+from lararium.modules.finance.trading212 import client as client_module
 from lararium.modules.finance.trading212.client import (
     PIES_REMOVED,
     HistoryKind,
+    HistoryLoopedError,
     HistoryNotEndedError,
     HistoryStoppedError,
     Item,
@@ -59,6 +61,7 @@ FIELDS = "fields"
 EXPORT = "export"
 INSTRUMENT_TYPES = "instrument_types"
 _STOPPED = "history stopped early (404)"
+_LOOPED = "history repeated a page"
 # What Trading 212 reports now, rather than records: each storing is sighted.
 REPORTS = frozenset({"summary", "positions", "pending_orders", "pies", "pie"})
 
@@ -147,7 +150,7 @@ def _own(reason: str, kept: Collection[str]) -> bool:
         reason in kept
         or reason.startswith("missing permission ")
         or reason == PIES_REMOVED
-        or reason.endswith(f" {_STOPPED}")
+        or reason.endswith((f" {_STOPPED}", f" {_LOOPED}"))
     )
 
 
@@ -221,28 +224,35 @@ class _Run:
             )
 
     async def _pages(
-        self, kind: HistoryKind, seen: _Seen | None, start: str | None
-    ) -> tuple[str | None, str | None]:
-        """Store a walk's pages; (the newest item's key, the page to go on from when the walk
-        reached the cap or a page after the first answered 404, which is flagged)."""
+        self, kind: HistoryKind, seen: _Seen | None, start: str | None, pages: int
+    ) -> tuple[str | None, str | None, int]:
+        """Store a walk's pages, at most `pages` of them; (the newest item's key, the page to
+        go on from when the walk reached that cap or a page after the first answered 404,
+        which is flagged, the pages walked). A page repeating the one before ends the walk
+        and is flagged too."""
         newest: str | None = None
+        walked = 0
         try:
-            async for page in self.client.history(kind, seen or _never, start=start):
+            async for page in self.client.history(kind, seen or _never, start=start, pages=pages):
+                walked += 1
                 for item in page.items:
                     newest = newest or _key(kind, item)
                     await self.store(kind, item, params=page.params)
         except HistoryNotEndedError as capped:
-            return newest, capped.resume
+            return newest, capped.resume, walked
         except HistoryStoppedError as stopped:
             self.found.add((kind, f"{kind} {_STOPPED}"))
-            return newest, stopped.resume
-        return newest, None
+            return newest, stopped.resume, walked
+        except HistoryLoopedError:
+            self.found.add((kind, f"{kind} {_LOOPED}"))
+        return newest, None, walked
 
     async def walk(
         self, kind: HistoryKind, marker: str | None, resume: str | None
     ) -> tuple[str | None, str | None]:
         """Walk a history newest first, stopping at `marker` (None: to the end), then on from
-        `resume` when the walk stopped there. (The newest key, the resume left.)
+        `resume` when the walk stopped there, the two passes together at most the client's
+        MAX_PAGES pages: what is left is the next sync's. (The newest key, the resume left.)
 
         A walk that did not reach `marker` and was not cut short drops `resume`. When it ended
         at a null `nextPagePath` it has passed every page `resume` points to. When it ended at a
@@ -250,9 +260,12 @@ class _Run:
         is what finds what lay beyond."""
         self.checked.add(kind)
         seen = _Seen(kind, marker)
-        newest, left = await self._pages(kind, seen, None)
+        cap = client_module.MAX_PAGES
+        newest, left, walked = await self._pages(kind, seen, None, cap)
         if left is None and seen.reached and resume is not None:
-            _, left = await self._pages(kind, None, resume)
+            if walked >= cap:
+                return newest, resume  # no page left for it in this sync
+            _, left, _ = await self._pages(kind, None, resume, cap - walked)
         return newest, left
 
     async def metadata(self) -> None:

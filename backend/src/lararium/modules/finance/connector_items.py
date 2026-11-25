@@ -6,6 +6,7 @@ number is read from text. Errors are the connector's own class, and name the rec
 the field, never a value.
 """
 
+import re
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
@@ -107,6 +108,23 @@ def leaves(value: JSONValue, path: str = "", maps: MapEntries | None = None) -> 
             yield from leaves(entry, f"{path}[]", maps)
     elif value is not None:
         yield path
+
+
+# A path segment fit to name in a flag: a plain name, then its array or map markers.
+_PLAIN = re.compile(r"([A-Za-z0-9_]{1,64})((?:\[\]|\{\})*)")
+
+
+def shown_path(path: str) -> str:
+    """A path from `leaves` as a flag may name it: the server writes its keys, so a segment
+    that is not a plain name (letters, digits, underscore, at most 64) is shown as `{}`, a run
+    of them as one."""
+    shown: list[str] = []
+    for segment in path.split("."):
+        if _PLAIN.fullmatch(segment):
+            shown.append(segment)
+        elif not shown or shown[-1] != "{}":
+            shown.append("{}")
+    return ".".join(shown)
 
 
 def lacks(

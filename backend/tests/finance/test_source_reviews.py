@@ -5,7 +5,7 @@ import pytest
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
-from lararium.modules.finance import source_reviews
+from lararium.modules.finance import source_merge, source_reviews
 from lararium.modules.finance.errors import ReviewNotFoundError, ReviewResolvedError
 
 EVENT = "close:3000000001"
@@ -45,11 +45,13 @@ async def test_a_changed_value_updates_the_open_item(session, run, connection_id
 async def test_resolving_records_the_decision(session, run, connection_id) -> None:
     await _open(run, connection_id)
     [item] = await source_reviews.list_reviews(session, connection_id)
-    assert await source_reviews.decision_for(session, connection_id, EVENT, "units") is None
+    found = [("units", "4", "5")]
+    assert await source_merge.decided_takes(session, connection_id, EVENT, found) == {}
     owner = Actor("user", "owner")
     async with command_context(session, owner, "resolve", {}) as ctx:
         await source_reviews.resolve_review(ctx, item.id, "statement")
-    assert await source_reviews.decision_for(session, connection_id, EVENT, "units") == "statement"
+    taken = await source_merge.decided_takes(session, connection_id, EVENT, found)
+    assert taken == {"units": "statement"}
     [resolved] = await source_reviews.list_reviews(session, connection_id)
     assert resolved.resolution == "statement" and resolved.resolved_by == "user"
     # The decided disagreement does not reopen; a new value does.

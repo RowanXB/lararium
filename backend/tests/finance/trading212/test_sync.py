@@ -124,6 +124,8 @@ class FakeTrading212:
         self.refuse: dict[str, httpx.Response] = {}
         # Page tokens (`_token`) whose history page answers 404.
         self.gone: set[str] = set()
+        # Page tokens whose history page names itself as the next page.
+        self.looping: set[str] = set()
         self.requests: list[httpx.Request] = []
         # A fake clock that sleeping advances: pacing waits cost no real time.
         self.now = Decimal(1000)
@@ -148,6 +150,8 @@ class FakeTrading212:
                 next_path = (
                     f"limit=50&cursor={_token(pages[n + 1])}" if n + 1 < len(pages) else None
                 )
+                if pages[n] and _token(pages[n]) in self.looping:
+                    next_path = f"limit=50&cursor={_token(pages[n])}"
                 return self._ok(page(pages[n], next_path))
         bodies: dict[str, Any] = {
             f"{API}/account/summary": self.summary,
@@ -601,6 +605,52 @@ async def test_history_longer_than_the_cap_finishes_over_two_syncs(
     assert api.cursors("orders") == [0]
 
 
+async def _ledger(session, connection) -> list[tuple[Any, ...]]:
+    """The connection's transactions: (external id, time, its postings' instruments and
+    quantities), whatever its accounts' ids."""
+    rows = await session.execute(
+        text(
+            "select t.external_id, t.occurred_at,"
+            " array_agg(p.instrument_id::text || ' ' || p.quantity::text order by"
+            " p.instrument_id, p.quantity) as postings"
+            " from finance.transactions t join finance.postings p on p.transaction_id = t.id"
+            " where t.connection_id = :c and t.status <> 'void'"
+            " group by t.id, t.external_id, t.occurred_at order by t.external_id"
+        ),
+        {"c": connection.id},
+    )
+    return [tuple(row) for row in rows]
+
+
+async def test_each_sync_walks_at_most_the_cap_and_the_ledger_comes_out_the_same(
+    session, run, api, monkeypatch
+) -> None:
+    """The cap bounds a sync's pages per kind, the pass from the newest and the resumed one
+    together; a history longer than that finishes over several syncs, with the ledger one
+    sync of it all gives."""
+    monkeypatch.setattr(t212_sync, "normalize", t212_normalize.normalize)
+    pages = [orders(700000 + 2 * n, 700000 + 2 * n - 1) for n in range(7, 0, -1)]
+    api.history["orders"] = pages
+    whole = await _connection(run)
+    await _sync(session, whole, api)
+    expected = await _ledger(session, whole)
+    assert len(expected) >= 14
+
+    monkeypatch.setattr(client_module, "MAX_PAGES", 3)
+    capped = await _connection(run)
+    walked: list[list[int]] = []
+    for _ in range(4):
+        api.requests.clear()
+        cursor = await _sync(session, capped, api)
+        walked.append(api.cursors("orders"))
+        assert isinstance(cursor, dict)
+        if cursor["resume"] == {}:
+            break
+    assert all(len(asked) <= 3 for asked in walked)
+    assert walked == [[0, 1, 2], [0, 3, 4], [0, 5, 6]]
+    assert await _ledger(session, capped) == expected
+
+
 async def test_a_rewalk_that_reaches_the_end_drops_the_resume(session, run, api) -> None:
     api.history["orders"] = [orders(700004), orders(700003)]
     cursor = _later_cursor(rewalk_at=_ago(days=8), resume={"orders": "limit=50&cursor=700003"})
@@ -689,6 +739,26 @@ async def test_a_failed_notification_is_sent_next_sync(session, run, api) -> Non
     assert len(notifier.messages) == 1
 
 
+async def test_a_looping_next_page_is_flagged(session, run, api) -> None:
+    """A page naming itself as the next one ends the walk, as a 404 does, and is flagged;
+    the flag clears once a walk of that history ends as it should."""
+    api.history["orders"] = [orders(700006, 700005), orders(700004, 700003), orders(700002)]
+    api.looping = {"700004"}
+    connection = await _connection(run)
+    notifier = RecordingNotifier()
+    after = await _run_sync(session, connection, api, notifier)
+    assert after.status == "healthy"
+    assert api.cursors("orders") == [0, 1, 1]
+    flag = "Trading 212 flagged: orders history repeated a page"
+    assert flag in after.warnings
+    assert notifier.messages == [f"Trading 212 Invest: {flag}"]
+
+    api.looping = set()
+    api.requests.clear()
+    after = await _run_sync(session, connection, api, notifier)
+    assert flag not in after.warnings
+
+
 async def test_a_404_deep_in_a_history_resumes_next_sync(session, run, api) -> None:
     api.history["orders"] = [orders(700006, 700005), orders(700004, 700003), orders(700002)]
     api.gone = {"700004"}
@@ -745,11 +815,18 @@ async def test_new_items_while_a_resume_is_pending(session, run, api, monkeypatc
     api.history["orders"].insert(0, orders(700012, 700011))
     api.requests.clear()
     second = await _sync(session, connection, api)
-    # The new page, the page holding what was seen, then on from the page the first stopped at.
-    assert api.cursors("orders") == [0, 1, 4, 5]
+    # The new page, the page holding what was seen, then on from the page the first stopped
+    # at, as far as the cap: three pages in all.
+    assert api.cursors("orders") == [0, 1, 4]
     assert isinstance(second, dict)
-    assert second["resume"] == {}
+    assert second["resume"] == {"orders": "limit=50&cursor=700002"}
     assert second["seen"]["orders"] == "700012"
+
+    api.requests.clear()
+    third = await _sync(session, connection, api)
+    assert api.cursors("orders") == [0, 5]
+    assert isinstance(third, dict)
+    assert third["resume"] == {}
     stored = _fill_ids(await _records(session, connection, "trading212.order"))
     assert sorted(stored) == [str(n) for n in range(700001, 700013)]
 

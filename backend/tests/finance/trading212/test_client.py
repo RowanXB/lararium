@@ -19,6 +19,7 @@ from lararium.modules.finance.readonly_http import (
 from lararium.modules.finance.trading212.client import (
     BASE,
     MAX_PAGES,
+    HistoryLoopedError,
     HistoryNotEndedError,
     HistoryStoppedError,
     Trading212Client,
@@ -113,7 +114,10 @@ async def test_next_page_forms_and_repeat_stop() -> None:
         ok(last),
         ok(page(orders(7001))),
     )
-    items = await walk(env.client(), "orders", lambda item: False)
+    items: list[dict[str, Any]] = []
+    with pytest.raises(HistoryLoopedError):
+        async for got in env.client().history("orders", lambda item: False):
+            items += got.items
     assert len(env.requests) == 4  # the first, then three after it; the repeat is not followed
     assert {r.url.path for r in env.requests} == {ORDERS}
     assert env.params() == [

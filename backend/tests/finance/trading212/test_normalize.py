@@ -24,11 +24,12 @@ from lararium.core.connections import (
     update_config,
 )
 from lararium.core.connectors import SyncContext
+from lararium.modules.finance import connector_run
 from lararium.modules.finance.instruments import InstrumentIdentifier, create_instrument
 from lararium.modules.finance.ledger import find_unbalanced_transactions
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
-from lararium.modules.finance.trading212 import state as state_module
+from lararium.modules.finance.trading212 import instruments as t212_instruments
 from lararium.modules.finance.trading212 import sync as t212_sync
 from lararium.modules.finance.trading212.client import Trading212Client
 from lararium.modules.finance.trading212.fields import ENDPOINTS
@@ -492,6 +493,38 @@ async def test_renamed_ticker_found_by_isin(session, run) -> None:
     assert await _identifiers(session, "ZZQA") == {("trading212_ticker", renamed), ("isin", ISIN)}
 
 
+async def test_two_held_tickers_of_one_listing_keep_their_identifier(session, run) -> None:
+    """Two tickers this sync holds that share an ISIN and currency: neither takes the ticker
+    identifier from the other, so finding them again writes nothing."""
+    fields = {"name": "Zzqa Example Corp", "isin": ISIN, "currency": "USD", "type": "STOCK"}
+    other = "ZZQB_US_EQ"
+    held = frozenset({TICKER, other})
+    first = await run(t212_instruments.listing, fields | {"ticker": TICKER}, current=True)
+    assert (
+        await run(t212_instruments.listing, fields | {"ticker": other}, current=True, held=held)
+        == first
+    )
+    before = await _identifiers(session, "ZZQA")
+    updated = text("select count(*) from core.events where type = 'finance.instrument.updated'")
+    changes = await session.scalar(updated)
+
+    for ticker in (TICKER, other, TICKER):
+        found = await run(
+            t212_instruments.listing, fields | {"ticker": ticker}, current=True, held=held
+        )
+        assert found == first
+
+    assert (
+        await _identifiers(session, "ZZQA")
+        == before
+        == {
+            ("trading212_ticker", TICKER),
+            ("isin", ISIN),
+        }
+    )
+    assert await session.scalar(updated) == changes
+
+
 async def test_unknown_type_flagged_not_posted(session, run) -> None:
     connection = await _connection(run)
     meta = instrument_json(type="WARRANT")
@@ -534,14 +567,38 @@ async def test_unknown_fields_and_values_flagged(session, run) -> None:
     assert await session.scalar(text("select count(*) from finance.transactions")) == 0
 
 
+async def test_an_unknown_field_is_named_only_by_plain_names(session, run) -> None:
+    """The server writes the JSON keys: one that is not a plain name (letters, digits,
+    underscore, of bounded length) is shown as `{}`, never as written."""
+    connection = await _connection(run)
+    odd = order_item()
+    odd["order"]["see https://x.test/"] = "x"
+    odd["order"]["n" * 65] = "x"
+    odd["order"]["plain_Name2"] = {"a b": "x"}
+    report = await Ledger(session, connection).normalize(SUMMARY, META, ("orders", odd))
+    shown = {flag for flag in report.flagged if flag.startswith("orders.order.")}
+    assert shown == {"orders.order.{}", "orders.order.plain_Name2.{}"}
+
+
 async def test_an_unbalanced_fill_fails_naming_it(session, run) -> None:
     connection = await _connection(run)
     # A sell whose cash goes out: its postings cannot balance.
     sell = order_item(order_id=500009, fill_id=700009, side="SELL", net_value="-238.80")
     with pytest.raises(Trading212DataError) as failed:
         await Ledger(session, connection).normalize(SUMMARY, META, ("orders", sell))
-    assert "700009" in str(failed.value)
+    # Named by its fill id's last four characters (design §5.13), never in full.
+    assert "···0009" in str(failed.value)
+    assert "700009" not in str(failed.value)
     assert "238" not in str(failed.value)
+
+
+async def test_a_trade_fill_without_quantity_fails_naming_its_ending(session, run) -> None:
+    connection = await _connection(run)
+    empty = order_item(order_id=500009, fill_id=700009)
+    empty["fill"]["quantity"] = Decimal(0)
+    with pytest.raises(Trading212DataError) as failed:
+        await Ledger(session, connection).normalize(SUMMARY, META, ("orders", empty))
+    assert "···0009" in str(failed.value) and "700009" not in str(failed.value)
 
 
 async def test_one_key_two_contents_in_a_run_fails(session, run) -> None:
@@ -669,7 +726,7 @@ async def test_renormalize_writes_nothing(session, run, monkeypatch) -> None:
     await ledger.normalize(*entries)
 
     written: list[str] = []
-    upsert = state_module.upsert_typed
+    upsert = connector_run.upsert_typed
 
     async def spy(ctx, table, key, values) -> bool:
         wrote = await upsert(ctx, table, key, values)
@@ -677,7 +734,7 @@ async def test_renormalize_writes_nothing(session, run, monkeypatch) -> None:
             written.append(table)
         return wrote
 
-    monkeypatch.setattr(state_module, "upsert_typed", spy)
+    monkeypatch.setattr(connector_run, "upsert_typed", spy)
     report = await ledger.normalize(*entries, now=NOW.replace(hour=13))
     assert (report.created, report.updated) == (0, 0)
     assert report.unchanged > 0

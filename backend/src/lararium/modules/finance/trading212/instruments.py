@@ -17,7 +17,7 @@ and on replay alike: one the ledger does not hold posts nothing, and an instrume
 one has what it posted voided.
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from uuid import UUID
 
 from sqlalchemy import text
@@ -28,6 +28,7 @@ from lararium.modules.finance.connector_run import listing_currency
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     InstrumentKind,
+    InstrumentRecord,
     add_identifiers,
     create_instrument,
     find_by_identifier,
@@ -58,14 +59,24 @@ def symbol(instrument: Mapping[str, str]) -> str:
     return short or instrument["ticker"].split("_", 1)[0]
 
 
+def _ticker(record: InstrumentRecord) -> str | None:
+    return next((i.value for i in record.identifiers if i.scheme == SCHEME), None)
+
+
 async def listing(
-    ctx: CommandContext, instrument: Mapping[str, str], *, current: bool = False
+    ctx: CommandContext,
+    instrument: Mapping[str, str],
+    *,
+    current: bool = False,
+    held: Collection[str] = (),
 ) -> UUID | None:
     """The instrument a row names, created if new; None for a type the ledger does not hold.
 
     `instrument` is a row's instrument object (ticker, name, isin, currency), with the
     metadata's `type` and `shortName` when Trading 212 lists the ticker. `current`: the row
-    is a position, so its ticker is the one Trading 212 uses now."""
+    is a position, so its ticker is the one Trading 212 uses now, and the instrument takes it
+    unless the ticker it holds is one of `held` (this sync's positions' tickers): two held
+    tickers of one listing would otherwise take it from each other every sync."""
     kind = instrument_kind(instrument.get("type"))
     if kind is None:
         return None
@@ -79,7 +90,7 @@ async def listing(
     found = await find_by_identifier(ctx.session, SCHEME, ticker)
     if found is None and isin:
         found = await find_same_listing(ctx.session, isin, currency.id)
-        if found is not None and current:
+        if found is not None and current and _ticker(found) not in held:
             # Found by ISIN, so no instrument holds this ticker: it can take it.
             found = await replace_identifier(ctx, found.id, identifiers[0])
     if found is None:

@@ -418,6 +418,35 @@ async def test_a_disagreement_opens_a_review_and_the_api_posts(session, run) -> 
     assert "transaction ···0001 (amount)" in told
 
 
+class _FailingOnce:
+    """A notifier whose first send fails, as an unreachable webhook would."""
+
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = messages
+        self.failed = False
+
+    async def send(self, text: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("unreachable")
+        self.messages.append(text)
+
+
+async def test_a_failed_review_notification_is_sent_next_run(session, run) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    await ledger.normalize(SUMMARY, ("transactions", transaction_item()))
+    ledger.notifier = _FailingOnce(ledger.notifier.messages)
+    await _ingest(ledger, export_csv(row(total="260.00")))
+    assert [m for m in ledger.notifier.messages if "disagree" in m] == []
+
+    await ledger.normalize(SUMMARY)
+    [told] = [m for m in ledger.notifier.messages if "disagree" in m]
+    assert "transaction ···0001 (amount)" in told and "resolved through the API" in told
+    await ledger.normalize(SUMMARY)
+    assert len([m for m in ledger.notifier.messages if "disagree" in m]) == 1
+
+
 async def test_taking_the_export_posts_its_value_and_replays(session, run) -> None:
     connection, ledger = await _disagreeing(
         session, run, total="260.00", time="2026-03-02 00:30:00+00:00"
@@ -507,6 +536,24 @@ async def test_regenerate_with_an_export(session, run) -> None:
     await _delete_derived(session, connection)
     await ledger.replay()
     assert await state() == before
+
+
+async def test_an_upload_takes_the_stored_row_as_a_replay_does(session, run) -> None:
+    """One ID uploaded with two contents, then the first again (stored once, so it keeps its
+    first fetch): the upload resolves the row as the replay does, the latest stored copy."""
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    await ledger.normalize(SUMMARY, META)
+    first = export_csv(row(reference="ref-twice", total="12.00"))
+    await _ingest(ledger, first)
+    await _ingest(ledger, export_csv(row(reference="ref-twice", total="13.00")))
+    await _ingest(ledger, first)
+    uploaded = await _postings(session, "transaction:ref-twice")
+
+    await _delete_derived(session, connection)
+    await ledger.replay()
+
+    assert await _postings(session, "transaction:ref-twice") == uploaded
 
 
 async def test_works_without_export(session, run, monkeypatch) -> None:

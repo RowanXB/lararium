@@ -26,7 +26,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
+from lararium.core.connections import get_connection
 from lararium.core.connectors import SyncContext
+from lararium.core.json_types import JSONValue
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.source_reviews import (
     AGREED,
@@ -181,38 +183,61 @@ async def record_reviews[E](
     key: str,
     transaction_id: UUID | None,
     choice: Choice[E],
-) -> list[str]:
+) -> None:
     """Link the event's review items to its transaction, close the open ones on fields the
     two sources now agree on, and open one for each disagreement the owner has not seen with
-    these values. Returns the fields of the items it opened, to tell the owner once."""
+    these values (notify_reviews tells the owner of it)."""
     await link_reviews(ctx, connection_id, key, transaction_id)
     await close_agreed(ctx, connection_id, key, choice.agreed)
-    opened: list[str] = []
     for field, theirs, ours in choice.found:
-        if await open_review(ctx, connection_id, transaction_id, key, field, theirs, ours):
-            opened.append(field)
-    return opened
+        await open_review(ctx, connection_id, transaction_id, key, field, theirs, ours)
+
+
+# The cursor's key for the open review items the owner was told of, by id.
+REVIEWS_NOTIFIED = "reviews_notified"
+# Where the owner reads how to resolve them (the README section's name).
+_RESOLVE = "they are resolved through the API (README: Review items)"
 
 
 async def notify_reviews(
     ctx: SyncContext,
     display_name: str,
-    opened: Sequence[tuple[str, str]],
     *,
     sources: str,
     name: Callable[[str], str],
     label: str,
-) -> None:
-    """Tell the owner, in one message, of the review items (event key, field) a run opened:
+) -> dict[str, JSONValue]:
+    """Tell the owner, in one message, of the connection's open review items not told yet:
     `sources` names the two ("eToro's API and statement"), `name` an event by its key, never
     a value; `label` the connector with its article, for a failed send's log line, which names
-    the error's class only (its message could carry the notifier's address)."""
-    if not opened:
-        return
-    named = ", ".join(f"{name(key)} ({field})" for key, field in opened)
-    try:
-        await ctx.notifier.send(
-            f"{display_name}: {sources} disagree on {named}; review them on the connection"
+    the error's class only (its message could carry the notifier's address). The cursor keeps
+    the items told (REVIEWS_NOTIFIED), as it keeps the flags told (connector_flags): an item
+    counts as told only once a send succeeds, so a failed send is retried next run, and one
+    closed meanwhile drops out untold. Returns that key, for the caller to write."""
+    session = ctx.command.session
+    rows = (
+        await session.execute(
+            text(
+                "select id::text as id, event_key, field from finance.source_reviews"
+                " where connection_id = :c and resolved_at is null order by opened_at, id"
+            ),
+            {"c": ctx.connection.id},
         )
-    except Exception as error:
-        logger.warning("sending %s review notification failed (%s)", label, type(error).__name__)
+    ).all()
+    connection = await get_connection(session, ctx.connection.id)
+    cursor = connection.cursor if isinstance(connection.cursor, dict) else {}
+    before = cursor.get(REVIEWS_NOTIFIED)
+    told = {x for x in before if isinstance(x, str)} if isinstance(before, list) else set[str]()
+    open_ids = [row.id for row in rows]
+    notified = [x for x in open_ids if x in told]
+    new = [row for row in rows if row.id not in told]
+    if new:
+        named = ", ".join(f"{name(row.event_key)} ({row.field})" for row in new)
+        try:
+            await ctx.notifier.send(f"{display_name}: {sources} disagree on {named}; {_RESOLVE}")
+            notified = open_ids
+        except Exception as error:
+            logger.warning(
+                "sending %s review notification failed (%s)", label, type(error).__name__
+            )
+    return {REVIEWS_NOTIFIED: list[JSONValue](notified)}

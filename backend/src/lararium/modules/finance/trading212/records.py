@@ -127,8 +127,8 @@ async def _rounding(
         currency,
         quantity,
         lambda: Trading212DataError(
-            f"Trading 212 order fill {fill_id}: its cash differs from its quantity times"
-            " price by more than rounding"
+            f"Trading 212 order fill {source_merge.ending(fill_id)}: its cash differs from its"
+            " quantity times price by more than rounding"
         ),
     )
 
@@ -178,7 +178,9 @@ async def _post_fill(run: Run, record: Record, key: str, order: Item, fill: Item
     postings: list[PostingInput] = []
     if fill_type == "TRADE":
         if quantity == 0:
-            raise Trading212DataError(f"Trading 212 order fill {fill_id} has no quantity")
+            raise Trading212DataError(
+                f"Trading 212 order fill {source_merge.ending(fill_id)} has no quantity"
+            )
         price = per_unit(gross.copy_abs(), quantity.copy_abs())
         if currency is None or price == 0:
             # Nothing to weigh the shares by: they come from (or go to) Unassigned.
@@ -360,10 +362,9 @@ async def cash_movement(run: Run, record: Record, export: ExportRecord | None = 
         )
         if choice.values.amount != 0:
             transaction_id = await _post_movement(run, key, kind, description, choice.values)
-        opened = await source_merge.record_reviews(
+        await source_merge.record_reviews(
             run.command, run.connection_id, key, transaction_id, choice
         )
-        run.reviews.extend((key, field) for field in opened)
     if transaction_id is None:
         await run.void(key)
     values = await run.typed("transactions", "trading212_transactions", flat(content))

@@ -33,8 +33,9 @@ from lararium.modules.finance.readonly_http import (
 
 BASE = "https://live.trading212.com"
 PAGE_LIMIT = 50
-# A walk that has not ended after this many pages is a pagination fault, not a history.
-MAX_PAGES = 300
+# The pages of one history a sync walks at most: a longer history goes on in the next sync
+# (HistoryNotEndedError's resume), so a failure loses one sync's pages, never a whole history.
+MAX_PAGES = 50
 
 type Item = dict[str, JSONValue]
 type HistoryKind = Literal["orders", "dividends", "transactions"]
@@ -93,6 +94,15 @@ class HistoryStoppedError(HttpNotFoundError):
     def __init__(self, resume: str) -> None:
         super().__init__("history stopped early (404)")
         self.resume = resume
+
+
+class HistoryLoopedError(HttpError):
+    """A history page repeated the one before it (its `nextPagePath` named the same page): a
+    pagination fault. Every page before was yielded; asking again would loop, so there is no
+    page to go on from."""
+
+    def __init__(self) -> None:
+        super().__init__("history repeated a page")
 
 
 class HistoryNotEndedError(HttpRetryableError):
@@ -252,13 +262,19 @@ class Trading212Client:
         return None if found is None else _object(found, "pies/{id}")
 
     async def history(
-        self, kind: HistoryKind, seen: Callable[[Item], bool], *, start: str | None = None
+        self,
+        kind: HistoryKind,
+        seen: Callable[[Item], bool],
+        *,
+        start: str | None = None,
+        pages: int | None = None,
     ) -> AsyncIterator[HistoryPage]:
         """A history endpoint's pages, newest first, from the first page or from `start` (a
         `nextPagePath` given before), until `nextPagePath` is null, a page holds only `seen`
-        items (or none), or a page repeats the one before it. `seen` is asked of every item of
-        a page, in order. After MAX_PAGES pages it raises `HistoryNotEndedError`; a 404 on any
-        page but the first of a walk from the start raises `HistoryStoppedError`."""
+        items (or none), or a page repeats the one before it (`HistoryLoopedError`). `seen` is
+        asked of every item of a page, in order. After `pages` pages (at least one; MAX_PAGES
+        when None) it raises `HistoryNotEndedError`; a 404 on any page but the first of a
+        walk from the start raises `HistoryStoppedError`."""
         path, _ = _ENDPOINTS[kind]
         endpoint = f"history/{kind}"
         params = {"limit": str(PAGE_LIMIT)} if start is None else _next_params(path, start)
@@ -266,7 +282,7 @@ class Trading212Client:
         # The path of the page being asked (None: the first page).
         current = start
         resume = ""
-        for _ in range(MAX_PAGES):
+        for _ in range(max(1, MAX_PAGES if pages is None else pages)):
             try:
                 answer = await self._get(kind, params=params)
             except HttpNotFoundError:
@@ -277,7 +293,7 @@ class Trading212Client:
             page = _objects(body.get("items"), endpoint)
             next_page_path = body.get("nextPagePath")
             if page == previous:
-                return
+                raise HistoryLoopedError
             yield HistoryPage(page, params)
             # A list, not a generator: `all` would stop asking at the first unseen item.
             if next_page_path is None or all([seen(item) for item in page]):

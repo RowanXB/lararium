@@ -39,6 +39,7 @@ from typing import Literal
 from uuid import UUID
 
 from lararium.core.connectors import SyncContext
+from lararium.core.json_types import JSONValue
 from lararium.modules.finance import source_merge
 from lararium.modules.finance.etoro.state import Run, ending
 from lararium.modules.finance.source_merge import Choice, Disagreement
@@ -135,10 +136,7 @@ async def review(run: Run, key: str, transaction_id: UUID, choice: Choice[TradeE
     """Link the event's review items to its transaction, close the open ones on fields the
     two sources now agree on, and open one for each disagreement the owner has not seen with
     these values."""
-    opened = await source_merge.record_reviews(
-        run.command, run.connection_id, key, transaction_id, choice
-    )
-    run.reviews.extend((key, field) for field in opened)
+    await source_merge.record_reviews(run.command, run.connection_id, key, transaction_id, choice)
 
 
 async def decided_positions(run: Run) -> set[str]:
@@ -150,13 +148,12 @@ async def decided_positions(run: Run) -> set[str]:
     return {key.split(":", 1)[1] for key in keys}
 
 
-async def notify(ctx: SyncContext, display_name: str, opened: Sequence[tuple[str, str]]) -> None:
-    """Tell the owner of the review items this run opened, once; a failed send is logged by
-    its class (its message could carry the notifier's address)."""
-    await source_merge.notify_reviews(
+async def notify(ctx: SyncContext, display_name: str) -> dict[str, JSONValue]:
+    """Tell the owner of the open review items not told yet, once (source_merge); returns
+    the cursor's record of those told."""
+    return await source_merge.notify_reviews(
         ctx,
         display_name,
-        opened,
         sources="eToro's API and statement",
         name=lambda key: f"{key.split(':', 1)[0]} of position {ending(key.split(':', 1)[1])}",
         label="an eToro",

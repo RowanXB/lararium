@@ -1,10 +1,11 @@
 """Review items between two sources of one event, and the owner's decisions (design §5.7,
 Decision 14).
 
-When two sources of an event (eToro's API and its statement) disagree on a value that makes a
-posting or its date, the normalizer opens a review item: both values, open until the owner
-takes one. Taking one is also a decision, kept by the event's key and the field, which the
-normalizer reads (`decision_for`), so regeneration replays it. A disagreement the owner has
+When two sources of an event (eToro's API and its statement, Trading 212's API and its CSV
+export) disagree on a value that makes a posting or its date, the connector's normalizer opens
+a review item: both values, open until the owner takes one. Taking one is also a decision,
+kept by the event's key and the field, which the normalizers read through
+`source_merge.decided_takes`, so regeneration replays it. A disagreement the owner has
 decided, with the same values, opens nothing; a later change in either value does. An open
 item whose sources come to agree closes on its own (`close_agreed`), decided by no one.
 
@@ -185,19 +186,6 @@ async def resolve_review(ctx: CommandContext, review_id: UUID, take: Take) -> No
     ctx.record_change(
         f"source_decision:{row.connection_id}:{row.event_key}:{row.field}", {"take": take}
     )
-
-
-async def decision_for(
-    session: AsyncSession, connection_id: UUID, event_key: str, field: str
-) -> Take | None:
-    """The owner's take on the event's field, if any."""
-    d = models.SourceDecision
-    take = await session.scalar(
-        select(d.take).where(
-            d.connection_id == connection_id, d.event_key == event_key, d.field == field
-        )
-    )
-    return cast(Take | None, take)
 
 
 async def list_reviews(session: AsyncSession, connection_id: UUID) -> list[ReviewOut]:
