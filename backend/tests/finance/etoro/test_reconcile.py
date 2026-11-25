@@ -213,6 +213,27 @@ async def test_difference_without_cause_is_a_difference(session, run, ledger) ->
     assert ledger.notifier.messages == ["eToro: " + "\n".join(expected)]
 
 
+async def test_one_offset_over_consecutive_days_is_one_warning(session, run, ledger) -> None:
+    """A difference that stands, unchanged, on consecutive snapshot days is one warning
+    naming its first and last day; a change, or a gap of a day, starts another."""
+    await _after_october(run, ledger)
+    now = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    history = [
+        _trading(date(2026, 11, 1), "1300.00"),
+        _trading(date(2026, 11, 2), "1300.00"),
+        _trading(date(2026, 11, 3), "1300.00"),
+        _trading(date(2026, 11, 4), "1310.00"),
+        _trading(date(2026, 11, 6), "1310.00"),
+    ]
+    await ledger.normalize(*_sync("1260.00", history), now=now)
+    assert await _warnings(session, ledger) == [
+        OTHER,
+        "eToro Trading USD differs from eToro's report from 2026-11-01 to 2026-11-03 by -40.00",
+        "eToro Trading USD differs from eToro's report on 2026-11-04 by -50.00",
+        "eToro Trading USD differs from eToro's report on 2026-11-06 by -50.00",
+    ]
+
+
 async def test_api_fees_after_the_statement_prompt_statement(session, run, ledger) -> None:
     await _after_october(run, ledger)
     now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)

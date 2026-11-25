@@ -290,6 +290,18 @@ def _settlement(position: Position) -> Settlement:
     return "real" if leverage else "unsupported"
 
 
+def settled(position: Position) -> Settlement:
+    """The settlement the position posts by: the API's when the API has the position and
+    states it (_settlement); else the statement's, when its Closed Positions row states it
+    (statement_ledger.settlement). So a close whose order lookup is missing (a 404, or no
+    orderId) posts once a statement covers it."""
+    statement = position.statement
+    found: Settlement = _settlement(position) if position.from_api else "unknown"
+    if found == "unknown" and statement is not None:
+        found = statement_ledger.settlement(statement)
+    return found
+
+
 def _plain(quantity: Decimal) -> str:
     return to_plain_str(quantity.copy_abs().normalize())
 
@@ -463,15 +475,12 @@ def etoro_instrument(position: Position) -> str:
 
 
 async def _instrument(run: Run, position: Position) -> UUID | None:
-    """The position's instrument when it posts: the API's settlement and instrument when the
-    API has the position, else the statement's (statement_ledger)."""
+    """The position's instrument when it posts (`settled`): the API's instrument when the API
+    has the position, else the statement's (statement_ledger)."""
     statement = position.statement
-    if position.from_api:
-        settlement = _settlement(position)
-    elif statement is not None:
-        settlement = statement_ledger.settlement(statement)
-    else:
+    if not position.from_api and statement is None:
         return None
+    settlement = settled(position)
     if settlement == "unsupported":
         run.flag(UNSUPPORTED_POSITION)
     elif settlement == "real":
@@ -553,14 +562,20 @@ async def settlement_unknown(
     trades: Mapping[str, Record],
     lookups: Mapping[str, Record],
     pnl: Mapping[str, tuple[Record, Item]],
+    statement: Mapping[str, statement_ledger.Trade],
 ) -> int:
     """How many of the connection's positions (closed, or listed in PnL) are `unknown` as
-    _settlement reads them, from everything stored. Found in full, so the flag clears once a
-    source states the settlement. `pnl`: as latest_pnl."""
+    `settled` reads them, from everything stored. Found in full, so the flag clears once a
+    source states the settlement. `pnl`: as latest_pnl; `statement`: the statement's trades
+    by position."""
     breakdown = await _latest_items(run, "breakdown")
     by_execution = _by_execution(lookups)
     return sum(
-        _settlement(_assemble(p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution))
+        settled(
+            _assemble(
+                p, pnl.get(p), breakdown.get(p), trades, lookups, by_execution, statement.get(p)
+            )
+        )
         == "unknown"
         for p in set(trades) | set(pnl)
     )

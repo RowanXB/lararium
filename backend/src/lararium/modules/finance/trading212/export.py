@@ -30,6 +30,7 @@ from lararium.core.documents import record_document
 from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance.connector_items import SHOWN_NAME
 from lararium.modules.finance.report_sightings import first_sighting
 from lararium.modules.finance.trading212.accounts import mapped_id
 from lararium.modules.finance.trading212.fields import (
@@ -261,7 +262,10 @@ async def ingest_export(
         )
     ids = list(dict.fromkeys(ids))
     report = await normalize(ctx, ids)
-    found = {(EXPORT, f"export column {header}") for header in flagged}
+    shown = {header for header in flagged if SHOWN_NAME.fullmatch(header)}
+    found = {(EXPORT, f"export column {header}") for header in shown}
+    if unshown := len(flagged - shown):
+        found.add((EXPORT, f"export column <unknown column> ({unshown})"))
     found |= {(FIELDS, flag) for flag in report.flagged}
     found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
     checked = {EXPORT, INSTRUMENT_TYPES} | ({FIELDS} if report.replayed else set[str]())

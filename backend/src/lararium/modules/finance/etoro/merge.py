@@ -31,7 +31,6 @@ settles the item.
 Messages name a position by its last four digits and the field, never a value.
 """
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -42,13 +41,12 @@ from lararium.core.connectors import SyncContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import source_merge
 from lararium.modules.finance.etoro.state import Run, ending
-from lararium.modules.finance.source_merge import Choice, Disagreement
-from lararium.modules.finance.source_reviews import Take
+from lararium.modules.finance.source_merge import Choice
 
 # The fields a disagreement is about, in the order reviews name them.
 FIELDS = ("units", "cash", "profit", "booking_date")
 # Taking the statement's booking date takes its moment too.
-_TOGETHER = {"booking_date": ("occurred_at",)}
+TOGETHER = {"booking_date": ("occurred_at",)}
 
 
 # What an open's or close's figures describe (R39): the position as opened; what closed, being
@@ -72,35 +70,7 @@ class TradeEvent:
     describes: Describes
 
 
-def disagreements(api: TradeEvent, statement: TradeEvent) -> list[Disagreement]:
-    """(field, the API's value, the statement's value) for each field they differ in. Numbers
-    are compared as numbers (500.0 is 500); a profit only one source states is no
-    disagreement."""
-    return source_merge.disagreements(FIELDS, api, statement)
-
-
-def agreements(api: TradeEvent, statement: TradeEvent) -> list[str]:
-    """The fields both sources state and agree on: a field one of them leaves out agrees on
-    nothing, so an open review of it stays open."""
-    return source_merge.agreements(FIELDS, api, statement)
-
-
-def posting_values(
-    api: TradeEvent | None, statement: TradeEvent | None, takes: Mapping[str, Take]
-) -> TradeEvent:
-    """The values the event posts: the API's, but for each field the owner took from the
-    statement; the statement's when the API has none. Taking the statement's booking date
-    takes its moment too."""
-    return source_merge.posting_values(api, statement, FIELDS, takes, _TOGETHER)
-
-
 # Against the ledger --------------------------------------------------------------------------
-
-
-async def takes(run: Run, key: str, found: Sequence[Disagreement]) -> dict[str, Take]:
-    """The owner's take on each disagreeing field, where the latest item they resolved for it
-    had these very values; a field whose values changed since has none (its review reopens)."""
-    return await source_merge.decided_takes(run.session, run.connection_id, key, found)
 
 
 def comparable(api: TradeEvent, statement: TradeEvent) -> bool:
@@ -121,7 +91,7 @@ async def choose(
     the two sources disagree and agree on. Two that describe unlike facts leave units and
     cash unreviewed: no review on them is opened or closed until both describe the same."""
     choice = await source_merge.choose(
-        run.session, run.connection_id, key, api, statement, FIELDS, _TOGETHER
+        run.session, run.connection_id, key, api, statement, FIELDS, TOGETHER
     )
     if api is None or statement is None or comparable(api, statement):
         return choice

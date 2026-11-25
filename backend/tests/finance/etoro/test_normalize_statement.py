@@ -17,16 +17,12 @@ from sqlalchemy import text
 from lararium.core import models as core_models
 from lararium.core.connections import get_connection
 from lararium.core.documents import LocalDocumentStore
+from lararium.modules.finance import source_merge
 from lararium.modules.finance.connector_run import holdings
 from lararium.modules.finance.etoro import statement_ledger
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.fields import ACCOUNT_ACTIVITY, ACCOUNT_SUMMARY
-from lararium.modules.finance.etoro.merge import (
-    TradeEvent,
-    agreements,
-    disagreements,
-    posting_values,
-)
+from lararium.modules.finance.etoro.merge import FIELDS, TOGETHER, TradeEvent
 from lararium.modules.finance.etoro.normalize import EtoroDataError, NormalizeReport, normalize
 from lararium.modules.finance.etoro.statement import parse_statement
 from lararium.modules.finance.instruments import (
@@ -343,7 +339,7 @@ def test_posting_values_and_disagreements() -> None:
     api = _event(cash=Decimal("500.0"))
     same = _event(occurred_at=datetime(2026, 10, 2, 14, 30, 6, tzinfo=UTC))
     # Equal numbers in another scale, and another second of the same day, agree.
-    assert disagreements(api, same) == []
+    assert source_merge.disagreements(FIELDS, api, same) == []
     statement = _event(
         units=Decimal(5),
         profit=Decimal("1.5"),
@@ -351,22 +347,24 @@ def test_posting_values_and_disagreements() -> None:
         occurred_at=datetime(2026, 10, 3, 0, 30, tzinfo=UTC),
     )
     # A profit only one source states is not a disagreement.
-    assert disagreements(api, statement) == [
+    assert source_merge.disagreements(FIELDS, api, statement) == [
         ("units", "4", "5"),
         ("booking_date", "2026-10-02", "2026-10-03"),
     ]
-    assert posting_values(api, statement, {}) == api
-    assert posting_values(None, statement, {}) == statement
-    assert posting_values(api, None, {"units": "statement"}) == api
-    taken = posting_values(api, statement, {"units": "statement", "booking_date": "statement"})
+    assert source_merge.posting_values(api, statement, FIELDS, {}, TOGETHER) == api
+    assert source_merge.posting_values(None, statement, FIELDS, {}, TOGETHER) == statement
+    assert source_merge.posting_values(api, None, FIELDS, {"units": "statement"}, TOGETHER) == api
+    taken = source_merge.posting_values(
+        api, statement, FIELDS, {"units": "statement", "booking_date": "statement"}, TOGETHER
+    )
     assert taken == dataclasses.replace(
         api, units=Decimal(5), booking_date=date(2026, 10, 3), occurred_at=statement.occurred_at
     )
     with pytest.raises(ValueError):
-        posting_values(None, None, {})
+        source_merge.posting_values(None, None, FIELDS, {}, TOGETHER)
     # Agreeing is stated by both and equal: a profit one source leaves out agrees on nothing.
-    assert agreements(api, statement) == ["cash"]
-    assert agreements(api, same) == ["units", "cash", "booking_date"]
+    assert source_merge.agreements(FIELDS, api, statement) == ["cash"]
+    assert source_merge.agreements(FIELDS, api, same) == ["units", "cash", "booking_date"]
 
 
 # Cash events (design §5.7) ----------------------------------------------------------------------
@@ -799,6 +797,23 @@ async def test_a_failed_review_notification_is_sent_next_run(session, ledger) ->
     assert "···0001" in message and "resolved through the API" in message
     await ledger.normalize(*BASE, *TRADES, now=NOW + timedelta(days=2))
     assert len(ledger.disagreement_messages()) == 1
+
+
+async def test_a_close_without_its_lookup_posts_once_the_statement_settles_it(
+    session, ledger
+) -> None:
+    """The API states no settlement for a closed trade whose order lookup is missing (a 404,
+    or no orderId): the statement's Closed Positions row settles it, so it posts and the
+    flag clears (as test_settlement_unknown_has_its_own_flag's lookup does)."""
+    report = await ledger.normalize(*BASE, ("trade_history", api_trade()))
+    assert await _postings(session, f"close:{POSITION}") == []
+    assert "position settlement unknown (1)" in report.flags_in_full
+
+    report = await ledger.upload(trade_statement())
+
+    assert await _postings(session, f"close:{POSITION}") != []
+    assert await _postings(session, f"open:{POSITION}") != []
+    assert not any(f.startswith("position settlement unknown") for f in report.flags_in_full)
 
 
 async def test_review_closes_when_the_sources_agree(session, ledger) -> None:

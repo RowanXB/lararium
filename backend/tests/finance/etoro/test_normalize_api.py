@@ -1153,6 +1153,23 @@ async def test_instrument_currency_unknown_waits_for_the_aggregate(session, ledg
     assert report.flags_in_full == set()
 
 
+async def test_a_breakdown_position_gives_its_own_instruments_currency(session, ledger) -> None:
+    """A breakdown position naming its own instrument gives that instrument's currency, as
+    the stored rows give it on a replay (own id, else its parent's), not its parent's."""
+    row = trade_row(POSITION) | {"instrumentId": INSTRUMENT_ID, "orderId": ORDER}
+    breakdown = breakdown_body([breakdown_position(POSITION)])
+    breakdown["instruments"][0]["instrumentId"] = INSTRUMENT_ID + 1
+    report = await ledger.normalize(
+        BALANCES,
+        META,
+        ("breakdown", breakdown),
+        ("trade_history", row),
+        ("order_lookup", lookup_body(ORDER, POSITION)),
+    )
+    assert await _postings(session, f"close:{POSITION}") != []
+    assert not any(f.startswith("instrument currency unknown") for f in report.flags_in_full)
+
+
 async def test_internal_transfer_to_trading_without_one_is_flagged(session, ledger) -> None:
     balances = balances_body()
     balances["balances"] = [b for b in balances["balances"] if b["accountType"] != "Trading"]

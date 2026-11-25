@@ -40,7 +40,7 @@ the day and the amount, never another value.
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -54,7 +54,6 @@ from lararium.modules.finance import connector_flags, models
 from lararium.modules.finance.connector_run import differences, holdings
 from lararium.modules.finance.errors import UnknownCurrencyError
 from lararium.modules.finance.etoro.fields import STATEMENT_SHEETS
-from lararium.modules.finance.etoro.records import end_of
 from lararium.modules.finance.etoro.reports import trading_cash
 from lararium.modules.finance.etoro.state import (
     LONDON,
@@ -81,6 +80,7 @@ logger = logging.getLogger(__name__)
 PLATFORM = "eToro"
 # What every reconciliation warning holds, after the account's name (Decision 12).
 DIFFERS = f" differs from {PLATFORM}'s report on "
+SPANS = f" differs from {PLATFORM}'s report from "
 PROMPT = f": upload an {PLATFORM} statement covering "
 # A run that could not check (a fixed text: it names no account the owner may have renamed).
 UNRECONCILED = "eToro Trading could not be reconciled"
@@ -96,13 +96,16 @@ class Difference:
     difference: Decimal  # the books' less the report's
     # Trading's cash after the latest statement's end, which a statement may explain.
     explainable: bool = False
+    # The last of a run of consecutive days with the same difference (history), if longer.
+    last: date | None = None
 
     @property
     def warning(self) -> str:
-        return (
-            f"{self.account_name} {self.symbol}{DIFFERS}{self.day.isoformat()}"
-            f" by {to_plain_str(self.difference)}"
-        )
+        if self.last is not None and self.last != self.day:
+            when = f"{SPANS}{self.day.isoformat()} to {self.last.isoformat()}"
+        else:
+            when = f"{DIFFERS}{self.day.isoformat()}"
+        return f"{self.account_name} {self.symbol}{when} by {to_plain_str(self.difference)}"
 
 
 @dataclass(frozen=True)
@@ -224,12 +227,20 @@ class _Check:
         self, trading: UUID, name: str, since: date | None, covered: date | None
     ) -> None:
         """Trading's cash against balance history's on each day since `since` (every day when
-        None), at the end of the day. A day on or before `covered` (covered_through: the last
-        day the latest statement covers in full) is one it covers, so a difference on it is
-        ordinary."""
+        None), at the end of the day (records.end_of), in one query. A day on or before
+        `covered` (covered_through: the last day the latest statement covers in full) is one
+        it covers, so a difference on it is ordinary. A run of consecutive days with the same
+        difference is one warning, naming its first and last day."""
         rows = await self.session.execute(
             text(
-                "select s.snapshot_date, s.cash, s.currency"
+                "select s.snapshot_date, s.cash, s.currency,"
+                " coalesce((select sum(p.quantity) from finance.postings p"
+                " join finance.transactions t on t.id = p.transaction_id"
+                " join finance.instrument_identifiers ii on ii.instrument_id = p.instrument_id"
+                " and ii.scheme = 'iso4217' and ii.value = upper(btrim(s.currency))"
+                " where p.account_id = :a and t.status <> 'void'"
+                " and t.occurred_at < cast(s.snapshot_date + 1 as timestamp) at time zone 'UTC'"
+                " ), 0) as held"
                 " from finance.etoro_balance_account_snapshots s"
                 " where s.connection_id = :c and s.finance_account_id = :a"
                 " and s.cash is not null and s.currency is not null"
@@ -238,17 +249,29 @@ class _Check:
             ),
             {"c": self.connection_id, "a": trading, "since": since},
         )
+        run: Difference | None = None
+        currencies: dict[str, InstrumentRecord] = {}
         for row in rows:
-            currency = await _currency(self.session, row.currency)
-            await self.compare(
-                trading,
-                name,
-                end_of(row.snapshot_date),
-                row.snapshot_date,
-                {currency.id: Decimal(row.cash)},
-                only={currency.id},
-                explainable=covered is None or row.snapshot_date > covered,
-            )
+            if row.currency not in currencies:
+                currencies[row.currency] = await _currency(self.session, row.currency)
+            currency = currencies[row.currency]
+            difference = Decimal(row.held) - Decimal(row.cash)
+            if difference.copy_abs() <= tolerance(currency.decimals):
+                continue
+            explainable = covered is None or row.snapshot_date > covered
+            if (
+                run is not None
+                and row.snapshot_date == (run.last or run.day) + timedelta(days=1)
+                and (run.symbol, run.difference, run.explainable)
+                == (currency.symbol, difference, explainable)
+            ):
+                run = replace(run, last=row.snapshot_date)
+                continue
+            if run is not None:
+                self.found.append(run)
+            run = Difference(name, currency.symbol, row.snapshot_date, difference, explainable)
+        if run is not None:
+            self.found.append(run)
 
     async def explained(self, trading: UUID, trading_etoro_id: str, end: datetime) -> bool:
         """Whether eToro has said, after the statement's end, what only a statement posts."""

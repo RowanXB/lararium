@@ -560,35 +560,6 @@ async def test_trade_history_windows_back_until_nothing_new(session, run, api) -
     assert cursor["trade_history_to"] == (today() - timedelta(days=10)).isoformat()
 
 
-async def test_trade_history_windows_back_to_creation(session, run, api, tmp_path) -> None:
-    api.me["username"] = USERNAME
-    connection = await _connection(run)
-    await _sync(session, connection, api)
-    created = today() - timedelta(days=900)
-    await _ingest(
-        session,
-        connection,
-        _statement(
-            start=_statement_moment(created, "00:00:00"), created=_statement_moment(created)
-        ),
-        tmp_path,
-    )
-    # A trade a year and a half back, after a year with none: a window that adds nothing
-    # does not stop a walk that knows the opening.
-    api.trades = [
-        trade_row(3000000001, today() - timedelta(days=10)),
-        trade_row(3000000003, today() - timedelta(days=800)),
-    ]
-    cursor = (await get_connection(session, connection.id)).cursor
-    assert isinstance(cursor, dict)
-    await _set_cursor(session, connection, {**cursor, "trade_history_to": None})
-    api.requests.clear()
-    await _sync(session, connection, api)
-    # The third window starts before Date Created: it is the last.
-    assert api.windows() == [today() - timedelta(days=364 * k) for k in (1, 2, 3)]
-    assert len(await _records(session, connection, "etoro.trade")) == 2
-
-
 async def test_later_sync_asks_one_window_with_overlap(session, run, api) -> None:
     connection = await _connection(run)
     await _sync(session, connection, api)
@@ -649,6 +620,47 @@ async def test_orders_looked_up_once(session, run, api) -> None:
     cursor = await _sync(session, connection, api)
     assert api.looked_up() == ["4000000102"]
     assert sorted(cursor["looked_up"]) == ["3000000501", "4000000101", "4000000102"]
+
+
+async def _ledger(session, connection) -> list[tuple[Any, ...]]:
+    """The connection's transactions: (external id, time, its postings' instruments and
+    quantities), whatever its accounts' ids."""
+    rows = await session.execute(
+        text(
+            "select t.external_id, t.occurred_at,"
+            " array_agg(p.instrument_id::text || ' ' || p.quantity::text order by"
+            " p.instrument_id, p.quantity) as postings"
+            " from finance.transactions t join finance.postings p on p.transaction_id = t.id"
+            " where t.connection_id = :c and t.status <> 'void'"
+            " group by t.id, t.external_id, t.occurred_at order by t.external_id"
+        ),
+        {"c": connection.id},
+    )
+    return [tuple(row) for row in rows]
+
+
+async def test_order_lookups_are_capped_per_sync_and_finish_later(
+    session, run, api, monkeypatch
+) -> None:
+    """A sync looks up at most MAX_LOOKUPS orders; the rest wait for the next syncs, and the
+    ledger comes out as one sync of them all gives."""
+    api.trades = [trade_row(3000000001 + n, today() - timedelta(days=10 + n)) for n in range(5)]
+    whole = await _connection(run)
+    every = (await _sync(session, whole, api))["looked_up"]
+    expected = await _ledger(session, whole)
+    assert len(every) == 6 and sum(1 for row in expected if row[0].startswith("close:")) == 5
+
+    monkeypatch.setattr(etoro_sync, "MAX_LOOKUPS", 2)
+    capped = await _connection(run)
+    asked: list[int] = []
+    for _ in range(5):
+        api.requests.clear()
+        cursor = await _sync(session, capped, api)
+        asked.append(len(api.looked_up()))
+        if sorted(cursor["looked_up"]) == sorted(every):
+            break
+    assert asked == [2, 2, 2]
+    assert await _ledger(session, capped) == expected
 
 
 async def test_cash_transactions_stop_at_the_newest_seen(session, run, api) -> None:
@@ -723,6 +735,51 @@ async def test_instrument_type_flags_clear_once_typed(session, run, api) -> None
     after = await _run_sync(session, connection, api, notifier)
     assert _flags(after.warnings) == []
     assert len(_flags(notifier.messages)) == 1
+
+
+async def test_a_new_instruments_metadata_is_fetched_on_any_sync(session, run, api) -> None:
+    """An instrument first bought between daily parts has its metadata fetched by the next
+    sync, so it is typed at once, not as `other` until the next day."""
+    connection = await _connection(run)
+    await _sync(session, connection, api)
+    new = INSTRUMENT + 1
+    position = dict(api.pnl["clientPortfolio"]["positions"][0])
+    position |= {"positionID": 3000000102, "instrumentID": new, "orderID": 4000000103}
+    api.pnl = {
+        "clientPortfolio": {
+            **api.pnl["clientPortfolio"],
+            "positions": [*api.pnl["clientPortfolio"]["positions"], position],
+        }
+    }
+    api.aggregate = {
+        **api.aggregate,
+        "instrumentAggregates": [
+            *api.aggregate["instrumentAggregates"],
+            {"instrumentId": new, "assetCurrency": "USD", "netUnits": Decimal("2")},
+        ],
+    }
+    api.breakdown = {
+        **api.breakdown,
+        "instruments": [
+            *api.breakdown["instruments"],
+            {"instrumentId": new, "symbol": "ZZQB", "positions": []},
+        ],
+    }
+    api.orders["4000000103"] = {
+        "orderId": Decimal(4000000103),
+        "asset": {"instrumentId": new, "settlementType": "REAL", "leverage": 1},
+        "positionExecutions": [],
+    }
+    api.requests.clear()
+    after = await _run_sync(session, connection, api)
+
+    [asked] = [r for r in api.requests if r.url.path == INSTRUMENTS]
+    assert asked.url.params["instrumentIds"] == str(new)
+    assert not (DAILY - {INSTRUMENTS}) & set(api.paths())
+    assert not [w for w in after.warnings if "instrument type unknown" in w]
+    api.requests.clear()
+    await _sync(session, connection, api)
+    assert INSTRUMENTS not in api.paths()
 
 
 def test_connector_identity_and_registration() -> None:

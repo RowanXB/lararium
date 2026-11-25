@@ -189,7 +189,11 @@ async def _context(run: Run, seen: Sequence[Report], lookups: dict[str, Record])
                     run.symbols[etoro_id] = symbol
                 for item in objects_at(instrument, "positions"):
                     if code := text_at(item, "assetCurrency").upper():
-                        run.asset_currencies[etoro_id] = code
+                        # The position's own instrument, else its parent's, as the query reads
+                        # the stored rows.
+                        own = text_at(item, "instrumentId")
+                        key = id_at(report.record, item, "instrumentId") if own else etoro_id
+                        run.asset_currencies[key] = code
 
 
 async def normalize(ctx: SyncContext, raw_record_ids: Sequence[UUID]) -> NormalizeReport:
@@ -283,7 +287,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     )
     report.flags_in_full |= await currency_flags(run.session, run.connection_id)
     pnl = await records.latest_pnl(run)
-    if unknown := await records.settlement_unknown(run, trades, lookups, pnl):
+    if unknown := await records.settlement_unknown(run, trades, lookups, pnl, statement.trades):
         report.flags_in_full.add(f"{records.SETTLEMENT_UNKNOWN} ({unknown})")
     if await records.unplaced(run, trades, pnl, statement):
         report.flags_in_full.add(statement_ledger.UNPLACED)

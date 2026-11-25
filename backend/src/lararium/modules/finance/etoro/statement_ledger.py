@@ -52,6 +52,7 @@ from sqlalchemy import select, text
 from lararium.core import models as core_models
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
+from lararium.modules.finance.connector_items import SHOWN_NAME
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro import accounts
 from lararium.modules.finance.etoro.fields import (
@@ -132,8 +133,6 @@ _UNASSIGNED: Mapping[str, _Kind] = {
 }
 # Closed Positions' Type of a position the ledger holds, in lower case.
 _KINDS: Mapping[str, InstrumentKind] = {"stocks": "equity", "etf": "etf"}
-# A Type fit to name in a flag: eToro's labels are words.
-_TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 :>/&().-]{0,39}")
 # What eToro writes where a number has none.
 _NO_NUMBER = frozenset({"", "-", "N/A"})
 # An open's or close's Details: the symbol and the asset currency.
@@ -629,7 +628,7 @@ def _dividend(statement: Statement, row: Row) -> Row | None:
 
 
 def _flag_type(run: Run, row: Row) -> None:
-    named = _TYPE_NAME.fullmatch(row.type) is not None
+    named = SHOWN_NAME.fullmatch(row.type) is not None
     run.flag(f"{ACCOUNT_ACTIVITY}.Type={row.type}" if named else f"{ACCOUNT_ACTIVITY}.Type")
 
 

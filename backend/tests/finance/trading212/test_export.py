@@ -327,6 +327,21 @@ async def test_trade_row_flagged_not_posted(session, run) -> None:
     assert stored["cells"]["Ticker"] == "ZZQA"
 
 
+async def test_an_unknown_column_unfit_to_show_is_counted_not_named(session, run) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    await ledger.normalize(SUMMARY)
+    header = (*HEADER, "Ticker", "<b>Odd</b>", "x" * 41)
+    deposit = row() | {"Ticker": "ZZQA", "<b>Odd</b>": "1", "x" * 41: "2"}
+
+    await _ingest(ledger, export_csv(deposit, header=header))
+
+    assert sorted(w for w in await _warnings(session, connection) if "export column" in w) == [
+        "Trading 212 flagged: export column <unknown column> (2)",
+        "Trading 212 flagged: export column Ticker",
+    ]
+
+
 async def test_upload_twice_writes_nothing(session, run) -> None:
     connection = await _connection(run)
     ledger = Ledger(session, connection)

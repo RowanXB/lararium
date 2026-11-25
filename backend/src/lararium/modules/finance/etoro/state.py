@@ -67,9 +67,10 @@ class NormalizeReport:
     replayed: bool = False
     # Flags every run finds in full: instruments whose type eToro has not given, or gave as
     # one the ledger does not hold, or whose currency it has not given; positions whose
-    # settlement no source states.
+    # settlement no source states; a statement position it cannot place.
     flags_in_full: set[str] = field(default_factory=set[str])
-    # The cursor's reconciliation keys (connector_flags.RECONCILIATION_KEYS), as written.
+    # The cursor's reconciliation keys (connector_flags.RECONCILIATION_KEYS) and the review
+    # items told (source_merge.REVIEWS_NOTIFIED), as written.
     cursor: dict[str, JSONValue] = field(default_factory=dict[str, JSONValue])
 
 

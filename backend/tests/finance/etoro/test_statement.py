@@ -307,6 +307,35 @@ def test_column_twice_refused() -> None:
         parse(build_workbook(sheets))
 
 
+def test_an_unknown_column_twice_is_refused_without_its_name() -> None:
+    """A repeated header is named only when it is a known one: an unknown header is the
+    file's text, which may be anything."""
+    extra = {**OPEN, "Notes 2026-10-01 4111": "x"}
+    sheets = statement_sheets(summary(), [extra])
+    index = next(i for i, s in enumerate(sheets) if s[0] == ACCOUNT_ACTIVITY)
+    name, rows = sheets[index]
+    sheets[index] = (name, [[*row, row[-1]] for row in rows])
+    with pytest.raises(StatementError, match=r"Account Activity has a column twice") as error:
+        parse(build_workbook(sheets))
+    assert "4111" not in str(error.value)
+
+
+def test_names_unfit_to_show_are_flagged_by_a_placeholder_and_count() -> None:
+    odd = "x" * 41
+    extra = {**OPEN, "Brand New Column": "x", odd: "y", "<b>Note</b>": "z"}
+    sheets = statement_sheets(summary(), [extra])
+    sheets.append(("Sheet <script>", [[("inline", "something")]]))
+    sheets.append(("Feuille é", [[("inline", "something")]]))
+    statement = parse(build_workbook(sheets))
+    assert statement.flagged == frozenset(
+        {
+            "Account Activity.Brand New Column",
+            "Account Activity.<unknown column> (2)",
+            "<unknown sheet> (2)",
+        }
+    )
+
+
 def test_non_ascii_digits_refused() -> None:
     # Arabic-Indic digits: a date only in another script's numerals is not eToro's format.
     arabic = "01/10/2026 00:00:00".translate(ARABIC_INDIC)
@@ -394,7 +423,10 @@ def test_padding_to_a_wide_header_capped() -> None:
     name, rows = sheets[index]
     header = [*rows[0], *(("shared", f"Wide {n}") for n in range(989))]
     sheets[index] = (name, [header, *([("number", "1")] for _ in range(101))])
-    with pytest.raises(StatementError, match="Account Activity has more than 100000 cells"):
+    with pytest.raises(
+        StatementError,
+        match="Account Activity has more than 100000 cells: upload a statement of a shorter period",
+    ):
         parse(build_workbook(sheets))
 
 

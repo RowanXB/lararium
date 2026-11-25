@@ -111,7 +111,9 @@ def test_billion_laughs_fails_fast() -> None:
 def test_too_many_cells_refused() -> None:
     rows = [[("number", "1")] * 1000 for _ in range(100)]
     rows.append([("number", "1")])
-    with pytest.raises(XlsxError, match="more than 100000 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 100000 cells: upload a statement of a shorter period"
+    ):
         read_workbook(build_workbook([("S", rows)]))
     # Exactly the cap reads.
     assert len(read_workbook(build_workbook([("S", rows[:-1])]))[0].rows) == 100
@@ -119,7 +121,9 @@ def test_too_many_cells_refused() -> None:
 
 def test_cells_count_across_sheets() -> None:
     rows = [[("number", "1")] * 1000 for _ in range(50)]
-    with pytest.raises(XlsxError, match="more than 100000 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 100000 cells: upload a statement of a shorter period"
+    ):
         read_workbook(build_workbook([("A", rows), ("B", rows), ("C", [[("number", "1")]])]))
 
 
@@ -131,7 +135,9 @@ def test_padding_counts_as_cells() -> None:
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         f"<sheetData>{rows}</sheetData></worksheet>"
     ).encode()
-    with pytest.raises(XlsxError, match="more than 100000 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 100000 cells: upload a statement of a shorter period"
+    ):
         read_workbook(zip_parts(parts))
 
 
@@ -141,7 +147,9 @@ def test_empty_rows_count_as_cells() -> None:
         b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         b"<sheetData>" + b"<row/>" * 100_001 + b"</sheetData></worksheet>"
     )
-    with pytest.raises(XlsxError, match="more than 100000 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 100000 cells: upload a statement of a shorter period"
+    ):
         read_workbook(zip_parts(parts))
 
 
@@ -284,13 +292,17 @@ def test_cells_counted_as_they_close(monkeypatch: pytest.MonkeyPatch) -> None:
     # The row never ends: the cap stops it at its 11th cell, before the parser reaches the
     # broken rest of the part.
     monkeypatch.setattr(xlsx, "MAX_CELLS", 10)
-    with pytest.raises(XlsxError, match="more than 10 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 10 cells: upload a statement of a shorter period"
+    ):
         read_workbook(_sheet(b"<row>" + b"<c><v>1</v></c>" * 1000 + b"<broken"))
 
 
 def test_full_rows_of_cells_without_references_counted() -> None:
     row = b"<row>" + b"<c><v>1</v></c>" * 16_384 + b"</row>"
-    with pytest.raises(XlsxError, match="more than 100000 cells"):
+    with pytest.raises(
+        XlsxError, match="more than 100000 cells: upload a statement of a shorter period"
+    ):
         read_workbook(_sheet(row * 7))
 
 

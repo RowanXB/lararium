@@ -28,6 +28,8 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024  # every part read, decompressed, together
 MAX_ENTRIES = 1000
 # Every cell of every row as returned, the padding of gaps included; an empty row counts as one.
 MAX_CELLS = 100_000
+# What a refusal over MAX_CELLS tells the owner to do.
+SHORTER = ": upload a statement of a shorter period"
 # The text the reader returns, summed over every cell: a shared string is counted at each cell
 # that names it, so one long string named many times cannot fan out.
 MAX_TEXT_CHARS = 64 * 1024 * 1024
@@ -171,8 +173,6 @@ class _Workbook:
             infos = self._zip.infolist()
         except _UNZIP_ERRORS:
             raise XlsxError("the file is not an xlsx workbook") from None
-        if len(infos) > MAX_ENTRIES:
-            raise XlsxError(f"the file has more than {MAX_ENTRIES} parts")
         self._infos = {info.filename: info for info in infos}
         self._read = 0
         self._cells = 0
@@ -216,7 +216,7 @@ class _Workbook:
     def spend(self, cells: int) -> None:
         self._cells += cells
         if self._cells > MAX_CELLS:
-            raise XlsxError(f"the workbook has more than {MAX_CELLS} cells")
+            raise XlsxError(f"the workbook has more than {MAX_CELLS} cells{SHORTER}")
 
     def read_strings(self, name: str) -> None:
         what = "the shared strings"

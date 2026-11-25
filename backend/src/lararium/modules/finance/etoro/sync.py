@@ -10,17 +10,18 @@ Per sync (design §5.2), in order:
 3. eToro Money's transactions for each Cash account, newest first, until a page holds only what
    was seen (the newest id per account, `seen_cash`).
 4. Trade history. The first sync walks back in windows whose `minDate` is 364 days apart (one
-   window: every trade closed since `minDate`), until the window starts on or before the
-   account's opening (the earliest stored statement's Date Created), or, with no statement
-   uploaded, until a window brings no `positionId` the walk had not seen. Later syncs ask one
-   window, from the latest stored close date (`trade_history_to`) less 7 days, however long
-   ago that is.
-5. `orders:lookup` once for each order of an open position or a closed trade (`looked_up`).
+   window: every trade closed since `minDate`), until a window brings no `positionId` the walk
+   had not seen; a statement, which can be uploaded only after it, posts any close beyond.
+   Later syncs ask one window, from the latest stored close date (`trade_history_to`) less 7
+   days, however long ago that is.
+5. `orders:lookup` once for each order of an open position or a closed trade (`looked_up`),
+   at most MAX_LOOKUPS a sync: the next syncs ask the rest.
 6. Balance history from the latest stored snapshot (`balance_history_to`) less 7 days; the
    first sync takes 365 days.
 7. Once a day (`daily_at`): closed-events, stockback, the market data of the instruments held
    or traded, and daily candles of those held, from each one's first open (then from the last
-   day fetched, `candles_to`, less 7 days).
+   day fetched, `candles_to`, less 7 days). Between those, a sync fetches the market data of
+   an instrument held or traded that the connection has none of yet.
 
 Every item is stored as eToro sent it, its numbers as exact text; a report (`/me`, balances,
 PnL, aggregate, breakdown, balance history) is also sighted (report_sightings), so it is dated
@@ -74,9 +75,7 @@ from lararium.modules.finance.etoro.client import (
 from lararium.modules.finance.etoro.fields import (
     ACCOUNT_SUMMARY,
     ENDPOINTS,
-    LABEL,
     STATEMENT_SHEETS,
-    VALUE,
 )
 from lararium.modules.finance.etoro.normalize import normalize
 from lararium.modules.finance.etoro.statement import (
@@ -84,7 +83,6 @@ from lararium.modules.finance.etoro.statement import (
     EtoroStatement,
     StatementError,
     parse_statement,
-    read_moment,
 )
 from lararium.modules.finance.readonly_http import JSONValue as ApiValue
 from lararium.modules.finance.readonly_http import record_json
@@ -111,6 +109,8 @@ DAILY_EVERY = timedelta(hours=24)
 OVERLAP = timedelta(days=7)
 # A first walk back that has not ended after this many windows (40 years) is a fault.
 MAX_WINDOWS = 40
+# The orders a sync looks up at most (`orders:lookup`), all in its one transaction.
+MAX_LOOKUPS = 50
 # What eToro reports now, rather than records: each storing is sighted.
 REPORTS = frozenset({"me", "balances", "pnl", "aggregate", "breakdown", "balance_history"})
 # A refused key's scopes, without the rest of its `/me` (not an endpoint's record: the
@@ -385,28 +385,6 @@ class _Run:
             await self.store("trade_history", row, params={"minDate": min_date.isoformat()})
         return rows
 
-    async def opening(self) -> date | None:
-        """The account's opening: the earliest Date Created of the statements stored."""
-        values = await self.ctx.command.session.scalars(
-            text(
-                "select content->'cells'->>:value from core.raw_records"
-                " where connection_id = :c and record_type = :t"
-                " and btrim(content->'cells'->>:label) = 'Date Created'"
-            ),
-            {
-                "c": self.ctx.connection.id,
-                "t": STATEMENT_SHEETS[ACCOUNT_SUMMARY].record_type,
-                "label": LABEL,
-                "value": VALUE,
-            },
-        )
-        days = [
-            read_moment(value.strip(), "Date Created", STATEMENT_ZONE).date()
-            for value in values
-            if isinstance(value, str)
-        ]
-        return min(days, default=None)
-
     async def trades(self, today: date) -> tuple[date, list[Item]]:
         """The trade history this sync asks (design §5.2, step 4); (the latest close date
         stored, or today when there is none, and every row fetched)."""
@@ -417,22 +395,23 @@ class _Run:
             # skip what closed during a long outage.
             rows = await self.window(latest - OVERLAP)
             return _latest_close(rows, latest), rows
-        opening = await self.opening()
+        # The first sync: no statement can be stored before it ends (StatementTooEarly), so
+        # the walk stops at a window that adds nothing; a statement posts what lay beyond.
         seen: set[str] = set()
         fetched: list[Item] = []
         for k in range(1, MAX_WINDOWS + 1):
-            min_date = today - span * k
-            rows = await self.window(min_date)
+            rows = await self.window(today - span * k)
             fetched.extend(rows)
             ids = {_id_text(row.get("positionId"), "trade history", "positionId") for row in rows}
             new = ids - seen
             seen |= ids
-            if (min_date <= opening) if opening is not None else not new:
+            if not new:
                 return _latest_close(fetched, today if not fetched else None), fetched
         raise EtoroSyncError("eToro's trade history did not end")
 
     async def orders(self, pnl: Item, trades: list[Item]) -> list[JSONValue]:
-        """`orders:lookup` for each order not looked up before; every order looked up."""
+        """`orders:lookup` for each order not looked up before, at most MAX_LOOKUPS of them;
+        every order looked up."""
         before = self.cursor.get("looked_up")
         looked_up: set[str] = (
             {v for v in before if isinstance(v, str)} if isinstance(before, list) else set()
@@ -446,7 +425,9 @@ class _Run:
             order_id = _optional_id(row.get("orderId"), "trade history", "orderId")
             if order_id is not None:
                 wanted.add(order_id)
-        for order_id in sorted(wanted - looked_up, key=int):
+        # At most MAX_LOOKUPS a sync: a failure loses one sync's lookups, not a whole
+        # history's; the rest are asked next sync (their closes post then).
+        for order_id in sorted(wanted - looked_up, key=int)[:MAX_LOOKUPS]:
             order = await self.client.order_lookup(Decimal(order_id))
             if order is not None:
                 await self.store("order_lookup", order, params={"orderId": order_id})
@@ -481,21 +462,8 @@ class _Run:
         for item in await self.client.stockback():
             await self.store("stockback", item)
 
-        opened: dict[str, date] = {}
-        for position in _objects(_object(pnl, "clientPortfolio"), "positions", "pnl"):
-            instrument = _id_text(position.get("instrumentID"), "pnl", "positions[].instrumentID")
-            day = position.get("openDateTime")
-            first = _day(day, "pnl", "positions[].openDateTime") if day is not None else today
-            opened[instrument] = min(opened.get(instrument, first), first)
-        held = set(opened)
-        for item in _objects(aggregate, "instrumentAggregates", "aggregate-portfolio"):
-            held.add(_id_text(item.get("instrumentId"), "aggregate-portfolio", "instrumentId"))
-        for item in _objects(breakdown, "instruments", "instrument-breakdown"):
-            held.add(_id_text(item.get("instrumentId"), "instrument-breakdown", "instrumentId"))
-        traded = {_id_text(r.get("instrumentId"), "trade history", "instrumentId") for r in trades}
-
-        for item in await self.client.instruments([int(i) for i in sorted(held | traded, key=int)]):
-            await self.store("instruments", item)
+        opened, held, traded = _instruments_of(today, pnl, aggregate, breakdown, trades)
+        await self.instruments(held | traded)
         for item in await self.client.instrument_types():
             await self.store("instrument_types", item)
         for item in await self.client.exchanges():
@@ -517,6 +485,29 @@ class _Run:
             candles_to[instrument] = today.isoformat()
         return candles_to
 
+    async def instruments(self, ids: Collection[str]) -> None:
+        """The market data of these instruments (eToro ids)."""
+        for item in await self.client.instruments([int(i) for i in sorted(ids, key=int)]):
+            await self.store("instruments", item)
+
+    async def new_instruments(
+        self, today: date, pnl: Item, aggregate: Item, breakdown: Item, trades: list[Item]
+    ) -> None:
+        """Between daily parts, the market data of the instruments held or traded that the
+        connection has none of yet (one first bought since), so they are typed at once."""
+        _, held, traded = _instruments_of(today, pnl, aggregate, breakdown, trades)
+        known = set(
+            await self.ctx.command.session.scalars(
+                text(
+                    "select instrument_id::text from finance.etoro_instruments"
+                    " where connection_id = :c"
+                ),
+                {"c": self.ctx.connection.id},
+            )
+        )
+        if missing := (held | traded) - known:
+            await self.instruments(missing)
+
     async def sync(self, now: datetime) -> dict[str, JSONValue]:
         today = now.date()
         gcid, real_cid = await self.gate()
@@ -529,6 +520,8 @@ class _Run:
         candles_to: JSONValue = self.cursor.get("candles_to")
         if daily:
             candles_to = await self.daily(today, pnl, aggregate, breakdown, trades)
+        else:
+            await self.new_instruments(today, pnl, aggregate, breakdown, trades)
         return {
             "gcid": gcid,
             "real_cid": real_cid,
@@ -548,6 +541,25 @@ _BREAKDOWN = {"positionLevel": "Normal", "orderLevel": "Normal", "mirrorLevel": 
 
 def _request(path: str, params: Mapping[str, str] | None) -> dict[str, JSONValue]:
     return {"endpoint": path, "params": dict(params or {})}
+
+
+def _instruments_of(
+    today: date, pnl: Item, aggregate: Item, breakdown: Item, trades: list[Item]
+) -> tuple[dict[str, date], set[str], set[str]]:
+    """(each held instrument's first open, the instruments held, those traded), eToro ids."""
+    opened: dict[str, date] = {}
+    for position in _objects(_object(pnl, "clientPortfolio"), "positions", "pnl"):
+        instrument = _id_text(position.get("instrumentID"), "pnl", "positions[].instrumentID")
+        day = position.get("openDateTime")
+        first = _day(day, "pnl", "positions[].openDateTime") if day is not None else today
+        opened[instrument] = min(opened.get(instrument, first), first)
+    held = set(opened)
+    for item in _objects(aggregate, "instrumentAggregates", "aggregate-portfolio"):
+        held.add(_id_text(item.get("instrumentId"), "aggregate-portfolio", "instrumentId"))
+    for item in _objects(breakdown, "instruments", "instrument-breakdown"):
+        held.add(_id_text(item.get("instrumentId"), "instrument-breakdown", "instrumentId"))
+    traded = {_id_text(r.get("instrumentId"), "trade history", "instrumentId") for r in trades}
+    return opened, held, traded
 
 
 def _latest_close(rows: list[Item], floor: date | None) -> date:

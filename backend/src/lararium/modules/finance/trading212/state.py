@@ -61,7 +61,8 @@ class NormalizeReport:
     # Flags about the records the run normalized (fields, values, types it does not know).
     flagged: set[str] = field(default_factory=set[str])
     mismatches: list[str] = field(default_factory=list[str])
-    # The cursor's reconciliation keys (connector_flags.RECONCILIATION_KEYS), as written.
+    # The cursor's reconciliation keys (connector_flags.RECONCILIATION_KEYS) and the review
+    # items told (source_merge.REVIEWS_NOTIFIED), as written.
     cursor: dict[str, JSONValue] = field(default_factory=dict[str, JSONValue])
     # The run replayed every stored record, so `flagged` is all there is to flag.
     replayed: bool = False

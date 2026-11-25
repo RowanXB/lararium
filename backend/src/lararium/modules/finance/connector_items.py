@@ -110,6 +110,9 @@ def leaves(value: JSONValue, path: str = "", maps: MapEntries | None = None) -> 
         yield path
 
 
+# A name a file gives (a column's, a sheet's, a row's type) fit to show in a flag: the sources'
+# are words. Any other is the file's text, shown only as a placeholder and a count.
+SHOWN_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 :>/&().-]{0,39}")
 # A path segment fit to name in a flag: a plain name, then its array or map markers.
 _PLAIN = re.compile(r"([A-Za-z0-9_]{1,64})((?:\[\]|\{\})*)")
 

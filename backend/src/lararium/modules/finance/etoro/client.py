@@ -305,9 +305,8 @@ class EtoroClient:
 
     async def trade_history(self, min_date: date) -> list[Item]:
         """One window: every trade eToro closed from `min_date` to now, which is the contract
-        the sync's walk back relies on (it asks windows TRADE_WINDOW_DAYS apart until one starts
-        on or before the account's opening when a statement gives it, else until one adds no
-        new `positionId`). Pages are asked with
+        the sync's walk back relies on (it asks windows TRADE_WINDOW_DAYS apart until one adds
+        no new `positionId`). Pages are asked with
         `page`/`pageSize` until an empty page; a short page does not end it, since eToro may
         cap the page below TRADE_PAGE. A row repeated exactly (the pages shifting under a new
         close) is dropped; a row that differs is kept for the caller to judge. A full page

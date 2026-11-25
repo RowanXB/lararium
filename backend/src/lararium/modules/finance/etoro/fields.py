@@ -666,8 +666,8 @@ STATEMENT_KINDS: Mapping[str, Mapping[str, Kind]] = {
 }
 
 # Account Summary's labels as columns of `etoro_statements`, one row per statement: column B
-# (`Value`) typed by the label, column C and on (`Value 2`) as text in `<column>_2`, since the
-# probe did not show what column C holds. Headings and notes carry no value and get no column.
+# (`Value`) typed by the label, column C and on (`Value 2`) as text in `<column>_2`, as eToro
+# gives it. Headings and notes carry no value and get no column.
 SUMMARY_HEADINGS = frozenset(
     {
         "Details",

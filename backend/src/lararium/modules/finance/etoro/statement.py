@@ -27,6 +27,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from lararium.core.errors import DisplayableError
+from lararium.modules.finance.connector_items import SHOWN_NAME
 from lararium.modules.finance.etoro.fields import (
     ACCOUNT_SUMMARY,
     GLOSSARY,
@@ -35,7 +36,13 @@ from lararium.modules.finance.etoro.fields import (
     VALUE,
     StatementSheet,
 )
-from lararium.modules.finance.etoro.xlsx import MAX_CELLS, Sheet, XlsxError, read_workbook
+from lararium.modules.finance.etoro.xlsx import (
+    MAX_CELLS,
+    SHORTER,
+    Sheet,
+    XlsxError,
+    read_workbook,
+)
 
 # A label not in the field list has a figure: a value with a digit. A value of words only is a
 # section's heading (the owner's statement has one whose label the probe did not show). The
@@ -120,10 +127,13 @@ def _table_rows(sheet: Sheet, spec: StatementSheet, flagged: set[str]) -> list[d
     counts = Counter(name for name in header if name)
     for name in header:
         if counts[name] > 1:
-            raise StatementError(f"{sheet.name}.{name} appears twice")
+            # Named only when known: an unknown header is the file's text.
+            if name in spec.known or name in spec.required:
+                raise StatementError(f"{sheet.name}.{name} appears twice")
+            raise StatementError(f"{sheet.name} has a column twice")
     # Every row is padded to the header, so the reader's cap is checked again on the padding.
     if len(header) * (len(rows) - 1) > MAX_CELLS:
-        raise StatementError(f"{sheet.name} has more than {MAX_CELLS} cells")
+        raise StatementError(f"{sheet.name} has more than {MAX_CELLS} cells{SHORTER}")
 
     def name_of(index: int) -> str:
         name = header[index] if index < len(header) else ""
@@ -136,14 +146,21 @@ def _table_rows(sheet: Sheet, spec: StatementSheet, flagged: set[str]) -> list[d
         if not name or not (spec.open_columns or name in spec.known)
     }
     out: list[dict[str, str]] = []
+    unshown: set[str] = set()
     for row in rows[1:]:
         cells = {name_of(index): "" for index in range(len(header))}
         for index, value in enumerate(row):
             if index < len(header) or value:
                 cells[name_of(index)] = value
             if value.strip() and (index >= len(header) or index in flaggable):
-                flagged.add(f"{sheet.name}.{name_of(index)}")
+                name = name_of(index)
+                if SHOWN_NAME.fullmatch(name):
+                    flagged.add(f"{sheet.name}.{name}")
+                else:
+                    unshown.add(name)
         out.append(cells)
+    if unshown:
+        flagged.add(f"{sheet.name}.<unknown column> ({len(unshown)})")
     return out
 
 
@@ -211,13 +228,19 @@ def parse_statement(body: bytes, zone: ZoneInfo) -> EtoroStatement:
 
     flagged: set[str] = set()
     by_name: dict[str, Sheet] = {}
+    unshown = 0
     for sheet in sheets:
         if sheet.name in STATEMENT_SHEETS:
             if sheet.name in by_name:
                 raise StatementError(f"the statement has two {sheet.name} sheets")
             by_name[sheet.name] = sheet
         elif sheet.name != GLOSSARY and any(not _blank(row) for row in sheet.rows):
-            flagged.add(sheet.name)
+            if SHOWN_NAME.fullmatch(sheet.name):
+                flagged.add(sheet.name)
+            else:
+                unshown += 1
+    if unshown:
+        flagged.add(f"<unknown sheet> ({unshown})")
     for name in STATEMENT_SHEETS:
         if name not in by_name:
             raise StatementError(f"the statement has no {name} sheet")
