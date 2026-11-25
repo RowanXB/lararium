@@ -473,9 +473,13 @@ What is built so far (phase A):
 - **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
   Lararium already has. If Lararium has no currency with that ISO 4217 code, the asset is not
   counted: the connection is flagged with the code, its balance is left out and its records
-  are kept but not posted. To count it, add the currency on the Instruments page (kind Fiat,
-  the ISO code as its symbol): later syncs count its balance and the records they fetch; the
-  records kept before are not posted afterwards.
+  are kept but not posted. The other side of a trade in it is not posted either: after the
+  account's earliest report it shows as a reconciliation difference, and before that it is
+  inside that asset's opening adjustment. To count the currency, add it on the Instruments page
+  (kind Fiat, the ISO code as its symbol): later syncs count its balance and the records they
+  fetch. Its balance first shows as a reconciliation difference, because the earlier reports
+  counted it as nothing; the records kept before are posted only when Lararium next replays
+  its records (a new normaliser version) or when Binance changes them.
 - **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
   (subscriptions, redemptions and rewards).
 

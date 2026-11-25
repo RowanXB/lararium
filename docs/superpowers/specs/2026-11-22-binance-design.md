@@ -359,7 +359,7 @@ Holdings and net worth need no new page.
 | A record arrives after the snapshot that already contains it | Its `occurred_at` is before the snapshot's `as_of`, so the `hybrid` rule does not add it again. |
 | A record occurs while the balances are being read | That wallet's balance is read again, so its snapshot is cut on one side of the record (§5.6). |
 | Binance lists a record only later, with a time inside an old read | Known limit: the balance may be off by that record until the next report, and the two intervals around that read show equal and opposite differences, which stay open. The read's two moments are stored, so the cause is visible. The same holds for a trade fetched after the snapshots of its sync were cut: by the trade sweep, or in a symbol that only a read made again first showed (it is fetched by the next sync). |
-| A fiat currency Lararium has no instrument for | Not counted: no snapshot, its records stored typed and not posted, flagged once by its code. The other side of a trade or convert in it is not posted either, so it shows as a reconciliation difference. |
+| A fiat currency Lararium has no instrument for | Not counted: no snapshot, its records stored typed and not posted, flagged once by its code. The other side of a trade or convert in it is not posted either: after the account's earliest report it shows as a reconciliation difference; before that (most of a first sync's history) it is inside that asset's opening adjustment. |
 | A withdrawal fails after being posted | The next sync within the 7-day overlap sees the status; the withdrawal stops being a transfer and a refund is posted at the time the amount came back (§5.7). |
 | A deposit is credited but still locked (`status` 6) | Posted: Binance counts it in the balance. |
 | An asset bought and sold between two syncs, never seen before | The quote asset's change is unexplained; the symbol sweep finds both trades. |
@@ -390,7 +390,7 @@ Holdings and net worth need no new page.
 - **M3, M6**: the read-only gate exists three times (eToro's scopes, Trading 212's, Binance's permissions). `check_access` could own it.
 - **M1 snapshots**: a `hybrid` connector account writes a snapshot per asset per sync. Thinning old snapshots (keep one a day) needs a rule before the table grows large.
 - **M5, typed tables**: one table per record type is many tables for Binance. A shared way to declare "raw record → typed columns" would cut the repetition for the next connector.
-- **Foundation, currencies**: the ledger has only the ten currencies the foundation seeds. Seeding the full ISO 4217 list with each currency's decimals would let a connector count any fiat it meets; until then Binance leaves out and flags such an asset (owner, 2026-11-25).
+- **Foundation, currencies**: the foundation seeds only ten currencies. Seeding the full ISO 4217 list with each currency's decimals would let a connector count any fiat it meets; until then Binance leaves out and flags such an asset (owner, 2026-11-25).
 
 **Left for later milestones:**
 - **M8**: wallets, hash pairing with the rows of §5.12, CoinGecko prices by contract address.
