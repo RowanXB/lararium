@@ -15,7 +15,6 @@ from lararium.modules.finance.binance.catalogue import wallet_key
 from lararium.modules.finance.binance.models import AssetsSeen
 from lararium.modules.finance.binance.parse import parse
 from lararium.modules.finance.binance.tables import records, store
-from lararium.modules.finance.errors import UnknownCurrencyError
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
     create_instrument,
@@ -245,11 +244,17 @@ async def test_fiat_asset_is_the_currency(run, session) -> None:
     assert "EUR" in await instruments.assets_seen(session, connection.id)
 
 
-async def test_legal_money_that_is_no_currency_is_refused_by_name(run) -> None:
+async def test_legal_money_lararium_does_not_have_is_left_out_and_flagged(run, session) -> None:
+    # Never made a currency (its decimals cannot be guessed) nor a crypto instrument.
     connection = await _connection(run)
-    await _coin_config(run, connection.id, coin="ZZZ", isLegalMoney=True)
-    with pytest.raises(UnknownCurrencyError):
-        await _asset(run, connection.id, "ZZZ")
+    await _coin_config(run, connection.id, coin="XFA", isLegalMoney=True)
+    before = len(await list_instruments(session, include_hidden=True))
+    flags: list[str] = []
+
+    assert await _asset(run, connection.id, "XFA", flags) is None
+
+    assert flags == ["XFA is a currency Lararium does not have: it is not counted"]
+    assert len(await list_instruments(session, include_hidden=True)) == before
 
 
 async def test_ld_mirror_is_not_an_instrument(run, session) -> None:

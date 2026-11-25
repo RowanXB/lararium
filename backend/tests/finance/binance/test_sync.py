@@ -749,3 +749,106 @@ async def test_a_balance_answer_that_cannot_be_typed_is_not_stored(
 
     assert again.status == "healthy", again.last_error
     assert await _raw(session, connection.id, "spot-account") >= 1
+
+
+# A fiat currency Lararium has no instrument for is left out and flagged, never failing a sync.
+
+
+async def test_a_fiat_currency_lararium_lacks_is_not_counted_and_the_sync_goes_on(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    from lararium.modules.finance.binance.reconcile import asset_code, open_differences
+
+    fake.add("coin-config", build_row("coin-config", coin="XFA", isLegalMoney=True))
+    fake.add("coin-config", build_row("coin-config", coin="AAA", isLegalMoney=False))
+    fake.add(
+        "exchange-info",
+        build_row("exchange-info", symbol="AAAXFA", baseAsset="AAA", quoteAsset="XFA"),
+    )
+    # A day holding both, and the first sync's read; then 1 AAA bought with XFA (its
+    # commission in XFA too) before the second sync.
+    day = NOW_MS - 2 * DAY_MS - 1_000
+    snapshot = build_row("snapshot", type="spot", updateTime=day)
+    data = dict(snapshot["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["balances"] = [
+        {"asset": "AAA", "free": "2", "locked": "0"},
+        {"asset": "XFA", "free": "500", "locked": "0"},
+    ]
+    fake.add("snapshot", {**snapshot, "data": data})
+
+    def spot(aaa: str, xfa: str) -> None:
+        fake.set_rows(
+            "spot-account",
+            [
+                build_row("spot-account", asset="AAA", free=aaa, locked="0"),
+                build_row("spot-account", asset="XFA", free=xfa, locked="0"),
+            ],
+        )
+
+    spot("2", "500")
+    connection = await binance_connection(run)
+
+    first = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert first.status == "healthy", first.last_error
+    assert first.config.get("first_sync_done") is True
+    flag = "XFA is a currency Lararium does not have: it is not counted"
+    flags = first.config["flags"]
+    assert isinstance(flags, list) and flags.count(flag) == 1
+    assert not any("has a balance but lists no asset" in f for f in flags)  # pyright: ignore[reportOperatorIssue]
+    assert not any("disagrees" in f for f in flags)  # pyright: ignore[reportOperatorIssue]
+
+    clock.ms += 4 * HOUR_MS
+    trade = build_row(
+        "my-trades",
+        symbol="AAAXFA",
+        isBuyer=True,
+        qty="1",
+        price="100",
+        quoteQty="100",
+        commission="0.5",
+        commissionAsset="XFA",
+        time=clock.ms - HOUR_MS,
+    )
+    fake.add("my-trades", trade)
+    spot("3", "399.5")
+    fake.requests.clear()
+
+    second = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert second.status == "healthy", second.last_error
+    assert second.config["flags"] == flags
+    assert "no price for XFA" not in flags
+    # The trade is stored typed and not posted: no one-sided transaction.
+    typed = await session.scalar(
+        text("select count(*) from finance.binance_my_trades where connection_id = :c"),
+        {"c": connection.id},
+    )
+    assert typed == 1
+    posted = await session.scalar(
+        text("select count(*) from finance.transactions where external_id like 'trade:%'")
+    )
+    assert posted == 0
+    # No XFA instrument, so no XFA snapshot; the day was written for AAA.
+    symbols = await session.scalars(
+        text(
+            "select distinct i.symbol from finance.balance_snapshots s"
+            " join finance.instruments i on i.id = s.instrument_id"
+            " join finance.accounts a on a.id = s.account_id where a.source_connection_id = :c"
+        ),
+        {"c": connection.id},
+    )
+    assert set(symbols) == {"AAA"}
+    # The other side of the unposted trade is the visible consequence: a difference on AAA,
+    # which sends for the sweep once.
+    differences = await open_differences(session, connection.id)
+    assert {await asset_code(session, d.instrument_id) for d in differences} == {"AAA"}
+    assert any("startTime" in seen.params for seen in fake.calls("my-trades"))
+
+    fake.requests.clear()
+    clock.ms += 4 * HOUR_MS
+    third = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert third.status == "healthy", third.last_error
+    assert third.config["flags"] == flags
+    assert not any("startTime" in seen.params for seen in fake.calls("my-trades"))

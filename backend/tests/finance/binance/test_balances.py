@@ -1054,3 +1054,28 @@ async def test_a_summed_quantity_left_out_of_a_funding_entry_fails(session, run,
     assert (caught.value.label, caught.value.field) == ("funding-asset", f"[].{name}")
     assert await _snapshots(session, connection.id) == []
     assert await _count(session, "binance_funding_asset", connection.id) == 0
+
+
+async def test_a_wallet_holding_only_a_currency_lararium_lacks_is_not_misread(session, run) -> None:
+    from lararium.modules.finance.binance.parse import parse
+    from lararium.modules.finance.binance.tables import records, store
+
+    connection = await binance_connection(run)
+    row = build_row("coin-config", coin="XFA", isLegalMoney=True)
+    parsed = parse("coin-config", build_response("coin-config", [row]))
+    key = {"connection_id": connection.id, "snapshot_at": _at(NOW_MS)}
+    for record in records("coin-config", parsed):
+        await run(store, "coin-config", key, record, {"read_to": _at(NOW_MS)})
+    flags: list[str] = []
+    reads: dict[str, Read | None] = {
+        "spot-account": _read("spot-account", _spot(("XFA", "5", "0"))),
+        "wallet-balance": _read(
+            "wallet-balance", [_wallet("Spot", ("XFA", "5")), _wallet("Earn", ("XFA", "3"))]
+        ),
+    }
+
+    assert await _report(run, connection, reads, flags) == {}
+
+    # Held but not counted: no snapshot, and neither "disagrees" nor "lists no asset".
+    assert flags == ["XFA is a currency Lararium does not have: it is not counted"]
+    assert await _snapshots(session, connection.id) == []

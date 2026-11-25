@@ -1,6 +1,8 @@
 """Finding or creating the instrument of a Binance asset code (design 5.5).
 
-An asset is the existing fiat instrument when Binance marks it as legal money, an instrument
+An asset is the existing fiat instrument when Binance marks it as legal money (none, and
+flagged, when Lararium has no currency of that code: its decimals cannot be guessed), an
+instrument
 already known by its `binance_asset` identifier, the one existing crypto instrument with that
 symbol (which then gains the identifier), or a new crypto instrument. An `LD`-prefixed code that
 mirrors another asset is never an instrument. Every asset resolved is recorded in
@@ -21,7 +23,6 @@ from lararium.modules.finance.instruments import (
     add_identifiers,
     create_instrument,
     find_by_identifier,
-    get_currency,
     normalize_identifier,
 )
 
@@ -99,6 +100,17 @@ async def _same_symbol(session: AsyncSession, code: str) -> list[UUID]:
     return list(rows)
 
 
+def uncounted_flag(code: str) -> str:
+    return f"{code} is a currency Lararium does not have: it is not counted"
+
+
+async def uncounted(session: AsyncSession, connection_id: UUID, code: str) -> bool:
+    """Whether the code is legal money Lararium has no currency of: no instrument, and not
+    counted."""
+    _, legal_money = await _coin(session, connection_id, code)
+    return legal_money and await find_by_identifier(session, "iso4217", code) is None
+
+
 def clash_flag(code: str) -> str:
     return f"{code} may be the same coin as another instrument"
 
@@ -124,7 +136,8 @@ async def asset(
     *,
     flag: Callable[[str], None] | None = None,
 ) -> UUID | None:
-    """The instrument of an asset code, created if new; None for the mirror of another asset.
+    """The instrument of an asset code, created if new; None for the mirror of another asset
+    and for legal money Lararium has no currency of (`uncounted`, flagged).
 
     `flag` is told what the owner should look at (`several instruments named <code>`).
     """
@@ -135,7 +148,12 @@ async def asset(
     await _see(session, connection_id, code)
     name, legal_money = await _coin(session, connection_id, code)
     if legal_money:
-        return (await get_currency(session, code)).id
+        currency = await find_by_identifier(session, "iso4217", code)
+        if currency is None:
+            if flag is not None:
+                flag(uncounted_flag(code))
+            return None
+        return currency.id
     identifier = InstrumentIdentifier("binance_asset", code)
     found = await find_by_identifier(session, "binance_asset", code)
     if found is not None:

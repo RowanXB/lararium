@@ -52,7 +52,7 @@ from lararium.modules.finance.binance.fetch import (
     walk,
     walk_trades,
 )
-from lararium.modules.finance.binance.instruments import MIRROR, asset
+from lararium.modules.finance.binance.instruments import MIRROR, asset, uncounted
 from lararium.modules.finance.binance.parse import (
     ApiValue,
     BinanceDataError,
@@ -639,23 +639,33 @@ class _Assets:
     def __init__(self, ctx: CommandContext, connection: ConnectionRecord, flag: Flag) -> None:
         self._ctx, self._connection, self._flag = ctx, connection, flag
         self._found: dict[str, UUID | None] = {}
+        # Legal money Lararium has no currency of: no instrument, and not counted.
+        self.uncounted: set[str] = set()
 
     async def resolve(self, codes: Collection[str]) -> None:
         # Every other code before an `LD` one, so that the asset a mirror stands for is known
         # when the mirror is met (in another wallet, in the same sync).
         for code in sorted(codes, key=lambda c: (c.startswith(MIRROR), c)):
             if code not in self._found:
-                self._found[code] = await asset(
-                    self._ctx, self._connection.id, code, flag=self._flag
-                )
+                found = await asset(self._ctx, self._connection.id, code, flag=self._flag)
+                self._found[code] = found
+                if found is None and await uncounted(self._ctx.session, self._connection.id, code):
+                    self.uncounted.add(code)
 
     def unresolved(self, held: Mapping[str, Decimal]) -> str | None:
-        """The first code held (not zero) that has no instrument and is not an `LD` mirror
-        (the only code `asset` gives none); None when every quantity has its instrument."""
+        """The first code held (not zero) that has no instrument and is neither an `LD` mirror
+        nor a currency Lararium does not have (the codes `asset` gives none); None when every
+        quantity has its instrument."""
         for code, quantity in sorted(held.items()):
-            if quantity != 0 and self._found.get(code) is None and not code.startswith(MIRROR):
+            if quantity == 0 or self._found.get(code) is not None or code in self.uncounted:
+                continue
+            if not code.startswith(MIRROR):
                 return code
         return None
+
+    def holds_uncounted(self, held: Mapping[str, Decimal]) -> bool:
+        """Whether a quantity (not zero) is of a currency Lararium does not have."""
+        return any(quantity != 0 and code in self.uncounted for code, quantity in held.items())
 
     def per_instrument(self, held: Mapping[str, Decimal]) -> dict[UUID, Decimal]:
         quantities: dict[UUID, Decimal] = {}
@@ -699,7 +709,8 @@ async def report_balances(
     for wallet in wallets:
         quantities = assets.per_instrument(wallet.held)
         if wallet.key in OWN_SOURCES:
-            derived[wallet.key] = bool(quantities)
+            # A currency that is not counted is still held: the wallet list is not contradicted.
+            derived[wallet.key] = bool(quantities) or assets.holds_uncounted(wallet.held)
         if quantities:
             account = await wallet_account(ctx, connection, wallet.key)
         else:

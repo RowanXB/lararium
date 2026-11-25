@@ -250,3 +250,54 @@ async def test_regenerate_gives_the_same_ledger(session, run) -> None:
     assert report.records == 8
     assert await ledger(session, connection.id) == before
     await assert_balanced_and_quiet(session, connection.id)
+
+
+async def _uncounted_currency(run, connection, code: str) -> None:
+    """Binance marks `code` legal money; Lararium has no currency of it."""
+    from lararium.modules.finance.binance.parse import parse
+    from lararium.modules.finance.binance.tables import records, store
+
+    from .fixtures import NOW_MS, build_response
+    from .test_balances import _at
+
+    row = build_row("coin-config", coin=code, isLegalMoney=True)
+    parsed = parse("coin-config", build_response("coin-config", [row]))
+    key = {"connection_id": connection.id, "snapshot_at": _at(NOW_MS)}
+    for record in records("coin-config", parsed):
+        await run(store, "coin-config", key, record, {"read_to": _at(NOW_MS)})
+
+
+@pytest.mark.parametrize("side", ["quote", "commission", "convert"])
+async def test_a_record_naming_a_currency_lararium_lacks_is_typed_and_not_posted(
+    session, run, side: str
+) -> None:
+    # One side that is not counted: the record is not posted at all, never one-sided.
+    connection = await binance_connection(run)
+    await list_pairs(run, connection, ("AAABBB", "AAA", "BBB"), ("AAAXFA", "AAA", "XFA"))
+    await _uncounted_currency(run, connection, "XFA")
+    if side == "convert":
+        label = "convert"
+        row = build_row(
+            label,
+            fromAsset="XFA",
+            toAsset="AAA",
+            fromAmount="100",
+            toAmount="1",
+            orderStatus="SUCCESS",
+            walletType="SPOT",
+        )
+    else:
+        label = "my-trades"
+        fields = {"symbol": "AAAXFA", "commissionAsset": "XFA"} if side == "quote" else {}
+        if side == "commission":
+            fields = {"commissionAsset": "XFA"}
+        row = _trade(
+            0, buyer=True, qty="1", price="100", quote_qty="100", commission="0.5", **fields
+        )
+
+    report = await normalize_rows(session, connection.id, (label, [row]))
+
+    assert await keys(session, connection.id) == []
+    assert "XFA is a currency Lararium does not have: it is not counted" in report.new_flags
+    table = "binance_convert" if label == "convert" else "binance_my_trades"
+    assert len(await typed(session, table, connection.id)) == 1
