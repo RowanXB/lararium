@@ -29,6 +29,7 @@ import dataclasses
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -45,14 +46,16 @@ from lararium.core.documents import LocalDocumentStore
 from lararium.db import create_engine
 from lararium.modules.finance.etoro import sync as etoro_sync
 from lararium.modules.finance.etoro.normalize import normalize
+from lararium.modules.finance.etoro.reconcile import PROMPT, prompt
 from lararium.modules.finance.ledger import find_unbalanced_transactions
 from lararium.modules.finance.source_reviews import list_reviews, resolve_review
 
-from .strategies import DAY0, History, Piece, Schedule, histories, schedules
+from .strategies import DAY0, Event, History, Piece, Position, Schedule, histories, schedules
 from .test_normalize_api import Ledger, _connection, _delete_derived, _ledger_state
 from .test_normalize_statement import _ledger, _leg_fees, _review_links
 
 USER = Actor("user", "test")
+TRADING = "eToro Trading"
 SUMMER_TIME_ENDS = date(2026, 10, 25)
 # A history is a dozen events and a schedule of a few syncs and statements at the least,
 # which is what a smallest example of eToro's is (large_base_example).
@@ -82,6 +85,7 @@ class Books(Ledger):
         self.documents = LocalDocumentStore(root)
         self.synced: datetime | None = None
         self.flags_in_full: set[str] = set()
+        self.prompted: set[bool] = set()  # prompts seen, by whether the latest ended mid-day
         self.uploaded: list[Piece] = []
 
     async def sync(self, at: datetime) -> None:
@@ -121,8 +125,10 @@ class Books(Ledger):
             else:
                 await self.upload(what)
             assert await find_unbalanced_transactions(self.session) == []
+            warnings = await self.warnings()
             if self.covered():
-                assert await self.warnings() == [], kind
+                assert warnings == [], kind
+            await self.check_prompt(warnings)
             reviews = await self.reviews()
             assert not reviews, [
                 (r.event_key, r.field, r.api_value, r.statement_value) for r in reviews
@@ -131,6 +137,19 @@ class Books(Ledger):
         assert await self.warnings() == []
         if schedule.steps()[-1][0] == "sync":
             assert not self.flags_in_full, self.flags_in_full
+
+    async def check_prompt(self, warnings: list[str]) -> None:
+        """An "upload a statement" prompt, once a statement is in, names the first day the
+        latest one does not cover in full: its end's day when it ends mid-day (the rest of
+        that day is not covered), else the next day (design §5.11, ruling R34)."""
+        prompts = [w for w in warnings if PROMPT in w]
+        if not prompts or not self.uploaded:
+            return
+        latest = max(self.uploaded, key=lambda p: (p.end, p.start))
+        mid_day = latest.end.time() != time(23, 59, 59)
+        expected = latest.end.date() if mid_day else latest.end.date() + timedelta(days=1)
+        assert prompts == [prompt(TRADING, expected)], (prompts, latest)
+        self.prompted.add(mid_day)
 
     async def raw_record_ids(self) -> list[Any]:
         rows = await self.session.scalars(
@@ -251,6 +270,7 @@ async def test_no_reconciliation_difference(
     _events(history, schedule)
     async with isolated(connection, history, tmp_path) as books:
         await books.follow(schedule)  # checks it after every step once covered, and at the end
+        event(f"a prompt after a mid-day end: {True in books.prompted}")
         assert await books.reviews() == []
         assert not [m for m in books.notifier.messages if "disagree" in m]
 
@@ -318,3 +338,63 @@ async def test_regenerate_from_raw(
         after = await books.everything()
         for name in before:
             assert after[name] == before[name], name
+
+
+def _at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 10, day, hour, minute, tzinfo=UTC)
+
+
+def _fixed() -> tuple[History, Schedule, Schedule]:
+    """A history every CI run checks, whatever Hypothesis draws: a partial close that a
+    statement ends before while the API already has it (R39), and a position a statement
+    opens before any sync has seen it (R40), opened late on a summer evening."""
+    first = Position(3000000101, 3000000601, Decimal(2), Decimal("200.00"), _at(22, 11))
+    rest = Position(
+        3000000102, 3000000601, Decimal(1), Decimal("100.00"), _at(22, 11), first.position_id
+    )
+    late = Position(3000000103, 3000000603, Decimal(3), Decimal("300.00"), _at(24, 23, 30))
+    history = History(
+        (
+            Event(0, "in", _at(22, 10), Decimal("1260.00"), Decimal("-1000.00"), Decimal("6.30")),
+            Event(1, "open", _at(22, 11), Decimal("-200.00"), position=first),
+            Event(
+                2,
+                "partial",
+                _at(23, 12),
+                Decimal("103.33"),
+                position=first,
+                units=Decimal(1),
+                profit=Decimal("3.33"),
+                remainder=rest,
+            ),
+            Event(3, "open", _at(24, 23, 30), Decimal("-300.00"), position=late),
+            Event(4, "close", _at(26, 10), Decimal("100.00"), position=rest, units=Decimal(1)),
+        )
+    )
+    behind = Piece(DAY0, datetime.combine(DAY0, time(23, 59, 59), UTC))
+    opening = Piece(date(2026, 10, 23), _at(25, 1))
+    rest_piece = Piece(date(2026, 10, 25), _at(27, 0))
+    syncs = (_at(22, 10, 30), _at(23, 13), _at(27, 12))
+    schedule = Schedule(syncs, ((behind, 2), (opening, 2), (rest_piece, 3)))
+    later = Schedule((syncs[0], syncs[2]), ((behind, 2), (opening, 2), (rest_piece, 2)))
+    return history, schedule, later
+
+
+async def test_a_partial_close_and_a_statement_first_open(
+    connection: AsyncConnection, tmp_path: Path
+) -> None:
+    """Every property above on _fixed's history."""
+    history, schedule, later = _fixed()
+    assert await _follow(connection, history, schedule, tmp_path) == await _follow(
+        connection, history, later, tmp_path
+    )
+    async with isolated(connection, history, tmp_path) as books:
+        await books.follow(schedule)  # balance, warnings, reviews after every step
+        before = await books.everything()
+        ctx = await books.context()
+        report = await normalize(ctx, await books.raw_record_ids())
+        assert (report.created, report.updated) == (0, 0)
+        assert await books.everything() == before
+        await _delete_derived(books.session, books.connection)
+        await books.replay()
+        assert await books.everything() == before

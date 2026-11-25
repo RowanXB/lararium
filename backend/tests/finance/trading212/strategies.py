@@ -17,7 +17,8 @@ A schedule is how the history reaches Lararium:
   only the weekly re-walk goes further, design §5.2);
 - optionally, CSV exports (design §5.3a), each uploaded after a drawn sync, of the deposits
   and withdrawals of a drawn window that ends before the next sync's cut (the owner
-  downloads it before that sync runs, and an export cannot list what has not happened).
+  downloads it before that sync runs, and an export cannot list what has not happened),
+  from the start of a drawn day (a file never starts mid-day) to a drawn event.
   The audited columns only, and only those two actions: the rows of trades are unknown
   until the owner's first one, and stored flagged (Task 13a).
 
@@ -354,13 +355,15 @@ def schedules(draw: st.DrawFn, history: History, *, exports: bool | None = None)
     )
     found: list[Export] = []
     wanted = 0 if exports is False else draw(st.integers(1 if exports else 0, 2))
-    movements = [e.n for e in history.events if e.kind in ("deposit", "withdrawal")]
     for _ in range(wanted):
         after = draw(st.integers(1, len(syncs)))
         # It lists nothing after the next sync's cut (or the end).
         reach = syncs[after].cut if after < len(syncs) else total
-        listed = [n for n in movements if n < reach]
-        first = draw(st.integers(0, max(listed[-1], 0))) if listed else 0
+        # It starts at a day's start (files never start mid-day, they may end mid-day): the
+        # first event on or after 00:00 of a drawn day, through one before the reach.
+        days = sorted({e.at.date() for e in history.events[:reach]})
+        day = draw(st.sampled_from(days))
+        first = next(e.n for e in history.events if e.at.date() >= day)
         last = draw(st.integers(first, reach - 1))
         found.append(Export(after, first, last))
     return Schedule(syncs, tuple(found))

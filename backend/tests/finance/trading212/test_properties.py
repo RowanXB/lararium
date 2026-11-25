@@ -219,6 +219,21 @@ class Account:
         )
         return list(rows)
 
+    async def own_quantity(self, external_id: str) -> Decimal:
+        """The live transaction's posting on the connection's own account."""
+        quantity = await self.session.scalar(
+            text(
+                "select p.quantity from finance.postings p"
+                " join finance.transactions t on t.id = p.transaction_id"
+                " join finance.accounts a on a.id = p.account_id"
+                " where t.connection_id = :c and t.external_id = :e and t.status <> 'void'"
+                " and a.source_connection_id = :c"
+            ),
+            {"c": self.connection.id, "e": external_id},
+        )
+        assert isinstance(quantity, Decimal)
+        return quantity
+
     async def ledger(self) -> list[tuple[Any, ...]]:
         """Every transaction of the connection and its postings, by external id, without
         UUIDs."""
@@ -397,8 +412,9 @@ async def test_renormalize_writes_nothing(
 
 
 async def _disagreeing_export(account: Account, history: History) -> None:
-    """An export listing every deposit and withdrawal, its first a pound more than the API
-    says, and the owner taking the export's amount. Whether there was a row to disagree."""
+    """Upload an export listing every deposit and withdrawal, its first a pound more than
+    the API says; check that it opens one review, on that amount; and take the export's
+    amount, which the next run posts."""
     movements = [e for e in history.events if e.kind in ("deposit", "withdrawal")]
     export = Export(len(history.events), 0, len(history.events) - 1)
     await account.upload(_export_rows(history, export, disagree=True))
@@ -430,10 +446,8 @@ async def test_regenerate_from_raw(
         if decided:
             await _disagreeing_export(account, history)
             first: Event = next(e for e in history.events if e.kind == "deposit")
-            [taken] = [
-                t for t in await account.ledger() if t[0] == f"transaction:{first.reference}"
-            ]
-            assert Decimal(taken[7][0][2]) == first.cash + 1  # the export's amount posts
+            posted = await account.own_quantity(f"transaction:{first.reference}")
+            assert posted == first.cash + 1  # the export's amount posts
         before = await account.everything()
         await _delete_derived(account.session, account.connection)
         await account.replay()

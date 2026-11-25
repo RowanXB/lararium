@@ -186,6 +186,7 @@ async def test_registration_replay_leaves_categories_places_transfers_and_decisi
 
     # The replay ran and named the merchant's payment, and only that changed.
     assert report.updated >= 1
+    assert report.updated + report.unchanged == len(history)
     card = await transaction_row(session, "tx_CARD0001")
     assert card.counterparty_identifier_id == record.id
     assert await _replay_state(session) == before
