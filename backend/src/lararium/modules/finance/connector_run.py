@@ -45,7 +45,8 @@ from lararium.modules.finance.typed_tables import Fields, Value, typed_values, u
 LONDON = ZoneInfo("Europe/London")
 OPENING = "opening:"
 
-# Platforms quote London listings in pence; the ledger lists them in pounds (ruling R19).
+# Platforms quote London listings in pence; the ledger lists them in pounds, the listing's
+# own currency.
 _SUBUNITS: Mapping[str, tuple[str, int]] = {"GBX": ("GBP", -2)}
 
 

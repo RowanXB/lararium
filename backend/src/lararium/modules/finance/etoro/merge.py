@@ -8,7 +8,7 @@ later arrival re-posts the same transaction in place.
 
 A **disagreement** is a difference between the two in a value that makes a posting or its date:
 the units, the cash amount, the profit, or the booking date (after the UTC rule, design §5.8).
-Only like facts are reviewed (ruling R39): an open's units and cash as the position was
+Only like facts are reviewed (design §5.7): an open's units and cash as the position was
 opened (PnL, the "Open Position" row) and as a partial close left them (the part closed:
 trade history, Closed Positions) are different facts, so while the sources are at those
 different stages their units and cash open and close no review and tell nobody; they are
@@ -49,7 +49,7 @@ FIELDS = ("units", "cash", "profit", "booking_date")
 TOGETHER = {"booking_date": ("occurred_at",)}
 
 
-# What an open's or close's figures describe (R39): the position as opened; what closed, being
+# What an open's or close's figures describe: the position as opened; what closed, being
 # the whole position; or what closed, a part (a partial close) or not known to be the whole.
 type Describes = Literal["opened", "closed_whole", "closed_part"]
 # The fields whose figures depend on that; the booking date does not.
@@ -60,7 +60,7 @@ _STAGED = frozenset({"units", "cash"})
 class TradeEvent:
     """What one source says of an open or a close: its units and cash (magnitudes; the
     posting gives the signs), the profit a close made (None for an open, or unstated), when
-    it happened, and what it describes (comparable: R39)."""
+    it happened, and what it describes (`comparable` reads it)."""
 
     units: Decimal
     cash: Decimal
@@ -74,7 +74,7 @@ class TradeEvent:
 
 
 def comparable(api: TradeEvent, statement: TradeEvent) -> bool:
-    """Whether the two describe the same fact (R39): both the position as opened, both what
+    """Whether the two describe the same fact (design §5.7): both the position as opened, both what
     closed, or one of each when what closed is the whole position."""
     kinds = {api.describes, statement.describes}
     return (

@@ -155,7 +155,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     bank account, or its import rows print part of one; a card merchant is none), holders
     (the own accounts the card merchant it names pays into, NULL for any other record: such
     evidence never identifies it, so holder stays NULL and it pairs only with a record that
-    is there, Task 16's tier),
+    is there, pairs.card_tier),
     bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
@@ -297,8 +297,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             .scalar_subquery()
         )
 
-    # A connector's record gives the account number alone on the transaction itself (ruling
-    # R28): the same evidence as an import row's, and counted with theirs.
+    # A connector's record gives the account number alone on the transaction itself (eToro
+    # Money's bank transfers, design §5.7): the same evidence as an import row's, and counted
+    # with theirs.
     own_number = t.counterparty_account_number
     printed = func.coalesce(func.cardinality(evidence.c.numbers), 0)
     number_count = case(

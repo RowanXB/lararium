@@ -197,7 +197,7 @@ PERSONAL: frozenset[str] = frozenset()
 
 # The CSV export (design §5.3a): one raw record per row, its cells as text, typed in
 # finance.trading212_export_rows (migration 0034). Its columns are those the owner's export
-# showed (Task 0); each is the column Decision 3 names from its header. The key is `ID`.
+# showed; each is the column Decision 3 names from its header. The key is `ID`.
 EXPORT_RECORD_TYPE = "trading212.export_row"
 EXPORT_TABLE = "trading212_export_rows"
 EXPORT_KEY = "ID"

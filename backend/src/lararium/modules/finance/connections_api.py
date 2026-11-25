@@ -989,7 +989,7 @@ async def upload_etoro_statement(
         ) from None
     except (StatementRejected, StatementError, XlsxError, EtoroDataError) as error:
         # The message names a sheet, a column, a rule or a masked position id, never a
-        # value (R27, Decision 9).
+        # value (design §5.3, Decision 9).
         raise _unprocessable("statement_invalid", str(error)) from None
     return EtoroUploadOut(raw_records=len(result.raw_record_ids))
 

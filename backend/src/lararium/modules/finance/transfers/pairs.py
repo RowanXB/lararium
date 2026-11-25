@@ -95,7 +95,7 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
     other's account and each other one a bank transfer. A record naming a card merchant
-    (holders) is none of these tiers' (Task 16 pairs it). Decisions are not considered."""
+    (holders) is none of these tiers' (card_tier pairs it). Decisions are not considered."""
     if c.account_id == r.account_id or not (r.identified or c.identified):
         return None
     if r.holders or c.holders:

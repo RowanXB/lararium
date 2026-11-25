@@ -30,9 +30,9 @@ by the sync that saw it. Nothing here logs a value.
 A statement upload (design §5.3) is checked before anything is stored: its Username must be
 `/me`'s, its Currency the Trading account's, and the connection's first statement must start
 on or before the account's Date Created. Each refusal is a `StatementRejected` naming no value
-but that date (R27); one before the first sync has finished is a `StatementTooEarly`. Each row
-is a raw record of its cells and key; the statement's period is the upload's request, so a row
-two overlapping statements share is stored once.
+but that date (design §5.3); one before the first sync has finished is a `StatementTooEarly`.
+Each row is a raw record of its cells and key; the statement's period is the upload's request,
+so a row two overlapping statements share is stored once.
 
 Flags (Decision 4) from the normalizer and from reading a statement are connection warnings,
 `eToro flagged: <reason>`, and the owner is told of each new one once (connector_flags, shared
@@ -655,7 +655,7 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
     ):
         raise StatementRejected("this statement is for another eToro user")
     currencies = _trading_currencies(balances)
-    currency = statement.account_currency  # the first code (R41): the second is GBP's figures
+    currency = statement.account_currency  # the first code: the second is the other figures'
     if not currencies or any(
         not isinstance(c, str) or c.strip().upper() != currency for c in currencies
     ):
@@ -671,7 +671,7 @@ async def _check_statement(ctx: SyncContext, statement: EtoroStatement) -> None:
     )
     if not earlier and statement.period_from > statement.created:
         # The first statement and the API together must cover the account's whole life. The
-        # date (Date Created, the day only) is shown to its owner alone (R27).
+        # date (Date Created, the day only) is shown to its owner alone (design §5.3).
         raise StatementRejected(
             "The first eToro statement must start on or before"
             f" {statement.created.date().isoformat()}."

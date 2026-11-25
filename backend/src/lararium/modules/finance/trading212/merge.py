@@ -1,7 +1,8 @@
 """Trading 212's two sources of a cash movement: the API's transaction and the CSV export's row
 (design §5.3a, §5.7, Decision 14).
 
-Both key it `transaction:<reference>`: the export's `ID` is the API's `reference` (Task 0). The
+Both key it `transaction:<reference>`: the export's `ID` is the API's `reference` (as the owner's
+export shows). The
 API's values make the postings and the export only enriches (its typed row links the
 transaction); a deposit or withdrawal only the export has posts from it, under the key the API
 would use, so the API's later arrival re-posts it in place only if its values differ. The

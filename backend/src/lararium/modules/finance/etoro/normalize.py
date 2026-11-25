@@ -22,7 +22,7 @@ Every record's fields are checked first: a required one missing fails the run; a
 with a value is flagged, as are values and types the mapping does not know. Some flags are
 found in full every run, so they clear once their cause is gone: instruments still without a
 type, of one the ledger does not hold, or of no known currency, positions no source states
-the settlement of, and statement positions Lararium cannot place (records.unplaced, R40).
+the settlement of, and statement positions Lararium cannot place (records.unplaced).
 """
 
 from collections import defaultdict

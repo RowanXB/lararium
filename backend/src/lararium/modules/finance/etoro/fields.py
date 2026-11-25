@@ -370,8 +370,8 @@ OWN_COLUMNS = frozenset(
         "figure",
     }
 )
-# Columns read from one cell beside the cell's own (ruling R41): Account Summary's "Currency",
-# `<account currency>/<second currency>`, as its two codes.
+# Columns read from one cell beside the cell's own: Account Summary's "Currency", which real
+# statements give as `<account currency>/<second currency>`, as its two codes (design §5.3).
 DERIVED_COLUMNS: Mapping[str, frozenset[str]] = {
     "etoro_statements": frozenset({"account_currency", "second_currency"})
 }

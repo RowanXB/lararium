@@ -7,7 +7,7 @@ with `parentPositionId`, design §6), else from the latest PnL report that lists
 survives the position leaving PnL. An open adds the units at `amount / units` in the account's
 currency (`accountCurrency`) and takes `amount` out; a close takes the units out at
 `(investment + netProfit) / units` and puts that cash in. The API's fees and taxes are typed,
-not posted (ruling R30): an open's execution fees and taxes (orders:lookup; SDRT among them)
+not posted (design §5.7): an open's execution fees and taxes (orders:lookup; SDRT among them)
 and a close's trade-history `fees` (the position's overnight fees and dividends) are what the
 statement posts as rows of their own, so posting them here too would count them twice. A
 position that is not real (`settlementTypeID` 1, `settlementType` real), has leverage other
@@ -27,9 +27,9 @@ its ISIN names.
 **eToro Money** (key `cash:<id>`): only a `settled` row posts, its `amount` in its currency, a
 debit negative. A bank transfer goes through transfer_contra as a bank transfer, naming the
 other bank's account when it is a UK one (a GB IBAN, or a sort code and account number), or
-giving its account number alone, which the transfer engine reads as an imported row's (ruling
-R28); an IBAN outside the UK names nothing and is flagged. An internal transfer names the
-Trading account when its counterparty's name says trading (Task 0, check 4), and goes to
+giving its account number alone, which the transfer engine reads as an imported row's (design
+§5.7); an IBAN outside the UK names nothing and is flagged. An internal transfer names the
+Trading account when its counterparty's name says trading (as the owner's data shows), and goes to
 Unassigned when it names MoneyFarm or the ISA (design §5.12), or neither, or Trading while the
 balances list none (both flagged); a card payment or balance adjustment goes to Unassigned.
 
@@ -521,7 +521,7 @@ async def unplaced(
     pnl: Mapping[str, tuple[Record, Item]],
     statement: statement_ledger.Statement,
 ) -> int:
-    """How many positions only the statement has cannot be placed (ruling R40): no Closed
+    """How many positions only the statement has cannot be placed (design §6): no Closed
     Positions row to say they are real (an open the statement does not close), or one that
     does not say which instrument. Found in full from everything stored, so the flag clears
     once the API or a later statement places them. An open the statement does not close,
@@ -606,7 +606,7 @@ _ACCOUNT_NUMBER = re.compile(r"[0-9]{8}")
 @dataclass(frozen=True)
 class _Bank:
     """What a bank transfer's identifiers say of the other bank account: a UK one in the
-    registry's form, or its account number alone (ruling R28); `abroad` for an IBAN outside
+    registry's form, or its account number alone (design §5.7); `abroad` for an IBAN outside
     the UK."""
 
     uk_bank_account: str | None = None

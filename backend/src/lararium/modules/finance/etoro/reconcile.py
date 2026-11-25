@@ -14,7 +14,8 @@ cut-off (connector_run.holdings), within the instrument's tolerance:
 - **MoneyFarm**: nothing (a snapshots account).
 
 **"Upload a statement" in place of a difference.** Only a statement posts Trading's transfers
-with eToro Money and its fees, taxes and dividends (ruling R30). So the differences in
+with eToro Money and its fees, taxes and dividends (the API's are typed, not posted: design
+§5.7). So the differences in
 Trading's cash after what the latest statement covers (a snapshot day after the last day it
 covers in full, covered_through; a current figure seen after its end) become one prompt,
 "<Trading's name>: upload an eToro statement covering <the first day it does not cover in
@@ -25,7 +26,7 @@ leg, so it has none yet); or the API states fees, taxes or dividends after that 
 execution's or a close's fees or taxes, or a position's `totalFees` or
 `overnightFeesAndDividends` changed since the end's London day, the day its rows are
 stamped with). Any other difference is an ordinary
-one. The prompt names no end (ruling R34): its text, and so its one notification, changes only
+one. The prompt names no end (design §5.11): its text, and so its one notification, changes only
 when a new statement moves its start.
 
 The warnings are what the latest check found: each run replaces in full the reconciliation

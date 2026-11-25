@@ -75,7 +75,7 @@ class EtoroStatement:
     period_to: datetime
     created: datetime
     username: str
-    # Account Summary's "Currency" (ruling R41): `<account currency>` or
+    # Account Summary's "Currency" (design §5.3): `<account currency>` or
     # `<account currency>/<second currency>`, the second the one eToro also reports figures in.
     account_currency: str
     second_currency: str | None
@@ -178,7 +178,7 @@ def read_moment(value: str, label: str, zone: ZoneInfo, sheet: str = ACCOUNT_SUM
 
 
 def read_currencies(value: str) -> tuple[str, str | None]:
-    """Account Summary's "Currency" (ruling R41): the Trading account's currency, and the
+    """Account Summary's "Currency" (design §5.3): the Trading account's currency, and the
     second one eToro reports figures in, when the label names two (`USD/GBP`). Any other shape
     is refused, naming the label, never its value."""
     match = _CURRENCIES.fullmatch(value.strip().upper())

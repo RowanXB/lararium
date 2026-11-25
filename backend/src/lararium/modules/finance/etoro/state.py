@@ -117,7 +117,7 @@ _ENDPOINT_OF = {spec.record_type: name for name, spec in ENDPOINTS.items()}
 
 def as_record(raw: RawRecord) -> Record | None:
     """The raw record as an item of its endpoint; None for one that is no endpoint's: a
-    statement row (Task 11's), or a refused key's scopes (sync.REFUSED_KEY)."""
+    statement row (statement_ledger reads those), or a refused key's scopes (sync.REFUSED_KEY)."""
     endpoint = _ENDPOINT_OF.get(raw.record_type)
     if endpoint is None or not isinstance(raw.content, dict):
         return None

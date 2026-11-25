@@ -948,7 +948,7 @@ async def _summaries(run: Run, statement: Statement) -> None:
                     by_column[columns[f"{name}{SECOND_VALUE}"]] = row.cells.get(f"{VALUE} 2")
                     labels[columns[name]] = f"{ACCOUNT_SUMMARY}.{label}"
             values = dict(await typed_values(run.session, "etoro_statements", by_column, labels))
-            # "Currency" is kept as given, and its two codes typed beside it (ruling R41).
+            # "Currency" is kept as given, and its two codes typed beside it (design §5.3).
             label = by_label.get("Currency")
             account, second = (None, None)
             if label:

@@ -23,7 +23,7 @@ class TransferSettings:
     # pairs.card_tier) take two records whose occurred_at are at most this far apart, both
     # included: eToro stamps both sides of an internal transfer with one clock, and a Monzo
     # card payment and its Trading 212 deposit are 0 s apart while two deposits were 512 s
-    # apart (eToro design §5.12, Task 0 check 5; Decision 16).
+    # apart (eToro design §5.12; Decision 16).
     near_window: timedelta = timedelta(minutes=2)
 
 

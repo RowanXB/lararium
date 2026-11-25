@@ -4,7 +4,8 @@ to be one (design §5.6).
 An instrument is a listing: a security in one currency. One is found by eToro's instrument id
 (`etoro_id`), then by ISIN in the same currency (a listing IBKR or Trading 212 holds), and
 created when neither finds it; a hit lacking the id or the ISIN gets it. eToro's API gives no
-ISIN, so an eToro instrument stands alone until a statement brings one (Task 11), which may
+ISIN, so an eToro instrument stands alone until a statement brings one (Closed Positions,
+statement_ledger), which may
 show it is a listing another source holds: `merge_instruments` makes them one.
 
 An instrument's kind is eToro's instrument type (5 stocks → `equity`, 6 ETF → `etf`), from
