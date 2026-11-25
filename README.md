@@ -471,9 +471,11 @@ What is built so far (phase A):
   an account, and one whose balance is not zero but which lists no asset is flagged by name.
   Crypto-loan debt is not read until phase B.
 - **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
-  Lararium already has. If Lararium has no currency with that ISO 4217 code, the sync fails
-  (the connection shows `UnknownCurrencyError`, without naming the currency) until one is
-  added.
+  Lararium already has. If Lararium has no currency with that ISO 4217 code, the asset is not
+  counted: the connection is flagged with the code, its balance is left out and its records
+  are kept but not posted. To count it, add the currency on the Instruments page (kind Fiat,
+  the ISO code as its symbol): later syncs count its balance and the records they fetch; the
+  records kept before are not posted afterwards.
 - **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
   (subscriptions, redemptions and rewards).
 

@@ -186,7 +186,7 @@ The probe sent only queries, with a key that had only "Enable Reading", and prin
 
 - **A new identifier scheme `binance_asset`** (upper case): Binance's asset code.
 - **Finding an instrument.** By `binance_asset`; else by the `coingecko` id when the asset maps to one (§5.10); else, when exactly one existing `crypto` instrument has the asset's symbol, that one, which gains the `binance_asset` identifier; else a new one. So a coin the owner already holds in a manual wallet account, or later in an M8 wallet, is one instrument. Several existing instruments with the symbol are not guessed between: a new one is created and flagged for the owner to merge.
-- **Creating one.** Kind `crypto`, symbol and name from `capital/config/getall`, 8 decimals. An asset that Binance marks as legal money (`isLegalMoney`) is the existing fiat instrument of that ISO code.
+- **Creating one.** Kind `crypto`, symbol and name from `capital/config/getall`, 8 decimals. An asset that Binance marks as legal money (`isLegalMoney`) is the existing fiat instrument of that ISO code. When Lararium has no instrument of that code, the asset is not counted and is flagged by name: no instrument is made (a currency's decimals are not guessed), its balances get no snapshot, and its records are stored typed and not posted.
 - **LD-prefixed assets are never instruments.** They are dropped where they appear (§5.6).
 - **Tokens that stand for a staked asset** (WBETH, BNSOL) and yield tokens (BFUSD, RWUSD) are ordinary instruments with their own prices.
 - **Futures and options contracts are not instruments.** A position is detail in a typed table; its value reaches net worth through the wallet's balance (§5.6).
@@ -320,7 +320,8 @@ Each of these is flagged once, by name, in the connection's warnings and one not
 - a symbol with trades that `exchangeInfo` no longer lists (its trades cannot be fetched);
 - **Portfolio Margin enabled** (`account/info`): its balance is read from the Portfolio Margin account endpoint into one account, and its records are not posted;
 - **Trading Bots or Copy Trading with a balance**: counted from the report; Binance has no record endpoint for them, so their changes show as reconciliation differences against transfers in and out;
-- an asset no source can price.
+- an asset no source can price;
+- a fiat currency Lararium has no instrument for (it is not counted).
 
 Not inspected for unknown fields: the envelope of a later page of a paged balance read (only the first page's is kept), and an answer replaced by a read made again.
 
@@ -358,6 +359,7 @@ Holdings and net worth need no new page.
 | A record arrives after the snapshot that already contains it | Its `occurred_at` is before the snapshot's `as_of`, so the `hybrid` rule does not add it again. |
 | A record occurs while the balances are being read | That wallet's balance is read again, so its snapshot is cut on one side of the record (§5.6). |
 | Binance lists a record only later, with a time inside an old read | Known limit: the balance may be off by that record until the next report, and the two intervals around that read show equal and opposite differences, which stay open. The read's two moments are stored, so the cause is visible. The same holds for a trade fetched after the snapshots of its sync were cut: by the trade sweep, or in a symbol that only a read made again first showed (it is fetched by the next sync). |
+| A fiat currency Lararium has no instrument for | Not counted: no snapshot, its records stored typed and not posted, flagged once by its code. The other side of a trade or convert in it is not posted either, so it shows as a reconciliation difference. |
 | A withdrawal fails after being posted | The next sync within the 7-day overlap sees the status; the withdrawal stops being a transfer and a refund is posted at the time the amount came back (§5.7). |
 | A deposit is credited but still locked (`status` 6) | Posted: Binance counts it in the balance. |
 | An asset bought and sold between two syncs, never seen before | The quote asset's change is unexplained; the symbol sweep finds both trades. |
@@ -388,6 +390,7 @@ Holdings and net worth need no new page.
 - **M3, M6**: the read-only gate exists three times (eToro's scopes, Trading 212's, Binance's permissions). `check_access` could own it.
 - **M1 snapshots**: a `hybrid` connector account writes a snapshot per asset per sync. Thinning old snapshots (keep one a day) needs a rule before the table grows large.
 - **M5, typed tables**: one table per record type is many tables for Binance. A shared way to declare "raw record → typed columns" would cut the repetition for the next connector.
+- **Foundation, currencies**: the ledger has only the ten currencies the foundation seeds. Seeding the full ISO 4217 list with each currency's decimals would let a connector count any fiat it meets; until then Binance leaves out and flags such an asset (owner, 2026-11-25).
 
 **Left for later milestones:**
 - **M8**: wallets, hash pairing with the rows of §5.12, CoinGecko prices by contract address.
