@@ -455,6 +455,207 @@ by hand:
    IBKR connection on Connections and upload the XML (up to 64 MiB). Run it after the latest
    sync: an older file's copy of a row IBKR has since corrected would undo the correction.
 
+## Connecting Trading 212
+
+Trading 212 is a connector: the `worker` syncs it every 30 minutes (and on **Sync now**)
+through Trading 212's public API. It only reads: it sends only GET requests, and only to
+Trading 212. One connection is one account, so an Invest account and a Stocks ISA are two
+connections, each with its own key.
+
+### 1. Create the key
+
+In the Trading 212 app open Settings, then API (Beta), and create a key for the one account
+you are connecting.
+
+- Tick the read permissions. Lararium needs `account`, `portfolio`, `metadata`,
+  `history:orders`, `history:dividends` and `history:transactions`, and uses `orders:read`
+  (pending orders) and `pies:read` (pies) when you tick them; without those two it skips that
+  part and says so once in a "Trading 212 flagged: …" warning.
+- **Leave `orders:execute` and `pies:write` off.** Lararium never sends anything but a read,
+  and a key without them can't place an order or change a pie even if it leaked.
+- Note the API key and the API secret. Trading 212 fixes a key's permissions when it is
+  created, so if a needed one is missing, the connection asks for new keys: create a new key
+  with it ticked.
+
+### 2. Add the connection
+
+On Connections, under **Add Trading 212**, enter a display name, choose the **Account type**
+(Invest or Stocks ISA), paste the API key and API secret, and choose **Add Trading 212**.
+Lararium checks the key with Trading 212 first, and refuses a key whose account is already
+connected.
+
+The connection creates one account, `Trading 212 Invest ···1234` or `Trading 212 ISA ···1234`
+(the last four digits of Trading 212's account id; you can rename it), with its tax wrapper
+(GIA or ISA). Into it go your orders (each fill, with its taxes and fees), dividends,
+deposits, withdrawals, fees and interest, and each held instrument's price on every sync. The
+first sync reads the whole history; later syncs read what is new, and once a week the whole
+history again. If Trading 212 rejects the key later, the connection says so: **Update keys**
+takes a new pair.
+
+### The CSV export (optional)
+
+Everything works without it. Trading 212's CSV export (in the app, under History) has a few
+details the API doesn't return, such as a card deposit's transaction id in its Notes. To add
+them, choose **Upload Trading 212 export (CSV, optional)** on the connection, after its first
+sync has finished (up to 16 MiB). The file must be this connection's account's.
+
+The export is stored in full, every column typed, and each row is attached to the API's record
+with the same ID: it enriches that record and doesn't post it again. A deposit or withdrawal
+the API hasn't listed posts from the export. Rows of any other kind (trades, dividends,
+interest) are stored and flagged but not posted: the API posts those, and how their rows match
+the API's has not been seen yet. If the export and the API state an amount, a currency or a
+booking date differently, Lararium opens a [review item](#review-items).
+
+### Transfers
+
+- **Card or Apple Pay deposits from Monzo.** Monzo files a card top-up as a card payment to
+  Trading 212's merchant, not as a bank transfer. Register that merchant once to your Trading
+  212 accounts, and each such payment then pairs with the Trading 212 deposit of the same
+  amount made within two minutes of it. This is in the API only for now. Once Monzo has
+  synced a payment to a merchant whose website is on `trading212.com`,
+  `GET /api/v1/finance/transfer-suggestions` lists it (kind `card_merchant`, with its
+  `merchant_id` and the Trading 212 accounts it can pay into, `account_ids`). Register it
+  with `POST /api/v1/finance/accounts/identifiers/card-merchants` and
+  `{"merchant_id": "<merchant_id>", "account_ids": ["<account id>"]}`, naming every Trading
+  212 account you top up by card (Invest and ISA share one merchant). Lararium then goes
+  through the whole history. If it isn't yours,
+  `POST /api/v1/finance/transfer-suggestions/card-merchants/dismiss` with
+  `{"merchant_id": "<merchant_id>"}` drops it.
+- **Bank transfer deposits** name no account on the Trading 212 side, so they pair with your
+  bank's payment by amount and date when it is the only candidate (as in [Registering
+  identifiers](#registering-identifiers)). When two candidates fit (two accounts receiving
+  the same amount close together, say), the transfer waits under Needs attention on the
+  Transfers page: **Pair** the right one.
+- **Invest ↔ ISA.** With exactly two Trading 212 connections, one Invest and one ISA, a
+  transfer between them pairs by itself.
+
+### Warnings
+
+- **"Trading 212 ISA ···1234 SYMBOL differs from Trading 212's report on DATE by AMOUNT"**:
+  after each sync Lararium compares each instrument's quantity and the cash with what Trading
+  212 reports, and never corrects a difference silently.
+- **"Trading 212 flagged: …"** names a field, a value or an instrument type Lararium doesn't
+  handle yet, a permission not ticked, or a history page Trading 212 stopped serving. Each is
+  sent as a notification once.
+
+## Connecting eToro
+
+eToro is a connector: the `worker` syncs it every 30 minutes (and on **Sync now**) through
+eToro's public API, and you add eToro's account statements to it by hand. It only reads: it
+sends only GET requests, only to eToro, and refuses a key that isn't read-only.
+
+### 1. Create the key
+
+In eToro open Settings, then Trading, then API Key Management, and create a key with
+Environment **Real** and Permission **Read**. Note the Public API Key and the User Key.
+Lararium reads the key's scopes when you add it and at the start of every sync: if any of them
+is not a read scope, the key is refused ("This eToro key can trade or move money. Create a key
+with Read permission.") and nothing else is fetched.
+
+### 2. Add the connection
+
+On Connections, under **Add eToro**, enter a display name, the Public API Key and the User
+Key, and choose **Add eToro**. One connection holds all of an eToro user's accounts; a second
+connection for the same user is refused. The first sync creates a separate account for each:
+
+- **eToro Trading** (broker, GIA): your stocks and ETFs, each open and close, and their prices.
+  Its other cash movements come from your statements (step 3).
+- **eToro Money GBP** (bank; one per eToro Money currency account): its card payments, bank
+  transfers and transfers to and from eToro Trading.
+- **MoneyFarm ISA** (snapshots): its balance as eToro reports it on each sync. eToro's API
+  gives no MoneyFarm holdings or transactions.
+
+If eToro rejects the keys later, the connection says so: **Update keys** takes a new pair.
+
+### 3. Upload your statements
+
+eToro's API gives the trades, but not the other cash movements on the Trading account: fees
+(overnight, SDRT, withdrawal), taxes, dividends, interest, transfers to and from eToro Money,
+and withdrawals. Those come only from eToro's account statement. Without statements they are
+missing, and Trading's cash won't match eToro's.
+
+1. In eToro's web app open Portfolio, then History, then Account Statement, choose the
+   period, and download it as Excel (xlsx).
+2. Once the connection's first sync has finished, choose **Upload eToro statement (xlsx)** on
+   the eToro connection and upload it (up to 16 MiB).
+
+- **The first statement must start on or before the day you opened the account** (the
+  statement's Date Created). A later start is refused, naming that day, so that the API and
+  your statements together cover the account's whole life.
+- A statement must be the connection's: its username and currency must be the eToro user's
+  and the Trading account's.
+- Statements may overlap: a row two of them share is written once. A statement that ends part
+  of the way through a day (one downloaded on its end day) doesn't cover the rest of that day,
+  so start the next one on that day.
+- Statement times are read as UTC.
+
+**"eToro Trading: upload an eToro statement covering YYYY-MM-DD onward"** is shown on the
+connection, and sent once, when Trading's cash differs from eToro's and the reason is likely
+something only a statement has: a transfer with eToro Money, or fees or dividends on a
+position, after the latest statement. Download a statement starting on or before that date
+and upload it.
+
+### Transfers
+
+- **eToro Money ↔ eToro Trading** (GBP ↔ USD) pair by themselves, with the conversion fee the
+  statement shows, when both sides name each other and are within two minutes of each other
+  (eToro stamps both with one clock). Until a statement brings the Trading side, the eToro
+  Money side waits in In transit, so net worth doesn't dip.
+- **Monzo ↔ eToro Money.** eToro's API doesn't give eToro Money's own sort code and account
+  number. Register them (as eToro shows them) on the eToro Money GBP account, by hand or from
+  Suggestions once Monzo has paid them, as in [Registering
+  identifiers](#registering-identifiers); Monzo's payments then pair with eToro Money's.
+- **Records that differ in currency or amount** (a withdrawal from eToro Trading in USD that
+  your bank receives in GBP, say) never pair by themselves. Pair them through the API, as in
+  [Records that name no account](#the-transfers-page): `POST
+  /api/v1/finance/transactions/{id}/pair` with `{"transaction_id": "<other>"}` accepts two
+  money records of opposite directions that differ in currency (the difference is the
+  exchange rate) or, in one currency, in amount (the difference is posted as a fee).
+
+### Warnings
+
+- **"eToro Trading SYMBOL differs from eToro's report on DATE by AMOUNT"**: after each sync
+  and upload Lararium compares each account's positions and cash with eToro's own report,
+  and never corrects a difference silently.
+- **"eToro Trading could not be reconciled"**: Lararium couldn't compare (before eToro has
+  reported the balances, say); the previous check's warnings stay.
+- **"eToro flagged: …"** names a sheet, a column, a field, a value or a type Lararium doesn't
+  handle yet. Each is sent as a notification once.
+
+### Review items
+
+When eToro's API and a statement, or Trading 212's API and its export, state one fact
+differently, Lararium opens a review item, keeps both values, posts the API's value, and
+sends one notification, such as "eToro: eToro's API and statement disagree on close of position
+···1234 (cash); review them on the connection". For eToro the fact is the units, the cash, the
+profit or the booking date of an open or a close; for Trading 212, the amount, the currency or
+the booking date of a deposit or withdrawal.
+
+There is no screen for them yet; use the API from a device on your tailnet.
+`GET /api/v1/connections/<id>/reviews` lists the connection's items, open ones first, each
+with both values. `POST /api/v1/connections/<id>/reviews/<review id>/resolve` with
+`{"take": "api"}` or `{"take": "statement"}` (for Trading 212, `statement` is the export)
+settles one: the value you take posts at once and stays across later syncs. If either source
+later changes its value, the item opens again; one whose sources come to agree closes by
+itself.
+
+### Known limits
+
+- No CFDs, leverage or copy trading: such positions are flagged and not posted.
+- No MoneyFarm holdings or transactions, only its balance.
+- eToro's fees, taxes and dividends come only from statements.
+- An eToro instrument you only ever held before connecting (opened and closed, never held at a
+  sync) gets its currency from a statement: until one covers it, its trades are flagged and not
+  posted.
+- Statement times are taken to be UTC. That is confirmed for winter only (when UTC and UK
+  time agree); a summer trade's open or close an hour off would show as a review item.
+- Trading 212's signs (of withdrawals, fees, transfers, an order's taxes and net value) and
+  its export's trade rows haven't been checked against a real trade yet.
+- Card deposits pair only with records of connector accounts, never with a manual or imported
+  one.
+- Between Monzo's sync and Trading 212's, a card deposit shows as spending on Unassigned and
+  net worth dips by it, until both sides are in.
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo
@@ -732,6 +933,22 @@ first, must be allowed and leave a zero balance. It prints only counts and pass 
 text has its digits and file names masked. The stored copies go to a temporary directory that
 is removed at the end, and the container is removed with it. Wherever Docker runs (a remote
 Docker host, say), the files' contents are sent there for the run. `make check` and CI skip it.
+
+To check an eToro account statement the same way, pass it as `ETORO_STATEMENT`, alone or with
+`REAL_ROOT` (at least one of the two is needed):
+
+```bash
+make real-check ETORO_STATEMENT="$HOME/Downloads/statement.xlsx"
+```
+
+It reads the statement, which must parse with nothing flagged, and checks its own running
+balance: per second, the balance after the second's rows must be the balance before plus the
+cash they move. It then uploads it to a throwaway eToro connection in the same container (with
+a stand-in for the first sync, so no eToro key is used): nothing may be refused or flagged,
+every row must be stored and typed, and every transaction must balance. Open positions the
+statement never closes wait for the API's data there, and are counted, not failed. It prints
+how many rows of each sheet it read and how many records it produced, and pass or fail: no
+value, id, name or date from the file.
 
 ## Secrets: encrypting `infra/.env` with SOPS + age
 

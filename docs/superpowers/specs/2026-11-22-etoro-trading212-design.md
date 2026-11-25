@@ -1,7 +1,7 @@
 # M6 design: eToro and Trading 212
 
 - Date: 2026-11-22 (brainstormed with the owner 2026-11-22 to 2026-11-23)
-- Status: approved by the owner 2026-11-23; plan `docs/superpowers/plans/2026-11-22-etoro-trading212.md`
+- Status: approved by the owner 2026-11-23; implemented in PR #32, pending the owner's check; plan `docs/superpowers/plans/2026-11-22-etoro-trading212.md`
 - Builds on: `main` at `68e0bec` (M0–M5 and the transfer work through PR #31 merged); migrations up to `0029`. Migrations are numbered after whatever is on `main` when implementation starts.
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§3, §6.3, §7.6, §8.3, §13 M6, §14)
 - Related:
