@@ -268,10 +268,18 @@ def _settable_type(key: str) -> tuple[account_types.AccountType, account_types.A
 
 
 def _require_shape_agrees(
-    found: account_types.AccountType, shape: account_types.AccountShape, account: object
+    found: account_types.AccountType,
+    shape: account_types.AccountShape,
+    account: AccountCreate | accounts.AccountRecord,
 ) -> None:
     """The account (a create body or a stored account) must agree with the type wherever the
-    type states its shape; the side is the account's when the type leaves it open."""
+    type states its shape; the side is the account's when the type leaves it open, and then
+    one a statement can import into."""
+    if shape.ledger_type is None and account.ledger_type not in ("asset", "liability"):
+        raise _type_error(
+            "type_mismatch",
+            f"ledger_type must be asset or liability for the {found.name} account type",
+        )
     stated: dict[str, str | None] = {
         "ledger_type": shape.ledger_type,
         "subtype": shape.subtype,

@@ -470,6 +470,25 @@ async def test_create_from_a_statement_type_takes_either_side(client) -> None:
     assert response.json()["type_key"] == "hsbc_uk"
 
 
+@pytest.mark.parametrize("side", ["income", "expense", "equity"])
+async def test_create_from_a_statement_type_refuses_a_side_statements_cannot_import_into(
+    client, side: str
+) -> None:
+    before = len((await client.get(f"{API}/accounts")).json())
+    body = {
+        "name": "Not a bank account",
+        "ledger_type": side,
+        "subtype": "bank",
+        "balance_mode": "transactions",
+        "type_key": "hsbc_uk",
+    }
+    response = await client.post(f"{API}/accounts", json=body)
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "type_mismatch"
+    assert "ledger_type" in response.json()["detail"]["message"]
+    assert len((await client.get(f"{API}/accounts")).json()) == before
+
+
 async def test_create_refuses_an_api_type_and_an_unknown_one(client) -> None:
     before = len((await client.get(f"{API}/accounts")).json())
     api_type = await client.post(
