@@ -34,7 +34,7 @@ from .syncing import (
     later_config,
     run_binance_sync,
 )
-from .test_sync import _delete, _system_accounts
+from .test_sync import _committed_before, _delete
 
 _CHANGED = "changed by something no record explains"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -553,7 +553,7 @@ async def _committed(
     engine = create_engine(backend_url)
     sessions = make_sessionmaker(engine)
     connection_id: UUID | None = None
-    system_before = await _system_accounts(owner_url)
+    before = await _committed_before(owner_url)
     try:
         async with (
             sessions() as setup,
@@ -584,7 +584,7 @@ async def _committed(
         yield sessions, found, sync
     finally:
         if connection_id is not None:
-            await _delete(engine, owner_url, connection_id, system_before)
+            await _delete(engine, owner_url, connection_id, before)
         await engine.dispose()
 
 

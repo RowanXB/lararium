@@ -5,6 +5,7 @@ import base64
 import json
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -346,7 +347,7 @@ async def test_first_sync_resumes(
     interrupted = HISTORY_LABELS[4]
     fake.add(interrupted, build_row(interrupted, 0, time=NOW_MS - 400 * DAY_MS))
     asked: list[int] = []
-    system_before = await _system_accounts(owner_url)
+    before = await _committed_before(owner_url)
 
     def failing(request: httpx.Request) -> httpx.Response:
         if request.url.path == ENDPOINTS[interrupted].path:
@@ -403,7 +404,7 @@ async def test_first_sync_resumes(
         assert stored == 1
     finally:
         if connection_id is not None:
-            await _delete(engine, owner_url, connection_id, system_before)
+            await _delete(engine, owner_url, connection_id, before)
         await engine.dispose()
 
 
@@ -420,7 +421,7 @@ async def test_a_flag_is_told_after_a_sync_that_failed_later(
     engine = create_engine(backend_url)
     sessions = make_sessionmaker(engine)
     connection_id: uuid.UUID | None = None
-    system_before = await _system_accounts(owner_url)
+    before = await _committed_before(owner_url)
     at = NOW_MS - 2 * HOUR_MS
     row = build_row("deposits", status=1, walletType=0, insertTime=at, completeTime=at, coin="AAA")
     fake.add("deposits", {**row, "extraField": "secret-value-4242"})
@@ -477,7 +478,7 @@ async def test_a_flag_is_told_after_a_sync_that_failed_later(
         assert "pending_flags" not in again.config
     finally:
         if connection_id is not None:
-            await _delete(engine, owner_url, connection_id, system_before)
+            await _delete(engine, owner_url, connection_id, before)
         await engine.dispose()
 
 
@@ -506,20 +507,32 @@ _SYSTEM = (
 )
 
 
-async def _system_accounts(owner_url: str) -> set[str]:
-    """The system accounts' setting keys committed now."""
+@dataclass(frozen=True)
+class Before:
+    """What was committed when a test that commits for real began: the database's clock then,
+    and the system accounts' setting keys."""
+
+    at: datetime
+    system_accounts: frozenset[str]
+
+
+async def _committed_before(owner_url: str) -> Before:
     owner = create_engine(owner_url)
     try:
         async with owner.connect() as conn:
-            return {row.key for row in await conn.execute(text(_SYSTEM))}
+            at = await conn.scalar(text("select clock_timestamp()"))
+            keys = frozenset(row.key for row in await conn.execute(text(_SYSTEM)))
+            assert isinstance(at, datetime)
+            return Before(at, keys)
     finally:
         await owner.dispose()
 
 
-async def _delete(
-    engine, owner_url: str, connection_id: uuid.UUID, system_before: set[str]
-) -> None:
+async def _delete(engine, owner_url: str, connection_id: uuid.UUID, before: Before) -> None:
+    """Everything the test committed: the connection's rows, and what its syncs made that is
+    no connection's (instruments, entities, system accounts, every event and audit entry)."""
     params = {"id": connection_id}
+    since = {"at": before.at}
     owner = create_engine(owner_url)
     try:
         # Raw records and the audit log are append-only for the backend role.
@@ -527,13 +540,9 @@ async def _delete(
             await conn.execute(
                 text("delete from core.raw_records where connection_id = :id"), params
             )
-            await conn.execute(
-                text(
-                    "delete from core.audit_log where args->>'connection_id' = :id"
-                    " or changes ? ('connection:' || :id)"
-                ),
-                {"id": str(connection_id)},
-            )
+            # Every log row written since the test began: no other test commits meanwhile.
+            await conn.execute(text("delete from core.audit_log where occurred_at >= :at"), since)
+            await conn.execute(text("delete from core.events where occurred_at >= :at"), since)
             await conn.execute(
                 text("delete from core.credentials where connection_id = :id"), params
             )
@@ -552,18 +561,12 @@ async def _delete(
             # What the records posted.
             posted = "select id from finance.transactions where connection_id = :id"
             await conn.execute(
-                text(f"delete from core.events where subject_id in ({posted})"), params
-            )
-            await conn.execute(
                 text(f"delete from finance.postings where transaction_id in ({posted})"), params
             )
             await conn.execute(
                 text("delete from finance.transactions where connection_id = :id"), params
             )
             accounts = "select id from finance.accounts where source_connection_id = :id"
-            await conn.execute(
-                text(f"delete from core.events where subject_id in ({accounts})"), params
-            )
             await conn.execute(
                 text(f"delete from finance.balance_snapshots where account_id in ({accounts})"),
                 params,
@@ -582,20 +585,19 @@ async def _delete(
             await conn.execute(
                 text("delete from finance.accounts where source_connection_id = :id"), params
             )
-            await conn.execute(text("delete from core.events where subject_id = :id"), params)
             await conn.execute(text("delete from core.connections where id = :id"), params)
             # The system accounts the normaliser made for this test (committed, unlike others').
             for row in (await conn.execute(text(_SYSTEM))).all():
-                if row.key in system_before:
+                if row.key in before.system_accounts:
                     continue
                 made = {"id": uuid.UUID(row.id), "key": row.key}
-                await conn.execute(text("delete from core.events where subject_id = :id"), made)
-                await conn.execute(
-                    text("delete from core.audit_log where changes ? ('account:' || :id)"),
-                    {"id": row.id},
-                )
                 await conn.execute(text("delete from finance.accounts where id = :id"), made)
                 await conn.execute(text("delete from core.settings where key = :key"), made)
+            # The instruments (their identifiers go with them) and entities it made.
+            await conn.execute(
+                text("delete from finance.instruments where created_at >= :at"), since
+            )
+            await conn.execute(text("delete from core.entities where created_at >= :at"), since)
     finally:
         await owner.dispose()
 
