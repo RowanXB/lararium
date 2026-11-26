@@ -1,7 +1,7 @@
 # Design: an account type catalog, with the Trading 212 Cash ISA as its first new type
 
 - Date: 2026-11-26
-- Status: proposed (full design, a project)
+- Status: approved 2026-11-26; Part A implemented
 - Builds on: `main` at `75c78ff`; the M2 import design (the format catalog); the M6 design (`2026-11-22-etoro-trading212-design.md`, §5.12); the transfer evidence design (`2026-11-21-transfer-evidence-design.md`)
 - Replaces: the uncommitted draft `2026-11-26-trading212-cash-isa-design.md` of another session, whose findings and owner decisions are folded in here (§7 to §9)
 

@@ -434,8 +434,8 @@ Trading 212 是一个连接器：`worker` 通过 Trading 212 的公开 API 每 3
 
 ### 2. 添加连接
 
-在 Connections 页面的 **Add Trading 212** 里填写显示名称，选择 **Account type**（Invest 或
-Stocks ISA），粘贴 API key 和 API secret，点 **Add Trading 212**。Lararium 会先向 Trading 212
+在 Accounts → Add account 里选择 **Trading 212 Invest** 或 **Trading 212 Stocks ISA**，填写显示
+名称，粘贴 API key 和 API secret，点 **Add Trading 212**。Lararium 会先向 Trading 212
 核验这个 key；如果它对应的账户已经连接过，会被拒绝。
 
 这个连接会创建一个账户，名为 `Trading 212 Invest ···1234` 或 `Trading 212 ISA ···1234`（Trading 212
@@ -478,8 +478,9 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 
 ### Cash ISA（没有 API）
 
-Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再用目录条目 “Trading 212 Cash ISA”
-（History CSV）创建的导入配置，上传 app History 页面导出的 CSV。每次导出必须从该账户的第一天开始，
+Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再上传 app History 页面导出的 CSV：
+在 Accounts → Add account 里选 **Trading 212 Cash ISA** 并在那里上传 History CSV（上传会自己使用现成的
+profile）。每次导出必须从该账户的第一天开始，
 或从之前某次上传已覆盖的某一天开始。利息行在其 `Action` 确定之前，按普通行导入。
 
 ### 警告
@@ -662,7 +663,11 @@ SQL
    Lararium 会认出它是这家银行的哪种格式，并为它新建或复用 profile。其他文件在 Data →
    Statement files 上传，并选一个 profile（怎样读这家银行的文件，见下文）。两种方式都要选择
    账户（或填一个新账户的名称）；文件本身不写明币种时，还可以选一个币种。文件最大 5 MiB、
-   20,000 行。文件会作为文档保存（在 `documents` 卷中），永不删除。
+   20,000 行。文件会作为文档保存（在 `documents` 卷中），永不删除。在账户类型出现之前添加的账户，可以用
+`PATCH /api/v1/finance/accounts/{id}`、请求体 `{"type_key": "<key>"}` 为它设置类型；账单类型的 key 有
+`hsbc_uk`、`lloyds`、`boc_uk`、`revolut.current`、`revolut.savings`、`tembo`、`lemfi` 和
+`trading212.cash_isa`。该账户必须是手动的 transactions 账户，且形态与类型相符；设置类型后，它在
+Accounts 上的卡片会出现 **Upload file**。
 2. **审阅。** 批次页面把每一行标为 **new**（新的）、**duplicate**（账本里已有）、**skipped**
    （金额为零，或被 profile 的 `include_only` 排除；会显示原因）或 **error**（无法读取，或与
    滚动余额对不上）。只要有错误行就不能提交：修改 profile 或文件，丢弃这个批次后重新上传。行列表
