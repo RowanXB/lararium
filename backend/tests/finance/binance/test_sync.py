@@ -726,6 +726,87 @@ async def test_a_history_row_that_cannot_be_typed_is_not_stored(
     assert posted >= 1
 
 
+def _history_row(label: str, at: int) -> dict[str, Any]:
+    if label == "deposits":
+        return build_row(label, coin="AAA", status=1, walletType=0, insertTime=at, completeTime=at)
+    return build_row(
+        label,
+        orderStatus="SUCCESS",
+        walletType="SPOT",
+        fromAsset="AAA",
+        fromAmount="3",
+        toAsset="BBB",
+        toAmount="2",
+        createTime=at,
+    )
+
+
+def _answering(fake: FakeBinance, label: str, change: Any) -> tuple[Any, dict[str, bool]]:
+    """A handler that answers `label` with `change(body)` while `on`, the fake otherwise."""
+    on = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        if request.url.path != ENDPOINTS[label].path or not on["on"]:
+            return answer
+        body = change(json.loads(answer.content))
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    return handler, on
+
+
+@pytest.mark.parametrize(
+    ("label", "field", "change"),
+    [
+        ("deposits", ".", lambda body: None),
+        ("convert", "list", lambda body: {**body, "list": None}),
+    ],
+)
+async def test_a_history_answer_whose_records_are_null_is_not_an_empty_window(
+    session, run, fake: FakeBinance, connector, clock: Clock, label: str, field: str, change
+) -> None:
+    fake.add(label, _history_row(label, NOW_MS - 2 * HOUR_MS))
+    handler, broken = _answering(fake, label, change)
+    connection = await binance_connection(run, config=later_config())
+    before = connection.config[CURSORS_KEY][label]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    after = await run_binance_sync(session, connection.id, handler)
+
+    assert after.status == "failing"
+    assert f"Binance answered {label} in an unexpected shape (field {field})" in (
+        after.last_error or ""
+    )
+    assert await _raw(session, connection.id, label) == 0
+    assert after.config[CURSORS_KEY][label] == before  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    # Binance answers the window normally: the next sync stores its record.
+    broken["on"] = False
+    clock.ms += 4 * HOUR_MS
+    again = await run_binance_sync(session, connection.id, handler)
+
+    assert again.status == "healthy", again.last_error
+    assert await _raw(session, connection.id, label) == 1
+
+
+async def test_a_history_answer_without_its_record_list_is_an_empty_window(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # Left as it is on purpose: whether Binance leaves the key out of an empty window is not
+    # known, and the real sync works. Changing it is a decision, not a side effect.
+    fake.add("convert", _history_row("convert", NOW_MS - 2 * HOUR_MS))
+    handler, _ = _answering(
+        fake, "convert", lambda body: {k: v for k, v in body.items() if k != "list"}
+    )
+    connection = await binance_connection(run, config=later_config())
+    before = connection.config[CURSORS_KEY]["convert"]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    after = await run_binance_sync(session, connection.id, handler)
+
+    assert after.status == "healthy", after.last_error
+    assert await _raw(session, connection.id, "convert") == 0
+    assert after.config[CURSORS_KEY]["convert"] != before  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+
 async def test_a_balance_answer_that_cannot_be_typed_is_not_stored(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:

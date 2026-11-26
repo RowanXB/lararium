@@ -231,11 +231,32 @@ def test_numbers_are_decimals() -> None:
 def test_rows_come_from_the_endpoints_rows_path() -> None:
     nested = build_response("rebate", [build_row("rebate")])
     assert [dict(r) for r in parse("rebate", nested).rows] == [build_row("rebate")]
-    # A missing array is an empty answer; an array of the wrong kind is an error.
+    # An empty array is an empty answer; an array of the wrong kind is an error.
     assert parse("deposits", []).rows == []
-    assert parse("earn-flexible-subscriptions", {"total": 0}).rows == []
+    assert parse("earn-flexible-subscriptions", {"rows": [], "total": 0}).rows == []
     with pytest.raises(BinanceDataError):
         parse("earn-flexible-subscriptions", {"rows": 5})
+
+
+def test_a_record_list_that_is_null_is_never_an_empty_answer() -> None:
+    # The body itself, for a label whose records are the body; a container present but null.
+    for label, body, field in [
+        ("deposits", None, "."),
+        ("convert", {"list": None, "moreData": False}, "list"),
+        ("rebate", {"status": "OK", "type": "GENERAL", "code": "0", "data": None}, "data.data"),
+    ]:
+        with pytest.raises(BinanceDataError) as caught:
+            parse(label, body)
+        assert (caught.value.label, caught.value.field) == (label, field)
+    # A label whose body is its one record: a null body is no record either.
+    with pytest.raises(BinanceDataError):
+        parse("api-restrictions", None)
+
+
+def test_a_record_list_left_out_is_an_empty_answer() -> None:
+    # Whether Binance leaves the key out of an empty window is not known; the real sync works.
+    assert parse("earn-flexible-subscriptions", {"total": 0}).rows == []
+    assert parse("convert", {"moreData": False}).rows == []
 
 
 def test_a_bar_is_keyed_by_position() -> None:

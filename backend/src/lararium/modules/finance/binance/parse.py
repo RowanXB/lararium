@@ -220,17 +220,21 @@ class _Walk:
 
 
 def _rows(label: str, body: ApiValue) -> list[Row]:
+    """The records of a body. A record list that is null or not a list (the body itself, for a
+    label whose records are the body) is never an empty answer: it is a `BinanceDataError`."""
     where = ENDPOINTS[label].rows
     found: ApiValue = body
     if where not in ("", "."):
         for step in where.split("."):
             if not isinstance(found, dict):
                 raise BinanceDataError(label, where)
-            found = found.get(step)
+            if step not in found:
+                # Whether Binance leaves the key out of an empty window is not known, and the
+                # real sync works so: no records.
+                return []
+            found = found[step]
     elif where == "":
         found = [body]
-    if found is None:
-        return []
     if not isinstance(found, list):
         raise BinanceDataError(label, where)
     rows: list[Row] = []
