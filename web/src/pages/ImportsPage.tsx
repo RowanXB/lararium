@@ -3,6 +3,9 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useId, useState } from "react";
 
 import {
+  type AccountCreate,
+  type AccountOut,
+  type AccountTypeOut,
   type BodyStageImport,
   createAccount,
   createImportProfile,
@@ -94,9 +97,30 @@ type UploadFormProps = {
   // One bank's formats from the catalog: the form asks for a format instead of a profile,
   // and makes the profile itself.
   formats?: ImportCatalogEntryOut[];
+  // The account type a new account is made as: its shape, its key and its name.
+  type?: AccountTypeOut;
+  // The one account to upload to: the form asks for no account.
+  account?: AccountOut;
 };
 
-export function UploadForm({ formats }: UploadFormProps = {}) {
+// A new account of a catalog type takes the type's shape and key; the side is asked only
+// when the shape leaves it open. The type stands for the institution.
+function newAccountBody(name: string, side: Side, type: AccountTypeOut | undefined): AccountCreate {
+  const body = accountBody({ name, side, balance: "files" });
+  if (!type?.shape) return body;
+  const { ledger_type, subtype, tax_wrapper, balance_mode } = type.shape;
+  return {
+    ...body,
+    ledger_type: ledger_type ?? body.ledger_type,
+    subtype,
+    tax_wrapper,
+    balance_mode,
+    institution_name: null,
+    type_key: type.key,
+  };
+}
+
+export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const fileId = useId();
@@ -118,7 +142,7 @@ export function UploadForm({ formats }: UploadFormProps = {}) {
   });
 
   const [accountId, setAccountId] = useState<string>();
-  const [newName, setNewName] = useState("");
+  const [newName, setNewName] = useState(type?.name ?? "");
   const [newSide, setNewSide] = useState<Side>("have");
   const [profileId, setProfileId] = useState<string>();
   // Which of the bank's formats the chosen file is; picked by hand only when it can't be told.
@@ -130,7 +154,11 @@ export function UploadForm({ formats }: UploadFormProps = {}) {
 
   const importable = (accounts.data ?? []).filter(isImportable);
   // With no account to pick, the form starts at a new one.
-  const selectedAccount = accountId ?? (accounts.data && importable.length === 0 ? NEW_ACCOUNT : undefined);
+  const selectedAccount =
+    account?.id ??
+    accountId ??
+    (accounts.data && importable.length === 0 ? NEW_ACCOUNT : undefined);
+  const askSide = !type?.shape || type.shape.ledger_type === null;
   const creating = selectedAccount === NEW_ACCOUNT;
   const fiat = (instruments.data ?? []).filter((instrument) => instrument.kind === "fiat");
   const format =
@@ -167,7 +195,7 @@ export function UploadForm({ formats }: UploadFormProps = {}) {
       if (account_id === undefined) {
         const created = (
           await createAccount({
-            body: accountBody({ name: newName, side: newSide, balance: "files" }),
+            body: newAccountBody(newName, newSide, type),
             throwOnError: true,
           })
         ).data;
@@ -239,24 +267,34 @@ export function UploadForm({ formats }: UploadFormProps = {}) {
           </p>
         )}
         <form aria-label="Upload statement" onSubmit={submit} className="grid gap-4 sm:grid-cols-4">
-          <LabelledSelect
-            label="Account"
-            value={selectedAccount}
-            options={[
-              ...importable.map((account) => ({ value: account.id, label: account.name })),
-              { value: NEW_ACCOUNT, label: "New account…" },
-            ]}
-            onChange={setAccountId}
-            placeholder="Account"
-          />
+          {!account && (
+            <LabelledSelect
+              label="Account"
+              value={selectedAccount}
+              options={[
+                ...importable.map((option) => ({ value: option.id, label: option.name })),
+                { value: NEW_ACCOUNT, label: "New account…" },
+              ]}
+              onChange={setAccountId}
+              placeholder="Account"
+            />
+          )}
           {creating && (
             <div className="flex flex-wrap items-end gap-4 rounded-lg border border-dashed p-3 sm:col-span-4">
               <div className="min-w-56">
                 <TextField label="New account name" value={newName} onChange={setNewName} />
               </div>
-              <Segmented label="What it holds" value={newSide} options={SIDES} onChange={setNewSide} />
+              {askSide && (
+                <Segmented
+                  label="What it holds"
+                  value={newSide}
+                  options={SIDES}
+                  onChange={setNewSide}
+                />
+              )}
               <p className="w-full text-sm text-muted-foreground">
-                A credit card or a loan is money you owe. The account is created when you upload.
+                {askSide && "A credit card or a loan is money you owe. "}The account is created
+                when you upload.
               </p>
             </div>
           )}
