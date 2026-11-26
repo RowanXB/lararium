@@ -8,6 +8,7 @@ import {
   createAccount,
   listAccountIdentifiers,
   listAccounts,
+  listAccountTypes,
   recordSnapshot,
   removeAccountIdentifier,
   setAccountBalanceMode,
@@ -235,7 +236,7 @@ beforeEach(() => {
 
 function renderPage() {
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <AccountsPage />
     </QueryClientProvider>,
   );
@@ -279,6 +280,12 @@ it("rejects a negative amount owed instead of storing a positive liability", asy
     form.getByText("Enter the amount owed as a positive number, e.g. 500"),
   ).toBeInTheDocument();
   expect(recordSnapshot).not.toHaveBeenCalled();
+});
+
+it("shows a failed account types fetch instead of leaving the page silent", async () => {
+  vi.mocked(listAccountTypes).mockRejectedValueOnce(new Error("account types unavailable"));
+  renderPage();
+  expect(await screen.findByText("account types unavailable")).toBeInTheDocument();
 });
 
 it("offers no balance to type for accounts whose balance comes from transactions", async () => {

@@ -746,7 +746,7 @@ export function AccountsPage() {
       (await getHoldings({ query: { date: today, all_accounts: true }, throwOnError: true }))
         .data,
   });
-  const error = accounts.error ?? instruments.error ?? settings.error;
+  const error = accounts.error ?? instruments.error ?? settings.error ?? types.error;
   // Default the snapshot instrument to the reporting currency, which most balances are in.
   const defaultInstrumentId = (
     instruments.data?.find(
