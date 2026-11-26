@@ -26,8 +26,21 @@ from datetime import datetime
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, exists, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    SQLColumnExpression,
+    Text,
+    delete,
+    exists,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
@@ -237,6 +250,42 @@ async def identifier_account(session: AsyncSession, identifier_id: UUID) -> UUID
     return await session.scalar(
         select(models.AccountIdentifier.account_id).where(
             models.AccountIdentifier.id == identifier_id
+        )
+    )
+
+
+def named_account_expression(
+    i: type[models.AccountIdentifier], payment_reference: SQLColumnExpression[str | None]
+) -> ColumnElement[UUID | None]:
+    """The own account a record naming the identifier `i` with `payment_reference` names,
+    as SQL: the one `i` is registered to; else, for a shared payee bank account, the one of
+    its references equal to the payment reference trimmed of surrounding spaces and
+    upper-cased (as references are stored); NULL for neither. A dismissed row is read as
+    any other: one is registered to no account, and a dismissal racing a registration may
+    leave it carrying references, which are read as a card merchant's holders are.
+
+    The one definition: named_account and transfers.contra.named_account_sql (pairing)
+    both read it, so a record posts to the contra its pairing gives it."""
+    r = aliased(models.AccountIdentifierReference, name="named_reference")
+    by_reference = (
+        select(r.account_id)
+        .where(r.identifier_id == i.id, r.reference == func.upper(func.btrim(payment_reference)))
+        .correlate_except(r)
+        .scalar_subquery()
+    )
+    return func.coalesce(i.account_id, by_reference)
+
+
+async def named_account(
+    session: AsyncSession, identifier_id: UUID, payment_reference: str | None
+) -> UUID | None:
+    """The own account a record naming the identifier with the payment reference names
+    (named_account_expression): its account, else its reference's; None for neither, and
+    for an unknown identifier. identifier_account is for callers with no record in hand."""
+    i = models.AccountIdentifier
+    return await session.scalar(
+        select(named_account_expression(i, literal(payment_reference, Text()))).where(
+            i.id == identifier_id
         )
     )
 

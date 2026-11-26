@@ -30,6 +30,7 @@ from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
     get_identifier,
+    named_account,
     register_card_merchant,
     register_references,
     unassign_identifier,
@@ -828,8 +829,9 @@ async def preview_match(
     (a counterpart found by amount and date is taken only from the first day imports list
     in full, design §5.8).
 
-    The row's evidence is its counterparty identifier only: `counterparty.account_number`
-    is not read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    The row's evidence is its counterparty identifier only, with its payment reference
+    (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
+    read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
     post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
@@ -850,7 +852,13 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        holder=None if named is None else named.account_id,
+        # As eligible_records' holder (contra.named_account_sql): its account, or by the
+        # reference.
+        holder=(
+            None
+            if named is None
+            else await named_account(session, named.id, counterparty.reference)
+        ),
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,

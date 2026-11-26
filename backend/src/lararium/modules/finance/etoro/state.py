@@ -340,6 +340,12 @@ class Run(ConnectorRun):
         self._instruments.clear()
         self._symbols.clear()
 
-    async def contra(self, key: str, account_id: UUID, identifier_id: UUID | None) -> UUID:
+    async def contra(
+        self,
+        key: str,
+        account_id: UUID,
+        identifier_id: UUID | None,
+        payment_reference: str | None = None,
+    ) -> UUID:
         """Unassigned or In transit for a movement of two postings, as transfer_contra says."""
-        return await self.contra_for(key, account_id, 0, identifier_id)
+        return await self.contra_for(key, account_id, 0, identifier_id, payment_reference)

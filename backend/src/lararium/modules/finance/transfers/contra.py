@@ -45,7 +45,7 @@ from sqlalchemy.types import TypeEngine
 
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import TransactionNotFoundError
-from lararium.modules.finance.identifiers import identifier_account
+from lararium.modules.finance.identifiers import named_account, named_account_expression
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
 
 # Derived transactions (placeholders, settlements) are never legs themselves.
@@ -133,6 +133,16 @@ def names_source(t: type[models.Transaction], source: SourceRef) -> ColumnElemen
     return false()
 
 
+def named_account_sql(
+    t: type[models.Transaction], i: type[models.AccountIdentifier]
+) -> ColumnElement[UUID | None]:
+    """The own account the transaction names through its counterparty identifier `i`: the
+    one `i` is registered to, else the one of `i`'s references its payment reference
+    matches (identifiers.named_account_expression, which transfer_contra and
+    engine.preview_match read through identifiers.named_account)."""
+    return named_account_expression(i, t.payment_reference)
+
+
 # A transfer's leg is exactly two postings, its own posting and its contra: one with others
 # besides (a fee, say) is no leg, so its contra stays on Unassigned. eligible_records and
 # transfer_contra both read this.
@@ -146,9 +156,11 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
-    the one its counterparty bank account is registered to, else the one registered under
-    the account number its import rows print alone (or its connector gives alone), else the
-    main account of a manual sub-account for a bank transfer naming no bank account),
+    the one its counterparty bank account names (named_account_sql: registered to it, or a
+    shared payee's reference matching the record's payment reference), else the one
+    registered under the account number its import rows print alone (or its connector gives
+    alone), else the main account of a manual sub-account for a bank transfer naming no bank
+    account),
     weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
@@ -321,7 +333,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     holder = case(
         (
             t.counterparty_identifier_id.is_not(None),
-            select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
+            select(named_account_sql(t, i))
+            .where(i.id == t.counterparty_identifier_id)
+            .scalar_subquery(),
         ),
         (number_count == 1, number_holder),
         # A savings sub-account moves money only to and from its main account.
@@ -652,6 +666,7 @@ async def transfer_contra(
     own_account_id: UUID,
     counterparty_identifier_id: UUID | None,
     other_postings: int,
+    payment_reference: str | None = None,
 ) -> UUID:
     """The system account a record's contra belongs on: In transit for a transfer between
     own accounts, Unassigned otherwise (design §5.6).
@@ -659,11 +674,13 @@ async def transfer_contra(
     In order: the owner's reject decision for `source` wins (Unassigned); a transaction
     with `other_postings` (postings besides its own and the contra, a fee say) can't be a
     leg (LEG_POSTINGS), so Unassigned; a leg of a transfer that is not rejected stays In
-    transit; a counterparty bank account registered to another own account makes it In
-    transit. A card merchant (registered with holders, not to one account) never does: its
-    record stays on Unassigned until it is paired (eToro design §5.12, as amended in Task
-    15). `source` is None for a transaction not yet posted, which has neither. Both
-    system accounts must exist already (get_or_create_system_account).
+    transit; a counterparty bank account naming another own account makes it In transit:
+    one registered to it, or a shared payee whose reference the record's
+    `payment_reference` matches (identifiers.named_account, which eligible_records reads
+    too, named_account_sql). A card merchant (registered with holders, not to one account)
+    never does: its record stays on Unassigned until it is paired (eToro design §5.12, as
+    amended in Task 15). `source` is None for a transaction not yet posted, which has
+    neither. Both system accounts must exist already (get_or_create_system_account).
     """
     system = await system_account_ids(session)
     missing = [key for key in ("unassigned", "in_transit") if key not in system]
@@ -678,7 +695,7 @@ async def transfer_contra(
         if transaction_id is not None and await is_active_leg(session, transaction_id):
             return system["in_transit"]
     if counterparty_identifier_id is not None:
-        holder = await identifier_account(session, counterparty_identifier_id)
+        holder = await named_account(session, counterparty_identifier_id, payment_reference)
         if holder is not None and holder != own_account_id:
             return system["in_transit"]
     return system["unassigned"]
