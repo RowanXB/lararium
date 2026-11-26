@@ -21,6 +21,7 @@ import { type FormEvent, type ReactNode, useId, useMemo, useState } from "react"
 import {
   type AccountCreate,
   type AccountOut,
+  type AccountTypeOut,
   addAccountIdentifier,
   createAccount,
   getFinanceSettings,
@@ -28,6 +29,7 @@ import {
   type InstrumentOut,
   listAccountIdentifiers,
   listAccounts,
+  listAccountTypes,
   listInstruments,
   recordSnapshot,
   removeAccountIdentifier,
@@ -49,7 +51,9 @@ import {
 } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import { statementFormats, typeOf } from "../lib/accountTypes";
 import { errorMessage } from "../lib/errors";
+import { isImportable } from "../lib/imports";
 import { todayForInput } from "../lib/dates";
 import {
   formatMoney,
@@ -66,6 +70,7 @@ import {
   type Side,
 } from "../lib/newAccount";
 import { refreshAfterTransferWrite } from "../lib/refresh";
+import { UploadForm } from "./ImportsPage";
 
 // The ledger's terms, as the account list shows them.
 const LEDGER_TYPES: { value: AccountCreate["ledger_type"]; label: string }[] = [
@@ -494,7 +499,7 @@ function MainAccountSelect({ account, accounts }: { account: AccountOut; account
   );
 }
 
-type Panel = "balance" | "bank" | "main";
+type Panel = "balance" | "bank" | "main" | "upload";
 
 const SUBTYPE_ICONS: Record<AccountOut["subtype"], LucideIcon> = {
   bank: Landmark,
@@ -549,6 +554,7 @@ function PanelButton({
 function AccountCard({
   account,
   accounts,
+  types,
   value,
   currency,
   instruments,
@@ -556,6 +562,7 @@ function AccountCard({
 }: {
   account: AccountOut;
   accounts: AccountOut[];
+  types: AccountTypeOut[];
   value: string | undefined;
   currency: string | undefined;
   instruments: InstrumentOut[];
@@ -575,6 +582,13 @@ function AccountCard({
     !account.system &&
     account.source_kind === "manual" &&
     !accounts.some((other) => other.parent_account_id === account.id);
+  // A type read by an upload gets an upload form here; one a connection also reads, a link
+  // to the connection that takes the file.
+  const type = typeOf(types, account);
+  const formats = type ? statementFormats(type) : [];
+  const canUpload = type !== undefined && formats.length > 0 && isImportable(account);
+  const uploadsOnConnections =
+    type !== undefined && type.api !== null && type.files.length > 0 && account.status === "open";
   const toggle = (next: Panel) => setPanel((current) => (current === next ? undefined : next));
   const muted = account.excluded_from_reports || account.status === "closed";
 
@@ -617,7 +631,7 @@ function AccountCard({
           {ownMoney && !account.system && <ReportingToggle account={account} />}
         </div>
       </div>
-      {(typesBalance || hasBankDetails || hasMain) && (
+      {(typesBalance || hasBankDetails || hasMain || canUpload || uploadsOnConnections) && (
         <div>
           <div className="flex flex-wrap gap-2">
             {typesBalance && (
@@ -639,6 +653,24 @@ function AccountCard({
               >
                 Bank details
               </PanelButton>
+            )}
+            {canUpload && (
+              <PanelButton
+                panel="upload"
+                open={panel === "upload"}
+                controls={`${panelId}-upload`}
+                onToggle={toggle}
+              >
+                Upload file
+              </PanelButton>
+            )}
+            {!canUpload && uploadsOnConnections && (
+              <Link
+                to="/connections"
+                className="flex items-center rounded-full border px-3 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Upload file
+              </Link>
             )}
             {hasMain && (
               <PanelButton
@@ -673,6 +705,11 @@ function AccountCard({
               </div>
             </Reveal>
           )}
+          {canUpload && type && (
+            <Reveal open={panel === "upload"} id={`${panelId}-upload`}>
+              <UploadForm formats={formats} account={account} />
+            </Reveal>
+          )}
           {hasMain && (
             <Reveal open={panel === "main"} id={`${panelId}-main`}>
               <MainAccountSelect account={account} accounts={accounts} />
@@ -696,6 +733,10 @@ export function AccountsPage() {
   const settings = useQuery({
     queryKey: ["finance-settings"],
     queryFn: async () => (await getFinanceSettings({ throwOnError: true })).data,
+  });
+  const types = useQuery({
+    queryKey: ["account-types"],
+    queryFn: async () => (await listAccountTypes({ throwOnError: true })).data,
   });
   const today = todayForInput();
   // Every account's, hidden ones included: hiding is for the Overview, not for this page.
@@ -749,6 +790,7 @@ export function AccountsPage() {
             key={account.id}
             account={account}
             accounts={accounts.data ?? []}
+            types={types.data ?? []}
             value={values.get(account.id)}
             currency={settings.data?.reporting_currency}
             instruments={instruments.data ?? []}
