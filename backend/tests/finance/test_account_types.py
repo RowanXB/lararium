@@ -47,6 +47,8 @@ def test_the_invariants_refuse_a_bad_catalog():
         check_catalog((first, first))
     with pytest.raises(RuntimeError, match="neither"):
         check_catalog((replace(first, api=None, files=()),))
+    with pytest.raises(RuntimeError, match="nor a shape"):
+        check_catalog((replace(statement, shape=None),))
     with pytest.raises(RuntimeError, match="without a profile"):
         check_catalog((replace(statement, files=(FileFormat("x", "csv", None),)),))
     with pytest.raises(RuntimeError, match="family"):

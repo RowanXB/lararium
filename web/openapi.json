@@ -5700,7 +5700,7 @@
     },
     "/api/v1/finance/accounts/{account_id}": {
       "patch": {
-        "description": "Rename the account, set its type, or both, in one command: if either is refused,\nneither happens. A type must have no API and the account must be able to take imports;\ntype_key null clears it.",
+        "description": "Rename the account, set its type, or both, in one command: if either is refused,\nneither happens. Setting or clearing the type needs an account that can take imports (a\nconnector owns a connected account's); a type must have no API and agree with the\naccount's shape. type_key null clears it.",
         "operationId": "rename_account",
         "parameters": [
           {

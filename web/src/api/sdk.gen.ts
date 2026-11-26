@@ -257,8 +257,9 @@ export const registerCardMerchant = <ThrowOnError extends boolean = false>(optio
  * Rename Account
  *
  * Rename the account, set its type, or both, in one command: if either is refused,
- * neither happens. A type must have no API and the account must be able to take imports;
- * type_key null clears it.
+ * neither happens. Setting or clearing the type needs an account that can take imports (a
+ * connector owns a connected account's); a type must have no API and agree with the
+ * account's shape. type_key null clears it.
  */
 export const renameAccount = <ThrowOnError extends boolean = false>(options: Options<RenameAccountData, ThrowOnError>): RequestResult<RenameAccountResponses, RenameAccountErrors, ThrowOnError> => (options.client ?? client).patch<RenameAccountResponses, RenameAccountErrors, ThrowOnError>({
     url: '/api/v1/finance/accounts/{account_id}',

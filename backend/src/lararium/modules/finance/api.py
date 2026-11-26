@@ -258,18 +258,20 @@ def _settable_type(key: str) -> tuple[account_types.AccountType, account_types.A
     found = account_types.account_type(key)
     if found is None:
         raise _type_error("unknown_type", "type_key names no account type")
-    if found.api is not None or found.shape is None:
+    if found.api is not None:
         raise _type_error(
             "type_not_creatable",
             f"{found.name} syncs through its API, so type_key can't name it; connect it instead",
         )
+    assert found.shape is not None  # check_catalog: a type with no API has a shape
     return found, found.shape
 
 
-def _require_type_shape(body: AccountCreate, key: str) -> account_types.AccountType:
-    """The body must agree with the type wherever the type states its shape; the side is the
-    body's when the type leaves it open, and the institution is always the type's."""
-    found, shape = _settable_type(key)
+def _require_shape_agrees(
+    found: account_types.AccountType, shape: account_types.AccountShape, account: object
+) -> None:
+    """The account (a create body or a stored account) must agree with the type wherever the
+    type states its shape; the side is the account's when the type leaves it open."""
     stated: dict[str, str | None] = {
         "ledger_type": shape.ledger_type,
         "subtype": shape.subtype,
@@ -277,10 +279,16 @@ def _require_type_shape(body: AccountCreate, key: str) -> account_types.AccountT
         "balance_mode": shape.balance_mode,
     }
     for field, value in stated.items():
-        if value is not None and getattr(body, field) != value:
+        if value is not None and getattr(account, field) != value:
             raise _type_error(
                 "type_mismatch", f"{field} disagrees with the {found.name} account type"
             )
+
+
+def _require_type_shape(body: AccountCreate, key: str) -> account_types.AccountType:
+    """The body must agree with the type's shape, and the institution is always the type's."""
+    found, shape = _settable_type(key)
+    _require_shape_agrees(found, shape, body)
     if body.institution_name is not None:
         raise _type_error(
             "type_mismatch",
@@ -323,14 +331,19 @@ async def rename_account(
     account_id: UUID, body: AccountRename, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
     """Rename the account, set its type, or both, in one command: if either is refused,
-    neither happens. A type must have no API and the account must be able to take imports;
-    type_key null clears it."""
-    args = _args(body, account_id=account_id)
+    neither happens. Setting or clearing the type needs an account that can take imports (a
+    connector owns a connected account's); a type must have no API and agree with the
+    account's shape. type_key null clears it."""
+    # The audit records what was sent, not the fields left out.
+    args = _args(account_id=account_id) | body.model_dump(mode="json", exclude_unset=True)
     set_type = "type_key" in body.model_fields_set
     async with command_context(session, actor, "rename_account", args) as ctx:
-        if set_type and body.type_key is not None:
-            _settable_type(body.type_key)
-            staging.require_importable(await accounts.get_account(session, account_id))
+        if set_type:
+            account = await accounts.get_account(session, account_id)
+            staging.require_importable(account)
+            if body.type_key is not None:
+                found, shape = _settable_type(body.type_key)
+                _require_shape_agrees(found, shape, account)
         if body.name is not None:
             await accounts.rename_account(ctx, account_id, body.name)
         if set_type:

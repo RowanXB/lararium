@@ -139,6 +139,8 @@ def check_catalog(types: tuple[AccountType, ...]) -> None:
     for t in types:
         if t.api is None and not t.files:
             raise RuntimeError(f"account type {t.key} has neither an API nor a file")
+        if t.api is None and t.shape is None:
+            raise RuntimeError(f"account type {t.key} has neither an API nor a shape")
         if t.api is None and any(f.profile is None for f in t.files):
             raise RuntimeError(f"account type {t.key} has a file without a profile or an API")
     families = [t.family for t in types if t.family]

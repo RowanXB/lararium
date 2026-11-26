@@ -521,17 +521,56 @@ async def test_patch_refuses_what_cannot_take_imports(client, run) -> None:
     assert unknown.status_code == 422
     assert unknown.json()["detail"]["error"] == "unknown_type"
     assert (await client.patch(url, json={})).status_code == 422
-    # A refused type change leaves the rename sent with it undone too.
+    # A rename sent with a refused type change does not happen either.
     both = await client.patch(url, json={"name": "Renamed", "type_key": "nope"})
     assert both.status_code == 422
     listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
     assert listed[account_id]["name"] == "Current"
     assert listed[account_id]["type_key"] is None
 
+    # The type must agree with the account's shape: a bank account is no Cash ISA.
+    mismatch = await client.patch(url, json={"type_key": "trading212.cash_isa"})
+    assert mismatch.status_code == 422
+    detail = mismatch.json()["detail"]
+    assert detail["error"] == "type_mismatch"
+    assert "subtype" in detail["message"] and "Trading 212 Cash ISA" in detail["message"]
+    listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
+    assert listed[account_id]["type_key"] is None
+
     typed = (await client.post(f"{API}/accounts", json=_CASH_ISA)).json()["id"]
     cleared = await client.patch(f"{API}/accounts/{typed}", json={"type_key": None})
     assert cleared.status_code == 200
     assert cleared.json()["type_key"] is None
+
+
+async def test_patch_refuses_to_clear_a_connected_accounts_type(client, run) -> None:
+    connection = await run(
+        create_connection, connector="trading212", display_name="Trading 212", config={}
+    )
+    connected = await run(
+        create_account,
+        name="Invest",
+        ledger_type="asset",
+        subtype="broker",
+        balance_mode="transactions",
+        source_connection_id=connection.id,
+        type_key="trading212.invest",
+    )
+    refused = await client.patch(f"{API}/accounts/{connected.id}", json={"type_key": None})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "import_not_allowed"
+    listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
+    assert listed[str(connected.id)]["type_key"] == "trading212.invest"
+
+
+async def test_patch_refuses_a_type_on_the_wrong_side(client) -> None:
+    body = {"name": "Card", "ledger_type": "liability", "subtype": "savings_pot"}
+    account_id = await _account(client, **body, balance_mode="transactions", tax_wrapper="isa")
+    url = f"{API}/accounts/{account_id}"
+    refused = await client.patch(url, json={"type_key": "trading212.cash_isa"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "type_mismatch"
+    assert "ledger_type" in refused.json()["detail"]["message"]
 
 
 async def test_rename_still_works(client) -> None:
