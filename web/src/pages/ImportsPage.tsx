@@ -152,7 +152,11 @@ export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
   const [file, setFile] = useState<File>();
   const [incomplete, setIncomplete] = useState(false);
 
-  const importable = (accounts.data ?? []).filter(isImportable);
+  // A type's file carries no account identity the server could check, so a type's upload
+  // goes only into an account of that type; an older account is given its type first.
+  const importable = (accounts.data ?? []).filter(
+    (option) => isImportable(option) && (!type || option.type_key === type.key),
+  );
   // With no account to pick, the form starts at a new one.
   const selectedAccount =
     account?.id ??
