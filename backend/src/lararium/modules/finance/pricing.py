@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +69,22 @@ async def record_price(
             "source": source,
         },
     )
+
+
+async def delete_price(ctx: CommandContext, price_id: UUID) -> None:
+    """Remove a recorded price (one its source no longer gives)."""
+    p = models.Price
+    row = (await ctx.session.execute(delete(p).where(p.id == price_id).returning(p))).scalar_one()
+    data: dict[str, JSONValue] = {
+        "id": str(row.id),
+        "instrument_id": str(row.instrument_id),
+        "quote_instrument_id": str(row.quote_instrument_id),
+        "price": to_plain_str(row.price),
+        "as_of_date": row.as_of_date.isoformat(),
+        "source": row.source,
+    }
+    ctx.emit("finance.price.deleted", row.id, data)
+    ctx.record_change(f"price:{row.id}", {"before": data, "after": None})
 
 
 async def record_fx_rate(

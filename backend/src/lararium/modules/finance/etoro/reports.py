@@ -15,8 +15,11 @@ only when it differs.
 
 Prices are in the asset currency (pence as pounds / 100), source `etoro`: each daily candle's
 close for its day, and each day's current rate (the breakdown's `currentRate`) where no candle
-is stored for it, so the official close wins whichever arrives first. No FX rate is written
-(design §5.10).
+is stored for it, so the official close wins whichever arrives first. A candle's day is the UTC
+date of its `time` plus 12 hours (client.candle_day): eToro stamps it at midnight in Israel,
+21:00 or 22:00 UTC the evening before. A replay writes every price the connection's records
+give, so it also removes the `etoro` prices of their instruments that they no longer give (one
+an earlier version dated otherwise). No FX rate is written (design §5.10).
 """
 
 from collections.abc import Sequence
@@ -28,6 +31,7 @@ from sqlalchemy import select, text
 
 from lararium.modules.finance import models
 from lararium.modules.finance.connector_run import reported_snapshot
+from lararium.modules.finance.etoro.client import CANDLE_DAY_SHIFT, candle_day
 from lararium.modules.finance.etoro.records import end_of, link_open
 from lararium.modules.finance.etoro.state import (
     SOURCE,
@@ -44,7 +48,7 @@ from lararium.modules.finance.etoro.state import (
     text_at,
 )
 from lararium.modules.finance.identifiers import normalize_identifier
-from lararium.modules.finance.pricing import record_price
+from lararium.modules.finance.pricing import delete_price, record_price
 from lararium.modules.finance.typed_tables import parse_date
 
 # Balances entries whose `balance` is the account's cash or value, as a reported snapshot.
@@ -171,7 +175,7 @@ async def _candle_price(run: Run, record: Record) -> None:
     instrument_id = await run.instrument(etoro_id)
     if instrument_id is None:
         return
-    day = moment_at(record, record.content, "time").date()
+    day = candle_day(moment_at(record, record.content, "time"))
     quote_id, price = await run.price(code, close)
     run.candle_prices[(instrument_id, quote_id, day)] = price
 
@@ -484,9 +488,11 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
 
 async def prices(run: Run) -> None:
     """Each candle's close for its day; a current rate for its day where no candle of the
-    connection's is stored for it (module doc)."""
+    connection's is stored for it; on a replay, the `etoro` prices of their instruments that
+    none gives removed (module doc)."""
     p = models.Price
     wanted = list(run.candle_prices.items())
+    shift = f"{int(CANDLE_DAY_SHIFT.total_seconds())} seconds"
     for key, price in run.current_prices.items():
         if key in run.candle_prices:
             continue
@@ -497,12 +503,14 @@ async def prices(run: Run) -> None:
                 " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
                 " and ii.value = c.instrument_id::text"
                 " where c.connection_id = :c and ii.instrument_id = :i"
-                " and (c.time at time zone 'UTC')::date = :d)"
+                " and ((c.time at time zone 'UTC') + cast(:shift as interval))::date = :d)"
             ),
-            {"c": run.connection_id, "i": instrument_id, "d": day},
+            {"c": run.connection_id, "i": instrument_id, "d": day, "shift": shift},
         )
         if not has_candle:
             wanted.append((key, price))
+    if run.report.replayed:
+        await _remove_unwritten(run, {key for key, _ in wanted})
     for (instrument_id, quote_id, day), price in wanted:
         stored = await run.session.scalar(
             select(p.price).where(
@@ -522,3 +530,34 @@ async def prices(run: Run) -> None:
             as_of_date=day,
             source=SOURCE,
         )
+
+
+async def _remove_unwritten(run: Run, wanted: set[tuple[UUID, UUID, date]]) -> None:
+    """Delete the `etoro` prices of the connection's instruments (those its candles name, and
+    those priced now) that no record of the replay gives."""
+    instruments = {instrument_id for instrument_id, _, _ in wanted}
+    instruments |= set(
+        await run.session.scalars(
+            text(
+                "select distinct ii.instrument_id from finance.etoro_candles c"
+                " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
+                " and ii.value = c.instrument_id::text where c.connection_id = :c"
+            ),
+            {"c": run.connection_id},
+        )
+    )
+    if not instruments:
+        return
+    p = models.Price
+    stored = await run.session.execute(
+        select(p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date).where(
+            p.source == SOURCE, p.instrument_id.in_(instruments)
+        )
+    )
+    unwritten = [
+        row.id
+        for row in stored
+        if (row.instrument_id, row.quote_instrument_id, row.as_of_date) not in wanted
+    ]
+    for price_id in unwritten:
+        await delete_price(run.command, price_id)

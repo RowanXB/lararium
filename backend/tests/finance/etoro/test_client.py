@@ -433,10 +433,13 @@ async def test_candles_follow_the_cursor() -> None:
     items = await (await env.ready()).candles(9001, date(2026, 6, 1), date(2026, 6, 4))
     assert [i["time"] for i in items] == ["2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z"]
     assert [r.url.path for r in env.requests] == ["/api/v1/data/instruments/9001/candles"] * 2
+    # A candle's day is the UTC date 12 hours after its time (eToro stamps each at midnight in
+    # Israel, 21:00 or 22:00 UTC the evening before): the window holds the days asked, the
+    # first one's included.
     query = {
         "interval": "1d",
-        "from": "2026-06-01T00:00:00Z",
-        "to": "2026-06-05T00:00:00Z",
+        "from": "2026-05-31T12:00:00Z",
+        "to": "2026-06-04T12:00:00Z",
         "limit": "2000",
     }
     assert env.params() == [query, {**query, "cursor": "cur-2"}]
