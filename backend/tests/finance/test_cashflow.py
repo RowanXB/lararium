@@ -3,7 +3,9 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import insert
 
+from lararium.modules.finance import models
 from lararium.modules.finance.accounts import set_excluded_from_reports
 from lararium.modules.finance.cashflow import CategoryTotal, PayeeTotal, cash_flow
 from lararium.modules.finance.errors import FinanceValidationError
@@ -190,3 +192,43 @@ async def test_only_own_asset_and_liability_accounts_can_be_excluded(
     for account_id in (expense.id, unassigned):
         with pytest.raises(FinanceValidationError):
             await run(set_excluded_from_reports, account_id, True)
+
+
+async def test_a_transfer_fee_goes_with_an_excluded_side(
+    session, run, move, make_account, bank, unassigned, gbp
+) -> None:
+    """A settlement posts only to In transit and Unassigned, so it is left out by the
+    transfer it settles: when either of its accounts is excluded."""
+    other = await make_account(name="Other", balance_mode="transactions")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    day = date(2026, 11, 2)
+    sent = await move("-100", day, contra=in_transit)
+    received = await move("95", day, account=other, contra=in_transit)
+    fee = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Transfer fee",
+            postings=[
+                PostingInput(in_transit, gbp.id, Decimal("-5"), is_fee=True),
+                PostingInput(unassigned, gbp.id, Decimal("5")),
+            ],
+        ),
+    )
+    await session.execute(
+        insert(models.Transfer).values(
+            from_account_id=bank.id,
+            to_account_id=other.id,
+            instrument_id=gbp.id,
+            amount=Decimal("100"),
+            status="matched",
+            out_transaction_id=sent.id,
+            in_transaction_id=received.id,
+            settlement_transaction_id=fee.id,
+            opened_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+        )
+    )
+
+    assert (await cash_flow(session, START, END)).spending == Decimal("5")
+    for excluded in ([other.id], [bank.id], [bank.id, other.id]):
+        assert (await cash_flow(session, START, END, excluded=excluded)).spending == 0

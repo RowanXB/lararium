@@ -97,6 +97,13 @@ _FLOWS = """
           select 1 from finance.postings x
           where x.transaction_id = t.id and x.account_id = any(:excluded)
         )
+        -- A transfer's settlement (its fee, or its conversion) posts only to In transit and
+        -- Unassigned; it belongs to the transfer's two accounts.
+        and not exists (
+          select 1 from finance.transfers tr
+          where tr.settlement_transaction_id = t.id
+            and (tr.from_account_id = any(:excluded) or tr.to_account_id = any(:excluded))
+        )
     ),
     rates as (
       select k.instrument_id, k.day,
@@ -180,7 +187,8 @@ async def cash_flow(
 ) -> CashFlow:
     """Income and spending from start to end, both included.
 
-    A transaction touching one of the `excluded` accounts is left out whole. Spending the
+    A transaction touching one of the `excluded` accounts is left out whole, and so is the
+    settlement of a transfer to or from one, which touches neither side. Spending the
     source itself marks as not spending (include_in_spending false) is left out too.
     """
     require_series_range(start, end)
