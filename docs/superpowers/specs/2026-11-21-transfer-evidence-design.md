@@ -89,6 +89,7 @@ The owner chose A. The owner left the sort-code tier (goal 3) to the designer's 
 
 1. **The full identifier, as now.** The registered account of the record's counterparty registry row (sort code and account number).
 2. **An account number alone.** For an imported row with the other side's account number and no sort code: the own account whose registered UK bank account has that account number, when exactly one own account's does. When two do, it names nobody.
+   - **Connector rows too (M6 ruling R28, 2026-11-23).** A connector whose record gives an account number without a sort code (eToro Money's bank transfers print `bankAccountNumber` alone) stores it on the transaction, `finance.transactions.counterparty_account_number` (8 digits; `CounterpartyFields.account_number`). It is the same evidence, counted with the import rows' numbers: one number names the own account registered under it, and two different ones (the transaction's and an import row's) name nobody. It makes the record `names_account`, so the weak tier never takes it. `transfer_contra` still reads only the full identifier at post time, so such a record is posted on Unassigned and matching moves it to In transit when it pairs. `preview_match` does not read it: only connectors give it, and they do not preview.
 3. **A sub-account's main account.** For a bank transfer on a sub-account (§5.2) that names no bank account at all (none of items 1 and 2, and no sort code either): its main account.
 
 M4's rule that a record naming its own account is no transfer (§5.3) holds for every item.

@@ -3,6 +3,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from psycopg.errors import LockNotAvailable, QueryCanceled, UniqueViolation
@@ -66,6 +68,17 @@ async def _database_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code)
 
 
+async def _validation_error(request: Request, exc: Exception) -> JSONResponse:
+    """FastAPI's 422 body, without each error's `input`: a rejected field can be a key or
+    a token, and the default body echoes it back (and `ctx`, which can hold it too)."""
+    assert isinstance(exc, RequestValidationError)
+    errors = [
+        {name: value for name, value in error.items() if name not in ("input", "ctx")}
+        for error in exc.errors()
+    ]
+    return JSONResponse({"detail": jsonable_encoder(errors)}, status.HTTP_422_UNPROCESSABLE_CONTENT)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     engine = create_engine(settings.database_url)  # connects lazily, on first use
@@ -87,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.sessionmaker = make_sessionmaker(engine)
     app.state.document_store = LocalDocumentStore(settings.document_dir)
+    app.add_exception_handler(RequestValidationError, _validation_error)
     for error_class in (IntegrityError, DataError, OperationalError):
         app.add_exception_handler(error_class, _database_error)
     app.include_router(core_routes.public_router)

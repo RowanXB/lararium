@@ -104,6 +104,8 @@ _ERRORS: dict[type[errors.FinanceError], tuple[int, str]] = {
     errors.ImportHasErrorsError: (status.HTTP_409_CONFLICT, "import_has_errors"),
     errors.ImportBatchStaleError: (status.HTTP_409_CONFLICT, "import_batch_stale"),
     errors.TransactionImportedError: (status.HTTP_409_CONFLICT, "transaction_imported"),
+    errors.ReviewNotFoundError: (status.HTTP_404_NOT_FOUND, "review_not_found"),
+    errors.ReviewResolvedError: (status.HTTP_409_CONFLICT, "review_resolved"),
 }
 _UPLOAD_CHUNK = 64 * 1024
 
@@ -250,6 +252,7 @@ async def rename_account(
 async def close_account(
     account_id: UUID, body: AccountClose, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
+    """Close the account; it stays a holder of the card merchants it held."""
     args = _args(body, account_id=account_id)
     async with command_context(session, actor, "close_account", args) as ctx:
         record = await accounts.close_account(ctx, account_id, body.closed_on)

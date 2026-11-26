@@ -1,8 +1,8 @@
-.PHONY: check backend-sync backend-check real-check openapi openapi-check web-install web-check up down backup
+.PHONY: check backend-sync backend-check license-check real-check openapi openapi-check web-install web-check up down backup restore-rehearsal
 
 COMPOSE = docker compose -f infra/compose.yaml --env-file infra/.env
 
-check: backend-check openapi-check web-check
+check: backend-check license-check openapi-check web-check
 
 # Install exactly what the lockfiles pin; fail if a lockfile is out of date.
 backend-sync:
@@ -14,17 +14,37 @@ web-install:
 backend-check: backend-sync
 	cd backend && uv run --locked ruff check .
 	cd backend && uv run --locked ruff format --check .
+	cd backend && uv run --locked ruff check --config pyproject.toml ../tools
+	cd backend && uv run --locked ruff format --check --config pyproject.toml ../tools
 	cd backend && uv run --locked pyright
 	cd backend && uv run --locked lint-imports
 	cd backend && uv run --locked pytest -q
 
+# Every production dependency's licence must be compatible with AGPL-3.0-or-later, or have a
+# reviewed exception (tools/licenses.toml; README, "Dependency licences").
+license-check: backend-sync web-install
+	cd backend && uv run --locked python ../tools/license_check.py
+
 # Your own bank statements, end to end on the throwaway test database (README, "Verifying
-# against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC/Revolut/Tembo/LemF folders>.
+# against your real statements"): make real-check REAL_ROOT=<dir holding HSBC/Lloy/BOC/Revolut/Tembo/LemF folders>,
+# and/or ETORO_STATEMENT=<an eToro account statement, xlsx> (at least one of the two).
 # Prints counts and pass or fail only.
+# With both set, both run even when the first fails; the target fails at the end. Each check is
+# in the recipe only when its variable is set.
+BANK_CHECK = if root="$$(cd "$(REAL_ROOT)" && pwd)"; then \
+		(cd backend && LARARIUM_REAL_ROOT="$$root" \
+			uv run --locked pytest -q -s -p no:cacheprovider tests/finance/importing/test_real_files.py) \
+			|| failed=1; \
+	else echo "REAL_ROOT is not a folder"; failed=1; fi;
+ETORO_CHECK = if [ -f "$(ETORO_STATEMENT)" ]; then \
+		statement="$$(cd "$$(dirname "$(ETORO_STATEMENT)")" && pwd)/$$(basename "$(ETORO_STATEMENT)")"; \
+		(cd backend && LARARIUM_ETORO_STATEMENT="$$statement" \
+			uv run --locked pytest -q -s -p no:cacheprovider tests/finance/etoro/test_real_statement.py::test_real_statement) \
+			|| failed=1; \
+	else echo "ETORO_STATEMENT is not a file: give the path of an eToro account statement (xlsx)"; failed=1; fi;
 real-check: backend-sync
-	$(if $(REAL_ROOT),,$(error set REAL_ROOT to the folder holding one folder per bank))
-	root="$$(cd "$(REAL_ROOT)" && pwd)" && cd backend && LARARIUM_REAL_ROOT="$$root" \
-		uv run --locked pytest -q -s -p no:cacheprovider tests/finance/importing/test_real_files.py
+	$(if $(REAL_ROOT)$(ETORO_STATEMENT),,$(error set REAL_ROOT to the folder holding one folder per bank or ETORO_STATEMENT to an eToro statement (xlsx) or both))
+	@failed=0; $(if $(REAL_ROOT),$(BANK_CHECK)) $(if $(ETORO_STATEMENT),$(ETORO_CHECK)) exit $$failed
 
 # Regenerate web/openapi.json from the backend, then the typed client from it.
 # The export goes to a temporary file first, so a failed export can't truncate the spec.
@@ -55,3 +75,9 @@ down:
 
 backup:
 	infra/backup/backup.sh
+
+# Restore a backup into a throwaway PostgreSQL on another Docker host and check it (README,
+# "Restore rehearsal"): make restore-rehearsal CONTEXT=<docker context> DUMP=<.dump> DOCUMENTS=<.tar>
+restore-rehearsal:
+	$(if $(and $(CONTEXT),$(DUMP),$(DOCUMENTS)),,$(error set CONTEXT, DUMP and DOCUMENTS))
+	infra/backup/rehearse-restore.sh "$(CONTEXT)" "$(DUMP)" "$(DOCUMENTS)"

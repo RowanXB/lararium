@@ -39,6 +39,9 @@ TRANSFERS_TO_B = 100
 # snapshot); healing 100 newly identified transfers about 4.5 s, nearly all of it the ~27
 # small indexed statements each record's own matching runs (its contra, its transfer, its
 # placeholder, their audit). Without the imported rows, the same day: 0.3 s and 3.7 s.
+# With JIT on (lararium.db turns it off), a heal with nothing due took 5.5 s without
+# statistics, 2.4 s of it compiling the scan of the own records, whose estimated cost the
+# missing statistics inflate (and 3.2-3.4 s on CI); 1 s with it off, as with stale ones.
 # Before the snapshot, with stale statistics, finding what was due alone hit the 30 s
 # statement timeout (and took 26 s before the pair relation was computed set-wise); so did
 # reading what the imported rows print while rows and batches were joined (and took 11 s
