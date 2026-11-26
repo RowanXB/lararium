@@ -671,9 +671,9 @@ itself.
   another date.
 - Trading 212's signs (of withdrawals, fees, transfers, an order's taxes and net value) and
   its export's trade rows haven't been checked against a real trade yet.
-- A Trading 212 record that Trading 212 changes and later changes back to what it was
-  before is posted from that earlier content when a new version of Lararium rebuilds the
-  connection's transactions.
+- If Trading 212 changes a record and later changes it back (a deposit stated as 10, then
+  20, then 10 again), Lararium posts 10; but when a new version of Lararium rebuilds the
+  connection's transactions, it posts the version in between (20).
 - Card deposits pair only with records of connector accounts, never with a manual or imported
   one.
 - A card payment pairs with any record of the merchant's account that names no other account
