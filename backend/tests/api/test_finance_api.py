@@ -337,3 +337,47 @@ async def test_voiding_a_derived_transaction_is_refused(client, session, run) ->
     detail = response.json()["detail"]
     assert detail["error"] == "invalid_input"
     assert "derived" in detail["message"]
+
+
+async def test_excluding_an_account_and_cash_flow(client) -> None:
+    account_id, gbp_id = await _account(client), await _gbp_id(client)
+    snapshot = {"instrument_id": gbp_id, "quantity": "100", "as_of": "2026-11-01T12:00:00Z"}
+    await client.post(f"/api/v1/finance/accounts/{account_id}/snapshots", json=snapshot)
+    day = {"start": "2026-11-02", "end": "2026-11-02"}
+    assert (await client.get("/api/v1/finance/net-worth", params=day)).json()[0]["value"] == "100"
+
+    url = f"/api/v1/finance/accounts/{account_id}/reporting"
+    excluded = await client.post(url, json={"excluded": True})
+    assert excluded.json()["excluded_from_reports"] is True
+    assert (await client.get("/api/v1/finance/net-worth", params=day)).json()[0]["value"] == "0"
+    assert (
+        await client.get("/api/v1/finance/holdings", params={"date": "2026-11-02"})
+    ).json() == []
+    # The Accounts page still shows a hidden account's balance.
+    every = {"date": "2026-11-02", "all_accounts": "true"}
+    shown = (await client.get("/api/v1/finance/holdings", params=every)).json()
+    assert [h["value"] for h in shown] == ["100"]
+    listed = (await client.get("/api/v1/finance/accounts")).json()
+    assert [a["excluded_from_reports"] for a in listed if a["id"] == account_id] == [True]
+
+    assert (await client.post(url, json={"excluded": False})).json()[
+        "excluded_from_reports"
+    ] is False
+    assert (await client.get("/api/v1/finance/net-worth", params=day)).json()[0]["value"] == "100"
+
+    flow = (await client.get("/api/v1/finance/cash-flow", params=day | {"bucket": "day"})).json()
+    assert flow == {
+        "start": "2026-11-02",
+        "end": "2026-11-02",
+        "bucket": "day",
+        "income": "0",
+        "spending": "0",
+        "net": "0",
+        "missing_count": 0,
+        "periods": [{"start": "2026-11-02", "income": "0", "spending": "0"}],
+        "categories": [],
+        "payees": [],
+        "hidden_accounts": [],
+    }
+    bad = await client.get("/api/v1/finance/cash-flow", params={"bucket": "year"})
+    assert bad.status_code == 422

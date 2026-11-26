@@ -26,6 +26,7 @@ from lararium.modules.finance.accounts import (
     SourceKind,
     TaxWrapper,
 )
+from lararium.modules.finance.cashflow import Bucket
 from lararium.modules.finance.identifiers import IdentifierKind
 from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
@@ -143,6 +144,12 @@ class AccountOut(_Out):
     closed_on: date | None
     # One the ledger keeps for itself (Unassigned, Opening balances, In transit).
     system: bool
+    # Left out of net worth, holdings and cash flow by the owner.
+    excluded_from_reports: bool
+
+
+class AccountReportingUpdate(BaseModel):
+    excluded: bool
 
 
 class SnapshotCreate(BaseModel):
@@ -264,6 +271,49 @@ class NetWorthPointOut(_Out):
     day: date
     value: DecimalStr
     missing_count: int
+
+
+class CashFlowPeriodOut(_Out):
+    start: date
+    income: DecimalStr
+    spending: DecimalStr
+
+
+class CashFlowCategoryOut(_Out):
+    category: str | None
+    income: DecimalStr
+    spending: DecimalStr
+
+
+class CashFlowPayeeOut(_Out):
+    name: str
+    spending: DecimalStr
+
+
+class CashFlowHiddenAccountOut(_Out):
+    """Money moved between an account left out of reports and those still in them."""
+
+    account_id: UUID
+    name: str
+    moved_in: DecimalStr  # from the hidden account: income
+    moved_out: DecimalStr  # into the hidden account: spending
+
+
+class CashFlowOut(_Out):
+    """Income and spending in the reporting currency; spending is positive."""
+
+    start: date
+    end: date
+    bucket: Bucket
+    income: DecimalStr
+    spending: DecimalStr
+    net: DecimalStr
+    missing_count: int
+    periods: list[CashFlowPeriodOut]
+    categories: list[CashFlowCategoryOut]
+    payees: list[CashFlowPayeeOut]
+    # Also in the totals and periods, apart from categories and payees.
+    hidden_accounts: list[CashFlowHiddenAccountOut]
 
 
 # Imports

@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
+from lararium.core.errors import SettingNotFoundError
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Setting
+from lararium.core.settings_store import get_setting, set_setting
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import (
     AccountAlreadyClosedError,
@@ -31,6 +33,8 @@ AccountStatus = Literal["open", "closed"]
 # The settings remembering the ledger's own accounts (system_accounts): an account is one
 # when a setting under this prefix holds its id.
 SYSTEM_ACCOUNT_SETTING_PREFIX = "finance.system_account."
+# The ids of the accounts the owner left out of reports, as a list of strings.
+EXCLUDED_ACCOUNTS_KEY = "finance.report_excluded_accounts"
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,8 @@ class AccountRecord:
     # One the ledger keeps for itself (Unassigned, Opening balances, In transit): the owner
     # can't close, rename or snapshot it.
     system: bool
+    # Left out of the reports (net worth, holdings, cash flow) by the owner; its records stay.
+    excluded_from_reports: bool
     product_type: str | None
     owner_type: str | None
     goal_amount: Decimal | None
@@ -102,6 +108,12 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
                 Setting.value == func.to_jsonb(sql_cast(a.id, Text)),
             )
             .label("system"),
+            exists()
+            .where(
+                Setting.key == EXCLUDED_ACCOUNTS_KEY,
+                Setting.value.contains(func.to_jsonb(sql_cast(a.id, Text))),
+            )
+            .label("excluded_from_reports"),
             a.product_type,
             a.owner_type,
             a.goal_amount,
@@ -129,6 +141,7 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             opened_on=row.opened_on,
             closed_on=row.closed_on,
             system=row.system,
+            excluded_from_reports=row.excluded_from_reports,
             product_type=row.product_type,
             owner_type=row.owner_type,
             goal_amount=row.goal_amount,
@@ -398,4 +411,41 @@ async def set_balance_mode(
     record = await get_account(ctx.session, account_id)
     if switched is not None:
         _publish(ctx, "finance.account.updated", record)
+    return record
+
+
+async def excluded_account_ids(session: AsyncSession) -> frozenset[UUID]:
+    """The accounts the owner left out of reports."""
+    try:
+        value = await get_setting(session, EXCLUDED_ACCOUNTS_KEY)
+    except SettingNotFoundError:
+        return frozenset()
+    if not isinstance(value, list):
+        raise ValueError(f"{EXCLUDED_ACCOUNTS_KEY} must be a list of account ids, got {value!r}")
+    return frozenset(UUID(str(item)) for item in value)
+
+
+async def set_excluded_from_reports(
+    ctx: CommandContext, account_id: UUID, excluded: bool
+) -> AccountRecord:
+    """Leave an account out of the reports, or put it back. Nothing in the ledger changes.
+
+    Only an asset or liability account of the owner's: the others are in no report's totals,
+    and without In transit a transfer would dip net worth while it is on its way.
+    """
+    session = ctx.session
+    record = await get_account(session, account_id)
+    require_owner_account(record, "left out of reports")
+    if record.ledger_type not in ("asset", "liability"):
+        raise FinanceValidationError(f"{record.name} isn't an asset or liability account")
+    # Read and write the list under one lock, so two concurrent changes both land.
+    await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(EXCLUDED_ACCOUNTS_KEY))))
+    current = await excluded_account_ids(session)
+    wanted = current | {account_id} if excluded else current - {account_id}
+    if wanted == current:
+        return record
+    value: list[JSONValue] = [*sorted(str(item) for item in wanted)]
+    await set_setting(ctx, EXCLUDED_ACCOUNTS_KEY, value)
+    record = await get_account(session, account_id)
+    ctx.emit("finance.account.updated", record.id, {"account_id": str(record.id)})
     return record
