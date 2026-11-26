@@ -5,6 +5,7 @@ import dataclasses
 import itertools
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from lararium.modules.finance.binance.fetch import (
     LAUNCH_MS,
     record_type,
     trade_symbols,
+    typed,
     walk,
     walk_trades,
     windows,
@@ -488,6 +490,19 @@ async def test_a_row_that_cannot_be_typed_fails_its_page_and_stores_nothing(
     )
     assert stored == 0
     assert (await get_connection(session, connection.id)).config.get(CURSORS_KEY) == before
+
+
+def test_the_door_checks_an_answer_as_it_is_stored_and_read_back() -> None:
+    # A JSON `1.0` is the Decimal 1.0 in memory, an integer; stored, it is the text "1.0".
+    unreadable = build_row("deposits", status=Decimal("1.0"))
+    with pytest.raises(BinanceDataError) as caught:
+        typed("deposits", build_response("deposits", [unreadable]))
+    assert (caught.value.label, caught.value.field) == ("deposits", "[].status")
+    # A decimal amount, a number or a string, reads back as it is stored.
+    for amount in (Decimal("1.50"), "0.10"):
+        row = build_row("deposits", amount=amount)
+        [kept] = typed("deposits", build_response("deposits", [row])).rows
+        assert kept["amount"] == str(amount)
 
 
 async def test_a_balance_read_that_cannot_be_typed_fails(fake, clock) -> None:

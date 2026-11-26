@@ -30,7 +30,14 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.binance import layout, notices, tables
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
-from lararium.modules.finance.binance.parse import ApiValue, Parsed, Row, parse, unknown_flags
+from lararium.modules.finance.binance.parse import (
+    ApiValue,
+    Parsed,
+    Row,
+    as_api,
+    parse,
+    unknown_flags,
+)
 from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
@@ -246,7 +253,12 @@ def typed(label: str, body: ApiValue) -> Parsed:
     """An answer parsed, and each of its rows and what it says beside them converted as the
     typed tables will convert them, and a history record's ledger key checked: a row that
     cannot be typed or keyed is never stored raw, so every stored record can be normalised.
-    The `BinanceDataError` names the field."""
+    The `BinanceDataError` names the field.
+
+    Everything is checked on the answer as it is stored and read back (`to_json`, then
+    `as_api`), not as it is in memory: a JSON `1.0` is a whole Decimal now but the text "1.0"
+    once stored. The parsed answer returned is that form, the one its callers store."""
+    body = as_api(to_json(body))
     parsed = parse(label, body)
     endpoint = ENDPOINTS[label]
     if label in layout.TABLE_LABELS:
@@ -287,7 +299,7 @@ async def window_pages(
         body = await client.call(endpoint, asked)
         parsed = typed(endpoint.label, body)
         unknown = tuple(unknown_flags(endpoint.label, parsed))
-        return Page(endpoint.label, start, end, index, body, parsed.rows, unknown)
+        return Page(endpoint.label, start, end, index, parsed.body, parsed.rows, unknown)
 
     if endpoint.paging == "none":
         answer = await ask(0, params)

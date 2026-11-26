@@ -3,8 +3,10 @@ the account check, the balance reads and a first sync that resumes."""
 
 import base64
 import json
+import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -602,6 +604,55 @@ async def _delete(engine, owner_url: str, connection_id: uuid.UUID, before: Befo
         await owner.dispose()
 
 
+@asynccontextmanager
+async def _committed(
+    backend_url: str,
+    owner_url: str,
+    fake: FakeBinance,
+    clock: Clock,
+    handler: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> AsyncIterator[tuple[Any, uuid.UUID, Callable[[], Awaitable[Any]]]]:
+    """A connection whose syncs commit for real (each step commits on its own, a failed
+    sync's transaction rolls back), and a sync 4 hours after the last, answered by `handler`
+    (the fake's own by default); deleted afterwards."""
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id: uuid.UUID | None = None
+    before = await _committed_before(owner_url)
+    try:
+        async with (
+            sessions() as setup,
+            command_context(setup, Actor("user", "dev"), "test.setup", {}) as ctx,
+        ):
+            connection = await create_connection(
+                ctx,
+                connector="binance",
+                display_name=f"Binance {uuid.uuid4()}",
+                config={"key_type": "hmac", "uid": UID, **later_config()},
+            )
+            connection_id = connection.id
+            await store_credential(ctx, KEY, connection_id, "api_key", API_KEY, None)
+            await store_credential(ctx, KEY, connection_id, "api_secret", API_SECRET, None)
+            await setup.execute(
+                text("update core.connections set status = 'healthy' where id = :id"),
+                {"id": connection_id},
+            )
+        found = connection_id
+
+        async def sync() -> Any:
+            clock.ms += 4 * HOUR_MS
+            async with sessions() as session:
+                return await run_binance_sync(
+                    session, found, handler or fake.handler, session_factory=sessions
+                )
+
+        yield sessions, found, sync
+    finally:
+        if connection_id is not None:
+            await _delete(engine, owner_url, connection_id, before)
+        await engine.dispose()
+
+
 # Whatever the parser finds unknown in any answer the sync reads is flagged.
 
 
@@ -755,6 +806,16 @@ def _answering(fake: FakeBinance, label: str, change: Any) -> tuple[Any, dict[st
     return handler, on
 
 
+async def _cursor(sessions, connection_id: uuid.UUID, key: str) -> JSONValue:
+    async with sessions() as session:
+        config = (await get_connection(session, connection_id)).config
+    return config[CURSORS_KEY][key]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+
+# A refusal at the door is checked on syncs that commit for real: a window whose answer was
+# stored would stay stored, its cursor moved, whatever fails after it.
+
+
 @pytest.mark.parametrize(
     ("label", "field", "change"),
     [
@@ -763,29 +824,81 @@ def _answering(fake: FakeBinance, label: str, change: Any) -> tuple[Any, dict[st
     ],
 )
 async def test_a_history_answer_whose_records_are_null_is_not_an_empty_window(
-    session, run, fake: FakeBinance, connector, clock: Clock, label: str, field: str, change
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    label: str,
+    field: str,
+    change,
 ) -> None:
     fake.add(label, _history_row(label, NOW_MS - 2 * HOUR_MS))
     handler, broken = _answering(fake, label, change)
-    connection = await binance_connection(run, config=later_config())
-    before = connection.config[CURSORS_KEY][label]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+    async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
+        before = await _cursor(sessions, id_, label)
 
-    after = await run_binance_sync(session, connection.id, handler)
+        after = await sync()
 
-    assert after.status == "failing"
-    assert f"Binance answered {label} in an unexpected shape (field {field})" in (
-        after.last_error or ""
-    )
-    assert await _raw(session, connection.id, label) == 0
-    assert after.config[CURSORS_KEY][label] == before  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+        assert after.status == "failing"
+        assert f"Binance answered {label} in an unexpected shape (field {field})" in (
+            after.last_error or ""
+        )
+        assert await _count(sessions, id_, record_type(label)) == 0
+        assert await _cursor(sessions, id_, label) == before
 
-    # Binance answers the window normally: the next sync stores its record.
-    broken["on"] = False
-    clock.ms += 4 * HOUR_MS
-    again = await run_binance_sync(session, connection.id, handler)
+        # Binance answers the window normally: the next sync stores its record.
+        broken["on"] = False
+        again = await sync()
 
-    assert again.status == "healthy", again.last_error
-    assert await _raw(session, connection.id, label) == 1
+        assert again.status == "healthy", again.last_error
+        assert await _count(sessions, id_, record_type(label)) == 1
+
+
+async def test_a_value_unreadable_once_stored_is_refused_on_the_live_answer(
+    backend_url: str, owner_url: str, migrated: None, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # The JSON number 1.0 for an integer: the client reads it as a whole Decimal, but it is
+    # stored as the text "1.0", which no replay could read.
+    fake.add("deposits", _history_row("deposits", NOW_MS - 2 * HOUR_MS))
+
+    def one_point_o(answer: httpx.Response) -> bytes:
+        content = re.sub(rb'"status": 1(?=[,}])', b'"status": 1.0', answer.content)
+        assert content != answer.content
+        return content
+
+    broken = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        if request.url.path != ENDPOINTS["deposits"].path or not broken["on"]:
+            return answer
+        return httpx.Response(200, content=one_point_o(answer))
+
+    async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
+        before = await _cursor(sessions, id_, "deposits")
+
+        after = await sync()
+
+        assert after.status == "failing"
+        assert "deposits" in (after.last_error or "")
+        assert "[].status" in (after.last_error or "")
+        assert await _count(sessions, id_, record_type("deposits")) == 0
+        assert await _cursor(sessions, id_, "deposits") == before
+
+        # Binance answers 1: the next sync stores the deposit and normalises it.
+        broken["on"] = False
+        again = await sync()
+
+        assert again.status == "healthy", again.last_error
+        assert await _count(sessions, id_, record_type("deposits")) == 1
+        async with sessions() as session:
+            posted = await session.scalar(
+                text("select count(*) from finance.transactions where connection_id = :c"),
+                {"c": id_},
+            )
+        assert posted >= 1
 
 
 async def test_a_history_answer_without_its_record_list_is_an_empty_window(

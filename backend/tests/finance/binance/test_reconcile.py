@@ -3,20 +3,14 @@ Decision 11): the differences stored, warned and told once, closed when the reco
 explains them arrives, and the trade sweep after an unexplained change (design 5.2)."""
 
 import itertools
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
 
-from lararium.core.actors import Actor
-from lararium.core.commands import command_context
-from lararium.core.connections import create_connection, store_credential
-from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.parse import ApiValue
 from lararium.modules.finance.binance.reconcile import TOUCHED_KEY
@@ -24,17 +18,13 @@ from lararium.modules.finance.binance.sync import SWEPT_KEY
 
 from .fixtures import HOUR_MS, FakeBinance, build_row
 from .syncing import (
-    API_KEY,
-    API_SECRET,
-    KEY,
-    UID,
     Clock,
     RecordingNotifier,
     binance_connection,
     later_config,
     run_binance_sync,
 )
-from .test_sync import _committed_before, _delete
+from .test_sync import _committed
 
 _CHANGED = "changed by something no record explains"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -542,50 +532,6 @@ async def test_first_sync_checks_every_daily_interval(
     [difference] = await _differences(session, connection.id)
     assert (difference.from_at, difference.to_at) == (reported[0], reported[1])
     assert (difference.reported_change, difference.posted_sum) == (3, 0)
-
-
-@asynccontextmanager
-async def _committed(
-    backend_url: str, owner_url: str, fake: FakeBinance, clock: Clock
-) -> AsyncIterator[tuple[Any, UUID, Callable[[], Awaitable[Any]]]]:
-    """A connection whose syncs commit for real (each step commits on its own, a failed
-    sync's transaction rolls back), and a sync 4 hours after the last; deleted afterwards."""
-    engine = create_engine(backend_url)
-    sessions = make_sessionmaker(engine)
-    connection_id: UUID | None = None
-    before = await _committed_before(owner_url)
-    try:
-        async with (
-            sessions() as setup,
-            command_context(setup, Actor("user", "dev"), "test.setup", {}) as ctx,
-        ):
-            connection = await create_connection(
-                ctx,
-                connector="binance",
-                display_name=f"Binance {uuid4()}",
-                config={"key_type": "hmac", "uid": UID, **later_config()},
-            )
-            connection_id = connection.id
-            await store_credential(ctx, KEY, connection_id, "api_key", API_KEY, None)
-            await store_credential(ctx, KEY, connection_id, "api_secret", API_SECRET, None)
-            await setup.execute(
-                text("update core.connections set status = 'healthy' where id = :id"),
-                {"id": connection_id},
-            )
-        found = connection_id
-
-        async def sync() -> Any:
-            clock.ms += 4 * HOUR_MS
-            async with sessions() as session:
-                return await run_binance_sync(
-                    session, found, fake.handler, session_factory=sessions
-                )
-
-        yield sessions, found, sync
-    finally:
-        if connection_id is not None:
-            await _delete(engine, owner_url, connection_id, before)
-        await engine.dispose()
 
 
 async def _broken(*_: Any, **__: Any) -> Any:
