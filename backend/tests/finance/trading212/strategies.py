@@ -3,7 +3,9 @@
 A history is one Invest account's true events in time order, in GBP, on one US-listed stock:
 deposits and withdrawals, buys and sells (with or without a currency conversion fee),
 cancelled orders, dividends, interest and fees. Its cash and shares never go below zero, as
-Trading 212's do not. Each is shaped as the API's history rows of the fixtures (fixtures.py),
+Trading 212's do not. A drawn history holds its shares under two tickers of the one listing
+(`split`): its positions report one share under the second ticker, the rest under the first.
+Each event is shaped as the API's history rows of the fixtures (fixtures.py),
 with the sign rules records.py documents: a buy's `netValue` is what it cost, its taxes
 included; a sell's what it brought, its taxes taken out; a fill's price is in the stock's
 currency at a fixed `fxRate`. Times are whole seconds in UTC, as the API's and the export's
@@ -37,6 +39,8 @@ from .fixtures import ACCOUNT_ID, TICKER, instrument
 
 START = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
 FX = Decimal("0.8")  # GBP per USD, every fill's
+# A second ticker of the fixtures' listing: the same ISIN and currency, so one instrument.
+OTHER_TICKER = "ZZQB_US_EQ"
 CURRENT_PRICE = Decimal("110.00")  # USD: each sync's positions price the stock at it
 PRICES = (Decimal("80.00"), Decimal("100.00"), Decimal("125.50"))  # GBP per share
 FEES = (Decimal(0), Decimal("0.50"), Decimal("1.20"))
@@ -166,6 +170,7 @@ class Event:
 @dataclass(frozen=True)
 class History:
     events: tuple[Event, ...]
+    split: bool = False
 
     def upto(self, cut: int) -> list[Event]:
         return [e for e in self.events if e.n < cut]
@@ -201,28 +206,29 @@ class History:
         }
 
     def positions(self, cut: int) -> list[dict[str, Any]]:
-        shares = self.shares(cut)
-        if shares == 0:
-            return []
+        total = self.shares(cut)
+        other = Decimal(1) if self.split and total >= 2 else Decimal(0)
+        held = {TICKER: total - other, OTHER_TICKER: other}
+        return [self._position(cut, ticker, shares) for ticker, shares in held.items() if shares]
+
+    def _position(self, cut: int, ticker: str, shares: Decimal) -> dict[str, Any]:
         value = (shares * CURRENT_PRICE * FX).quantize(Decimal("0.01"))
-        return [
-            {
-                "instrument": instrument(),
-                "quantity": shares,
-                "quantityAvailableForTrading": shares,
-                "quantityInPies": Decimal(0),
-                "averagePricePaid": Decimal("100.00"),
-                "currentPrice": CURRENT_PRICE,
-                "createdAt": stamp(START),
-                "walletImpact": {
-                    "currency": "GBP",
-                    "totalCost": self.cost(cut),
-                    "currentValue": value,
-                    "unrealizedProfitLoss": Decimal(0),
-                    "fxImpact": None,
-                },
-            }
-        ]
+        return {
+            "instrument": instrument(ticker),
+            "quantity": shares,
+            "quantityAvailableForTrading": shares,
+            "quantityInPies": Decimal(0),
+            "averagePricePaid": Decimal("100.00"),
+            "currentPrice": CURRENT_PRICE,
+            "createdAt": stamp(START),
+            "walletImpact": {
+                "currency": "GBP",
+                "totalCost": self.cost(cut),
+                "currentValue": value,
+                "unrealizedProfitLoss": Decimal(0),
+                "fxImpact": None,
+            },
+        }
 
     def sync_time(self, cut: int) -> datetime:
         """When a sync at the cut runs: a minute after the cut's last event, so before the
@@ -234,7 +240,7 @@ class History:
         return [e for e in reversed(self.upto(cut)) if e.endpoint == endpoint]
 
     def describe(self) -> str:
-        return "\n".join(
+        return f"split {self.split}\n" + "\n".join(
             f"{e.n}: {e.kind} {e.at:%d %H:%M:%S} cash {e.cash} shares {e.shares}"
             f" price {e.price} fee {e.fee}"
             for e in self.events
@@ -290,7 +296,7 @@ def histories(draw: st.DrawFn) -> History:
         cash += event.cash
         shares += event.shares
         events.append(event)
-    return History(tuple(events))
+    return History(tuple(events), split=draw(st.booleans()))
 
 
 @dataclass(frozen=True)

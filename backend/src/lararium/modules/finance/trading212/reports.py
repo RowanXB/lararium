@@ -1,18 +1,19 @@
 """What Trading 212 reports rather than records (design §5.9-5.10): instrument and exchange
 metadata; each summary, position, pending order and pie, typed per day, the summary's cash and
-each position a `reported` snapshot; and prices.
+each instrument's positions a `reported` snapshot; and prices.
 
 A report is dated by the sync that saw it (report_sightings): a raw record is stored once per
 content, so content that comes back (A, B, A) is one record, seen each time. Each sighting of
-a summary or a position is a reported snapshot at its time; a day's typed row and price are
-the day's latest sighting. Applied to every sighting in the order seen (a new normalizer
-version's replay), they come out as the syncs that saw them left them. Everything here is
-written only when it differs from what is stored.
+a summary, or of an instrument's positions, is a reported snapshot at its time; a day's typed
+row and price are the day's latest sighting. Applied to every sighting in the order seen (a
+new normalizer version's replay), they come out as the syncs that saw them left them.
+Everything here is written only when it differs from what is stored.
 """
 
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
+from itertools import groupby
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -128,22 +129,34 @@ def cash(record: Record) -> Decimal:
     return sum((number_at(record, content, f"cash.{part}") for part in _CASH), Decimal(0))
 
 
-async def _snapshot(run: Run, report: Report) -> UUID | None:
-    """The reported snapshot of a summary's cash or a position's quantity, as seen."""
-    record = report.record
-    if report.endpoint == "summary":
-        instrument_id = (await run.currency(text_at(record.content, "currency"))).id
-        quantity = cash(record)
-    else:
-        found = await run.instrument(
+async def _cash_snapshot(run: Run, report: Report) -> UUID:
+    """The reported snapshot of a summary's cash, as seen."""
+    currency = await run.currency(text_at(report.content, "currency"))
+    return await reported_snapshot(
+        run.command, run.account, currency.id, cash(report.record), report.seen_at, report.day
+    )
+
+
+async def _position_snapshots(run: Run, positions: Sequence[Report]) -> dict[str, UUID | None]:
+    """Ticker → the reported snapshot its row links, of the positions one sync saw at one
+    time. An instrument held under several tickers has one snapshot, of their quantities
+    together (as `reported` counts it), linked from the row of the smallest ticker."""
+    held: dict[UUID, list[Report]] = {}
+    found: dict[str, UUID | None] = {}
+    for report in positions:
+        record = report.record
+        instrument_id = await run.instrument(
             record, object_at(record.content, "instrument"), current=report.sync_id == run.sync_id
         )
-        if found is None:
-            return None
-        instrument_id, quantity = found, number_at(record, record.content, "quantity")
-    return await reported_snapshot(
-        run.command, run.account, instrument_id, quantity, report.seen_at, report.day
-    )
+        found[record_key(record)] = None
+        if instrument_id is not None:
+            held.setdefault(instrument_id, []).append(report)
+    for instrument_id, group in held.items():
+        quantity = sum((number_at(r.record, r.content, "quantity") for r in group), Decimal(0))
+        found[min(record_key(r.record) for r in group)] = await reported_snapshot(
+            run.command, run.account, instrument_id, quantity, group[0].seen_at, group[0].day
+        )
+    return found
 
 
 async def _summary(run: Run, report: Report, snapshot_id: UUID | None) -> None:
@@ -174,9 +187,25 @@ async def _position(run: Run, report: Report, snapshot_id: UUID | None) -> None:
         run.position_prices[(instrument_id, quote_id, report.day)] = in_quote
     values = await run.typed("positions", "trading212_positions", flat(content))
     ticker = values.pop("instrument_ticker")
+    key = {
+        "connection_id": run.connection_id,
+        "as_of_date": report.day,
+        "instrument_ticker": ticker,
+    }
+    if snapshot_id is not None:
+        # One row links a snapshot: the latest to name it. An earlier row has the same one
+        # when the instrument's quantity came back the same under another ticker.
+        await run.session.execute(
+            text(
+                "update finance.trading212_positions set snapshot_id = null"
+                " where snapshot_id = :snapshot_id and not (connection_id = :connection_id"
+                " and as_of_date = :as_of_date and instrument_ticker = :instrument_ticker)"
+            ),
+            key | {"snapshot_id": snapshot_id},
+        )
     await run.upsert(
         "trading212_positions",
-        {"connection_id": run.connection_id, "as_of_date": report.day, "instrument_ticker": ticker},
+        key,
         values | {"snapshot_id": snapshot_id, "raw_record_id": record.id},
     )
 
@@ -267,18 +296,33 @@ async def _pie_detail(run: Run, report: Report | None, pie_id: object, day: date
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:
-    """Every sighting, in the order seen: each summary and position a snapshot; then each
-    day's latest sighting of an item its typed row (and price)."""
+    """Every sighting, in the order seen: each summary, and each instrument's positions, a
+    snapshot; then each day's latest sighting of an item its typed row (and price), also in
+    the order seen."""
     ordered = sorted(reports, key=lambda r: r.order)
-    snapshots: dict[tuple[UUID, UUID], UUID | None] = {}
+    # (sync, endpoint, the item's key) → the snapshot the item's row links.
+    snapshots: dict[tuple[UUID, str, str], UUID | None] = {}
     latest: dict[tuple[str, date, str], Report] = {}
-    for report in ordered:
-        if report.endpoint in ("summary", "positions"):
-            snapshots[(report.sync_id, report.record.id)] = await _snapshot(run, report)
-        latest[(report.endpoint, report.day, record_key(report.record))] = report
+    for (_, sync_id), group in groupby(ordered, key=lambda r: (r.seen_at, r.sync_id)):
+        sighting = list(group)
+        for report in sighting:
+            key = record_key(report.record)
+            if report.endpoint == "summary":
+                snapshots[(sync_id, "summary", key)] = await _cash_snapshot(run, report)
+            latest[(report.endpoint, report.day, key)] = report
+        positions = [r for r in sighting if r.endpoint == "positions"]
+        for ticker, snapshot_id in (await _position_snapshots(run, positions)).items():
+            snapshots[(sync_id, "positions", ticker)] = snapshot_id
     details = {(r.sync_id, record_key(r.record)): r for r in ordered if r.endpoint == "pie"}
-    for (endpoint, _, key), report in latest.items():
-        snapshot_id = snapshots.get((report.sync_id, report.record.id))
+    # In the order seen, a snapshot several rows name linked from the last of them only: as
+    # the syncs that wrote them one by one left it (_position), so a replay writes nothing.
+    rows = sorted(latest.items(), key=lambda item: item[1].order)
+    linked = {snapshots.get((r.sync_id, e, k)): (e, day, k) for (e, day, k), r in rows}
+    for row, report in rows:
+        endpoint, _, key = row
+        snapshot_id = snapshots.get((report.sync_id, endpoint, key))
+        if linked[snapshot_id] != row:
+            snapshot_id = None
         match endpoint:
             case "summary":
                 await _summary(run, report, snapshot_id)

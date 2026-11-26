@@ -4,12 +4,22 @@
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import text
 
 from lararium.core.connections import get_connection, set_warnings
+from lararium.modules.finance import connector_run
 
-from .fixtures import dividend_item, order_item, position_json, summary_json, transaction_item
-from .test_normalize import META, NOW, Ledger, _connection
+from .fixtures import (
+    TICKER,
+    dividend_item,
+    instrument_json,
+    order_item,
+    position_json,
+    summary_json,
+    transaction_item,
+)
+from .test_normalize import META, NOW, Ledger, _connection, _delete_derived, _reports
 
 DEPOSIT = ("transactions", transaction_item(amount="491.95"))
 BUY = ("orders", order_item())
@@ -161,3 +171,104 @@ async def test_a_fill_after_the_summary_is_no_difference(session, run) -> None:
         SUMMARY, ("positions", position_json()), ("orders", after), now=LATER
     )
     assert report.mismatches == []
+
+
+# A second ticker of the fixtures' listing (the same ISIN and currency): one instrument.
+OTHER = "ZZQB_US_EQ"
+OTHER_META = ("instruments", instrument_json(OTHER))
+
+
+def _held(**quantities: str) -> list[tuple[str, dict]]:
+    tickers = {"first": TICKER, "other": OTHER}
+    return [("positions", position_json(tickers[k], quantity=q)) for k, q in quantities.items()]
+
+
+async def _links(session) -> list[tuple]:
+    """(ticker, the quantity of the snapshot its row links) of each position row."""
+    rows = await session.execute(
+        text(
+            "select p.instrument_ticker, s.quantity from finance.trading212_positions p"
+            " left join finance.balance_snapshots s on s.id = p.snapshot_id order by 1"
+        )
+    )
+    return [tuple(r) for r in rows]
+
+
+def _written(monkeypatch) -> list[str]:
+    """The typed tables written from here on, one entry per row."""
+    written: list[str] = []
+    upsert = connector_run.upsert_typed
+
+    async def spy(ctx, table, key, values) -> bool:
+        wrote = await upsert(ctx, table, key, values)
+        if wrote:
+            written.append(table)
+        return wrote
+
+    monkeypatch.setattr(connector_run, "upsert_typed", spy)
+    return written
+
+
+async def _writes_nothing(session, ledger: Ledger, written: list[str]) -> None:
+    """Normalizing the last sync again, and replaying every record, write nothing."""
+    state = await _reports(session, ledger.connection)
+    for again in (ledger.again, ledger.replay):
+        await again()
+        assert written == []
+        assert (ledger.events(), ledger.changes()) == (0, 1 if again == ledger.replay else 0)
+        assert await _reports(session, ledger.connection) == state
+
+
+@pytest.mark.parametrize("quantities", [("1.5", "1.5"), ("1", "2")])
+async def test_two_tickers_of_one_instrument_are_one_snapshot(
+    session, run, monkeypatch, quantities
+) -> None:
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    first, other = quantities
+    report = await ledger.normalize(
+        SUMMARY, META, OTHER_META, DEPOSIT, BUY, *_held(first=first, other=other)
+    )
+    # The instrument's quantity is the two tickers' together, as the reconciliation reads it.
+    assert report.mismatches == []
+    assert (await get_connection(session, connection.id)).warnings == []
+    assert await _snapshots(session) == [
+        ("GBP", Decimal("250.75"), NOW, NOW.date()),
+        ("ZZQA", Decimal(3), NOW, NOW.date()),
+    ]
+    links = [(TICKER, Decimal(3)), (OTHER, None)]
+    assert await _links(session) == links
+    state = await _reports(session, connection)
+
+    await _writes_nothing(session, ledger, _written(monkeypatch))
+    await _delete_derived(session, connection)
+    await ledger.replay()
+    assert await _reports(session, connection) == state
+    assert await _links(session) == links
+
+
+@pytest.mark.parametrize("before", [{"first": "3"}, {"first": "1.5", "other": "1.5"}])
+async def test_a_snapshot_is_linked_from_the_latest_row_to_name_it(
+    session, run, monkeypatch, before
+) -> None:
+    """The instrument's quantity seen again the same day under its other ticker alone (one
+    renamed, or one of two sold as the other bought): the same snapshot, linked once."""
+    connection = await _connection(run)
+    ledger = Ledger(session, connection)
+    await ledger.normalize(SUMMARY, META, OTHER_META, DEPOSIT, BUY, *_held(**before))
+    report = await ledger.normalize(SUMMARY, *_held(other="3"), now=NOW.replace(hour=14))
+    assert report.mismatches == []
+    assert await _snapshots(session) == [
+        ("GBP", Decimal("250.75"), NOW, NOW.date()),
+        ("ZZQA", Decimal(3), NOW, NOW.date()),
+    ]
+    links = [(TICKER, None), (OTHER, Decimal(3))]
+    assert await _links(session) == links
+    state = await _reports(session, connection)
+
+    await _writes_nothing(session, ledger, _written(monkeypatch))
+    assert await _links(session) == links
+    await _delete_derived(session, connection)
+    await ledger.replay()
+    assert await _reports(session, connection) == state
+    assert await _links(session) == links

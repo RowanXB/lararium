@@ -50,7 +50,16 @@ from lararium.modules.finance.trading212.normalize import normalize
 from lararium.modules.finance.trading212.sync import Trading212Connector
 
 from .fixtures import instrument_json
-from .strategies import START, Event, Export, History, Schedule, histories, schedules
+from .strategies import (
+    OTHER_TICKER,
+    START,
+    Event,
+    Export,
+    History,
+    Schedule,
+    histories,
+    schedules,
+)
 from .test_export import _delete_derived, export_csv, row
 from .test_normalize import _ledger_state, _reports
 from .test_sync import KEY, FakeTrading212, _set_cursor
@@ -171,7 +180,7 @@ class Account:
         api.summary = history.summary(cut)
         api.positions = history.positions(cut)
         api.pending = []
-        api.instruments = [instrument_json()]
+        api.instruments = [instrument_json(), instrument_json(OTHER_TICKER)]
         api.pies = []
         api.requests = []
         for endpoint, splits in pages.items():
