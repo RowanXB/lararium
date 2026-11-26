@@ -979,6 +979,11 @@ _DROPPED = [
 DOWNGRADE = [
     *(f"DROP TABLE finance.{name}" for name in _DROPPED),
     "DELETE FROM finance.instrument_identifiers WHERE scheme = 'binance_asset'",
+    # A transaction to or from a chain address names it: the name goes, as 0035 does for a
+    # card merchant's, before the identifier does.
+    "UPDATE finance.transactions SET counterparty_identifier_id = NULL"
+    " WHERE counterparty_identifier_id IN"
+    " (SELECT id FROM finance.account_identifiers WHERE kind = 'chain_address')",
     "DELETE FROM finance.account_identifiers WHERE kind = 'chain_address'",
     """
     ALTER TABLE finance.account_identifiers DROP CONSTRAINT account_identifiers_chain_address_check

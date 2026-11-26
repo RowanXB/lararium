@@ -112,16 +112,39 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
         with engine.begin() as connection:
             assert _present(connection, core + later) == _all(core + later, True)
             _assert_lists(connection, binance=True)
-            connection.execute(
+            identifier = connection.execute(
                 text(
                     "insert into finance.account_identifiers (kind, value, created_by)"
-                    " values ('chain_address', '0x11111111111111111111', 'test')"
+                    " values ('chain_address', '0x11111111111111111111', 'test') returning id"
                 )
-            )
+            ).scalar_one()
+            # A withdrawal to that address names it; the downgrade must let go of the name.
+            owner = connection.execute(
+                text(
+                    "insert into core.entities (kind, name) values ('person', 'Migration test')"
+                    " returning id"
+                )
+            ).scalar_one()
+            named = connection.execute(
+                text(
+                    "insert into finance.transactions (occurred_at, booking_date, status,"
+                    "  origin, owner_entity_id, counterparty_identifier_id)"
+                    " values (now(), current_date, 'booked', 'manual', :owner, :identifier)"
+                    " returning id"
+                ),
+                {"owner": owner, "identifier": identifier},
+            ).scalar_one()
         try:
             command.downgrade(config, "0036")
             with engine.begin() as connection:
                 assert _present(connection, core + later) == _all(core + later, False)
+                kept = connection.execute(
+                    text(
+                        "select counterparty_identifier_id from finance.transactions where id = :id"
+                    ),
+                    {"id": named},
+                )
+                assert kept.one() == (None,)
                 gone = connection.execute(
                     text(
                         "select count(*) from finance.account_identifiers"
@@ -132,6 +155,11 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
                 _assert_lists(connection, binance=False)
         finally:
             command.upgrade(config, "head")
+            with engine.begin() as connection:
+                connection.execute(
+                    text("delete from finance.transactions where id = :id"), {"id": named}
+                )
+                connection.execute(text("delete from core.entities where id = :id"), {"id": owner})
         with engine.begin() as connection:
             assert _present(connection, core + later) == _all(core + later, True)
             _assert_lists(connection, binance=True)
