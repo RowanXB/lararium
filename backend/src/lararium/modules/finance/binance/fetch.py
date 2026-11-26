@@ -43,9 +43,6 @@ from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
-# In a backfill's cursor: its next window answered once and was then refused, so a refusal of
-# that window is not where history ends. A window stored in full writes a cursor without it.
-INTERRUPTED_KEY = "interrupted"
 NOT_PRESENT_KEY = "not_present"
 
 DAY_MS = 86_400_000
@@ -336,8 +333,8 @@ async def window_pages(
 
     Only the window's first request being refused can mean its history ends there. A later
     one (a half of a split window, a later page) is refused inside a window that answered,
-    so it fails: the walk keeps its cursor and asks again, and never ends with the records
-    already answered left unstored (the backfill's cursor remembers it, `INTERRUPTED_KEY`)."""
+    so it fails: the walk keeps its cursor and asks again. A refusal seen on a later sync is
+    not known to follow an answer (design §6)."""
     low, high = endpoint.time_params
     params: dict[str, str | int] = {**fixed, low: start, high: end}
     cursor_name, size_name, first = paging_params(endpoint)
@@ -472,20 +469,16 @@ async def _walk_key(
         try:
             pages = await window_pages(client, endpoint, fixed, start, end)
         except RefusedInside:
-            if not backfilling:
-                # As a refused window after the backfill: the cursor stays, and the next
-                # walk asks again.
-                return ids
-            await commit(ctx, key, cursor={**cursor, INTERRUPTED_KEY: True})
-            raise
+            if backfilling:
+                raise
+            # As a refused window after the backfill: the cursor stays, and the next walk
+            # asks again.
+            return ids
         except BinanceNotPresent:
             if not backfilling:
                 # A label whose history was walked in full is served: a refusal now (a
                 # passing 404) is nothing this time, and the next walk asks from its cursor.
                 return ids
-            if cursor.get(INTERRUPTED_KEY) is True:
-                # This window answered on an earlier sync: it is not where history ends.
-                raise _refused_inside(endpoint) from None
             if not (newest and index == 0):
                 # History ends here; every newer window is stored (Decision 7).
                 state = {**cursor, "fetched_to": fetched_to, "complete": True}

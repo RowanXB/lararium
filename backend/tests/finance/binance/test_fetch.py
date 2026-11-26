@@ -387,8 +387,7 @@ async def test_a_refused_half_of_an_answered_window_fails_the_backfill(
 
     assert len(fake.calls(label)) == 3
     assert await _raw_count(session, connection) == 0
-    # Nothing stored, the cursor where it was, and the window marked as having answered.
-    assert (await _config(session, connection))["cursors"][label] == {"interrupted": True}
+    assert (await _config(session, connection)).get("cursors", {}).get(label) is None
 
 
 async def test_a_refused_later_page_fails_the_backfill(session, run, fake, clock) -> None:
@@ -402,34 +401,7 @@ async def test_a_refused_later_page_fails_the_backfill(session, run, fake, clock
 
     assert len(fake.calls(label)) == 2
     assert await _raw_count(session, connection) == 0
-    # Nothing stored, the cursor where it was, and the window marked as having answered.
-    assert (await _config(session, connection))["cursors"][label] == {"interrupted": True}
-
-
-async def test_a_window_that_answered_is_not_ended_by_a_refusal_on_the_next_sync(
-    session, run, fake, clock
-) -> None:
-    """The window answered a page before it was refused, so the next sync's refusal of its
-    first page is not where history ends either: the backfill waits for the window."""
-    label = "earn-flexible-rewards"
-    old = NOW_MS - 35 * DAY_MS
-    fake.add(label, *[build_row(label, i, time=old - i * 1000) for i in range(101)])
-    # The newest window answers (empty), the older one its first page, then every ask is refused.
-    _refuse_from_ask(fake, label, 2)
-    connection = await binance_connection(run)
-    with pytest.raises(DisplayableError, match=f"refused part of a {label} window"):
-        await _walk(session, connection, fake, clock, label)
-
-    with pytest.raises(DisplayableError, match=f"refused part of a {label} window"):
-        await _walk(session, connection, fake, clock, label)
-    assert (await _config(session, connection))["cursors"][label].get("complete") is not True
-    assert await _raw_count(session, connection) == 0
-
-    fake.when_asked(label, None)
-    fake.clear_failures()
-    assert len(set(await _walk(session, connection, fake, clock, label))) == 101
-    cursor = (await _config(session, connection))["cursors"][label]
-    assert "interrupted" not in cursor
+    assert (await _config(session, connection)).get("cursors", {}).get(label) is None
 
 
 async def test_a_refused_later_page_after_the_backfill_waits_for_the_next_walk(
