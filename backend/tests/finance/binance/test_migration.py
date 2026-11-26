@@ -1,14 +1,16 @@
 """Migration 0037 goes down to 0036 and up again, taking what it added and leaving the rest;
 migration 0038 (`never_transfer`) likewise down to 0037, 0039 (the reconciliation
 differences and the account report times) down to 0038, and 0040 (the daily bars and the
-CoinGecko ids) down to 0039. Each table a migration creates is checked on its own."""
+CoinGecko ids) down to 0039. Each table a migration creates is checked on its own, and each
+downgrade takes from a Binance connection's config what says what is in what it drops."""
 
+import json
 import re
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 
 BACKEND = Path(__file__).parents[3]
 VERSIONS = BACKEND / "migrations" / "versions"
@@ -38,6 +40,83 @@ def _config(owner_url: str) -> Config:
     config = Config(str(BACKEND / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", owner_url)
     return config
+
+
+# Every key a Binance connection's config holds (sync.py lists them). A downgrade removes those
+# that say what is in a table (or column) it drops, and only from a Binance connection.
+_CONFIG: dict[str, object] = {
+    "key_type": "hmac",
+    "uid": 1,
+    "account_map": {"spot": "00000000-0000-0000-0000-000000000001"},
+    "cursors": {"deposits": {"fetched_to": 1, "backfilled_to": 1, "complete": True}},
+    "not_present": {"dividends": 1},
+    "first_sync_done": True,
+    "normalized_through": "00000000-0000-0000-0000-000000000002",
+    "normalizer_version": "binance-norm-2",
+    "flags": ["AAA flag"],
+    "report_digests": {"coin-config": "digest"},
+    "swept": [["AAA", 1]],
+    "reconciled_through": 1,
+    "touched_pending": {"a:i": [1, 2]},
+    "pending_flags": ["AAA flag"],
+    "pending_lines": ["line"],
+    "bars_asked": {"AAABBB": ["2026-01-01", "2026-01-02"]},
+    "coingecko_ids_asked": {"at_ms": 1, "ok": True},
+    "sync_requested": True,
+}
+# What each downgrade removes, by the revision it goes down to.
+_REMOVED = {
+    "0039": {"bars_asked", "coingecko_ids_asked"},
+    "0038": {"bars_asked", "coingecko_ids_asked", "reconciled_through"},
+    "0037": {"bars_asked", "coingecko_ids_asked", "reconciled_through", "normalized_through"},
+    "0036": {
+        "bars_asked",
+        "coingecko_ids_asked",
+        "reconciled_through",
+        "normalized_through",
+        "report_digests",
+    },
+}
+
+
+def _seed(connection: Connection) -> tuple[object, object, object]:
+    """A Binance connection and a Monzo one, each with every key; (owner, binance, other)."""
+    owner = connection.execute(
+        text("insert into core.entities (kind, name) values ('person', 'Config test') returning id")
+    ).scalar_one()
+    made = [
+        connection.execute(
+            text(
+                "insert into core.connections (connector, display_name, status, config,"
+                " owner_entity_id) values (:c, 'Config test', 'healthy', cast(:config as jsonb),"
+                " :owner) returning id"
+            ),
+            {"c": connector, "config": json.dumps(_CONFIG), "owner": owner},
+        ).scalar_one()
+        for connector in ("binance", "monzo")
+    ]
+    return owner, made[0], made[1]
+
+
+def _assert_config(engine: Engine, seeded: tuple[object, object, object], down_to: str) -> None:
+    _, binance, other = seeded
+    with engine.begin() as connection:
+        config = {
+            id_: connection.execute(
+                text("select config from core.connections where id = :id"), {"id": id_}
+            ).scalar_one()
+            for id_ in (binance, other)
+        }
+    assert config[binance] == {k: v for k, v in _CONFIG.items() if k not in _REMOVED[down_to]}
+    assert config[other] == _CONFIG
+
+
+def _unseed(engine: Engine, seeded: tuple[object, object, object]) -> None:
+    owner, binance, other = seeded
+    with engine.begin() as connection:
+        for id_ in (binance, other):
+            connection.execute(text("delete from core.connections where id = :id"), {"id": id_})
+        connection.execute(text("delete from core.entities where id = :id"), {"id": owner})
 
 
 def test_each_migration_creates_its_own_tables() -> None:
@@ -134,8 +213,10 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
                 ),
                 {"owner": owner, "identifier": identifier},
             ).scalar_one()
+            seeded = _seed(connection)
         try:
             command.downgrade(config, "0036")
+            _assert_config(engine, seeded, "0036")
             with engine.begin() as connection:
                 assert _present(connection, core + later) == _all(core + later, False)
                 kept = connection.execute(
@@ -160,6 +241,7 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
                     text("delete from finance.transactions where id = :id"), {"id": named}
                 )
                 connection.execute(text("delete from core.entities where id = :id"), {"id": owner})
+            _unseed(engine, seeded)
         with engine.begin() as connection:
             assert _present(connection, core + later) == _all(core + later, True)
             _assert_lists(connection, binance=True)
@@ -178,13 +260,17 @@ def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> 
     core = _created("0037")
     engine = create_engine(owner_url)
     try:
+        with engine.begin() as connection:
+            seeded = _seed(connection)
         try:
             command.downgrade(config, "0037")
+            _assert_config(engine, seeded, "0037")
             with engine.begin() as connection:
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 0
                 assert _present(connection, core) == _all(core, True)
         finally:
             command.upgrade(config, "head")
+            _unseed(engine, seeded)
         with engine.begin() as connection:
             assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 1
     finally:
@@ -196,13 +282,17 @@ def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
     tables = _created("0039")
     engine = create_engine(owner_url)
     try:
+        with engine.begin() as connection:
+            seeded = _seed(connection)
         try:
             command.downgrade(config, "0038")
+            _assert_config(engine, seeded, "0038")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 1
         finally:
             command.upgrade(config, "head")
+            _unseed(engine, seeded)
         with engine.begin() as connection:
             assert _present(connection, tables) == _all(tables, True)
     finally:
@@ -214,13 +304,17 @@ def test_prices_migration_round_trip(owner_url: str, migrated: None) -> None:
     tables, before = _created("0040"), _created("0039")
     engine = create_engine(owner_url)
     try:
+        with engine.begin() as connection:
+            seeded = _seed(connection)
         try:
             command.downgrade(config, "0039")
+            _assert_config(engine, seeded, "0039")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert _present(connection, before) == _all(before, True)
         finally:
             command.upgrade(config, "head")
+            _unseed(engine, seeded)
         with engine.begin() as connection:
             assert _present(connection, tables) == _all(tables, True)
     finally:

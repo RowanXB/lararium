@@ -50,6 +50,10 @@ UPGRADE = [
 ]
 
 DOWNGRADE = [
+    # The newest report time a Binance connection's last reconciliation covered: the report
+    # times and differences go.
+    "UPDATE core.connections SET config = config - 'reconciled_through'"
+    " WHERE connector = 'binance'",
     "DROP TABLE finance.binance_reconciliation_differences",
     "DROP TABLE finance.binance_account_reports",
 ]

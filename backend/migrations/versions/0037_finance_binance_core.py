@@ -977,6 +977,12 @@ _DROPPED = [
 ]
 
 DOWNGRADE = [
+    # What a Binance connection's config says about the tables dropped here: the digest of
+    # each report's last stored answer (its table empty, the answer would not be stored
+    # again) and the last raw record applied (the typed record rows empty, the raw records
+    # would never be replayed into them).
+    "UPDATE core.connections SET config = config - ARRAY['report_digests', 'normalized_through']"
+    " WHERE connector = 'binance'",
     *(f"DROP TABLE finance.{name}" for name in _DROPPED),
     "DELETE FROM finance.instrument_identifiers WHERE scheme = 'binance_asset'",
     # A transaction to or from a chain address names it: the name goes, as 0035 does for a

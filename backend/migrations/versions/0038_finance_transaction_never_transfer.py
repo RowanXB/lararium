@@ -23,4 +23,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The last raw record a Binance connection applied: its marks go with the column, so the
+    # records are applied again once it is back.
+    op.execute(
+        "UPDATE core.connections SET config = config - 'normalized_through'"
+        " WHERE connector = 'binance'"
+    )
     op.execute("ALTER TABLE finance.transactions DROP COLUMN never_transfer")

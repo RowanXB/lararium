@@ -54,6 +54,10 @@ UPGRADE = [
 ]
 
 DOWNGRADE = [
+    # The bars a Binance connection already asked and its last read of CoinGecko's id map:
+    # the bars and the ids go.
+    "UPDATE core.connections SET config = config - ARRAY['bars_asked', 'coingecko_ids_asked']"
+    " WHERE connector = 'binance'",
     "DROP TABLE finance.binance_coingecko_ids",
     "DROP TABLE finance.binance_klines",
 ]
