@@ -65,6 +65,10 @@ export type AccountOut = {
      */
     closed_on: string | null;
     /**
+     * Excluded From Reports
+     */
+    excluded_from_reports: boolean;
+    /**
      * Id
      */
     id: string;
@@ -126,6 +130,16 @@ export type AccountRename = {
      * Name
      */
     name: string;
+};
+
+/**
+ * AccountReportingUpdate
+ */
+export type AccountReportingUpdate = {
+    /**
+     * Excluded
+     */
+    excluded: boolean;
 };
 
 /**
@@ -320,6 +334,132 @@ export type CardMerchantSuggestionOut = {
 };
 
 export type CardTypes = Array<string>;
+
+/**
+ * CashFlowCategoryOut
+ */
+export type CashFlowCategoryOut = {
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Spending
+     */
+    spending: string;
+};
+
+/**
+ * CashFlowHiddenAccountOut
+ *
+ * Money moved between an account left out of reports and those still in them.
+ */
+export type CashFlowHiddenAccountOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Moved In
+     */
+    moved_in: string;
+    /**
+     * Moved Out
+     */
+    moved_out: string;
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
+ * CashFlowOut
+ *
+ * Income and spending in the reporting currency; spending is positive.
+ */
+export type CashFlowOut = {
+    /**
+     * Bucket
+     */
+    bucket: 'day' | 'week' | 'month';
+    /**
+     * Categories
+     */
+    categories: Array<CashFlowCategoryOut>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Hidden Accounts
+     */
+    hidden_accounts: Array<CashFlowHiddenAccountOut>;
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Missing Count
+     */
+    missing_count: number;
+    /**
+     * Net
+     */
+    net: string;
+    /**
+     * Payees
+     */
+    payees: Array<CashFlowPayeeOut>;
+    /**
+     * Periods
+     */
+    periods: Array<CashFlowPeriodOut>;
+    /**
+     * Spending
+     */
+    spending: string;
+    /**
+     * Start
+     */
+    start: string;
+};
+
+/**
+ * CashFlowPayeeOut
+ */
+export type CashFlowPayeeOut = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Spending
+     */
+    spending: string;
+};
+
+/**
+ * CashFlowPeriodOut
+ */
+export type CashFlowPeriodOut = {
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Spending
+     */
+    spending: string;
+    /**
+     * Start
+     */
+    start: string;
+};
 
 /**
  * ConnectionOut
@@ -2922,6 +3062,36 @@ export type SetMainAccountResponses = {
 
 export type SetMainAccountResponse = SetMainAccountResponses[keyof SetMainAccountResponses];
 
+export type SetAccountReportingData = {
+    body: AccountReportingUpdate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/reporting';
+};
+
+export type SetAccountReportingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetAccountReportingError = SetAccountReportingErrors[keyof SetAccountReportingErrors];
+
+export type SetAccountReportingResponses = {
+    /**
+     * Successful Response
+     */
+    200: AccountOut;
+};
+
+export type SetAccountReportingResponse = SetAccountReportingResponses[keyof SetAccountReportingResponses];
+
 export type RecordSnapshotData = {
     body: SnapshotCreate;
     path: {
@@ -2951,6 +3121,44 @@ export type RecordSnapshotResponses = {
 };
 
 export type RecordSnapshotResponse = RecordSnapshotResponses[keyof RecordSnapshotResponses];
+
+export type GetCashFlowData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Start
+         */
+        start?: string | null;
+        /**
+         * End
+         */
+        end?: string | null;
+        /**
+         * Bucket
+         */
+        bucket?: 'day' | 'week' | 'month';
+    };
+    url: '/api/v1/finance/cash-flow';
+};
+
+export type GetCashFlowErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCashFlowError = GetCashFlowErrors[keyof GetCashFlowErrors];
+
+export type GetCashFlowResponses = {
+    /**
+     * Successful Response
+     */
+    200: CashFlowOut;
+};
+
+export type GetCashFlowResponse = GetCashFlowResponses[keyof GetCashFlowResponses];
 
 export type RecordFxRateData = {
     body: FxRateCreate;
@@ -2985,6 +3193,10 @@ export type GetHoldingsData = {
          * Date
          */
         date?: string | null;
+        /**
+         * All Accounts
+         */
+        all_accounts?: boolean;
     };
     url: '/api/v1/finance/holdings';
 };

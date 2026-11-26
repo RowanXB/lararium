@@ -29,6 +29,7 @@ from lararium.core.settings_store import get_setting, get_timezone, set_setting
 from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
     accounts,
+    cashflow,
     errors,
     instruments,
     ledger,
@@ -43,6 +44,8 @@ from lararium.modules.finance.schemas import (
     AccountCreate,
     AccountOut,
     AccountRename,
+    AccountReportingUpdate,
+    CashFlowOut,
     FinanceSettingsOut,
     FinanceSettingsUpdate,
     FxRateCreate,
@@ -259,6 +262,17 @@ async def close_account(
     return AccountOut.model_validate(record)
 
 
+@router.post("/accounts/{account_id}/reporting", name="set_account_reporting")
+async def set_account_reporting(
+    account_id: UUID, body: AccountReportingUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Leave the account out of net worth, holdings and cash flow, or put it back."""
+    args = _args(body, account_id=account_id)
+    async with command_context(session, actor, "set_account_reporting", args) as ctx:
+        record = await accounts.set_excluded_from_reports(ctx, account_id, body.excluded)
+    return AccountOut.model_validate(record)
+
+
 @router.post(
     "/accounts/{account_id}/snapshots",
     name="record_snapshot",
@@ -366,24 +380,56 @@ async def record_fx_rate(body: FxRateCreate, session: SessionDep, actor: ActorDe
 
 @router.get("/holdings", name="get_holdings")
 async def get_holdings(
-    session: SessionDep, day: Annotated[date | None, Query(alias="date")] = None
+    session: SessionDep,
+    day: Annotated[date | None, Query(alias="date")] = None,
+    all_accounts: bool = False,
 ) -> list[HoldingOut]:
-    """Holdings valued in the reporting currency; the date defaults to today."""
-    rows = await valuation.holdings_asof(session, day or await _today(session))
+    """Holdings valued in the reporting currency, without the accounts left out of reports
+    unless `all_accounts`; the date defaults to today."""
+    excluded: frozenset[UUID] = (
+        frozenset() if all_accounts else await accounts.excluded_account_ids(session)
+    )
+    rows = await valuation.holdings_asof(session, day or await _today(session), excluded)
     return [HoldingOut.model_validate(row) for row in rows]
+
+
+async def _year_to(
+    session: AsyncSession, start: date | None, end: date | None
+) -> tuple[date, date]:
+    """The range asked for; by default the 365 days up to and including today."""
+    end = end or await _today(session)
+    if start is None:
+        # Clamped, because a year before the first representable day would overflow.
+        start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
+    return start, end
 
 
 @router.get("/net-worth", name="get_net_worth")
 async def get_net_worth(
     session: SessionDep, start: date | None = None, end: date | None = None
 ) -> list[NetWorthPointOut]:
-    """Daily net worth; defaults to the 365 days up to and including today."""
-    end = end or await _today(session)
-    if start is None:
-        # Clamped, because a year before the first representable day would overflow.
-        start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
-    points = await valuation.net_worth_series(session, start, end)
+    """Daily net worth, without the accounts left out of reports; defaults to the 365 days up
+    to and including today."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    points = await valuation.net_worth_series(session, start, end, excluded)
     return [NetWorthPointOut.model_validate(point) for point in points]
+
+
+@router.get("/cash-flow", name="get_cash_flow")
+async def get_cash_flow(
+    session: SessionDep,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: cashflow.Bucket = "month",
+) -> CashFlowOut:
+    """Income and spending by period, category and payee, without the accounts left out of
+    reports; defaults to the 365 days up to and including today."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    return CashFlowOut.model_validate(
+        await cashflow.cash_flow(session, start, end, bucket, excluded)
+    )
 
 
 # Imports

@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateEtoroConnectionData, CreateEtoroConnectionErrors, CreateEtoroConnectionResponses, CreateIbkrConnectionData, CreateIbkrConnectionErrors, CreateIbkrConnectionResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, CreateTrading212ConnectionData, CreateTrading212ConnectionErrors, CreateTrading212ConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissCardMerchantSuggestionData, DismissCardMerchantSuggestionErrors, DismissCardMerchantSuggestionResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListSourceReviewsData, ListSourceReviewsErrors, ListSourceReviewsResponses, ListTransactionPairCandidatesData, ListTransactionPairCandidatesErrors, ListTransactionPairCandidatesResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransactionsData, PairTransactionsErrors, PairTransactionsResponses, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RegisterCardMerchantData, RegisterCardMerchantErrors, RegisterCardMerchantResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, ResolveSourceReviewData, ResolveSourceReviewErrors, ResolveSourceReviewResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, SetMainAccountData, SetMainAccountErrors, SetMainAccountResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateEtoroConnectionData, UpdateEtoroConnectionErrors, UpdateEtoroConnectionResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateIbkrConnectionData, UpdateIbkrConnectionErrors, UpdateIbkrConnectionResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, UpdateTrading212ConnectionData, UpdateTrading212ConnectionErrors, UpdateTrading212ConnectionResponses, UploadEtoroStatementData, UploadEtoroStatementErrors, UploadEtoroStatementResponses, UploadIbkrStatementData, UploadIbkrStatementErrors, UploadIbkrStatementResponses, UploadTrading212ExportData, UploadTrading212ExportErrors, UploadTrading212ExportResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
+import type { AddAccountIdentifierData, AddAccountIdentifierErrors, AddAccountIdentifierResponses, AuthorizeConnectionData, AuthorizeConnectionErrors, AuthorizeConnectionResponses, CloseAccountData, CloseAccountErrors, CloseAccountResponses, CommitImportData, CommitImportErrors, CommitImportResponses, CreateAccountData, CreateAccountErrors, CreateAccountResponses, CreateEtoroConnectionData, CreateEtoroConnectionErrors, CreateEtoroConnectionResponses, CreateIbkrConnectionData, CreateIbkrConnectionErrors, CreateIbkrConnectionResponses, CreateImportProfileData, CreateImportProfileErrors, CreateImportProfileResponses, CreateInstrumentData, CreateInstrumentErrors, CreateInstrumentResponses, CreateMonzoConnectionData, CreateMonzoConnectionErrors, CreateMonzoConnectionResponses, CreateTrading212ConnectionData, CreateTrading212ConnectionErrors, CreateTrading212ConnectionResponses, DisableConnectionData, DisableConnectionErrors, DisableConnectionResponses, DiscardImportData, DiscardImportErrors, DiscardImportResponses, DismissCardMerchantSuggestionData, DismissCardMerchantSuggestionErrors, DismissCardMerchantSuggestionResponses, DismissTransferSuggestionData, DismissTransferSuggestionErrors, DismissTransferSuggestionResponses, GetCashFlowData, GetCashFlowErrors, GetCashFlowResponses, GetFinanceSettingsData, GetFinanceSettingsResponses, GetHoldingsData, GetHoldingsErrors, GetHoldingsResponses, GetImportBatchData, GetImportBatchErrors, GetImportBatchResponses, GetImportCatalogData, GetImportCatalogResponses, GetNetWorthData, GetNetWorthErrors, GetNetWorthResponses, GetSettingsData, GetSettingsResponses, HealthData, HealthResponses, ListAccountIdentifiersData, ListAccountIdentifiersErrors, ListAccountIdentifiersResponses, ListAccountsData, ListAccountsResponses, ListConnectionsData, ListConnectionsResponses, ListImportBatchesData, ListImportBatchesResponses, ListImportProfilesData, ListImportProfilesResponses, ListInstrumentsData, ListInstrumentsErrors, ListInstrumentsResponses, ListSourceReviewsData, ListSourceReviewsErrors, ListSourceReviewsResponses, ListTransactionPairCandidatesData, ListTransactionPairCandidatesErrors, ListTransactionPairCandidatesResponses, ListTransferCandidatesData, ListTransferCandidatesErrors, ListTransferCandidatesResponses, ListTransfersData, ListTransfersErrors, ListTransfersResponses, ListTransferSuggestionsData, ListTransferSuggestionsResponses, MonzoOauthCallbackData, MonzoOauthCallbackErrors, PairTransactionsData, PairTransactionsErrors, PairTransactionsResponses, PairTransferData, PairTransferErrors, PairTransferResponses, PostTransactionData, PostTransactionErrors, PostTransactionResponses, RecordFxRateData, RecordFxRateErrors, RecordFxRateResponses, RecordPriceData, RecordPriceErrors, RecordPriceResponses, RecordSnapshotData, RecordSnapshotErrors, RecordSnapshotResponses, RegisterCardMerchantData, RegisterCardMerchantErrors, RegisterCardMerchantResponses, RejectTransferData, RejectTransferErrors, RejectTransferResponses, RemoveAccountIdentifierData, RemoveAccountIdentifierErrors, RemoveAccountIdentifierResponses, RenameAccountData, RenameAccountErrors, RenameAccountResponses, ResolveSourceReviewData, ResolveSourceReviewErrors, ResolveSourceReviewResponses, RollbackImportData, RollbackImportErrors, RollbackImportResponses, SetAccountBalanceModeData, SetAccountBalanceModeErrors, SetAccountBalanceModeResponses, SetAccountReportingData, SetAccountReportingErrors, SetAccountReportingResponses, SetMainAccountData, SetMainAccountErrors, SetMainAccountResponses, StageImportData, StageImportErrors, StageImportResponses, SyncConnectionNowData, SyncConnectionNowErrors, SyncConnectionNowResponses, UnpairTransferData, UnpairTransferErrors, UnpairTransferResponses, UnrejectTransferData, UnrejectTransferErrors, UnrejectTransferResponses, UpdateEtoroConnectionData, UpdateEtoroConnectionErrors, UpdateEtoroConnectionResponses, UpdateFinanceSettingsData, UpdateFinanceSettingsErrors, UpdateFinanceSettingsResponses, UpdateIbkrConnectionData, UpdateIbkrConnectionErrors, UpdateIbkrConnectionResponses, UpdateImportProfileData, UpdateImportProfileErrors, UpdateImportProfileResponses, UpdateInstrumentData, UpdateInstrumentErrors, UpdateInstrumentResponses, UpdateSettingsData, UpdateSettingsErrors, UpdateSettingsResponses, UpdateTrading212ConnectionData, UpdateTrading212ConnectionErrors, UpdateTrading212ConnectionResponses, UploadEtoroStatementData, UploadEtoroStatementErrors, UploadEtoroStatementResponses, UploadIbkrStatementData, UploadIbkrStatementErrors, UploadIbkrStatementResponses, UploadTrading212ExportData, UploadTrading212ExportErrors, UploadTrading212ExportResponses, VoidTransactionData, VoidTransactionErrors, VoidTransactionResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -328,6 +328,20 @@ export const setMainAccount = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
+ * Set Account Reporting
+ *
+ * Leave the account out of net worth, holdings and cash flow, or put it back.
+ */
+export const setAccountReporting = <ThrowOnError extends boolean = false>(options: Options<SetAccountReportingData, ThrowOnError>): RequestResult<SetAccountReportingResponses, SetAccountReportingErrors, ThrowOnError> => (options.client ?? client).post<SetAccountReportingResponses, SetAccountReportingErrors, ThrowOnError>({
+    url: '/api/v1/finance/accounts/{account_id}/reporting',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Record Snapshot
  */
 export const recordSnapshot = <ThrowOnError extends boolean = false>(options: Options<RecordSnapshotData, ThrowOnError>): RequestResult<RecordSnapshotResponses, RecordSnapshotErrors, ThrowOnError> => (options.client ?? client).post<RecordSnapshotResponses, RecordSnapshotErrors, ThrowOnError>({
@@ -338,6 +352,14 @@ export const recordSnapshot = <ThrowOnError extends boolean = false>(options: Op
         ...options.headers
     }
 });
+
+/**
+ * Get Cash Flow
+ *
+ * Income and spending by period, category and payee, without the accounts left out of
+ * reports; defaults to the 365 days up to and including today.
+ */
+export const getCashFlow = <ThrowOnError extends boolean = false>(options?: Options<GetCashFlowData, ThrowOnError>): RequestResult<GetCashFlowResponses, GetCashFlowErrors, ThrowOnError> => (options?.client ?? client).get<GetCashFlowResponses, GetCashFlowErrors, ThrowOnError>({ url: '/api/v1/finance/cash-flow', ...options });
 
 /**
  * Record Fx Rate
@@ -354,7 +376,8 @@ export const recordFxRate = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * Get Holdings
  *
- * Holdings valued in the reporting currency; the date defaults to today.
+ * Holdings valued in the reporting currency, without the accounts left out of reports
+ * unless `all_accounts`; the date defaults to today.
  */
 export const getHoldings = <ThrowOnError extends boolean = false>(options?: Options<GetHoldingsData, ThrowOnError>): RequestResult<GetHoldingsResponses, GetHoldingsErrors, ThrowOnError> => (options?.client ?? client).get<GetHoldingsResponses, GetHoldingsErrors, ThrowOnError>({ url: '/api/v1/finance/holdings', ...options });
 
@@ -466,7 +489,8 @@ export const updateInstrument = <ThrowOnError extends boolean = false>(options: 
 /**
  * Get Net Worth
  *
- * Daily net worth; defaults to the 365 days up to and including today.
+ * Daily net worth, without the accounts left out of reports; defaults to the 365 days up
+ * to and including today.
  */
 export const getNetWorth = <ThrowOnError extends boolean = false>(options?: Options<GetNetWorthData, ThrowOnError>): RequestResult<GetNetWorthResponses, GetNetWorthErrors, ThrowOnError> => (options?.client ?? client).get<GetNetWorthResponses, GetNetWorthErrors, ThrowOnError>({ url: '/api/v1/finance/net-worth', ...options });
 

@@ -83,3 +83,13 @@ describe("formatSortCode", () => {
     expect(formatSortCode("1122")).toBe("1122");
   });
 });
+
+it("adds and subtracts decimal strings exactly", async () => {
+  const { subtractDecimalStrings, sumDecimalStrings } = await import("./format");
+  expect(sumDecimalStrings(["0.1", "0.2", "-1"])).toBe("-0.7");
+  expect(sumDecimalStrings([])).toBe("0");
+  expect(subtractDecimalStrings("1500.00", "900.5")).toBe("599.50");
+  expect(subtractDecimalStrings("0.1", "0.3")).toBe("-0.2");
+  expect(subtractDecimalStrings("-5", "7")).toBe("-12");
+  expect(subtractDecimalStrings("10", "10")).toBe("0");
+});

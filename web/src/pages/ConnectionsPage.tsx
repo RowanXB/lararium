@@ -432,12 +432,12 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
           <p className="text-sm text-destructive">Last error: {connection.last_error}</p>
         )}
         {connection.warnings.map((warning) => (
-          <p key={warning} className="text-sm text-amber-600">
+          <p key={warning} className="text-sm text-warning">
             {warning}
           </p>
         ))}
         {expiry && (
-          <p className={expiry.soon ? "text-sm font-medium text-amber-600" : "text-sm"}>
+          <p className={expiry.soon ? "text-sm font-medium text-warning" : "text-sm"}>
             Token expires on {expiry.date}
           </p>
         )}
@@ -486,7 +486,13 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
   );
 }
 
-function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
+function AddMonzoForm({
+  redirectUri,
+  onAdded,
+}: {
+  redirectUri: string | undefined;
+  onAdded?: () => void;
+}) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const [clientId, setClientId] = useState("");
@@ -506,6 +512,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
       setDisplayName("");
       setClientId("");
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     onError: (failure) => setError(errorMessage(failure)),
   });
@@ -564,7 +571,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
   );
 }
 
-function AddIbkrForm() {
+function AddIbkrForm({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const form = useIbkrCredentialsForm(
@@ -580,6 +587,7 @@ function AddIbkrForm() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     { doneMessage: "Interactive Brokers connected" },
   );
@@ -613,7 +621,7 @@ function AddIbkrForm() {
   );
 }
 
-function AddTrading212Form() {
+function AddTrading212Form({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const kindId = useId();
   const [displayName, setDisplayName] = useState("");
@@ -628,6 +636,7 @@ function AddTrading212Form() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     "Trading 212 connected",
   );
@@ -673,7 +682,7 @@ function AddTrading212Form() {
   );
 }
 
-function AddEtoroForm() {
+function AddEtoroForm({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const form = useKeysForm(
@@ -686,6 +695,7 @@ function AddEtoroForm() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     "eToro connected",
   );
@@ -715,6 +725,42 @@ function AddEtoroForm() {
   );
 }
 
+export type Provider = "monzo" | "ibkr" | "trading212" | "etoro";
+
+export const PROVIDERS: { value: Provider; label: string }[] = [
+  { value: "monzo", label: "Monzo" },
+  { value: "ibkr", label: "Interactive Brokers" },
+  { value: "trading212", label: "Trading 212" },
+  { value: "etoro", label: "eToro" },
+];
+
+// The form that connects one provider; onAdded runs once the connection exists.
+export function ConnectForm({ provider, onAdded }: { provider: Provider; onAdded?: () => void }) {
+  const connections = useQuery({
+    queryKey: ["connections"],
+    queryFn: async () => (await listConnections({ throwOnError: true })).data,
+    enabled: provider === "monzo",
+  });
+  switch (provider) {
+    case "monzo":
+      return (
+        <AddMonzoForm
+          redirectUri={
+            connections.data?.find((connection) => connection.redirect_uri)?.redirect_uri ??
+            undefined
+          }
+          onAdded={onAdded}
+        />
+      );
+    case "ibkr":
+      return <AddIbkrForm onAdded={onAdded} />;
+    case "trading212":
+      return <AddTrading212Form onAdded={onAdded} />;
+    case "etoro":
+      return <AddEtoroForm onAdded={onAdded} />;
+  }
+}
+
 export function ConnectionsPage() {
   const connections = useQuery({
     queryKey: ["connections"],
@@ -741,12 +787,11 @@ export function ConnectionsPage() {
       {list.map((connection) => (
         <ConnectionCard key={connection.id} connection={connection} />
       ))}
-      <AddMonzoForm
-        redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined}
-      />
-      <AddIbkrForm />
-      <AddTrading212Form />
-      <AddEtoroForm />
+      {connections.isSuccess && list.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No connections yet. Connect a bank or broker from Accounts → Add account.
+        </p>
+      )}
     </div>
   );
 }
