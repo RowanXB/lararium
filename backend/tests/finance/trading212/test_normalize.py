@@ -322,6 +322,24 @@ async def test_account_named_registered_and_wrapped(session, run) -> None:
     assert (account.name, account.tax_wrapper) == ("Trading 212 ISA ···0002", "isa")
 
 
+async def test_account_gets_its_type_key_and_regains_a_cleared_one(session, run) -> None:
+    invest = await _connection(run)
+    isa = await _connection(run, "isa")
+    await Ledger(session, invest).normalize(SUMMARY)
+    await Ledger(session, isa).normalize(("summary", summary_json(account_id=20000002)))
+    keys = text("select type_key from finance.accounts where source_connection_id = :c")
+    assert await session.scalar(keys, {"c": invest.id}) == "trading212.invest"
+    assert await session.scalar(keys, {"c": isa.id}) == "trading212.stocks_isa"
+
+    await session.execute(
+        text("update finance.accounts set type_key = NULL where source_connection_id = :c"),
+        {"c": invest.id},
+    )
+    report = await Ledger(session, invest).normalize(SUMMARY)
+    assert await session.scalar(keys, {"c": invest.id}) == "trading212.invest"
+    assert report.accounts_updated == 1
+
+
 async def test_sell_weighs_by_price(session, run) -> None:
     connection = await _connection(run)
     sell = order_item(order_id=500002, fill_id=700002, side="SELL", net_value="238.80")

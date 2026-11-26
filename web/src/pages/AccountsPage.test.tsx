@@ -8,6 +8,7 @@ import {
   createAccount,
   listAccountIdentifiers,
   listAccounts,
+  listAccountTypes,
   recordSnapshot,
   removeAccountIdentifier,
   setAccountBalanceMode,
@@ -19,6 +20,7 @@ import type { ReactNode } from "react";
 import { AccountsPage, NewAccountForm } from "./AccountsPage";
 
 vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 
@@ -60,8 +62,135 @@ vi.mock("../api", () => ({
         closed_on: null,
         system: false,
       },
+{
+        id: "0190a0b0-0000-7000-8000-000000000011",
+        name: "Cash ISA",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "manual",
+        source_connection_id: null,
+        status: "open",
+        opened_on: null,
+        closed_on: null,
+        system: false,
+        type_key: "trading212.cash_isa",
+      },
+{
+        id: "0190a0b0-0000-7000-8000-000000000012",
+        name: "Invest",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "connection",
+        source_connection_id: null,
+        status: "open",
+        opened_on: null,
+        closed_on: null,
+        system: false,
+        type_key: "trading212.invest",
+      },
+{
+        id: "0190a0b0-0000-7000-8000-000000000013",
+        name: "Untyped",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "manual",
+        source_connection_id: null,
+        status: "open",
+        opened_on: null,
+        closed_on: null,
+        system: false,
+        type_key: null,
+      },
+{
+        id: "0190a0b0-0000-7000-8000-000000000014",
+        name: "Gone type",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "manual",
+        source_connection_id: null,
+        status: "open",
+        opened_on: null,
+        closed_on: null,
+        system: false,
+        type_key: "gone",
+      },
+{
+        id: "0190a0b0-0000-7000-8000-000000000015",
+        name: "Closed ISA",
+        ledger_type: "asset",
+        subtype: "bank",
+        institution_entity_id: null,
+        owner_entity_id: "0190a0b0-0000-7000-8000-0000000000aa",
+        tax_wrapper: "none",
+        parent_account_id: null,
+        balance_mode: "transactions",
+        source_kind: "manual",
+        source_connection_id: null,
+        status: "closed",
+        opened_on: null,
+        closed_on: null,
+        system: false,
+        type_key: "trading212.cash_isa",
+      },
     ],
   })),
+  listAccountTypes: vi.fn(async () => ({
+    data: [
+      {
+        key: "trading212.cash_isa",
+        institution: "Trading 212",
+        label: "Cash ISA",
+        name: "Trading 212 Cash ISA",
+        shape: null,
+        api: null,
+        funding: [],
+        family: "trading212",
+        files: [
+          {
+            label: "History CSV",
+            format: "csv",
+            recommended: true,
+            config: { format: "csv", columns: { date: "Time", amount: "Total" }, date_format: "%Y-%m-%d" },
+          },
+        ],
+      },
+      {
+        key: "trading212.invest",
+        institution: "Trading 212",
+        label: "Invest",
+        name: "Trading 212 Invest",
+        shape: null,
+        api: { connector: "trading212", config: {} },
+        funding: [],
+        family: "trading212",
+        files: [{ label: "History CSV", format: "csv", recommended: false, config: null }],
+      },
+    ],
+  })),
+  listImportProfiles: vi.fn(async () => ({ data: [] })),
+  stageImport: vi.fn(async () => ({ data: {} })),
+  createImportProfile: vi.fn(async () => ({ data: {} })),
+  listImportBatches: vi.fn(async () => ({ data: [] })),
   listInstruments: vi.fn(async () => ({
     data: [
       {
@@ -107,7 +236,7 @@ beforeEach(() => {
 
 function renderPage() {
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <AccountsPage />
     </QueryClientProvider>,
   );
@@ -151,6 +280,12 @@ it("rejects a negative amount owed instead of storing a positive liability", asy
     form.getByText("Enter the amount owed as a positive number, e.g. 500"),
   ).toBeInTheDocument();
   expect(recordSnapshot).not.toHaveBeenCalled();
+});
+
+it("shows a failed account types fetch instead of leaving the page silent", async () => {
+  vi.mocked(listAccountTypes).mockRejectedValueOnce(new Error("account types unavailable"));
+  renderPage();
+  expect(await screen.findByText("account types unavailable")).toBeInTheDocument();
 });
 
 it("offers no balance to type for accounts whose balance comes from transactions", async () => {
@@ -404,4 +539,27 @@ it("adds an account from plain answers", async () => {
     }),
   );
   await waitFor(() => expect(onAdded).toHaveBeenCalled());
+});
+
+it("uploads a statement from an account of a statement type, with no account to pick", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await user.click((await card("Cash ISA")).getByRole("button", { name: "Upload file" }));
+  const form = within(await screen.findByRole("form", { name: /upload/i }));
+  expect(form.queryByLabelText("Account")).toBeNull();
+});
+
+it("links a connected account's file to Connections", async () => {
+  renderPage();
+  const link = (await card("Invest")).getByRole("link", { name: "Upload file" });
+  expect(link).toHaveAttribute("href", "/connections");
+});
+
+it("offers no upload without a known type, or on a closed account", async () => {
+  renderPage();
+  for (const name of ["Untyped", "Gone type", "Closed ISA"]) {
+    const account = await card(name);
+    expect(account.queryByRole("button", { name: "Upload file" })).toBeNull();
+    expect(account.queryByRole("link", { name: "Upload file" })).toBeNull();
+  }
 });

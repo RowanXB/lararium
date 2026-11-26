@@ -4,8 +4,8 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 
-import { createAccount, stageImport } from "../api";
-import { ImportsPage } from "./ImportsPage";
+import { createAccount, listAccounts, stageImport } from "../api";
+import { ImportsPage, UploadForm } from "./ImportsPage";
 
 const GBP_ID = "0190a0b0-0000-7000-8000-0000000000b1";
 const CURRENT_ID = "0190a0b0-0000-7000-8000-000000000001";
@@ -327,5 +327,62 @@ it("asks for a name before making a new account", async () => {
   await user.click(form.getByRole("button", { name: "Upload" }));
 
   expect(form.getByText("Name the new account")).toBeInTheDocument();
+  expect(createAccount).not.toHaveBeenCalled();
+});
+
+it("offers a type's upload only the accounts of that type", async () => {
+  vi.mocked(listAccounts).mockResolvedValueOnce({
+    data: [
+      account(CURRENT_ID, "Example Bank current"),
+      account("0190a0b0-0000-7000-8000-000000000008", "Lloyds current", { type_key: "lloyds" }),
+      account("0190a0b0-0000-7000-8000-000000000009", "HSBC current", { type_key: "hsbc_uk" }),
+    ],
+  } as never);
+  const lloyds = {
+    key: "lloyds",
+    institution: "Lloyds",
+    label: "",
+    name: "Lloyds",
+    shape: { ledger_type: null, subtype: "bank", tax_wrapper: "none", balance_mode: "transactions" },
+    api: null,
+    files: [],
+    funding: [],
+    family: null,
+  };
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <UploadForm type={lloyds as never} />
+    </QueryClientProvider>,
+  );
+  const form = within(await screen.findByRole("form", { name: "Upload statement" }));
+  await user.click(form.getByRole("combobox", { name: "Account" }));
+  const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+
+  expect(options).toEqual(["Lloyds current", "New account…"]);
+});
+
+it("stages into the account it is given, without asking for one", async () => {
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <UploadForm account={account(CURRENT_ID, "Example Bank current") as never} />
+    </QueryClientProvider>,
+  );
+  const form = within(await screen.findByRole("form", { name: "Upload statement" }));
+  expect(form.queryByRole("combobox", { name: "Account" })).toBeNull();
+  await waitFor(() =>
+    expect(form.getByRole("combobox", { name: "Currency" })).toHaveTextContent("GBP"),
+  );
+  await choose(form, "Profile", "Example Bank CSV");
+  const file = new File(["Date,Description,Amount\n"], "example.csv", { type: "text/csv" });
+  await user.upload(form.getByLabelText("File"), file);
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  expect(stageImport).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: { account_id: CURRENT_ID, profile_id: PROFILE_ID, instrument_id: GBP_ID, file },
+    }),
+  );
   expect(createAccount).not.toHaveBeenCalled();
 });

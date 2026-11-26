@@ -513,8 +513,8 @@ you are connecting.
 
 ### 2. Add the connection
 
-On Connections, under **Add Trading 212**, enter a display name, choose the **Account type**
-(Invest or Stocks ISA), paste the API key and API secret, and choose **Add Trading 212**.
+On Accounts → Add account, pick **Trading 212 Invest** or **Trading 212 Stocks ISA**, enter a
+display name, paste the API key and API secret, and choose **Add Trading 212**.
 Lararium checks the key with Trading 212 first, and refuses a key whose account is already
 connected.
 
@@ -544,6 +544,13 @@ booking date differently, Lararium opens a [review item](#review-items).
 
 A warning that Lararium's cash differs from Trading 212's report, raised before an upload,
 stays until the next sync checks again, even when the upload supplied the missing record.
+
+### Cash ISA (no API)
+
+A Trading 212 Cash ISA has no API. Add it as an account of its own, then upload the CSV from the
+app's History page: on Accounts → Add account pick the **Trading 212 Cash ISA** tile and upload
+the History CSV there (the upload uses the ready profile itself). Each export must start on the account's first day or on a day an earlier upload
+covers. Interest rows import as ordinary rows until their `Action` is known.
 
 ### Transfers
 
@@ -784,7 +791,11 @@ the ledger until you have reviewed it.
    profile (how to read this bank's file; see below). Either way, choose the account (or name
    a new one) and optionally a currency for files that don't state one. Files are at most
    5 MiB and 20,000 rows. The file is kept as a document (in the `documents` volume) and never
-   deleted.
+   deleted. An account added before account types existed can be given its type with
+   `PATCH /api/v1/finance/accounts/{id}` and the body `{"type_key": "<key>"}`; the statement
+   keys are `hsbc_uk`, `lloyds`, `boc_uk`, `revolut.current`, `revolut.savings`, `tembo`,
+   `lemfi` and `trading212.cash_isa`. The account must be a manual transactions account whose
+   shape matches the type; once typed, its card on Accounts shows **Upload file**.
 2. **Review.** The batch page lists every row as **new**, **duplicate** (already in the
    ledger), **skipped** (a zero amount, or left out by the profile's `include_only`; the reason
    is shown) or **error** (couldn't be read, or breaks the running balance). Any error blocks

@@ -3,30 +3,15 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, FileText, Landmark, PencilLine, RefreshCw } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
-import { getImportCatalog, type ImportCatalogEntryOut } from "../api";
+import { type AccountTypeOut, listAccountTypes } from "../api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { byInstitution, statementFormats, tileDetail } from "../lib/accountTypes";
 import { errorMessage } from "../lib/errors";
 import { NewAccountForm } from "./AccountsPage";
-import { ConnectForm, type Provider, PROVIDERS } from "./ConnectionsPage";
+import { ConnectForm } from "./ConnectionsPage";
 import { UploadForm } from "./ImportsPage";
 
-type Choice =
-  | { kind: "connect"; provider: Provider; label: string }
-  | { kind: "statement"; institution: string; formats: ImportCatalogEntryOut[] }
-  | { kind: "other-file" }
-  | { kind: "manual" };
-
-// Each bank's formats, the recommended one (the most complete) first.
-function byInstitution(entries: ImportCatalogEntryOut[]): [string, ImportCatalogEntryOut[]][] {
-  const groups = new Map<string, ImportCatalogEntryOut[]>();
-  for (const entry of entries) {
-    groups.set(entry.institution, [...(groups.get(entry.institution) ?? []), entry]);
-  }
-  return [...groups].map(([institution, group]) => [
-    institution,
-    [...group].sort((a, b) => Number(b.recommended) - Number(a.recommended)),
-  ]);
-}
+type Choice = { kind: "type"; type: AccountTypeOut } | { kind: "other-file" } | { kind: "manual" };
 
 function Tile({
   title,
@@ -54,12 +39,12 @@ function Tile({
   );
 }
 
-function Group({ title, note, children }: { title: string; note: string; children: ReactNode }) {
+function Group({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
   return (
     <section className="space-y-3">
       <div>
         <h2 className="font-medium">{title}</h2>
-        <p className="text-sm text-muted-foreground">{note}</p>
+        {note && <p className="text-sm text-muted-foreground">{note}</p>}
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
     </section>
@@ -67,47 +52,32 @@ function Group({ title, note, children }: { title: string; note: string; childre
 }
 
 function Picker({ onPick }: { onPick: (choice: Choice) => void }) {
-  const catalog = useQuery({
-    queryKey: ["import-catalog"],
-    queryFn: async () => (await getImportCatalog({ throwOnError: true })).data,
+  const types = useQuery({
+    queryKey: ["account-types"],
+    queryFn: async () => (await listAccountTypes({ throwOnError: true })).data,
   });
   return (
     <div className="space-y-8">
-      <Group title="Connect" note="Balances and payments arrive on their own, every day.">
-        {PROVIDERS.map((provider) => (
-          <Tile
-            key={provider.value}
-            title={provider.label}
-            detail="Syncs automatically"
-            icon={<RefreshCw className="size-5" aria-hidden />}
-            onClick={() => onPick({ kind: "connect", provider: provider.value, label: provider.label })}
-          />
-        ))}
-      </Group>
-      <Group
-        title="Upload statements"
-        note="Download a statement from your bank's website or app, then upload it here."
-      >
-        {catalog.error && (
-          <p className="text-sm text-destructive">{errorMessage(catalog.error)}</p>
-        )}
-        {byInstitution(catalog.data ?? []).map(([institution, formats]) => {
-          const best = formats.find((entry) => entry.recommended) ?? formats[0];
-          return (
+      {types.error && <p className="text-sm text-destructive">{errorMessage(types.error)}</p>}
+      {byInstitution(types.data ?? []).map(([institution, group]) => (
+        <Group key={institution} title={institution}>
+          {group.map((type) => (
             <Tile
-              key={institution}
-              title={institution}
-              detail={
-                <>
-                  Recommended: <span className="text-foreground">{best.label}</span>
-                </>
+              key={type.key}
+              title={type.label || type.institution}
+              detail={tileDetail(type)}
+              icon={
+                type.api ? (
+                  <RefreshCw className="size-5" aria-hidden />
+                ) : (
+                  <Landmark className="size-5" aria-hidden />
+                )
               }
-              icon={<Landmark className="size-5" aria-hidden />}
-              onClick={() => onPick({ kind: "statement", institution, formats })}
+              onClick={() => onPick({ kind: "type", type })}
             />
-          );
-        })}
-      </Group>
+          ))}
+        </Group>
+      ))}
       <Group title="Something else" note="Any other bank, or anything you'd rather type in.">
         <Tile
           title="Another bank's file"
@@ -126,13 +96,9 @@ function Picker({ onPick }: { onPick: (choice: Choice) => void }) {
   );
 }
 
-function StatementPanel({
-  institution,
-  formats,
-}: {
-  institution: string;
-  formats: ImportCatalogEntryOut[];
-}) {
+function StatementPanel({ type }: { type: AccountTypeOut }) {
+  const institution = type.name;
+  const formats = statementFormats(type);
   const best = formats.find((entry) => entry.recommended) ?? formats[0];
   return (
     <div className="space-y-4">
@@ -162,7 +128,7 @@ function StatementPanel({
           </ul>
         </CardContent>
       </Card>
-      <UploadForm formats={formats} />
+      <UploadForm formats={formats} type={type} />
     </div>
   );
 }
@@ -173,11 +139,11 @@ export function AddAccountPage() {
   const title =
     choice === undefined
       ? "Add an account"
-      : choice.kind === "connect"
-        ? `Connect ${choice.label}`
-        : choice.kind === "statement"
-          ? `Upload a ${choice.institution} statement`
-          : choice.kind === "other-file"
+      : choice.kind === "type"
+        ? choice.type.api
+          ? `Connect ${choice.type.name}`
+          : `Upload a ${choice.type.name} statement`
+        : choice.kind === "other-file"
             ? "Upload another bank's file"
             : "Type in an account";
 
@@ -201,16 +167,16 @@ export function AddAccountPage() {
         <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
       </div>
       {choice === undefined && <Picker onPick={setChoice} />}
-      {choice?.kind === "connect" && (
-        <ConnectForm
-          provider={choice.provider}
-          // Its accounts appear once it syncs; Monzo first asks to be authorised there.
-          onAdded={() => void navigate({ to: "/connections" })}
-        />
-      )}
-      {choice?.kind === "statement" && (
-        <StatementPanel institution={choice.institution} formats={choice.formats} />
-      )}
+      {choice?.kind === "type" &&
+        (choice.type.api ? (
+          <ConnectForm
+            type={choice.type}
+            // Its accounts appear once it syncs; Monzo first asks to be authorised there.
+            onAdded={() => void navigate({ to: "/connections" })}
+          />
+        ) : (
+          <StatementPanel type={choice.type} />
+        ))}
       {choice?.kind === "other-file" && (
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">

@@ -354,4 +354,5 @@ def test_import_operation_ids() -> None:
         "discard_import",
         "rollback_import",
         "get_import_catalog",
+        "list_account_types",
     } <= operation_ids
