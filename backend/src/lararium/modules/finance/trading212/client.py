@@ -1,0 +1,306 @@
+"""A read-only client for Trading 212's public API (one account per key pair).
+
+Every call goes through `ReadOnlyClient`: GET only, to live.trading212.com only, no
+redirects, paced per endpoint. The key and secret are sent as HTTP Basic and never kept
+revealed. History endpoints are walked newest first by following `nextPagePath`, one page at
+a time, so a caller stores each page as it arrives.
+"""
+
+import asyncio
+import base64
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Literal, cast
+from urllib.parse import parse_qsl
+
+import httpx
+
+from lararium.core.secrets import Secret
+from lararium.modules.finance.readonly_http import (
+    Clock,
+    HttpError,
+    HttpForbiddenError,
+    HttpNotFoundError,
+    HttpRetryableError,
+    JSONValue,
+    RateLimit,
+    ReadOnlyClient,
+    Sleep,
+    monotonic,
+    wall_time,
+)
+
+BASE = "https://live.trading212.com"
+PAGE_LIMIT = 50
+# The pages of one history a sync walks at most: a longer history goes on in the next sync
+# (HistoryNotEndedError's resume), so a failure loses one sync's pages, never a whole history.
+MAX_PAGES = 50
+
+type Item = dict[str, JSONValue]
+type HistoryKind = Literal["orders", "dividends", "transactions"]
+
+_API = "/api/v0/equity"
+# Endpoint → (path, permission). The path of a pie's detail is `pie` plus its id.
+_ENDPOINTS: Mapping[str, tuple[str, str]] = {
+    "summary": (f"{_API}/account/summary", "account"),
+    "positions": (f"{_API}/positions", "portfolio"),
+    "pending_orders": (f"{_API}/orders", "orders:read"),
+    "orders": (f"{_API}/history/orders", "history:orders"),
+    "dividends": (f"{_API}/history/dividends", "history:dividends"),
+    "transactions": (f"{_API}/history/transactions", "history:transactions"),
+    "instruments": (f"{_API}/metadata/instruments", "metadata"),
+    "exchanges": (f"{_API}/metadata/exchanges", "metadata"),
+    "pies": (f"{_API}/pies", "pies:read"),
+    "pie": (f"{_API}/pies", "pies:read"),
+}
+# The permission names a key can have: a 403's scope is kept only when it is one of these.
+_PERMISSIONS = frozenset(permission for _, permission in _ENDPOINTS.values())
+# The optional part each optional endpoint belongs to (Trading212Client.skipped).
+_PARTS: Mapping[str, str] = {"pending_orders": "pending_orders", "pies": "pies", "pie": "pies"}
+# The OpenAPI bundle's limits (design §3.2); each endpoint is its own pool.
+LIMITS: Mapping[str, RateLimit] = {
+    "summary": RateLimit(1, 5),
+    "positions": RateLimit(1, 1),
+    "pending_orders": RateLimit(1, 5),
+    "orders": RateLimit(20, 60),
+    "dividends": RateLimit(20, 60),
+    "transactions": RateLimit(20, 60),
+    "instruments": RateLimit(1, 50),
+    "exchanges": RateLimit(1, 30),
+    "pies": RateLimit(1, 30),
+    "pie": RateLimit(1, 5),
+}
+_NEXT_PAGE = "unexpected next page path"
+_PIE_ID = "a Trading 212 pie id is a whole number"
+# Why the pies were skipped when their list is gone (Trading212Client.skipped).
+PIES_REMOVED = "pies endpoint removed"
+# A pie id is below this, as the migration's ids are (at most 19 digits).
+_ID_BOUND = 10**19
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    items: list[Item]
+    # The query this page was fetched with.
+    params: dict[str, str]
+
+
+class HistoryStoppedError(HttpNotFoundError):
+    """A history page after the first answered 404 (users report these deep in the
+    transactions). Every page before was yielded; `resume` is the missing page's path, to ask
+    again in a later walk."""
+
+    def __init__(self, resume: str) -> None:
+        super().__init__("history stopped early (404)")
+        self.resume = resume
+
+
+class HistoryLoopedError(HttpError):
+    """A history page repeated the one before it (its `nextPagePath` named the same page): a
+    pagination fault. Every page before was yielded; asking again would loop, so there is no
+    page to go on from."""
+
+    def __init__(self) -> None:
+        super().__init__("history repeated a page")
+
+
+class HistoryNotEndedError(HttpRetryableError):
+    """A walk reached MAX_PAGES. Every page before was yielded; `resume` is the next page's
+    path (already checked), to go on from in a later walk."""
+
+    def __init__(self, resume: str) -> None:
+        super().__init__("history did not end")
+        self.resume = resume
+
+
+def endpoint_path(endpoint: str) -> str:
+    """An endpoint's path (`summary` → `/api/v0/equity/account/summary`)."""
+    return _ENDPOINTS[endpoint][0]
+
+
+def _basic(key: Secret, secret: Secret) -> str:
+    # b64encode never wraps lines (GNU base64 does at 76 characters, which breaks the header).
+    token = base64.b64encode(f"{key.reveal()}:{secret.reveal()}".encode()).decode("ascii")
+    return f"Basic {token}"
+
+
+def _next_params(path: str, next_page_path: str) -> dict[str, str]:
+    """The query of a `nextPagePath`, given as a full path (`/api/v0/…?…`), `?query` or a bare
+    query. A full path must be the endpoint's own; anything else is refused, as the client
+    takes no query in a path."""
+    if "#" in next_page_path:
+        raise HttpRetryableError(_NEXT_PAGE)
+    if next_page_path.startswith("/"):
+        own, _, query = next_page_path.partition("?")
+        if own != path:
+            raise HttpRetryableError(_NEXT_PAGE)
+    elif next_page_path.startswith("?"):
+        query = next_page_path[1:]
+    elif "?" in next_page_path:
+        raise HttpRetryableError(_NEXT_PAGE)
+    else:
+        query = next_page_path
+    try:
+        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        raise HttpRetryableError(_NEXT_PAGE) from None
+    params = dict(pairs)
+    if not params or len(params) != len(pairs):
+        raise HttpRetryableError(_NEXT_PAGE)
+    return params
+
+
+def _objects(value: JSONValue, endpoint: str) -> list[Item]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise HttpError(f"Trading 212's {endpoint} answer has an unexpected shape")
+    return cast(list[Item], value)
+
+
+def _object(value: JSONValue, endpoint: str) -> Item:
+    if not isinstance(value, dict):
+        raise HttpError(f"Trading 212's {endpoint} answer has an unexpected shape")
+    return value
+
+
+class Trading212Client:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        key: Secret,
+        secret: Secret,
+        *,
+        sleep: Sleep = asyncio.sleep,
+        clock: Clock = monotonic,
+        wall_clock: Clock = wall_time,
+    ) -> None:
+        self._client = ReadOnlyClient(
+            http,
+            BASE,
+            lambda: {"Authorization": _basic(key, secret)},
+            LIMITS,
+            sleep=sleep,
+            clock=clock,
+            wall_clock=wall_clock,
+        )
+        # The optional parts this client has skipped, and why: (part, `missing permission
+        # <permission>` or PIES_REMOVED).
+        self.skipped: set[tuple[str, str]] = set()
+
+    async def _get(
+        self, endpoint: str, *, suffix: str = "", params: Mapping[str, str] | None = None
+    ) -> JSONValue:
+        path, permission = _ENDPOINTS[endpoint]
+        try:
+            response = await self._client.get(f"{path}{suffix}", pool=endpoint, params=params)
+        except HttpForbiddenError as error:
+            if error.scope not in _PERMISSIONS and not error.cloudflare_block:
+                # Trading 212 names the scope; when it names none, or one that is not a
+                # permission, it is the endpoint's own: no other text of the answer is passed on.
+                raise HttpForbiddenError(permission) from None
+            raise
+        return response.json
+
+    async def _optional(self, endpoint: str, suffix: str = "") -> JSONValue | None:
+        """The answer, or None when the key lacks this optional permission, or when a pies
+        endpoint (deprecated by Trading 212) answers 404: the list gone, or that one pie gone.
+        A part skipped is recorded in `skipped`; a single pie gone is not a part."""
+        part = _PARTS[endpoint]
+        try:
+            return await self._get(endpoint, suffix=suffix)
+        except HttpForbiddenError as error:
+            if error.cloudflare_block:
+                raise
+            # _get has made the scope a known permission name.
+            self.skipped.add((part, f"missing permission {error.scope}"))
+            return None
+        except HttpNotFoundError:
+            if endpoint == "pie":
+                return None
+            if endpoint != "pies":
+                raise
+            self.skipped.add((part, PIES_REMOVED))
+            return None
+
+    async def summary(self) -> Item:
+        return _object(await self._get("summary"), "account/summary")
+
+    async def positions(self) -> list[Item]:
+        return _objects(await self._get("positions"), "positions")
+
+    async def pending_orders(self) -> list[Item] | None:
+        found = await self._optional("pending_orders")
+        return None if found is None else _objects(found, "orders")
+
+    async def instruments(self) -> list[Item]:
+        return _objects(await self._get("instruments"), "metadata/instruments")
+
+    async def exchanges(self) -> list[Item]:
+        return _objects(await self._get("exchanges"), "metadata/exchanges")
+
+    async def pies(self) -> list[Item] | None:
+        found = await self._optional("pies")
+        return None if found is None else _objects(found, "pies")
+
+    async def pie(self, pie_id: int | Decimal) -> Item | None:
+        """One pie's detail. `pie_id` is the list's `id`, a whole number from 1 to 19 digits (a
+        Decimal as parsed); any other value raises `ValueError` rather than asking for another
+        pie. The size is checked before converting: a huge exponent would build a huge int."""
+        if isinstance(pie_id, bool) or (
+            isinstance(pie_id, Decimal)
+            and (
+                not pie_id.is_finite()
+                or pie_id.adjusted() >= 19
+                or pie_id != pie_id.to_integral_value()
+            )
+        ):
+            raise ValueError(_PIE_ID)
+        whole = int(pie_id)
+        if not 0 < whole < _ID_BOUND:
+            raise ValueError(_PIE_ID)
+        found = await self._optional("pie", f"/{whole}")
+        return None if found is None else _object(found, "pies/{id}")
+
+    async def history(
+        self,
+        kind: HistoryKind,
+        seen: Callable[[Item], bool],
+        *,
+        start: str | None = None,
+        pages: int | None = None,
+    ) -> AsyncIterator[HistoryPage]:
+        """A history endpoint's pages, newest first, from the first page or from `start` (a
+        `nextPagePath` given before), until `nextPagePath` is null, a page holds only `seen`
+        items (or none), or a page repeats the one before it (`HistoryLoopedError`). `seen` is
+        asked of every item of a page, in order. After `pages` pages (at least one; MAX_PAGES
+        when None) it raises `HistoryNotEndedError`; a 404 on any page but the first of a
+        walk from the start raises `HistoryStoppedError`."""
+        path, _ = _ENDPOINTS[kind]
+        endpoint = f"history/{kind}"
+        params = {"limit": str(PAGE_LIMIT)} if start is None else _next_params(path, start)
+        previous: list[Item] | None = None
+        # The path of the page being asked (None: the first page).
+        current = start
+        resume = ""
+        for _ in range(max(1, MAX_PAGES if pages is None else pages)):
+            try:
+                answer = await self._get(kind, params=params)
+            except HttpNotFoundError:
+                if current is None:
+                    raise
+                raise HistoryStoppedError(current) from None
+            body = _object(answer, endpoint)
+            page = _objects(body.get("items"), endpoint)
+            next_page_path = body.get("nextPagePath")
+            if page == previous:
+                raise HistoryLoopedError
+            yield HistoryPage(page, params)
+            # A list, not a generator: `all` would stop asking at the first unseen item.
+            if next_page_path is None or all([seen(item) for item in page]):
+                return
+            if not isinstance(next_page_path, str):
+                raise HttpError(f"Trading 212's {endpoint} answer has an unexpected shape")
+            params = _next_params(path, next_page_path)
+            previous = page
+            current = resume = next_page_path
+        raise HistoryNotEndedError(resume)

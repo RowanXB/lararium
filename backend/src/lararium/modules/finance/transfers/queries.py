@@ -2,9 +2,10 @@
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     func,
     or_,
     select,
+    tuple_,
     union,
     update,
 )
@@ -31,6 +33,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from lararium.core import models as core_models
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
@@ -43,15 +46,17 @@ from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
+    LegFee,
     RecordColumns,
     SourceRef,
     eligible_records,
     is_rejected,
+    leg_fee_columns,
     load_own_record,
     names_source,
     source_ref,
 )
-from lararium.modules.finance.transfers.pairs import pair_relation
+from lararium.modules.finance.transfers.pairs import owner_pair_refusal, pair_relation
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
 # What the ledger holds for the transfer: one own record waiting for the connected other
@@ -171,6 +176,56 @@ async def list_transfers(
     if statuses is None:
         return await load_transfers(session)
     return await load_transfers(session, models.Transfer.status.in_(list(statuses)))
+
+
+async def weak_transfers(
+    session: AsyncSession, transfers: Collection[TransferRecord]
+) -> frozenset[UUID]:
+    """The ids of those of the transfers that a sort code alone paired (pairs.WEAK): matched,
+    neither own record naming another own account (eligible_records' holder), and no pair
+    decision linking them. Read from their records, not from the pair relation, since the
+    Transfers page asks on every load."""
+    legs = {
+        t.id: (t.out_transaction_id, t.in_transaction_id)
+        for t in transfers
+        if t.status == "matched"
+        and t.out_transaction_id is not None
+        and t.in_transaction_id is not None
+    }
+    if not legs:
+        return frozenset()
+    e = eligible_records(await system_account_ids(session))
+    rows = await session.execute(
+        select(
+            e.c.transaction_id, e.c.account_id, e.c.holder, e.c.source_kind, e.c.source_ref
+        ).where(e.c.transaction_id.in_([leg for pair in legs.values() for leg in pair]))
+    )
+    naming_nobody: dict[UUID, SourceRef] = {
+        row.transaction_id: (row.source_kind, row.source_ref)
+        for row in rows
+        if row.holder is None or row.holder == row.account_id
+    }
+    unnamed = {
+        transfer_id: (naming_nobody[sent], naming_nobody[received])
+        for transfer_id, (sent, received) in legs.items()
+        if sent in naming_nobody and received in naming_nobody
+    }
+    if not unnamed:
+        return frozenset()
+    d = models.TransferDecision
+    sources = [source for pair in unnamed.values() for source in pair]
+    # Stored once, from the record whose transfer it completed: either leg can be its subject.
+    decided = {
+        frozenset({(row.subject_kind, row.subject_ref), (row.other_kind, row.other_ref)})
+        for row in await session.execute(
+            select(d.subject_kind, d.subject_ref, d.other_kind, d.other_ref).where(
+                d.kind == "pair", tuple_(d.subject_kind, d.subject_ref).in_(sources)
+            )
+        )
+    }
+    return frozenset(
+        transfer_id for transfer_id, pair in unnamed.items() if frozenset(pair) not in decided
+    )
 
 
 def counterpart_window(
@@ -349,20 +404,82 @@ class CandidateRecord:
 
     transaction_id: UUID
     account_id: UUID
+    instrument_id: UUID  # its own, which may be another currency than the transfer's
     quantity: Decimal  # signed, as posted on account_id
     occurred_at: datetime
     description: str
     reason: CandidateReason
 
 
+@dataclass(frozen=True)
+class PairSideRecord:
+    """An own record as the owner pairs it (pairs.PairSide, pairs.owner_pair_refusal)."""
+
+    id: UUID
+    account_id: UUID
+    instrument_id: UUID
+    quantity: Decimal  # signed: negative on the sending side
+    booking_date: date
+    fiat: bool  # its instrument is a currency
+    fee: LegFee | None  # the leg fee its connector gives (finance.transfer_leg_fees)
+
+
+def _pair_side_select(e: Any, *extra: Any) -> Select[*tuple[Any, ...]]:
+    """The PairSideRecord columns of eligible_records `e`, then `extra`."""
+    fee_instrument_id, fee_amount = leg_fee_columns(e.c.transaction_id)
+    i = aliased(models.Instrument, name="side_instrument")
+    fiat = select(i.kind == "fiat").where(i.id == e.c.instrument_id).scalar_subquery()
+    return select(
+        e.c.transaction_id,
+        e.c.account_id,
+        e.c.instrument_id,
+        e.c.quantity,
+        e.c.booking_date,
+        fiat.label("fiat"),
+        fee_instrument_id.label("fee_instrument_id"),
+        fee_amount.label("fee_amount"),
+        *extra,
+    )
+
+
+def _pair_side(row: Any) -> PairSideRecord:
+    return PairSideRecord(
+        id=row.transaction_id,
+        account_id=row.account_id,
+        instrument_id=row.instrument_id,
+        quantity=row.quantity,
+        booking_date=row.booking_date,
+        fiat=bool(row.fiat),
+        fee=None
+        if row.fee_instrument_id is None
+        else LegFee(row.fee_instrument_id, row.fee_amount),
+    )
+
+
+async def load_pair_side(session: AsyncSession, transaction_id: UUID) -> PairSideRecord | None:
+    """The record as the owner pairs it, or None when it can't be a transfer's leg."""
+    e = eligible_records(await system_account_ids(session))
+    row = (
+        await session.execute(_pair_side_select(e).where(e.c.transaction_id == transaction_id))
+    ).one_or_none()
+    return None if row is None else _pair_side(row)
+
+
 async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
     """The own records the owner unpaired from this one (a never_pair decision either way
-    round) that a pair decision would link with it again: on another account, in the same
-    instrument, of opposite sign and the same amount, and neither rejected. The way back
-    from a mistaken unpair."""
+    round) that a pair decision would link with it again: a pair the owner could make
+    (pairs.owner_pair_refusal: in one instrument of opposite, equal amounts, or two
+    currencies whose sides differ and settle), neither rejected. The way back from a
+    mistaken unpair."""
     system = await system_account_ids(session)
     e = eligible_records(system)
-    record = (await session.execute(select(e).where(e.c.transaction_id == record_id))).one_or_none()
+    record = (
+        await session.execute(
+            _pair_side_select(e, e.c.source_kind, e.c.source_ref).where(
+                e.c.transaction_id == record_id
+            )
+        )
+    ).one_or_none()
     if record is None:
         return []
     source = (record.source_kind, record.source_ref)
@@ -384,13 +501,11 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
     if not others:
         return []
     t = models.Transaction
-    found = await session.scalars(
-        select(e.c.transaction_id)
+    subject_side = _pair_side(record)
+    rows = await session.execute(
+        _pair_side_select(e)
         .where(
             e.c.transaction_id.in_(select(t.id).where(or_(*(names_source(t, x) for x in others)))),
-            e.c.account_id != record.account_id,
-            e.c.instrument_id == record.instrument_id,
-            e.c.quantity == -record.quantity,
             ~exists().where(
                 d.kind == "reject",
                 d.subject_kind == e.c.source_kind,
@@ -399,10 +514,18 @@ async def unpaired_from(session: AsyncSession, record_id: UUID) -> list[UUID]:
         )
         .order_by(e.c.transaction_id)
     )
-    return list(found)
+    return [
+        row.transaction_id
+        for row in rows
+        if owner_pair_refusal(subject_side, _pair_side(row)) is None
+    ]
 
 
 PAIR_CANDIDATES_LIMIT = 20
+# How far from the record's booking date a candidate whose side differs may be booked.
+DIFFERING_CANDIDATES_WINDOW = timedelta(days=7)
+# How a candidate's side differs from the record's: in currency, or in amount in one.
+type Differs = Literal["currency", "amount"]
 
 
 def in_matched_transfer(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
@@ -434,22 +557,27 @@ class PairCandidateRecord:
 
     transaction_id: UUID
     account_id: UUID
+    instrument_id: UUID  # its own, which may be another currency than the record's
     quantity: Decimal  # signed, as posted on account_id
     occurred_at: datetime
     booking_date: date
     description: str
+    differs: Differs | None = None  # None for one in the same instrument, of equal amount
 
 
 async def pair_candidates(
     session: AsyncSession, transaction_id: UUID, limit: int = PAIR_CANDIDATES_LIMIT
 ) -> list[PairCandidateRecord]:
-    """The own records the owner could pair this one with (pair_records): on another
-    account, in the same instrument, of the opposite and equal amount, and not a leg of a
-    matched transfer nor rejected. One the owner unpaired from this record (a never_pair
-    decision) is still listed: pair_records withdraws that decision, which is the way back
-    from a mistaken unpair. Nearest booking date first (then the earlier occurred_at); no
-    window applies, as for any pair decision. Refuses a record that can't be a transfer's leg,
-    and one pair_records would refuse (require_pairable)."""
+    """The own records the owner could pair this one with (pair_records), on another
+    account and neither a leg of a matched transfer nor rejected: first those in the same
+    instrument, of the opposite and equal amount (no window applies, as for any pair
+    decision); then, for a record in a currency, those in a currency whose side differs
+    (in currency, or in amount: eToro design §5.12) that pair_records would accept, booked
+    within DIFFERING_CANDIDATES_WINDOW of it. Each part nearest booking date first (then
+    the earlier occurred_at), at most `limit` in all. One the owner unpaired from this
+    record (a never_pair decision) is still listed: pair_records withdraws that decision,
+    which is the way back from a mistaken unpair. Refuses a record that can't be a
+    transfer's leg, and one pair_records would refuse (require_pairable)."""
     await source_ref(session, transaction_id)  # an unknown id raises here
     system = await system_account_ids(session)
     subject = await load_own_record(session, system, transaction_id)
@@ -461,10 +589,22 @@ async def pair_candidates(
     rejected = exists().where(
         d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
     )
+    nearest = (
+        func.abs(e.c.booking_date - sql_cast(subject.booking_date, Date)),
+        e.c.occurred_at,
+        e.c.transaction_id,
+    )
+    choosable = (
+        e.c.transaction_id != transaction_id,
+        e.c.account_id != subject.account_id,
+        ~in_matched_transfer(e.c.transaction_id),
+        ~rejected,
+    )
     rows = await session.execute(
         select(
             e.c.transaction_id,
             e.c.account_id,
+            e.c.instrument_id,
             e.c.quantity,
             e.c.occurred_at,
             e.c.booking_date,
@@ -472,24 +612,18 @@ async def pair_candidates(
         )
         .join(t, t.id == e.c.transaction_id)
         .where(
-            e.c.transaction_id != transaction_id,
-            e.c.account_id != subject.account_id,
+            *choosable,
             e.c.instrument_id == subject.instrument_id,
             e.c.quantity == -subject.quantity,
-            ~in_matched_transfer(e.c.transaction_id),
-            ~rejected,
         )
-        .order_by(
-            func.abs(e.c.booking_date - sql_cast(subject.booking_date, Date)),
-            e.c.occurred_at,
-            e.c.transaction_id,
-        )
+        .order_by(*nearest)
         .limit(limit)
     )
-    return [
+    found = [
         PairCandidateRecord(
             transaction_id=row.transaction_id,
             account_id=row.account_id,
+            instrument_id=row.instrument_id,
             quantity=row.quantity,
             occurred_at=row.occurred_at,
             booking_date=row.booking_date,
@@ -497,50 +631,112 @@ async def pair_candidates(
         )
         for row in rows
     ]
+    side = await load_pair_side(session, transaction_id)
+    if len(found) >= limit or side is None or not side.fiat:
+        return found
+    i = aliased(models.Instrument, name="candidate_instrument")
+    opposite = e.c.quantity > 0 if subject.quantity < 0 else e.c.quantity < 0
+    differing = await session.execute(
+        _pair_side_select(e, e.c.occurred_at, t.description)
+        .join(t, t.id == e.c.transaction_id)
+        .join(i, and_(i.id == e.c.instrument_id, i.kind == "fiat"))
+        .where(
+            *choosable,
+            opposite,
+            or_(e.c.instrument_id != subject.instrument_id, e.c.quantity != -subject.quantity),
+            e.c.booking_date.between(
+                subject.booking_date - DIFFERING_CANDIDATES_WINDOW,
+                subject.booking_date + DIFFERING_CANDIDATES_WINDOW,
+            ),
+        )
+        .order_by(*nearest)
+    )
+    for row in differing:
+        other = _pair_side(row)
+        if owner_pair_refusal(side, other) is not None:
+            continue  # its receiving side is larger, or its fee doesn't fit
+        found.append(
+            PairCandidateRecord(
+                transaction_id=row.transaction_id,
+                account_id=row.account_id,
+                instrument_id=row.instrument_id,
+                quantity=row.quantity,
+                occurred_at=row.occurred_at,
+                booking_date=row.booking_date,
+                description=row.description,
+                differs="currency" if other.instrument_id != side.instrument_id else "amount",
+            )
+        )
+        if len(found) >= limit:
+            break
+    return found
 
 
 async def candidates(session: AsyncSession, transfer_id: UUID) -> list[CandidateRecord]:
     """The own records that could complete a transfer missing one side, for the owner's
     review: its own record's candidates in the pair relation, those of the same amount
-    first, then those whose amount differs, then those the owner unpaired from it (which
-    pair can link again), each oldest first. Empty for a transfer with both sides."""
+    first, then those whose amount differs, then those in another currency (labelled
+    amount_differs as well), then those the owner unpaired from it (which
+    pair can link again), each oldest first, each once. Only those pair would accept: not
+    a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
+    make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
+    (the owner paired it, so its side differs) is labelled amount_differs. Empty for a
+    transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
     present_id = transfer.out_transaction_id or transfer.in_transaction_id
     if present_id is None:
         return []
+    present = await load_pair_side(session, present_id)
+    if present is None:
+        return []
     system = await system_account_ids(session)
     relation = await pair_relation(session, system, await load_transfer_settings(session))
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
         ("exact", relation.candidates(present_id)),
         ("amount_differs", relation.candidates(present_id, exact=False)),
+        ("amount_differs", sorted(relation.across.get(present_id, frozenset()))),
         ("unpaired", await unpaired_from(session, present_id)),
     ]
     e = eligible_records(system)
-    t = models.Transaction
-    found: list[CandidateRecord] = []
+    t, d = models.Transaction, models.TransferDecision
+    rejected = exists().where(
+        d.kind == "reject", d.subject_kind == e.c.source_kind, d.subject_ref == e.c.source_ref
+    )
+    found: dict[UUID, CandidateRecord] = {}
     for reason, ids in reasons:
         if not ids:
             continue
         rows = await session.execute(
-            select(e.c.transaction_id, e.c.account_id, e.c.quantity, e.c.occurred_at, t.description)
+            _pair_side_select(e, e.c.occurred_at, t.description)
             .join(t, t.id == e.c.transaction_id)
-            .where(e.c.transaction_id.in_(ids))
+            .where(
+                e.c.transaction_id.in_(ids),
+                ~in_matched_transfer(e.c.transaction_id),
+                ~rejected,
+            )
             .order_by(e.c.occurred_at, e.c.transaction_id)
         )
-        found += [
-            CandidateRecord(
+        for row in rows:
+            side = _pair_side(row)
+            if side.id in found or owner_pair_refusal(present, side) is not None:
+                continue
+            label: CandidateReason = reason
+            if reason == "exact" and (
+                side.instrument_id != present.instrument_id or side.quantity != -present.quantity
+            ):
+                label = "amount_differs"
+            found[side.id] = CandidateRecord(
                 transaction_id=row.transaction_id,
                 account_id=row.account_id,
+                instrument_id=row.instrument_id,
                 quantity=row.quantity,
                 occurred_at=row.occurred_at,
                 description=row.description,
-                reason=reason,
+                reason=label,
             )
-            for row in rows
-        ]
-    return found
+    return list(found.values())
 
 
 @dataclass(frozen=True)
@@ -593,6 +789,134 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
                 outgoing=row.outgoing,
                 incoming=row.incoming,
                 latest=row.latest,
+            )
+        )
+    return found
+
+
+# The platforms whose card merchants are suggested: a merchant website's host on the domain
+# (or a subdomain of it) offers the accounts of the connector's connections (§5.12).
+CARD_MERCHANT_PLATFORMS = {"trading212.com": "trading212", "etoro.com": "etoro"}
+
+
+@dataclass(frozen=True)
+class CardMerchantSuggestion:
+    """A Monzo card merchant own records pay, neither registered nor dismissed, whose website
+    is on a connected platform's domain: maybe paying into these of the owner's accounts."""
+
+    merchant_id: str
+    name: str | None  # the merchant's name, as its place has it
+    host: str  # its website's host
+    outgoing: int  # own records paying it
+    incoming: int  # own records it refunded
+    latest: date  # the latest booking date of those records
+    account_ids: tuple[UUID, ...]  # the platform's accounts a registration may name, sorted
+    kind: Literal["card_merchant"] = "card_merchant"  # as GET /transfer-suggestions tells it
+
+
+def website_host(website: str) -> str | None:
+    """The host of a website as Monzo gives it (with or without a scheme), lower case; None
+    when it has none."""
+    website = website.strip()
+    try:
+        # Both the split (a bracket opening an IPv6 literal it doesn't close) and the host
+        # (a malformed port, say) refuse some values Monzo may hold.
+        host = urlsplit(website if "://" in website else f"//{website}").hostname
+    except ValueError:
+        return None
+    return host.rstrip(".") if host else None
+
+
+def platform_of(host: str) -> str | None:
+    """The connector whose domain the host is, or a subdomain of: by its labels, never as a
+    substring (nottrading212.com is no Trading 212 host)."""
+    for domain, connector in CARD_MERCHANT_PLATFORMS.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return connector
+    return None
+
+
+async def card_merchant_suggestions(session: AsyncSession) -> list[CardMerchantSuggestion]:
+    """Card merchants (Monzo merchant ids) that at least one own record pays, neither
+    registered to an account nor dismissed, whose website's host is on a connected
+    platform's domain (CARD_MERCHANT_PLATFORMS), each offering the accounts of that
+    platform's connections a registration may name (open, own, asset, not snapshots-only).
+    Most paid first, then the most recently paid. None without such a connection."""
+    a, c = models.Account, core_models.Connection
+    system = await system_account_ids(session)
+    offered: dict[str, list[UUID]] = {}
+    for connector, account_id in await session.execute(
+        select(c.connector, a.id)
+        .join(a, a.source_connection_id == c.id)
+        .where(
+            c.connector.in_(list(CARD_MERCHANT_PLATFORMS.values())),
+            a.id.not_in(list(system.values())),
+            a.ledger_type == "asset",
+            a.status == "open",
+            a.balance_mode != "snapshots",
+        )
+        .order_by(a.id)
+    ):
+        offered.setdefault(connector, []).append(account_id)
+    if not offered:
+        return []
+    e = eligible_records(system)
+    t, place = models.Transaction, aliased(core_models.Entity, name="merchant_place")
+    i, h = models.AccountIdentifier, models.AccountIdentifierHolder
+    merchant_id = place.external_ids["monzo_merchant"].astext
+    settled = (
+        select(i.id)
+        .where(
+            i.kind == "card_merchant",
+            i.value == merchant_id,
+            or_(
+                i.dismissed_at.is_not(None),
+                exists().where(h.identifier_id == i.id),
+            ),
+        )
+        .exists()
+    )
+    outgoing = func.count().filter(e.c.quantity < 0)
+    incoming = func.count().filter(e.c.quantity > 0)
+    latest = func.max(e.c.booking_date)
+    rows = await session.execute(
+        select(
+            merchant_id.label("merchant_id"),
+            place.name,
+            place.website,
+            outgoing.label("outgoing"),
+            incoming.label("incoming"),
+            latest.label("latest"),
+        )
+        .select_from(e)
+        .join(t, t.id == e.c.transaction_id)
+        .join(place, place.id == t.place_entity_id)
+        .where(
+            place.kind == "place",
+            merchant_id.is_not(None),
+            place.website.is_not(None),
+            ~t.bank_transfer,
+            ~settled,
+        )
+        .group_by(merchant_id, place.name, place.website)
+        .having(outgoing > 0)
+        .order_by((outgoing + incoming).desc(), latest.desc(), merchant_id)
+    )
+    found: list[CardMerchantSuggestion] = []
+    for row in rows:
+        host = website_host(row.website)
+        connector = None if host is None else platform_of(host)
+        if host is None or connector is None or connector not in offered:
+            continue
+        found.append(
+            CardMerchantSuggestion(
+                merchant_id=row.merchant_id,
+                name=row.name,
+                host=host,
+                outgoing=row.outgoing,
+                incoming=row.incoming,
+                latest=row.latest,
+                account_ids=tuple(offered[connector]),
             )
         )
     return found

@@ -26,8 +26,12 @@ from lararium.modules.finance.schemas import (
     AccountOut,
     BalanceModeUpdate,
     CandidateOut,
+    CardMerchantDismiss,
+    CardMerchantRegister,
+    CardMerchantSuggestionOut,
     IdentifierCreate,
     IdentifierOut,
+    MainAccountUpdate,
     PairCandidateOut,
     SuggestionOut,
     TransferOut,
@@ -83,6 +87,7 @@ def _identifier_out(record: identifiers.IdentifierRecord) -> IdentifierOut:
         sort_code=sort_code,
         account_number=account_number,
         account_id=record.account_id,
+        holder_account_ids=list(record.holders),
         dismissed_at=record.dismissed_at,
         created_by=record.created_by,
         created_at=record.created_at,
@@ -125,9 +130,39 @@ async def remove_account_identifier(
     args = _args(account_id=account_id, identifier_id=identifier_id)
     async with healing_command(session, actor, "remove_account_identifier", args) as ctx:
         await accounts.get_account(session, account_id)  # 404 when there is no such account
+        held = [
+            record
+            for record in await identifiers.list_identifiers(session, account_id=account_id)
+            if record.id == identifier_id and account_id in record.holders
+        ]
+        if held:
+            # A card merchant: the account leaves its holders, the others stay.
+            [merchant] = held
+            await transfers.register_card_merchant_and_rematch(
+                ctx,
+                merchant.value,
+                [a for a in merchant.holders if a != account_id],
+                heal=False,  # healing_command heals once, at the end
+            )
+            return
         if await identifiers.identifier_account(session, identifier_id) != account_id:
             raise errors.AccountIdentifierNotFoundError(str(identifier_id))
         await transfers.unassign_identifier_and_rematch(ctx, identifier_id)
+
+
+@router.post("/accounts/identifiers/card-merchants", name="register_card_merchant")
+async def register_card_merchant(
+    body: CardMerchantRegister, session: SessionDep, actor: ActorDep
+) -> IdentifierOut:
+    """Register a Monzo card merchant as paying into these own accounts (a suggestion, too),
+    replacing the accounts it had; none removes the registration. Every record naming it is
+    matched again; Monzo's next sync names it on the payments made before."""
+    args = _args(body.model_dump(mode="json"))
+    async with healing_command(session, actor, "register_card_merchant", args) as ctx:
+        record = await transfers.register_card_merchant_and_rematch(
+            ctx, body.merchant_id, body.account_ids, heal=False
+        )
+    return _identifier_out(record)
 
 
 @router.post("/accounts/{account_id}/balance-mode", name="set_account_balance_mode")
@@ -141,7 +176,25 @@ async def set_account_balance_mode(
     return AccountOut.model_validate(record)
 
 
+@router.post("/accounts/{account_id}/main-account", name="set_main_account")
+async def set_main_account(
+    account_id: UUID, body: MainAccountUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Give a manual account a main account, or clear it; its transfers are matched anew."""
+    args = _args(body.model_dump(mode="json"), account_id=account_id)
+    async with healing_command(session, actor, "set_main_account", args) as ctx:
+        record = await accounts.set_main_account(ctx, account_id, body.main_account_id)
+    return AccountOut.model_validate(record)
+
+
 # Transfers
+
+
+async def _symbols(session: AsyncSession) -> dict[UUID, str]:
+    return {
+        instrument.id: instrument.symbol
+        for instrument in await instruments.list_instruments(session, include_hidden=True)
+    }
 
 
 async def _transfers_out(
@@ -150,13 +203,11 @@ async def _transfers_out(
     # Loaded even for no transfers, so a malformed setting shows on the Transfers page.
     settings = await transfers.load_transfer_settings(session)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
-    symbols = {
-        instrument.id: instrument.symbol
-        for instrument in await instruments.list_instruments(session, include_hidden=True)
-    }
+    symbols = await _symbols(session)
     now = datetime.now(UTC)
     timezone = await get_timezone(session)
     today = now.astimezone(timezone).date()
+    weak = await transfers.weak_transfers(session, found)
     return [
         TransferOut(
             id=record.id,
@@ -180,6 +231,7 @@ async def _transfers_out(
             out_transaction_id=record.out_transaction_id,
             in_transaction_id=record.in_transaction_id,
             placeholder_transaction_id=record.placeholder_transaction_id,
+            weak=record.id in weak,
         )
         for record in found
     ]
@@ -202,12 +254,14 @@ async def list_transfer_candidates(transfer_id: UUID, session: SessionDep) -> li
     link again); empty for a transfer with both sides."""
     found = await transfers.candidates(session, transfer_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    symbols = await _symbols(session)
     return [
         CandidateOut(
             transaction_id=c.transaction_id,
             account_id=c.account_id,
             account_name=names[c.account_id],
             quantity=c.quantity,
+            currency=symbols[c.instrument_id],
             occurred_at=c.occurred_at,
             description=c.description,
             reason=c.reason,
@@ -255,8 +309,10 @@ async def unpair_transfer(transfer_id: UUID, session: SessionDep, actor: ActorDe
 async def pair_transfer(
     transfer_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
 ) -> TransferOut:
-    """The owner picks the transfer's missing side among its candidates of the same amount,
-    or one they unpaired from it."""
+    """The owner picks the transfer's missing side among its candidates, or one they
+    unpaired from it. Two currencies may differ in currency or in amount (settled by a
+    conversion, or the difference a fee); anything else must be of the same instrument and
+    amount."""
     args = _args(body.model_dump(mode="json"), transfer_id=transfer_id)
     async with healing_command(session, actor, "pair_transfer", args) as ctx:
         record = await transfers.pair(ctx, transfer_id, body.transaction_id)
@@ -270,19 +326,24 @@ async def pair_transfer(
 async def list_transaction_pair_candidates(
     transaction_id: UUID, session: SessionDep
 ) -> list[PairCandidateOut]:
-    """The own records the record could be paired with as one transfer: on another account,
-    of the opposite and equal amount, nearest booking date first."""
+    """The own records the record could be paired with as one transfer, on another account:
+    those of the opposite and equal amount first, then those in a currency whose side
+    differs (`differs`: in currency or in amount) booked within 7 days; each part nearest
+    booking date first, at most 20 in all."""
     found = await transfers.pair_candidates(session, transaction_id)
     names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    symbols = await _symbols(session)
     return [
         PairCandidateOut(
             transaction_id=c.transaction_id,
             account_id=c.account_id,
             account_name=names[c.account_id],
             quantity=c.quantity,
+            currency=symbols[c.instrument_id],
             occurred_at=c.occurred_at,
             booking_date=c.booking_date,
             description=c.description,
+            differs=c.differs,
         )
         for c in found
     ]
@@ -292,8 +353,10 @@ async def list_transaction_pair_candidates(
 async def pair_transactions(
     transaction_id: UUID, body: TransferPair, session: SessionDep, actor: ActorDep
 ) -> TransferOut:
-    """The owner says two own records are one transfer, whether or not either is in one.
-    Undone by unpairing the resulting transfer."""
+    """The owner says two own records are one transfer, whether or not either is in one:
+    in one instrument of opposite, equal amounts, or two currencies of opposite sign that
+    differ in currency or in amount (the receiving side not larger). Undone by unpairing
+    the resulting transfer."""
     # _args merges the body over the path, so its own transaction_id would hide the path's.
     args: dict[str, JSONValue] = {
         "transaction_id": str(transaction_id),
@@ -309,10 +372,35 @@ async def pair_transactions(
 
 
 @router.get("/transfer-suggestions", name="list_transfer_suggestions")
-async def list_transfer_suggestions(session: SessionDep) -> list[SuggestionOut]:
+async def list_transfer_suggestions(
+    session: SessionDep,
+) -> list[SuggestionOut | CardMerchantSuggestionOut]:
     """Bank accounts that own records name and that are neither registered nor dismissed,
-    most named first. Registering one is add_account_identifier."""
-    return [SuggestionOut.model_validate(s) for s in await transfers.suggestions(session)]
+    most named first (registering one is add_account_identifier); then card merchants on a
+    connected platform's domain (kind card_merchant; registering one is
+    register_card_merchant)."""
+    banks: list[SuggestionOut | CardMerchantSuggestionOut] = [
+        SuggestionOut.model_validate(s) for s in await transfers.suggestions(session)
+    ]
+    return banks + [
+        CardMerchantSuggestionOut.model_validate(s)
+        for s in await transfers.card_merchant_suggestions(session)
+    ]
+
+
+# Before dismiss_transfer_suggestion, whose {identifier_id} would otherwise take this path.
+@router.post(
+    "/transfer-suggestions/card-merchants/dismiss",
+    name="dismiss_card_merchant_suggestion",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_card_merchant_suggestion(
+    body: CardMerchantDismiss, session: SessionDep, actor: ActorDep
+) -> None:
+    """The owner says the card merchant pays into none of their accounts."""
+    args = _args(body.model_dump(mode="json"))
+    async with healing_command(session, actor, "dismiss_card_merchant_suggestion", args) as ctx:
+        await identifiers.dismiss_card_merchant(ctx, body.merchant_id)
 
 
 @router.post(

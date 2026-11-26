@@ -23,8 +23,10 @@ from sqlalchemy import (
     Table,
     Uuid,
     and_,
+    any_,
     case,
     cast,
+    distinct,
     exists,
     false,
     func,
@@ -48,14 +50,6 @@ from lararium.modules.finance.system_accounts import SystemAccountKey, system_ac
 
 # Derived transactions (placeholders, settlements) are never legs themselves.
 DERIVED_ORIGINS = ("inference", "rule")
-
-
-@dataclass(frozen=True)
-class OwnLeg:
-    account_id: UUID  # the own account the record moves money in or out of
-    instrument_id: UUID
-    quantity: Decimal  # signed: negative on the sending side
-    contra_account_id: UUID  # Unassigned or In transit
 
 
 # A transaction's stable reference, which the owner's decisions are keyed by (design §5.9):
@@ -151,8 +145,18 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     In transit and the other on an account that is not a system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
-    contra_account_id, counterparty_identifier_id, holder (the account that bank account is
-    registered to), bank_transfer, source_kind, source_ref.
+    contra_account_id, counterparty_identifier_id, holder (the own account the record names:
+    the one its counterparty bank account is registered to, else the one registered under
+    the account number its import rows print alone (or its connector gives alone), else the
+    main account of a manual sub-account for a bank transfer naming no bank account),
+    weak_holder (apart from holder:
+    for a record naming no bank account in full and no account number, the one own account
+    registered under the sort code its import rows print alone), names_account (it names a
+    bank account, or its import rows print part of one; a card merchant is none), holders
+    (the own accounts the card merchant it names pays into, NULL for any other record: such
+    evidence never identifies it, so holder stays NULL and it pairs only with a record that
+    is there, pairs.card_tier),
+    bank_transfer, source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -187,6 +191,182 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         )
         .lateral("legs")
     )
+    # What the transaction's import rows print of their counterparty's bank account: its
+    # committed row, and the rows of committed batches that duplicate it (a later file
+    # printing what the first did not). Another lateral aggregate, its rows found as
+    # queries._in_ids finds them: their ids gathered first, by index (its rows by
+    # import_rows_transaction, their duplicates by import_rows_duplicate_of), then each row
+    # by its primary key and its batch by its own. Joined instead, rows and batches leave
+    # the plan to the planner's estimates, and with wrong ones (statistics taken while a
+    # bulk insert was uncommitted) it read every row of a batch for each record.
+    c, d, r = (
+        aliased(models.ImportRow, name=n) for n in ("own_row", "duplicate_row", "printed_row")
+    )
+    batch = aliased(models.ImportBatch, name="printed_batch")
+    # By transaction alone, so the planner has one index to take (with the status too, it
+    # may AND in an index of every committed row). A transaction that isn't void has no
+    # other rows than its committed ones: a rollback voids its rows' transactions. Each is
+    # correlated with the transaction explicitly: nested in the lateral, it would otherwise
+    # look for it in the lateral alone, and gather every transaction's rows.
+    own_rows = cast(
+        select(func.array_agg(c.id))
+        .where(c.transaction_id == t.id)
+        .correlate_except(c)
+        .scalar_subquery(),
+        ARRAY(Uuid()),
+    )
+    duplicates = cast(
+        select(func.array_agg(d.id))
+        .where(d.duplicate_of.is_not(None), d.duplicate_of == any_(own_rows))
+        .correlate_except(d)
+        .scalar_subquery(),
+        ARRAY(Uuid()),
+    )
+    batch_status = select(batch.status).where(batch.id == r.batch_id).scalar_subquery()
+    # A duplicate speaks for its original only when it is surely that row: matched by its
+    # key, or the one committed row of its account on that day with that instrument and
+    # amount. Otherwise it was matched by day and amount alone (Decision 16), in file order,
+    # and among alike rows it may be another's: a later file's savings transfer marked the
+    # duplicate of a shop payment the same day would make the payment a transfer. (A row
+    # of its own file alike to it is committed, or the duplicate of another such row.)
+    o, s = (aliased(models.ImportRow, name=n) for n in ("original_row", "alike_row"))
+    surely_its_original = or_(
+        r.status == "committed",
+        exists().where(o.id == r.duplicate_of, o.dedupe_key == r.dedupe_key),
+        ~exists().where(
+            s.account_id == r.account_id,
+            s.status == "committed",
+            s.booking_date == r.booking_date,
+            s.kind == "statement",
+            s.instrument_id == r.instrument_id,
+            s.quantity == r.quantity,
+            s.id != r.duplicate_of,
+        ),
+    )
+    # The column holds digits only (a CHECK), so the replace below only guards.
+    only_number = and_(
+        r.counterparty_account_number.is_not(None), r.counterparty_sort_code.is_(None)
+    )
+    only_sort_code = and_(
+        r.counterparty_sort_code.is_not(None), r.counterparty_account_number.is_(None)
+    )
+    evidence = (
+        select(
+            type_coerce(
+                func.array_agg(
+                    distinct(func.regexp_replace(r.counterparty_account_number, r"\D", "", "g"))
+                ).filter(only_number),
+                ARRAY(String()),
+            ).label("numbers"),
+            type_coerce(
+                func.array_agg(
+                    distinct(func.regexp_replace(r.counterparty_sort_code, r"\D", "", "g"))
+                ).filter(only_sort_code),
+                ARRAY(String()),
+            ).label("sort_codes"),
+            func.bool_or(
+                or_(
+                    r.counterparty_sort_code.is_not(None),
+                    r.counterparty_account_number.is_not(None),
+                    r.counterparty_account_ending.is_not(None),
+                )
+            ).label("partial"),
+        )
+        .where(
+            r.id == any_(func.array_cat(own_rows, duplicates)),
+            r.kind == "statement",
+            r.status.in_(("committed", "duplicate")),
+            batch_status == "committed",
+            surely_its_original,
+        )
+        .lateral("evidence")
+    )
+
+    def registered_alone(part: int, printed: ColumnElement[str]) -> ColumnElement[UUID]:
+        """The one own account registered under a UK bank account whose part (1, its sort
+        code; 2, its account number) is the printed one; NULL when none is, or several."""
+        n = aliased(models.AccountIdentifier, name=f"part_{part}_identifier")
+        return (
+            select(type_coerce(func.array_agg(distinct(n.account_id)), ARRAY(Uuid()))[1])
+            .where(
+                n.kind == "uk_bank_account",
+                n.account_id.is_not(None),
+                func.split_part(n.value, ":", part) == printed,
+            )
+            .having(func.count(distinct(n.account_id)) == 1)
+            .scalar_subquery()
+        )
+
+    # A connector's record gives the account number alone on the transaction itself (eToro
+    # Money's bank transfers, design §5.7): the same evidence as an import row's, and counted
+    # with theirs.
+    own_number = t.counterparty_account_number
+    printed = func.coalesce(func.cardinality(evidence.c.numbers), 0)
+    number_count = case(
+        (own_number.is_(None), printed),
+        (own_number == any_(evidence.c.numbers), printed),
+        else_=printed + 1,
+    )
+    number_holder = registered_alone(2, func.coalesce(own_number, evidence.c.numbers[1]))
+    # The record's own account, looked up per record too, not joined, for the same reason.
+    a = aliased(models.Account, name="own_account")
+    own_account = (
+        select(a.source_kind, a.parent_account_id).where(a.id == legs.c.account_id).lateral("own")
+    )
+    names_nothing = and_(
+        t.counterparty_identifier_id.is_(None),
+        number_count == 0,
+        ~func.coalesce(evidence.c.partial, false()),
+    )
+    holder = case(
+        (
+            t.counterparty_identifier_id.is_not(None),
+            select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
+        ),
+        (number_count == 1, number_holder),
+        # A savings sub-account moves money only to and from its main account.
+        (
+            and_(
+                names_nothing,
+                t.bank_transfer,
+                own_account.c.source_kind == "manual",
+                own_account.c.parent_account_id.is_not(None),
+            ),
+            own_account.c.parent_account_id,
+        ),
+        else_=None,
+    )
+    # Weak evidence, apart from holder, which only pairs.weak_tier reads: the import rows
+    # print the counterparty's sort code alone, and one own account has it.
+    weak_holder = case(
+        (
+            and_(
+                t.counterparty_identifier_id.is_(None),
+                number_count == 0,
+                func.cardinality(evidence.c.sort_codes) == 1,
+            ),
+            registered_alone(1, evidence.c.sort_codes[1]),
+        ),
+        else_=None,
+    )
+    # The card merchants, each with its holders (NULL for none), aggregated once and joined:
+    # a handful of rows, where a lookup per record would run for every record naming any
+    # identifier.
+    m = aliased(models.AccountIdentifier, name="merchant")
+    h = aliased(models.AccountIdentifierHolder, name="merchant_holder")
+    merchants = (
+        select(
+            m.id.label("identifier_id"),
+            type_coerce(
+                func.array_agg(h.account_id).filter(h.account_id.is_not(None)), ARRAY(Uuid())
+            ).label("holders"),
+        )
+        .select_from(m)
+        .outerjoin(h, h.identifier_id == m.id)
+        .where(m.kind == "card_merchant")
+        .group_by(m.id)
+        .subquery("card_merchants")
+    )
     source_kind, source_ref_ = source_columns(t)
     return (
         select(
@@ -198,16 +378,26 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             legs.c.quantity,
             legs.c.contra_account_id,
             t.counterparty_identifier_id,
-            # A lookup per record too, not a join, for the same reason.
-            select(i.account_id)
-            .where(i.id == t.counterparty_identifier_id)
-            .scalar_subquery()
-            .label("holder"),
+            holder.label("holder"),
+            weak_holder.label("weak_holder"),
+            or_(
+                # A card merchant is no bank account.
+                and_(
+                    t.counterparty_identifier_id.is_not(None), merchants.c.identifier_id.is_(None)
+                ),
+                own_number.is_not(None),
+                func.coalesce(evidence.c.partial, false()),
+            ).label("names_account"),
+            merchants.c.holders,
             t.bank_transfer,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
+        .select_from(t)
         .join(legs, true())
+        .join(evidence, true())
+        .join(own_account, true())
+        .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )
@@ -229,6 +419,9 @@ _OWN_RECORDS = Table(
     Column("contra_account_id", Uuid, nullable=False),
     Column("counterparty_identifier_id", Uuid),
     Column("holder", Uuid),
+    Column("weak_holder", Uuid),
+    Column("names_account", Boolean, nullable=False),
+    Column("holders", ARRAY(Uuid)),
     Column("bank_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
@@ -254,6 +447,28 @@ async def snapshot_own_records(
     # ledger's).
     await session.execute(text(f"ANALYZE pg_temp.{_OWN_RECORDS.name}"))
     return _OWN_RECORDS
+
+
+@dataclass(frozen=True)
+class LegFee:
+    """A transfer leg's conversion fee, as its connector gives it (finance.transfer_leg_fees,
+    eToro design §5.12): only connectors write it, and the engine reads it into the
+    conversion it posts."""
+
+    instrument_id: UUID
+    amount: Decimal  # not negative
+
+
+def leg_fee_columns(
+    transaction_id: SQLColumnExpression[UUID],
+) -> tuple[ColumnElement[UUID], ColumnElement[Decimal]]:
+    """The (instrument_id, amount) of the transaction's leg fee, NULL when it has none: a
+    lookup by its primary key for each record."""
+    f = aliased(models.TransferLegFee, name="leg_fee")
+    return (
+        select(f.instrument_id).where(f.transaction_id == transaction_id).scalar_subquery(),
+        select(f.amount).where(f.transaction_id == transaction_id).scalar_subquery(),
+    )
 
 
 def bound_id(value: UUID) -> SQLColumnExpression[UUID]:
@@ -304,6 +519,7 @@ class OwnRecord:
     counterparty_identifier_id: UUID | None
     bank_transfer: bool
     source: tuple[str, str]
+    holder: UUID | None = None  # the own account it names (see eligible_records)
 
     @property
     def role(self) -> Literal["out", "in"]:
@@ -347,22 +563,8 @@ async def load_own_record(
         counterparty_identifier_id=row.counterparty_identifier_id,
         bank_transfer=row.bank_transfer,
         source=(row.source_kind, row.source_ref),
+        holder=row.holder,
     )
-
-
-async def own_leg(session: AsyncSession, transaction_id: UUID) -> OwnLeg | None:
-    """The transaction's own posting and contra, or None when it can't be a transfer's leg."""
-    e = eligible_records(await system_account_ids(session))
-    row = (
-        await session.execute(
-            select(e.c.account_id, e.c.instrument_id, e.c.quantity, e.c.contra_account_id).where(
-                e.c.transaction_id == transaction_id
-            )
-        )
-    ).one_or_none()
-    if row is None:
-        return None
-    return OwnLeg(row.account_id, row.instrument_id, row.quantity, row.contra_account_id)
 
 
 async def source_ref(session: AsyncSession, transaction_id: UUID) -> SourceRef:
@@ -458,7 +660,9 @@ async def transfer_contra(
     with `other_postings` (postings besides its own and the contra, a fee say) can't be a
     leg (LEG_POSTINGS), so Unassigned; a leg of a transfer that is not rejected stays In
     transit; a counterparty bank account registered to another own account makes it In
-    transit. `source` is None for a transaction not yet posted, which has neither. Both
+    transit. A card merchant (registered with holders, not to one account) never does: its
+    record stays on Unassigned until it is paired (eToro design §5.12, as amended in Task
+    15). `source` is None for a transaction not yet posted, which has neither. Both
     system accounts must exist already (get_or_create_system_account).
     """
     system = await system_account_ids(session)

@@ -174,6 +174,8 @@ class ParsedRow:
     fx_rate: Decimal | None = None
     fx_reference_rate: Decimal | None = None
     time_unit: TimeUnit = "day"
+    # The row pays interest (the bank's own, never a transfer from another account).
+    interest: bool = False
 
     def __post_init__(self) -> None:
         if (self.occurred_at is None) != (self.time_unit == "day"):

@@ -12,9 +12,11 @@ everything back, newest first, must be allowed and leave a zero balance. A file 
 period without transactions is refused as empty (EmptyStatementError), as intended: it
 is counted, not failed.
 
-Nothing of the files is printed or kept: only counts and pass or fail. Error text has its
-digits and the file names masked, and the stored documents live in a temporary directory
-removed at the end.
+Nothing of the files is printed or kept: only counts and pass or fail. Only Lararium's own
+displayable errors are shown by their text, its digits and the file names masked; any other
+error by its class (real_check.shown). The test fails with a fixed message and no traceback,
+so pytest prints no locals. The stored documents live in a temporary directory removed at the
+end.
 """
 
 import os
@@ -44,6 +46,7 @@ from lararium.modules.finance.importing.staging import (
 )
 from lararium.modules.finance.instruments import InstrumentRecord
 
+from ..real_check import shown
 from .staging_helpers import MakeAccount, Run, _rows
 
 ROOT = os.environ.get("LARARIUM_REAL_ROOT")
@@ -111,7 +114,8 @@ def _banks(root: Path) -> list[tuple[Path, str]]:
         for prefix, institution in BANKS.items()
         if folder.name.lower().startswith(prefix)
     ]
-    assert found, f"no folder starting {', '.join(BANKS)} in LARARIUM_REAL_ROOT"
+    if not found:
+        pytest.fail(f"no folder starting {', '.join(BANKS)} in LARARIUM_REAL_ROOT", pytrace=False)
     return found
 
 
@@ -121,13 +125,17 @@ async def test_real_files_end_to_end(
 ) -> None:
     assert ROOT is not None
     failures: list[str] = []
-    with tempfile.TemporaryDirectory() as documents:
-        store = LocalDocumentStore(Path(documents))
-        for folder, institution in _banks(Path(ROOT)):
-            failures += await _bank(
-                session, run, make_account, gbp, store, folder, institution, order
-            )
-    assert not failures, "\n".join(failures)
+    try:
+        with tempfile.TemporaryDirectory() as documents:
+            store = LocalDocumentStore(Path(documents))
+            for folder, institution in _banks(Path(ROOT)):
+                failures += await _bank(
+                    session, run, make_account, gbp, store, folder, institution, order
+                )
+    except Exception as error:  # reported, as a failure
+        failures.append(f"the check stopped ({shown(error, lambda m: re.sub(r'[0-9]', '9', m))})")
+    if failures:
+        pytest.fail("\n".join(failures), pytrace=False)
 
 
 def closings(statements: list[ParsedStatement]) -> tuple[list[tuple[date, Decimal]], int]:
@@ -184,8 +192,8 @@ def _load(
         except EmptyStatementError:
             empty += 1
             continue
-        except Exception as error:  # reported, masked, as a failure
-            kind = f"{type(error).__name__}: {_mask(str(error), names)}"
+        except Exception as error:  # reported, as a failure
+            kind = shown(error, lambda message: _mask(message, names))
             failures.append(f"{tag}: a {label} doesn't parse ({kind})")
             continue
         loaded.append(_File(label, content, statement))
@@ -244,10 +252,9 @@ async def _bank(
                 continue
             await run(commit_batch, batch.id)
             session.expunge_all()
-        except Exception as error:  # reported, masked, as a failure
-            failures.append(
-                f"{tag}: a {label} refused ({type(error).__name__}: {_mask(str(error), names)})"
-            )
+        except Exception as error:  # reported, as a failure
+            kind = shown(error, lambda message: _mask(message, names))
+            failures.append(f"{tag}: a {label} refused ({kind})")
             continue
         committed.append(batch.id)
         outcome[label] += 1

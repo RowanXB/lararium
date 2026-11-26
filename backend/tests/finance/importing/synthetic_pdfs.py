@@ -602,6 +602,8 @@ class TemboStatement:
     start: str | None = None  # None: the first row's date, as Tembo prints it
     end: str | None = None  # None: the last row's date
     account_no: str = "ACC-EX01AB-CD23EF"
+    opened: str | None = "03/02/2027"  # None: the Account open date line is left out
+    valued: str | None = "01/06/2027"  # None: the Valuation date line is left out
     omit_page: int | None = None  # a page (from 1) left out of the file, its number kept
     # A page (from 1) whose table has no text layer (an image, say); its number still has.
     unreadable_page: int | None = None
@@ -669,13 +671,15 @@ def tembo_pdf(statement: TemboStatement) -> bytes:
     _tembo_heading(pdf, 62.0, 227.7, "Account summary")
     for top, left, left_value, right, right_value in [
         (249.0, "Account no:", statement.account_no, "Available to withdraw*:", None),
-        (259.5, "Account open date:", "03/02/2027", "Plan value:", plan_value),
-        (270.0, "Account type:", "Regular Saver", "Valuation date:", "01/06/2027"),
+        (259.5, "Account open date:", statement.opened, "Plan value:", plan_value),
+        (270.0, "Account type:", "Regular Saver", "Valuation date:", statement.valued),
     ]:
         _tembo(pdf, 62.0, top, left)
-        _tembo(pdf, 283.5, top, left_value, right=True)
+        if left_value is not None:
+            _tembo(pdf, 283.5, top, left_value, right=True)
         _tembo(pdf, 311.8, top, right)
-        _tembo(pdf, 533.3, top, right_value or statement.available or plan_value, right=True)
+        if right != "Valuation date:" or right_value is not None:
+            _tembo(pdf, 533.3, top, right_value or statement.available or plan_value, right=True)
     _tembo_heading(pdf, 62.0, 314.7, "Transactions:")
     _tembo_heading(pdf, 138.8, 316.4, f"{start} - {end}", size=9)
 

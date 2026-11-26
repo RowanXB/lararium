@@ -1,6 +1,6 @@
 """The transfers and identifiers API (/api/v1/finance/transfers, .../identifiers)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,10 +20,12 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     TransactionRecord,
+    post_transaction,
     upsert_connector_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import transfer_contra
+from tests.finance.transfers.conftest import RowDetails, record_import_rows
 
 FINANCE = "/api/v1/finance"
 WHEN = datetime(2026, 11, 2, 12, tzinfo=UTC)
@@ -71,10 +73,11 @@ async def _connector_tx(
     identifier_id: UUID | None = None,
     name: str = "Test Owner",
     bank_transfer: bool = True,
+    currency: str = "GBP",
 ) -> TransactionRecord:
     """Post a connector transaction as a normalizer would (contra from transfer_contra)."""
     connection_id, account = bank
-    gbp = await get_currency(session, "GBP")
+    gbp = await get_currency(session, currency)
     contra = await transfer_contra(
         session,
         source=("connection", f"{connection_id}:{external_id}"),
@@ -295,7 +298,11 @@ async def test_pair_candidate_flow(client, session, run) -> None:
         (str(loose[0].id), "exact"),
         (str(loose[1].id), "exact"),
     ]
-    assert (found[0]["account_name"], found[0]["quantity"]) == ("C", "100")
+    assert (found[0]["account_name"], found[0]["quantity"], found[0]["currency"]) == (
+        "C",
+        "100",
+        "GBP",
+    )
 
     paired = await client.post(
         f"{FINANCE}/transfers/{transfer['id']}/pair", json={"transaction_id": str(loose[0].id)}
@@ -356,8 +363,10 @@ async def test_unpair_is_undone_by_pair(client, session, run) -> None:
     assert await _transfers(client) == [body]
 
 
-async def _hand_post(client, session, run, account_id: str, quantity: str) -> str:
-    gbp = await get_currency(session, "GBP")
+async def _hand_post(
+    client, session, run, account_id: str, quantity: str, currency: str = "GBP"
+) -> str:
+    gbp = await get_currency(session, currency)
     unassigned = await run(get_or_create_system_account, "unassigned")
     response = await client.post(
         f"{FINANCE}/transactions",
@@ -429,11 +438,84 @@ async def test_pair_transactions_audit_row_names_both_records(client, session, r
     assert args == {"transaction_id": str(out.id), "other_transaction_id": in_id}
 
 
+async def test_pair_records_that_differ_through_the_api(client, session, run) -> None:
+    """A deposit net of a fee is listed after the equal candidates, marked, and pairs; a
+    larger one is neither listed nor paired (422)."""
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out_id = str((await _connector_tx(session, run, a, "-100.00", bank_transfer=False)).id)
+    equal_id = await _hand_post(client, session, run, b_id, "100.00")
+    net_id = await _hand_post(client, session, run, b_id, "99.30")
+    larger_id = await _hand_post(client, session, run, b_id, "100.70")
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["differs"]) for x in found] == [
+        (equal_id, None),
+        (net_id, "amount"),
+    ]
+    larger = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
+    )
+    assert larger.status_code == 422
+    assert "larger" in larger.json()["detail"]["message"]
+
+    paired = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": net_id}
+    )
+    assert paired.status_code == 200
+    body = paired.json()
+    assert (body["status"], body["amount"], body["in_transaction_id"]) == (
+        "matched",
+        "100.00",
+        net_id,
+    )
+
+
+async def test_candidates_carry_their_own_currency(client, session, run) -> None:
+    """A candidate in another currency is listed with its own currency, both among a
+    record's pair candidates and, once unpaired, among the waiting transfer's candidates."""
+    a, c = await _connected(run, "A"), await _connected(run, "C")
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", C_IDENTIFIER)
+    assert (await _register(client, str(c[1].id), C_IDENTIFIER)).status_code == 201
+    out_id = str((await _connector_tx(session, run, a, "-100.00", identifier_id=c_identifier)).id)
+    usd_id = str(
+        (
+            await _connector_tx(
+                session,
+                run,
+                c,
+                "126.00",
+                external_id="in_usd",
+                occurred_at=WHEN + timedelta(hours=1),
+                currency="USD",
+            )
+        ).id
+    )
+    assert (await _register(client, str(a[1].id), A_IDENTIFIER)).status_code == 201
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["differs"], x["currency"]) for x in found] == [
+        (usd_id, "currency", "USD")
+    ]
+    paired = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": usd_id}
+    )
+    assert paired.status_code == 200
+    body = paired.json()
+    assert body["currency"] == "GBP"
+    assert (await client.post(f"{FINANCE}/transfers/{body['id']}/unpair")).status_code == 204
+    [waiting] = [t for t in await _transfers(client) if t["out_transaction_id"] == out_id]
+    listed = (await client.get(f"{FINANCE}/transfers/{waiting['id']}/candidates")).json()
+    assert [(x["transaction_id"], x["reason"], x["currency"]) for x in listed] == [
+        (usd_id, "unpaired", "USD")
+    ]
+
+
 async def test_pair_transactions_refusals(client, session, run) -> None:
     a = await _connected(run, "A")
     b_id = await _manual(client, "B")
     out_id = str((await _connector_tx(session, run, a, "-100", bank_transfer=False)).id)
-    short_id = await _hand_post(client, session, run, b_id, "90")
+    larger_id = await _hand_post(client, session, run, b_id, "110")
     unknown = str(uuid4())
 
     same = await client.post(
@@ -443,7 +525,7 @@ async def test_pair_transactions_refusals(client, session, run) -> None:
     assert same.json()["detail"]["error"] == "invalid_input"
 
     differs = await client.post(
-        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": short_id}
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
     )
     assert differs.status_code == 422
     assert differs.json()["detail"]["error"] == "invalid_input"
@@ -748,3 +830,229 @@ async def test_lists_an_ibkr_account_identifier_and_refuses_to_register_one(clie
         json={"kind": "ibkr_account", "value": "U0000002"},
     )
     assert refused.status_code == 422
+
+
+async def _statement_row(
+    session, run, account_id: str, quantity: str, *, details: RowDetails | None = None
+) -> UUID:
+    """A bank transfer naming nobody, posted as a statement import would and recorded as a
+    row of a committed import listing its day in full, which prints `details` of its
+    counterparty's bank account (nothing by default). Its transaction's id."""
+    gbp = await get_currency(session, "GBP")
+    own = UUID(account_id)
+    contra = await transfer_contra(
+        session, source=None, own_account_id=own, counterparty_identifier_id=None, other_postings=0
+    )
+    amount = Decimal(quantity)
+    row = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime.combine(WHEN.date(), time(), UTC),
+            description="Faster payment",
+            origin="manual",
+            postings=[PostingInput(own, gbp.id, amount), PostingInput(contra, gbp.id, -amount)],
+            counterparty=CounterpartyFields(identifier_id=None, bank_transfer=True),
+        ),
+    )
+    # Listed in full from before the counterpart's window starts, so a pair is found.
+    complete = (WHEN.date() - timedelta(days=6), WHEN.date() + timedelta(days=6))
+    printed = None if details is None else [details]
+    await record_import_rows(session, run, own, [row.id], complete, details=printed)
+    return row.id
+
+
+async def _set_main(client, account_id: str, main_account_id: str | None) -> Any:
+    return await client.post(
+        f"{FINANCE}/accounts/{account_id}/main-account", json={"main_account_id": main_account_id}
+    )
+
+
+async def _main_and_savings(client, session, run) -> tuple[str, str]:
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    await _statement_row(session, run, main_id, "-100")
+    await _statement_row(session, run, savings_id, "100")
+    return main_id, savings_id
+
+
+async def test_setting_a_main_account_pairs_its_history(client, session, run) -> None:
+    main_id, savings_id = await _main_and_savings(client, session, run)
+    assert await _transfers(client) == []
+    response = await _set_main(client, savings_id, main_id)
+    assert (response.status_code, response.json()["parent_account_id"]) == (200, main_id)
+    [transfer] = await _transfers(client)
+    assert (transfer["from_account_id"], transfer["to_account_id"]) == (main_id, savings_id)
+    assert transfer["status"] == "matched"
+
+
+async def test_clearing_the_main_account_unpairs_its_history(client, session, run) -> None:
+    main_id, savings_id = await _main_and_savings(client, session, run)
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+    assert len(await _transfers(client)) == 1
+    response = await _set_main(client, savings_id, None)
+    assert (response.status_code, response.json()["parent_account_id"]) == (200, None)
+    assert await _transfers(client) == []
+
+
+async def _accounts_no_record_can_name(client) -> tuple[str, str]:
+    """A snapshots-only account, whose postings valuation ignores, and an expense account,
+    none of the owner's money: a transfer naming either would move net worth, so neither can
+    have identifiers or be a main account."""
+    snapshots_id = await _manual(client, "Pension", "snapshots")
+    body = {
+        "name": "Rent",
+        "ledger_type": "expense",
+        "subtype": "other",
+        "balance_mode": "transactions",
+    }
+    response = await client.post(f"{FINANCE}/accounts", json=body)
+    assert response.status_code == 201, response.text
+    return snapshots_id, response.json()["id"]
+
+
+async def test_a_main_account_is_refused_where_it_cant_hold(client, run) -> None:
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    other_id = await _manual(client, "Other", "transactions")
+    _, connected = await _connected(run, "Connected")
+    closed_id = await _manual(client, "Closed", "transactions")
+    closed = await client.post(
+        f"{FINANCE}/accounts/{closed_id}/close", json={"closed_on": "2026-11-01"}
+    )
+    assert closed.status_code == 200, closed.text
+    snapshots_id, expense_id = await _accounts_no_record_can_name(client)
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+
+    assert (await _set_main(client, str(connected.id), main_id)).status_code == 422
+    assert (await _set_main(client, other_id, other_id)).status_code == 422
+    assert (await _set_main(client, other_id, closed_id)).status_code == 422
+    assert (await _set_main(client, other_id, snapshots_id)).status_code == 422
+    assert (await _set_main(client, other_id, expense_id)).status_code == 422
+    # savings has a main account of its own; main is already another's main.
+    assert (await _set_main(client, other_id, savings_id)).status_code == 422
+    assert (await _set_main(client, main_id, other_id)).status_code == 422
+    assert (await _set_main(client, other_id, str(uuid4()))).status_code == 404
+    # A system account takes none, and can't be one.
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    assert (await _set_main(client, str(unassigned), main_id)).status_code == 422
+    assert (await _set_main(client, other_id, str(unassigned))).status_code == 422
+    # Nothing changed.
+    [account] = [a for a in (await client.get(f"{FINANCE}/accounts")).json() if a["id"] == other_id]
+    assert account["parent_account_id"] is None
+    # A hybrid account counts its postings too, so it can be one.
+    hybrid_id = await _manual(client, "Hybrid", "hybrid")
+    assert (await _set_main(client, other_id, hybrid_id)).status_code == 200
+
+
+async def test_a_main_account_is_refused_at_creation_where_it_cant_hold(client, run) -> None:
+    """A manual account created with a main account takes it under the rules setting one
+    does: else a sub-account's bank transfer would name, say, a system account."""
+    main_id = await _manual(client, "Main", "transactions")
+    savings_id = await _manual(client, "Savings", "transactions")
+    assert (await _set_main(client, savings_id, main_id)).status_code == 200
+    closed_id = await _manual(client, "Closed", "transactions")
+    closed = await client.post(
+        f"{FINANCE}/accounts/{closed_id}/close", json={"closed_on": "2026-11-01"}
+    )
+    assert closed.status_code == 200, closed.text
+    unassigned = await run(get_or_create_system_account, "unassigned")
+    snapshots_id, expense_id = await _accounts_no_record_can_name(client)
+
+    async def create(main_account_id: str) -> Any:
+        body = {
+            "name": "New savings",
+            "ledger_type": "asset",
+            "subtype": "bank",
+            "balance_mode": "transactions",
+            "parent_account_id": main_account_id,
+        }
+        return await client.post(f"{FINANCE}/accounts", json=body)
+
+    before = (await client.get(f"{FINANCE}/accounts")).json()
+    # A system account, a closed one, one with a main account of its own, a snapshots-only
+    # one and an expense account.
+    for refused in (str(unassigned), closed_id, savings_id, snapshots_id, expense_id):
+        response = await create(refused)
+        assert response.status_code == 422, refused
+        assert response.json()["detail"]["error"] == "invalid_input"
+    assert (await create(str(uuid4()))).status_code == 404
+    assert (await client.get(f"{FINANCE}/accounts")).json() == before
+
+    created = await create(main_id)
+    assert (created.status_code, created.json()["parent_account_id"]) == (201, main_id)
+
+
+async def _weak_pair(client, session, run) -> tuple[dict[str, Any], UUID, UUID, str]:
+    """X's payment prints only H's sort code, and H's receipt names nobody: they pair weakly.
+    The pair, X's and H's records, and H's id."""
+    x_id = await _manual(client, "X", "transactions")
+    h_id = await _manual(client, "H", "transactions")
+    sent = await _statement_row(session, run, x_id, "-100", details=RowDetails(sort_code="404040"))
+    received = await _statement_row(session, run, h_id, "100")
+    assert (await _register(client, h_id, "404040:55556666")).status_code == 201
+    [transfer] = await _transfers(client)
+    assert (transfer["status"], transfer["weak"]) == ("matched", True)
+    return transfer, sent, received, h_id
+
+
+async def _pair_records(client, transaction_id: UUID, other_id: UUID) -> Any:
+    return await client.post(
+        f"{FINANCE}/transactions/{transaction_id}/pair", json={"transaction_id": str(other_id)}
+    )
+
+
+async def test_a_pair_made_by_sort_code_alone_is_weak_and_can_be_rejected(
+    client, session, run
+) -> None:
+    transfer, _, _, _ = await _weak_pair(client, session, run)
+    rejected = await client.post(f"{FINANCE}/transfers/{transfer['id']}/reject")
+    assert rejected.status_code == 200
+    assert (rejected.json()["status"], rejected.json()["weak"]) == ("rejected", False)
+    undone = await client.post(f"{FINANCE}/transfers/{transfer['id']}/unreject")
+    assert undone.status_code == 204
+    [again] = await _transfers(client)
+    assert (again["status"], again["weak"]) == ("matched", True)
+
+
+async def test_unpairing_a_weak_pair_frees_its_records_for_their_right_counterparts(
+    client, session, run
+) -> None:
+    """The sort code was wrong evidence: H's receipt came from D, whose payment names
+    nobody. Reject would mark the receipt as no transfer, which pair_records refuses; Unpair
+    keeps both records free, so the receipt pairs with D's payment."""
+    transfer, sent, received, h_id = await _weak_pair(client, session, run)
+    d_id = await _manual(client, "D", "transactions")
+    d_sent = await _statement_row(session, run, d_id, "-100")
+    assert await _transfers(client) == [transfer]
+    first = await _pair_records(client, received, d_sent)
+    assert first.status_code == 422
+    assert "unpair it first" in first.json()["detail"]["message"]
+
+    assert (await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")).status_code == 204
+    # Neither record is a transfer on its own: no transfer, placeholder or review is left.
+    assert await _transfers(client) == []
+    assert await _placeholders(session) == []
+
+    paired = await _pair_records(client, received, d_sent)
+    assert paired.status_code == 200, paired.text
+    body = paired.json()
+    assert (body["status"], body["from_account_id"], body["to_account_id"]) == (
+        "matched",
+        d_id,
+        h_id,
+    )
+    assert (body["out_transaction_id"], body["in_transaction_id"]) == (str(d_sent), str(received))
+    # X's payment stays apart from the receipt and opens nothing of its own.
+    assert [t["id"] for t in await _transfers(client)] == [body["id"]]
+    assert str(sent) not in {body["out_transaction_id"], body["in_transaction_id"]}
+
+
+async def test_unpairing_a_weak_pair_is_undone_by_pairing_its_records(client, session, run) -> None:
+    transfer, sent, received, _ = await _weak_pair(client, session, run)
+    assert (await client.post(f"{FINANCE}/transfers/{transfer['id']}/unpair")).status_code == 204
+    assert await _transfers(client) == []
+
+    paired = await _pair_records(client, received, sent)
+    assert paired.status_code == 200, paired.text
+    # Paired by the owner now, it is no longer a pair a sort code alone made.
+    assert (paired.json()["status"], paired.json()["weak"]) == ("matched", False)

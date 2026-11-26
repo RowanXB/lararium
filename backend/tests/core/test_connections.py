@@ -12,8 +12,10 @@ from lararium.core.connections import (
     get_connection,
     list_connections,
     load_credential,
+    merge_cursor,
     record_sync_failure,
     record_sync_success,
+    set_cursor,
     set_status,
     set_warnings,
     store_credential,
@@ -150,6 +152,28 @@ async def test_config_write_keeps_keys_written_since_it_was_read(run) -> None:
         "account_map": {"acc_1": "a"},
         "backfill_requested": True,
     }
+
+
+async def test_merge_cursor_sets_its_keys_only(run) -> None:
+    connection = await _create(run)
+    await run(set_cursor, connection.id, {"seen": "a", "flags": {"old": ["x"]}})
+    # Written since a writer read it: kept, since the merge is done on the row as it is.
+    await run(set_cursor, connection.id, {"seen": "b", "flags": {"old": ["x"]}})
+    merged = await run(merge_cursor, connection.id, {"flags": {}, "notified": ["y"]})
+    assert merged.cursor == {"seen": "b", "flags": {}, "notified": ["y"]}
+
+
+@pytest.mark.parametrize("cursor", ["sql null", None, [1], "text"])
+async def test_merge_cursor_starts_a_cursor_that_is_not_an_object(session, run, cursor) -> None:
+    connection = await _create(run)
+    if cursor == "sql null":
+        await session.execute(
+            text("update core.connections set cursor = null where id = :id"), {"id": connection.id}
+        )
+    else:
+        await run(set_cursor, connection.id, cursor)
+    merged = await run(merge_cursor, connection.id, {"flags": {"statement": ["z"]}})
+    assert merged.cursor == {"flags": {"statement": ["z"]}}
 
 
 async def test_transition_status_only_from_given_statuses(session, run) -> None:

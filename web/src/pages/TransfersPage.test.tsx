@@ -37,6 +37,7 @@ function transfer(overrides: Record<string, unknown>) {
     placeholder_transaction_id: null,
     opened_at: "2026-11-10T09:00:00Z",
     matched_at: null,
+    weak: false,
     ...overrides,
   };
 }
@@ -70,6 +71,7 @@ const CANDIDATE = {
   account_name: "Bank A",
   occurred_at: "2026-11-11T09:00:00Z",
   quantity: "100",
+  currency: "GBP",
   description: "From Monzo",
   reason: "exact",
 };
@@ -196,6 +198,15 @@ it("renders sections from the API", async () => {
   expect(recent.getByText("Monzo → Bank A · 40.00 GBP · matched")).toBeInTheDocument();
 });
 
+it("shows a candidate's own currency", async () => {
+  vi.mocked(listTransferCandidates).mockResolvedValue({
+    data: [{ ...CANDIDATE, quantity: "126", currency: "USD", reason: "amount_differs" }],
+  } as never);
+  renderPage();
+  const attention = await section("Needs attention");
+  expect(await attention.findByText(/Bank A · .* · 126\.00 USD · From Monzo/)).toBeInTheDocument();
+});
+
 it("pairs a candidate", async () => {
   const user = userEvent.setup();
   renderPage();
@@ -228,6 +239,29 @@ it("rejects a transfer", async () => {
   expect(unpairTransfer).toHaveBeenCalledWith(
     expect.objectContaining({ path: { transfer_id: "0190a0b0-0000-7000-8000-0000000000f4" } }),
   );
+});
+
+it("offers only Reject on a pair made by sort code", async () => {
+  const weak = transfer({
+    id: "0190a0b0-0000-7000-8000-0000000000f6",
+    status: "matched",
+    in_transaction_id: "0190a0b0-0000-7000-8000-0000000000c6",
+    weak: true,
+  });
+  vi.mocked(listTransfers).mockResolvedValue({ data: [weak] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const recent = await section("Recent");
+  await user.click(await recent.findByText("Recent (1)"));
+  expect(recent.getByText("Monzo → Bank A · 100.00 GBP · matched")).toBeInTheDocument();
+
+  expect(screen.queryByRole("button", { name: "Unpair" })).toBeNull();
+  expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Reject" }));
+  expect(rejectTransfer).toHaveBeenCalledWith(
+    expect.objectContaining({ path: { transfer_id: "0190a0b0-0000-7000-8000-0000000000f6" } }),
+  );
+  expect(unpairTransfer).not.toHaveBeenCalled();
 });
 
 it("undoes a rejection whose records were all rolled back", async () => {

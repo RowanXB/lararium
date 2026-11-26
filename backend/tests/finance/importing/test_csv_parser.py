@@ -1,3 +1,4 @@
+import gc
 import time
 from datetime import date, datetime
 from decimal import Decimal
@@ -54,6 +55,13 @@ def test_signed_amount_column() -> None:
     assert all(row.balance is None and row.currency is None for row in rows)
 
 
+def test_interest_descriptions_mark_interest_rows() -> None:
+    content = b"Date,Description,Amount\n10/11/2026,Interest,1.00\n11/11/2026,Deposit,2.00\n"
+    rows = _rows(_parse(content, interest_descriptions=["Interest"]))
+    assert [r.interest for r in rows] == [True, False]
+    assert [r.interest for r in _rows(_parse(content))] == [False, False]
+
+
 def test_outflow_positive_sign() -> None:
     rows = _rows(_parse(SIMPLE, sign="outflow_positive"))
     assert [row.quantity for row in rows] == [Decimal("3.50"), Decimal("-2000.00")]
@@ -88,9 +96,16 @@ def test_wide_padded_header_stays_linear() -> None:
     thousands of empty trailing cells cost gigabytes for a small file."""
     header = b"Date,Description,Amount" + b"," * 16_381 + b"\n"
     content = header + b"10/11/2026,Coffee,-3.50\n" * 2_000
-    started = time.perf_counter()
-    rows = _rows(_parse(content))
-    assert time.perf_counter() - started < 2
+    # The parser's own time: late in a full run a collection of the whole heap takes seconds
+    # by itself, and one landing here is not the parser's cost.
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        rows = _rows(_parse(content))
+        elapsed = time.perf_counter() - started
+    finally:
+        gc.enable()
+    assert elapsed < 2
     assert rows[0].raw == {"Date": "10/11/2026", "Description": "Coffee", "Amount": "-3.50"}
 
 
