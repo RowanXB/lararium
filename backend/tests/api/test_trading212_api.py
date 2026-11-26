@@ -1,5 +1,6 @@
 """/api/v1/connections: the Trading 212 connection routes."""
 
+import asyncio
 import base64
 from collections.abc import AsyncIterator
 from typing import Any
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lararium.api.app import create_app
 from lararium.config import Settings
 from lararium.core.connections import get_connection, load_credential, set_status
+from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.worker import jobs
@@ -145,6 +147,71 @@ async def test_same_account_twice_409(api, queue) -> None:
     assert "already connected" in response.json()["detail"]["message"]
     assert API_KEY not in response.text
     assert _queued(queue) == []
+
+
+async def test_concurrent_creates_of_one_account_make_one_connection(
+    backend_url: str, owner_url: str, migrated: None, trading212, queue, monkeypatch
+) -> None:
+    # Two requests, each in its own transaction, neither committed when the other checks.
+    engine, owner = create_engine(backend_url), create_engine(owner_url)
+    settings = Settings(
+        database_url="postgresql+psycopg://unused@localhost/unused",
+        auth_mode="tailscale",
+        owner_login="me@example.com",
+        master_key=SecretStr(base64.b64encode(KEY).decode()),
+    )
+    app = create_app(settings)
+    app.state.sessionmaker = make_sessionmaker(engine)
+
+    async def _test_http() -> AsyncIterator[httpx.AsyncClient]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(trading212)) as http:
+            yield http
+
+    app.dependency_overrides[connections_api.get_http] = _test_http
+    create_connection = connections_api.create_connection
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Still uncommitted while the other request checks.
+        await asyncio.sleep(0.5)
+        return await create_connection(*args, **kwargs)
+
+    monkeypatch.setattr(connections_api, "create_connection", slow_create)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first, second = await asyncio.gather(
+                client.post(URL, json=BODY, headers=OWNER),
+                client.post(URL, json=BODY, headers=OWNER),
+            )
+        assert sorted([first.status_code, second.status_code]) == [201, 409]
+        async with owner.connect() as conn:
+            rows = await conn.scalar(
+                text("select count(*) from core.connections where connector = 'trading212'")
+            )
+        assert rows == 1
+    finally:
+        async with owner.begin() as conn:
+            ids = [
+                r[0]
+                for r in await conn.execute(
+                    text("select id from core.connections where connector = 'trading212'")
+                )
+            ]
+            await conn.execute(
+                text("delete from core.credentials where connection_id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(
+                text("delete from core.events where subject_id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(
+                text("delete from core.audit_log where command = 'create_trading212_connection'")
+            )
+            await conn.execute(
+                text("delete from core.connections where id = any(:ids)"), {"ids": ids}
+            )
+        await engine.dispose()
+        await owner.dispose()
 
 
 async def test_bad_key_422(api, session, trading212, queue) -> None:

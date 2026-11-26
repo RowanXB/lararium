@@ -612,6 +612,11 @@ async def _create_with_keys(
     the sync's account check looks, healthy, and a sync queued after the commit."""
     master_key = _require_master_key(settings)
     async with command_context(session, actor, f"create_{connector}_connection", args) as ctx:
+        # One create of a connector at a time: two at once would each pass the check below
+        # before the other's connection is committed.
+        await session.execute(
+            select(func.pg_advisory_xact_lock(func.hashtext(f"create_connection:{connector}")))
+        )
         if any(
             isinstance(other.cursor, dict) and other.cursor.get(identity) == cursor[identity]
             for other in await list_connections(session)
