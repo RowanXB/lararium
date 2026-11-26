@@ -103,6 +103,11 @@ initialExposureAssetCurrency addedFunds marginAccountCurrency marginAssetCurrenc
 remainingUnits remainingContracts stopLossRate takeProfitRate"""
 _OPENING_NUMERIC = """orderId units contracts avgPrice avgConversionRate marketSpread markup
 priceId fees taxes"""
+# An order lookup's `externalOperation.data` is a string holding the JSON text of an object. The
+# string is a field, kept as sent; the object's members are fields below it, read out of the
+# text (reports.operation_data).
+OPERATION_DATA = "externalOperation.data"
+_OPERATION_DATA_NUMERIC = "CreditorTypeId DebitorTypeId Id StatusID"
 
 
 def _endpoint(
@@ -240,6 +245,7 @@ _DECLARED: Mapping[str, tuple[EndpointSpec, dict[str, Kind]]] = {
         timestamptz="openTimestamp closeTimestamp",
         boolean="isBuy trailingStopLoss",
     ),
+    # Probe and SPEC; `externalOperation` is neither's: eToro sends it with some orders.
     "order_lookup": _endpoint(
         "etoro.order",
         "etoro_orders",
@@ -248,10 +254,12 @@ _DECLARED: Mapping[str, tuple[EndpointSpec, dict[str, Kind]]] = {
         asset.instrumentId asset.leverage requestedAmount requestedUnits requestedContracts
         frozenAmount requestedTriggerRate openStopLossRate openTakeProfitRate totalCosts
         {_POSITIONS_TO_CLOSE} {_under(f"{_EXECUTIONS}.", _EXECUTION_NUMERIC)}
-        {_under(f"{_EXECUTIONS}.openingData.", _OPENING_NUMERIC)}""",
+        {_under(f"{_EXECUTIONS}.openingData.", _OPENING_NUMERIC)}
+        {_under(f"{OPERATION_DATA}.", _OPERATION_DATA_NUMERIC)}""",
         text=f"""action transaction type status.name status.errorMessage
         {_under("asset.", "symbol currency settlementType side")} orderCurrency stopLossType
-        openActionType requestType {_EXECUTIONS}.state""",
+        openActionType requestType {_EXECUTIONS}.state externalOperation.type
+        externalOperation.referenceId {OPERATION_DATA}""",
         timestamptz=f"""requestTime lastUpdate {_EXECUTIONS}.openingData.openTime
         {_EXECUTIONS}.openingData.executionTime""",
         children={

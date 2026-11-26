@@ -27,7 +27,9 @@ from uuid import UUID
 from sqlalchemy import select, text
 
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_items import shown_path
 from lararium.modules.finance.connector_run import reported_snapshot
+from lararium.modules.finance.etoro.fields import ENDPOINTS, OPERATION_DATA
 from lararium.modules.finance.etoro.records import end_of, link_open
 from lararium.modules.finance.etoro.state import (
     SOURCE,
@@ -42,10 +44,12 @@ from lararium.modules.finance.etoro.state import (
     number_or_none,
     objects_at,
     text_at,
+    value_at,
 )
 from lararium.modules.finance.identifiers import normalize_identifier
 from lararium.modules.finance.pricing import record_price
-from lararium.modules.finance.typed_tables import parse_date
+from lararium.modules.finance.readonly_http import loads_decimal
+from lararium.modules.finance.typed_tables import Value, parse_date
 
 # Balances entries whose `balance` is the account's cash or value, as a reported snapshot.
 _SNAPSHOT_TYPES = frozenset({"Cash", "MoneyFarm"})
@@ -89,13 +93,53 @@ async def metadata(run: Run, by_endpoint: dict[str, list[Record]]) -> None:
             )
 
 
+def operation_data(run: Run, lookup: Item) -> dict[str, Value]:
+    """An order lookup's `externalOperation.data` (fields.OPERATION_DATA) and its members, by
+    path: all that is typed at or below it. The field is text holding a JSON object's, its
+    members numbers. Anything else is flagged by path, as an unknown field is, and left out:
+    a value that is not text, text that is not a JSON object's (kept as sent), a member the
+    fields do not know and a known one that is not a number (the known numbers still typed)."""
+    data = value_at(lookup, OPERATION_DATA)
+    if data is None:
+        return {}
+    flagged = f"order_lookup.{OPERATION_DATA}"
+    if not isinstance(data, str):
+        run.flag(flagged)
+        return {}
+    found: dict[str, Value] = {OPERATION_DATA: data}
+    if not data.strip():
+        return found
+    try:
+        members = loads_decimal(data)
+    except (ValueError, RecursionError):
+        members = None
+    if not isinstance(members, dict):
+        run.flag(flagged)
+        return found
+    for name, value in members.items():
+        path = f"{OPERATION_DATA}.{name}"
+        if value is None:
+            continue
+        if path in ENDPOINTS["order_lookup"].known and isinstance(value, Decimal):
+            found[path] = value
+        else:
+            run.flag(f"order_lookup.{shown_path(path)}")
+    return found
+
+
 async def lookups(run: Run, records: Sequence[Record]) -> None:
     """Each order looked up, its executions (linked to their positions' opens) and the
     positions it closes."""
     endpoint = "order_lookup"
     for record in records:
         content = record.content
-        values = await run.typed(endpoint, "etoro_orders", flat(content))
+        # `externalOperation.data` and what is below it come from operation_data alone.
+        fields = {
+            path: value
+            for path, value in flat(content).items()
+            if path != OPERATION_DATA and not path.startswith(f"{OPERATION_DATA}.")
+        }
+        values = await run.typed(endpoint, "etoro_orders", fields | operation_data(run, content))
         order_id = values.pop("order_id")
         await run.upsert(
             "etoro_orders",

@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from fastapi import Request
 from procrastinate.testing import InMemoryConnector
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -28,7 +29,6 @@ from lararium.core.connections import (
     update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED
-from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.monzo import sync as monzo_sync
 from lararium.modules.finance.monzo.client import MonzoClient
@@ -36,6 +36,7 @@ from lararium.worker import jobs
 from lararium.worker.app import procrastinate_app
 
 from ..finance.monzo.fixtures import make_account, make_balance, make_pot, make_transaction
+from .overrides import use_session
 
 KEY = bytes(range(32))
 OWNER = {"Tailscale-User-Login": "me@example.com"}
@@ -167,6 +168,12 @@ def queue() -> Any:
         yield app.connector
 
 
+# Module-level and fed through app.state, for the reason given in tests/api/overrides.py.
+async def _test_http(request: Request) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(request.app.state.monzo)) as http:
+        yield http
+
+
 async def _client(
     settings: Settings,
     session: AsyncSession,
@@ -175,15 +182,8 @@ async def _client(
 ) -> AsyncIterator[httpx.AsyncClient]:
     app = create_app(settings)
 
-    async def _test_session() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    async def _test_http() -> AsyncIterator[httpx.AsyncClient]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(monzo)) as http:
-            yield http
-
-    app.dependency_overrides[get_session] = _test_session
-    app.dependency_overrides[get_session_factory] = lambda: sessions
+    use_session(app, session, sessions)
+    app.state.monzo = monzo
     app.dependency_overrides[connections_api.get_http] = _test_http
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
