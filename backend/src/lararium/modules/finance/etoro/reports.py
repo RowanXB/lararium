@@ -18,8 +18,9 @@ close for its day, and each day's current rate (the breakdown's `currentRate`) w
 is stored for it, so the official close wins whichever arrives first. A candle's day is the UTC
 date of its `time` plus 12 hours (client.candle_day): eToro stamps it at midnight in Israel,
 21:00 or 22:00 UTC the evening before. A replay writes every price the connection's records
-give, so it also removes the `etoro` prices of their instruments that they no longer give (one
-an earlier version dated otherwise). No FX rate is written (design §5.10).
+give, so it also removes an `etoro` price an earlier version filed on a candle's UTC date
+that none gives now, unless another eToro connection gives that day (prices name no
+connection). No FX rate is written (design §5.10).
 """
 
 from collections.abc import Sequence
@@ -30,8 +31,10 @@ from uuid import UUID
 from sqlalchemy import select, text
 
 from lararium.modules.finance import models
+from lararium.modules.finance.connector_items import shown_path
 from lararium.modules.finance.connector_run import reported_snapshot
 from lararium.modules.finance.etoro.client import CANDLE_DAY_SHIFT, candle_day
+from lararium.modules.finance.etoro.fields import ENDPOINTS, OPERATION_DATA
 from lararium.modules.finance.etoro.records import end_of, link_open
 from lararium.modules.finance.etoro.state import (
     SOURCE,
@@ -46,10 +49,12 @@ from lararium.modules.finance.etoro.state import (
     number_or_none,
     objects_at,
     text_at,
+    value_at,
 )
 from lararium.modules.finance.identifiers import normalize_identifier
 from lararium.modules.finance.pricing import delete_price, record_price
-from lararium.modules.finance.typed_tables import parse_date
+from lararium.modules.finance.readonly_http import loads_decimal
+from lararium.modules.finance.typed_tables import Value, parse_date
 
 # Balances entries whose `balance` is the account's cash or value, as a reported snapshot.
 _SNAPSHOT_TYPES = frozenset({"Cash", "MoneyFarm"})
@@ -93,13 +98,53 @@ async def metadata(run: Run, by_endpoint: dict[str, list[Record]]) -> None:
             )
 
 
+def operation_data(run: Run, lookup: Item) -> dict[str, Value]:
+    """An order lookup's `externalOperation.data` (fields.OPERATION_DATA) and its members, by
+    path: all that is typed at or below it. The field is text holding a JSON object's, its
+    members numbers. Anything else is flagged by path, as an unknown field is, and left out:
+    a value that is not text, text that is not a JSON object's (kept as sent), a member the
+    fields do not know and a known one that is not a number (the known numbers still typed)."""
+    data = value_at(lookup, OPERATION_DATA)
+    if data is None:
+        return {}
+    flagged = f"order_lookup.{OPERATION_DATA}"
+    if not isinstance(data, str):
+        run.flag(flagged)
+        return {}
+    found: dict[str, Value] = {OPERATION_DATA: data}
+    if not data.strip():
+        return found
+    try:
+        members = loads_decimal(data)
+    except (ValueError, RecursionError):
+        members = None
+    if not isinstance(members, dict):
+        run.flag(flagged)
+        return found
+    for name, value in members.items():
+        path = f"{OPERATION_DATA}.{name}"
+        if value is None:
+            continue
+        if path in ENDPOINTS["order_lookup"].known and isinstance(value, Decimal):
+            found[path] = value
+        else:
+            run.flag(f"order_lookup.{shown_path(path)}")
+    return found
+
+
 async def lookups(run: Run, records: Sequence[Record]) -> None:
     """Each order looked up, its executions (linked to their positions' opens) and the
     positions it closes."""
     endpoint = "order_lookup"
     for record in records:
         content = record.content
-        values = await run.typed(endpoint, "etoro_orders", flat(content))
+        # `externalOperation.data` and what is below it come from operation_data alone.
+        fields = {
+            path: value
+            for path, value in flat(content).items()
+            if path != OPERATION_DATA and not path.startswith(f"{OPERATION_DATA}.")
+        }
+        values = await run.typed(endpoint, "etoro_orders", fields | operation_data(run, content))
         order_id = values.pop("order_id")
         await run.upsert(
             "etoro_orders",
@@ -533,31 +578,39 @@ async def prices(run: Run) -> None:
 
 
 async def _remove_unwritten(run: Run, wanted: set[tuple[UUID, UUID, date]]) -> None:
-    """Delete the `etoro` prices of the connection's instruments (those its candles name, and
-    those priced now) that no record of the replay gives."""
-    instruments = {instrument_id for instrument_id, _, _ in wanted}
-    instruments |= set(
-        await run.session.scalars(
-            text(
-                "select distinct ii.instrument_id from finance.etoro_candles c"
-                " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
-                " and ii.value = c.instrument_id::text where c.connection_id = :c"
-            ),
-            {"c": run.connection_id},
-        )
-    )
-    if not instruments:
+    """Delete the `etoro` prices an earlier version filed on one of the connection's candles'
+    UTC dates that no record of the replay gives, in an instrument and currency it prices. A
+    day another eToro connection gives (a candle's, or a breakdown's current rate) is kept:
+    prices name no connection, and that one may have written it."""
+    pairs = {(instrument_id, quote_id) for instrument_id, quote_id, _ in wanted}
+    if not pairs:
         return
-    p = models.Price
-    stored = await run.session.execute(
-        select(p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date).where(
-            p.source == SOURCE, p.instrument_id.in_(instruments)
-        )
+    shift = f"{int(CANDLE_DAY_SHIFT.total_seconds())} seconds"
+    rows = await run.session.execute(
+        text(
+            "select distinct p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date"
+            " from finance.prices p"
+            " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
+            " and ii.instrument_id = p.instrument_id"
+            " join finance.etoro_candles c on c.connection_id = :c"
+            " and c.instrument_id::text = ii.value"
+            " and (c.time at time zone 'UTC')::date = p.as_of_date"
+            " where p.source = :s and p.instrument_id = any(:i)"
+            " and not exists (select 1 from finance.etoro_candles o"
+            " where o.connection_id <> :c and o.instrument_id::text = ii.value"
+            " and ((o.time at time zone 'UTC') + cast(:shift as interval))::date = p.as_of_date)"
+            " and not exists (select 1 from finance.etoro_breakdown_positions b"
+            " where b.connection_id <> :c and b.finance_instrument_id = p.instrument_id"
+            " and b.as_of_date = p.as_of_date)"
+        ),
+        {
+            "c": run.connection_id,
+            "s": SOURCE,
+            "i": sorted({i for i, _ in pairs}),
+            "shift": shift,
+        },
     )
-    unwritten = [
-        row.id
-        for row in stored
-        if (row.instrument_id, row.quote_instrument_id, row.as_of_date) not in wanted
-    ]
-    for price_id in unwritten:
-        await delete_price(run.command, price_id)
+    for row in rows:
+        key = (row.instrument_id, row.quote_instrument_id, row.as_of_date)
+        if key[:2] in pairs and key not in wanted:
+            await delete_price(run.command, row.id)
