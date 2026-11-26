@@ -816,6 +816,46 @@ async def test_a_close_without_its_lookup_posts_once_the_statement_settles_it(
     assert not any(f.startswith("position settlement unknown") for f in report.flags_in_full)
 
 
+@pytest.mark.parametrize("close_listed", [True, False])
+async def test_a_statement_close_for_nothing_sends_its_shares_to_unassigned(
+    session, ledger, close_listed
+) -> None:
+    """A total loss only the statement has, with or without its "Position closed" row
+    (without it, Closed Positions' amount and profit give the cash): the close moves none."""
+    await ledger.normalize(*BASE)
+    lost = close_row(balance="760.00") | {
+        "Amount": "0",
+        "Realized Equity Change": "-500.00",
+        "Realized Equity": "760.00",
+    }
+    body = build_statement(
+        summary(username=USERNAME),
+        [transfer_in(), open_row(), *([lost] if close_listed else [])],
+        [closed_row() | {"Profit(USD)": "-500.00", "Close Rate": "0"}],
+    )
+
+    await ledger.upload(body)
+
+    postings = await _postings(session, f"close:{POSITION}")
+    assert postings == [
+        (TRADING, SYMBOL, Decimal(-4), None, None, None, None, False),
+        ("Unassigned", SYMBOL, Decimal(4), None, None, None, None, False),
+    ]
+    held = await _rows(
+        session,
+        "select i.symbol, sum(p.quantity) as q from finance.postings p"
+        " join finance.transactions t on t.id = p.transaction_id"
+        " join finance.accounts a on a.id = p.account_id"
+        " join finance.instruments i on i.id = p.instrument_id"
+        " where a.name = :a and t.status <> 'void' group by i.symbol having sum(p.quantity) <> 0",
+        a=TRADING,
+    )
+    assert [tuple(r) for r in held] == [("USD", Decimal("760.00"))]
+    again = await ledger.upload(body)
+    assert (again.created, again.updated) == (0, 0)
+    assert await _postings(session, f"close:{POSITION}") == postings
+
+
 async def test_review_closes_when_the_sources_agree(session, ledger) -> None:
     await ledger.normalize(*BASE, *TRADES)
     await ledger.upload(trade_statement(closed_units="5"))

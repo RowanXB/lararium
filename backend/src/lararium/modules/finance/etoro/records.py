@@ -394,18 +394,24 @@ async def _post_open(run: Run, position: Position, instrument_id: UUID) -> UUID 
         raise EtoroDataError(f"eToro position {ending(position.position_id)} has no units")
     currency = await _account_currency(run)
     unassigned = await run.system_account("unassigned")
-    postings = [
-        PostingInput(
-            run.trading,
-            instrument_id,
-            units,
-            cost_per_unit=per_unit(amount, units),
-            cost_instrument_id=currency.id,
-        )
-    ]
-    if amount != 0:
-        postings.append(PostingInput(run.trading, currency.id, -amount))
-    await _rounding(run, position.position_id, postings, unassigned, currency, units)
+    if amount == 0:
+        # Nothing to weigh the shares by: they come from Unassigned.
+        postings = [
+            PostingInput(run.trading, instrument_id, units),
+            PostingInput(unassigned, instrument_id, -units),
+        ]
+    else:
+        postings = [
+            PostingInput(
+                run.trading,
+                instrument_id,
+                units,
+                cost_per_unit=per_unit(amount, units),
+                cost_instrument_id=currency.id,
+            ),
+            PostingInput(run.trading, currency.id, -amount),
+        ]
+        await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Buy {_plain(units)} {await run.symbol(instrument_id)}"
     transaction_id = await run.post(key, values.occurred_at, description, postings)
     await merge.review(run, key, transaction_id, choice)
@@ -429,18 +435,24 @@ async def _post_close(run: Run, position: Position, instrument_id: UUID) -> UUID
         )
     currency = await _account_currency(run)
     unassigned = await run.system_account("unassigned")
-    postings = [
-        PostingInput(
-            run.trading,
-            instrument_id,
-            -units,
-            price_per_unit=per_unit(proceeds, units),
-            price_instrument_id=currency.id,
-        )
-    ]
-    if proceeds != 0:
-        postings.append(PostingInput(run.trading, currency.id, proceeds))
-    await _rounding(run, position.position_id, postings, unassigned, currency, units)
+    if proceeds == 0:
+        # Nothing to weigh the shares by (a total loss): they go to Unassigned.
+        postings = [
+            PostingInput(run.trading, instrument_id, -units),
+            PostingInput(unassigned, instrument_id, units),
+        ]
+    else:
+        postings = [
+            PostingInput(
+                run.trading,
+                instrument_id,
+                -units,
+                price_per_unit=per_unit(proceeds, units),
+                price_instrument_id=currency.id,
+            ),
+            PostingInput(run.trading, currency.id, proceeds),
+        ]
+        await _rounding(run, position.position_id, postings, unassigned, currency, units)
     description = f"Sell {_plain(units)} {await run.symbol(instrument_id)}"
     transaction_id = await run.post(key, values.occurred_at, description, postings)
     await merge.review(run, key, transaction_id, choice)

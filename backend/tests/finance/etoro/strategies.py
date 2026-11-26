@@ -480,7 +480,9 @@ def histories(draw: st.DrawFn) -> History:
                 if kind == "close"
                 else Decimal(draw(st.integers(1, int(position.units) - 1)))
             )
-            profit = draw(st.sampled_from(PROFITS))
+            closed = position.amount * units / position.units
+            # One of the profits, or a total loss: the close moves no cash.
+            profit = draw(st.sampled_from((*PROFITS, -closed)))
             open_positions.remove(position)
             remainder = None
             if kind == "partial":
@@ -494,7 +496,6 @@ def histories(draw: st.DrawFn) -> History:
                 )
                 next_position += 1
                 open_positions.append(remainder)
-            closed = position.amount * units / position.units
             event = Event(
                 n,
                 kind,

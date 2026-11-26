@@ -463,6 +463,53 @@ async def test_close_fees_are_typed_not_posted(session, ledger) -> None:
     assert await find_unbalanced_transactions(session) == []
 
 
+async def test_a_close_for_nothing_sends_its_shares_to_unassigned(session, ledger) -> None:
+    # A total loss: the position's whole investment gone, so the close moves no cash.
+    await ledger.normalize(*_ledger_entries())
+    cash = (await _holdings(session, TRADING))["USD"]
+    row = trade_row(POSITION) | {
+        "investment": Decimal("500.00"),
+        "initialInvestment": Decimal("500.00"),
+        "netProfit": Decimal("-500.00"),
+        "closeRate": Decimal("0"),
+        "units": Decimal("4"),
+        "instrumentId": INSTRUMENT_ID,
+        "orderId": ORDER,
+    }
+    await ledger.normalize(
+        BALANCES,
+        ("pnl", pnl_body([])),
+        ("trade_history", row),
+        ("order_lookup", lookup_body(ORDER, POSITION)),
+        now=NOW + timedelta(days=1),
+    )
+    postings = await _postings(session, f"close:{POSITION}")
+    assert postings == [
+        (TRADING, SYMBOL, Decimal(-4), None, None, None, None, False),
+        ("Unassigned", SYMBOL, Decimal(4), None, None, None, None, False),
+    ]
+    assert (await _transaction(session, f"close:{POSITION}")).description == f"Sell 4 {SYMBOL}"
+    assert await _holdings(session, TRADING) == {"USD": cash}
+    assert await find_unbalanced_transactions(session) == []
+    again = await ledger.again()
+    assert (again.created, again.updated) == (0, 0)
+    assert await _postings(session, f"close:{POSITION}") == postings
+
+
+async def test_an_open_for_nothing_takes_its_shares_from_unassigned(session, ledger) -> None:
+    await ledger.normalize(*_ledger_entries(amount="0"))
+    postings = await _postings(session, f"open:{POSITION}")
+    assert postings == [
+        (TRADING, SYMBOL, Decimal(4), None, None, None, None, False),
+        ("Unassigned", SYMBOL, Decimal(-4), None, None, None, None, False),
+    ]
+    assert await _holdings(session, TRADING) == {SYMBOL: Decimal(4)}
+    assert await find_unbalanced_transactions(session) == []
+    again = await ledger.again()
+    assert (again.created, again.updated) == (0, 0)
+    assert await _postings(session, f"open:{POSITION}") == postings
+
+
 async def test_partial_close_two_positions(session, ledger) -> None:
     remainder = POSITION + 1
     await ledger.normalize(*_ledger_entries(units="10", amount="1000.00"))

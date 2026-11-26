@@ -25,9 +25,11 @@ from .fixtures import (
     cash_item,
     history_body,
     instrument_meta,
+    lookup_body,
     me_json,
     pnl_body,
     pnl_position,
+    trade_row,
 )
 from .statement_fixtures import activity_row, build_statement, summary
 from .test_normalize_api import Ledger, Notifier, _connection
@@ -129,6 +131,49 @@ async def test_consistent_no_warning(session, run, ledger) -> None:
         )
     ).all()
     assert tuple(snapshot) == (Decimal("760.00"), now)
+
+
+async def test_a_close_for_nothing_reconciles(session, run, ledger) -> None:
+    await _after_october(run, ledger)
+    # 4 bought for 500, then closed for nothing: the cash stays 760 and no units are left.
+    opened = "2026-11-01T09:00:00.000Z"
+    history = [_trading(date(2026, 10, 31), "1260.00"), _trading(date(2026, 11, 1), "760.00")]
+    await ledger.normalize(
+        *_sync(
+            "760.00",
+            history,
+            positions=(pnl_position(POSITION, opened=opened),),
+            breakdown=(breakdown_position(POSITION),),
+            units="4",
+        ),
+        now=datetime(2026, 11, 2, 12, 0, tzinfo=UTC),
+    )
+    lost = trade_row(POSITION, date(2026, 11, 2)) | {
+        "openTimestamp": opened,
+        "investment": Decimal("500.00"),
+        "initialInvestment": Decimal("500.00"),
+        "netProfit": Decimal("-500.00"),
+        "closeRate": Decimal("0"),
+        "units": Decimal("4"),
+        "instrumentId": INSTRUMENT_ID,
+    }
+    await ledger.normalize(
+        *_sync("760.00", [*history, _trading(date(2026, 11, 2), "760.00")]),
+        ("trade_history", lost),
+        ("order_lookup", lookup_body(POSITION + 500, POSITION)),
+        now=datetime(2026, 11, 3, 12, 0, tzinfo=UTC),
+    )
+    assert await _warnings(session, ledger) == [OTHER]
+    assert ledger.notifier.messages == []
+    postings = await session.scalar(
+        text(
+            "select count(*) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where t.external_id = :e and t.status <> 'void'"
+        ),
+        {"e": f"close:{POSITION}"},
+    )
+    assert postings == 2
 
 
 async def test_unmatched_internal_transfer_prompts_statement_once(session, run, ledger) -> None:
