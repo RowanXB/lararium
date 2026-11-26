@@ -9,11 +9,13 @@ from sqlalchemy import exc, text
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
+from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import (
     assign_identifier,
     get_or_create_identifier,
     list_identifiers,
+    register_card_merchant,
 )
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
@@ -21,12 +23,14 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     post_transaction,
+    upsert_connector_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
     heal_transfers,
     suggestions,
+    transfer_contra,
 )
 from lararium.modules.finance.transfers.queries import list_transfers
 from lararium.modules.finance.valuation import balances_asof
@@ -39,6 +43,7 @@ from .normalizing import (
     normalize_rows,
     plain,
     postings,
+    run_normalize,
     transaction,
 )
 from .syncing import binance_connection, later_config, run_binance_sync
@@ -345,3 +350,145 @@ async def test_counterparty_name_is_the_network_only(session, run) -> None:
         "withdrawal:w-3": None,
         "withdrawal:w-4": None,
     }
+
+
+# Only a deposit and a withdrawal can be a transfer leg (design 5.7): every other record the
+# connector posts says so, though its two postings (one on Unassigned) have a leg's shape. A
+# card payment of the same amount, to a merchant registered on the wallet, pairs with a leg
+# only.
+
+MERCHANT = "merch_TESTBIN"
+_REWARD = build_row(
+    "earn-flexible-rewards", asset="AAA", rewards="0.25", type="REALTIME", time=BASE_TIME_MS
+)
+_DIVIDEND = build_row("dividends", asset="AAA", amount="0.7", direction=1, divTime=BASE_TIME_MS)
+# Inside Binance (no chain address), so a leg names nobody and the card tier can pair it.
+_INSIDE = {"transferType": 1, "txId": "Internal transfer 1"}
+_NO_FEE = {"transactionFee": "0", **_INSIDE}
+# Each case: the label, the rows normalised one after the other, the key's suffix, and
+# whether the record can be a transfer leg.
+_CASES = {
+    "deposit": ("deposits", [_deposit(1, **_INSIDE)], "", True),
+    "withdrawal": ("withdrawals", [_withdrawal(6, **_INSIDE)], "", True),
+    "withdrawal fee": ("withdrawals", [_withdrawal(6, **_INSIDE)], ":fee", False),
+    "zero-fee refund": (
+        "withdrawals",
+        [
+            _withdrawal(4, completeTime=None, **_NO_FEE),
+            _withdrawal(5, completeTime=_text_time(BASE_TIME_MS + HOUR_MS), **_NO_FEE),
+        ],
+        ":refund",
+        False,
+    ),
+    "dividend": ("dividends", [_DIVIDEND], "", False),
+    "realtime reward": ("earn-flexible-rewards", [_REWARD], "", False),
+}
+
+
+async def _own_posting(session, connection_id, key: str):
+    """The one posting of the transaction `key` on a Binance wallet, with its time."""
+    return (
+        await session.execute(
+            text(
+                "select p.account_id, p.instrument_id, p.quantity, t.occurred_at"
+                " from finance.postings p join finance.transactions t on t.id = p.transaction_id"
+                " join finance.accounts a on a.id = p.account_id"
+                " where t.connection_id = :c and t.external_id = :k"
+                " and a.source_connection_id = :c"
+            ),
+            {"c": connection_id, "k": key},
+        )
+    ).one()
+
+
+async def _card_payment(session, run, account_id, instrument_id, quantity, occurred_at):
+    """A card connection's payment naming the merchant, the wallet's opposite amount."""
+    card = await run(create_connection, connector="monzo", display_name="Card", config={})
+    bank = await run(
+        create_account,
+        name="Card",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+        source_connection_id=card.id,
+    )
+    merchant = await run(register_card_merchant, MERCHANT, [account_id])
+    contra = await transfer_contra(
+        session,
+        source=("connection", f"{card.id}:card_1"),
+        own_account_id=bank.id,
+        counterparty_identifier_id=merchant.id,
+        other_postings=0,
+    )
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=occurred_at,
+            description="Binance",
+            origin="connector",
+            connection_id=card.id,
+            external_id="card_1",
+            postings=[
+                PostingInput(bank.id, instrument_id, -quantity),
+                PostingInput(contra, instrument_id, quantity),
+            ],
+            counterparty=CounterpartyFields(identifier_id=merchant.id, bank_transfer=False),
+        ),
+    )
+
+
+@pytest.mark.parametrize("case", list(_CASES))
+async def test_only_a_deposit_or_withdrawal_pairs_with_a_card_payment(
+    session, run, case: str
+) -> None:
+    label, rows, suffix, leg = _CASES[case]
+    connection = await binance_connection(run)
+    for row in rows:
+        await normalize_rows(session, connection.id, (label, [row]))
+    [key] = [
+        k
+        for k in await keys(session, connection.id)
+        if (k.endswith(suffix) if suffix else not k.endswith((":fee", ":refund")))
+    ]
+    account_id, instrument_id, quantity, occurred_at = await _own_posting(
+        session, connection.id, key
+    )
+    await _card_payment(session, run, account_id, instrument_id, quantity, occurred_at)
+
+    await _heal(session)
+
+    assert len(await list_transfers(session)) == (1 if leg else 0)
+    never = await session.scalar(
+        text("select never_transfer from finance.transactions where external_id = :k"),
+        {"k": key},
+    )
+    assert never is not leg
+    assert await find_transfer_violations(session) == []
+
+
+async def test_a_connection_normalised_before_marks_its_records_on_the_next_run(
+    session, run
+) -> None:
+    # Normalised by binance-norm-1, a reward was left unmarked: the new version replays it.
+    connection = await binance_connection(run)
+    await normalize_rows(session, connection.id, ("earn-flexible-rewards", [_REWARD]))
+    [key] = await keys(session, connection.id)
+    await session.execute(
+        text("update finance.transactions set never_transfer = false where external_id = :k"),
+        {"k": key},
+    )
+    await session.execute(
+        text(
+            "update core.connections set config = config"
+            ' || \'{"normalizer_version": "binance-norm-1"}\' where id = :c'
+        ),
+        {"c": connection.id},
+    )
+
+    await run_normalize(session, connection.id)
+
+    never = await session.scalar(
+        text("select never_transfer from finance.transactions where external_id = :k"),
+        {"k": key},
+    )
+    assert never is True

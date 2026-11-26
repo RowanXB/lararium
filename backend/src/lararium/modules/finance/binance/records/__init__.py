@@ -303,12 +303,16 @@ async def post(
     postings: Sequence[PostingInput],
     counterparty_identifier_id: UUID | None = None,
     counterparty_name: str | None = None,
-    never_transfer: bool = False,
+    transfer_leg: bool = False,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
     postings it creates, changes or removes; its id. A zero posting is left out (the ledger
     has none); with fewer than two left, the transaction no longer applies: it is removed and
-    None returned."""
+    None returned.
+
+    Only a handler that says so (`transfer_leg`: a deposit, a withdrawal not ended) posts a
+    record that can be a transfer leg; every other is marked `never_transfer`, though its two
+    postings (one on Unassigned) have a leg's shape."""
     postings = [p for p in postings if p.quantity != 0]
     if len(postings) < 2:
         await remove(run, key)
@@ -334,7 +338,7 @@ async def post(
             counterparty=CounterpartyFields(
                 identifier_id=counterparty_identifier_id,
                 name=counterparty_name,
-                never_transfer=never_transfer,
+                never_transfer=not transfer_leg,
             ),
         ),
     )

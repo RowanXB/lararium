@@ -5,7 +5,8 @@ locked); a withdrawal from the moment it is applied. Each is a transfer leg: its
 and the contra `transfer_contra` chooses, nothing else, so a fee is a transaction of its own.
 A withdrawal cancelled, rejected or failed after it was posted is not voided, because the
 balance really fell and rose again: it stops being a transfer leg (its contra moves to
-Unassigned) and a refund puts the amount and the fee back.
+Unassigned) and a refund puts the amount and the fee back. A fee and a refund are never
+transfer legs (`post` marks them so).
 
 The chain address on the other side is the counterparty identifier
 (`counterparty_identifier`); until it is known the contra is Unassigned unless the owner pairs
@@ -141,6 +142,7 @@ async def deposit(run: Run, row: Row) -> None:
         ],
         counterparty_identifier_id=identifier_id,
         counterparty_name=counterparty_name(row, identifier_id),
+        transfer_leg=True,
     )
     await run.typed(transaction_id=transaction_id)
 
@@ -177,7 +179,7 @@ async def withdrawal(run: Run, row: Row) -> None:
         ],
         counterparty_identifier_id=identifier_id,
         counterparty_name=counterparty_name(row, identifier_id),
-        never_transfer=ended,
+        transfer_leg=not ended,
     )
     await run.typed(transaction_id=transaction_id)
     await post(
