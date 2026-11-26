@@ -306,7 +306,7 @@ Every record is one connector transaction. Fees and taxes are separate postings 
 ### 5.8 Time (pinned)
 
 - **API timestamps.** `occurred_at` is the instant given (UTC when zoned). A timestamp without a zone (instrument-breakdown `openTime`) is not used for `occurred_at`; the same event's zoned time is.
-- **Statement times are read as UTC.** Task 0 (2026-11-23) found every open and close at the same minute as the API's UTC time, but all of the owner's rows fall in GMT, when UTC and Europe/London agree. UTC is taken (the API's own clock); a statement row whose time disagrees with the API's for the same event, as a London clock would by an hour in summer, raises the review of §5.7, so a wrong guess shows up on the first summer trade.
+- **Statement times are read as UTC.** Task 0 (2026-11-23) found every open and close at the same minute as the API's UTC time, but all of the owner's rows fall in GMT, when UTC and Europe/London agree. UTC is taken (the API's own clock); a statement row whose booking date disagrees with the API's for the same event, as a London clock would when its hour in summer moves a trade to another day, raises the review of §5.7. The time alone is not compared, so a wrong guess shows up only on such a trade; until then, events that come only from a statement would be an hour off in summer.
 - **`booking_date`**: the event's date in Europe/London, the owner's reporting zone, except eToro balance-history snapshots, whose `date` is used as given. **Task 0 pins** the cut-off of eToro's end-of-day snapshot by comparing it with the records of that day.
 - **Reported snapshots**: `as_of` is the fetch time for current balances and positions; the end of `date` (UTC unless Task 0 shows otherwise) for balance history.
 

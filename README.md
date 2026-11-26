@@ -513,6 +513,9 @@ interest) are stored and flagged but not posted: the API posts those, and how th
 the API's has not been seen yet. If the export and the API state an amount, a currency or a
 booking date differently, Lararium opens a [review item](#review-items).
 
+A warning that Lararium's cash differs from Trading 212's report, raised before an upload,
+stays until the next sync checks again, even when the upload supplied the missing record.
+
 ### Transfers
 
 - **Card or Apple Pay deposits from Monzo.** Monzo files a card top-up as a card payment to
@@ -663,11 +666,19 @@ itself.
   sync) gets its currency from a statement: until one covers it, its trades are flagged and not
   posted.
 - Statement times are taken to be UTC. That is confirmed for winter only (when UTC and UK
-  time agree); a summer trade's open or close an hour off would show as a review item.
+  time agree). If summer statements turn out to be in UK time, events that come only from a
+  statement would be an hour off; a review item appears only when that hour moves a trade to
+  another date.
 - Trading 212's signs (of withdrawals, fees, transfers, an order's taxes and net value) and
   its export's trade rows haven't been checked against a real trade yet.
+- A Trading 212 record that Trading 212 changes and later changes back to what it was
+  before is posted from that earlier content when a new version of Lararium rebuilds the
+  connection's transactions.
 - Card deposits pair only with records of connector accounts, never with a manual or imported
   one.
+- A card payment pairs with any record of the merchant's account that names no other account
+  and has the same amount within two minutes of it. So a payment exactly equal to an
+  interest credit in that time would pair with it.
 - Closing a Trading 212 account keeps it registered to its card merchant, so its past card
   deposits stay paired; no new one pairs into it. Removing it from the merchant's accounts
   unpairs them.
