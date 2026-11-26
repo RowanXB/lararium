@@ -950,6 +950,46 @@ def _keys(label: str) -> list[str]:
     return [key for key, _ in cursor_keys(ENDPOINTS[label])]
 
 
+async def test_a_text_field_sent_as_a_number_is_refused_on_the_live_answer(
+    backend_url: str, owner_url: str, migrated: None, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # The JSON number 1.5 for an asset's code: stored, it would read back as the text "1.5"
+    # and be booked as an asset of that name. The answer as Binance sent it is refused.
+    fake.add("deposits", _history_row("deposits", NOW_MS - 2 * HOUR_MS))
+    broken = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        if request.url.path != ENDPOINTS["deposits"].path or not broken["on"]:
+            return answer
+        content = answer.content.replace(b'"coin": "AAA"', b'"coin": 1.5')
+        assert content != answer.content
+        return httpx.Response(200, content=content)
+
+    async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
+        before = await _cursor(sessions, id_, "deposits")
+
+        after = await sync()
+
+        assert after.status == "failing"
+        assert "Binance answered deposits in an unexpected shape (field [].coin)" in (
+            after.last_error or ""
+        )
+        assert await _count(sessions, id_, record_type("deposits")) == 0
+        assert await _cursor(sessions, id_, "deposits") == before
+        async with sessions() as session:
+            named = await session.scalar(
+                text("select count(*) from finance.instruments where symbol = '1.5'")
+            )
+        assert named == 0
+
+        broken["on"] = False
+        again = await sync()
+
+        assert again.status == "healthy", again.last_error
+        assert await _count(sessions, id_, record_type("deposits")) == 1
+
+
 async def test_a_history_answer_without_its_record_list_is_an_empty_window(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:

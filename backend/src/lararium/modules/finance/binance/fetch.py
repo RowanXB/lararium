@@ -255,9 +255,11 @@ def typed(label: str, body: ApiValue) -> Parsed:
     cannot be typed or keyed is never stored raw, so every stored record can be normalised.
     The `BinanceDataError` names the field.
 
-    Everything is checked on the answer as it is stored and read back (`to_json`, then
-    `as_api`), not as it is in memory: a JSON `1.0` is a whole Decimal now but the text "1.0"
-    once stored. The parsed answer returned is that form, the one its callers store."""
+    The answer is checked twice: as Binance sent it (a text field sent as the number 1.5 is
+    wrong there, though stored it would read as the text "1.5"), then as it is stored and read
+    back (`to_json`, then `as_api`): a JSON `1.0` is a whole Decimal now but the text "1.0"
+    once stored. The parsed answer returned is the stored form, the one its callers store."""
+    parse(label, body)
     body = as_api(to_json(body))
     parsed = parse(label, body)
     endpoint = ENDPOINTS[label]
