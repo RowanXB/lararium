@@ -381,6 +381,7 @@ Holdings and net worth need no new page.
 | A 418 | The sync stops at once and fails; the next tick retries after `Retry-After`. |
 | Two connections for one Binance account | Refused by `uid`. |
 | The first sync is interrupted | It resumes from the saved cursors; opening adjustments are fixed only when it finishes. |
+| The Binance migrations are downgraded on a database with Binance data | Not supported: the downgrade loses the instrument bindings (`binance_asset`) and the empty-report times, which nothing rebuilds, so an upgrade after it can put a holding on another instrument or turn an unexplained difference into an opening. To go back, restore a backup (README, Backup and restore). |
 
 ## 7. TODOs for earlier designs, and what is left for later
 

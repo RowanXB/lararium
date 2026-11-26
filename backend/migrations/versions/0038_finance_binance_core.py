@@ -978,7 +978,10 @@ _DROPPED = [
 
 # A downgrade and a new upgrade do not rebuild everything: the cursors are kept (the raw records
 # are), so the history answers' envelopes (`*_responses`) of windows walked before are not asked
-# again, and the report tables hold only the next reads. The ledger needs neither.
+# again, and the report tables hold only the next reads. The ledger needs neither. Downgrading
+# the Binance migrations on a database with Binance data loses the instrument bindings
+# (`binance_asset`) and the empty-report times, which nothing rebuilds: to go back, restore a
+# backup.
 DOWNGRADE = [
     # What a Binance connection's config says about the tables dropped here: the digest of
     # each report's last stored answer (its table empty, the answer would not be stored
