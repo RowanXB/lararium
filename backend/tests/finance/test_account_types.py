@@ -1,9 +1,12 @@
+from dataclasses import replace
+
 import pytest
 
 from lararium.modules.finance.account_types import (
     ACCOUNT_TYPES,
     AccountShape,
     Api,
+    FileFormat,
     account_type,
     check_catalog,
     family_keys,
@@ -38,10 +41,16 @@ def test_a_family_has_at_least_two_types():
 
 def test_the_invariants_refuse_a_bad_catalog():
     first = ACCOUNT_TYPES[0]
-    with pytest.raises(RuntimeError):
+    statement = account_type("hsbc_uk")
+    assert statement is not None
+    with pytest.raises(RuntimeError, match="unique"):
         check_catalog((first, first))
-    with pytest.raises(RuntimeError):
-        check_catalog((first.__class__(**{**first.__dict__, "api": None, "files": ()}),))
+    with pytest.raises(RuntimeError, match="neither"):
+        check_catalog((replace(first, api=None, files=()),))
+    with pytest.raises(RuntimeError, match="without a profile"):
+        check_catalog((replace(statement, files=(FileFormat("x", "csv", None),)),))
+    with pytest.raises(RuntimeError, match="family"):
+        check_catalog((replace(first, family="solo"),))
 
 
 def test_the_entries():

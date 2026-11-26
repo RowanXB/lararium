@@ -5,7 +5,7 @@ profiles come from the import catalog. The invariants are checked when the modul
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from lararium.core.json_types import JSONValue
@@ -63,14 +63,11 @@ def _catalog_files(name: str) -> tuple[FileFormat, ...]:
 
 
 def _statement_type(key: str, institution: str, label: str = "") -> AccountType:
-    name = f"{institution} {label}".strip()
-    return AccountType(
-        key,
-        institution,
-        label,
-        AccountShape(None, "bank", "none", "transactions"),
-        None,
-        _catalog_files(name),
+    bare = AccountType(key, institution, label, None, None, ())
+    return replace(
+        bare,
+        shape=AccountShape(None, "bank", "none", "transactions"),
+        files=_catalog_files(bare.name),
     )
 
 
