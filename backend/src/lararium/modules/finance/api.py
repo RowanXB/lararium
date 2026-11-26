@@ -28,6 +28,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_setting, get_timezone, set_setting
 from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
+    account_types,
     accounts,
     cashflow,
     errors,
@@ -45,6 +46,10 @@ from lararium.modules.finance.schemas import (
     AccountOut,
     AccountRename,
     AccountReportingUpdate,
+    AccountShapeOut,
+    AccountTypeApiOut,
+    AccountTypeFileOut,
+    AccountTypeOut,
     CashFlowOut,
     FinanceSettingsOut,
     FinanceSettingsUpdate,
@@ -216,6 +221,74 @@ async def update_instrument(
 # Accounts
 
 
+def _type_out(found: account_types.AccountType) -> AccountTypeOut:
+    return AccountTypeOut(
+        key=found.key,
+        institution=found.institution,
+        label=found.label,
+        name=found.name,
+        shape=None if found.shape is None else AccountShapeOut.model_validate(found.shape),
+        api=None
+        if found.api is None
+        else AccountTypeApiOut(connector=found.api.connector, config=dict(found.api.config)),
+        files=[
+            AccountTypeFileOut(
+                label=f.label, format=f.format, recommended=f.recommended, config=f.profile
+            )
+            for f in found.files
+        ],
+        funding=sorted(found.funding),
+        family=found.family,
+    )
+
+
+@router.get("/account-types", name="list_account_types")
+async def list_account_types() -> list[AccountTypeOut]:
+    """The account types the owner can pick: where an account's data comes from and how it
+    posts. Only a type with no API creates an account here; one with an API is connected."""
+    return [_type_out(found) for found in account_types.ACCOUNT_TYPES]
+
+
+def _type_error(code: str, message: str) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {"error": code, "message": message})
+
+
+def _settable_type(key: str) -> tuple[account_types.AccountType, account_types.AccountShape]:
+    """The type a type_key names, with its shape; only one with no API can be set by hand."""
+    found = account_types.account_type(key)
+    if found is None:
+        raise _type_error("unknown_type", "type_key names no account type")
+    if found.api is not None or found.shape is None:
+        raise _type_error(
+            "type_not_creatable",
+            f"{found.name} syncs through its API, so type_key can't name it; connect it instead",
+        )
+    return found, found.shape
+
+
+def _require_type_shape(body: AccountCreate, key: str) -> account_types.AccountType:
+    """The body must agree with the type wherever the type states its shape; the side is the
+    body's when the type leaves it open, and the institution is always the type's."""
+    found, shape = _settable_type(key)
+    stated: dict[str, str | None] = {
+        "ledger_type": shape.ledger_type,
+        "subtype": shape.subtype,
+        "tax_wrapper": shape.tax_wrapper,
+        "balance_mode": shape.balance_mode,
+    }
+    for field, value in stated.items():
+        if value is not None and getattr(body, field) != value:
+            raise _type_error(
+                "type_mismatch", f"{field} disagrees with the {found.name} account type"
+            )
+    if body.institution_name is not None:
+        raise _type_error(
+            "type_mismatch",
+            f"institution_name is the {found.name} account type's own; leave it out",
+        )
+    return found
+
+
 @router.get("/accounts", name="list_accounts")
 async def list_accounts(session: SessionDep) -> list[AccountOut]:
     return [AccountOut.model_validate(record) for record in await accounts.list_accounts(session)]
@@ -223,9 +296,12 @@ async def list_accounts(session: SessionDep) -> list[AccountOut]:
 
 @router.post("/accounts", name="create_account", status_code=status.HTTP_201_CREATED)
 async def create_account(body: AccountCreate, session: SessionDep, actor: ActorDep) -> AccountOut:
+    found = None if body.type_key is None else _require_type_shape(body, body.type_key)
     async with command_context(session, actor, "create_account", _args(body)) as ctx:
         institution_id = None
-        if body.institution_name is not None:
+        if found is not None:
+            institution_id = await get_or_create_organization(ctx, found.institution)
+        elif body.institution_name is not None:
             institution_id = await get_or_create_organization(ctx, body.institution_name)
         record = await accounts.create_account(
             ctx,
@@ -237,6 +313,7 @@ async def create_account(body: AccountCreate, session: SessionDep, actor: ActorD
             tax_wrapper=body.tax_wrapper,
             parent_account_id=body.parent_account_id,
             opened_on=body.opened_on,
+            type_key=body.type_key,
         )
     return AccountOut.model_validate(record)
 
@@ -245,9 +322,20 @@ async def create_account(body: AccountCreate, session: SessionDep, actor: ActorD
 async def rename_account(
     account_id: UUID, body: AccountRename, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
+    """Rename the account, set its type, or both, in one command: if either is refused,
+    neither happens. A type must have no API and the account must be able to take imports;
+    type_key null clears it."""
     args = _args(body, account_id=account_id)
+    set_type = "type_key" in body.model_fields_set
     async with command_context(session, actor, "rename_account", args) as ctx:
-        record = await accounts.rename_account(ctx, account_id, body.name)
+        if set_type and body.type_key is not None:
+            _settable_type(body.type_key)
+            staging.require_importable(await accounts.get_account(session, account_id))
+        if body.name is not None:
+            await accounts.rename_account(ctx, account_id, body.name)
+        if set_type:
+            await accounts.set_type_key(ctx, account_id, body.type_key)
+        record = await accounts.get_account(session, account_id)
     return AccountOut.model_validate(record)
 
 

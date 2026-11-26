@@ -101,6 +101,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -256,6 +267,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -274,21 +296,38 @@
           "opened_on",
           "closed_on",
           "system",
-          "excluded_from_reports"
+          "excluded_from_reports",
+          "type_key"
         ],
         "title": "AccountOut",
         "type": "object"
       },
       "AccountRename": {
+        "description": "Rename the account, set its type (one with no API), or both; type_key null clears it.",
         "properties": {
           "name": {
-            "title": "Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
-        "required": [
-          "name"
-        ],
         "title": "AccountRename",
         "type": "object"
       },
@@ -303,6 +342,203 @@
           "excluded"
         ],
         "title": "AccountReportingUpdate",
+        "type": "object"
+      },
+      "AccountShapeOut": {
+        "properties": {
+          "balance_mode": {
+            "enum": [
+              "transactions",
+              "snapshots",
+              "hybrid"
+            ],
+            "title": "Balance Mode",
+            "type": "string"
+          },
+          "ledger_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asset",
+                  "liability",
+                  "income",
+                  "expense",
+                  "equity"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger Type"
+          },
+          "subtype": {
+            "enum": [
+              "bank",
+              "savings_pot",
+              "broker",
+              "exchange",
+              "wallet",
+              "in_transit",
+              "manual_asset",
+              "other"
+            ],
+            "title": "Subtype",
+            "type": "string"
+          },
+          "tax_wrapper": {
+            "enum": [
+              "none",
+              "isa",
+              "sipp",
+              "lisa",
+              "gia"
+            ],
+            "title": "Tax Wrapper",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ledger_type",
+          "subtype",
+          "tax_wrapper",
+          "balance_mode"
+        ],
+        "title": "AccountShapeOut",
+        "type": "object"
+      },
+      "AccountTypeApiOut": {
+        "properties": {
+          "config": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "title": "Config",
+            "type": "object"
+          },
+          "connector": {
+            "title": "Connector",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector",
+          "config"
+        ],
+        "title": "AccountTypeApiOut",
+        "type": "object"
+      },
+      "AccountTypeFileOut": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "recommended": {
+            "title": "Recommended",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "label",
+          "format",
+          "recommended",
+          "config"
+        ],
+        "title": "AccountTypeFileOut",
+        "type": "object"
+      },
+      "AccountTypeOut": {
+        "properties": {
+          "api": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountTypeApiOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/AccountTypeFileOut"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "funding": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Funding",
+            "type": "array"
+          },
+          "institution": {
+            "title": "Institution",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "shape": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountShapeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "institution",
+          "label",
+          "name",
+          "shape",
+          "api",
+          "files",
+          "funding",
+          "family"
+        ],
+        "title": "AccountTypeOut",
         "type": "object"
       },
       "AmountFormat": {
@@ -3275,6 +3511,34 @@
         "title": "InstrumentUpdate",
         "type": "object"
       },
+      "JSONValue": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "MainAccountUpdate": {
         "properties": {
           "main_account_id": {
@@ -5302,6 +5566,32 @@
         ]
       }
     },
+    "/api/v1/finance/account-types": {
+      "get": {
+        "description": "The account types the owner can pick: where an account's data comes from and how it\nposts. Only a type with no API creates an account here; one with an API is connected.",
+        "operationId": "list_account_types",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountTypeOut"
+                  },
+                  "title": "Response List Account Types",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Account Types",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts": {
       "get": {
         "operationId": "list_accounts",
@@ -5410,6 +5700,7 @@
     },
     "/api/v1/finance/accounts/{account_id}": {
       "patch": {
+        "description": "Rename the account, set its type, or both, in one command: if either is refused,\nneither happens. A type must have no API and the account must be able to take imports;\ntype_key null clears it.",
         "operationId": "rename_account",
         "parameters": [
           {

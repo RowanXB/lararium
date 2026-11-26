@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from lararium.api.export_openapi import render_openapi
+from lararium.core.connections import create_connection
 from lararium.modules.finance import errors
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.api import _ERRORS  # pyright: ignore[reportPrivateUsage]
@@ -381,3 +382,176 @@ async def test_excluding_an_account_and_cash_flow(client) -> None:
     }
     bad = await client.get("/api/v1/finance/cash-flow", params={"bucket": "year"})
     assert bad.status_code == 422
+
+
+# Account types
+
+API = "/api/v1/finance"
+_CASH_ISA = {
+    "name": "Cash ISA",
+    "ledger_type": "asset",
+    "subtype": "savings_pot",
+    "balance_mode": "transactions",
+    "tax_wrapper": "isa",
+    "type_key": "trading212.cash_isa",
+}
+
+
+async def test_account_types_lists_the_catalog(client) -> None:
+    types = (await client.get(f"{API}/account-types")).json()
+    assert [t["key"] for t in types][:6] == [
+        "monzo",
+        "ibkr",
+        "etoro",
+        "trading212.invest",
+        "trading212.stocks_isa",
+        "trading212.cash_isa",
+    ]
+    cash = types[5]
+    assert cash["api"] is None and cash["family"] == "trading212"
+    assert cash["name"] == "Trading 212 Cash ISA"
+    assert cash["shape"] == {
+        "ledger_type": "asset",
+        "subtype": "savings_pot",
+        "tax_wrapper": "isa",
+        "balance_mode": "transactions",
+    }
+    assert cash["funding"] == ["bank_transfer"]
+    assert [f["label"] for f in cash["files"]] == ["History CSV"]
+    assert cash["files"][0]["config"]["format"] == "csv"
+    invest = types[3]
+    assert invest["api"] == {"connector": "trading212", "config": {"account_kind": "invest"}}
+    assert invest["funding"] == ["bank_transfer", "card"]
+    assert invest["shape"] is None and invest["files"][0]["config"] is None
+
+
+async def test_create_from_a_type(client) -> None:
+    response = await client.post(f"{API}/accounts", json=_CASH_ISA)
+    assert response.status_code == 201
+    created = response.json()
+    assert created["type_key"] == "trading212.cash_isa"
+    plain = await _account(client, name="Other", institution_name="Trading 212")
+    listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
+    assert created["institution_entity_id"] == listed[plain]["institution_entity_id"]
+    assert listed[plain]["type_key"] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subtype", "bank"),
+        ("ledger_type", "liability"),
+        ("tax_wrapper", "none"),
+        ("balance_mode", "hybrid"),
+        ("institution_name", "Trading 212"),
+    ],
+)
+async def test_create_from_a_type_refuses_a_disagreeing_shape(client, field, value) -> None:
+    before = len((await client.get(f"{API}/accounts")).json())
+    response = await client.post(f"{API}/accounts", json=_CASH_ISA | {field: value})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "type_mismatch"
+    assert field in detail["message"] and "Trading 212 Cash ISA" in detail["message"]
+    assert len((await client.get(f"{API}/accounts")).json()) == before
+
+
+async def test_create_from_a_statement_type_takes_either_side(client) -> None:
+    body = {
+        "name": "Credit card",
+        "ledger_type": "liability",
+        "subtype": "bank",
+        "balance_mode": "transactions",
+        "type_key": "hsbc_uk",
+    }
+    response = await client.post(f"{API}/accounts", json=body)
+    assert response.status_code == 201
+    assert response.json()["ledger_type"] == "liability"
+    assert response.json()["type_key"] == "hsbc_uk"
+
+
+async def test_create_refuses_an_api_type_and_an_unknown_one(client) -> None:
+    before = len((await client.get(f"{API}/accounts")).json())
+    api_type = await client.post(
+        f"{API}/accounts", json=_CASH_ISA | {"type_key": "trading212.invest"}
+    )
+    assert api_type.status_code == 422
+    assert api_type.json()["detail"]["error"] == "type_not_creatable"
+    assert "Trading 212 Invest" in api_type.json()["detail"]["message"]
+    unknown = await client.post(f"{API}/accounts", json=_CASH_ISA | {"type_key": "nope"})
+    assert unknown.status_code == 422
+    assert unknown.json()["detail"]["error"] == "unknown_type"
+    assert "nope" not in unknown.json()["detail"]["message"]
+    assert len((await client.get(f"{API}/accounts")).json()) == before
+
+
+async def test_patch_sets_the_type_of_an_importable_account(client) -> None:
+    account_id = await _account(client, name="Old current", balance_mode="transactions")
+    response = await client.patch(f"{API}/accounts/{account_id}", json={"type_key": "lloyds"})
+    assert response.status_code == 200
+    assert response.json()["type_key"] == "lloyds"
+    assert response.json()["name"] == "Old current"
+
+
+async def test_patch_refuses_what_cannot_take_imports(client, run) -> None:
+    snapshots = await _account(client)  # balance from snapshots
+    refused = await client.patch(f"{API}/accounts/{snapshots}", json={"type_key": "lloyds"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "import_not_allowed"
+
+    connection = await run(create_connection, connector="etoro", display_name="eToro", config={})
+    connected = await run(
+        create_account,
+        name="eToro",
+        ledger_type="asset",
+        subtype="broker",
+        balance_mode="transactions",
+        source_connection_id=connection.id,
+    )
+    refused = await client.patch(f"{API}/accounts/{connected.id}", json={"type_key": "lloyds"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "import_not_allowed"
+
+    account_id = await _account(client, name="Current", balance_mode="transactions")
+    url = f"{API}/accounts/{account_id}"
+    api_type = await client.patch(url, json={"type_key": "trading212.invest"})
+    assert api_type.status_code == 422
+    assert api_type.json()["detail"]["error"] == "type_not_creatable"
+    unknown = await client.patch(url, json={"type_key": "nope"})
+    assert unknown.status_code == 422
+    assert unknown.json()["detail"]["error"] == "unknown_type"
+    assert (await client.patch(url, json={})).status_code == 422
+    # A refused type change leaves the rename sent with it undone too.
+    both = await client.patch(url, json={"name": "Renamed", "type_key": "nope"})
+    assert both.status_code == 422
+    listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
+    assert listed[account_id]["name"] == "Current"
+    assert listed[account_id]["type_key"] is None
+
+    typed = (await client.post(f"{API}/accounts", json=_CASH_ISA)).json()["id"]
+    cleared = await client.patch(f"{API}/accounts/{typed}", json={"type_key": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["type_key"] is None
+
+
+async def test_rename_still_works(client) -> None:
+    typed = (await client.post(f"{API}/accounts", json=_CASH_ISA)).json()["id"]
+    response = await client.patch(f"{API}/accounts/{typed}", json={"name": "ISA"})
+    assert response.status_code == 200
+    assert response.json()["name"] == "ISA"
+    assert response.json()["type_key"] == "trading212.cash_isa"
+    both = await client.patch(f"{API}/accounts/{typed}", json={"name": "ISA 2", "type_key": None})
+    assert both.json()["name"] == "ISA 2" and both.json()["type_key"] is None
+
+
+async def test_a_type_key_no_longer_in_the_catalog_reads_as_none(client, run) -> None:
+    record = await run(
+        create_account,
+        name="Gone",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+        type_key="retired.type",
+    )
+    listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
+    assert listed[str(record.id)]["type_key"] is None
