@@ -261,6 +261,35 @@ async def test_money_moved_to_or_from_a_hidden_account_is_a_flow(
     assert (flow.categories, flow.payees) == ([], [])
 
 
+async def test_a_move_straight_to_a_hidden_pot_is_a_flow(
+    session, run, make_account, bank, gbp
+) -> None:
+    """A Monzo pot move posts the main account and the pot in one transaction, with no
+    transfer: hiding the pot makes it spending, as net worth falls by it."""
+    pot = await make_account(name="Holiday pot", subtype="savings_pot", balance_mode="hybrid")
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Holiday pot",
+            postings=[
+                PostingInput(bank.id, gbp.id, Decimal("-50")),
+                PostingInput(pot.id, gbp.id, Decimal("50")),
+            ],
+        ),
+    )
+
+    assert (await cash_flow(session, START, END)).spending == 0
+    flow = await cash_flow(session, START, END, excluded=[pot.id])
+    assert (flow.income, flow.spending) == (Decimal("0"), Decimal("50"))
+    assert flow.hidden_accounts == [
+        HiddenAccountTotal(pot.id, "Holiday pot", Decimal("0"), Decimal("50"))
+    ]
+    # With the main account hidden instead, the pot's side arrived from it.
+    flow = await cash_flow(session, START, END, excluded=[bank.id])
+    assert (flow.income, flow.spending) == (Decimal("50"), Decimal("0"))
+
+
 async def test_a_transfer_fee_goes_with_an_excluded_side(
     session, run, move, make_account, bank, unassigned, gbp
 ) -> None:

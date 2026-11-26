@@ -143,33 +143,45 @@ _FLOWS = (
 )
 
 
-# The side of each transfer between a hidden account and one still in the reports that is on
-# the latter: its own record, or the placeholder standing in for it, valued as _FLOWS values
-# a flow. Its sign is the move's: positive arrived from the hidden account. A rejected
-# transfer is no transfer, and its record's other side on Unassigned is a flow already.
+# Money crossing between the hidden accounts and those still in the reports: the postings on
+# a shown asset or liability account (not In transit) of a transaction that either posts to a
+# hidden account itself (a Monzo pot move) or is a side of a transfer to or from one (its own
+# record, or the placeholder standing in for it), valued as _FLOWS values a flow. Its sign is
+# the move's: positive arrived from the hidden account. A rejected transfer is no transfer,
+# and its record's other side on Unassigned is a flow already.
 _HIDDEN_MOVES = (
     "with"
     + _REPORTING
     + """,
-    sides as (
-      select tr.id,
-        case when tr.from_account_id = any(:excluded) then tr.from_account_id
-          else tr.to_account_id end as hidden_id,
-        case when tr.from_account_id = any(:excluded) then tr.to_account_id
-          else tr.from_account_id end as shown_id,
-        array[tr.out_transaction_id, tr.in_transaction_id, tr.placeholder_transaction_id]
-          as legs
+    crossing as (
+      select x.transaction_id, x.account_id as hidden_id
+      from finance.postings x
+      where x.account_id = any(:excluded)
+      union
+      select leg.id, case when tr.from_account_id = any(:excluded)
+                       then tr.from_account_id else tr.to_account_id end
       from finance.transfers tr
-      where tr.status <> 'rejected'
-        and (tr.from_account_id = any(:excluded)) <> (tr.to_account_id = any(:excluded))
+      cross join lateral unnest(array[tr.out_transaction_id, tr.in_transaction_id,
+                                      tr.placeholder_transaction_id]) as leg(id)
+      where tr.status <> 'rejected' and leg.id is not null
+        and (tr.from_account_id = any(:excluded) or tr.to_account_id = any(:excluded))
+    ),
+    -- One hidden account per transaction, should it touch several: the first by id.
+    named as (
+      select distinct on (crossing.transaction_id) crossing.transaction_id, crossing.hidden_id
+      from crossing
+      order by crossing.transaction_id, crossing.hidden_id
     ),
     moves as (
-      select t.booking_date as day, sides.hidden_id, p.instrument_id, p.quantity
-      from sides
-      join finance.transactions t on t.id = any(sides.legs)
-      join finance.postings p on p.transaction_id = t.id and p.account_id = sides.shown_id
+      select t.booking_date as day, named.hidden_id, p.instrument_id, p.quantity
+      from named
+      join finance.transactions t on t.id = named.transaction_id
+      join finance.postings p on p.transaction_id = t.id
+      join finance.accounts a on a.id = p.account_id
       join finance.instruments i on i.id = p.instrument_id
-      where t.status <> 'void' and t.booking_date between :start and :end
+      where a.ledger_type in ('asset', 'liability')
+        and a.id <> all(:excluded) and a.id is distinct from :in_transit
+        and t.status <> 'void' and t.booking_date between :start and :end
         and i.kind = 'fiat' and not i.hidden and p.quantity <> 0
     ),
     rates as (
@@ -266,7 +278,8 @@ async def cash_flow(
     source itself marks as not spending (include_in_spending false) is left out too.
     """
     require_series_range(start, end)
-    opening = (await system_account_ids(session)).get("opening_balances")
+    system = await system_account_ids(session)
+    opening = system.get("opening_balances")
     skipped = [] if opening is None else [opening]
     uuids = ARRAY(PG_UUID(as_uuid=True))
     rows = (
@@ -280,8 +293,16 @@ async def cash_flow(
     splits = await _splits(session, {row.transaction_id for row in rows})
     moves = (
         await session.execute(
-            text(_HIDDEN_MOVES).bindparams(bindparam("excluded", type_=uuids)),
-            {"start": start, "end": end, "excluded": list(excluded)},
+            text(_HIDDEN_MOVES).bindparams(
+                bindparam("excluded", type_=uuids),
+                bindparam("in_transit", type_=PG_UUID(as_uuid=True)),
+            ),
+            {
+                "start": start,
+                "end": end,
+                "excluded": list(excluded),
+                "in_transit": system.get("in_transit"),
+            },
         )
     ).all()
 
