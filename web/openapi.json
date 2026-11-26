@@ -135,6 +135,10 @@
             ],
             "title": "Closed On"
           },
+          "excluded_from_reports": {
+            "title": "Excluded From Reports",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -269,7 +273,8 @@
           "status",
           "opened_on",
           "closed_on",
-          "system"
+          "system",
+          "excluded_from_reports"
         ],
         "title": "AccountOut",
         "type": "object"
@@ -285,6 +290,19 @@
           "name"
         ],
         "title": "AccountRename",
+        "type": "object"
+      },
+      "AccountReportingUpdate": {
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "title": "AccountReportingUpdate",
         "type": "object"
       },
       "AmountFormat": {
@@ -589,6 +607,161 @@
         },
         "maxItems": 50,
         "type": "array"
+      },
+      "CashFlowCategoryOut": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowCategoryOut",
+        "type": "object"
+      },
+      "CashFlowOut": {
+        "description": "Income and spending in the reporting currency; spending is positive.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowCategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "net": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Net",
+            "type": "string"
+          },
+          "payees": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPayeeOut"
+            },
+            "title": "Payees",
+            "type": "array"
+          },
+          "periods": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPeriodOut"
+            },
+            "title": "Periods",
+            "type": "array"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "bucket",
+          "income",
+          "spending",
+          "net",
+          "missing_count",
+          "periods",
+          "categories",
+          "payees"
+        ],
+        "title": "CashFlowOut",
+        "type": "object"
+      },
+      "CashFlowPayeeOut": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "spending"
+        ],
+        "title": "CashFlowPayeeOut",
+        "type": "object"
+      },
+      "CashFlowPeriodOut": {
+        "properties": {
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowPeriodOut",
+        "type": "object"
       },
       "ConnectionOut": {
         "properties": {
@@ -5556,6 +5729,60 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/{account_id}/reporting": {
+      "post": {
+        "description": "Leave the account out of net worth, holdings and cash flow, or put it back.",
+        "operationId": "set_account_reporting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountReportingUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Account Reporting",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}/snapshots": {
       "post": {
         "operationId": "record_snapshot",
@@ -5609,6 +5836,89 @@
         ]
       }
     },
+    "/api/v1/finance/cash-flow": {
+      "get": {
+        "description": "Income and spending by period, category and payee, without the accounts left out of\nreports; defaults to the 365 days up to and including today.",
+        "operationId": "get_cash_flow",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashFlowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Cash Flow",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/fx-rates": {
       "post": {
         "operationId": "record_fx_rate",
@@ -5645,7 +5955,7 @@
     },
     "/api/v1/finance/holdings": {
       "get": {
-        "description": "Holdings valued in the reporting currency; the date defaults to today.",
+        "description": "Holdings valued in the reporting currency, without the accounts left out of reports;\nthe date defaults to today.",
         "operationId": "get_holdings",
         "parameters": [
           {
@@ -6219,7 +6529,7 @@
     },
     "/api/v1/finance/net-worth": {
       "get": {
-        "description": "Daily net worth; defaults to the 365 days up to and including today.",
+        "description": "Daily net worth, without the accounts left out of reports; defaults to the 365 days up\nto and including today.",
         "operationId": "get_net_worth",
         "parameters": [
           {
