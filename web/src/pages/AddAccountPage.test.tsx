@@ -160,7 +160,8 @@ it("makes a new profile when one of the same name reads files differently", asyn
     data: [
       {
         id: "profile-edited",
-        name: "Example Bank PDF statement",
+        // The database compares names without case or outer spaces.
+        name: " example bank pdf STATEMENT ",
         config: { format: "pdf", layout: "example", negate: true },
       },
     ],

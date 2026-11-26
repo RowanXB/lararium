@@ -62,11 +62,13 @@ function catalogProfileName(entry: ImportCatalogEntryOut): string {
   return `${entry.institution} ${entry.label}`;
 }
 
-// Profile names are unique: "HSBC UK CSV", else "HSBC UK CSV (2)" and on.
+// Profile names are unique as the database compares them (lower(btrim(name))): "HSBC UK
+// CSV", else "HSBC UK CSV (2)" and on.
 function freeName(name: string, profiles: ImportProfileOut[]): string {
-  const taken = new Set(profiles.map((p) => p.name));
+  const key = (value: string) => value.trim().toLowerCase();
+  const taken = new Set(profiles.map((p) => key(p.name)));
   let candidate = name;
-  for (let n = 2; taken.has(candidate); n++) candidate = `${name} (${n})`;
+  for (let n = 2; taken.has(key(candidate)); n++) candidate = `${name} (${n})`;
   return candidate;
 }
 
