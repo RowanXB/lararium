@@ -225,14 +225,16 @@ def _rows(label: str, body: ApiValue) -> list[Row]:
     where = ENDPOINTS[label].rows
     found: ApiValue = body
     if where not in ("", "."):
-        for step in where.split("."):
-            if not isinstance(found, dict):
-                raise BinanceDataError(label, where)
-            if step not in found:
-                # Whether Binance leaves the key out of an empty window is not known, and the
-                # real sync works so: no records.
-                return []
-            found = found[step]
+        *parents, last = where.split(".")
+        for step in parents:
+            found = found.get(step) if isinstance(found, dict) else None
+        if not isinstance(found, dict):
+            raise BinanceDataError(label, where)
+        if last not in found:
+            # Whether Binance leaves the list out of an empty window is not known, and the
+            # real sync works so: no records. (Only the list itself: a missing parent is not.)
+            return []
+        found = found[last]
     elif where == "":
         found = [body]
     if not isinstance(found, list):

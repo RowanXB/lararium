@@ -257,6 +257,12 @@ def test_a_record_list_left_out_is_an_empty_answer() -> None:
     # Whether Binance leaves the key out of an empty window is not known; the real sync works.
     assert parse("earn-flexible-subscriptions", {"total": 0}).rows == []
     assert parse("convert", {"moreData": False}).rows == []
+    # Only the list itself: a parent of it left out is not an answer of that shape.
+    envelope = {"status": "OK", "type": "GENERAL", "code": "0"}
+    assert parse("rebate", {**envelope, "data": {"page": 1}}).rows == []
+    with pytest.raises(BinanceDataError) as caught:
+        parse("rebate", envelope)
+    assert (caught.value.label, caught.value.field) == ("rebate", "data.data")
 
 
 def test_a_bar_is_keyed_by_position() -> None:
