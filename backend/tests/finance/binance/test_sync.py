@@ -33,7 +33,7 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
-from lararium.modules.finance.binance.fetch import CURSORS_KEY, record_type
+from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys, record_type
 from lararium.modules.finance.binance.layout import TABLE_LABELS, layout
 from lararium.modules.finance.binance.sync import (
     BALANCE_LABELS,
@@ -901,6 +901,53 @@ async def test_a_value_unreadable_once_stored_is_refused_on_the_live_answer(
                 {"c": id_},
             )
         assert posted >= 1
+
+
+def _without(key: str, **envelope: JSONValue) -> Callable[[Any], Any]:
+    """An answer with its record list left out and what sits beside it changed."""
+    return lambda body: {**{k: v for k, v in body.items() if k != key}, **envelope}
+
+
+@pytest.mark.parametrize(
+    ("label", "field", "change"),
+    [
+        ("convert", "list", _without("list", moreData=True)),
+        ("earn-flexible-rewards", "rows", _without("rows", total=3)),
+    ],
+)
+async def test_an_answer_that_says_it_has_records_but_carries_no_list_is_refused(
+    backend_url: str,
+    owner_url: str,
+    migrated: None,
+    fake: FakeBinance,
+    connector,
+    clock: Clock,
+    label: str,
+    field: str,
+    change,
+) -> None:
+    # The absent list reads as "no records" only when nothing in the answer says otherwise.
+    handler, broken = _answering(fake, label, change)
+    async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
+        cursors = {key: await _cursor(sessions, id_, key) for key in _keys(label)}
+
+        after = await sync()
+
+        assert after.status == "failing"
+        assert f"Binance answered {label} in an unexpected shape (field {field})" in (
+            after.last_error or ""
+        )
+        assert await _count(sessions, id_, record_type(label)) == 0
+        assert {key: await _cursor(sessions, id_, key) for key in _keys(label)} == cursors
+
+        broken["on"] = False
+        again = await sync()
+
+        assert again.status == "healthy", again.last_error
+
+
+def _keys(label: str) -> list[str]:
+    return [key for key, _ in cursor_keys(ENDPOINTS[label])]
 
 
 async def test_a_history_answer_without_its_record_list_is_an_empty_window(

@@ -219,9 +219,18 @@ class _Walk:
             self._parsed.unknown_fields.add(f"{node.path}[{index}]")
 
 
+def _says_there_are_records(envelope: Mapping[str, ApiValue]) -> bool:
+    """Whether what sits beside a record list says it holds records: a `moreData` that is
+    true, or a `total` above 0."""
+    total = envelope.get("total")
+    counted = isinstance(total, int | Decimal) and not isinstance(total, bool) and total > 0
+    return envelope.get("moreData") is True or counted
+
+
 def _rows(label: str, body: ApiValue) -> list[Row]:
     """The records of a body. A record list that is null or not a list (the body itself, for a
-    label whose records are the body) is never an empty answer: it is a `BinanceDataError`."""
+    label whose records are the body) is never an empty answer: it is a `BinanceDataError`; nor
+    is a list left out of an answer that says it has records (`moreData`, `total`)."""
     where = ENDPOINTS[label].rows
     found: ApiValue = body
     if where not in ("", "."):
@@ -233,6 +242,9 @@ def _rows(label: str, body: ApiValue) -> list[Row]:
         if last not in found:
             # Whether Binance leaves the list out of an empty window is not known, and the
             # real sync works so: no records. (Only the list itself: a missing parent is not.)
+            # Not when the same answer says there are records: then the list is missing.
+            if _says_there_are_records(found):
+                raise BinanceDataError(label, where)
             return []
         found = found[last]
     elif where == "":

@@ -265,6 +265,21 @@ def test_a_record_list_left_out_is_an_empty_answer() -> None:
     assert (caught.value.label, caught.value.field) == ("rebate", "data.data")
 
 
+def test_a_record_list_left_out_of_an_answer_that_says_it_has_records_is_an_error() -> None:
+    # The answer contradicts itself: it is not read as an empty window.
+    for label, body, field in [
+        ("convert", {"moreData": True}, "list"),
+        ("earn-flexible-rewards", {"total": 3}, "rows"),
+        ("dividends", {"total": 1}, "rows"),
+    ]:
+        with pytest.raises(BinanceDataError) as caught:
+            parse(label, body)
+        assert (caught.value.label, caught.value.field) == (label, field)
+    # Saying nothing, or that there is nothing, is still no records.
+    assert parse("earn-flexible-rewards", {}).rows == []
+    assert parse("dividends", {"total": 0}).rows == []
+
+
 def test_a_bar_is_keyed_by_position() -> None:
     bar = build_row("klines")
     parsed = parse("klines", build_response("klines", [bar]))
