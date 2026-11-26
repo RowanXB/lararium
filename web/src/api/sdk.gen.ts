@@ -376,8 +376,8 @@ export const recordFxRate = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * Get Holdings
  *
- * Holdings valued in the reporting currency, without the accounts left out of reports;
- * the date defaults to today.
+ * Holdings valued in the reporting currency, without the accounts left out of reports
+ * unless `all_accounts`; the date defaults to today.
  */
 export const getHoldings = <ThrowOnError extends boolean = false>(options?: Options<GetHoldingsData, ThrowOnError>): RequestResult<GetHoldingsResponses, GetHoldingsErrors, ThrowOnError> => (options?.client ?? client).get<GetHoldingsResponses, GetHoldingsErrors, ThrowOnError>({ url: '/api/v1/finance/holdings', ...options });
 

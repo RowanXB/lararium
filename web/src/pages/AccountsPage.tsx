@@ -698,9 +698,12 @@ export function AccountsPage() {
     queryFn: async () => (await getFinanceSettings({ throwOnError: true })).data,
   });
   const today = todayForInput();
+  // Every account's, hidden ones included: hiding is for the Overview, not for this page.
   const holdings = useQuery({
-    queryKey: ["holdings", today],
-    queryFn: async () => (await getHoldings({ query: { date: today }, throwOnError: true })).data,
+    queryKey: ["holdings", today, "all-accounts"],
+    queryFn: async () =>
+      (await getHoldings({ query: { date: today, all_accounts: true }, throwOnError: true }))
+        .data,
   });
   const error = accounts.error ?? instruments.error ?? settings.error;
   // Default the snapshot instrument to the reporting currency, which most balances are in.
@@ -709,7 +712,7 @@ export function AccountsPage() {
       (i) => i.kind === "fiat" && i.symbol === settings.data?.reporting_currency,
     ) ?? instruments.data?.[0]
   )?.id;
-  // What each account is worth today; a hidden account is left out of holdings.
+  // What each account is worth today.
   const values = useMemo(() => {
     const byAccount = new Map<string, string[]>();
     for (const holding of holdings.data ?? []) {

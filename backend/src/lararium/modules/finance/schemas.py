@@ -290,6 +290,15 @@ class CashFlowPayeeOut(_Out):
     spending: DecimalStr
 
 
+class CashFlowHiddenAccountOut(_Out):
+    """Money moved between an account left out of reports and those still in them."""
+
+    account_id: UUID
+    name: str
+    moved_in: DecimalStr  # from the hidden account: income
+    moved_out: DecimalStr  # into the hidden account: spending
+
+
 class CashFlowOut(_Out):
     """Income and spending in the reporting currency; spending is positive."""
 
@@ -303,6 +312,8 @@ class CashFlowOut(_Out):
     periods: list[CashFlowPeriodOut]
     categories: list[CashFlowCategoryOut]
     payees: list[CashFlowPayeeOut]
+    # Also in the totals and periods, apart from categories and payees.
+    hidden_accounts: list[CashFlowHiddenAccountOut]
 
 
 # Imports

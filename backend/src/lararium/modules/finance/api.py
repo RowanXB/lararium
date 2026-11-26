@@ -380,11 +380,15 @@ async def record_fx_rate(body: FxRateCreate, session: SessionDep, actor: ActorDe
 
 @router.get("/holdings", name="get_holdings")
 async def get_holdings(
-    session: SessionDep, day: Annotated[date | None, Query(alias="date")] = None
+    session: SessionDep,
+    day: Annotated[date | None, Query(alias="date")] = None,
+    all_accounts: bool = False,
 ) -> list[HoldingOut]:
-    """Holdings valued in the reporting currency, without the accounts left out of reports;
-    the date defaults to today."""
-    excluded = await accounts.excluded_account_ids(session)
+    """Holdings valued in the reporting currency, without the accounts left out of reports
+    unless `all_accounts`; the date defaults to today."""
+    excluded: frozenset[UUID] = (
+        frozenset() if all_accounts else await accounts.excluded_account_ids(session)
+    )
     rows = await valuation.holdings_asof(session, day or await _today(session), excluded)
     return [HoldingOut.model_validate(row) for row in rows]
 

@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -7,7 +8,12 @@ from sqlalchemy import insert
 
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import set_excluded_from_reports
-from lararium.modules.finance.cashflow import CategoryTotal, PayeeTotal, cash_flow
+from lararium.modules.finance.cashflow import (
+    CategoryTotal,
+    HiddenAccountTotal,
+    PayeeTotal,
+    cash_flow,
+)
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.ledger import (
     CategorySplit,
@@ -194,6 +200,67 @@ async def test_only_own_asset_and_liability_accounts_can_be_excluded(
             await run(set_excluded_from_reports, account_id, True)
 
 
+async def _transfer(session, *, sent, received, from_account, to_account, gbp, **more) -> None:
+    await session.execute(
+        insert(models.Transfer).values(
+            from_account_id=from_account.id,
+            to_account_id=to_account.id,
+            instrument_id=gbp.id,
+            amount=Decimal("100"),
+            status=more.pop("status", "matched"),
+            out_transaction_id=sent.id if sent else None,
+            in_transaction_id=received.id if received else None,
+            opened_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            **more,
+        )
+    )
+
+
+async def test_money_moved_to_or_from_a_hidden_account_is_a_flow(
+    session, run, move, make_account, bank, gbp
+) -> None:
+    """A hidden account is as good as someone else's: what moves between it and an account
+    still in the reports is income or spending, apart from categories and payees."""
+    pension = await make_account(name="Pension", balance_mode="transactions")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    out = await move("-100", date(2026, 10, 30), contra=in_transit)
+    arrived = await move("100", date(2026, 11, 2), account=pension, contra=in_transit)
+    await _transfer(
+        session, sent=out, received=arrived, from_account=bank, to_account=pension, gbp=gbp
+    )
+    back = await move("-30", date(2026, 11, 5), account=pension, contra=in_transit)
+    landed = await move("30", date(2026, 11, 5), contra=in_transit)
+    await _transfer(
+        session, sent=back, received=landed, from_account=pension, to_account=bank, gbp=gbp
+    )
+    # Not yet arrived: the shown side's record is all there is.
+    waiting = await move("-20", date(2026, 11, 20), contra=in_transit)
+    await _transfer(
+        session,
+        sent=waiting,
+        received=None,
+        from_account=bank,
+        to_account=pension,
+        gbp=gbp,
+        status="awaiting",
+    )
+
+    shown = await cash_flow(session, START, END)
+    assert (shown.income, shown.spending, shown.hidden_accounts) == (0, 0, [])
+
+    flow = await cash_flow(session, START, END, excluded=[pension.id])
+    assert (flow.income, flow.spending) == (Decimal("30"), Decimal("120"))
+    assert flow.hidden_accounts == [
+        HiddenAccountTotal(pension.id, "Pension", Decimal("30"), Decimal("120"))
+    ]
+    # Counted on the day the shown side moved, and kept out of categories and payees.
+    assert [(p.start, p.income, p.spending) for p in flow.periods] == [
+        (date(2026, 10, 1), Decimal("0"), Decimal("100")),
+        (date(2026, 11, 1), Decimal("30"), Decimal("20")),
+    ]
+    assert (flow.categories, flow.payees) == ([], [])
+
+
 async def test_a_transfer_fee_goes_with_an_excluded_side(
     session, run, move, make_account, bank, unassigned, gbp
 ) -> None:
@@ -230,5 +297,46 @@ async def test_a_transfer_fee_goes_with_an_excluded_side(
     )
 
     assert (await cash_flow(session, START, END)).spending == Decimal("5")
-    for excluded in ([other.id], [bank.id], [bank.id, other.id]):
-        assert (await cash_flow(session, START, END, excluded=excluded)).spending == 0
+    # With one side hidden, the side still shown moved the whole amount, the fee within it.
+    to_hidden = await cash_flow(session, START, END, excluded=[other.id])
+    assert (to_hidden.income, to_hidden.spending) == (Decimal("0"), Decimal("100"))
+    from_hidden = await cash_flow(session, START, END, excluded=[bank.id])
+    assert (from_hidden.income, from_hidden.spending) == (Decimal("95"), Decimal("0"))
+    both = await cash_flow(session, START, END, excluded=[bank.id, other.id])
+    assert (both.income, both.spending, both.hidden_accounts) == (Decimal("0"), Decimal("0"), [])
+
+
+async def test_money_on_its_way_to_or_from_a_hidden_account_is_left_out(
+    session, run, move, make_account, bank, gbp
+) -> None:
+    """In transit is shared by every transfer: what it holds for one to or from a hidden
+    account goes with that account, so net worth falls the day money leaves for it (when
+    cash flow counts the spending) and rises the day money from it arrives."""
+    savings = await make_account(name="Savings", balance_mode="transactions")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    await move("1000", date(2026, 11, 1))
+    out = await move("-100", date(2026, 11, 2), contra=in_transit)
+    arrived = await move("100", date(2026, 11, 3), account=savings, contra=in_transit)
+    await _transfer(
+        session, sent=out, received=arrived, from_account=bank, to_account=savings, gbp=gbp
+    )
+    day1, day2 = date(2026, 11, 2), date(2026, 11, 3)
+
+    async def worth(excluded):
+        return [p.value for p in await net_worth_series(session, day1, day2, excluded)]
+
+    assert await worth([]) == [Decimal("1000"), Decimal("1000")]
+    assert await worth([savings.id]) == [Decimal("900"), Decimal("900")]
+    assert await worth([bank.id]) == [Decimal("0"), Decimal("100")]
+    assert await worth([bank.id, savings.id]) == [Decimal("0"), Decimal("0")]
+    # In transit's money is shown until it is a hidden transfer's.
+    assert in_transit in {h.account_id for h in await holdings_asof(session, day1)}
+    assert in_transit not in {h.account_id for h in await holdings_asof(session, day1, [bank.id])}
+
+
+async def test_many_transactions_take_one_parameter(session) -> None:
+    """Category splits are read with one array parameter: a long range of trades and fees
+    can hold more flows than a statement takes parameters (65,535)."""
+    from lararium.modules.finance.cashflow import _splits
+
+    assert await _splits(session, [uuid4() for _ in range(70_000)]) == {}

@@ -640,6 +640,38 @@
         "title": "CashFlowCategoryOut",
         "type": "object"
       },
+      "CashFlowHiddenAccountOut": {
+        "description": "Money moved between an account left out of reports and those still in them.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "moved_in": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved In",
+            "type": "string"
+          },
+          "moved_out": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved Out",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "name",
+          "moved_in",
+          "moved_out"
+        ],
+        "title": "CashFlowHiddenAccountOut",
+        "type": "object"
+      },
       "CashFlowOut": {
         "description": "Income and spending in the reporting currency; spending is positive.",
         "properties": {
@@ -663,6 +695,13 @@
             "format": "date",
             "title": "End",
             "type": "string"
+          },
+          "hidden_accounts": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowHiddenAccountOut"
+            },
+            "title": "Hidden Accounts",
+            "type": "array"
           },
           "income": {
             "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
@@ -713,7 +752,8 @@
           "missing_count",
           "periods",
           "categories",
-          "payees"
+          "payees",
+          "hidden_accounts"
         ],
         "title": "CashFlowOut",
         "type": "object"
@@ -5955,7 +5995,7 @@
     },
     "/api/v1/finance/holdings": {
       "get": {
-        "description": "Holdings valued in the reporting currency, without the accounts left out of reports;\nthe date defaults to today.",
+        "description": "Holdings valued in the reporting currency, without the accounts left out of reports\nunless `all_accounts`; the date defaults to today.",
         "operationId": "get_holdings",
         "parameters": [
           {
@@ -5973,6 +6013,16 @@
                 }
               ],
               "title": "Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_accounts",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Accounts",
+              "type": "boolean"
             }
           }
         ],

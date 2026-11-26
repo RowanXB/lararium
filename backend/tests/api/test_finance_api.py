@@ -353,6 +353,10 @@ async def test_excluding_an_account_and_cash_flow(client) -> None:
     assert (
         await client.get("/api/v1/finance/holdings", params={"date": "2026-11-02"})
     ).json() == []
+    # The Accounts page still shows a hidden account's balance.
+    every = {"date": "2026-11-02", "all_accounts": "true"}
+    shown = (await client.get("/api/v1/finance/holdings", params=every)).json()
+    assert [h["value"] for h in shown] == ["100"]
     listed = (await client.get("/api/v1/finance/accounts")).json()
     assert [a["excluded_from_reports"] for a in listed if a["id"] == account_id] == [True]
 
@@ -373,6 +377,7 @@ async def test_excluding_an_account_and_cash_flow(client) -> None:
         "periods": [{"start": "2026-11-02", "income": "0", "spending": "0"}],
         "categories": [],
         "payees": [],
+        "hidden_accounts": [],
     }
     bad = await client.get("/api/v1/finance/cash-flow", params={"bucket": "year"})
     assert bad.status_code == 422

@@ -23,6 +23,7 @@ const FLOW = {
     { category: null, income: "2000.00", spending: "200.00" },
   ],
   payees: [{ name: "Corner cafe", spending: "300.00" }],
+  hidden_accounts: [],
 };
 
 vi.mock("../api", () => ({
@@ -180,4 +181,24 @@ it("leads to adding a first account when there is none", async () => {
     "href",
     "/accounts/new",
   );
+});
+
+it("shows money moved to and from hidden accounts apart from categories", async () => {
+  vi.mocked(getCashFlow).mockResolvedValue({
+    data: {
+      ...FLOW,
+      spending: "700.00",
+      net: "1300.00",
+      hidden_accounts: [
+        { account_id: "a9", name: "Pension", moved_in: "0", moved_out: "200.00" },
+      ],
+    },
+  } as never);
+  renderPage();
+
+  expect(await screen.findByText("Moved to and from hidden accounts")).toBeInTheDocument();
+  expect(screen.getByText("Pension")).toBeInTheDocument();
+  expect(screen.getByText("Moved in £200.00")).toBeInTheDocument();
+  // Categories' shares are of what categories hold, not of spending with the moves in it.
+  expect(screen.getByText("60%")).toBeInTheDocument();
 });

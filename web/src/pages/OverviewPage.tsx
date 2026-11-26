@@ -145,6 +145,43 @@ function Welcome() {
   );
 }
 
+function HiddenAccounts({ flow, currency }: { flow: CashFlowOut; currency: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Moved to and from hidden accounts</CardTitle>
+        <CardDescription>
+          A hidden account counts as someone else's, so this is in income and spending above
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="divide-y">
+          {flow.hidden_accounts.map((account) => (
+            <li
+              key={account.account_id}
+              className="flex flex-wrap items-baseline justify-between gap-3 py-2 text-sm first:pt-0 last:pb-0"
+            >
+              <span className="font-medium">{account.name}</span>
+              <span className="flex gap-4 tabular-nums">
+                {!isZeroDecimal(account.moved_out) && (
+                  <span className="text-spending">
+                    Moved in {formatMoney(account.moved_out, currency)}
+                  </span>
+                )}
+                {!isZeroDecimal(account.moved_in) && (
+                  <span className="text-income">
+                    Taken out {formatMoney(account.moved_in, currency)}
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: string }) {
   const shares: Share[] = useMemo(
     () =>
@@ -158,6 +195,8 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
     [flow.categories],
   );
   const format = useCallback((value: string) => formatMoney(value, currency), [currency]);
+  // Money moved to hidden accounts is spending too, but no category's.
+  const categorised = sumDecimalStrings(shares.map((share) => share.value));
   if (shares.length === 0) {
     return <p className="text-sm text-muted-foreground">No spending in these dates</p>;
   }
@@ -178,7 +217,7 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
             <span className="shrink-0 tabular-nums">
               {format(share.value)}
               <span className="ml-2 text-muted-foreground">
-                {Math.round(percent(share.value, flow.spending))}%
+                {Math.round(percent(share.value, categorised))}%
               </span>
             </span>
           </li>
@@ -362,6 +401,10 @@ export function OverviewPage() {
             </Card>
           </div>
         </>
+      )}
+
+      {currency && flow && flow.hidden_accounts.length > 0 && (
+        <HiddenAccounts flow={flow} currency={currency} />
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">

@@ -354,6 +354,30 @@ export type CashFlowCategoryOut = {
 };
 
 /**
+ * CashFlowHiddenAccountOut
+ *
+ * Money moved between an account left out of reports and those still in them.
+ */
+export type CashFlowHiddenAccountOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Moved In
+     */
+    moved_in: string;
+    /**
+     * Moved Out
+     */
+    moved_out: string;
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
  * CashFlowOut
  *
  * Income and spending in the reporting currency; spending is positive.
@@ -371,6 +395,10 @@ export type CashFlowOut = {
      * End
      */
     end: string;
+    /**
+     * Hidden Accounts
+     */
+    hidden_accounts: Array<CashFlowHiddenAccountOut>;
     /**
      * Income
      */
@@ -3165,6 +3193,10 @@ export type GetHoldingsData = {
          * Date
          */
         date?: string | null;
+        /**
+         * All Accounts
+         */
+        all_accounts?: boolean;
     };
     url: '/api/v1/finance/holdings';
 };
