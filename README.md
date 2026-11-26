@@ -749,10 +749,13 @@ Messages never contain credentials.
 For accounts no connector syncs, upload the statement files your bank exports. Nothing reaches
 the ledger until you have reviewed it.
 
-1. **Upload.** On Imports, choose the account, a profile (how to read this bank's file; see
-   below) and the file, and optionally a currency for files that don't state one. Files are at
-   most 5 MiB and 20,000 rows. The file is kept as a document (in the `documents` volume) and
-   never deleted.
+1. **Upload.** For a bank in the catalog (below), go to Accounts → Add account and pick the
+   bank: upload the file, and Lararium recognises which of the bank's formats it is and makes
+   or reuses the profile for it. For any other file, use Data → Statement files and choose a
+   profile (how to read this bank's file; see below). Either way, choose the account (or name
+   a new one) and optionally a currency for files that don't state one. Files are at most
+   5 MiB and 20,000 rows. The file is kept as a document (in the `documents` volume) and never
+   deleted.
 2. **Review.** The batch page lists every row as **new**, **duplicate** (already in the
    ledger), **skipped** (a zero amount, or left out by the profile's `include_only`; the reason
    is shown) or **error** (couldn't be read, or breaks the running balance). Any error blocks
@@ -944,6 +947,13 @@ the new file is right, roll the earlier import back first.
 Example Bank files (`example-bank.csv`, `.ofx`, `.qif`) and the profiles for the first two
 (`example-bank-csv.json`, `example-bank-ofx.json`). Paste a profile's JSON into a new profile,
 pick GBP at upload, and import into a manual `transactions` account to try the flow.
+
+### Known limits
+
+- A profile is read as it is when the file is staged. If you pick a profile for an upload
+  and the profile is edited in another tab before you press Upload, the file is read with the
+  edited profile. The batch page shows every row's amount before anything is committed, so a
+  file read with the wrong signs is caught there: discard it and upload again.
 
 ### Verifying against your real statements
 
