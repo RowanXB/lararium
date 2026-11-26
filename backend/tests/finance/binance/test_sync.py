@@ -908,42 +908,44 @@ def _without(key: str, **envelope: JSONValue) -> Callable[[Any], Any]:
     return lambda body: {**{k: v for k, v in body.items() if k != key}, **envelope}
 
 
-@pytest.mark.parametrize(
-    ("label", "field", "change"),
-    [
-        ("convert", "list", _without("list", moreData=True)),
-        ("earn-flexible-rewards", "rows", _without("rows", total=3)),
-    ],
-)
-async def test_an_answer_that_says_it_has_records_but_carries_no_list_is_refused(
-    backend_url: str,
-    owner_url: str,
-    migrated: None,
-    fake: FakeBinance,
-    connector,
-    clock: Clock,
-    label: str,
-    field: str,
-    change,
+async def test_an_answer_that_says_it_has_more_but_carries_no_list_is_refused(
+    backend_url: str, owner_url: str, migrated: None, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    # The absent list reads as "no records" only when nothing in the answer says otherwise.
-    handler, broken = _answering(fake, label, change)
+    # The absent list reads as "no records" only when the answer does not say there are more.
+    handler, broken = _answering(fake, "convert", _without("list", moreData=True))
     async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
-        cursors = {key: await _cursor(sessions, id_, key) for key in _keys(label)}
+        before = await _cursor(sessions, id_, "convert")
 
         after = await sync()
 
         assert after.status == "failing"
-        assert f"Binance answered {label} in an unexpected shape (field {field})" in (
+        assert "Binance answered convert in an unexpected shape (field list)" in (
             after.last_error or ""
         )
-        assert await _count(sessions, id_, record_type(label)) == 0
-        assert {key: await _cursor(sessions, id_, key) for key in _keys(label)} == cursors
+        assert await _count(sessions, id_, record_type("convert")) == 0
+        assert await _cursor(sessions, id_, "convert") == before
 
         broken["on"] = False
         again = await sync()
 
         assert again.status == "healthy", again.last_error
+
+
+async def test_a_total_beside_an_absent_list_still_reads_as_no_records(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # A `total` counts every page: the page asked past a full one has none and may say 3.
+    label = "earn-flexible-rewards"
+    handler, _ = _answering(fake, label, _without("rows", total=3))
+    connection = await binance_connection(run, config=later_config())
+    before = {key: connection.config[CURSORS_KEY][key] for key in _keys(label)}  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+
+    after = await run_binance_sync(session, connection.id, handler)
+
+    assert after.status == "healthy", after.last_error
+    assert await _raw(session, connection.id, label) == 0
+    moved = {key: after.config[CURSORS_KEY][key] for key in _keys(label)}  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+    assert all(moved[key] != before[key] for key in before)
 
 
 def _keys(label: str) -> list[str]:

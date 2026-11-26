@@ -221,16 +221,14 @@ class _Walk:
 
 def _says_there_are_records(envelope: Mapping[str, ApiValue]) -> bool:
     """Whether what sits beside a record list says it holds records: a `moreData` that is
-    true, or a `total` above 0."""
-    total = envelope.get("total")
-    counted = isinstance(total, int | Decimal) and not isinstance(total, bool) and total > 0
-    return envelope.get("moreData") is True or counted
+    true. (Not a `total`: it counts every page, and the page asked past a full one has none.)"""
+    return envelope.get("moreData") is True
 
 
 def _rows(label: str, body: ApiValue) -> list[Row]:
     """The records of a body. A record list that is null or not a list (the body itself, for a
     label whose records are the body) is never an empty answer: it is a `BinanceDataError`; nor
-    is a list left out of an answer that says it has records (`moreData`, `total`)."""
+    is a list left out of an answer that says it has more records (`moreData`)."""
     where = ENDPOINTS[label].rows
     found: ApiValue = body
     if where not in ("", "."):
