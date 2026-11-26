@@ -71,10 +71,16 @@ async def record_price(
     )
 
 
-async def delete_price(ctx: CommandContext, price_id: UUID) -> None:
-    """Remove a recorded price (one its source no longer gives)."""
+async def delete_price(ctx: CommandContext, price_id: UUID, price: Decimal) -> bool:
+    """Remove a recorded price (one its source no longer gives) while it still holds `price`,
+    the value the caller read: one rewritten since, by another transaction too, is kept.
+    Whether it was removed."""
     p = models.Price
-    row = (await ctx.session.execute(delete(p).where(p.id == price_id).returning(p))).scalar_one()
+    row = (
+        await ctx.session.execute(delete(p).where(p.id == price_id, p.price == price).returning(p))
+    ).scalar_one_or_none()
+    if row is None:
+        return False
     data: dict[str, JSONValue] = {
         "id": str(row.id),
         "instrument_id": str(row.instrument_id),
@@ -85,6 +91,7 @@ async def delete_price(ctx: CommandContext, price_id: UUID) -> None:
     }
     ctx.emit("finance.price.deleted", row.id, data)
     ctx.record_change(f"price:{row.id}", {"before": data, "after": None})
+    return True
 
 
 async def record_fx_rate(

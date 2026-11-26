@@ -700,6 +700,16 @@ async def test_a_candle_stamped_the_evening_before_prices_its_day(session, ledge
     assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.50"))]
 
 
+async def test_a_candle_without_a_close_leaves_the_day_its_current_rate(session, ledger) -> None:
+    """eToro's candle fields are nullable: one without a close prices nothing, so the day's
+    current rate stands."""
+    day = NOW.date()
+    await ledger.normalize(*_ledger_entries(), ("candles", {**_stamped(day, "1"), "close": None}))
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+    await ledger.replay()
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+
+
 async def test_a_replay_leaves_no_misdated_candle_price(session, ledger) -> None:
     monday = NOW.date() - timedelta(days=1)
     sunday = monday - timedelta(days=1)
@@ -770,6 +780,28 @@ async def test_a_replay_keeps_a_day_another_etoro_connection_gives(session, run,
     await other.normalize(("candles", _stamped(sunday, "123.90")))
     await ledger.replay()
     assert (sunday, Decimal("123.90")) in await _price_days(session)
+
+
+async def test_a_replay_keeps_a_misdated_day_rewritten_since(session, run, ledger) -> None:
+    """Only the value the previous version filed there is removed: a price written on that
+    day since (another eToro connection's, whose rows are pruned now) is kept."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 123.70, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    await ledger.replay()
+    assert (sunday, Decimal("123.70")) in await _price_days(session)
 
 
 # eToro Money (design §5.7, §5.12) -------------------------------------------------------------

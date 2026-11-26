@@ -19,8 +19,9 @@ is stored for it, so the official close wins whichever arrives first. A candle's
 date of its `time` plus 12 hours (client.candle_day): eToro stamps it at midnight in Israel,
 21:00 or 22:00 UTC the evening before. A replay writes every price the connection's records
 give, so it also removes an `etoro` price an earlier version filed on a candle's UTC date
-that none gives now, unless another eToro connection gives that day (prices name no
-connection). No FX rate is written (design §5.10).
+that none gives now, while it still holds that candle's close: prices name no connection,
+and a value written there since is another eToro connection's. No FX rate is written
+(design §5.10).
 """
 
 from collections.abc import Sequence
@@ -548,6 +549,8 @@ async def prices(run: Run) -> None:
                 " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
                 " and ii.value = c.instrument_id::text"
                 " where c.connection_id = :c and ii.instrument_id = :i"
+                # A candle without a close (eToro's are nullable) prices nothing.
+                " and c.close > 0"
                 " and ((c.time at time zone 'UTC') + cast(:shift as interval))::date = :d)"
             ),
             {"c": run.connection_id, "i": instrument_id, "d": day, "shift": shift},
@@ -579,38 +582,30 @@ async def prices(run: Run) -> None:
 
 async def _remove_unwritten(run: Run, wanted: set[tuple[UUID, UUID, date]]) -> None:
     """Delete the `etoro` prices an earlier version filed on one of the connection's candles'
-    UTC dates that no record of the replay gives, in an instrument and currency it prices. A
-    day another eToro connection gives (a candle's, or a breakdown's current rate) is kept:
-    prices name no connection, and that one may have written it."""
+    UTC dates that no record of the replay gives, in an instrument and currency it prices,
+    while each still holds the candle's close it filed. Prices name no connection: a value
+    written there since (another eToro connection's) is not this one's to remove."""
     pairs = {(instrument_id, quote_id) for instrument_id, quote_id, _ in wanted}
     if not pairs:
         return
-    shift = f"{int(CANDLE_DAY_SHIFT.total_seconds())} seconds"
     rows = await run.session.execute(
         text(
-            "select distinct p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date"
+            "select p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date, p.price,"
+            " ii.value as etoro_id, c.close"
             " from finance.prices p"
             " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
             " and ii.instrument_id = p.instrument_id"
             " join finance.etoro_candles c on c.connection_id = :c"
             " and c.instrument_id::text = ii.value"
             " and (c.time at time zone 'UTC')::date = p.as_of_date"
-            " where p.source = :s and p.instrument_id = any(:i)"
-            " and not exists (select 1 from finance.etoro_candles o"
-            " where o.connection_id <> :c and o.instrument_id::text = ii.value"
-            " and ((o.time at time zone 'UTC') + cast(:shift as interval))::date = p.as_of_date)"
-            " and not exists (select 1 from finance.etoro_breakdown_positions b"
-            " where b.connection_id <> :c and b.finance_instrument_id = p.instrument_id"
-            " and b.as_of_date = p.as_of_date)"
+            " where p.source = :s and p.instrument_id = any(:i) and c.close > 0"
         ),
-        {
-            "c": run.connection_id,
-            "s": SOURCE,
-            "i": sorted({i for i, _ in pairs}),
-            "shift": shift,
-        },
+        {"c": run.connection_id, "s": SOURCE, "i": sorted({i for i, _ in pairs})},
     )
     for row in rows:
         key = (row.instrument_id, row.quote_instrument_id, row.as_of_date)
-        if key[:2] in pairs and key not in wanted:
-            await delete_price(run.command, row.id)
+        code = run.asset_currencies.get(row.etoro_id)
+        if key[:2] not in pairs or key in wanted or not code:
+            continue
+        if await run.price(code, row.close) == (row.quote_instrument_id, row.price):
+            await delete_price(run.command, row.id, row.price)
