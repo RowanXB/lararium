@@ -356,6 +356,59 @@ async def test_more_data_in_one_millisecond_fails_the_walk(session, run, fake, c
     assert (await _config(session, connection))["cursors"] == {label: cursor}
 
 
+def _rows_left_out(fake: FakeBinance, label: str, total: int | None = None) -> httpx.AsyncClient:
+    """The fake's answers to `label`, an empty record list left out (and `total` set)."""
+    path = ENDPOINTS[label].path
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = fake.handler(request)
+        assert isinstance(answer, httpx.Response)
+        if request.url.path != path:
+            return answer
+        body = json.loads(answer.content)
+        if body["rows"]:
+            return answer
+        del body["rows"]
+        if total is not None:
+            body["total"] = total
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("label", ["dividends", "earn-flexible-rewards"])
+async def test_a_first_answer_counting_records_it_leaves_out_fails_the_walk(
+    session, run, fake, clock, label: str
+) -> None:
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    with pytest.raises(BinanceDataError) as caught:
+        async with _rows_left_out(fake, label, total=1) as http:
+            ctx = await context(session, connection.id, http)
+            await walk(ctx, client_for(clock, http), label)
+
+    assert (caught.value.label, caught.value.field) == (label, "rows")
+    assert await _raw_count(session, connection) == 0
+    assert (await _config(session, connection))["cursors"] == {label: cursor}
+
+
+async def test_a_page_past_a_full_one_may_leave_its_list_out(session, run, fake, clock) -> None:
+    # The page asked after a full page 1 has no records, while its `total` counts every page
+    # of the window: no list there is an empty page, not a missing one.
+    label = "earn-flexible-rewards"
+    fake.add(label, *_rows_at(label, 100, "time"))
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    async with _rows_left_out(fake, label) as http:
+        ctx = await context(session, connection.id, http)
+        ids = await walk(ctx, client_for(clock, http), label)
+
+    assert len(set(ids)) == 100
+    assert len(fake.calls(label)) == 2
+
+
 async def test_trades_page_until_short_page(session, run, fake, clock) -> None:
     fake.add("my-trades", *[build_row("my-trades", i, time=NOW_MS - i) for i in range(1001)])
     connection = await binance_connection(run)

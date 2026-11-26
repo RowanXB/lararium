@@ -32,6 +32,7 @@ from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS, Endpoi
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
     ApiValue,
+    BinanceDataError,
     Parsed,
     Row,
     as_api,
@@ -291,6 +292,21 @@ def _beside(endpoint: Endpoint, body: ApiValue, name: str) -> ApiValue:
     return body.get(name) if isinstance(body, dict) else None
 
 
+def _counts_records_it_leaves_out(endpoint: Endpoint, body: ApiValue) -> bool:
+    """Whether an answer leaves its record list out while its `total` says it has records.
+    A window's first answer that does has no reading but a missing list. (A later page can:
+    the page asked past a full one has no records, while `total` counts every page.)"""
+    total = _beside(endpoint, body, "total")
+    if isinstance(total, str) and total.isdecimal():
+        total = int(total)
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        return False
+    *parents, last = endpoint.rows.split(".")
+    for step in parents:
+        body = body.get(step) if isinstance(body, dict) else None
+    return isinstance(body, dict) and last not in body
+
+
 async def window_pages(
     client: BinanceClient,
     endpoint: Endpoint,
@@ -312,6 +328,8 @@ async def window_pages(
     async def ask(index: int, asked: Mapping[str, str | int]) -> Page:
         body = await client.call(endpoint, asked)
         parsed = typed(endpoint.label, body)
+        if index == 0 and _counts_records_it_leaves_out(endpoint, parsed.body):
+            raise BinanceDataError(endpoint.label, endpoint.rows)
         unknown = tuple(unknown_flags(endpoint.label, parsed))
         return Page(endpoint.label, start, end, index, parsed.body, parsed.rows, unknown)
 

@@ -934,16 +934,22 @@ async def test_an_answer_that_says_it_has_more_but_carries_no_list_is_refused(
 async def test_a_total_beside_an_absent_list_still_reads_as_no_records(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    # A `total` counts every page: the page asked past a full one has none and may say 3.
+    # A `total` counts every page: the page asked past a full one has none and still says how
+    # many the window holds. (A window's first answer that does is refused: test_fetch.)
     label = "earn-flexible-rewards"
-    handler, _ = _answering(fake, label, _without("rows", total=3))
+    size = ENDPOINTS[label].page_size
+    fake.add(label, *[build_row(label, i, time=NOW_MS - 2 * HOUR_MS - i) for i in range(size)])
+    handler, _ = _answering(
+        fake, label, lambda body: body if body["rows"] else _without("rows")(body)
+    )
     connection = await binance_connection(run, config=later_config())
     before = {key: connection.config[CURSORS_KEY][key] for key in _keys(label)}  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
 
     after = await run_binance_sync(session, connection.id, handler)
 
     assert after.status == "healthy", after.last_error
-    assert await _raw(session, connection.id, label) == 0
+    assert await _raw(session, connection.id, label) == size
+    assert len(fake.calls(label)) == 2
     moved = {key: after.config[CURSORS_KEY][key] for key in _keys(label)}  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
     assert all(moved[key] != before[key] for key in before)
 
