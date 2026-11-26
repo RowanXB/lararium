@@ -15,7 +15,7 @@ Per sync (design §5.2), in order:
    Later syncs ask one window, from the latest stored close date (`trade_history_to`) less 7
    days, however long ago that is.
 5. `orders:lookup` once for each order of an open position or a closed trade (`looked_up`),
-   at most MAX_LOOKUPS a sync: the next syncs ask the rest.
+   at most MAX_LOOKUPS a sync: the next syncs ask the rest (`to_look_up`).
 6. Balance history from the latest stored snapshot (`balance_history_to`) less 7 days; the
    first sync takes 365 days.
 7. Once a day (`daily_at`): closed-events, stockback, the market data of the instruments held
@@ -409,14 +409,21 @@ class _Run:
                 return _latest_close(fetched, today if not fetched else None), fetched
         raise EtoroSyncError("eToro's trade history did not end")
 
-    async def orders(self, pnl: Item, trades: list[Item]) -> list[JSONValue]:
+    async def orders(
+        self, pnl: Item, trades: list[Item]
+    ) -> tuple[list[JSONValue], list[JSONValue]]:
         """`orders:lookup` for each order not looked up before, at most MAX_LOOKUPS of them;
-        every order looked up."""
+        (every order looked up, those still to ask)."""
         before = self.cursor.get("looked_up")
         looked_up: set[str] = (
             {v for v in before if isinstance(v, str)} if isinstance(before, list) else set()
         )
-        wanted: set[str] = set()
+        # Those a sync left over the cap: a later sync's trade history may not hold their
+        # trades again.
+        kept = self.cursor.get("to_look_up")
+        wanted: set[str] = (
+            {v for v in kept if isinstance(v, str)} if isinstance(kept, list) else set()
+        )
         for position in _objects(_object(pnl, "clientPortfolio"), "positions", "pnl"):
             order_id = _optional_id(position.get("orderID"), "pnl", "positions[].orderID")
             if order_id is not None:
@@ -433,7 +440,10 @@ class _Run:
                 await self.store("order_lookup", order, params={"orderId": order_id})
             # An order eToro does not know (404) is not asked again either.
             looked_up.add(order_id)
-        return list[JSONValue](sorted(looked_up, key=int))
+        return (
+            list[JSONValue](sorted(looked_up, key=int)),
+            list[JSONValue](sorted(wanted - looked_up, key=int)),
+        )
 
     async def balance_history(self, today: date) -> str | None:
         """Snapshots since the latest stored less 7 days (the first sync: 365 days); the
@@ -514,7 +524,7 @@ class _Run:
         balances, pnl, aggregate, breakdown = await self.reports()
         seen_cash = await self.cash(balances)
         trade_history_to, trades = await self.trades(today)
-        looked_up = await self.orders(pnl, trades)
+        looked_up, to_look_up = await self.orders(pnl, trades)
         balance_history_to = await self.balance_history(today)
         daily = _due(self.cursor, "daily_at", DAILY_EVERY, now)
         candles_to: JSONValue = self.cursor.get("candles_to")
@@ -530,6 +540,7 @@ class _Run:
             "seen_cash": seen_cash,
             "daily_at": now.isoformat() if daily else self.cursor.get("daily_at"),
             "looked_up": looked_up,
+            "to_look_up": to_look_up,
             "candles_to": candles_to if isinstance(candles_to, dict) else {},
         }
 

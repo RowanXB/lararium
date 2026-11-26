@@ -663,6 +663,37 @@ async def test_order_lookups_are_capped_per_sync_and_finish_later(
     assert await _ledger(session, capped) == expected
 
 
+async def test_capped_order_lookups_of_old_trades_are_kept_for_later_syncs(
+    session, run, api, monkeypatch
+) -> None:
+    """An order beyond the cap whose trade a later sync's window no longer fetches is still
+    looked up: the cursor keeps it until it is asked."""
+    # Months apart, the oldest with the highest order ids: after the first sync only the
+    # newest trade is fetched again.
+    api.trades = [
+        trade_row(3000000001 + n, today() - timedelta(days=10 + 60 * n)) for n in range(5)
+    ]
+    whole = await _connection(run)
+    every = (await _sync(session, whole, api))["looked_up"]
+    expected = await _ledger(session, whole)
+    assert len(every) == 6 and sum(1 for row in expected if row[0].startswith("close:")) == 5
+
+    monkeypatch.setattr(etoro_sync, "MAX_LOOKUPS", 2)
+    capped = await _connection(run)
+    asked: list[str] = []
+    kept: list[int] = []
+    cursor: dict[str, Any] = {}
+    for _ in range(4):
+        api.requests.clear()
+        cursor = await _sync(session, capped, api)
+        asked.extend(api.looked_up())
+        kept.append(len(cursor.get("to_look_up", [])))
+    assert sorted(asked) == sorted(every)
+    assert kept == [4, 2, 0, 0]
+    assert sorted(cursor["looked_up"]) == sorted(every)
+    assert await _ledger(session, capped) == expected
+
+
 async def test_cash_transactions_stop_at_the_newest_seen(session, run, api) -> None:
     connection = await _connection(run)
     api.cash = [
