@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lararium.api.app import create_app
 from lararium.config import Settings
 from lararium.core.connections import get_connection, load_credential, set_status, update_config
-from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.ibkr import sync as ibkr_sync
 from lararium.worker.app import procrastinate_app
 
 from ..finance.ibkr.fixtures import AccountSpec, RowSpec, build_statement
+from .overrides import use_session
 
 KEY = bytes(range(32))
 OWNER = {"Tailscale-User-Login": "me@example.com"}
@@ -59,11 +59,7 @@ async def api(session, sessions, tmp_path: Path, queue) -> AsyncIterator[httpx.A
     )
     app = create_app(settings)
 
-    async def _test_session() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    app.dependency_overrides[get_session] = _test_session
-    app.dependency_overrides[get_session_factory] = lambda: sessions
+    use_session(app, session, sessions)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
