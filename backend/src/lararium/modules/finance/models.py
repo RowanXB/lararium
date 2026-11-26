@@ -62,6 +62,8 @@ class Account(Base):
     locked: Mapped[bool | None]
     round_up: Mapped[bool | None]
     round_up_multiplier: Mapped[Decimal | None] = mapped_column(Numeric)
+    # A key of the account type catalog (account_types.py); stored only.
+    type_key: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

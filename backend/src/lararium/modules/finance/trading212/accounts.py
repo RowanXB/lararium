@@ -23,6 +23,7 @@ from lararium.modules.finance.accounts import (
     create_account,
     get_account,
     set_source_details,
+    set_type_key,
 )
 from lararium.modules.finance.errors import AccountNotFoundError, FinanceValidationError
 from lararium.modules.finance.identifiers import (
@@ -40,6 +41,8 @@ KINDS: Mapping[str, tuple[str, TaxWrapper]] = {
     "invest": ("Trading 212 Invest", "gia"),
     "isa": ("Trading 212 ISA", "isa"),
 }
+# The account type (finance/account_types.py) of each account kind.
+TYPE_KEYS: Mapping[str, str] = {"invest": "trading212.invest", "isa": "trading212.stocks_isa"}
 
 
 def mapped_id(config: Mapping[str, JSONValue]) -> str | None:
@@ -89,11 +92,13 @@ async def account(run: Run, summary: Record | None) -> None:
             institution_entity_id=institution,
             tax_wrapper=wrapper,
             source_connection_id=run.connection_id,
+            type_key=TYPE_KEYS[kind],
         )
         account_id = created.id
         run.account_map[trading212_id] = str(account_id)
     run.account_id = account_id
     changed = await set_source_details(run.command, account_id, SourceDetails(tax_wrapper=wrapper))
+    changed |= await set_type_key(run.command, account_id, TYPE_KEYS[kind])
     # The row exists before ensure_identifier runs, so it takes no lock in this transaction.
     await run.shared(
         ("identifier", "trading212_account", trading212_id),
