@@ -384,6 +384,35 @@ dated Friday pairs with a Monzo payment any time on Wednesday; overdue after 7 d
 3650, and the two windows together must be shorter than 7 days, so a weekly transfer never pairs
 with the next week's.
 
+## The Overview
+
+The Overview shows the dates you pick (a preset, or any two days up to today): net worth and how
+much it changed, income, spending and what is left over, bars of both by day, week or month,
+spending by category, where your money is, where it went (by payee) and the holdings on the last
+day. All of it is in your reporting currency.
+
+**What counts as income and spending.** Money that comes into or leaves your accounts:
+everything a transaction posts to an income, expense or equity account, Unassigned included,
+except Opening balances. A transfer between your own accounts is neither, nor is a trade, nor a
+security arriving from nowhere (a corporate action). Spending the bank marks as not spending
+(Monzo's `include_in_spending`) is left out. A category is whatever the source gave; a
+transaction without one is Uncategorised. A payment in a currency with no FX rate that day is
+left out, and the page says how many.
+
+**Hiding an account.** On Accounts, the eye on an asset or liability account hides it from the
+Overview; the ledger and the Accounts page are unchanged. A hidden account counts as someone
+else's: its balance is left out of net worth and holdings, and so is money on its way to or from
+it in In transit. Money moved between it and an account still shown (a transfer, or a Monzo pot
+move) is spending when it leaves and income when it arrives, on the day the shown side moved, so
+net worth's change and income less spending agree. The Overview lists these moves per hidden
+account, apart from categories and payees.
+
+### Known limits
+
+- Income and spending are read in more than one query. If a sync pairs a transfer between two
+  of them, that one load can count the transfer's amount twice; loading the page again shows it
+  right. Nothing stored is affected.
+
 ## Connecting Interactive Brokers
 
 Interactive Brokers (IBKR) is a connector: the `worker` syncs it through IBKR's Flex Web
