@@ -892,7 +892,7 @@ _OPERATION_MEMBERS = {"CreditorTypeId": 3, "DebitorTypeId": 7, "Id": 4100200300,
 _OPERATION_REFERENCE = "0f9e8d7c-1111-4222-8333-944455556666"
 
 
-def _operation(data: str) -> dict[str, Any]:
+def _operation(data: Any) -> dict[str, Any]:
     return {"type": "SyntheticOp", "referenceId": _OPERATION_REFERENCE, "data": data}
 
 
@@ -967,6 +967,18 @@ async def test_external_operation_data_that_is_not_as_known_is_flagged_by_path(
     assert found == {f"order_lookup.externalOperation.{flag}" for flag in flags}
     assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, data, *members)
     # The open still posts.
+    assert len(await _postings(session, f"open:{POSITION}")) == 2
+
+
+@pytest.mark.parametrize("data", [True, {"Id": 41}, {"Id": "forty-one"}])
+async def test_external_operation_data_that_is_not_text_is_flagged_and_left_out(
+    session, ledger, data: Any
+) -> None:
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    found = {flag for flag in report.flagged if flag.startswith("order_lookup.")}
+    assert found == {"order_lookup.externalOperation.data"}
+    assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, *(None,) * 5)
     assert len(await _postings(session, f"open:{POSITION}")) == 2
 
 

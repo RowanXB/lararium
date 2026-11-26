@@ -94,22 +94,28 @@ async def metadata(run: Run, by_endpoint: dict[str, list[Record]]) -> None:
 
 
 def operation_data(run: Run, lookup: Item) -> dict[str, Value]:
-    """The members of an order lookup's `externalOperation.data` (fields.OPERATION_DATA), by
-    path. They are numbers: text that is not a JSON object's, a member the fields do not know
-    and a known one that is not a number are flagged by path, as an unknown field is, and the
-    known numbers still typed."""
+    """An order lookup's `externalOperation.data` (fields.OPERATION_DATA) and its members, by
+    path: all that is typed at or below it. The field is text holding a JSON object's, its
+    members numbers. Anything else is flagged by path, as an unknown field is, and left out:
+    a value that is not text, text that is not a JSON object's (kept as sent), a member the
+    fields do not know and a known one that is not a number (the known numbers still typed)."""
     data = value_at(lookup, OPERATION_DATA)
-    if not isinstance(data, str) or not data.strip():
+    if data is None:
         return {}
     flagged = f"order_lookup.{OPERATION_DATA}"
+    if not isinstance(data, str):
+        run.flag(flagged)
+        return {}
+    found: dict[str, Value] = {OPERATION_DATA: data}
+    if not data.strip():
+        return found
     try:
         members = loads_decimal(data)
     except (ValueError, RecursionError):
         members = None
     if not isinstance(members, dict):
         run.flag(flagged)
-        return {}
-    found: dict[str, Value] = {}
+        return found
     for name, value in members.items():
         path = f"{OPERATION_DATA}.{name}"
         if value is None:
@@ -127,9 +133,13 @@ async def lookups(run: Run, records: Sequence[Record]) -> None:
     endpoint = "order_lookup"
     for record in records:
         content = record.content
-        values = await run.typed(
-            endpoint, "etoro_orders", flat(content) | operation_data(run, content)
-        )
+        # `externalOperation.data` and what is below it come from operation_data alone.
+        fields = {
+            path: value
+            for path, value in flat(content).items()
+            if path != OPERATION_DATA and not path.startswith(f"{OPERATION_DATA}.")
+        }
+        values = await run.typed(endpoint, "etoro_orders", fields | operation_data(run, content))
         order_id = values.pop("order_id")
         await run.upsert(
             "etoro_orders",

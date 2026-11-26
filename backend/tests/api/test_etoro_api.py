@@ -23,12 +23,15 @@ from lararium.core.connections import (
     create_connection,
     get_connection,
     load_credential,
+    merge_cursor,
     set_status,
+    set_warnings,
+    update_config,
 )
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.etoro.client import GATE_MESSAGE
-from lararium.modules.finance.etoro.normalize import EtoroDataError
+from lararium.modules.finance.etoro.normalize import NORMALIZER_VERSION, EtoroDataError
 from lararium.modules.finance.transfers import heal_transfers
 from lararium.worker.app import procrastinate_app
 
@@ -637,6 +640,29 @@ async def test_reviews_list_and_resolve(api, session) -> None:
     )
     assert again.status_code == 409
     assert again.json()["detail"]["message"]
+
+
+async def test_a_resolve_that_replays_publishes_the_field_flags(api, session) -> None:
+    """A new normalizer version replays in whichever run comes first; a decision's run then
+    replaces the field flags as a sync's would, or the old ones would stay for good."""
+    created, review = await _disagreeing(api, session)
+    stale = "order_lookup.staleField"
+    async with command_context(session, Actor("system", "t"), "t", {}) as ctx:
+        await merge_cursor(ctx, created["id"], {"flags": {"fields": [stale]}, "notified": [stale]})
+        await set_warnings(ctx, created["id"], [f"eToro flagged: {stale}"])
+        await update_config(ctx, created["id"], {"normalizer_version": "etoro-norm-0"})
+
+    response = await api.post(
+        f"/api/v1/connections/{created['id']}/reviews/{review['id']}/resolve",
+        json={"take": "statement"},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 204, response.text
+    connection = await get_connection(session, created["id"])
+    assert connection.config["normalizer_version"] == NORMALIZER_VERSION
+    assert f"eToro flagged: {stale}" not in connection.warnings
+    assert stale not in connection.cursor["flags"].get("fields", [])
 
 
 async def test_resolve_takes_the_connection_lock_first(api, session, monkeypatch) -> None:

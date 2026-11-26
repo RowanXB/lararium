@@ -92,6 +92,9 @@ from lararium.modules.finance.etoro.sync import (
 from lararium.modules.finance.etoro.sync import (
     parse_upload as parse_etoro_upload,
 )
+from lararium.modules.finance.etoro.sync import (
+    publish_replayed as etoro_publish_replayed,
+)
 from lararium.modules.finance.etoro.xlsx import XlsxError
 from lararium.modules.finance.ibkr.normalize import normalize
 from lararium.modules.finance.ibkr.parser import FlexDataError
@@ -125,6 +128,9 @@ from lararium.modules.finance.trading212.sync import (
 from lararium.modules.finance.trading212.sync import (
     Trading212SyncError,
     summary_account_id,
+)
+from lararium.modules.finance.trading212.sync import (
+    publish_replayed as trading212_publish_replayed,
 )
 from lararium.modules.finance.transfers_api import LOCK_TIMEOUT, healing_command
 from lararium.worker.app import defer_await_approval, defer_sync
@@ -1125,9 +1131,11 @@ async def resolve_source_review(
         try:
             # Nothing new to apply: each run applies the events decided on.
             if connection.connector == "trading212":
-                await trading212_normalize(sync_ctx, [])
+                await trading212_publish_replayed(
+                    sync_ctx, await trading212_normalize(sync_ctx, [])
+                )
             else:
-                await etoro_normalize(sync_ctx, [])
+                await etoro_publish_replayed(sync_ctx, await etoro_normalize(sync_ctx, []))
         except (EtoroDataError, Trading212DataError) as error:
             # What is stored cannot be posted; the message names no value.
             raise _unprocessable("not_postable", str(error)) from None
