@@ -5700,7 +5700,7 @@
     },
     "/api/v1/finance/import-catalog": {
       "get": {
-        "description": "Each supported bank's export formats with a ready profile config (one recommended).",
+        "description": "Each supported bank's export formats with a ready profile config, the ones to import\nmarked recommended.",
         "operationId": "get_import_catalog",
         "responses": {
           "200": {

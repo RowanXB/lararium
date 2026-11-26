@@ -361,7 +361,8 @@ export const getHoldings = <ThrowOnError extends boolean = false>(options?: Opti
 /**
  * Get Import Catalog
  *
- * Each supported bank's export formats with a ready profile config (one recommended).
+ * Each supported bank's export formats with a ready profile config, the ones to import
+ * marked recommended.
  */
 export const getImportCatalog = <ThrowOnError extends boolean = false>(options?: Options<GetImportCatalogData, ThrowOnError>): RequestResult<GetImportCatalogResponses, unknown, ThrowOnError> => (options?.client ?? client).get<GetImportCatalogResponses, unknown, ThrowOnError>({ url: '/api/v1/finance/import-catalog', ...options });
 

@@ -415,7 +415,8 @@ async def update_import_profile(
 
 @router.get("/import-catalog", name="get_import_catalog")
 async def get_import_catalog() -> list[ImportCatalogEntryOut]:
-    """Each supported bank's export formats with a ready profile config (one recommended)."""
+    """Each supported bank's export formats with a ready profile config, the ones to import
+    marked recommended."""
     return [ImportCatalogEntryOut.model_validate(entry) for entry in catalog.CATALOG]
 
 
