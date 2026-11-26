@@ -77,7 +77,7 @@ from lararium.modules.finance.etoro.fields import (
     ENDPOINTS,
     STATEMENT_SHEETS,
 )
-from lararium.modules.finance.etoro.normalize import normalize
+from lararium.modules.finance.etoro.normalize import NormalizeReport, normalize
 from lararium.modules.finance.etoro.statement import (
     STATEMENT_ZONE,
     EtoroStatement,
@@ -240,6 +240,19 @@ async def publish_flags(
     return await connector_flags.publish_flags(
         ctx, found, checked, cursor=None, prefix=FLAGGED_PREFIX, label="an eToro"
     )
+
+
+async def publish_replayed(ctx: SyncContext, report: NormalizeReport) -> None:
+    """Publish the flags of a run outside a sync and an upload (a review decision) when it
+    replayed. The replay took the new normalizer version, so no later run replays: its flags
+    are all there is to flag, and the ones from before would stay for good. The caller holds
+    the connection's lock."""
+    if not report.replayed:
+        return
+    found = {(FIELDS, flag) for flag in report.flagged}
+    found |= {(IN_FULL, flag) for flag in report.flags_in_full}
+    flags = await publish_flags(ctx, found, {FIELDS, IN_FULL})
+    await merge_cursor(ctx.command, ctx.connection.id, flags)
 
 
 class _Seen:

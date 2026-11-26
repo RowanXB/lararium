@@ -882,6 +882,106 @@ async def test_an_unknown_field_is_named_only_by_plain_names(ledger) -> None:
     assert shown == {"pnl.clientPortfolio.positions[].{}"}
 
 
+# `externalOperation.data` of an order lookup: JSON text of an object, inside a string.
+_OPERATION_COLUMNS = (
+    "external_operation_type, external_operation_reference_id, external_operation_data,"
+    " external_operation_data_creditor_type_id, external_operation_data_debitor_type_id,"
+    " external_operation_data_id, external_operation_data_status_id"
+)
+_OPERATION_MEMBERS = {"CreditorTypeId": 3, "DebitorTypeId": 7, "Id": 4100200300, "StatusID": 2}
+_OPERATION_REFERENCE = "0f9e8d7c-1111-4222-8333-944455556666"
+
+
+def _operation(data: Any) -> dict[str, Any]:
+    return {"type": "SyntheticOp", "referenceId": _OPERATION_REFERENCE, "data": data}
+
+
+async def _order(session, ledger: Ledger, columns: str = _OPERATION_COLUMNS) -> tuple[Any, ...]:
+    [row] = await _rows(
+        session,
+        f"select {columns} from finance.etoro_orders where connection_id = :c",
+        c=ledger.connection.id,
+    )
+    return tuple(row)
+
+
+async def test_an_order_lookups_external_operation_is_typed(session, ledger) -> None:
+    data = json.dumps(_OPERATION_MEMBERS)
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    assert not any(flag.startswith("order_lookup.") for flag in report.flagged)
+    typed = ("SyntheticOp", _OPERATION_REFERENCE, data, Decimal(3), Decimal(7))
+    assert await _order(session, ledger) == (*typed, Decimal(4100200300), Decimal(2))
+    # Normalizing again writes nothing: the row is the one first written.
+    written = await _order(session, ledger, "ctid::text")
+    again = await ledger.again()
+    assert (again.created, again.updated) == (0, 0)
+    assert await _order(session, ledger, "ctid::text") == written
+    # A replay fills the columns of a lookup stored before they were.
+    await session.execute(
+        text(
+            "update finance.etoro_orders set external_operation_type = null,"
+            " external_operation_data = null, external_operation_data_id = null"
+        )
+    )
+    await ledger.replay()
+    assert await _order(session, ledger) == (*typed, Decimal(4100200300), Decimal(2))
+
+
+async def test_an_order_lookup_without_an_external_operation(session, ledger) -> None:
+    report = await ledger.normalize(
+        *_ledger_entries(), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    assert not any(flag.startswith("order_lookup.") for flag in report.flagged)
+    assert await _order(session, ledger) == (None,) * 7
+
+
+@pytest.mark.parametrize(
+    ("data", "flags", "members"),
+    [
+        # Not JSON, and JSON that is not an object: the text is kept, no member read.
+        ("Id=4100200300", {"data"}, (None, None, None, None)),
+        ("[4100200300]", {"data"}, (None, None, None, None)),
+        ('{"Id": NaN}', {"data"}, (None, None, None, None)),
+        # A member the fields do not list, named only when its name is a plain one.
+        (
+            '{"Id": 41, "StatusID": 2, "BrandNew": 5, "see https://x.test/": 6}',
+            {"data.BrandNew", "data.{}"},
+            (None, None, Decimal(41), Decimal(2)),
+        ),
+        # A listed member that is not a number: the others are still typed.
+        (
+            '{"CreditorTypeId": "3", "DebitorTypeId": true, "Id": {"a": 1}, "StatusID": 2}',
+            {"data.CreditorTypeId", "data.DebitorTypeId", "data.Id"},
+            (None, None, None, Decimal(2)),
+        ),
+        ('{"Id": null, "StatusID": 2.0}', set(), (None, None, None, Decimal(2))),
+    ],
+)
+async def test_external_operation_data_that_is_not_as_known_is_flagged_by_path(
+    session, ledger, data: str, flags: set[str], members: tuple[Decimal | None, ...]
+) -> None:
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    found = {flag for flag in report.flagged if flag.startswith("order_lookup.")}
+    assert found == {f"order_lookup.externalOperation.{flag}" for flag in flags}
+    assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, data, *members)
+    # The open still posts.
+    assert len(await _postings(session, f"open:{POSITION}")) == 2
+
+
+@pytest.mark.parametrize("data", [True, {"Id": 41}, {"Id": "forty-one"}])
+async def test_external_operation_data_that_is_not_text_is_flagged_and_left_out(
+    session, ledger, data: Any
+) -> None:
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    found = {flag for flag in report.flagged if flag.startswith("order_lookup.")}
+    assert found == {"order_lookup.externalOperation.data"}
+    assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, *(None,) * 5)
+    assert len(await _postings(session, f"open:{POSITION}")) == 2
+
+
 # Merging instruments (design §5.6) ----------------------------------------------------------
 
 
