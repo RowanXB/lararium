@@ -17,7 +17,7 @@ import {
   uploadIbkrStatement,
   uploadTrading212Export,
 } from "../api";
-import { ConnectionsPage } from "./ConnectionsPage";
+import { ConnectForm, ConnectionsPage, PROVIDERS } from "./ConnectionsPage";
 
 const CONNECTION = {
   id: "0190a0b0-0000-7000-8000-0000000000d1",
@@ -65,6 +65,10 @@ function renderPage(client = new QueryClient()) {
   render(
     <QueryClientProvider client={client}>
       <ConnectionsPage />
+      {/* The add forms live on the add-account page; they're tested here beside the list. */}
+      {PROVIDERS.map((provider) => (
+        <ConnectForm key={provider.value} provider={provider.value} />
+      ))}
     </QueryClientProvider>,
   );
 }
@@ -306,13 +310,13 @@ it("shows why a statement upload failed", async () => {
 it("highlights a token expiring within 14 days", async () => {
   vi.mocked(listConnections).mockResolvedValue({ data: [ibkrExpiringIn(5)] } as never);
   renderPage();
-  expect(await screen.findByText(/Token expires on/)).toHaveClass("text-amber-600");
+  expect(await screen.findByText(/Token expires on/)).toHaveClass("text-warning");
 });
 
 it("does not highlight a token expiring later", async () => {
   vi.mocked(listConnections).mockResolvedValue({ data: [ibkrExpiringIn(40)] } as never);
   renderPage();
-  expect(await screen.findByText(/Token expires on/)).not.toHaveClass("text-amber-600");
+  expect(await screen.findByText(/Token expires on/)).not.toHaveClass("text-warning");
 });
 
 it("does not offer Authorise for IBKR and asks to update a rejected token", async () => {

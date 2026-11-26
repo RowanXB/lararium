@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 
-import { stageImport } from "../api";
+import { createAccount, stageImport } from "../api";
 import { ImportsPage } from "./ImportsPage";
 
 const GBP_ID = "0190a0b0-0000-7000-8000-0000000000b1";
@@ -154,10 +154,12 @@ vi.mock("../api", () => ({
     ],
   })),
   stageImport: vi.fn(async () => ({ data: { id: "0190a0b0-0000-7000-8000-0000000000e1" } })),
+  createAccount: vi.fn(async () => ({ data: { id: "0190a0b0-0000-7000-8000-0000000000f1" } })),
 }));
 
 beforeEach(() => {
   vi.mocked(stageImport).mockClear();
+  vi.mocked(createAccount).mockClear();
   navigate.mockClear();
 });
 
@@ -212,7 +214,12 @@ it("test_only_importable_accounts_listed", async () => {
   await user.click(form.getByRole("combobox", { name: "Account" }));
   const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
 
-  expect(options).toEqual(["Example Bank current", "Example Bank savings", "Example Card"]);
+  expect(options).toEqual([
+    "Example Bank current",
+    "Example Bank savings",
+    "Example Card",
+    "New account…",
+  ]);
 });
 
 it("shows the server message when staging fails", async () => {
@@ -275,4 +282,50 @@ it("falls back to the reporting currency for a profile that can't state one", as
   const user = userEvent.setup();
   await user.click(currency);
   expect(screen.queryByRole("option", { name: "From the file" })).toBeNull();
+});
+
+it("creates the account it is uploading to, once", async () => {
+  vi.mocked(stageImport).mockRejectedValueOnce({
+    detail: { error: "file_format", message: "the file is empty" },
+  });
+  const user = userEvent.setup();
+  const form = await uploadForm();
+  await choose(form, "Account", "New account…");
+  await user.type(form.getByLabelText("New account name"), "Example credit card");
+  await user.click(form.getByRole("button", { name: "Money I owe" }));
+  await choose(form, "Profile", "Example Bank CSV");
+  const file = new File(["Date,Description,Amount\n"], "example.csv", { type: "text/csv" });
+  await user.upload(form.getByLabelText("File"), file);
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  expect(await form.findByText("the file is empty")).toBeInTheDocument();
+  expect(createAccount).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: expect.objectContaining({
+        name: "Example credit card",
+        ledger_type: "liability",
+        balance_mode: "transactions",
+      }),
+    }),
+  );
+
+  // Trying again uploads to the account just made, without making another.
+  await user.click(form.getByRole("button", { name: "Upload" }));
+  await waitFor(() => expect(stageImport).toHaveBeenCalledTimes(2));
+  expect(createAccount).toHaveBeenCalledTimes(1);
+  expect(stageImport).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      body: expect.objectContaining({ account_id: "0190a0b0-0000-7000-8000-0000000000f1" }),
+    }),
+  );
+});
+
+it("asks for a name before making a new account", async () => {
+  const user = userEvent.setup();
+  const form = await uploadForm();
+  await choose(form, "Account", "New account…");
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  expect(form.getByText("Name the new account")).toBeInTheDocument();
+  expect(createAccount).not.toHaveBeenCalled();
 });

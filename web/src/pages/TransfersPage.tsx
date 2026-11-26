@@ -63,7 +63,7 @@ function describeInTransit(transfer: TransferOut): string {
   return `${describe(transfer)} · ${days} ${days === 1 ? "day" : "days"} in transit`;
 }
 
-function needsAttention(transfer: TransferOut): boolean {
+export function needsAttention(transfer: TransferOut): boolean {
   return transfer.status !== "rejected" && (transfer.review_reason !== null || transfer.overdue);
 }
 
@@ -188,7 +188,7 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="font-medium">{describe(transfer)}</p>
-          <p className="text-sm text-amber-600">
+          <p className="text-sm text-warning">
             {[
               transfer.review_reason && REVIEW_REASONS[transfer.review_reason],
               transfer.overdue && "Overdue",

@@ -39,3 +39,33 @@ export function formatSortCode(sortCode: string): string {
   const parts = /^([0-9]{2})([0-9]{2})([0-9]{2})$/.exec(sortCode);
   return parts ? `${parts[1]}-${parts[2]}-${parts[3]}` : sortCode;
 }
+
+// Whole units for a chart axis or a headline: "£12,346", "-£50".
+export function formatMoneyShort(value: number, currency: string, locale = "en-GB"): string {
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 0,
+    notation: Math.abs(value) >= 100_000 ? "compact" : "standard",
+  }).format(value);
+}
+
+// The sum of decimal strings, exactly: amounts never pass through a float.
+export function sumDecimalStrings(values: string[]): string {
+  const decimals = (value: string) => value.split(".")[1]?.length ?? 0;
+  const scale = Math.max(0, ...values.map(decimals));
+  const scaled = (value: string) => {
+    const [whole, fraction = ""] = value.replace("-", "").split(".");
+    const digits = BigInt(whole + fraction.padEnd(scale, "0"));
+    return value.startsWith("-") ? -digits : digits;
+  };
+  const total = values.reduce((sum, value) => sum + scaled(value), BigInt(0));
+  const negative = total < BigInt(0);
+  const digits = (negative ? -total : total).toString().padStart(scale + 1, "0");
+  const text = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
+  return negative ? `-${text}` : text;
+}
+
+export function subtractDecimalStrings(a: string, b: string): string {
+  return sumDecimalStrings([a, negateDecimalString(b)]);
+}
