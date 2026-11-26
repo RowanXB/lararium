@@ -71,6 +71,7 @@ const CANDIDATE = {
   account_name: "Bank A",
   occurred_at: "2026-11-11T09:00:00Z",
   quantity: "100",
+  currency: "GBP",
   description: "From Monzo",
   reason: "exact",
 };
@@ -195,6 +196,15 @@ it("renders sections from the API", async () => {
   expect(recent.getByText("Recent (2)").closest("details")).not.toHaveAttribute("open");
   expect(recent.getByText("Monzo → Bank A · 100.00 GBP · inferred")).toBeInTheDocument();
   expect(recent.getByText("Monzo → Bank A · 40.00 GBP · matched")).toBeInTheDocument();
+});
+
+it("shows a candidate's own currency", async () => {
+  vi.mocked(listTransferCandidates).mockResolvedValue({
+    data: [{ ...CANDIDATE, quantity: "126", currency: "USD", reason: "amount_differs" }],
+  } as never);
+  renderPage();
+  const attention = await section("Needs attention");
+  expect(await attention.findByText(/Bank A · .* · 126\.00 USD · From Monzo/)).toBeInTheDocument();
 });
 
 it("pairs a candidate", async () => {

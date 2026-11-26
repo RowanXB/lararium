@@ -19,11 +19,17 @@ if [ ! -f "$dump" ]; then
   exit 2
 fi
 
-infra="$(cd "$(dirname "$0")/.." && pwd)"
-compose=(docker compose -f "$infra/compose.yaml" --env-file "$infra/.env")
+# LARARIUM_DB_CONTAINER names a container to run in (plain `docker exec`) instead of the
+# compose stack's db service: the restore rehearsal's throwaway server.
+if [ -n "${LARARIUM_DB_CONTAINER:-}" ]; then
+  db=(docker exec -i "$LARARIUM_DB_CONTAINER")
+else
+  infra="$(cd "$(dirname "$0")/.." && pwd)"
+  db=(docker compose -f "$infra/compose.yaml" --env-file "$infra/.env" exec -T db)
+fi
 
-"${compose[@]}" exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+"${db[@]}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE $target OWNER lararium_owner"
-"${compose[@]}" exec -T db pg_restore -U postgres -d "$target" \
+"${db[@]}" pg_restore -U postgres -d "$target" \
   --no-owner --role=lararium_owner --exit-on-error < "$dump"
 echo "restored $dump into $target"
