@@ -43,6 +43,7 @@ vi.mock("../api", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(listImportProfiles).mockResolvedValue({ data: [] } as never);
 });
 
 function renderPage() {
@@ -107,7 +108,10 @@ it("recognises the bank's file, makes its profile, and uploads to a new account"
 
 it("reuses the profile already made from the same format", async () => {
   vi.mocked(listImportProfiles).mockResolvedValue({
-    data: [{ id: "profile-old", name: "Example Bank PDF statement", config: PDF.config }],
+    // The same config, its keys in another order.
+    data: [
+      { id: "profile-old", name: "Mine", config: { layout: "example", format: "pdf" } },
+    ],
   } as never);
   const user = userEvent.setup();
   renderPage();
@@ -149,4 +153,35 @@ it("connects a provider and then shows the connections", async () => {
 
   await user.click(screen.getByRole("button", { name: "All ways to add" }));
   expect(screen.getByRole("heading", { name: "Add an account" })).toBeInTheDocument();
+});
+
+it("makes a new profile when one of the same name reads files differently", async () => {
+  vi.mocked(listImportProfiles).mockResolvedValue({
+    data: [
+      {
+        id: "profile-edited",
+        name: "Example Bank PDF statement",
+        config: { format: "pdf", layout: "example", negate: true },
+      },
+    ],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  await user.click(await screen.findByRole("button", { name: /Example Bank/ }));
+  const form = within(await screen.findByRole("form", { name: "Upload statement" }));
+  await user.type(form.getByLabelText("New account name"), "Example current");
+  await user.upload(form.getByLabelText("File"), new File(["%PDF"], "a.pdf"));
+  await form.findByText("Recognised as Example Bank PDF statement");
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  await waitFor(() =>
+    expect(stageImport).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.objectContaining({ profile_id: "profile-new" }) }),
+    ),
+  );
+  expect(createImportProfile).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: { name: "Example Bank PDF statement (2)", config: PDF.config },
+    }),
+  );
 });

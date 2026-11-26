@@ -57,10 +57,35 @@ function fileStatesCurrency(config: ImportProfileOut["config"] | undefined): boo
   return config.format === "csv" && Boolean(config.columns.currency || config.currency);
 }
 
-// A catalog format's profile: the one already made from it (the catalog names it so),
-// else a new one.
+// The name a catalog format's profile gets, as the profiles page names it.
 function catalogProfileName(entry: ImportCatalogEntryOut): string {
   return `${entry.institution} ${entry.label}`;
+}
+
+// Profile names are unique: "HSBC UK CSV", else "HSBC UK CSV (2)" and on.
+function freeName(name: string, profiles: ImportProfileOut[]): string {
+  const taken = new Set(profiles.map((p) => p.name));
+  let candidate = name;
+  for (let n = 2; taken.has(candidate); n++) candidate = `${name} (${n})`;
+  return candidate;
+}
+
+// Both configs come from the server's one model, so equal values serialise alike once
+// their keys are in order.
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
+  }
+  return value;
+}
+
+export function sameConfig(a: unknown, b: unknown): boolean {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
 type UploadFormProps = {
@@ -151,12 +176,14 @@ export function UploadForm({ formats }: UploadFormProps = {}) {
       }
       let profile_id = body.profile_id;
       if (format) {
-        const name = catalogProfileName(format);
+        // Only a profile that reads the file exactly as the catalog format does: one of the
+        // same name may have been edited since (another sign convention, say).
+        const existing = profiles.data ?? [];
         profile_id =
-          profiles.data?.find((p) => p.name === name)?.id ??
+          existing.find((p) => sameConfig(p.config, format.config))?.id ??
           (
             await createImportProfile({
-              body: { name, config: format.config },
+              body: { name: freeName(catalogProfileName(format), existing), config: format.config },
               throwOnError: true,
             })
           ).data.id;
