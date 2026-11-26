@@ -307,6 +307,13 @@ def _counts_records_it_leaves_out(endpoint: Endpoint, body: ApiValue) -> bool:
     return isinstance(body, dict) and last not in body
 
 
+def _refused_inside(endpoint: Endpoint) -> DisplayableError:
+    return DisplayableError(
+        f"Binance refused part of a {endpoint.label} window it had answered:"
+        " the walk stops there and asks again next time"
+    )
+
+
 async def window_pages(
     client: BinanceClient,
     endpoint: Endpoint,
@@ -317,7 +324,12 @@ async def window_pages(
     """Every answer of one window, through every page; an endpoint that cannot page and answers
     a full page, or says there is more (`moreData`), has its window split in two until each
     half fits (the full answer is kept as an answer, its rows are not). A window of one
-    millisecond that still does not fit fails: what it holds cannot all be asked."""
+    millisecond that still does not fit fails: what it holds cannot all be asked.
+
+    Only the window's first request being refused can mean its history ends there. A later
+    one (a half of a split window, a later page) is refused inside a window that answered,
+    so it fails: the walk keeps its cursor and asks again, and never ends with the records
+    already answered left unstored."""
     low, high = endpoint.time_params
     params: dict[str, str | int] = {**fixed, low: start, high: end}
     cursor_name, size_name, first = paging_params(endpoint)
@@ -344,18 +356,26 @@ async def window_pages(
                 )
             middle = start + (end - start) // 2
             full = Page(answer.label, start, end, 0, answer.body, [], answer.unknown)
-            return [
-                full,
-                *await window_pages(client, endpoint, fixed, middle + 1, end),
-                *await window_pages(client, endpoint, fixed, start, middle),
-            ]
+            try:
+                return [
+                    full,
+                    *await window_pages(client, endpoint, fixed, middle + 1, end),
+                    *await window_pages(client, endpoint, fixed, start, middle),
+                ]
+            except BinanceNotPresent:
+                raise _refused_inside(endpoint) from None
         return [answer]
     if endpoint.paging == "from_id":
         raise ValueError(f"{endpoint.label} is walked by trade id, not by window")
     pages: list[Page] = []
     position = first
     while True:
-        page = await ask(len(pages), {**params, cursor_name: position})
+        try:
+            page = await ask(len(pages), {**params, cursor_name: position})
+        except BinanceNotPresent:
+            if not pages:
+                raise
+            raise _refused_inside(endpoint) from None
         pages.append(page)
         if len(page.rows) < size or not page.rows:
             return pages

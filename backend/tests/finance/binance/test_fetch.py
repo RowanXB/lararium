@@ -356,6 +356,54 @@ async def test_more_data_in_one_millisecond_fails_the_walk(session, run, fake, c
     assert (await _config(session, connection))["cursors"] == {label: cursor}
 
 
+def _refuse_from_ask(fake: FakeBinance, label: str, ask: int) -> None:
+    """Refuse `label` from its `ask`-th request on (0 is the first), as a product that is not
+    present is refused."""
+
+    def hook(asked: int) -> None:
+        if asked == ask:
+            fake.fail(label, code=-5026)
+
+    fake.when_asked(label, hook)
+
+
+async def test_a_refused_half_of_an_answered_window_fails_the_backfill(
+    session, run, fake, clock
+) -> None:
+    """The window answered, so its history does not end inside it: the records of its newer
+    half are not dropped while the cursor says the walk is complete (Decision 7)."""
+    label = "convert"
+    fake.cap_answers(label, 3)
+    fake.add(label, *[build_row(label, i, createTime=NOW_MS - DAY_MS - i) for i in range(2)])
+    fake.add(
+        label, *[build_row(label, 2 + i, createTime=NOW_MS - 20 * DAY_MS - i) for i in range(2)]
+    )
+    # The whole window answers, then its newer half, then its older half is refused.
+    _refuse_from_ask(fake, label, 2)
+    connection = await binance_connection(run)
+
+    with pytest.raises(DisplayableError, match=f"refused part of a {label} window"):
+        await _walk(session, connection, fake, clock, label)
+
+    assert len(fake.calls(label)) == 3
+    assert await _raw_count(session, connection) == 0
+    assert (await _config(session, connection)).get("cursors", {}).get(label) is None
+
+
+async def test_a_refused_later_page_fails_the_backfill(session, run, fake, clock) -> None:
+    label = "earn-flexible-rewards"
+    fake.add(label, *_rows_at(label, 101, "time"))
+    _refuse_from_ask(fake, label, 1)
+    connection = await binance_connection(run)
+
+    with pytest.raises(DisplayableError, match=f"refused part of a {label} window"):
+        await _walk(session, connection, fake, clock, label)
+
+    assert len(fake.calls(label)) == 2
+    assert await _raw_count(session, connection) == 0
+    assert (await _config(session, connection)).get("cursors", {}).get(label) is None
+
+
 def _rows_left_out(fake: FakeBinance, label: str, total: int | None = None) -> httpx.AsyncClient:
     """The fake's answers to `label`, an empty record list left out (and `total` set)."""
     path = ENDPOINTS[label].path
