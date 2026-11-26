@@ -11,6 +11,11 @@ A card merchant (a Monzo merchant id) is the exception: it may pay into several 
 accounts (Trading 212's Invest and ISA share one), so it keeps `account_id` NULL and names
 its holders in finance.account_identifier_holders (M6 design §5.12). Such evidence never
 identifies a record on its own: it pairs only records that are both there.
+
+A shared payee bank account (a platform's client money account every one of the owner's
+accounts there is paid through) keeps `account_id` NULL too, and carries references instead:
+(own account, payment reference) pairs in finance.account_identifier_references (account
+type catalog design §8.1). A bank account carries an account or references, never both.
 """
 
 import logging
@@ -21,7 +26,7 @@ from datetime import datetime
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, delete, exists, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -65,6 +70,9 @@ class IdentifierRecord:
     created_at: datetime
     # A card merchant's own accounts, sorted; empty for every other kind.
     holders: tuple[UUID, ...] = ()
+    # A shared payee bank account's (own account, reference) pairs, sorted by reference;
+    # empty for every other row.
+    references: tuple[tuple[UUID, str], ...] = ()
 
 
 def normalize_identifier(kind: IdentifierKind, value: str) -> str:
@@ -106,6 +114,11 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     return f"{found[1]}:{found[2]}"
 
 
+def normalize_reference(text: str) -> str:
+    """A payment reference as stored and matched: surrounding spaces trimmed, upper-cased."""
+    return text.strip().upper()
+
+
 def uk_bank_account_parts(value: str) -> tuple[str, str]:
     """(sort code, account number) of a stored UK bank account."""
     sort_code, account_number = value.split(":")
@@ -115,7 +128,11 @@ def uk_bank_account_parts(value: str) -> tuple[str, str]:
 async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list[IdentifierRecord]:
     """Identifiers matching all conditions, sorted by kind and value."""
     # Select columns, not ORM objects, so a stale identity map can't hide an update.
-    i, h = models.AccountIdentifier, models.AccountIdentifierHolder
+    i, h, r = (
+        models.AccountIdentifier,
+        models.AccountIdentifierHolder,
+        models.AccountIdentifierReference,
+    )
     rows = list(
         await session.execute(
             select(i.id, i.kind, i.value, i.account_id, i.dismissed_at, i.created_by, i.created_at)
@@ -132,6 +149,20 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             .order_by(h.identifier_id, h.account_id)
         ):
             holders.setdefault(identifier_id, []).append(account_id)
+    banks = [row.id for row in rows if row.kind == "uk_bank_account"]
+    references: dict[UUID, list[tuple[UUID, str]]] = {}
+    if banks:
+        # By the same conditions, not by the ids: the registry holds every bank account a
+        # source has named.
+        for identifier_id, account_id, reference in await session.execute(
+            select(r.identifier_id, r.account_id, r.reference).where(
+                r.identifier_id.in_(select(i.id).where(*conditions))
+            )
+        ):
+            references.setdefault(identifier_id, []).append((account_id, reference))
+        for found in references.values():
+            # Sorted here, not by the database's collation, as register_references compares.
+            found.sort(key=lambda pair: pair[1])
     return [
         IdentifierRecord(
             id=row.id,
@@ -142,6 +173,7 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             created_by=row.created_by,
             created_at=row.created_at,
             holders=tuple(holders.get(row.id, ())),
+            references=tuple(references.get(row.id, ())),
         )
         for row in rows
     ]
@@ -172,6 +204,10 @@ def _change_data(record: IdentifierRecord) -> dict[str, JSONValue]:
         "dismissed_at": None if record.dismissed_at is None else record.dismissed_at.isoformat(),
         "created_by": record.created_by,
         "holders": [str(holder) for holder in record.holders],
+        "references": [
+            {"account_id": str(account_id), "reference": reference}
+            for account_id, reference in record.references
+        ],
     }
 
 
@@ -266,17 +302,35 @@ async def _require_can_carry_identifiers(session: AsyncSession, account_id: UUID
         raise FinanceValidationError(_SNAPSHOTS_ONLY)
 
 
+_CARRIES_REFERENCES = (
+    "the bank account carries references to your accounts, so it can't be registered to one;"
+    " remove its references first"
+)
+
+
+def _carries_references(identifier_id: UUID) -> ColumnElement[bool]:
+    r = models.AccountIdentifierReference
+    return exists().where(r.identifier_id == identifier_id)
+
+
 async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) -> bool:
-    """Assign an unassigned (or dismissed) row; False when it is assigned already."""
+    """Assign an unassigned (or dismissed) row; False when it is assigned already, and
+    refused when it carries references."""
     i = models.AccountIdentifier
+    # Locked first, as register_references locks it: the update below then reads, in a
+    # snapshot of its own, the references a registration that held the row committed. (A
+    # condition alone would be read in the snapshot taken before it waited on the row.)
+    await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
     # Conditional update, so a concurrent assignment elsewhere can't be overwritten.
     assigned = await ctx.session.scalar(
         update(i)
-        .where(i.id == identifier_id, i.account_id.is_(None))
+        .where(i.id == identifier_id, i.account_id.is_(None), ~_carries_references(identifier_id))
         .values(account_id=account_id, dismissed_at=None)
         .returning(i.id)
     )
     if assigned is None:
+        if await ctx.session.scalar(select(_carries_references(identifier_id))):
+            raise FinanceValidationError(_CARRIES_REFERENCES)
         return False
     _publish(ctx, "finance.account_identifier.assigned", await _get(ctx.session, identifier_id))
     return True
@@ -350,6 +404,11 @@ async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> Identi
     if current.holders:
         raise FinanceValidationError(
             "only a card merchant not registered to any account can be dismissed"
+        )
+    if current.references:
+        raise FinanceValidationError(
+            "a bank account carrying references to your accounts can't be dismissed;"
+            " remove its references first"
         )
     i = models.AccountIdentifier
     dismissed = await ctx.session.scalar(
@@ -439,3 +498,77 @@ async def registered_card_merchants(session: AsyncSession) -> dict[str, UUID]:
         )
     )
     return {row.value: row.id for row in rows}
+
+
+async def _require_can_be_referenced(session: AsyncSession, account_id: UUID) -> None:
+    """The account a reference names, as if the bank account were registered to it: the
+    refusals of _require_can_carry_identifiers. An unknown account is refused like the others
+    (a 422 on the request's body), not as a missing resource."""
+    try:
+        await _require_can_carry_identifiers(session, account_id)
+    except AccountNotFoundError:
+        raise FinanceValidationError("a reference's account_id is not an account") from None
+    except FinanceValidationError as refused:
+        raise FinanceValidationError(f"a reference's account_id is refused: {refused}") from None
+
+
+async def register_references(
+    ctx: CommandContext, value: str, references: Sequence[tuple[UUID, str]]
+) -> IdentifierRecord:
+    """The owner saying payments to this bank account (`value`, a UK bank account) go into
+    these own accounts, told apart by their payment reference: replaces the bank account's
+    (account, reference) pairs with `references` (an empty sequence removes them all; the
+    row stays, as transactions reference it). Each reference names one account, and each
+    account has one reference. Refused on a bank account registered to an account, which
+    names that account whatever the reference. Registering takes it back from dismissed."""
+    normalized = normalize_identifier("uk_bank_account", value)
+    wanted = sorted(
+        ((account_id, normalize_reference(reference)) for account_id, reference in references),
+        key=lambda pair: pair[1],
+    )
+    if any(reference == "" for _, reference in wanted):
+        raise FinanceValidationError("a reference can't be blank")
+    if len({reference for _, reference in wanted}) < len(wanted):
+        raise FinanceValidationError("a reference is given twice: each names one account")
+    if len({account_id for account_id, _ in wanted}) < len(wanted):
+        raise FinanceValidationError("an account_id is given twice: each has one reference")
+    for account_id, _ in wanted:
+        await _require_can_be_referenced(ctx.session, account_id)
+    identifier_id = await _get_or_create(ctx, "uk_bank_account", normalized)
+    i, r = models.AccountIdentifier, models.AccountIdentifierReference
+    # Serialised on the row, so two registrations can't interleave their reference sets,
+    # and an assignment (_assign, which locks it too) can't slip in between.
+    await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
+    before = await _get(ctx.session, identifier_id)
+    if before.account_id is not None:
+        raise FinanceValidationError(
+            "the bank account is registered to one of your accounts, so it can't carry"
+            " references; remove it from that account first"
+        )
+    if list(before.references) == wanted and not (wanted and before.dismissed_at is not None):
+        return before
+    await ctx.session.execute(delete(r).where(r.identifier_id == identifier_id))
+    if wanted:
+        await ctx.session.execute(
+            insert(r).values(
+                [
+                    {"identifier_id": identifier_id, "account_id": a, "reference": ref}
+                    for a, ref in wanted
+                ]
+            )
+        )
+        if before.dismissed_at is not None:
+            await ctx.session.execute(
+                update(i).where(i.id == identifier_id).values(dismissed_at=None)
+            )
+    record = await _get(ctx.session, identifier_id)
+    ctx.emit(
+        "finance.account_identifier.references_changed",
+        record.id,
+        {
+            "identifier_id": str(record.id),
+            "account_ids": [str(account_id) for account_id, _ in record.references],
+        },
+    )
+    ctx.record_change(f"account_identifier:{record.id}", _change_data(record))
+    return record

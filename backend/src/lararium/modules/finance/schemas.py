@@ -519,6 +519,14 @@ class IdentifierCreate(BaseModel):
     value: str  # a sort code and account number, e.g. "11-22-33 12345678"
 
 
+class IdentifierReference(BaseModel):
+    """One own account behind a shared payee bank account, told apart by the payment
+    reference it is paid with (stored trimmed and upper-cased)."""
+
+    account_id: UUID
+    reference: str
+
+
 class IdentifierOut(BaseModel):
     id: UUID
     kind: IdentifierKind
@@ -528,6 +536,9 @@ class IdentifierOut(BaseModel):
     account_id: UUID | None
     # A card merchant's own accounts (it has no account_id); empty for every other kind.
     holder_account_ids: list[UUID]
+    # A shared payee bank account's own accounts by reference (it has no account_id), sorted
+    # by reference; empty for every other row.
+    references: list[IdentifierReference]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
@@ -538,6 +549,14 @@ class CardMerchantRegister(BaseModel):
 
     merchant_id: str  # Monzo's merchant id, merch_…
     account_ids: list[UUID]
+
+
+class IdentifierReferencesRegister(BaseModel):
+    """The own accounts payments to a shared payee bank account go into, by reference; none
+    removes them."""
+
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+    references: list[IdentifierReference]
 
 
 class CardMerchantDismiss(BaseModel):

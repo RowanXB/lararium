@@ -31,6 +31,7 @@ from lararium.modules.finance.identifiers import (
     IdentifierRecord,
     get_identifier,
     register_card_merchant,
+    register_references,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -901,5 +902,20 @@ async def register_card_merchant_and_rematch(
     rematch_identifiers). Records that don't name it yet (posted before it was registered)
     are named by their connector's next normalize (Monzo's replays them)."""
     record = await register_card_merchant(ctx, merchant_id, account_ids)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
+    return record
+
+
+async def register_references_and_rematch(
+    ctx: CommandContext,
+    value: str,
+    references: Sequence[tuple[UUID, str]],
+    *,
+    heal: bool = True,
+) -> IdentifierRecord:
+    """register_references, then match again every record naming the bank account, so the
+    changed references take effect at once (healing unless `heal` is False, as in
+    rematch_identifiers)."""
+    record = await register_references(ctx, value, references)
     await rematch_identifiers(ctx, [record.id], heal=heal)
     return record
