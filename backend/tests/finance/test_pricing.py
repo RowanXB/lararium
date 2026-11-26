@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import exc, text
 
 from lararium.modules.finance.errors import NotACurrencyError
-from lararium.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.pricing import delete_price, record_fx_rate, record_price
 
 DAY = date(2026, 11, 10)
 
@@ -106,3 +106,28 @@ async def test_database_rejects_non_finite_prices_and_rates(
             ),
             {"first": first, "gbp": gbp.id, "bad": bad, "day": DAY},
         )
+
+
+async def test_a_price_is_deleted_only_while_it_holds_the_value_seen(
+    session, run, btc, usd
+) -> None:
+    """A price rewritten since it was read (another sync committing a new value on the same
+    row) is not deleted."""
+
+    async def record(price: str) -> None:
+        await run(
+            record_price,
+            instrument_id=btc.id,
+            quote_instrument_id=usd.id,
+            price=Decimal(price),
+            as_of_date=DAY,
+            source="etoro",
+        )
+
+    await record("60000")
+    price_id = await session.scalar(text("select id from finance.prices"))
+    await record("61000")
+    assert not await run(delete_price, price_id, Decimal("60000"))
+    assert await session.scalar(text("select price from finance.prices")) == Decimal("61000")
+    assert await run(delete_price, price_id, Decimal("61000"))
+    assert await session.scalar(text("select count(*) from finance.prices")) == 0

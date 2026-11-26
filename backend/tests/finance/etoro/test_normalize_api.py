@@ -666,6 +666,174 @@ async def test_prices_from_candles_and_current_rate(session, ledger) -> None:
     assert await session.scalar(text("select count(*) from finance.fx_rates")) == 0
 
 
+def _stamped(day: date, close: str) -> dict[str, Any]:
+    """A daily candle of `day` as eToro stamps it: midnight in Israel (UTC+2), 22:00 UTC the
+    evening before."""
+    evening = day - timedelta(days=1)
+    return {**candle_item(day, close), "time": f"{evening.isoformat()}T22:00:00Z"}
+
+
+async def _price_days(session) -> list[tuple[date, Decimal]]:
+    rows = await _rows(
+        session,
+        "select as_of_date, price from finance.prices where source = 'etoro' order by as_of_date",
+    )
+    return [(r.as_of_date, r.price) for r in rows]
+
+
+async def test_a_candle_stamped_the_evening_before_prices_its_day(session, ledger) -> None:
+    day = NOW.date()
+    monday = day - timedelta(days=1)
+    await ledger.normalize(
+        *_ledger_entries(),
+        ("candles", _stamped(monday, "124.10")),
+        # Today's candle wins over today's current rate, though stamped yesterday in UTC.
+        ("candles", _stamped(day, "125.00")),
+    )
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.00"))]
+    # Summer time (UTC+3) stamps it at 21:00 UTC: the same day.
+    summer = {**candle_item(day, "125.50"), "time": f"{monday.isoformat()}T21:00:00Z"}
+    await ledger.normalize(("candles", summer), now=NOW + timedelta(hours=1))
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.50"))]
+    # A later current rate does not replace the stored candle's day.
+    await ledger.normalize(*_ledger_entries(), now=NOW + timedelta(hours=2))
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.50"))]
+
+
+async def test_a_candle_without_a_close_leaves_the_day_its_current_rate(session, ledger) -> None:
+    """eToro's candle fields are nullable: one without a close prices nothing, so the day's
+    current rate stands."""
+    day = NOW.date()
+    await ledger.normalize(*_ledger_entries(), ("candles", {**_stamped(day, "1"), "close": None}))
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+    await ledger.replay()
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+
+
+async def test_a_replay_leaves_no_misdated_candle_price(session, ledger) -> None:
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    # What the previous version wrote: Monday's candle priced on its UTC date, a Sunday.
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.10, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Another source's price of that day is not the connector's to remove.
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.00, :d, 'manual')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Nor is a price in a currency the replay does not price (it cannot tell those apart).
+    gbp = await session.scalar(
+        text("select id from finance.instruments where symbol = 'GBP' and kind = 'fiat'")
+    )
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 98.00, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": gbp, "d": sunday},
+    )
+    await ledger.replay()
+    assert await _price_days(session) == [
+        (sunday, Decimal("98.00")),
+        (monday, Decimal("124.10")),
+        (NOW.date(), Decimal("126.5")),
+    ]
+    assert (
+        await session.scalar(text("select count(*) from finance.prices where source = 'manual'"))
+        == 1
+    )
+
+
+async def test_a_replay_leaves_no_misdated_price_of_a_candle_revised_since(session, ledger) -> None:
+    """Today's candle keeps its open time while its close moves: the misdated price an
+    earlier version filed from an earlier close of it is removed too."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.10, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # The upgrade's first sync fetches the same candle with a later close.
+    await update_config(
+        CommandContext(session, CONNECTOR, uuid.uuid4()),
+        ledger.connection.id,
+        {"normalizer_version": "etoro-norm-0"},
+    )
+    await ledger.normalize(("candles", _stamped(monday, "125.00")), now=NOW + timedelta(hours=1))
+    days = await _price_days(session)
+    assert sunday not in [d for d, _ in days]
+    assert (monday, Decimal("125.00")) in days
+
+
+async def test_a_replay_keeps_a_day_another_etoro_connection_gives(session, run, ledger) -> None:
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 123.90, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Another eToro connection holds the instrument's candle of that Sunday: prices name no
+    # connection, so the replay cannot tell the price is not that one's.
+    other = Ledger(session, await _connection(run))
+    await other.normalize(("candles", _stamped(sunday, "123.90")))
+    await ledger.replay()
+    assert (sunday, Decimal("123.90")) in await _price_days(session)
+
+
+async def test_a_replay_keeps_a_misdated_day_rewritten_since(session, run, ledger) -> None:
+    """Only the value the previous version filed there is removed: a price written on that
+    day since (another eToro connection's, whose rows are pruned now) is kept."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 123.70, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    await ledger.replay()
+    assert (sunday, Decimal("123.70")) in await _price_days(session)
+
+
 # eToro Money (design §5.7, §5.12) -------------------------------------------------------------
 
 
