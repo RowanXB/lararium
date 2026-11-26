@@ -471,15 +471,21 @@ What is built so far (phase A):
   an account, and one whose balance is not zero but which lists no asset is flagged by name.
   Crypto-loan debt is not read until phase B.
 - **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
-  Lararium already has. If Lararium has no currency with that ISO 4217 code, the asset is not
-  counted: the connection is flagged with the code, its balance is left out and its records
-  are kept but not posted. The other side of a trade in it is not posted either: after the
+  Lararium already has. If Lararium has no currency with that ISO 4217 code and no instrument
+  for the code exists yet, the asset is not counted: the connection is flagged with the code,
+  its balance is left out and its records are kept but not posted. A code that already has an
+  instrument (it counted as crypto before Binance marked it legal money, or through another
+  connection) keeps being counted on it. The other side of a trade in it is not posted either: after the
   account's earliest report it shows as a reconciliation difference, and before that it is
   inside that asset's opening adjustment. To count the currency, add it on the Instruments page
   (kind Fiat, the ISO code as its symbol): later syncs count its balance and the records they
   fetch. Its balance first shows as a reconciliation difference, because the earlier reports
   counted it as nothing; the records kept before are posted only when Lararium next replays
-  its records (a new normaliser version) or when Binance changes them.
+  its records (a new normaliser version) or when Binance changes them. If a crypto instrument
+  for that code already exists when you add the currency, the asset is the currency from then
+  on: at the next report the crypto instrument reads 0 and the currency the amount, two equal
+  and opposite reconciliation differences that stay open, and the earlier postings stay on the
+  crypto instrument until Lararium replays its records.
 - **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
   (subscriptions, redemptions and rewards).
 
