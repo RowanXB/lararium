@@ -755,11 +755,14 @@ async def update_binance_connection(
 ) -> ConnectionOut:
     """Replace the key (a new one after the old was rejected). It must belong to the account
     already connected. It is also how a disabled connection is brought back (adding the account
-    again is refused as a duplicate): the ledger, cursors and config are kept."""
+    again is refused as a duplicate): the ledger, cursors and config are kept. Only a
+    connection disabled when the update began is brought back: a disable made while the key
+    was checked stands."""
     settings = _settings(request)
     master_key = _require_master_key(settings)
     material = _material(body)
-    _require_binance(await get_connection(session, connection_id))
+    began = await get_connection(session, connection_id)
+    _require_binance(began)
     uid = await _checked_uid(http, body, material)
     args = body.model_dump(mode="json", include={"key_type"}) | {
         "connection_id": str(connection_id)
@@ -767,6 +770,10 @@ async def update_binance_connection(
     async with command_context(session, actor, "update_binance_connection", args) as ctx:
         connection = await lock_connection(ctx, connection_id)
         _require_binance(connection)
+        if connection.status == "disabled" and began.status != "disabled":
+            raise _invalid(
+                "not_updatable", "the connection was disabled meanwhile: it is not updated"
+            )
         if uid != connection.config.get("uid"):
             raise _invalid(
                 "another_account",

@@ -532,6 +532,58 @@ async def test_a_refused_update_leaves_a_disabled_connection_disabled(
     assert _queued(queue) == []
 
 
+async def test_a_disable_made_while_the_new_key_is_checked_stands(
+    api, session, run, fake, queue
+) -> None:
+    created = await _create(api)
+    await run(set_status, created["id"], "needs_reauth", error="Binance rejected the key")
+    queue.jobs.clear()
+
+    async def disable(_: int) -> None:
+        await run(set_status, created["id"], "disabled")
+
+    fake.when_asked("api-restrictions", disable)
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance",
+        json=HMAC | {"api_key": "ak-TEST-new-5555", "api_secret": OTHER_SECRET},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "not_updatable"
+    assert (await get_connection(session, created["id"])).status == "disabled"
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    assert key is not None and key.reveal() == API_KEY
+    assert _queued(queue) == []
+
+
+async def test_a_connection_disabled_before_the_update_is_brought_back(
+    api, session, run, fake, queue
+) -> None:
+    # Disabled from the start, and once more while the key is checked: still the way back.
+    created = await _create(api)
+    await run(set_status, created["id"], "disabled")
+    queue.jobs.clear()
+
+    async def disable(_: int) -> None:
+        await run(set_status, created["id"], "disabled")
+
+    fake.when_asked("api-restrictions", disable)
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance",
+        json=HMAC | {"api_key": "ak-TEST-new-5555", "api_secret": OTHER_SECRET},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "healthy"
+    key = await load_credential(session, KEY, created["id"], "api_key")
+    assert key is not None and key.reveal() == "ak-TEST-new-5555"
+    assert _queued(queue) == ["sync_connection"]
+
+
 async def test_list_shows_differences_and_flags(api, session, run, sessions) -> None:
     connection = await binance_connection(run)
     spot = await run(wallet_account, connection, "spot")

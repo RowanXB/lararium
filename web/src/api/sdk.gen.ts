@@ -76,7 +76,9 @@ export const authorizeConnection = <ThrowOnError extends boolean = false>(option
  *
  * Replace the key (a new one after the old was rejected). It must belong to the account
  * already connected. It is also how a disabled connection is brought back (adding the account
- * again is refused as a duplicate): the ledger, cursors and config are kept.
+ * again is refused as a duplicate): the ledger, cursors and config are kept. Only a
+ * connection disabled when the update began is brought back: a disable made while the key
+ * was checked stands.
  */
 export const updateBinanceConnection = <ThrowOnError extends boolean = false>(options: Options<UpdateBinanceConnectionData, ThrowOnError>): RequestResult<UpdateBinanceConnectionResponses, UpdateBinanceConnectionErrors, ThrowOnError> => (options.client ?? client).put<UpdateBinanceConnectionResponses, UpdateBinanceConnectionErrors, ThrowOnError>({
     url: '/api/v1/connections/{connection_id}/binance',

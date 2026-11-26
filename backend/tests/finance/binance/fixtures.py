@@ -11,7 +11,7 @@ and every value is invented: assets `AAA`, `BBB`, `STB`, addresses of one repeat
 import hashlib
 import hmac
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -255,6 +255,10 @@ class _Stored:
     when: Mapping[str, str]
 
 
+# What `FakeBinance.when_asked` runs: told how many earlier asks there were.
+type Hook = Callable[[int], Awaitable[None] | None]
+
+
 class FakeBinance:
     """An in-memory Binance for the catalogue's labels.
 
@@ -276,7 +280,7 @@ class FakeBinance:
         self._secret = secret
         self._stored: dict[str, list[_Stored]] = {}
         self._failures: list[_Failure] = []
-        self._hooks: dict[str, Callable[[int], None]] = {}
+        self._hooks: dict[str, Hook] = {}
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.
@@ -321,10 +325,11 @@ class FakeBinance:
 
     # What happens while it is asked.
 
-    def when_asked(self, label: str, callback: Callable[[int], None] | None) -> None:
+    def when_asked(self, label: str, callback: Hook | None) -> None:
         """Run `callback(n)` each time `label` is asked, before it is answered; `n` counts the
         earlier asks. A test moves money or the clock there, between a request and its answer.
-        None removes it."""
+        A callback that returns an awaitable (one that writes to the database) is awaited
+        before the answer, on an async client. None removes it."""
         if callback is None:
             self._hooks.pop(label, None)
         else:
@@ -338,7 +343,7 @@ class FakeBinance:
     def http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self.transport(), follow_redirects=True)
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx.Request) -> httpx.Response | Awaitable[httpx.Response]:
         route = (request.method, request.url.host, request.url.path)
         assert request.url.scheme == "https", "the client must use https"
         assert route in self._routes, f"a request outside the catalogue: {route}"
@@ -354,7 +359,17 @@ class FakeBinance:
         if refused is not None:
             return refused
         if (hook := self._hooks.get(endpoint.label)) is not None:
-            hook(len(self.calls(endpoint.label)) - 1)
+            pending = hook(len(self.calls(endpoint.label)) - 1)
+            if pending is not None:
+
+                async def after() -> httpx.Response:
+                    await pending
+                    return self._respond(endpoint, own)
+
+                return after()
+        return self._respond(endpoint, own)
+
+    def _respond(self, endpoint: Endpoint, own: Mapping[str, str]) -> httpx.Response:
         failure = self._failure_for(endpoint, own)
         if failure is not None:
             return failure

@@ -4345,7 +4345,7 @@
     },
     "/api/v1/connections/{connection_id}/binance": {
       "put": {
-        "description": "Replace the key (a new one after the old was rejected). It must belong to the account\nalready connected. It is also how a disabled connection is brought back (adding the account\nagain is refused as a duplicate): the ledger, cursors and config are kept.",
+        "description": "Replace the key (a new one after the old was rejected). It must belong to the account\nalready connected. It is also how a disabled connection is brought back (adding the account\nagain is refused as a duplicate): the ledger, cursors and config are kept. Only a\nconnection disabled when the update began is brought back: a disable made while the key\nwas checked stands.",
         "operationId": "update_binance_connection",
         "parameters": [
           {
