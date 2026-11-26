@@ -476,6 +476,12 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
   这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
 - **Invest ↔ ISA。** 恰好有两个 Trading 212 连接、一个 Invest 一个 ISA 时，两者之间的转账会自动配对。
 
+### Cash ISA（没有 API）
+
+Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再用目录条目 “Trading 212 Cash ISA”
+（History CSV）创建的导入配置，上传 app History 页面导出的 CSV。每次导出必须从该账户的第一天开始，
+或从之前某次上传已覆盖的某一天开始。利息行在其 `Action` 确定之前，按普通行导入。
+
 ### 警告
 
 - **“Trading 212 ISA ···1234 SYMBOL differs from Trading 212's report on DATE by AMOUNT”**：每次

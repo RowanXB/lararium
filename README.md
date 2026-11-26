@@ -545,6 +545,13 @@ booking date differently, Lararium opens a [review item](#review-items).
 A warning that Lararium's cash differs from Trading 212's report, raised before an upload,
 stays until the next sync checks again, even when the upload supplied the missing record.
 
+### Cash ISA (no API)
+
+A Trading 212 Cash ISA has no API. Add it as an account of its own, then upload the CSV from the
+app's History page with an import profile made from the catalog entry "Trading 212 Cash ISA"
+(History CSV). Each export must start on the account's first day or on a day an earlier upload
+covers. Interest rows import as ordinary rows until their `Action` is known.
+
 ### Transfers
 
 - **Card or Apple Pay deposits from Monzo.** Monzo files a card top-up as a card payment to

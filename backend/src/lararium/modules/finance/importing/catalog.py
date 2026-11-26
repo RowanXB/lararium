@@ -212,4 +212,26 @@ CATALOG: tuple[CatalogEntry, ...] = (
             ],
         ),
     ),
+    CatalogEntry(
+        "Trading 212 Cash ISA",
+        "History CSV",
+        CsvProfileConfig(
+            format="csv",
+            columns=CsvColumns(
+                date="Time (UTC)",
+                type="Action",
+                description=["Action"],
+                memo="Notes",
+                external_id="ID",
+                amount="Total",
+                currency="Currency (Total)",
+            ),
+            date_format="%Y-%m-%d %H:%M:%S%z",
+            timezone="UTC",
+            # A Cash ISA takes bank transfers only (Trading 212's payment methods): every row is
+            # one. An interest row's Action goes here once a real export shows it.
+            card_types=[],
+        ),
+        recommended=True,
+    ),
 )

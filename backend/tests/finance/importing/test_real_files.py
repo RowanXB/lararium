@@ -2,14 +2,14 @@
 REAL_ROOT=<dir>` (README, "Verifying against your real statements"). Skipped unless
 LARARIUM_REAL_ROOT is set, so `make check` and CI never run it.
 
-<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Revolut, Tembo or LemF
-(LemFi's GBP and savings accounts each get their own), each with one account's files in
-any of the catalog's formats. A Revolut folder's files say which account they are for (current
-or savings). In two orders (statements first, exports first) every file
-must commit with no error row, every statement's closing balance must hold on its own
-date (an undated one, such as Tembo's Plan value, on its last row's day), and rolling
-everything back, newest first, must be allowed and leave a zero balance. A file of a
-period without transactions is refused as empty (EmptyStatementError), as intended: it
+<dir> holds one folder per account, its name starting HSBC, Lloy, BOC, Revolut, Tembo, LemF or
+T212 (a Trading 212 Cash ISA's History CSVs; LemFi's GBP and savings accounts each get their
+own), each with one account's files in any of the catalog's formats. A Revolut folder's files
+say which account they are for (current or savings). In two orders (statements first,
+exports first) every file must commit with no error row, every statement's closing balance
+must hold on its own date (an undated one, such as Tembo's Plan value, on its last row's
+day), and rolling everything back, newest first, must be allowed and leave a zero balance. A
+file of a period without transactions is refused as empty (EmptyStatementError), as intended: it
 is counted, not failed.
 
 Nothing of the files is printed or kept: only counts and pass or fail. Only Lararium's own
@@ -62,6 +62,7 @@ BANKS = {
     "revolut": REVOLUT,
     "tembo": "Tembo",
     "lemf": "LemFi",
+    "t212": "Trading 212 Cash ISA",
 }
 PDF = "PDF statement"
 
@@ -93,6 +94,8 @@ def _label(institution: str, path: Path) -> str | None:
     if suffix == ".pdf":
         return PDF
     if suffix == ".csv":
+        if institution == "Trading 212 Cash ISA":
+            return "History CSV"
         if institution != "HSBC UK":
             return "CSV"
         head = path.read_bytes().lstrip(b"\xef\xbb\xbf")

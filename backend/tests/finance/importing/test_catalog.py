@@ -31,6 +31,7 @@ def test_one_recommended_format_per_institution() -> None:
         "Revolut Savings",
         "Tembo",
         "LemFi",
+        "Trading 212 Cash ISA",
     }
     assert recommended == Counter(dict.fromkeys(institutions, 1))
 
@@ -48,6 +49,7 @@ def test_decision_14_formats() -> None:
         "Revolut Savings": ["csv", "pdf"],
         "Tembo": ["pdf"],
         "LemFi": ["csv", "pdf"],
+        "Trading 212 Cash ISA": ["csv"],
     }
     recommended = {(e.institution, e.format) for e in CATALOG if e.recommended}
     assert recommended == {
@@ -58,6 +60,7 @@ def test_decision_14_formats() -> None:
         ("Revolut Savings", "pdf"),
         ("Tembo", "pdf"),
         ("LemFi", "pdf"),
+        ("Trading 212 Cash ISA", "csv"),
     }
 
 
