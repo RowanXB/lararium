@@ -746,35 +746,37 @@ async def _raw(session, connection_id, label: str) -> int:
 
 
 async def test_a_history_row_that_cannot_be_typed_is_not_stored(
-    session, run, fake: FakeBinance, connector, clock: Clock
+    backend_url: str, owner_url: str, migrated: None, fake: FakeBinance, connector, clock: Clock
 ) -> None:
+    # On syncs that commit for real: a stored window would stay stored, its cursor moved.
     moment = NOW_MS - 2 * HOUR_MS
     row = build_row("deposits", coin="AAA", status=1, walletType=0, insertTime=moment)
     fake.add("deposits", {**row, "completeTime": 10**20})
     fake.set_rows("spot-account", [build_row("spot-account", asset="AAA", free="1.5", locked="0")])
-    connection = await binance_connection(run, config=later_config())
-    before = connection.config[CURSORS_KEY]["deposits"]  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+    async with _committed(backend_url, owner_url, fake, clock) as (sessions, id_, sync):
+        before = await _cursor(sessions, id_, "deposits")
 
-    after = await run_binance_sync(session, connection.id, fake.handler)
+        after = await sync()
 
-    assert after.status == "failing"
-    assert "deposits" in (after.last_error or "") and "[].completeTime" in (after.last_error or "")
-    assert str(10**20) not in (after.last_error or "")
-    assert await _raw(session, connection.id, "deposits") == 0
-    assert after.config[CURSORS_KEY]["deposits"] == before  # pyright: ignore[reportArgumentType,reportCallIssue,reportIndexIssue]
+        assert after.status == "failing"
+        assert "deposits" in (after.last_error or "")
+        assert "[].completeTime" in (after.last_error or "")
+        assert str(10**20) not in (after.last_error or "")
+        assert await _count(sessions, id_, record_type("deposits")) == 0
+        assert await _cursor(sessions, id_, "deposits") == before
 
-    # Binance answers a readable row: the next sync stores it and normalises cleanly.
-    fake.set_rows("deposits", [{**row, "completeTime": moment}])
-    clock.ms += 4 * HOUR_MS
-    again = await run_binance_sync(session, connection.id, fake.handler)
+        # Binance answers a readable row: the next sync stores it and normalises cleanly.
+        fake.set_rows("deposits", [{**row, "completeTime": moment}])
+        again = await sync()
 
-    assert again.status == "healthy", again.last_error
-    assert await _raw(session, connection.id, "deposits") == 1
-    posted = await session.scalar(
-        text("select count(*) from finance.transactions where connection_id = :c"),
-        {"c": connection.id},
-    )
-    assert posted >= 1
+        assert again.status == "healthy", again.last_error
+        assert await _count(sessions, id_, record_type("deposits")) == 1
+        async with sessions() as session:
+            posted = await session.scalar(
+                text("select count(*) from finance.transactions where connection_id = :c"),
+                {"c": id_},
+            )
+        assert posted >= 1
 
 
 def _history_row(label: str, at: int) -> dict[str, Any]:
@@ -921,9 +923,9 @@ async def test_a_history_answer_without_its_record_list_is_an_empty_window(
 
 
 async def test_a_balance_answer_that_cannot_be_typed_is_not_stored(
-    session, run, fake: FakeBinance, connector, clock: Clock
+    backend_url: str, owner_url: str, migrated: None, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    connection = await binance_connection(run, config=later_config())
+    # On syncs that commit for real: a read is stored in a transaction of its own.
     broken = {"on": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -933,18 +935,19 @@ async def test_a_balance_answer_that_cannot_be_typed_is_not_stored(
         body = json.loads(answer.content)
         return httpx.Response(200, content=json.dumps({**body, "updateTime": 10**20}).encode())
 
-    after = await run_binance_sync(session, connection.id, handler)
+    async with _committed(backend_url, owner_url, fake, clock, handler) as (sessions, id_, sync):
+        after = await sync()
 
-    assert after.status == "failing"
-    assert "spot-account" in (after.last_error or "") and "updateTime" in (after.last_error or "")
-    assert await _raw(session, connection.id, "spot-account") == 0
+        assert after.status == "failing"
+        assert "spot-account" in (after.last_error or "")
+        assert "updateTime" in (after.last_error or "")
+        assert await _count(sessions, id_, record_type("spot-account")) == 0
 
-    broken["on"] = False
-    clock.ms += 4 * HOUR_MS
-    again = await run_binance_sync(session, connection.id, handler)
+        broken["on"] = False
+        again = await sync()
 
-    assert again.status == "healthy", again.last_error
-    assert await _raw(session, connection.id, "spot-account") >= 1
+        assert again.status == "healthy", again.last_error
+        assert await _count(sessions, id_, record_type("spot-account")) >= 1
 
 
 # A fiat currency Lararium has no instrument for is left out and flagged, never failing a sync.
