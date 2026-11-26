@@ -352,6 +352,9 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
 
 
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
+    """Close the account. It stays a holder of the card merchants it held, so its
+    card-deposit history stands, as a bank identifier stays assigned after a close; it
+    takes no new records, so the card tier pairs nothing new into it."""
     # Closing In transit would drop the transfers it holds from net worth.
     require_owner_account(await get_account(ctx.session, account_id), "closed")
     # Conditional update, so two concurrent closes can't both succeed.

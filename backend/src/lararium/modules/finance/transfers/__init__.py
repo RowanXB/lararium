@@ -2,8 +2,6 @@
 the sending and the receiving record, and keeping the ledger's In transit account right."""
 
 from lararium.modules.finance.transfers.contra import (
-    OwnLeg,
-    own_leg,
     source_ref,
     transfer_contra,
 )
@@ -19,17 +17,21 @@ from lararium.modules.finance.transfers.engine import (
     lock_transfers,
     match_transaction,
     preview_match,
+    register_card_merchant_and_rematch,
+    rematch_identifiers,
     unassign_identifier_and_rematch,
     unlink_transaction,
 )
 from lararium.modules.finance.transfers.queries import (
     CandidateRecord,
+    CardMerchantSuggestion,
     PairCandidateRecord,
     ReviewReason,
     SuggestionRecord,
     TransferRecord,
     TransferStatus,
     candidates,
+    card_merchant_suggestions,
     due_notifications,
     find_transfer_violations,
     get_transfer,
@@ -44,7 +46,7 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 
 __all__ = [
     "CandidateRecord",
-    "OwnLeg",
+    "CardMerchantSuggestion",
     "PairCandidateRecord",
     "ReviewReason",
     "SuggestionRecord",
@@ -52,6 +54,7 @@ __all__ = [
     "TransferSettings",
     "TransferStatus",
     "candidates",
+    "card_merchant_suggestions",
     "due_notifications",
     "find_transfer_violations",
     "get_transfer",
@@ -62,12 +65,13 @@ __all__ = [
     "lock_transfers",
     "mark_notified",
     "match_transaction",
-    "own_leg",
     "pair",
     "pair_candidates",
     "pair_records",
     "preview_match",
+    "register_card_merchant_and_rematch",
     "reject",
+    "rematch_identifiers",
     "source_ref",
     "suggestions",
     "transfer_contra",

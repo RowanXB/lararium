@@ -73,10 +73,11 @@ async def _connector_tx(
     identifier_id: UUID | None = None,
     name: str = "Test Owner",
     bank_transfer: bool = True,
+    currency: str = "GBP",
 ) -> TransactionRecord:
     """Post a connector transaction as a normalizer would (contra from transfer_contra)."""
     connection_id, account = bank
-    gbp = await get_currency(session, "GBP")
+    gbp = await get_currency(session, currency)
     contra = await transfer_contra(
         session,
         source=("connection", f"{connection_id}:{external_id}"),
@@ -297,7 +298,11 @@ async def test_pair_candidate_flow(client, session, run) -> None:
         (str(loose[0].id), "exact"),
         (str(loose[1].id), "exact"),
     ]
-    assert (found[0]["account_name"], found[0]["quantity"]) == ("C", "100")
+    assert (found[0]["account_name"], found[0]["quantity"], found[0]["currency"]) == (
+        "C",
+        "100",
+        "GBP",
+    )
 
     paired = await client.post(
         f"{FINANCE}/transfers/{transfer['id']}/pair", json={"transaction_id": str(loose[0].id)}
@@ -358,8 +363,10 @@ async def test_unpair_is_undone_by_pair(client, session, run) -> None:
     assert await _transfers(client) == [body]
 
 
-async def _hand_post(client, session, run, account_id: str, quantity: str) -> str:
-    gbp = await get_currency(session, "GBP")
+async def _hand_post(
+    client, session, run, account_id: str, quantity: str, currency: str = "GBP"
+) -> str:
+    gbp = await get_currency(session, currency)
     unassigned = await run(get_or_create_system_account, "unassigned")
     response = await client.post(
         f"{FINANCE}/transactions",
@@ -431,11 +438,84 @@ async def test_pair_transactions_audit_row_names_both_records(client, session, r
     assert args == {"transaction_id": str(out.id), "other_transaction_id": in_id}
 
 
+async def test_pair_records_that_differ_through_the_api(client, session, run) -> None:
+    """A deposit net of a fee is listed after the equal candidates, marked, and pairs; a
+    larger one is neither listed nor paired (422)."""
+    a = await _connected(run, "A")
+    b_id = await _manual(client, "B")
+    out_id = str((await _connector_tx(session, run, a, "-100.00", bank_transfer=False)).id)
+    equal_id = await _hand_post(client, session, run, b_id, "100.00")
+    net_id = await _hand_post(client, session, run, b_id, "99.30")
+    larger_id = await _hand_post(client, session, run, b_id, "100.70")
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["differs"]) for x in found] == [
+        (equal_id, None),
+        (net_id, "amount"),
+    ]
+    larger = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
+    )
+    assert larger.status_code == 422
+    assert "larger" in larger.json()["detail"]["message"]
+
+    paired = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": net_id}
+    )
+    assert paired.status_code == 200
+    body = paired.json()
+    assert (body["status"], body["amount"], body["in_transaction_id"]) == (
+        "matched",
+        "100.00",
+        net_id,
+    )
+
+
+async def test_candidates_carry_their_own_currency(client, session, run) -> None:
+    """A candidate in another currency is listed with its own currency, both among a
+    record's pair candidates and, once unpaired, among the waiting transfer's candidates."""
+    a, c = await _connected(run, "A"), await _connected(run, "C")
+    c_identifier = await run(get_or_create_identifier, "uk_bank_account", C_IDENTIFIER)
+    assert (await _register(client, str(c[1].id), C_IDENTIFIER)).status_code == 201
+    out_id = str((await _connector_tx(session, run, a, "-100.00", identifier_id=c_identifier)).id)
+    usd_id = str(
+        (
+            await _connector_tx(
+                session,
+                run,
+                c,
+                "126.00",
+                external_id="in_usd",
+                occurred_at=WHEN + timedelta(hours=1),
+                currency="USD",
+            )
+        ).id
+    )
+    assert (await _register(client, str(a[1].id), A_IDENTIFIER)).status_code == 201
+
+    found = (await client.get(f"{FINANCE}/transactions/{out_id}/pair-candidates")).json()
+    assert [(x["transaction_id"], x["differs"], x["currency"]) for x in found] == [
+        (usd_id, "currency", "USD")
+    ]
+    paired = await client.post(
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": usd_id}
+    )
+    assert paired.status_code == 200
+    body = paired.json()
+    assert body["currency"] == "GBP"
+    assert (await client.post(f"{FINANCE}/transfers/{body['id']}/unpair")).status_code == 204
+    [waiting] = [t for t in await _transfers(client) if t["out_transaction_id"] == out_id]
+    listed = (await client.get(f"{FINANCE}/transfers/{waiting['id']}/candidates")).json()
+    assert [(x["transaction_id"], x["reason"], x["currency"]) for x in listed] == [
+        (usd_id, "unpaired", "USD")
+    ]
+
+
 async def test_pair_transactions_refusals(client, session, run) -> None:
     a = await _connected(run, "A")
     b_id = await _manual(client, "B")
     out_id = str((await _connector_tx(session, run, a, "-100", bank_transfer=False)).id)
-    short_id = await _hand_post(client, session, run, b_id, "90")
+    larger_id = await _hand_post(client, session, run, b_id, "110")
     unknown = str(uuid4())
 
     same = await client.post(
@@ -445,7 +525,7 @@ async def test_pair_transactions_refusals(client, session, run) -> None:
     assert same.json()["detail"]["error"] == "invalid_input"
 
     differs = await client.post(
-        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": short_id}
+        f"{FINANCE}/transactions/{out_id}/pair", json={"transaction_id": larger_id}
     )
     assert differs.status_code == 422
     assert differs.json()["detail"]["error"] == "invalid_input"
