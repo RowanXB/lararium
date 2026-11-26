@@ -72,6 +72,7 @@ const CANDIDATE = {
   account_name: "Bank A",
   occurred_at: "2026-11-11T09:00:00Z",
   quantity: "100",
+  currency: "GBP",
   description: "From Monzo",
   reason: "exact",
 };
@@ -200,6 +201,15 @@ it("renders sections from the API", async () => {
   expect(recent.getByText("Monzo → Bank A · 40.00 GBP · matched")).toBeInTheDocument();
 });
 
+it("shows a candidate's own currency", async () => {
+  vi.mocked(listTransferCandidates).mockResolvedValue({
+    data: [{ ...CANDIDATE, quantity: "126", currency: "USD", reason: "amount_differs" }],
+  } as never);
+  renderPage();
+  const attention = await section("Needs attention");
+  expect(await attention.findByText(/Bank A · .* · 126\.00 USD · From Monzo/)).toBeInTheDocument();
+});
+
 it("pairs a candidate", async () => {
   const user = userEvent.setup();
   renderPage();
@@ -316,6 +326,29 @@ it("registers a suggestion against an account", async () => {
       body: { kind: "uk_bank_account", value: "112233:12345678" },
     }),
   );
+});
+
+it("lists a bank account suggestion but not a card merchant's", async () => {
+  vi.mocked(listTransferSuggestions).mockResolvedValueOnce({
+    data: [
+      {
+        kind: "card_merchant",
+        merchant_id: "merch_0001",
+        name: "Trading 212",
+        host: "trading212.com",
+        outgoing: 3,
+        incoming: 0,
+        latest: "2026-11-12",
+        account_ids: [BANK_A],
+      },
+      SUGGESTION,
+    ],
+  } as never);
+  renderPage();
+  const suggestions = await section("Suggestions");
+  expect(await suggestions.findByText("11-22-33 · 12345678")).toBeInTheDocument();
+  expect(suggestions.queryByText(/Trading 212/)).toBeNull();
+  expect(suggestions.getAllByRole("button", { name: "Register" })).toHaveLength(1);
 });
 
 it("registers a chain-address suggestion against an account", async () => {

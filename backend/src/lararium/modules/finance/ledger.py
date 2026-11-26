@@ -61,6 +61,9 @@ class CounterpartyFields:
     name: str | None = None
     reference: str | None = None  # the payment reference
     bank_transfer: bool = False  # the source marks it a payment between bank accounts
+    # Its bank account's number, when the source gives it without a sort code: the record
+    # names the own account registered under it (transfers.contra.eligible_records).
+    account_number: str | None = None
     # The source says it was not a transfer at all: it is never a transfer's leg.
     never_transfer: bool = False
 
@@ -226,6 +229,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.counterparty_name,
                 t.payment_reference,
                 t.bank_transfer,
+                t.counterparty_account_number,
                 t.never_transfer,
                 t.original_quantity,
                 t.original_instrument_id,
@@ -274,6 +278,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             name=row.counterparty_name,
             reference=row.payment_reference,
             bank_transfer=row.bank_transfer,
+            account_number=row.counterparty_account_number,
             never_transfer=row.never_transfer,
         ),
         postings=tuple(
@@ -337,13 +342,7 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
         "description": record.description,
         "status": record.status,
         "origin": record.origin,
-        "counterparty": {
-            "identifier_id": _optional_str(record.counterparty.identifier_id),
-            "name": record.counterparty.name,
-            "reference": record.counterparty.reference,
-            "bank_transfer": record.counterparty.bank_transfer,
-            "never_transfer": record.counterparty.never_transfer,
-        },
+        "counterparty": _counterparty_data(record.counterparty),
         "postings": [
             {
                 "id": str(posting.id),
@@ -364,12 +363,26 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
     }
 
 
+def _counterparty_data(fields: CounterpartyFields) -> dict[str, JSONValue]:
+    data: dict[str, JSONValue] = {
+        "identifier_id": _optional_str(fields.identifier_id),
+        "name": fields.name,
+        "reference": fields.reference,
+        "bank_transfer": fields.bank_transfer,
+        "never_transfer": fields.never_transfer,
+    }
+    if fields.account_number is not None:
+        data["account_number"] = fields.account_number
+    return data
+
+
 def _counterparty_values(fields: CounterpartyFields) -> dict[str, object]:
     return {
         "counterparty_identifier_id": fields.identifier_id,
         "counterparty_name": fields.name,
         "payment_reference": fields.reference,
         "bank_transfer": fields.bank_transfer,
+        "counterparty_account_number": fields.account_number,
         "never_transfer": fields.never_transfer,
     }
 
@@ -387,6 +400,9 @@ async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> 
         raise FinanceValidationError("a transaction needs at least two postings")
     for posting in tx.postings:
         _validate_posting(posting)
+    number = tx.counterparty.account_number
+    if number is not None and (len(number) != 8 or not number.isascii() or not number.isdigit()):
+        raise FinanceValidationError("a counterparty's account number is 8 digits")
     await _validate_details(session, tx.details)
     instruments = await _resolve_references(session, tx.postings)
     residuals = compute_residuals(tx.postings)
@@ -543,6 +559,7 @@ async def upsert_connector_transaction(
                 t.counterparty_name,
                 t.payment_reference,
                 t.bank_transfer,
+                t.counterparty_account_number,
                 t.never_transfer,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
@@ -571,6 +588,7 @@ async def upsert_connector_transaction(
         and existing.counterparty_name == tx.counterparty.name
         and existing.payment_reference == tx.counterparty.reference
         and existing.bank_transfer == tx.counterparty.bank_transfer
+        and existing.counterparty_account_number == tx.counterparty.account_number
         and existing.never_transfer == tx.counterparty.never_transfer
     )
     details_unchanged = before.details == tx.details

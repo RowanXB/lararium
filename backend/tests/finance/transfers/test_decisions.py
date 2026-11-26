@@ -233,29 +233,42 @@ async def test_pair_undoes_an_unpair(session, run, ids, a_and_c, connector_tx, h
 async def test_pair_that_does_not_take_effect_is_refused(
     session, run, a_and_c, connector_tx, heal
 ) -> None:
-    """The owner already paired the deposit with another payment: pairing it with this one
-    too leaves both ambiguous, so it is refused and nothing is stored."""
+    """The owner already paired the deposit with two other payments, so it is in no matched
+    transfer: pairing it with this one too leaves it ambiguous, so it is refused and nothing
+    is stored. (With one other pair decision the deposit would be matched, and pair refuses
+    taking a record from a matched transfer: test_owner_pair_differs.)"""
     a, a_id, c, c_id = a_and_c
     out_record = await connector_tx(a, "-100", external_id="out_1", identifier_id=c_id)
     in_record = await connector_tx(
         c, "100", external_id="in_1", occurred_at=WHEN + timedelta(hours=2), identifier_id=a_id
     )
-    await connector_tx(
-        a, "-100", external_id="out_2", occurred_at=WHEN + timedelta(days=30), bank_transfer=False
-    )
+    for n in (2, 3):
+        await connector_tx(
+            a,
+            "-100",
+            external_id=f"out_{n}",
+            occurred_at=WHEN + timedelta(days=30 * n),
+            bank_transfer=False,
+        )
     out_ref, in_ref = f"{a.connection_id}:out_1", f"{c.connection_id}:in_1"
     await session.execute(
         text(
             "insert into finance.transfer_decisions"
             " (kind, subject_kind, subject_ref, other_kind, other_ref) values"
             " ('pair', 'connection', :out_2, 'connection', :in_1),"
+            " ('pair', 'connection', :out_3, 'connection', :in_1),"
             " ('never_pair', 'connection', :out_1, 'connection', :in_1)"
         ),
-        {"out_2": f"{a.connection_id}:out_2", "out_1": out_ref, "in_1": in_ref},
+        {
+            "out_2": f"{a.connection_id}:out_2",
+            "out_3": f"{a.connection_id}:out_3",
+            "out_1": out_ref,
+            "in_1": in_ref,
+        },
     )
     await heal()
-    [waiting] = [t for t in await list_transfers(session) if t.status == "awaiting"]
-    assert waiting.out_transaction_id == out_record.id
+    [waiting] = [t for t in await list_transfers(session) if t.out_transaction_id == out_record.id]
+    assert waiting.status == "awaiting"
     before = await _decisions(session)
     assert [(x.transaction_id, x.reason) for x in await candidates(session, waiting.id)] == [
         (in_record.id, "unpaired")
@@ -481,7 +494,7 @@ async def test_pair_records_refusals_store_nothing(
     session,
     run,
     gbp,
-    usd,
+    btc,
     ids,
     manual_bank,
     manual_tx,
@@ -491,8 +504,10 @@ async def test_pair_records_refusals_store_nothing(
     a, _b, out_record, in_record = unnamed_pair
     c = await manual_bank("C", identifier=None, snapshot=None)
     other_on_a = await manual_tx(a.account, "100")
-    wrong_amount = await manual_tx(c, "90")
-    in_usd = await manual_tx(c, "100", instrument=usd)
+    # Two currencies may differ only with the receiving side not larger (Task 17); a
+    # non-fiat instrument may not differ at all (test_owner_pair_differs).
+    wrong_amount = await manual_tx(c, "110")
+    in_btc = await manual_tx(c, "100", instrument=btc)
     voided = await manual_tx(c, "100")
     await run(void_transaction, voided.id)
     with_fee = await run(
@@ -514,8 +529,8 @@ async def test_pair_records_refusals_store_nothing(
     refusals = [
         (out_record.id, out_record.id, "itself"),
         (out_record.id, other_on_a.id, "same account"),
-        (out_record.id, wrong_amount.id, "opposite and equal"),  # -100 against +90
-        (out_record.id, in_usd.id, "different instruments"),  # GBP against USD
+        (out_record.id, wrong_amount.id, "receiving side is larger"),  # -100 against +110
+        (out_record.id, in_btc.id, "different instruments"),  # GBP against BTC
         (out_record.id, voided.id, "cannot be a transfer's leg"),
         (out_record.id, with_fee.id, "cannot be a transfer's leg"),
         (out_record.id, rejected.id, "undo the rejection"),  # -100 against the rejected +100
@@ -581,7 +596,7 @@ async def test_pair_candidates_order_and_exclusions(
     minus1 = await manual_tx(m2, "100", occurred_at=at(-1))
     # Excluded ones.
     await manual_tx(a.account, "100")  # the same account
-    await manual_tx(m1, "90")
+    await manual_tx(m1, "110")  # larger than sent (one smaller is listed as differing)
     voided = await manual_tx(m1, "100")
     await run(void_transaction, voided.id)
     matched_leg = await manual_tx(m1, "100", occurred_at=at(0, 1))

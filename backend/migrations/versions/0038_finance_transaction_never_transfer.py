@@ -1,8 +1,8 @@
 """Finance transactions: never_transfer, the source's word that a movement was not a transfer
 (a Binance withdrawal that failed after it left the balance), so it is never a transfer's leg.
 
-Revision ID: 0031
-Revises: 0030
+Revision ID: 0038
+Revises: 0037
 Create Date: 2026-11-23
 """
 
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0031"
-down_revision: str | None = "0030"
+revision: str = "0038"
+down_revision: str | None = "0037"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

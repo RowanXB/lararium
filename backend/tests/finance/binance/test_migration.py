@@ -1,7 +1,7 @@
-"""Migration 0030 goes down to 0029 and up again, taking what it added and leaving the rest;
-migration 0031 (`never_transfer`) likewise down to 0030, 0032 (the reconciliation
-differences and the account report times) down to 0031, and 0033 (the daily bars and the
-CoinGecko ids) down to 0032. Each table a migration creates is checked on its own."""
+"""Migration 0037 goes down to 0036 and up again, taking what it added and leaving the rest;
+migration 0038 (`never_transfer`) likewise down to 0037, 0039 (the reconciliation
+differences and the account report times) down to 0038, and 0040 (the daily bars and the
+CoinGecko ids) down to 0039. Each table a migration creates is checked on its own."""
 
 import re
 from pathlib import Path
@@ -41,20 +41,77 @@ def _config(owner_url: str) -> Config:
 
 
 def test_each_migration_creates_its_own_tables() -> None:
-    assert len(_created("0030")) == 44
-    assert "binance_assets_seen" in _created("0030")
-    assert _created("0031") == []
-    assert _created("0032") == ["binance_account_reports", "binance_reconciliation_differences"]
-    assert _created("0033") == ["binance_klines", "binance_coingecko_ids"]
+    assert len(_created("0037")) == 44
+    assert "binance_assets_seen" in _created("0037")
+    assert _created("0038") == []
+    assert _created("0039") == ["binance_account_reports", "binance_reconciliation_differences"]
+    assert _created("0040") == ["binance_klines", "binance_coingecko_ids"]
+
+
+_CHECK = (
+    "select pg_get_constraintdef(c.oid) from pg_constraint c"
+    " join pg_class t on t.oid = c.conrelid join pg_namespace n on n.oid = t.relnamespace"
+    " where n.nspname = 'finance' and t.relname = :table and c.conname = :name"
+)
+
+
+def _check(connection: Connection, table: str, name: str) -> str | None:
+    return connection.execute(text(_CHECK), {"table": table, "name": name}).scalar()
+
+
+def _allowed(definition: str | None) -> set[str]:
+    """The quoted values a CHECK's IN list (or ANY array) names."""
+    assert definition is not None
+    return set(re.findall(r"'(\w+)'", definition))
+
+
+# What 0036 (main's M6) leaves: 0037 adds to these lists and its downgrade restores them.
+_M6_KINDS = {
+    "uk_bank_account",
+    "ibkr_account",
+    "trading212_account",
+    "etoro_account",
+    "card_merchant",
+}
+_M6_SCHEMES = {
+    "iso4217",
+    "isin",
+    "figi",
+    "ticker_mic",
+    "ibkr_conid",
+    "etoro_id",
+    "chain_contract",
+    "coingecko",
+    "trading212_ticker",
+}
+
+
+def _assert_lists(connection: Connection, *, binance: bool) -> None:
+    kinds = _allowed(_check(connection, "account_identifiers", "account_identifiers_kind_check"))
+    schemes = _allowed(
+        _check(connection, "instrument_identifiers", "instrument_identifiers_scheme_check")
+    )
+    assert kinds == (_M6_KINDS | {"chain_address"} if binance else _M6_KINDS)
+    assert schemes == (_M6_SCHEMES | {"binance_asset"} if binance else _M6_SCHEMES)
+    # M6's own value checks are left as they are.
+    for name in (
+        "account_identifiers_trading212_account_check",
+        "account_identifiers_etoro_account_check",
+        "account_identifiers_card_merchant_check",
+    ):
+        assert _check(connection, "account_identifiers", name) is not None
+    chain = _check(connection, "account_identifiers", "account_identifiers_chain_address_check")
+    assert (chain is not None) == binance
 
 
 def test_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    core, later = _created("0030"), [*_created("0032"), *_created("0033")]
+    core, later = _created("0037"), [*_created("0039"), *_created("0040")]
     engine = create_engine(owner_url)
     try:
         with engine.begin() as connection:
             assert _present(connection, core + later) == _all(core + later, True)
+            _assert_lists(connection, binance=True)
             connection.execute(
                 text(
                     "insert into finance.account_identifiers (kind, value, created_by)"
@@ -62,7 +119,7 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
                 )
             )
         try:
-            command.downgrade(config, "0029")
+            command.downgrade(config, "0036")
             with engine.begin() as connection:
                 assert _present(connection, core + later) == _all(core + later, False)
                 gone = connection.execute(
@@ -72,10 +129,12 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
                     )
                 )
                 assert gone.scalar() == 0
+                _assert_lists(connection, binance=False)
         finally:
             command.upgrade(config, "head")
         with engine.begin() as connection:
             assert _present(connection, core + later) == _all(core + later, True)
+            _assert_lists(connection, binance=True)
     finally:
         engine.dispose()
 
@@ -88,11 +147,11 @@ _NEVER_TRANSFER = (
 
 def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    core = _created("0030")
+    core = _created("0037")
     engine = create_engine(owner_url)
     try:
         try:
-            command.downgrade(config, "0030")
+            command.downgrade(config, "0037")
             with engine.begin() as connection:
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 0
                 assert _present(connection, core) == _all(core, True)
@@ -106,11 +165,11 @@ def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> 
 
 def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    tables = _created("0032")
+    tables = _created("0039")
     engine = create_engine(owner_url)
     try:
         try:
-            command.downgrade(config, "0031")
+            command.downgrade(config, "0038")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 1
@@ -124,11 +183,11 @@ def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
 
 def test_prices_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    tables, before = _created("0033"), _created("0032")
+    tables, before = _created("0040"), _created("0039")
     engine = create_engine(owner_url)
     try:
         try:
-            command.downgrade(config, "0032")
+            command.downgrade(config, "0039")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert _present(connection, before) == _all(before, True)

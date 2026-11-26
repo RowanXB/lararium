@@ -13,8 +13,8 @@ emitted once from the catalogue and are frozen here: this migration never import
 choose the trade symbols to ask for. The `binance_asset` instrument scheme and the
 `chain_address` account identifier kind are new (design 5.5, 5.12).
 
-Revision ID: 0030
-Revises: 0029
+Revision ID: 0037
+Revises: 0036
 Create Date: 2026-11-23
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0030"
-down_revision: str | None = "0029"
+revision: str = "0037"
+down_revision: str | None = "0036"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -892,8 +892,12 @@ _TABLES = [
     """,
 ]
 
+# The lists as 0036 leaves them (0030 added `trading212_ticker` and `trading212_account`, 0031
+# `etoro_account`, 0035 `card_merchant`); the downgrade restores exactly these.
 _SCHEMES = """'iso4217', 'isin', 'figi', 'ticker_mic', 'ibkr_conid', 'etoro_id',
-          'chain_contract', 'coingecko'"""
+          'chain_contract', 'coingecko', 'trading212_ticker'"""
+_KINDS = """'uk_bank_account', 'ibkr_account', 'trading212_account', 'etoro_account',
+          'card_merchant'"""
 
 
 def _scheme_check(extra: str) -> str:
@@ -910,7 +914,7 @@ def _kind_check(extra: str) -> str:
     ALTER TABLE finance.account_identifiers
       DROP CONSTRAINT account_identifiers_kind_check,
       ADD CONSTRAINT account_identifiers_kind_check
-        CHECK (kind IN ('uk_bank_account', 'ibkr_account'{extra}))
+        CHECK (kind IN ({_KINDS}{extra}))
     """
 
 

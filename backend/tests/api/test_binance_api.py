@@ -723,6 +723,14 @@ async def _ibkr_connection(api) -> str:
         ("put", "/api/v1/connections/{id}/ibkr", {"token": SECRET_VALUE}),
         (
             "post",
+            "/api/v1/connections/trading212",
+            {"display_name": "T", "account_kind": "isa", "api_secret": SECRET_VALUE},
+        ),
+        ("put", "/api/v1/connections/{id}/trading212", {"api_secret": SECRET_VALUE}),
+        ("post", "/api/v1/connections/etoro", {"display_name": "E", "user_key": SECRET_VALUE}),
+        ("put", "/api/v1/connections/{id}/etoro", {"user_key": SECRET_VALUE}),
+        (
+            "post",
             "/api/v1/connections/binance",
             {"display_name": "B", "key_type": "hmac", "api_secret": SECRET_VALUE},
         ),

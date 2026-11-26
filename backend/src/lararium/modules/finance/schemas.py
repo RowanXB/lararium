@@ -33,7 +33,7 @@ from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKin
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.snapshots import SnapshotKind
-from lararium.modules.finance.transfers import ReviewReason, TransferStatus
+from lararium.modules.finance.transfers import ReviewReason, SuggestedKind, TransferStatus
 from lararium.modules.finance.valuation import HoldingStatus
 
 # ASCII digits only (\d matches any script's digits), at most 40 on each side of the point:
@@ -424,9 +424,22 @@ class IdentifierOut(BaseModel):
     sort_code: str | None  # a UK bank account's only
     account_number: str | None
     account_id: UUID | None
+    # A card merchant's own accounts (it has no account_id); empty for every other kind.
+    holder_account_ids: list[UUID]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
+
+
+class CardMerchantRegister(BaseModel):
+    """The own accounts card payments to a Monzo merchant go into; none removes it."""
+
+    merchant_id: str  # Monzo's merchant id, merch_…
+    account_ids: list[UUID]
+
+
+class CardMerchantDismiss(BaseModel):
+    merchant_id: str
 
 
 class BalanceModeUpdate(BaseModel):
@@ -435,6 +448,30 @@ class BalanceModeUpdate(BaseModel):
 
 class MainAccountUpdate(BaseModel):
     main_account_id: UUID | None
+
+
+class ReviewOut(BaseModel):
+    """A value two sources of one event disagree on (design §5.7): open, or resolved by the
+    owner taking one of them."""
+
+    id: UUID
+    connection_id: UUID
+    transaction_id: UUID | None
+    event_key: str  # e.g. "close:<positionId>"
+    # eToro: units | cash | profit | booking_date; Trading 212: amount | currency | booking_date
+    field: str
+    api_value: str
+    statement_value: str
+    opened_at: AwareDatetime
+    resolved_at: AwareDatetime | None
+    resolution: Literal["api", "statement"] | None
+    resolved_by: str | None
+
+
+class ReviewResolve(BaseModel):
+    """Which source's value the owner takes for a review item."""
+
+    take: Literal["api", "statement"]
 
 
 class TransferOut(BaseModel):
@@ -468,6 +505,7 @@ class CandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the transfer's
     occurred_at: AwareDatetime
     description: str
     reason: Literal["exact", "amount_differs", "unpaired"]
@@ -480,19 +518,38 @@ class PairCandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the record's
     occurred_at: AwareDatetime
     booking_date: date
     description: str
+    # How its side differs from the record's (two currencies), or None for one in the same
+    # instrument of the opposite and equal amount.
+    differs: Literal["currency", "amount"] | None = None
 
 
 class TransferPair(BaseModel):
-    # One of the transfer's candidates of the same amount, or one unpaired from it.
+    # One of the transfer's candidates, or one unpaired from it; or, pairing two records,
+    # the other record.
     transaction_id: UUID
+
+
+class CardMerchantSuggestionOut(_Out):
+    """A card merchant whose website is on a connected platform's domain, offering the
+    platform's accounts; registering it is register_card_merchant."""
+
+    kind: Literal["card_merchant"]
+    merchant_id: str
+    name: str | None
+    host: str
+    outgoing: int
+    incoming: int
+    latest: date
+    account_ids: list[UUID]
 
 
 class SuggestionOut(_Out):
     identifier_id: UUID
-    kind: IdentifierKind
+    kind: SuggestedKind  # never card_merchant: that is CardMerchantSuggestionOut
     value: str  # as stored
     sort_code: str | None  # a UK bank account's only
     account_number: str | None

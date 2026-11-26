@@ -9,11 +9,16 @@ import pytest
 from sqlalchemy import text
 
 from lararium.modules.finance.ledger import PostingInput, TransactionInput, post_transaction
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import pair_records
-from lararium.modules.finance.transfers.contra import own_leg
+from lararium.modules.finance.transfers.contra import load_own_record
 from lararium.modules.finance.transfers.queries import list_transfers, pair_candidates
 
 from .conftest import WHEN, assert_consistent, contra_account, placeholders
+
+
+async def _own_record(session, transaction_id):
+    return await load_own_record(session, await system_account_ids(session), transaction_id)
 
 
 def _matched(transfers, transaction_id):
@@ -38,14 +43,14 @@ async def test_a_marked_record_is_never_matched(
     if marked:
         assert matched == []
         assert await contra_account(session, sent.id, a.account.id) == ids.unassigned
-        assert await own_leg(session, sent.id) is None
+        assert await _own_record(session, sent.id) is None
         offered = await pair_candidates(session, received.id)
         assert sent.id not in [o.transaction_id for o in offered]
     else:
         # Exactly as before the marker existed.
         assert [t.in_transaction_id for t in matched] == [received.id]
         assert await contra_account(session, sent.id, a.account.id) == ids.in_transit
-        assert await own_leg(session, sent.id) is not None
+        assert await _own_record(session, sent.id) is not None
     await assert_consistent(session)
     assert await heal() == 0
 

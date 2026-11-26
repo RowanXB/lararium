@@ -6,12 +6,18 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   authorizeConnection,
   createBinanceConnection,
+  createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
+  createTrading212Connection,
   listConnections,
   updateBinanceConnection,
+  updateEtoroConnection,
   updateIbkrConnection,
+  updateTrading212Connection,
+  uploadEtoroStatement,
   uploadIbkrStatement,
+  uploadTrading212Export,
 } from "../api";
 import { ConnectionsPage } from "./ConnectionsPage";
 
@@ -39,7 +45,13 @@ vi.mock("../api", () => ({
   listAccounts: vi.fn(async () => ({
     data: [{ id: "0190a0b0-0000-7000-8000-0000000000a1", name: "Binance Spot" }],
   })),
+  createTrading212Connection: vi.fn(async () => ({ data: {} })),
+  updateTrading212Connection: vi.fn(async () => ({ data: {} })),
   uploadIbkrStatement: vi.fn(async () => ({ data: { raw_records: 3 } })),
+  createEtoroConnection: vi.fn(async () => ({ data: {} })),
+  updateEtoroConnection: vi.fn(async () => ({ data: {} })),
+  uploadEtoroStatement: vi.fn(async () => ({ data: { raw_records: 7 } })),
+  uploadTrading212Export: vi.fn(async () => ({ data: { raw_records: 2 } })),
   authorizeConnection: vi.fn(async () => ({ data: { url: "https://auth.monzo.example/?x=1" } })),
   syncConnectionNow: vi.fn(async () => ({ data: {} })),
   disableConnection: vi.fn(async () => ({ data: {} })),
@@ -338,6 +350,254 @@ it("uploads a Flex statement", async () => {
     ),
   );
   expect(await screen.findByText("Uploaded statement.xml: 3 records ingested.")).toBeInTheDocument();
+});
+
+const TRADING212 = {
+  ...CONNECTION,
+  id: "0190a0b0-0000-7000-8000-0000000000f1",
+  connector: "trading212",
+  display_name: "Trading 212 ISA",
+  status: "needs_reauth",
+  redirect_uri: null,
+};
+
+it("adds a Trading 212 connection and clears the keys", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  renderPage(client);
+  const form = await screen.findByRole("form", { name: "Add Trading 212" });
+  expect(
+    within(form).getByText(
+      "Create an API key in the Trading 212 app under Settings → API (Beta), for this account only, with read permissions.",
+    ),
+  ).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("Display name"), "Trading 212 ISA");
+  await user.selectOptions(within(form).getByLabelText("Account type"), "isa");
+  const key = within(form).getByLabelText("API key");
+  const secret = within(form).getByLabelText("API secret");
+  expect(key).toHaveAttribute("type", "password");
+  expect(secret).toHaveAttribute("type", "password");
+  await user.type(key, "key-123");
+  await user.type(secret, "secret-456");
+  await user.click(within(form).getByRole("button", { name: "Add Trading 212" }));
+
+  expect(createTrading212Connection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: {
+        display_name: "Trading 212 ISA",
+        account_kind: "isa",
+        api_key: "key-123",
+        api_secret: "secret-456",
+      },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("API key")).toHaveValue(""));
+  expect(within(form).getByLabelText("API secret")).toHaveValue("");
+  expect(await within(form).findByText("Trading 212 connected")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("key-123");
+  await waitFor(() => {
+    const kept = JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables));
+    expect(kept).not.toContain("key-123");
+    expect(kept).not.toContain("secret-456");
+  });
+});
+
+it("uploads a Trading 212 export", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [{ ...TRADING212, status: "healthy" }],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  expect(
+    await screen.findByText(
+      "Optional: adds details the API doesn't give. Export it in the Trading 212 app under History.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText("Upload eToro statement (xlsx)")).not.toBeInTheDocument();
+  const file = new File(["Action,ID"], "export.csv", { type: "text/csv" });
+  await user.upload(screen.getByLabelText("Upload Trading 212 export (CSV, optional)"), file);
+
+  await waitFor(() =>
+    expect(uploadTrading212Export).toHaveBeenCalledWith(
+      expect.objectContaining({ path: { connection_id: TRADING212.id }, body: { file } }),
+    ),
+  );
+  expect(await screen.findByText("Uploaded export.csv: 2 records ingested.")).toBeInTheDocument();
+});
+
+it.each([
+  ["Trading 212", () => TRADING212],
+  ["eToro", () => ETORO],
+])("offers Update keys on a disabled %s connection, which brings it back", async (_, made) => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [{ ...made(), status: "disabled" }],
+  } as never);
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update keys" });
+  expect(within(form).getByRole("button", { name: "Update keys" })).toBeEnabled();
+});
+
+it("shows why Trading 212 refused the key", async () => {
+  vi.mocked(createTrading212Connection).mockRejectedValueOnce({
+    detail: { error: "key_rejected", message: "Trading 212 rejected this key" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add Trading 212" });
+  await user.type(within(form).getByLabelText("Display name"), "T");
+  await user.type(within(form).getByLabelText("API key"), "k");
+  await user.type(within(form).getByLabelText("API secret"), "s");
+  await user.click(within(form).getByRole("button", { name: "Add Trading 212" }));
+  expect(await within(form).findByText("Trading 212 rejected this key")).toBeInTheDocument();
+});
+
+it("updates the keys of a Trading 212 connection", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [TRADING212] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update keys" });
+  await user.type(within(form).getByLabelText("API key"), " new-key ");
+  await user.type(within(form).getByLabelText("API secret"), "new-secret");
+  await user.click(within(form).getByRole("button", { name: "Update keys" }));
+
+  expect(updateTrading212Connection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: TRADING212.id },
+      body: { api_key: "new-key", api_secret: "new-secret" },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("API key")).toHaveValue(""));
+  expect(within(form).getByLabelText("API secret")).toHaveValue("");
+  expect(await within(form).findByText("Keys updated")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorise" })).not.toBeInTheDocument();
+});
+
+const ETORO = {
+  ...CONNECTION,
+  id: "0190a0b0-0000-7000-8000-0000000000a1",
+  connector: "etoro",
+  display_name: "eToro",
+  status: "healthy",
+  redirect_uri: null,
+};
+
+it("adds an eToro connection", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  renderPage(client);
+  const form = await screen.findByRole("form", { name: "Add eToro" });
+  expect(
+    within(form).getByText(
+      "Create a key in eToro under Settings → Trading → API Key Management, Environment Real, Permission Read.",
+    ),
+  ).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("Display name"), "eToro");
+  const publicKey = within(form).getByLabelText("Public API Key");
+  const userKey = within(form).getByLabelText("User Key");
+  expect(publicKey).toHaveAttribute("type", "password");
+  expect(userKey).toHaveAttribute("type", "password");
+  await user.type(publicKey, " public-123 ");
+  await user.type(userKey, "user-456");
+  await user.click(within(form).getByRole("button", { name: "Add eToro" }));
+
+  expect(createEtoroConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: { display_name: "eToro", public_api_key: "public-123", user_key: "user-456" },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("Public API Key")).toHaveValue(""));
+  expect(within(form).getByLabelText("User Key")).toHaveValue("");
+  expect(await within(form).findByText("eToro connected")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("public-123");
+  await waitFor(() => {
+    const kept = JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables));
+    expect(kept).not.toContain("public-123");
+    expect(kept).not.toContain("user-456");
+  });
+});
+
+it("shows why eToro refused the key", async () => {
+  vi.mocked(createEtoroConnection).mockRejectedValueOnce({
+    detail: {
+      error: "key_not_read_only",
+      message: "This eToro key can trade or move money. Create a key with Read permission.",
+    },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add eToro" });
+  await user.type(within(form).getByLabelText("Display name"), "E");
+  await user.type(within(form).getByLabelText("Public API Key"), "p");
+  await user.type(within(form).getByLabelText("User Key"), "u");
+  await user.click(within(form).getByRole("button", { name: "Add eToro" }));
+  expect(
+    await within(form).findByText(
+      "This eToro key can trade or move money. Create a key with Read permission.",
+    ),
+  ).toBeInTheDocument();
+});
+
+it("updates the keys of an eToro connection that needs them", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [{ ...ETORO, status: "needs_reauth" }],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  expect(
+    await screen.findByText("eToro rejected the keys. Update them to resume syncing."),
+  ).toHaveAttribute("role", "alert");
+  const form = screen.getByRole("form", { name: "Update keys" });
+  await user.type(within(form).getByLabelText("Public API Key"), "new-public");
+  await user.type(within(form).getByLabelText("User Key"), "new-user");
+  await user.click(within(form).getByRole("button", { name: "Update keys" }));
+
+  expect(updateEtoroConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: ETORO.id },
+      body: { public_api_key: "new-public", user_key: "new-user" },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("Public API Key")).toHaveValue(""));
+  expect(within(form).getByLabelText("User Key")).toHaveValue("");
+  expect(await within(form).findByText("Keys updated")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorise" })).not.toBeInTheDocument();
+});
+
+it("uploads an eToro statement", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [ETORO] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  expect(
+    await screen.findByText(
+      "Download it from eToro's web app: Portfolio → History → Account Statement, as Excel. The first one must start on or before the day you opened the account.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText("Upload a Flex statement")).not.toBeInTheDocument();
+  const file = new File(["PK"], "statement.xlsx", {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  await user.upload(screen.getByLabelText("Upload eToro statement (xlsx)"), file);
+
+  await waitFor(() =>
+    expect(uploadEtoroStatement).toHaveBeenCalledWith(
+      expect.objectContaining({ path: { connection_id: ETORO.id }, body: { file } }),
+    ),
+  );
+  expect(await screen.findByText("Uploaded statement.xlsx: 7 records ingested.")).toBeInTheDocument();
+});
+
+it("shows why an eToro statement upload failed", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [ETORO] } as never);
+  vi.mocked(uploadEtoroStatement).mockRejectedValueOnce({
+    detail: { error: "statement_invalid", message: "this statement is for another eToro user" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  await user.upload(
+    await screen.findByLabelText("Upload eToro statement (xlsx)"),
+    new File(["PK"], "statement.xlsx"),
+  );
+  expect(await screen.findByText("this statement is for another eToro user")).toBeInTheDocument();
 });
 
 const BINANCE = {

@@ -33,6 +33,7 @@ IdentifierScheme = Literal[
     "ticker_mic",
     "ibkr_conid",
     "etoro_id",
+    "trading212_ticker",
     "chain_contract",
     "coingecko",
     "binance_asset",
@@ -152,6 +153,26 @@ async def find_by_identifier(
     return found[0] if found else None
 
 
+async def find_same_listing(
+    session: AsyncSession, isin: str, quote_instrument_id: UUID
+) -> InstrumentRecord | None:
+    """An instrument with the ISIN, quoted in the currency: the same listing, as another
+    source holds it (design M5 §5.6, M6 §5.6)."""
+    i, instrument = models.InstrumentIdentifier, models.Instrument
+    found = await session.scalar(
+        select(instrument.id)
+        .join(i, i.instrument_id == instrument.id)
+        .where(
+            i.scheme == "isin",
+            i.value == normalize_identifier("isin", isin),
+            instrument.quote_instrument_id == quote_instrument_id,
+        )
+        .order_by(instrument.id)
+        .limit(1)
+    )
+    return None if found is None else await get_instrument(session, found)
+
+
 async def get_currency(session: AsyncSession, iso_code: str) -> InstrumentRecord:
     found = await find_by_identifier(session, "iso4217", iso_code)
     if found is None:
@@ -263,6 +284,56 @@ async def add_identifiers(
             added = True
     if not added:
         return current
+    record = await get_instrument(ctx.session, instrument_id)
+    data = _event_data(record)
+    ctx.emit("finance.instrument.updated", record.id, data)
+    ctx.record_change(f"instrument:{record.id}", data)
+    return record
+
+
+async def replace_identifier(
+    ctx: CommandContext, instrument_id: UUID, identifier: InstrumentIdentifier
+) -> InstrumentRecord:
+    """Give the instrument's identifier of the scheme a new value: a source that renamed a
+    listing it knows (Trading 212 renames tickers). One of a scheme the instrument has none of
+    is added instead. The value must not be another instrument's: the caller looked it up.
+    Currencies keep their ISO 4217 code, so that scheme is refused."""
+    if identifier.scheme == "iso4217":
+        raise FinanceValidationError("an ISO 4217 code can't be replaced")
+    current = await get_instrument(ctx.session, instrument_id)
+    if identifier.scheme not in {i.scheme for i in current.identifiers}:
+        return await add_identifiers(ctx, instrument_id, [identifier])
+    i = models.InstrumentIdentifier
+    value = normalize_identifier(identifier.scheme, identifier.value)
+    replaced = await ctx.session.scalar(
+        update(i)
+        .where(i.instrument_id == instrument_id, i.scheme == identifier.scheme, i.value != value)
+        .values(value=value)
+        .returning(i.value)
+    )
+    if replaced is None:
+        return current
+    record = await get_instrument(ctx.session, instrument_id)
+    data = _event_data(record)
+    ctx.emit("finance.instrument.updated", record.id, data)
+    ctx.record_change(f"instrument:{record.id}", data)
+    return record
+
+
+async def set_kind(
+    ctx: CommandContext, instrument_id: UUID, kind: InstrumentKind
+) -> InstrumentRecord:
+    """Reclassify a security a source first could not type (Trading 212's, before its
+    metadata arrives). A currency stays one and nothing becomes one: the ISO 4217 code is
+    what makes an instrument a currency."""
+    current = await get_instrument(ctx.session, instrument_id)
+    if kind == "fiat" or current.kind == "fiat":
+        raise FinanceValidationError("an instrument can't become or stop being a currency")
+    if current.kind == kind:
+        return current
+    await ctx.session.execute(
+        update(models.Instrument).where(models.Instrument.id == instrument_id).values(kind=kind)
+    )
     record = await get_instrument(ctx.session, instrument_id)
     data = _event_data(record)
     ctx.emit("finance.instrument.updated", record.id, data)
