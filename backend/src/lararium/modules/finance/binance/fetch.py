@@ -43,6 +43,9 @@ from lararium.modules.finance.binance.tables import moment, store_response
 
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
+# In a backfill's cursor: its next window answered once and was then refused, so a refusal of
+# that window is not where history ends. A window stored in full writes a cursor without it.
+INTERRUPTED_KEY = "interrupted"
 NOT_PRESENT_KEY = "not_present"
 
 DAY_MS = 86_400_000
@@ -307,8 +310,13 @@ def _counts_records_it_leaves_out(endpoint: Endpoint, body: ApiValue) -> bool:
     return isinstance(body, dict) and last not in body
 
 
-def _refused_inside(endpoint: Endpoint) -> DisplayableError:
-    return DisplayableError(
+class RefusedInside(DisplayableError):
+    """Binance refused a request inside a window that had answered: not where its history
+    ends."""
+
+
+def _refused_inside(endpoint: Endpoint) -> RefusedInside:
+    return RefusedInside(
         f"Binance refused part of a {endpoint.label} window it had answered:"
         " the walk stops there and asks again next time"
     )
@@ -329,7 +337,7 @@ async def window_pages(
     Only the window's first request being refused can mean its history ends there. A later
     one (a half of a split window, a later page) is refused inside a window that answered,
     so it fails: the walk keeps its cursor and asks again, and never ends with the records
-    already answered left unstored."""
+    already answered left unstored (the backfill's cursor remembers it, `INTERRUPTED_KEY`)."""
     low, high = endpoint.time_params
     params: dict[str, str | int] = {**fixed, low: start, high: end}
     cursor_name, size_name, first = paging_params(endpoint)
@@ -463,11 +471,21 @@ async def _walk_key(
     for index, (start, end) in enumerate(pieces):
         try:
             pages = await window_pages(client, endpoint, fixed, start, end)
+        except RefusedInside:
+            if not backfilling:
+                # As a refused window after the backfill: the cursor stays, and the next
+                # walk asks again.
+                return ids
+            await commit(ctx, key, cursor={**cursor, INTERRUPTED_KEY: True})
+            raise
         except BinanceNotPresent:
             if not backfilling:
                 # A label whose history was walked in full is served: a refusal now (a
                 # passing 404) is nothing this time, and the next walk asks from its cursor.
                 return ids
+            if cursor.get(INTERRUPTED_KEY) is True:
+                # This window answered on an earlier sync: it is not where history ends.
+                raise _refused_inside(endpoint) from None
             if not (newest and index == 0):
                 # History ends here; every newer window is stored (Decision 7).
                 state = {**cursor, "fetched_to": fetched_to, "complete": True}
