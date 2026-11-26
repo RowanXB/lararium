@@ -310,6 +310,7 @@ Every record is one connector transaction on the wallet's account. Fees are sepa
 - **P2P.** The bank payment goes to a stranger's account, different each time, so nothing can be registered. The owner can pair the bank's row and the order's fiat leg by hand.
 - **Unpaired, nothing is lost.** The bank's outflow and Binance's fiat credit both sit on Unassigned and cancel there, and net worth is right throughout.
 - **Between Binance wallets**: no transfer object; one transaction (§5.7 rule 1).
+- **Only a transfer leg can pair.** Of the records the connector posts, only those named above as a transfer's leg (a deposit, and a withdrawal that has not ended) say so; everything else is marked as never a transfer, so a fee, a refund, a dividend or a reward can never be paired with a card payment or a bank row. A record type added later that is a leg (Phase B's fiat deposits and withdrawals, a card purchase's or a P2P order's fiat leg) must say so too, or a pairing the owner makes by hand is dissolved.
 - **Before history.** `before_history` is decided per account (M4), so each Binance wallet account has its own start: its earliest non-opening record.
 
 ### 5.13 What is reported instead of handled

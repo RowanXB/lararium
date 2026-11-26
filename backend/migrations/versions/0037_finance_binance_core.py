@@ -976,6 +976,9 @@ _DROPPED = [
     "binance_exchange_info",
 ]
 
+# A downgrade and a new upgrade do not rebuild everything: the cursors are kept (the raw records
+# are), so the history answers' envelopes (`*_responses`) of windows walked before are not asked
+# again, and the report tables hold only the next reads. The ledger needs neither.
 DOWNGRADE = [
     # What a Binance connection's config says about the tables dropped here: the digest of
     # each report's last stored answer (its table empty, the answer would not be stored
