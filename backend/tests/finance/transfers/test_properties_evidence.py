@@ -67,6 +67,13 @@ payee, registered to nothing):
   holder) yet names a bank account (names_account), so no tier pairs it on its own
   evidence: never MUTUAL nor WEAK, and ONE_SIDED only with a record naming its account.
 
+Accounts funded by bank transfer (account type catalog design §8.2; `funding_scenarios`): the
+payee scenario with some rows not marked bank transfers, run once as it is and once with a
+drawn set of accounts given a type funded by bank transfer:
+- E10 funding changes only the pairs of unmarked records naming nobody on those accounts:
+  every other edge of the pair relation, with its tier, is the same in both runs, and each
+  one funding adds is ONE_SIDED, with a record naming the deposit's account.
+
 Settings and example counts are the "ci" and "deep" profiles' (tests/finance/conftest.py)."""
 
 import sys
@@ -83,7 +90,8 @@ from hypothesis import strategies as st
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lararium.modules.finance.accounts import AccountRecord
+from lararium.modules.finance.account_types import keys_funded_by
+from lararium.modules.finance.accounts import AccountRecord, set_type_key
 from lararium.modules.finance.identifiers import assign_identifier, get_or_create_identifier
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import (
@@ -1163,3 +1171,154 @@ async def test_a_reference_names_its_account_as_a_registration_would(
             event("an other side printing the connected account's sort code")
     for status in sorted({line.split(" ")[4] for line in referenced.transfers}):
         event(f"status {status}")
+
+
+# Accounts funded by bank transfer (account type catalog design §8.2; E10).
+FUNDED_KEY = min(keys_funded_by("bank_transfer"))
+
+
+@dataclass(frozen=True)
+class FundingScenario:
+    payee: PayeeScenario
+    unmarked: frozenset[str]  # the rows (keys) not marked a bank transfer
+    funded: frozenset[str]  # the accounts given a type funded by bank transfer
+
+    def affected(self) -> frozenset[str]:
+        """The rows the funding arm may apply to: unmarked, naming nobody (no payee, no
+        sort code printed) and on a funded account."""
+        return frozenset(
+            r.key
+            for r in self.payee.rows
+            if r.key in self.unmarked
+            and not r.payee
+            and r.sort_code is None
+            and r.account in self.funded
+        )
+
+
+@st.composite
+def funding_scenarios(draw: st.DrawFn) -> FundingScenario:
+    payee = draw(payee_scenarios())
+    # Each row and account drawn on its own, so a row is as likely unmarked on a funded
+    # account as not.
+    unmarked = {r.key for r in payee.rows if draw(st.booleans())}
+    funded = {a for a in PAYEE_ACCOUNTS if draw(st.booleans())}
+    funded = funded or {draw(st.sampled_from(PAYEE_ACCOUNTS))}
+    return FundingScenario(payee, frozenset(unmarked), frozenset(funded))
+
+
+type Edges = dict[tuple[str, str], int]
+
+
+async def _funding_run(h: Harness, scenario: FundingScenario, funded: frozenset[str]) -> Edges:
+    """One run of the payee scenario, its `unmarked` rows not marked bank transfers, and the
+    `funded` accounts typed FUNDED_KEY, heal after every row (checking M4's invariants);
+    returns the pair relation's same-amount edges (both ways round), by row keys."""
+    payee = scenario.payee
+    accounts = {name: await h.imported_bank(name) for name in PAYEE_ACCOUNTS[:3]}
+    bank = await h.connected_bank(CONNECTED)
+    await h.run(assign_identifier, bank.account.id, "uk_bank_account", CONNECTED_ID)
+    accounts[CONNECTED] = bank.account
+    for name in sorted(funded):
+        await h.run(set_type_key, accounts[name].id, FUNDED_KEY)
+    payee_id = await h.run(get_or_create_identifier, "uk_bank_account", PAYEE)
+
+    async def register() -> None:
+        pairs = [(accounts[name].id, reference) for name, reference in payee.references]
+        await h.run(register_references_and_rematch, PAYEE, pairs)
+        await assert_consistent(h.session)
+
+    if payee.registered_first:
+        await register()
+    posted: dict[str, UUID] = {}
+    for row in payee.rows:
+        identifier = payee_id if row.payee else None
+        bank_transfer = row.key not in scenario.unmarked
+        if row.connected:
+            record = await h.connector_tx(
+                bank,
+                str(row.quantity),
+                external_id=row.key,
+                occurred_at=datetime.combine(row.day, time(), UTC),
+                identifier_id=identifier,
+                reference=row.reference,
+                bank_transfer=bank_transfer,
+            )
+            posted[row.key] = record.id
+        else:
+            sort_code, number = PAYEE.split(":") if row.payee else (row.sort_code, None)
+            posted[row.key] = await h.statement_row(
+                accounts[row.account],
+                str(row.quantity),
+                day=row.day,
+                details=RowDetails(sort_code=sort_code, account_number=number),
+                identifier_id=identifier,
+                reference=row.reference,
+                bank_transfer=bank_transfer,
+                complete=payee.complete,
+                key=row.key,
+            )
+        await h.heal()
+        await assert_consistent(h.session)
+    if not payee.registered_first:
+        await register()
+    assert await h.heal() == 0
+
+    system = await system_account_ids(h.session)
+    relation = await pair_relation(h.session, system, await load_transfer_settings(h.session))
+    keys = {transaction_id: key for key, transaction_id in posted.items()}
+    return {
+        (keys[r], keys[c]): tier for r, found in relation.tiers.items() for c, tier in found.items()
+    }
+
+
+@given(scenario=funding_scenarios())
+async def test_funding_changes_only_the_pairs_of_unmarked_deposits_on_funded_accounts(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    duplicate_row: DuplicateRow,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+    scenario: FundingScenario,
+) -> None:
+    """E10: marking a set of accounts as funded by bank transfer never changes any pair
+    (an edge of the pair relation, with its tier) that involves no unmarked record naming
+    nobody on those accounts; each pair it adds is ONE_SIDED, between such a record and
+    one naming its account. (A transfer may still change: a deposit that gains a pair can
+    take an identified record's only candidate from it.)"""
+    note(describe_payee(scenario.payee))
+    note(f"unmarked rows {sorted(scenario.unmarked)}, funded accounts {sorted(scenario.funded)}")
+    h = Harness(
+        session,
+        run,
+        ids,
+        imported_bank,
+        statement_row,
+        duplicate_row,
+        connected_bank,
+        connector_tx,
+        heal,
+    )
+    async with isolated_example(session):
+        plain = await _funding_run(h, scenario, frozenset())
+    async with isolated_example(session):
+        funded = await _funding_run(h, scenario, scenario.funded)
+    affected = scenario.affected()
+    assert {pair: tier for pair, tier in funded.items() if not affected & set(pair)} == plain
+    rows = {r.key: r for r in scenario.payee.rows}
+    added = {pair: tier for pair, tier in funded.items() if affected & set(pair)}
+    for (r, c), tier in added.items():
+        deposit, other = (rows[r], rows[c]) if r in affected else (rows[c], rows[r])
+        assert tier == ONE_SIDED, (r, c, tier)
+        assert other.names == deposit.account, (r, c)
+
+    event(f"funded accounts: {len(scenario.funded)}")
+    event(f"unmarked rows: {len(scenario.unmarked)}")
+    if added:
+        event("an unmarked deposit on a funded account gained a pair")
+    elif affected:
+        event("an unmarked deposit on a funded account, with no pair")

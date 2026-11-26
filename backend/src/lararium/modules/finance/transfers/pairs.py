@@ -2,11 +2,11 @@
 
 It is computed once, set-wise, from the own records that can pair at all (a bank transfer,
 or one naming a bank account or a card merchant, or one on an account a card merchant pays
-into, or one the owner paired) and the owner's decisions, and then
-read by matching, heal and review alike. It depends only on the records and the decisions,
-never on which transfers exist, and nothing matching writes changes it (re-pointing a
-contra, opening or dissolving a transfer, posting a placeholder), so one computation holds
-for a whole heal pass."""
+into or whose type is funded by bank transfer, or one the owner paired) and the owner's
+decisions, and then read by matching, heal and review alike. It depends only on the records
+and the decisions, never on which transfers exist, and nothing matching writes changes it
+(re-pointing a contra, opening or dissolving a transfer, posting a placeholder), so one
+computation holds for a whole heal pass."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -35,10 +35,10 @@ from lararium.modules.finance.transfers.settings import TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
 # owner paired them; each names the other's account; only one names the other's account
-# (the other is a bank transfer naming nobody); only one prints the sort code of the other's
-# account, and nothing else of it (the other names no bank account at all). Two records in
-# different currencies that name each other's accounts are MUTUAL too
-# (cross_currency_tier).
+# (the other is a bank transfer naming nobody, or names nobody on an account funded by bank
+# transfer); only one prints the sort code of the other's account, and nothing else of it
+# (the other names no bank account at all). Two records in different currencies that name
+# each other's accounts are MUTUAL too (cross_currency_tier).
 type Tier = Literal[1, 2, 3, 4]
 DECIDED: Tier = 1
 MUTUAL: Tier = 2
@@ -66,6 +66,10 @@ class Pairable:
     # The own accounts the card merchant it names pays into (contra.eligible_records'
     # holders); empty for any other record. Never `holder`: it doesn't identify the record.
     holders: frozenset[UUID] = frozenset()
+    # Its account's type lists bank transfer among the ways it is funded
+    # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
+    # one, though its source doesn't say (account type catalog design §8.2).
+    funded_by_transfer: bool = False
 
     @property
     def sends(self) -> bool:
@@ -90,11 +94,22 @@ def counterpart_bounds(record: Pairable, settings: TransferSettings) -> tuple[da
     return record.booking_date - after, record.booking_date + before
 
 
+def _may_be_transfer(x: Pairable) -> bool:
+    """Whether an unidentified record can be a transfer's side the registry pairs: it is
+    marked a bank transfer, or it is on an account funded by bank transfer and names
+    nobody: no own account, no card merchant, no bank account (_card_receiver's test
+    without its "from a connection" clause)."""
+    return x.bank_transfer or (
+        x.funded_by_transfer and x.holder is None and not x.holders and not x.names_account
+    )
+
+
 def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     """The tier the registry gives two records of opposite sign, in the same instrument,
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
-    other's account and each other one a bank transfer. A record naming a card merchant
+    other's account and each other one a bank transfer, or a record naming nobody on an
+    account funded by bank transfer (_may_be_transfer). A record naming a card merchant
     (holders) is none of these tiers' (card_tier pairs it). Decisions are not considered."""
     if c.account_id == r.account_id or not (r.identified or c.identified):
         return None
@@ -103,7 +118,7 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     for x, other in ((r, c), (c, r)):
         if x.identified and x.holder != other.account_id:
             return None
-        if not x.identified and not x.bank_transfer:
+        if not x.identified and not _may_be_transfer(x):
             return None
     return MUTUAL if r.identified and c.identified else ONE_SIDED
 
@@ -493,8 +508,8 @@ async def _load_records(
 ) -> list[Pairable]:
     """The own records that can pair at all: those a bank transfer, naming a bank
     account, a card merchant or an own account by its number (the registry's), those on an
-    account a card merchant pays into (card_tier's other side), and those the owner
-    paired."""
+    account a card merchant pays into (card_tier's other side) or funded by bank transfer
+    (registry_tier's, _may_be_transfer), and those the owner paired."""
     e = eligible_records(system)
     t = models.Transaction
     h = models.AccountIdentifierHolder
@@ -512,6 +527,7 @@ async def _load_records(
         e.c.counterparty_identifier_id.is_not(None),
         e.c.holder.is_not(None),
         e.c.account_id.in_(select(h.account_id)),
+        e.c.funded_by_transfer,
     ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
@@ -529,6 +545,7 @@ async def _load_records(
         e.c.weak_holder,
         e.c.names_account,
         e.c.holders,
+        e.c.funded_by_transfer,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -549,6 +566,7 @@ async def _load_records(
             weak_holder=row.weak_holder,
             names_account=row.names_account,
             holders=frozenset(row.holders or ()),
+            funded_by_transfer=row.funded_by_transfer,
             fiat=bool(row.fiat),
             fee=(
                 None
@@ -817,9 +835,10 @@ async def pair_relation(
     The registry pairs two records when they are on different accounts, in the same
     instrument, of opposite sign; the receiving one is booked in the sending one's window; at
     least one is identified through the registry; each identified one names the other's
-    account; each other one is a bank transfer; and neither is rejected nor decided never
-    to pair with the other. Where the registry doesn't pair two records, a sort code alone
-    may, as the weakest tier (weak_tier). Two records in different currencies pair when
+    account; each other one is a bank transfer, or names nobody on an account funded by bank
+    transfer (_may_be_transfer); and neither is rejected nor decided never to pair with the
+    other. Where the registry doesn't pair two records, a sort code alone may, as the
+    weakest tier (weak_tier). Two records in different currencies pair when
     cross_currency_tier takes them, within the near window, each the other's only such
     candidate and neither with one of the same amount; their conversion's fee must fit
     (conversion_postings), else they are for review as of another amount. A card payment

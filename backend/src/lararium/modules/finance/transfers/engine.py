@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
@@ -844,6 +845,8 @@ async def preview_match(
     # account (no holder), only its holders. (The importers that preview give bank accounts
     # only; this keeps the two definitions one should a card merchant reach it.)
     merchant = named is not None and named.kind == "card_merchant"
+    a = models.Account
+    type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
         id=_UNPOSTED,
         source=("unposted", "") if source is None else source,
@@ -863,6 +866,8 @@ async def preview_match(
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
         holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
+        # As eligible_records' funded_by_transfer: read from the account's type.
+        funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)

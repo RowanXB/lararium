@@ -44,6 +44,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.types import TypeEngine
 
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import named_account, named_account_expression
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
@@ -168,7 +169,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     (the own accounts the card merchant it names pays into, NULL for any other record: such
     evidence never identifies it, so holder stays NULL and it pairs only with a record that
     is there, pairs.card_tier),
-    bank_transfer, source_kind, source_ref.
+    bank_transfer, funded_by_transfer (its account's type lists bank transfer among the ways
+    it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
+    bank_transfer stays as the source gave it), source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -323,8 +326,13 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     # The record's own account, looked up per record too, not joined, for the same reason.
     a = aliased(models.Account, name="own_account")
     own_account = (
-        select(a.source_kind, a.parent_account_id).where(a.id == legs.c.account_id).lateral("own")
+        select(a.source_kind, a.parent_account_id, a.type_key)
+        .where(a.id == legs.c.account_id)
+        .lateral("own")
     )
+    # Its account's type is funded by bank transfer (False for an account of no type).
+    funding_keys = literal(sorted(keys_funded_by("bank_transfer")), ARRAY(String()))
+    funded_by_transfer = func.coalesce(own_account.c.type_key == any_(funding_keys), false())
     names_nothing = and_(
         t.counterparty_identifier_id.is_(None),
         number_count == 0,
@@ -404,6 +412,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             ).label("names_account"),
             merchants.c.holders,
             t.bank_transfer,
+            funded_by_transfer.label("funded_by_transfer"),
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
@@ -437,6 +446,7 @@ _OWN_RECORDS = Table(
     Column("names_account", Boolean, nullable=False),
     Column("holders", ARRAY(Uuid)),
     Column("bank_transfer", Boolean, nullable=False),
+    Column("funded_by_transfer", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
     prefixes=["TEMPORARY"],
