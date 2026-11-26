@@ -19,13 +19,14 @@ is stored for it, so the official close wins whichever arrives first. A candle's
 date of its `time` plus 12 hours (client.candle_day): eToro stamps it at midnight in Israel,
 21:00 or 22:00 UTC the evening before. A replay writes every price the connection's records
 give, so it also removes an `etoro` price an earlier version filed on a candle's UTC date
-that none gives now, while it still holds that candle's close: prices name no connection,
-and a value written there since is another eToro connection's. No FX rate is written
-(design §5.10).
+that none gives now, while it still holds a close a stored copy of that candle gave: prices
+name no connection, and a value written there since is another eToro connection's. No FX
+rate is written (design §5.10).
 """
 
+from collections import defaultdict
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -49,6 +50,7 @@ from lararium.modules.finance.etoro.state import (
     number_at,
     number_or_none,
     objects_at,
+    stored,
     text_at,
     value_at,
 )
@@ -213,17 +215,25 @@ async def keyed(run: Run, by_endpoint: dict[str, list[Record]]) -> None:
 
 
 async def _candle_price(run: Run, record: Record) -> None:
+    if priced := await _candle_close(run, record):
+        moment, key, price = priced
+        run.candle_prices[(*key, candle_day(moment))] = price
+
+
+async def _candle_close(
+    run: Run, record: Record
+) -> tuple[datetime, tuple[UUID, UUID], Decimal] | None:
+    """(its time, (instrument, currency), the price) of a candle that prices its day."""
     etoro_id = id_at(record, record.content, "instrumentId")
     close = number_or_none(record, record.content, "close")
     code = run.asset_currencies.get(etoro_id)
     if close is None or close <= 0 or not code:
-        return
+        return None
     instrument_id = await run.instrument(etoro_id)
     if instrument_id is None:
-        return
-    day = candle_day(moment_at(record, record.content, "time"))
+        return None
     quote_id, price = await run.price(code, close)
-    run.candle_prices[(instrument_id, quote_id, day)] = price
+    return moment_at(record, record.content, "time"), (instrument_id, quote_id), price
 
 
 # What a sync reported --------------------------------------------------------------------
@@ -581,31 +591,30 @@ async def prices(run: Run) -> None:
 
 
 async def _remove_unwritten(run: Run, wanted: set[tuple[UUID, UUID, date]]) -> None:
-    """Delete the `etoro` prices an earlier version filed on one of the connection's candles'
-    UTC dates that no record of the replay gives, in an instrument and currency it prices,
-    while each still holds the candle's close it filed. Prices name no connection: a value
+    """Delete the `etoro` prices an earlier version filed on a candle's UTC date that no record
+    of the replay gives, while each still holds a close a stored copy of that candle gave
+    (today's candle keeps its time while its close moves). Prices name no connection: a value
     written there since (another eToro connection's) is not this one's to remove."""
-    pairs = {(instrument_id, quote_id) for instrument_id, quote_id, _ in wanted}
-    if not pairs:
+    filed: defaultdict[tuple[UUID, UUID, date], set[Decimal]] = defaultdict(set)
+    for record in await stored(run.session, run.connection_id, ["candles"]):
+        if priced := await _candle_close(run, record):
+            moment, pair, price = priced
+            if (key := (*pair, moment.astimezone(UTC).date())) not in wanted:
+                filed[key].add(price)
+    if not filed:
         return
+    instruments, quotes, days = zip(*filed, strict=True)
     rows = await run.session.execute(
         text(
-            "select p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date, p.price,"
-            " ii.value as etoro_id, c.close"
+            "select p.id, p.instrument_id, p.quote_instrument_id, p.as_of_date, p.price"
             " from finance.prices p"
-            " join finance.instrument_identifiers ii on ii.scheme = 'etoro_id'"
-            " and ii.instrument_id = p.instrument_id"
-            " join finance.etoro_candles c on c.connection_id = :c"
-            " and c.instrument_id::text = ii.value"
-            " and (c.time at time zone 'UTC')::date = p.as_of_date"
-            " where p.source = :s and p.instrument_id = any(:i) and c.close > 0"
+            " join unnest(cast(:i as uuid[]), cast(:q as uuid[]), cast(:d as date[]))"
+            " k(i, q, d) on p.instrument_id = k.i and p.quote_instrument_id = k.q"
+            " and p.as_of_date = k.d"
+            " where p.source = :s"
         ),
-        {"c": run.connection_id, "s": SOURCE, "i": sorted({i for i, _ in pairs})},
+        {"i": list(instruments), "q": list(quotes), "d": list(days), "s": SOURCE},
     )
     for row in rows:
-        key = (row.instrument_id, row.quote_instrument_id, row.as_of_date)
-        code = run.asset_currencies.get(row.etoro_id)
-        if key[:2] not in pairs or key in wanted or not code:
-            continue
-        if await run.price(code, row.close) == (row.quote_instrument_id, row.price):
+        if row.price in filed[(row.instrument_id, row.quote_instrument_id, row.as_of_date)]:
             await delete_price(run.command, row.id, row.price)

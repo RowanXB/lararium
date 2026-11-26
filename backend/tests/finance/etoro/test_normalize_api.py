@@ -758,6 +758,36 @@ async def test_a_replay_leaves_no_misdated_candle_price(session, ledger) -> None
     )
 
 
+async def test_a_replay_leaves_no_misdated_price_of_a_candle_revised_since(session, ledger) -> None:
+    """Today's candle keeps its open time while its close moves: the misdated price an
+    earlier version filed from an earlier close of it is removed too."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.10, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # The upgrade's first sync fetches the same candle with a later close.
+    await update_config(
+        CommandContext(session, CONNECTOR, uuid.uuid4()),
+        ledger.connection.id,
+        {"normalizer_version": "etoro-norm-0"},
+    )
+    await ledger.normalize(("candles", _stamped(monday, "125.00")), now=NOW + timedelta(hours=1))
+    days = await _price_days(session)
+    assert sunday not in [d for d, _ in days]
+    assert (monday, Decimal("125.00")) in days
+
+
 async def test_a_replay_keeps_a_day_another_etoro_connection_gives(session, run, ledger) -> None:
     monday = NOW.date() - timedelta(days=1)
     sunday = monday - timedelta(days=1)
