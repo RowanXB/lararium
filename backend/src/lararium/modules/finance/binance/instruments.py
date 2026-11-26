@@ -1,9 +1,9 @@
 """Finding or creating the instrument of a Binance asset code (design 5.5).
 
-An asset is an instrument already known by its `binance_asset` identifier (whatever
-`coin-config` says later), the existing fiat instrument when Binance marks it as legal money
-(none, and flagged, when Lararium has no currency of that code: its decimals cannot be
-guessed), the one existing crypto instrument with that
+An asset is the existing fiat instrument when the connection's `coin-config` marks it as
+legal money and Lararium has that currency; else an instrument already known by its
+`binance_asset` identifier (whatever `coin-config` says later); else, legal money, none and
+flagged (its decimals cannot be guessed); else the one existing crypto instrument with that
 symbol (which then gains the identifier), or a new crypto instrument. An `LD`-prefixed code that
 mirrors another asset is never an instrument. Every asset resolved is recorded in
 `binance_assets_seen`, which decides the trade symbols a later sync asks for.
@@ -108,17 +108,19 @@ async def _settled(
     session: AsyncSession, connection_id: UUID, code: str
 ) -> tuple[UUID | None, bool]:
     """What already decides a code: the instrument it resolves to, and whether it is legal
-    money Lararium has no currency of. A code with a `binance_asset` instrument keeps it,
-    whatever `coin-config` says now (a holding never drops out of a report); only a code with
-    none is the fiat of its ISO code when Binance marks it legal money, or not counted."""
+    money Lararium has no currency of. In order: the currency of that ISO code when this
+    connection's `coin-config` marks the code legal money (the `binance_asset` identifier is
+    global, so another connection's crypto instrument never displaces it); else the instrument
+    known by the identifier, whatever `coin-config` says now (a holding never drops out of a
+    report); else, legal money with no currency, not counted."""
+    _, legal_money = await _coin(session, connection_id, code)
+    currency = await find_by_identifier(session, "iso4217", code) if legal_money else None
+    if currency is not None:
+        return currency.id, False
     found = await find_by_identifier(session, "binance_asset", code)
     if found is not None:
         return found.id, False
-    _, legal_money = await _coin(session, connection_id, code)
-    if not legal_money:
-        return None, False
-    currency = await find_by_identifier(session, "iso4217", code)
-    return (None, True) if currency is None else (currency.id, False)
+    return None, legal_money
 
 
 async def uncounted(session: AsyncSession, connection_id: UUID, code: str) -> bool:

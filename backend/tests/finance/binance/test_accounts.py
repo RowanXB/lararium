@@ -268,6 +268,26 @@ async def test_a_code_with_an_instrument_keeps_it_when_marked_legal_money(run) -
     assert not await run(lambda ctx: instruments.uncounted(ctx.session, connection.id, "aaa"))
 
 
+async def test_another_connections_crypto_instrument_never_displaces_a_currency(
+    run, session
+) -> None:
+    # Another connection, whose coin-config does not list EUR, made a crypto instrument of it.
+    other = await _connection(run)
+    crypto = await _asset(run, other.id, "EUR")
+    assert (await get_instrument(session, crypto)).kind == "crypto"
+    connection = await _connection(run)
+    await _coin_config(run, connection.id, coin="EUR", name="Euro", isLegalMoney=True)
+    euro = (await get_currency(session, "EUR")).id
+    flags: list[str] = []
+
+    assert await _asset(run, connection.id, "EUR", flags) == euro
+    assert await _asset(run, connection.id, "EUR", flags) == euro
+    assert flags == []
+    assert not await run(lambda ctx: instruments.uncounted(ctx.session, connection.id, "EUR"))
+    # The other connection keeps the instrument it had.
+    assert await _asset(run, other.id, "EUR") == crypto
+
+
 async def test_ld_mirror_is_not_an_instrument(run, session) -> None:
     connection = await _connection(run)
     assert await _asset(run, connection.id, "AAA") is not None
