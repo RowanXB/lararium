@@ -319,6 +319,43 @@ async def test_a_split_window_stores_each_halfs_response(session, run, fake, clo
     assert {row.page for row in stored} == {0}
 
 
+async def _raw_count(session, connection) -> int:
+    return await session.scalar(
+        text("select count(*) from core.raw_records where connection_id = :c"),
+        {"c": connection.id},
+    )
+
+
+async def test_an_answer_that_says_more_data_splits_its_window(session, run, fake, clock) -> None:
+    # Fewer records than the limit asked, and `moreData`: Binance's own cap is below it.
+    label = "convert"
+    fake.cap_answers(label, 3)
+    fake.add(label, *_rows_at(label, 5, "createTime"))
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    ids = await _walk(session, connection, fake, clock, label)
+
+    assert len(set(ids)) == 5
+    assert len(fake.calls(label)) > 1
+
+
+async def test_more_data_in_one_millisecond_fails_the_walk(session, run, fake, clock) -> None:
+    label = "convert"
+    fake.cap_answers(label, 3)
+    fake.add(label, *[build_row(label, i, createTime=NOW_MS - DAY_MS) for i in range(4)])
+    cursor = {"fetched_to": NOW_MS - 2 * DAY_MS, "backfilled_to": LAUNCH_MS, "complete": True}
+    connection = await binance_connection(run, config={"cursors": {label: cursor}})
+
+    with pytest.raises(DisplayableError, match="convert"):
+        await _walk(session, connection, fake, clock, label)
+
+    [*_, last] = fake.calls(label)
+    assert last.params["startTime"] == last.params["endTime"]
+    assert await _raw_count(session, connection) == 0
+    assert (await _config(session, connection))["cursors"] == {label: cursor}
+
+
 async def test_trades_page_until_short_page(session, run, fake, clock) -> None:
     fake.add("my-trades", *[build_row("my-trades", i, time=NOW_MS - i) for i in range(1001)])
     connection = await binance_connection(run)

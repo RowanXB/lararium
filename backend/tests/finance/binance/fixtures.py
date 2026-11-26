@@ -281,6 +281,7 @@ class FakeBinance:
         self._stored: dict[str, list[_Stored]] = {}
         self._failures: list[_Failure] = []
         self._hooks: dict[str, Hook] = {}
+        self._caps: dict[str, int] = {}
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.
@@ -298,6 +299,13 @@ class FakeBinance:
 
     def rows(self, label: str) -> list[Rowdict]:
         return [stored.row for stored in self._stored.get(label, [])]
+
+    def cap_answers(self, label: str, rows: int) -> None:
+        """Answer at most `rows` records of a label that cannot page, however many the request
+        asks, saying there is more (`moreData`) when more remain: a cap below the documented
+        limit."""
+        assert ENDPOINTS[label].paging == "none", label
+        self._caps[label] = rows
 
     # What it was asked.
 
@@ -425,7 +433,7 @@ class FakeBinance:
         chosen = self._select(endpoint, own)
         if not chosen and endpoint.rows == "" and not self._stored.get(label):
             return _json(build_response(label, [build_row(label)]))
-        page, total, more = self._page(endpoint, own, chosen)
+        page, total, more = self._page(endpoint, own, chosen, self._caps.get(label))
         body = build_response(label, page)
         if isinstance(body, dict):
             self._patch_envelope(body, total, more)
@@ -490,7 +498,7 @@ class FakeBinance:
 
     @staticmethod
     def _page(
-        endpoint: Endpoint, own: Mapping[str, str], rows: list[Rowdict]
+        endpoint: Endpoint, own: Mapping[str, str], rows: list[Rowdict], cap_to: int | None
     ) -> tuple[list[Rowdict], int, bool]:
         """The rows of the asked page, how many there were in all, and whether more remain."""
         cursor, size_name, first = paging_params(endpoint)
@@ -500,6 +508,7 @@ class FakeBinance:
             size = cap
         size = min(size, cap) if endpoint.page_size else size
         if endpoint.paging == "none":
+            size = min(size, cap_to) if cap_to is not None else size
             return rows[:size], len(rows), len(rows) > size
         if endpoint.paging == "offset":
             start = int(own.get(cursor, first))

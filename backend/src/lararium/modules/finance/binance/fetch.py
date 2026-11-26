@@ -28,7 +28,7 @@ from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.binance import layout, notices, tables
-from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint, paging_params
+from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS, Endpoint, paging_params
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
     ApiValue,
@@ -280,6 +280,17 @@ async def _ask(
     return typed(endpoint.label, await client.call(endpoint, params)).rows
 
 
+def _beside(endpoint: Endpoint, body: ApiValue, name: str) -> ApiValue:
+    """The field `name` beside an answer's record list, when the catalogue lists it there for
+    the label (`moreData`, `total`); otherwise None."""
+    *parents, _ = endpoint.rows.split(".")
+    if ".".join([*parents, name]) not in {spec.path for spec in FIELDS[endpoint.label]}:
+        return None
+    for step in parents:
+        body = body.get(step) if isinstance(body, dict) else None
+    return body.get(name) if isinstance(body, dict) else None
+
+
 async def window_pages(
     client: BinanceClient,
     endpoint: Endpoint,
@@ -288,8 +299,9 @@ async def window_pages(
     end: int,
 ) -> list[Page]:
     """Every answer of one window, through every page; an endpoint that cannot page and answers
-    a full page has its window split in two until each half fits (the full answer is kept as
-    an answer, its rows are not)."""
+    a full page, or says there is more (`moreData`), has its window split in two until each
+    half fits (the full answer is kept as an answer, its rows are not). A window of one
+    millisecond that still does not fit fails: what it holds cannot all be asked."""
     low, high = endpoint.time_params
     params: dict[str, str | int] = {**fixed, low: start, high: end}
     cursor_name, size_name, first = paging_params(endpoint)
@@ -305,7 +317,13 @@ async def window_pages(
 
     if endpoint.paging == "none":
         answer = await ask(0, params)
-        if size and len(answer.rows) >= size and end > start:
+        more = _beside(endpoint, answer.body, "moreData") is True
+        if (size and len(answer.rows) >= size) or more:
+            if end == start:
+                raise DisplayableError(
+                    f"Binance has more {endpoint.label} records in one millisecond"
+                    " than one answer holds"
+                )
             middle = start + (end - start) // 2
             full = Page(answer.label, start, end, 0, answer.body, [], answer.unknown)
             return [
