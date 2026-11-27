@@ -877,6 +877,7 @@ def test_connection_operation_ids() -> None:
         ("put", "/api/v1/connections/{connection_id}/binance"): "update_binance_connection",
         ("post", "/api/v1/connections/bitcoin"): "create_bitcoin_connection",
         ("post", "/api/v1/connections/bitcoin/preview"): "preview_bitcoin_wallet",
+        ("patch", "/api/v1/connections/{connection_id}/bitcoin/gaps"): "update_bitcoin_gaps",
         ("post", "/api/v1/connections/ibkr"): "create_ibkr_connection",
         ("put", "/api/v1/connections/{connection_id}/ibkr"): "update_ibkr_connection",
         ("post", "/api/v1/connections/trading212"): "create_trading212_connection",

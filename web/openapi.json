@@ -820,6 +820,23 @@
         "title": "BitcoinBranchesOut",
         "type": "object"
       },
+      "BitcoinGapsUpdate": {
+        "properties": {
+          "gaps": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Gaps",
+            "type": "object"
+          }
+        },
+        "required": [
+          "gaps"
+        ],
+        "title": "BitcoinGapsUpdate",
+        "type": "object"
+      },
       "BitcoinPreviewIn": {
         "description": "A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses\nare secret: a master public key reveals every address the wallet will ever use. Checked in\nthe route (keys.py), whose messages never repeat the input.",
         "properties": {
@@ -944,6 +961,16 @@
             "title": "Form",
             "type": "string"
           },
+          "gaps": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "title": "Gaps",
+            "type": "object"
+          },
           "last_check": {
             "anyOf": [
               {
@@ -977,7 +1004,8 @@
           "used",
           "last_check",
           "unconfirmed",
-          "server"
+          "server",
+          "gaps"
         ],
         "title": "BitcoinStateOut",
         "type": "object"
@@ -5819,6 +5847,60 @@
           }
         },
         "summary": "Update Binance Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/bitcoin/gaps": {
+      "patch": {
+        "description": "Replace the wallet's gap limits (design 5.1, 6: raise one when the balance is lower than\nthe wallet's own), and sync at once with them, the six-hour wait aside.",
+        "operationId": "update_bitcoin_gaps",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BitcoinGapsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Bitcoin Gaps",
         "tags": [
           "connections"
         ]

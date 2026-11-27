@@ -19,6 +19,7 @@ from lararium.config import Settings
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
 from lararium.core.connections import (
+    SYNC_REQUESTED_KEY,
     create_connection,
     get_connection,
     load_credential,
@@ -130,6 +131,7 @@ async def test_create_and_sync_is_queued(api, session, queue) -> None:
         "last_check": None,
         "unconfirmed": 0,
         "server": "esplora.example:3002",
+        "gaps": {},
     }
     spec = parse_input(WalletInput("electrum", "single", (ZPUB,)))
     record = await get_connection(session, created["id"])
@@ -153,6 +155,7 @@ async def test_create_stores_valid_gap_limits(api, session) -> None:
 
     record = await get_connection(session, created["id"])
     assert record.config["gaps"] == {"d0": {"0": 50, "1": 1000}}
+    assert created["bitcoin"]["gaps"] == {"d0": {"0": 50, "1": 1000}}
 
 
 @pytest.mark.parametrize(
@@ -269,6 +272,46 @@ async def test_a_refused_wallet_is_422_with_the_fixed_message(
     assert await _count(session, "core.connections") == 0
 
 
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        (
+            {"form": "electrum", "electrum_type": "multisig", "keys": [ZPUB] * 21, "threshold": 2},
+            "A wallet takes at most 20 master public keys.",
+        ),
+        (
+            {"form": "descriptor", "descriptors": [DESCRIPTOR] * 3},
+            "A wallet takes at most 2 output descriptors.",
+        ),
+        (
+            {"form": "addresses", "addresses": [RECEIVING_0] * 10_001},
+            "An address list takes at most 10,000 addresses.",
+        ),
+        (
+            {"form": "electrum", "electrum_type": "single", "keys": [ZPUB * 10]},
+            "A key, descriptor or address is too long.",
+        ),
+        (
+            {"form": "addresses", "addresses": [RECEIVING_0 * 24]},
+            "A key, descriptor or address is too long.",
+        ),
+        (
+            {"form": "descriptor", "descriptors": [DESCRIPTOR * 90]},
+            "A key, descriptor or address is too long.",
+        ),
+    ],
+)
+@pytest.mark.parametrize("path", [CREATE, PREVIEW])
+async def test_an_input_too_large_is_422_without_echo(api, session, path, fields, message) -> None:
+    response = await api.post(path, json={"display_name": "W"} | fields, headers=OWNER)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {"error": "wallet_invalid", "message": message}
+    for secret in (ZPUB, ZPUB_AS_XPUB, RECEIVING_0):
+        assert secret not in response.text
+    assert await _count(session, "core.connections") == 0
+
+
 async def test_a_malformed_body_does_not_echo_the_key(api) -> None:
     response = await api.post(
         CREATE, json=ELECTRUM | {"threshold": "two", "display_name": ""}, headers=OWNER
@@ -357,6 +400,7 @@ async def test_state_never_carries_the_key(api, session) -> None:
         "last_check": warning,
         "unconfirmed": 1,
         "server": "esplora.example:3002",
+        "gaps": {},
     }
     for secret in (ZPUB, ZPUB_AS_XPUB, RECEIVING_0, CHANGE_0, "pw", "token"):
         assert secret not in json.dumps(out["bitcoin"])
@@ -377,3 +421,61 @@ async def test_list_has_no_bitcoin_state_for_other_connectors(api, session) -> N
     listed = await api.get("/api/v1/connections", headers=OWNER)
 
     assert [c["bitcoin"] for c in listed.json()] == [None]
+
+
+def _gaps_path(connection_id: str) -> str:
+    return f"/api/v1/connections/{connection_id}/bitcoin/gaps"
+
+
+async def test_a_raised_gap_is_stored_and_a_sync_is_requested(api, session, queue) -> None:
+    created = await _create(api)
+    queue.jobs.clear()
+
+    response = await api.patch(
+        _gaps_path(created["id"]), json={"gaps": {"d0": {"0": 60}}}, headers=OWNER
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["bitcoin"]["gaps"] == {"d0": {"0": 60}}
+    record = await get_connection(session, created["id"])
+    assert record.config["gaps"] == {"d0": {"0": 60}}
+    assert SYNC_REQUESTED_KEY in record.config
+    assert _queued(queue) == ["sync_connection"]
+    args = await session.scalar(
+        text("select args from core.audit_log where command = 'update_bitcoin_gaps'")
+    )
+    assert args == {"connection_id": created["id"]}
+
+    # An empty map restores the defaults.
+    restored = await api.patch(_gaps_path(created["id"]), json={"gaps": {}}, headers=OWNER)
+    assert restored.status_code == 200, restored.text
+    assert "gaps" not in (await get_connection(session, created["id"])).config
+
+
+@pytest.mark.parametrize("gaps", [{"d0": {"0": 0}}, {"d1": {"0": 30}}, {"d0": {"1": "x"}}])
+async def test_a_bad_gap_update_is_422_and_stores_nothing(api, session, queue, gaps) -> None:
+    created = await _create(api, gaps={"d0": {"0": 50}})
+    queue.jobs.clear()
+    before = await get_connection(session, created["id"])
+
+    response = await api.patch(_gaps_path(created["id"]), json={"gaps": gaps}, headers=OWNER)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == GAP_INVALID
+    assert (await get_connection(session, created["id"])).config == before.config
+    assert _queued(queue) == []
+    assert await _count(session, "core.audit_log where command = 'update_bitcoin_gaps'") == 0
+
+
+async def test_a_gap_update_of_another_connector_is_404(api, session, queue) -> None:
+    async with command_context(session, Actor("system", "t"), "test", {}) as ctx:
+        other = await create_connection(ctx, connector="monzo", display_name="M", config={})
+
+    for connection_id in (str(other.id), "00000000-0000-4000-8000-00000000dead"):
+        response = await api.patch(
+            _gaps_path(connection_id), json={"gaps": {"d0": {"0": 60}}}, headers=OWNER
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"]["error"] == "connection_not_found"
+    assert (await get_connection(session, other.id)).config == {}
+    assert _queued(queue) == []

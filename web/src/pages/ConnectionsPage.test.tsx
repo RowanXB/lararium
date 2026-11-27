@@ -14,6 +14,7 @@ import {
   listConnections,
   previewBitcoinWallet,
   updateBinanceConnection,
+  updateBitcoinGaps,
   updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
@@ -69,6 +70,7 @@ vi.mock("../api", () => ({
   createBinanceConnection: vi.fn(async () => ({ data: {} })),
   updateBinanceConnection: vi.fn(async () => ({ data: {} })),
   createBitcoinConnection: vi.fn(async () => ({ data: {} })),
+  updateBitcoinGaps: vi.fn(async () => ({ data: {} })),
   previewBitcoinWallet: vi.fn(async () => ({
     data: {
       first_receiving_address: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
@@ -889,10 +891,31 @@ it("adds a Bitcoin wallet after showing its first receiving address", async () =
     }),
   );
   await waitFor(() => expect(within(form).getByLabelText("Master public key")).toHaveValue(""));
+  await waitFor(() => expect(within(form).getByLabelText("Receiving gap limit")).toHaveValue(null));
   await waitFor(() =>
     expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not
       .toContain(ZPUB),
   );
+});
+
+it("sends nothing for a seed phrase and says why", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add Bitcoin wallet" });
+  await user.type(within(form).getByLabelText("Display name"), "Electrum");
+  await user.type(
+    within(form).getByLabelText("Master public key"),
+    "legal winner thank year wave sausage worth useful legal winner thank yellow",
+  );
+
+  expect(await within(form).findByRole("alert")).toHaveTextContent(
+    "This looks like a seed phrase. Never enter it anywhere: Lararium needs the master public key from Wallet → Information.",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(previewBitcoinWallet).not.toHaveBeenCalled();
+  await user.click(within(form).getByRole("button", { name: "Add Bitcoin wallet" }));
+  expect(createBitcoinConnection).not.toHaveBeenCalled();
+  expect(within(form).getByLabelText("Master public key")).toHaveValue("");
 });
 
 it("shows a Bitcoin wallet's state, never its key", async () => {
@@ -913,17 +936,34 @@ it("shows a Bitcoin wallet's state, never its key", async () => {
           last_check: "agrees",
           unconfirmed: 2,
           server: "mempool.space",
+          gaps: { d0: { "0": 40 } },
         },
       },
     ],
   } as never);
   renderPage();
   expect(await screen.findByText("Cold wallet")).toBeInTheDocument();
-  expect(screen.getByText("Electrum master public key, multi-signature")).toBeInTheDocument();
+  expect(screen.getByText("Electrum master public key, Multi-signature")).toBeInTheDocument();
   expect(
     screen.getByText("Addresses scanned: 21 receiving, 11 change; used: 1 receiving, 1 change"),
   ).toBeInTheDocument();
   expect(screen.getByText("Last balance check: agrees")).toBeInTheDocument();
   expect(screen.getByText("Unconfirmed transactions waiting: 2")).toBeInTheDocument();
   expect(screen.getByText("Server: mempool.space")).toBeInTheDocument();
+
+  const gaps = screen.getByRole("form", { name: "Gap limits" });
+  const user = userEvent.setup();
+  const receiving = within(gaps).getByLabelText("Receiving gap limit");
+  expect(receiving).toHaveValue(40);
+  await user.clear(receiving);
+  await user.type(receiving, "60");
+  await user.type(within(gaps).getByLabelText("Change gap limit"), "15");
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: "0190a0b0-0000-7000-8000-0000000000c1" },
+      body: { gaps: { d0: { "0": 60, "1": 15 } } },
+    }),
+  );
+  expect(await within(gaps).findByText("Gap limits saved; syncing")).toBeInTheDocument();
 });

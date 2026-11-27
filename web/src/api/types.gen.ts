@@ -392,6 +392,20 @@ export type BitcoinBranchesOut = {
 };
 
 /**
+ * BitcoinGapsUpdate
+ */
+export type BitcoinGapsUpdate = {
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    };
+};
+
+/**
  * BitcoinPreviewIn
  *
  * A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
@@ -453,6 +467,14 @@ export type BitcoinStateOut = {
      * Form
      */
     form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: number;
+        };
+    };
     /**
      * Last Check
      */
@@ -3091,6 +3113,36 @@ export type UpdateBinanceConnectionResponses = {
 };
 
 export type UpdateBinanceConnectionResponse = UpdateBinanceConnectionResponses[keyof UpdateBinanceConnectionResponses];
+
+export type UpdateBitcoinGapsData = {
+    body: BitcoinGapsUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/bitcoin/gaps';
+};
+
+export type UpdateBitcoinGapsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBitcoinGapsError = UpdateBitcoinGapsErrors[keyof UpdateBitcoinGapsErrors];
+
+export type UpdateBitcoinGapsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateBitcoinGapsResponse = UpdateBitcoinGapsResponses[keyof UpdateBitcoinGapsResponses];
 
 export type DisableConnectionData = {
     body?: never;

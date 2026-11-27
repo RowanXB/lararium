@@ -97,7 +97,12 @@ from lararium.modules.finance.bitcoin.keys import (
     WalletInput,
     parse_input,
 )
-from lararium.modules.finance.bitcoin.sync import DESCRIPTOR_PURPOSE, GAPS_KEY, input_json
+from lararium.modules.finance.bitcoin.sync import (
+    DESCRIPTOR_PURPOSE,
+    GAPS_KEY,
+    input_json,
+    load_input,
+)
 from lararium.modules.finance.connector_flags import RECONCILIATION_KEYS
 from lararium.modules.finance.errors import FinanceValidationError, ReviewNotFoundError
 from lararium.modules.finance.etoro.client import GATE_MESSAGE, EtoroClient, ReadOnlyGateError
@@ -353,6 +358,11 @@ class BitcoinWalletCreate(BitcoinPreviewIn):
     gaps: dict[str, dict[str, Any]] | None = None
 
 
+class BitcoinGapsUpdate(BaseModel):
+    # As on create; replaces the stored limits in full (an empty map restores the defaults).
+    gaps: dict[str, dict[str, Any]]
+
+
 class BitcoinPreviewOut(BaseModel):
     first_receiving_address: str
     script_type: str
@@ -376,6 +386,8 @@ class BitcoinStateOut(BaseModel):
     unconfirmed: int
     # The Esplora server's host (and port): never its path or query, which may hold a key.
     server: str
+    # The gap limits set in place of the defaults, as on create; empty when none are.
+    gaps: dict[str, dict[str, int]]
 
 
 class IbkrUploadOut(BaseModel):
@@ -1547,6 +1559,42 @@ BITCOIN_CREATE_LOCK = 7_104_002
 MAX_GAP_LIMIT = 1000
 _BRANCH_NAMES: dict[int, str] = {0: "receiving", 1: "change"}
 _GAP_BRANCHES: dict[str, Branch] = {"0": 0, "1": 1}
+MAX_WALLET_KEYS = 20
+MAX_WALLET_DESCRIPTORS = 2
+MAX_WALLET_ADDRESSES = 10_000
+MAX_ENTRY_CHARS = 1000
+_WALLET_UNREADABLE = "The Bitcoin wallet's stored keys or addresses could not be read."
+
+
+def _capped(body: BitcoinPreviewIn) -> None:
+    """Refuse an input too large to be a wallet, before reading any of it."""
+    counts = (
+        (
+            body.keys,
+            MAX_WALLET_KEYS,
+            f"A wallet takes at most {MAX_WALLET_KEYS} master public keys.",
+        ),
+        (
+            body.descriptors,
+            MAX_WALLET_DESCRIPTORS,
+            f"A wallet takes at most {MAX_WALLET_DESCRIPTORS} output descriptors.",
+        ),
+        (
+            body.addresses,
+            MAX_WALLET_ADDRESSES,
+            f"An address list takes at most {MAX_WALLET_ADDRESSES:,} addresses.",
+        ),
+    )
+    for entries, most, message in counts:
+        if len(entries) > most:
+            raise _unprocessable("wallet_invalid", message)
+    # A descriptor of a large multisig wallet is several keys long (20 xpubs with origins are
+    # some 3,000 characters), so it gets Binance's key limit; a key or an address is short.
+    entries = [*body.keys, *body.addresses]
+    if any(len(e.get_secret_value()) > MAX_ENTRY_CHARS for e in entries) or any(
+        len(d.get_secret_value()) > MAX_KEY_CHARS for d in body.descriptors
+    ):
+        raise _unprocessable("wallet_invalid", "A key, descriptor or address is too long.")
 
 
 def _wallet_refused(error: FinanceValidationError) -> HTTPException:
@@ -1562,6 +1610,7 @@ def _wallet_refused(error: FinanceValidationError) -> HTTPException:
 
 def _bitcoin_wallet(body: BitcoinPreviewIn) -> tuple[WalletInput, Wallet]:
     """The validated input and the wallet it derives, locally: nothing is asked of a server."""
+    _capped(body)
     raw = WalletInput(
         body.form,
         body.electrum_type,
@@ -1646,6 +1695,12 @@ async def _bitcoin_state(
     )
     form = record.config.get("form")
     kind = record.config.get("electrum_type")
+    stored = record.config.get(GAPS_KEY)
+    gaps = {
+        source: {b: n for b, n in limits.items() if isinstance(n, int)}
+        for source, limits in (stored.items() if isinstance(stored, dict) else ())
+        if isinstance(limits, dict)
+    }
     return BitcoinStateOut(
         form=cast(WalletForm, form),
         electrum_type=cast(ElectrumType | None, kind),
@@ -1654,6 +1709,7 @@ async def _bitcoin_state(
         last_check=_last_check(record.cursor),
         unconfirmed=unconfirmed or 0,
         server=_server(settings.esplora_url),
+        gaps=gaps,
     )
 
 
@@ -1705,4 +1761,49 @@ async def create_bitcoin_connection(
         record = await set_status(ctx, created.id, "healthy")
     # After the commit, so the job finds the connection.
     await defer_sync(record.id)
+    return await _out_with_state(session, record, settings)
+
+
+def _require_bitcoin(connection: ConnectionRecord) -> None:
+    if connection.connector != "bitcoin":
+        raise ConnectionNotFoundError(str(connection.id))
+
+
+async def _stored_wallet(session: AsyncSession, master_key: bytes, connection_id: UUID) -> Wallet:
+    """The wallet the stored credential describes, with the default gap limits."""
+    try:
+        stored = await load_credential(session, master_key, connection_id, DESCRIPTOR_PURPOSE)
+        if stored is None:
+            raise ValueError
+        return build_wallet(parse_input(load_input(stored.reveal())))
+    except (ValueError, FinanceValidationError, CredentialDecryptError):
+        # The message of a FinanceValidationError may describe the input: never repeated.
+        raise _unprocessable("wallet_unreadable", _WALLET_UNREADABLE) from None
+
+
+@router.patch("/{connection_id}/bitcoin/gaps", name="update_bitcoin_gaps")
+async def update_bitcoin_gaps(
+    connection_id: UUID,
+    body: BitcoinGapsUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> ConnectionOut:
+    """Replace the wallet's gap limits (design 5.1, 6: raise one when the balance is lower than
+    the wallet's own), and sync at once with them, the six-hour wait aside."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    _require_bitcoin(await get_connection(session, connection_id))
+    gaps = _checked_gaps(await _stored_wallet(session, master_key, connection_id), body.gaps)
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "update_bitcoin_gaps", args) as ctx:
+        _require_bitcoin(await lock_connection(ctx, connection_id))
+        if gaps:
+            await update_config(ctx, connection_id, {GAPS_KEY: gaps})
+        else:
+            await update_config(ctx, connection_id, remove=[GAPS_KEY])
+        # As "Sync now" does: recorded before the job is queued.
+        await request_sync(ctx, connection_id)
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
     return await _out_with_state(session, record, settings)

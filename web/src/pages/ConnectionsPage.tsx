@@ -22,6 +22,7 @@ import {
   previewBitcoinWallet,
   syncConnectionNow,
   updateBinanceConnection,
+  updateBitcoinGaps,
   updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
@@ -665,6 +666,9 @@ function ConnectionCard({
         )}
         {connection.connector === "binance" && <UpdateBinanceKeyForm connection={connection} />}
         {connection.bitcoin && <BitcoinState state={connection.bitcoin} />}
+        {connection.bitcoin && connection.bitcoin.form !== "addresses" && (
+          <UpdateBitcoinGapsForm connection={connection} />
+        )}
         {isIbkr && <UpdateIbkrTokenForm connection={connection} />}
         {isTrading212 && <UpdateTrading212KeysForm connection={connection} />}
         {isEtoro && <UpdateEtoroKeysForm connection={connection} />}
@@ -1017,8 +1021,55 @@ function MultilineField({
   );
 }
 
-function gapLimit(text: string): number | undefined {
-  return text.trim() ? Number(text.trim()) : undefined;
+// The server's own words for a seed phrase, shown before anything is sent.
+const SEED_MESSAGE =
+  "This looks like a seed phrase. Never enter it anywhere: Lararium needs the master public key from Wallet → Information.";
+const SEED_MIN_WORDS = 12;
+const SEED_WORD = /^[a-z]{3,8}$/;
+
+// How many words the text is when it is nothing but short lowercase words, as a seed phrase
+// is (or the start of one); undefined otherwise. Such text is never sent.
+function seedWords(text: string): number | undefined {
+  const tokens = text.split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => SEED_WORD.test(token))
+    ? tokens.length
+    : undefined;
+}
+
+// The gap limits of the first descriptor (an Electrum wallet's only one), as the API takes
+// them; an empty field keeps the default.
+function firstGaps(receiving: string, change: string): Record<string, number> {
+  const branches: Record<string, number> = {};
+  if (receiving.trim()) branches["0"] = Number(receiving.trim());
+  if (change.trim()) branches["1"] = Number(change.trim());
+  return branches;
+}
+
+function GapFields({
+  receiving,
+  change,
+  onReceiving,
+  onChange,
+}: {
+  receiving: string;
+  change: string;
+  onReceiving: (value: string) => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <>
+      <TextField
+        label="Receiving gap limit"
+        type="number"
+        value={receiving}
+        onChange={onReceiving}
+      />
+      <TextField label="Change gap limit" type="number" value={change} onChange={onChange} />
+      <p className="text-sm text-muted-foreground sm:col-span-2">
+        Compare the balance with Electrum's. If it is lower, raise the gap limit.
+      </p>
+    </>
+  );
 }
 
 // The keys, descriptors and addresses are cleared as soon as they are sent, whether the request
@@ -1039,6 +1090,7 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
   const [done, setDone] = useState<string>();
 
   const entries = lines(material);
+  const seedCount = seedWords(material);
   const isMultisig = walletForm === "electrum" && electrumType === "multisig";
   const wallet: BitcoinPreviewInWritable =
     walletForm === "electrum"
@@ -1058,7 +1110,8 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
     setPreview(undefined);
     setPreviewError(undefined);
     const body = JSON.parse(walletKey) as BitcoinPreviewInWritable;
-    if (!(body.keys ?? body.descriptors ?? body.addresses)?.length) return;
+    const given = body.keys ?? body.descriptors ?? body.addresses ?? [];
+    if (given.length === 0 || seedWords(given.join("\n")) !== undefined) return;
     let current = true;
     const timer = setTimeout(() => {
       previewBitcoinWallet({ body, throwOnError: true }).then(
@@ -1079,6 +1132,9 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
     onSuccess: () => {
       setDone("Bitcoin wallet connected");
       setDisplayName("");
+      setThreshold("");
+      setReceivingGap("");
+      setChangeGap("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
       onAdded?.();
     },
@@ -1089,11 +1145,12 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
     event.preventDefault();
     setError(undefined);
     setDone(undefined);
-    const branches: Record<string, number> = {};
-    const receiving = gapLimit(receivingGap);
-    const change = gapLimit(changeGap);
-    if (receiving !== undefined) branches["0"] = receiving;
-    if (change !== undefined) branches["1"] = change;
+    if (seedCount !== undefined) {
+      setMaterial("");
+      setError(SEED_MESSAGE);
+      return;
+    }
+    const branches = firstGaps(receivingGap, changeGap);
     mutation.mutate(
       {
         display_name: displayName.trim(),
@@ -1170,6 +1227,11 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
               it is the first address your wallet shows.
             </p>
           )}
+          {seedCount !== undefined && seedCount >= SEED_MIN_WORDS && (
+            <p role="alert" className="text-sm text-destructive sm:col-span-2">
+              {SEED_MESSAGE}
+            </p>
+          )}
           {previewError && (
             <p className="text-sm text-destructive sm:col-span-2">{previewError}</p>
           )}
@@ -1177,21 +1239,12 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
             <details className="sm:col-span-2">
               <summary className="cursor-pointer text-sm">Advanced</summary>
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
-                <TextField
-                  label="Receiving gap limit"
-                  type="number"
-                  value={receivingGap}
-                  onChange={setReceivingGap}
-                />
-                <TextField
-                  label="Change gap limit"
-                  type="number"
-                  value={changeGap}
+                <GapFields
+                  receiving={receivingGap}
+                  change={changeGap}
+                  onReceiving={setReceivingGap}
                   onChange={setChangeGap}
                 />
-                <p className="text-sm text-muted-foreground sm:col-span-2">
-                  Compare the balance with Electrum's. If it is lower, raise the gap limit.
-                </p>
               </div>
             </details>
           )}
@@ -1208,12 +1261,59 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
   );
 }
 
+function UpdateBitcoinGapsForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const stored = connection.bitcoin?.gaps.d0 ?? {};
+  const [receiving, setReceiving] = useState(stored["0"]?.toString() ?? "");
+  const [change, setChange] = useState(stored["1"]?.toString() ?? "");
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+  const mutation = useMutation({
+    mutationFn: async (branches: Record<string, number>) =>
+      await updateBitcoinGaps({
+        path: { connection_id: connection.id },
+        // Every field empty restores the defaults.
+        body: { gaps: Object.keys(branches).length > 0 ? { d0: branches } : {} },
+        throwOnError: true,
+      }),
+    onSuccess: () => {
+      setDone("Gap limits saved; syncing");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+    onError: (failure) => setError(errorMessage(failure)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setDone(undefined);
+    mutation.mutate(firstGaps(receiving, change));
+  }
+  return (
+    <form aria-label="Gap limits" onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+      <p className="text-sm font-medium sm:col-span-2">Gap limits</p>
+      <GapFields
+        receiving={receiving}
+        change={change}
+        onReceiving={setReceiving}
+        onChange={setChange}
+      />
+      <div className="flex items-center gap-3 sm:col-span-2">
+        <Button type="submit" variant="outline" disabled={mutation.isPending}>
+          Save gap limits
+        </Button>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        {done && <p role="status" className="text-sm">{done}</p>}
+      </div>
+    </form>
+  );
+}
+
 function BitcoinState({ state }: { state: BitcoinStateOut }) {
   const form = WALLET_FORMS.find((option) => option.value === state.form)?.label ?? state.form;
   const kind = ELECTRUM_TYPES.find((option) => option.value === state.electrum_type)?.label;
   return (
     <div className="space-y-1 text-sm">
-      <p>{kind ? `${form}, ${kind.toLowerCase()}` : form}</p>
+      <p>{kind ? `${form}, ${kind}` : form}</p>
       <p>
         {`Addresses scanned: ${state.scanned.receiving} receiving, ${state.scanned.change} change;` +
           ` used: ${state.used.receiving} receiving, ${state.used.change} change`}
