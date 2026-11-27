@@ -113,11 +113,21 @@ UPGRADE = [
       -- The chain tip when the server last reported the transaction, for the recheck of those
       -- under 6 confirmations then; NULL once the server no longer knows it.
       seen_at_height bigint,
+      -- Set by every fetch write that inserts the row or changes its status or which inputs
+      -- and outputs are the wallet's; cleared by the normalizer in the sync's own
+      -- transaction, so a sync that fails after the fetch leaves it set.
+      pending boolean NOT NULL DEFAULT true,
+      -- Whether the row was confirmed when last normalized: its movements are posted.
+      normalized_confirmed boolean NOT NULL DEFAULT false,
       left_chain_at timestamptz,
       fee_transaction_id uuid REFERENCES finance.transactions (id) ON DELETE SET NULL,
       net_transaction_id uuid REFERENCES finance.transactions (id) ON DELETE SET NULL,
       PRIMARY KEY (connection_id, txid)
     )
+    """,
+    """
+    CREATE INDEX bitcoin_transactions_pending_idx ON finance.bitcoin_transactions (connection_id)
+      WHERE pending
     """,
     """
     CREATE TABLE finance.bitcoin_inputs (

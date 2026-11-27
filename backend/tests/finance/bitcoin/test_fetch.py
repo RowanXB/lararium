@@ -16,10 +16,20 @@ from lararium.core.commands import CommandContext
 from lararium.core.connections import ConnectionRecord, create_connection, get_connection
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.bitcoin import fetch as fetch_module
 from lararium.modules.finance.bitcoin.accounts import ACCOUNT_KEY, wallet_account
 from lararium.modules.finance.bitcoin.derive import Wallet, build_wallet
-from lararium.modules.finance.bitcoin.fetch import VERSION, FetchResult, fetch
+from lararium.modules.finance.bitcoin.fetch import (
+    MAX_TIP_JUMP,
+    TIP_KEY,
+    VERSION,
+    FetchResult,
+    TooManyAddresses,
+    fetch,
+    mark_normalized,
+)
 from lararium.modules.finance.bitcoin.keys import WalletInput, parse_input
+from lararium.modules.finance.bitcoin.parse import MalformedResponse
 from lararium.modules.finance.identifiers import assign_identifier, list_identifiers
 from lararium.modules.finance.readonly_http import HttpRetryableError
 
@@ -74,8 +84,15 @@ async def _connection(run) -> ConnectionRecord:
 
 
 async def _fetch(
-    session: AsyncSession, connection: ConnectionRecord, chain: FakeEsplora, wallet: Wallet
+    session: AsyncSession,
+    connection: ConnectionRecord,
+    chain: FakeEsplora,
+    wallet: Wallet,
+    *,
+    mark: bool = True,
 ) -> FetchResult:
+    """One fetch; with `mark`, the rest of a sync that succeeds: the normalizer marks what
+    it was given, in the sync's own session."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(chain.handler)) as http:
         ctx = SyncContext(
             esplora_url=BASE,
@@ -89,7 +106,10 @@ async def _fetch(
                 bind=session.bind, join_transaction_mode="create_savepoint"
             ),
         )
-        return await fetch(ctx, chain.client(http), wallet)
+        result = await fetch(ctx, chain.client(http), wallet)
+    if mark:
+        await mark_normalized(session, connection.id, result.changed_txids | result.left_chain)
+    return result
 
 
 async def _rows(session: AsyncSession, sql: str, **params: Any) -> list[Any]:
@@ -438,7 +458,8 @@ async def test_failed_fetch_keeps_what_it_stored(session, run, chain: FakeEsplor
 
     assert chain.asked_stats() == [receiving(i) for i in range(38)] + [change(i) for i in range(10)]
     assert chain.asked_txs() == [f"/address/{receiving(17)}/txs"]
-    assert result.changed_txids == {txid(3)}
+    # What the failed sync stored was never normalized: it is still to post.
+    assert result.changed_txids == {txid(1), txid(2), txid(3)}
 
 
 async def test_wallet_account_is_made_once(session, run, chain: FakeEsplora) -> None:
@@ -495,3 +516,170 @@ async def test_address_list_asks_each_address_once(session, run, chain: FakeEspl
     assert [(r.source, r.branch, r.address_index, r.address) for r in rows] == [
         ("list", 0, n, a) for n, a in enumerate(listed)
     ]
+
+
+async def test_unnormalized_transactions_stay_pending(session, run, chain: FakeEsplora) -> None:
+    chain.add(_receive(1, receiving(0)))
+    connection = await _connection(run)
+    wallet = build_wallet(SPEC)
+    first = await _fetch(session, connection, chain, wallet, mark=False)
+    assert first.changed_txids == {txid(1)}
+
+    # The sync failed after the fetch (in normalize, say): nothing was marked.
+    again = await _fetch(session, connection, chain, wallet)
+    assert chain.asked_txs() == [f"/address/{receiving(0)}/txs"]  # asked once, by the first
+    assert again.changed_txids == {txid(1)}
+
+    assert (await _fetch(session, connection, chain, wallet)).changed_txids == set()
+
+
+@pytest.mark.parametrize("was_confirmed", [False, True])
+async def test_replacement_is_found(session, run, chain: FakeEsplora, was_confirmed: bool) -> None:
+    """A fee bump (or a double spend) leaves every address's count as it was: the recheck's
+    404 for the replaced transaction is what makes the scan ask the histories again."""
+    chain.add(_receive(1, receiving(0), value=50_141, height=TIP - 100))
+    replaced = chain.add(
+        make_tx(
+            2,
+            [(STRANGER, 30_000), (change(0), 20_000)],
+            spends=[(receiving(0), 50_141)],
+            height=TIP if was_confirmed else None,
+        )
+    )
+    connection = await _connection(run)
+    wallet = build_wallet(SPEC)
+    await _fetch(session, connection, chain, wallet)
+
+    chain.drop(replaced["txid"])
+    bumped = chain.add(
+        make_tx(
+            3,
+            [(STRANGER, 30_000), (change(0), 19_641)],
+            spends=[(receiving(0), 50_141)],
+            height=TIP + 1,
+            fee=500,
+        )
+    )
+    chain.tip = TIP + 1
+    chain.requests.clear()
+    result = await _fetch(session, connection, chain, wallet)
+
+    assert bumped["txid"] in result.changed_txids
+    assert result.left_chain == ({replaced["txid"]} if was_confirmed else set())
+    stored = await _rows(
+        session,
+        "select txid from finance.bitcoin_transactions where connection_id = :c and confirmed",
+        c=connection.id,
+    )
+    assert bumped["txid"] in {r.txid for r in stored}
+
+
+async def test_a_history_stored_through_another_address_is_still_walked(
+    session, run, chain: FakeEsplora
+) -> None:
+    """B receives 25 payments, then T pays B from A. A sync that stores A's history (so T)
+    and fails before B's leaves T stored: B's next walk must not stop at T, since B's own last
+    history predates it, and must reach the oldest new payment on the second page."""
+    a, b = receiving(0), receiving(1)
+    chain.add(_receive(1, a, value=90_141, height=TIP - 600))
+    for n in range(30):
+        chain.add(_receive(100 + n, b, value=1_000 + n, height=TIP - 500 + n))
+    connection = await _connection(run)
+    wallet = build_wallet(SPEC)
+    await _fetch(session, connection, chain, wallet)
+
+    payments = [chain.add(_receive(200 + n, b, height=TIP + 1 + n)) for n in range(25)]
+    spend = chain.add(make_tx(300, [(b, 90_000)], spends=[(a, 90_141)], height=TIP + 26))
+    chain.tip = TIP + 30
+    chain.requests.clear()
+    chain.fail_after_stats = 1  # A's stats and history, then B's stats fails
+    with pytest.raises(HttpRetryableError):
+        await _fetch(session, connection, chain, wallet)
+    assert spend["txid"] in {
+        r.txid
+        for r in await _rows(
+            session,
+            "select txid from finance.bitcoin_transactions where connection_id = :c",
+            c=connection.id,
+        )
+    }
+
+    chain.fail_after_stats = None
+    chain.tip = TIP + 60  # T is now deep, but not by B's last history
+    result = await _fetch(session, connection, chain, wallet)
+
+    assert payments[0]["txid"] in result.changed_txids
+    assert {p["txid"] for p in payments} | {spend["txid"]} <= result.changed_txids
+
+
+def _all_used(chain: FakeEsplora) -> None:
+    """The server says every address has one transaction (and lists none)."""
+    real = chain.stats
+
+    def stats(address: str) -> dict[str, Any]:
+        found = real(address)
+        found["chain_stats"]["tx_count"] = max(found["chain_stats"]["tx_count"], 1)
+        return found
+
+    chain.stats = stats  # type: ignore[method-assign]
+
+
+async def test_endless_scan_is_capped(session, run, chain: FakeEsplora, monkeypatch) -> None:
+    monkeypatch.setattr(fetch_module, "MAX_INDEX", 5)
+    _all_used(chain)
+    connection = await _connection(run)
+
+    with pytest.raises(TooManyAddresses) as caught:
+        await _fetch(session, connection, chain, build_wallet(SPEC))
+
+    assert str(caught.value) == "The wallet has more addresses than Lararium scans."
+    assert chain.asked_stats() == [receiving(i) for i in range(5)]
+
+
+async def test_history_longer_than_its_count_is_refused(session, run, chain: FakeEsplora) -> None:
+    for n in range(3):
+        chain.add(_receive(1 + n, receiving(0)))
+    real = chain.stats
+
+    def understated(address: str) -> dict[str, Any]:
+        found = real(address)
+        found["chain_stats"]["tx_count"] = min(found["chain_stats"]["tx_count"], 2)
+        return found
+
+    chain.stats = understated  # type: ignore[method-assign]
+    connection = await _connection(run)
+
+    with pytest.raises(MalformedResponse):
+        await _fetch(session, connection, chain, build_wallet(SPEC))
+
+    stored = await _rows(
+        session,
+        "select txid from finance.bitcoin_transactions where connection_id = :c",
+        c=connection.id,
+    )
+    assert stored == []
+
+
+async def test_tip_below_a_stored_block_is_refused(session, run, chain: FakeEsplora) -> None:
+    chain.add(_receive(1, receiving(0), height=TIP))
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+
+    chain.tip = TIP - 1
+    with pytest.raises(MalformedResponse):
+        await _fetch(session, connection, chain, build_wallet(SPEC))
+
+
+async def test_tip_too_far_on_is_refused(session, run, chain: FakeEsplora) -> None:
+    chain.add(_receive(1, receiving(0)))
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert (await get_connection(session, connection.id)).config[TIP_KEY] == TIP
+
+    chain.tip = TIP + MAX_TIP_JUMP + 1
+    with pytest.raises(MalformedResponse):
+        await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert (await get_connection(session, connection.id)).config[TIP_KEY] == TIP
+
+    chain.tip = TIP + MAX_TIP_JUMP
+    assert (await _fetch(session, connection, chain, build_wallet(SPEC))).tip == chain.tip

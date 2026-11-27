@@ -1,21 +1,36 @@
 """Fetching a Bitcoin wallet from an Esplora server (design 5.2, 5.3).
 
-One fetch: the chain tip; the scan, each branch from index 0 until `gap` addresses in a row
-have never had a transaction (an address list asks each address once), with each changed
-address's history asked as soon as its stats show the change; the recheck of transactions that
-had fewer than 6 confirmations when last reported; then the wallet's account and identifiers.
+One fetch: the chain tip, checked against what is stored; the recheck of transactions that had
+fewer than 6 confirmations when last reported; the scan, each branch from index 0 until `gap`
+addresses in a row have never had a transaction (an address list asks each address once), with
+each changed address's history asked as soon as its stats show the change; then the wallet's
+account and identifiers.
 
 Everything fetched commits as it goes, in short transactions of its own through
 `ctx.session_factory`, so a sync that fails keeps it. What survives is the history: the next
 sync still asks every address's stats from index 0, but asks a history only where the reported
 count (chain + mempool) differs from the one its last complete history held
 (`bitcoin_addresses.history_tx_count`). An address's history commits whole, with that count,
-so a history cut short is asked again in full. No request, raw record request, audit entry or
-error names an address: a record's request is the endpoint template and the address's place
-in the wallet.
+so a history cut short is asked again in full. A transaction the recheck finds gone or back in
+the mempool clears that count on the wallet's addresses it touches, so the scan that follows
+asks their histories again and finds what replaced it (a fee bump, a double spend), though
+every count is unchanged.
+
+What still needs normalizing is kept in the database too: every write that inserts a
+transaction or changes its status or which of its inputs and outputs are the wallet's sets
+`bitcoin_transactions.pending` in the same transaction, and `FetchResult` is read from the
+pending rows. The normalizer calls `mark_normalized` in the sync's own transaction, so a sync
+that fails anywhere after the fetch leaves them pending for the next one.
+
+The caller must not hold the connection's row lock (`lock_connection`) in `ctx.command` when
+it calls `fetch`: the fetch writes the connection's config, and `wallet_account` locks the row,
+each in a session of its own, which would wait on that lock for ever.
+
+No request, raw record request, audit entry or error names an address: a record's request is
+the endpoint template and the address's place in the wallet.
 """
 
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -27,7 +42,9 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext, command_context
+from lararium.core.connections import get_connection, update_config
 from lararium.core.connectors import SyncContext
+from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.bitcoin.accounts import wallet_account
@@ -56,6 +73,11 @@ VERSION = "bitcoin-sync-1"
 SAFE_CONFIRMATIONS = 6
 # Confirmed transactions per history page (Esplora's `/txs` and `/txs/chain/:txid`).
 CHAIN_PAGE = 25
+# Bounds on what a misbehaving server can make a sync do: the addresses scanned per branch,
+# and how far the tip may move on from the last sync's (about a week of blocks).
+MAX_INDEX = 100_000
+MAX_TIP_JUMP = 1_000
+TIP_KEY = "tip_height"
 
 TIP = "/blocks/tip/height"
 STATS = "/address/:address"
@@ -64,16 +86,23 @@ TXS_AFTER = "/address/:address/txs/chain/:last_seen_txid"
 STATUS = "/tx/:txid/status"
 
 
+class TooManyAddresses(DisplayableError):
+    """The gap rule did not end within `MAX_INDEX` addresses of a branch."""
+
+    def __init__(self) -> None:
+        super().__init__("The wallet has more addresses than Lararium scans.")
+
+
 @dataclass
 class FetchResult:
     tip: int
     # Every address scanned this sync, with its stats. Addresses are the owner's: never
     # logged, so they stay out of the repr.
     scanned: dict[str, AddressStats] = field(repr=False)
-    # Stored transactions that are new or changed (their status, or which of their inputs and
-    # outputs are the wallet's), less those in `left_chain`.
+    # The pending transactions (module docstring), less those in `left_chain`: new or changed
+    # since they were last normalized, by this fetch or one whose sync failed later.
     changed_txids: set[str]
-    # Transactions stored as confirmed that are now unconfirmed or unknown to the server.
+    # The pending transactions that were confirmed when last normalized and are not now.
     left_chain: set[str]
     # Scanned addresses registered to another account, which keeps them (design 5.3).
     conflicts: list[str] = field(repr=False)
@@ -164,12 +193,15 @@ _TX_FIELDS = (
 _UPSERT_TX = text(
     f"""
     insert into finance.bitcoin_transactions
-      (connection_id, txid, {", ".join(_TX_FIELDS)}, first_seen_at, last_seen_at, seen_at_height)
-    values (:c, :txid, {", ".join(f":{name}" for name in _TX_FIELDS)}, :seen, :seen, :tip)
+      (connection_id, txid, {", ".join(_TX_FIELDS)}, first_seen_at, last_seen_at, seen_at_height,
+       pending)
+    values (:c, :txid, {", ".join(f":{name}" for name in _TX_FIELDS)}, :seen, :seen, :tip,
+            :pending)
     on conflict (connection_id, txid) do update set
       {", ".join(f"{name} = excluded.{name}" for name in _TX_FIELDS)},
       last_seen_at = excluded.last_seen_at,
-      seen_at_height = excluded.seen_at_height
+      seen_at_height = excluded.seen_at_height,
+      pending = finance.bitcoin_transactions.pending or excluded.pending
     """
 )
 # An input or output is the wallet's when its address is one the wallet has scanned; a row
@@ -236,6 +268,45 @@ _FIX_OWN = [
         ("outputs", "scriptpubkey_address"),
     )
 ]
+_MARK_PENDING = text(
+    "update finance.bitcoin_transactions set pending = true where connection_id = :c and txid in :t"
+).bindparams(bindparam("t", expanding=True))
+# The wallet's addresses a transaction touches forget their last history's count, so the scan
+# asks those histories again.
+_FORGET_HISTORIES = text(
+    """
+    update finance.bitcoin_addresses set history_tx_count = null
+    where connection_id = :c and address in (
+      select prevout_scriptpubkey_address from finance.bitcoin_inputs
+      where connection_id = :c and txid = :t
+      union
+      select scriptpubkey_address from finance.bitcoin_outputs
+      where connection_id = :c and txid = :t)
+    """
+)
+
+
+def _depth(tip: int, height: int) -> int:
+    """Confirmations of a block at `height` when the tip is `tip`; never negative."""
+    return max(tip - height + 1, 0)
+
+
+async def mark_normalized(
+    session: AsyncSession, connection_id: UUID, txids: Collection[str]
+) -> None:
+    """Clear `pending` on the transactions the normalizer has posted (or voided), recording
+    whether each was confirmed then. Call it in the sync's own transaction: a rollback leaves
+    them pending for the next sync."""
+    if not txids:
+        return
+    await session.execute(
+        text(
+            "update finance.bitcoin_transactions"
+            " set pending = false, normalized_confirmed = (confirmed is true)"
+            " where connection_id = :c and txid in :t"
+        ).bindparams(bindparam("t", expanding=True)),
+        {"c": connection_id, "t": sorted(set(txids))},
+    )
 
 
 def _input_row(index: int, vin: Input) -> dict[str, object]:
@@ -265,15 +336,11 @@ class _Fetch:
         self.client = client
         self.wallet = wallet
         self.tip = 0
-        # From before this sync: each address's last complete history (count, tip), and the
+        # From before the scan: each address's last complete history (count, tip), and the
         # transactions stored as confirmed.
         self.histories: dict[str, tuple[int | None, int | None]] = {}
         self.stored_confirmed: set[str] = set()
-        # Transactions a history reported this sync, so their status is fresh.
-        self.refreshed: set[str] = set()
         self.scanned: dict[str, AddressStats] = {}
-        self.changed: set[str] = set()
-        self.left: set[str] = set()
         self.unknown: set[str] = set()
 
     @asynccontextmanager
@@ -305,11 +372,9 @@ class _Fetch:
         )
 
     async def run(self) -> FetchResult:
+        await self._tip()
+        await self._recheck()
         await self._load()
-        self.tip = await self.client.tip_height()
-        async with self._command("tip") as cmd:
-            # The body is the bare number, so this is the record of it exactly.
-            await self._raw(cmd, "tip", {"endpoint": TIP}, record_json(Decimal(self.tip)))
         for source in self.wallet.sources:
             if not source.gaps:
                 # An address list: no branches to derive, each address asked once.
@@ -319,21 +384,48 @@ class _Fetch:
             for branch, gap in sorted(source.gaps.items()):
                 index, unused = 0, 0
                 while unused < gap:
+                    if index >= MAX_INDEX:
+                        raise TooManyAddresses
                     used = await self._address(_Position(source.name, branch, index))
                     unused = 0 if used else unused + 1
                     index += 1
-        await self._recheck()
         await self._own()
         account_id = await wallet_account(self.ctx, await self._opened_on())
         conflicts = await self._register(account_id)
+        changed, left = await self._pending()
         return FetchResult(
             tip=self.tip,
             scanned=self.scanned,
-            changed_txids=self.changed - self.left,
-            left_chain=self.left,
+            changed_txids=changed,
+            left_chain=left,
             conflicts=conflicts,
             unknown=self.unknown,
         )
+
+    async def _tip(self) -> None:
+        """The chain tip, refused when it is below a block a stored transaction is in, or
+        further on from the last sync's than the chain could have grown."""
+        tip = await self.client.tip_height()
+        connection_id = self.ctx.connection.id
+        async with self.ctx.session_factory() as session:
+            highest: int | None = await session.scalar(
+                text(
+                    "select max(block_height) from finance.bitcoin_transactions"
+                    " where connection_id = :c and confirmed is true"
+                ),
+                {"c": connection_id},
+            )
+            previous = (await get_connection(session, connection_id)).config.get(TIP_KEY)
+        if highest is not None and tip < highest:
+            raise MalformedResponse("tip height", "the body")
+        if isinstance(previous, int) and not isinstance(previous, bool):
+            if tip > previous + MAX_TIP_JUMP:
+                raise MalformedResponse("tip height", "the body")
+        self.tip = tip
+        async with self._command("tip") as cmd:
+            # The body is the bare number, so this is the record of it exactly.
+            await self._raw(cmd, "tip", {"endpoint": TIP}, record_json(Decimal(tip)))
+            await update_config(cmd, connection_id, {TIP_KEY: tip})
 
     async def _load(self) -> None:
         params = {"c": self.ctx.connection.id}
@@ -409,7 +501,7 @@ class _Fetch:
             )
         stored_count, stored_height = self.histories.get(address, (None, None))
         if total != (stored_count or 0):
-            await self._history(position, address, total, stored_height)
+            await self._history(position, address, stats, stored_height)
         return total > 0
 
     def _reaches_stored(self, txs: Sequence[Tx], stored_height: int | None) -> bool:
@@ -421,21 +513,33 @@ class _Fetch:
         return any(
             tx.status.block_height is not None
             and tx.txid in self.stored_confirmed
-            and stored_height - tx.status.block_height + 1 >= SAFE_CONFIRMATIONS
+            and _depth(stored_height, tx.status.block_height) >= SAFE_CONFIRMATIONS
             for tx in txs
         )
 
     async def _history(
-        self, position: _Position, address: str, total: int, stored_height: int | None
+        self, position: _Position, address: str, stats: AddressStats, stored_height: int | None
     ) -> None:
         """The address's history, newest first, until it reaches what was stored or ends;
-        stored whole, with the count it now holds, in one transaction."""
+        stored whole, with the count it holds, in one transaction.
+
+        More transactions than the stats count is a server misbehaving (a walk that would
+        never end) and fails the sync. The count is recorded only when the history is known
+        whole: the walk's own count when it ran to the end, the stats' when it reached what
+        was stored, none when the first page left out mempool transactions (Esplora lists 50
+        at most), so the next sync asks again."""
+        total = stats.chain.tx_count + stats.mempool.tx_count
         txs, body = await self.client.txs(address)
         pages = [_Page(position.request(TXS), body, txs)]
         seen = {tx.txid for tx in txs}
+        if len(seen) > total:
+            raise MalformedResponse("txs", "the body")
+        truncated = sum(1 for tx in txs if not tx.status.confirmed) < stats.mempool.tx_count
+        ended = False
         while not self._reaches_stored(txs, stored_height):
             confirmed = [tx for tx in txs if tx.status.confirmed]
             if len(confirmed) < CHAIN_PAGE:
+                ended = True
                 break
             after = confirmed[-1].txid
             txs, body = await self.client.txs(address, after)
@@ -443,7 +547,10 @@ class _Fetch:
                 # A page repeating or out of order would walk forever or miss transactions.
                 raise MalformedResponse("txs", "the body")
             seen |= {tx.txid for tx in txs}
+            if len(seen) > total:
+                raise MalformedResponse("txs", "the body")
             pages.append(_Page(position.request(TXS_AFTER, last_seen_txid=after), body, txs))
+        count = None if truncated else len(seen) if ended else total
         seen_at = _now()
         async with self._command("history", position.args(self.ctx.connection.id)) as cmd:
             for page in pages:
@@ -456,9 +563,8 @@ class _Fetch:
                     " set history_tx_count = :n, history_height = :tip"
                     " where connection_id = :c and address = :a"
                 ),
-                {"n": total, "tip": self.tip, "c": self.ctx.connection.id, "a": address},
+                {"n": count, "tip": self.tip, "c": self.ctx.connection.id, "a": address},
             )
-        self.refreshed |= seen
 
     async def _store_txs(self, session: AsyncSession, txs: Sequence[Tx], seen_at: datetime) -> None:
         if not txs:
@@ -478,14 +584,15 @@ class _Fetch:
         for tx in unique.values():
             values = (tx.version, tx.locktime, tx.size, tx.weight, tx.sigops, tx.fee)
             values += _status_row(tx.status)
-            before = stored.get(tx.txid)
-            if before is not None and before[6] is True and not tx.status.confirmed:
-                self.left.add(tx.txid)
-            elif before != values:
-                self.changed.add(tx.txid)
             await session.execute(
                 _UPSERT_TX,
-                {"c": c, "txid": tx.txid, "seen": seen_at, "tip": self.tip}
+                {
+                    "c": c,
+                    "txid": tx.txid,
+                    "seen": seen_at,
+                    "tip": self.tip,
+                    "pending": stored.get(tx.txid) != values,
+                }
                 | dict(zip(_TX_FIELDS, values, strict=True)),
             )
             if tx.vin:
@@ -516,7 +623,8 @@ class _Fetch:
 
     async def _recheck(self) -> None:
         """Ask again for every stored transaction that had fewer than 6 confirmations when
-        the server last reported it, unless a history reported it this sync."""
+        the server last reported it. One gone, or back in the mempool, makes the scan ask the
+        histories of the wallet's addresses it touches (module docstring)."""
         async with self.ctx.session_factory() as session:
             rows = (
                 await session.execute(
@@ -524,15 +632,14 @@ class _Fetch:
                         "select txid, confirmed, block_height, block_hash, block_time"
                         " from finance.bitcoin_transactions"
                         " where connection_id = :c and seen_at_height is not null"
-                        " and (confirmed is not true or seen_at_height - block_height + 1 < :n)"
+                        " and (confirmed is not true"
+                        " or greatest(seen_at_height - block_height + 1, 0) < :n)"
                         " order by txid"
                     ),
                     {"c": self.ctx.connection.id, "n": SAFE_CONFIRMATIONS},
                 )
             ).all()
         for row in rows:
-            if row.txid in self.refreshed:
-                continue
             status, body = await self.client.status(row.txid)
             seen_at = _now()
             if body is not None:
@@ -541,6 +648,7 @@ class _Fetch:
                 "connection_id": str(self.ctx.connection.id),
                 "txid": row.txid,
             }
+            ids = {"c": self.ctx.connection.id, "t": row.txid}
             async with self._command("status", args) as cmd:
                 # A status does not name its transaction, and two in one block read the
                 # same: the record carries the one asked for, and null for a 404.
@@ -556,7 +664,8 @@ class _Fetch:
                     sql = (
                         "update finance.bitcoin_transactions set confirmed = false,"
                         " block_height = null, block_hash = null, block_time = null,"
-                        " seen_at_height = null where connection_id = :c and txid = :t"
+                        " seen_at_height = null, pending = pending or :changed"
+                        " where connection_id = :c and txid = :t"
                     )
                     params: dict[str, object] = {}
                 else:
@@ -567,7 +676,8 @@ class _Fetch:
                     sql = (
                         "update finance.bitcoin_transactions set confirmed = :confirmed,"
                         " block_height = :height, block_hash = :hash, block_time = :time,"
-                        " last_seen_at = :seen, seen_at_height = :tip"
+                        " last_seen_at = :seen, seen_at_height = :tip,"
+                        " pending = pending or :changed"
                         " where connection_id = :c and txid = :t"
                     )
                     params = {
@@ -578,21 +688,24 @@ class _Fetch:
                         "seen": seen_at,
                         "tip": self.tip,
                     }
-                await cmd.session.execute(
-                    text(sql), {"c": self.ctx.connection.id, "t": row.txid} | params
-                )
-            if row.confirmed is True and not after[0]:
-                self.left.add(row.txid)
-            elif after != before:
-                self.changed.add(row.txid)
+                params["changed"] = after != before
+                await cmd.session.execute(text(sql), ids | params)
+                if status is None or (row.confirmed is True and not status.confirmed):
+                    await cmd.session.execute(_FORGET_HISTORIES, ids)
 
     async def _own(self) -> None:
         """Mark the inputs and outputs whose address the wallet now has, or no longer has, as
-        stored before that address was scanned (a raised gap limit finds later addresses)."""
+        stored before that address was scanned (a raised gap limit finds later addresses);
+        their transactions become pending."""
         async with self._command("own") as cmd:
+            flipped: set[str] = set()
             for statement in _FIX_OWN:
                 found = await cmd.session.execute(statement, {"c": self.ctx.connection.id})
-                self.changed |= set(found.scalars())
+                flipped |= set(found.scalars())
+            if flipped:
+                await cmd.session.execute(
+                    _MARK_PENDING, {"c": self.ctx.connection.id, "t": sorted(flipped)}
+                )
 
     async def _opened_on(self) -> date | None:
         async with self.ctx.session_factory() as session:
@@ -617,7 +730,25 @@ class _Fetch:
                     conflicts.append(address)
         return conflicts
 
+    async def _pending(self) -> tuple[set[str], set[str]]:
+        """(changed, left the chain) among the pending transactions."""
+        async with self.ctx.session_factory() as session:
+            rows = await session.execute(
+                text(
+                    "select txid, confirmed is true as confirmed, normalized_confirmed"
+                    " from finance.bitcoin_transactions where connection_id = :c and pending"
+                ),
+                {"c": self.ctx.connection.id},
+            )
+            changed: set[str] = set()
+            left: set[str] = set()
+            for row in rows:
+                (left if row.normalized_confirmed and not row.confirmed else changed).add(row.txid)
+        return changed, left
+
 
 async def fetch(ctx: SyncContext, client: EsploraClient, wallet: Wallet) -> FetchResult:
-    """Scan the wallet, store what changed, and register its addresses (module docstring)."""
+    """Scan the wallet, store what changed, and register its addresses (module docstring:
+    call it without the connection's row lock held, and call `mark_normalized` on what the
+    normalizer posts)."""
     return await _Fetch(ctx, client, wallet).run()
