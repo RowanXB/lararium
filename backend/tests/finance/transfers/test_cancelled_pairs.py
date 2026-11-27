@@ -133,3 +133,31 @@ async def test_a_pair_with_a_void_side_is_no_pair(
 
     assert await contra_account(session, request.id, bank.account.id) == ids.unassigned
     await assert_consistent(session)
+
+
+async def test_a_request_paired_as_a_transfer_leaves_it_when_cancelled(
+    session, ids, registered, connector_tx, post, heal
+) -> None:
+    a, a_id = await registered("A", A_IDENTIFIER)
+    c, c_id = await registered("C", C_IDENTIFIER)
+    request = await connector_tx(a, "-100", external_id="request_1", identifier_id=c_id)
+    receipt = await connector_tx(c, "100", external_id="in_1", identifier_id=a_id)
+    await heal()
+    assert await list_transfers(session)  # the request was a transfer's leg
+
+    cancellation = await post(a, "cancel_1", "100", WHEN + timedelta(minutes=3), request.id)
+    await post(a, "request_1", "-100", WHEN)
+    await heal()
+
+    paired = {request.id, cancellation.id}
+    live = [t for t in await list_transfers(session) if t.status != "rejected"]
+    for transfer in live:
+        assert not paired & {transfer.out_transaction_id, transfer.in_transaction_id}
+    # The receipt names A, an own account: it stays an identified side, awaiting its out leg.
+    (waiting,) = [t for t in live if receipt.id in {t.out_transaction_id, t.in_transaction_id}]
+    assert (waiting.in_transaction_id, waiting.out_transaction_id) == (receipt.id, None)
+    assert waiting.status == "awaiting"
+    assert await contra_account(session, receipt.id, c.account.id) == ids.in_transit
+    assert await contra_account(session, request.id, a.account.id) == ids.in_transit
+    assert await contra_account(session, cancellation.id, a.account.id) == ids.in_transit
+    await assert_consistent(session)
