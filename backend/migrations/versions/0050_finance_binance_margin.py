@@ -8,8 +8,8 @@ table for what an answer says beside its records. A margin transfer keeps the mo
 linked to (rule 2) and a borrow or repay the `type` it was asked for. The statements were
 emitted from the catalogue (`tests/finance/binance/emit_ddl.py`) and are frozen here.
 
-Revision ID: 0049
-Revises: 0048
+Revision ID: 0050
+Revises: 0049
 Create Date: 2026-11-27
 """
 
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0049"
-down_revision: str | None = "0048"
+revision: str = "0050"
+down_revision: str | None = "0049"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

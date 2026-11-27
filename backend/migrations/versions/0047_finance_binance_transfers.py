@@ -9,8 +9,8 @@ name it), the wallet a dust conversion was asked for (`accountType`), and the id
 or withdrawal a travel-rule row describes. The statements were emitted from the catalogue
 (`tests/finance/binance/emit_ddl.py`) and are frozen here.
 
-Revision ID: 0046
-Revises: 0045
+Revision ID: 0047
+Revises: 0046
 Create Date: 2026-11-27
 """
 
@@ -18,8 +18,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0046"
-down_revision: str | None = "0045"
+revision: str = "0047"
+down_revision: str | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
