@@ -590,6 +590,8 @@ covers. Interest rows import as ordinary rows until their `Action` is known.
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
   the transfer pairs by itself. With a Cash ISA added as well, transfers name no counterpart and
+  pair by amount or by hand. With only an Invest (or a Stocks ISA) and a Cash ISA, no
+  counterpart is named either: a Cash ISA has no Trading 212 id to name, so such transfers also
   pair by amount or by hand. Lararium counts only the accounts added to it: a Cash ISA you hold
   but haven't added leaves the two-account rule in force, so a move to it would be named as the
   other account's. A newly added family account takes effect at each Trading 212 connection's next
