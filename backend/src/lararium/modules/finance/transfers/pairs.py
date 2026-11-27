@@ -16,11 +16,14 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from lararium.core.settings_store import get_timezone
+from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.ledger import PostingInput
 from lararium.modules.finance.system_accounts import SystemAccountKey
@@ -70,6 +73,10 @@ class Pairable:
     # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
     # one, though its source doesn't say (account type catalog design §8.2).
     funded_by_transfer: bool = False
+    # Its occurred_at is a real instant (contra.eligible_records' timed): a connector's
+    # record, or an imported row its file gives to the second. Only the coverage gate reads
+    # it (_gate_day); a row giving only its date is stamped 00:00.
+    timed: bool = False
 
     @property
     def sends(self) -> bool:
@@ -206,10 +213,10 @@ def card_tier(r: Pairable, c: Pairable, window: timedelta) -> Tier | None:
     Both must be connectors' records. This rests on an assumption, not a check: that a
     connector's record carries a real time of day (Monzo's and Trading 212's do, to the
     second). An imported row from a file giving dates only is stamped 00:00 (its time_unit
-    is display only, never read in matching), and a payment just after midnight would
-    otherwise pair with it by coincidence, so such rows are paired by hand. An account
-    whose connector posts date-only times (00:00), registered as a holder, could still
-    pair by that coincidence at midnight."""
+    decides nothing here; only the coverage gate reads it, _gate_day), and a payment just
+    after midnight would otherwise pair with it by coincidence, so such rows are paired by
+    hand. An account whose connector posts date-only times (00:00), registered as a holder,
+    could still pair by that coincidence at midnight."""
     if r.account_id == c.account_id or r.instrument_id != c.instrument_id:
         return None
     if r.sends == c.sends or r.quantity != -c.quantity:
@@ -423,10 +430,13 @@ class Known:
     """What the ledger knows of manual accounts' own rows (design §5.8, "An unrelated row
     can stand in"): per account and instrument, the first day committed imports list in
     full (M2's complete_from). A connected account's history is known from its
-    connection, so it isn't in `manual`."""
+    connection, so it isn't in `manual`. `zone`: the owner's time zone, which a timed
+    payment's day is taken in (_gate_day); None, as in a Known built by hand, relaxes
+    nothing."""
 
     manual: frozenset[UUID]
     first_full_day: Mapping[tuple[UUID, UUID], date]
+    zone: ZoneInfo | None = None
 
     def holds_from(self, record: Pairable, earliest: date) -> bool:
         """Whether the ledger would hold the record's account's own row on a day from
@@ -478,7 +488,7 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
     for account_id, instrument_id, first in listing:
         key = (account_id, instrument_id)
         first_full_day[key] = min(first, first_full_day.get(key, first))
-    return Known(manual, first_full_day)
+    return Known(manual, first_full_day, await get_timezone(session))
 
 
 @dataclass(frozen=True)
@@ -562,6 +572,7 @@ async def _load_records(
         e.c.names_account,
         e.c.holders,
         e.c.funded_by_transfer,
+        e.c.timed,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -583,6 +594,7 @@ async def _load_records(
             names_account=row.names_account,
             holders=frozenset(row.holders or ()),
             funded_by_transfer=row.funded_by_transfer,
+            timed=row.timed,
             fiat=bool(row.fiat),
             fee=(
                 None
@@ -619,13 +631,39 @@ class _Timeline:
         return self._records[bisect_left(self._dates, earliest) : bisect_right(self._dates, latest)]
 
 
+def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, known: Known) -> date:
+    """The first day the coverage gate asks the ledger to hold `other`, the counterpart
+    found by amount and date of `record` (the side that names the other's account): the
+    start of record's window (counterpart_bounds). A receipt does not come before its
+    payment (account type catalog design §8.3 item 4): when record sends at a real instant
+    (timed) and other is an imported row timed to the second, received no earlier than that
+    instant less the near window, it is that instant's day in the owner's time zone, if
+    later. The window starts a day early only because a date-only statement can date a
+    payment after the money left, which such a row can't. This only ever lets the gate take
+    a pair: the window and tiers are unchanged, and nothing else reads `timed`."""
+    earliest = counterpart_bounds(record, settings)[0]
+    sent = record.occurred_at - settings.near_window
+    if (
+        known.zone is not None
+        and record.sends
+        and record.timed
+        # An imported row (or one previewed as it, preview_match), not a connector's record.
+        and other.timed
+        and other.source[0] != "connection"
+        and other.occurred_at >= sent
+    ):
+        return max(earliest, local_date(sent, known.zone))
+    return earliest
+
+
 def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
     nobody) is taken only if the identified record's window doesn't start before the days
     the counterpart's account's imports list (Known.holds_from): there the real row may be
-    inside the opening, and an unrelated one stand in for it for good."""
+    inside the opening, and an unrelated one stand in for it for good. A timed receipt is
+    asked only from its payment's day (_gate_day)."""
     identified, other = (s, c) if s.identified else (c, s)
-    return known.holds_from(other, counterpart_bounds(identified, settings)[0])
+    return known.holds_from(other, _gate_day(identified, other, settings, known))
 
 
 def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
@@ -633,7 +671,7 @@ def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Kno
     other's account: its counterpart, found by amount and date, is taken only where the
     ledger would hold the real one."""
     w, other = (s, c) if _names_weakly(s, c) else (c, s)
-    return known.holds_from(other, counterpart_bounds(w, settings)[0])
+    return known.holds_from(other, _gate_day(w, other, settings, known))
 
 
 def _registry_edges(

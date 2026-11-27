@@ -171,7 +171,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     is there, pairs.card_tier),
     bank_transfer, funded_by_transfer (its account's type lists bank transfer among the ways
     it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
-    bank_transfer stays as the source gave it), source_kind, source_ref.
+    bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
+    connector's record, or one whose statement import row gives its time to the second;
+    only the coverage gate reads it, pairs._gate_day), source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -390,6 +392,15 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .subquery("card_merchants")
     )
     source_kind, source_ref_ = source_columns(t)
+    timed_row = aliased(models.ImportRow, name="timed_row")
+    timed = or_(
+        source_kind == "connection",
+        exists().where(
+            timed_row.transaction_id == t.id,
+            timed_row.kind == "statement",
+            timed_row.time_unit == "second",
+        ),
+    )
     return (
         select(
             t.id.label("transaction_id"),
@@ -413,6 +424,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             merchants.c.holders,
             t.bank_transfer,
             funded_by_transfer.label("funded_by_transfer"),
+            timed.label("timed"),
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
@@ -447,6 +459,7 @@ _OWN_RECORDS = Table(
     Column("holders", ARRAY(Uuid)),
     Column("bank_transfer", Boolean, nullable=False),
     Column("funded_by_transfer", Boolean, nullable=False),
+    Column("timed", Boolean, nullable=False),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
     prefixes=["TEMPORARY"],

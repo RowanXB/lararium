@@ -349,13 +349,15 @@ async def record_import_rows(
     *,
     keys: list[str] | None = None,
     details: Sequence[RowDetails] | None = None,
+    time_unit: str = "day",
 ) -> None:
     """Record posted transactions as the rows of a committed statement import (M2) of their
     account, listing `complete` in full. Matching takes a counterpart found by amount and
     date only on days imports list in full (design §5.8), so a row posted as an import
     is recorded as one. `keys`: the rows' dedupe keys, which a row imported again keeps
     (its reference, source kind "import"); by default one per transaction. `details`: what
-    each row prints of its counterparty's bank account; by default nothing."""
+    each row prints of its counterparty's bank account; by default nothing. `time_unit`:
+    what the file gave the rows' times to; by default a date only, as a QIF gives."""
     r, t, p = models.ImportRow, models.Transaction, models.Posting
     batch_id = await insert_batch(session, run, account_id, complete)
     if keys is None:
@@ -381,7 +383,7 @@ async def record_import_rows(
                 status="committed",
                 booking_date=posted.booking_date,
                 occurred_at=posted.occurred_at,
-                time_unit="day",  # a QIF gives dates only
+                time_unit=time_unit,
                 description=posted.description,
                 quantity=posted.quantity,
                 instrument_id=posted.instrument_id,
@@ -442,7 +444,8 @@ def statement_row(
     and record it as a committed import row printing `details`. `identifier_id`: the bank
     account the posted transaction names, which a row naming one does; `reference`, its
     payment reference. `key`: the row's dedupe key (record_import_rows), its reference; by
-    default one from the transaction."""
+    default one from the transaction. `at`: the row's time, which its file gives to
+    `time_unit`; by default `day`'s midnight, a date only."""
 
     async def _post(
         account: AccountRecord,
@@ -455,6 +458,8 @@ def statement_row(
         bank_transfer: bool = True,
         complete: tuple[date, date] = IMPORTED,
         key: str | None = None,
+        at: datetime | None = None,
+        time_unit: str = "day",
     ) -> UUID:
         contra = await transfer_contra(
             session,
@@ -468,7 +473,7 @@ def statement_row(
         row = await run(
             post_transaction,
             TransactionInput(
-                occurred_at=datetime.combine(day, time(), UTC),
+                occurred_at=datetime.combine(day, time(), UTC) if at is None else at,
                 description="Faster payment",
                 origin="manual",
                 postings=[
@@ -486,6 +491,7 @@ def statement_row(
             complete,
             keys=None if key is None else [key],
             details=[details or RowDetails()],
+            time_unit=time_unit,
         )
         return row.id
 

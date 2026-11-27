@@ -877,7 +877,12 @@ account, and not of a card type, is taken by amount and date unless the transfer
 before the first day the account's imports list in full (an export may cut its last day
 short, and one whose rows carry a `started_at`, as Revolut's CSV does, its first day too):
 before it, the real row may be inside the account's opening, never to be imported, and an
-unrelated payment of the same amount must not stand in for it.
+unrelated payment of the same amount must not stand in for it. When the record naming the account
+is a payment, its window starts the day before it, since a statement giving only dates can date
+a payment after the money left. A row whose file gives its time to the second, received no
+earlier than two minutes before a payment whose time is real too (a connected account's, or
+another such row), is checked from the payment's own day in your time zone instead: a receipt
+does not come before its payment. The window itself, and so the candidates, stay as they are.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on
