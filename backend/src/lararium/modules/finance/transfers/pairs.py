@@ -835,8 +835,8 @@ class PairRelation:
         """The record's candidates the coverage gate alone refused (`gated`): rows on a
         manual account, found by amount and date, on days no upload lists in full. For an
         identified record they are on the account it names. Account type catalog design
-        §8.3 item 3: its transfer then waits for review (not_listed_in_full), with no
-        placeholder beside a row that may be its counterpart."""
+        §8.3 item 3: they hold it back (held_back), and its transfer's review, for whatever
+        reason (not_listed_in_full if none other), lists them as its candidates."""
         return self.gated.get(record_id, frozenset())
 
     def held_back(self, record_id: UUID) -> bool:

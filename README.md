@@ -312,10 +312,14 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     fixed order, as any pairing gives the same balances. Where one side's rows name no account,
     they are found by amount and date, like a single one: a payment from someone else of that
     amount on that day can be taken among them until your own arrives, and then they go here.
+    When one of them is a row on a manual account refused for this transfer or another (see
+    *Not listed in full*), it is listed too, and no inferred transaction is posted beside them.
   - *Amount differs*: the two records name each other's accounts but their amounts differ.
     The page has no **Pair** for them: when both are money records, pair them through the API
     (`POST /api/v1/finance/transfers/{id}/pair` with `{"transaction_id": "<other>"}`; see
-    *Records that name no account* below), else Reject the transfer if it isn't one.
+    *Records that name no account* below), else Reject the transfer if it isn't one. A row of
+    the same amount on a manual account refused as under *Not listed in full* is listed too,
+    with **Pair**, and no inferred transaction is posted beside it.
   - *Not listed in full*: a row on a manual account could be the other side, but it lies in
     the transfer's window before the first day that account's uploads list in full, so it isn't
     taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
@@ -899,7 +903,8 @@ before its payment. (An OFX row is booked on the date its own time is written in
 that zone; this check can then still start a day late after a payment made just after midnight in
 summer.) An imported payment never counts, even one timed to the second: its time may be when
 the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
-candidates, stay as they are.
+candidates, stay as they are. A row the check refuses still holds its transfer back, and any
+other whose candidate it is: neither pairs, and no inferred transaction is posted beside it.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on

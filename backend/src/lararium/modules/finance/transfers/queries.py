@@ -64,12 +64,14 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 # (matched), one whose other side predates that account's history (before_history: the
 # connected account's first record, or the manual account's first snapshot), or the
 # owner's word that it is not a transfer (rejected). A transfer of a manual other side
-# awaits too, with no placeholder, while it is not_listed_in_full.
+# awaits too, with no placeholder, while a row the coverage gate alone refused holds it
+# back (PairRelation.held_back), whatever its review reason.
 TransferStatus = Literal["awaiting", "inferred", "matched", "before_history", "rejected"]
 # Why the rule could not decide, apart from the status ("needs review"): several
 # candidates; a mutually identified one of another amount; or a row on the manual other
 # side that may be the counterpart, refused only because no upload lists its days in full
-# (PairRelation.unlisted, account type catalog design §8.3 item 3).
+# (PairRelation.unlisted, account type catalog design §8.3 item 3). A refused row is listed
+# on a review for any reason, and holds back any record whose candidate it is too.
 ReviewReason = Literal["several_candidates", "amount_differs", "not_listed_in_full"]
 # The statuses of a transfer that still misses one own record.
 OPEN_STATUSES: tuple[TransferStatus, ...] = ("awaiting", "inferred", "before_history")
