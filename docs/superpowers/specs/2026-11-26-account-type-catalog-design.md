@@ -1,7 +1,7 @@
 # Design: an account type catalog, with the Trading 212 Cash ISA as its first new type
 
 - Date: 2026-11-26
-- Status: approved 2026-11-26; Part A implemented
+- Status: approved 2026-11-26; implemented
 - Builds on: `main` at `75c78ff`; the M2 import design (the format catalog); the M6 design (`2026-11-22-etoro-trading212-design.md`, §5.12); the transfer evidence design (`2026-11-21-transfer-evidence-design.md`)
 - Replaces: the uncommitted draft `2026-11-26-trading212-cash-isa-design.md` of another session, whose findings and owner decisions are folded in here (§7 to §9)
 
@@ -285,4 +285,5 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
 
 1. Check the two Trading 212 accounts carry their type, and that the Add account page lists every type.
 2. Add the Cash ISA from the Add account page and upload its History CSV from the account's first day.
-3. After Part B: register the shared payee account's references for the three Trading 212 accounts; check the first Cash ISA deposit pairs with its Monzo payment, and that the two earlier Invest and Stocks ISA deposits pair or stay as they are for a stated reason.
+3. Give accounts made before account types existed their type with `PATCH /api/v1/finance/accounts/{id}` and `{"type_key": ...}` (as the README's Importing statements section says). After deploy each Trading 212 connection replays once at its next sync (the normaliser version is bumped).
+4. Register the shared payee account's references for the three Trading 212 accounts; check the first Cash ISA deposit pairs with its Monzo payment, and that the two earlier Invest and Stocks ISA deposits pair or stay as they are for a stated reason.

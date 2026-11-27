@@ -572,8 +572,28 @@ covers. Interest rows import as ordinary rows until their `Action` is known.
   identifiers](#registering-identifiers)). When two candidates fit (two accounts receiving
   the same amount close together, say), the transfer waits under Needs attention on the
   Transfers page: **Pair** the right one.
-- **Invest ↔ ISA.** With exactly two Trading 212 connections, one Invest and one ISA, a
-  transfer between them pairs by itself.
+- **Bank top-ups to a payee shared by several accounts.** If your bank pays Trading 212 Invest,
+  Stocks ISA and Cash ISA through one bank account (one sort code and account number), the
+  payment names which of them only by its payment reference. Register the references once, in the
+  API only, with `POST /api/v1/finance/accounts/identifiers/references` and
+  `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
+  "reference": "<payment reference>"}]}` (placeholders; use what your banking app shows, the sort code as
+  in 11-22-33 or 112233). One call replaces the identifier's whole
+  set of references, and an empty `references` list removes them. References match ignoring case and
+  surrounding spaces. A bank account carries either an account (registered as in [Registering
+  identifiers](#registering-identifiers)) or references, never both. Lararium then goes through the
+  whole history: a bank transfer to that payee with a matching reference names that account, and
+  bank top-ups to Trading 212 Invest, Stocks ISA and Cash ISA pair on their own. Card top-ups
+  still pair by the card rule above, and card evidence comes first: a deposit that has a
+  card-payment candidate is not paired as a bank transfer by its account's funding.
+- **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
+  you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
+  accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
+  the transfer pairs by itself. With a Cash ISA added as well, transfers name no counterpart and
+  pair by amount or by hand. Lararium counts only the accounts added to it: a Cash ISA you hold
+  but haven't added leaves the two-account rule in force, so a move to it would be named as the
+  other account's. A newly added family account takes effect at each Trading 212 connection's next
+  sync, which replays its transfers.
 
 ### Warnings
 

@@ -474,7 +474,23 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 - **银行转账入金**在 Trading 212 一侧不带任何账户信息，所以当你银行那笔付款是唯一候选时，按金额和
   日期配对（见[登记标识](#登记标识)）。有两个候选都符合时（比如两个账户在相近的时间收到同样金额），
   这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
-- **Invest ↔ ISA。** 恰好有两个 Trading 212 连接、一个 Invest 一个 ISA 时，两者之间的转账会自动配对。
+- **多个账户共用的收款银行账户。** 如果你的银行用同一个银行账户（同一组 sort code 和账号）向
+  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款只能靠付款参考（reference）说明付给
+  哪一个。把参考登记一次，目前只能通过 API 操作：`POST /api/v1/finance/accounts/identifiers/references`
+  和 `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
+  "reference": "<payment reference>"}]}`（占位符；填你的银行 app 显示的内容，sort code 写成 11-22-33 或
+  112233 都行）。一次调用会替换该标识的全部参考，`references` 为空列表则
+  移除它们。参考的匹配忽略大小写和首尾空格。一个银行账户要么登记到一个账户上（做法见
+  [登记标识](#登记标识)），要么带参考，不能两者兼有。Lararium 随后会检查全部历史：付给该收款账户、
+  参考相符的银行转账会指明对应账户，银行付到 Trading 212 Invest、Stocks ISA 和 Cash ISA 的充值
+  会自动配对。卡充值仍按上面的卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的
+  入金方式当作银行转账来配对。
+- **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
+  状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
+  一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
+  对手账户，按金额配对或手动配对。Lararium 只统计添加到它里面的账户：你持有但没添加的 Cash ISA，
+  仍按两个账户的规则处理，转到它的那笔会被当成转到另一个账户。新添加的同系列账户在每个
+  Trading 212 连接的下一次同步时生效（届时会重放其转账）。
 
 ### Cash ISA（没有 API）
 
