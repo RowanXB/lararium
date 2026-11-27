@@ -101,6 +101,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -134,6 +145,10 @@
               }
             ],
             "title": "Closed On"
+          },
+          "excluded_from_reports": {
+            "title": "Excluded From Reports",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -252,6 +267,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -269,22 +295,250 @@
           "status",
           "opened_on",
           "closed_on",
-          "system"
+          "system",
+          "excluded_from_reports",
+          "type_key"
         ],
         "title": "AccountOut",
         "type": "object"
       },
       "AccountRename": {
+        "description": "Rename the account, set its type (one with no API), or both; type_key null clears it.",
         "properties": {
           "name": {
-            "title": "Name",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
+          }
+        },
+        "title": "AccountRename",
+        "type": "object"
+      },
+      "AccountReportingUpdate": {
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "title": "AccountReportingUpdate",
+        "type": "object"
+      },
+      "AccountShapeOut": {
+        "properties": {
+          "balance_mode": {
+            "enum": [
+              "transactions",
+              "snapshots",
+              "hybrid"
+            ],
+            "title": "Balance Mode",
+            "type": "string"
+          },
+          "ledger_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asset",
+                  "liability",
+                  "income",
+                  "expense",
+                  "equity"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger Type"
+          },
+          "subtype": {
+            "enum": [
+              "bank",
+              "savings_pot",
+              "broker",
+              "exchange",
+              "wallet",
+              "in_transit",
+              "manual_asset",
+              "other"
+            ],
+            "title": "Subtype",
+            "type": "string"
+          },
+          "tax_wrapper": {
+            "enum": [
+              "none",
+              "isa",
+              "sipp",
+              "lisa",
+              "gia"
+            ],
+            "title": "Tax Wrapper",
             "type": "string"
           }
         },
         "required": [
-          "name"
+          "ledger_type",
+          "subtype",
+          "tax_wrapper",
+          "balance_mode"
         ],
-        "title": "AccountRename",
+        "title": "AccountShapeOut",
+        "type": "object"
+      },
+      "AccountTypeApiOut": {
+        "properties": {
+          "config": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "title": "Config",
+            "type": "object"
+          },
+          "connector": {
+            "title": "Connector",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector",
+          "config"
+        ],
+        "title": "AccountTypeApiOut",
+        "type": "object"
+      },
+      "AccountTypeFileOut": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "recommended": {
+            "title": "Recommended",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "label",
+          "format",
+          "recommended",
+          "config"
+        ],
+        "title": "AccountTypeFileOut",
+        "type": "object"
+      },
+      "AccountTypeOut": {
+        "properties": {
+          "api": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountTypeApiOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/AccountTypeFileOut"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "funding": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Funding",
+            "type": "array"
+          },
+          "institution": {
+            "title": "Institution",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "shape": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountShapeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "institution",
+          "label",
+          "name",
+          "shape",
+          "api",
+          "files",
+          "funding",
+          "family"
+        ],
+        "title": "AccountTypeOut",
         "type": "object"
       },
       "AmountFormat": {
@@ -384,6 +638,20 @@
         "title": "Body_stage_import",
         "type": "object"
       },
+      "Body_upload_etoro_statement": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_etoro_statement",
+        "type": "object"
+      },
       "Body_upload_ibkr_statement": {
         "properties": {
           "file": {
@@ -398,6 +666,20 @@
         "title": "Body_upload_ibkr_statement",
         "type": "object"
       },
+      "Body_upload_trading212_export": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_trading212_export",
+        "type": "object"
+      },
       "CandidateOut": {
         "properties": {
           "account_id": {
@@ -407,6 +689,10 @@
           },
           "account_name": {
             "title": "Account Name",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
             "type": "string"
           },
           "description": {
@@ -443,11 +729,110 @@
           "account_id",
           "account_name",
           "quantity",
+          "currency",
           "occurred_at",
           "description",
           "reason"
         ],
         "title": "CandidateOut",
+        "type": "object"
+      },
+      "CardMerchantDismiss": {
+        "properties": {
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "merchant_id"
+        ],
+        "title": "CardMerchantDismiss",
+        "type": "object"
+      },
+      "CardMerchantRegister": {
+        "description": "The own accounts card payments to a Monzo merchant go into; none removes it.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "merchant_id",
+          "account_ids"
+        ],
+        "title": "CardMerchantRegister",
+        "type": "object"
+      },
+      "CardMerchantSuggestionOut": {
+        "description": "A card merchant whose website is on a connected platform's domain, offering the\nplatform's accounts; registering it is register_card_merchant.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "incoming": {
+            "title": "Incoming",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "card_merchant",
+            "title": "Kind",
+            "type": "string"
+          },
+          "latest": {
+            "format": "date",
+            "title": "Latest",
+            "type": "string"
+          },
+          "merchant_id": {
+            "title": "Merchant Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "outgoing": {
+            "title": "Outgoing",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "merchant_id",
+          "name",
+          "host",
+          "outgoing",
+          "incoming",
+          "latest",
+          "account_ids"
+        ],
+        "title": "CardMerchantSuggestionOut",
         "type": "object"
       },
       "CardTypes": {
@@ -458,6 +843,201 @@
         },
         "maxItems": 50,
         "type": "array"
+      },
+      "CashFlowCategoryOut": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowCategoryOut",
+        "type": "object"
+      },
+      "CashFlowHiddenAccountOut": {
+        "description": "Money moved between an account left out of reports and those still in them.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "moved_in": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved In",
+            "type": "string"
+          },
+          "moved_out": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved Out",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "name",
+          "moved_in",
+          "moved_out"
+        ],
+        "title": "CashFlowHiddenAccountOut",
+        "type": "object"
+      },
+      "CashFlowOut": {
+        "description": "Income and spending in the reporting currency; spending is positive.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowCategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "hidden_accounts": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowHiddenAccountOut"
+            },
+            "title": "Hidden Accounts",
+            "type": "array"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "net": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Net",
+            "type": "string"
+          },
+          "payees": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPayeeOut"
+            },
+            "title": "Payees",
+            "type": "array"
+          },
+          "periods": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPeriodOut"
+            },
+            "title": "Periods",
+            "type": "array"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "bucket",
+          "income",
+          "spending",
+          "net",
+          "missing_count",
+          "periods",
+          "categories",
+          "payees",
+          "hidden_accounts"
+        ],
+        "title": "CashFlowOut",
+        "type": "object"
+      },
+      "CashFlowPayeeOut": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "spending"
+        ],
+        "title": "CashFlowPayeeOut",
+        "type": "object"
+      },
+      "CashFlowPeriodOut": {
+        "properties": {
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowPeriodOut",
+        "type": "object"
       },
       "ConnectionOut": {
         "properties": {
@@ -928,6 +1508,16 @@
               }
             ]
           },
+          "period_from_filename": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeriodPattern"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "row_order": {
             "default": "oldest_first",
             "enum": [
@@ -990,6 +1580,78 @@
           "latin-1"
         ],
         "type": "string"
+      },
+      "EtoroConnectionIn": {
+        "properties": {
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "public_api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Public Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "user_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "User Key",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "public_api_key",
+          "user_key",
+          "display_name"
+        ],
+        "title": "EtoroConnectionIn",
+        "type": "object"
+      },
+      "EtoroConnectionUpdate": {
+        "properties": {
+          "public_api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Public Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "user_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "User Key",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "public_api_key",
+          "user_key"
+        ],
+        "title": "EtoroConnectionUpdate",
+        "type": "object"
+      },
+      "EtoroUploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "EtoroUploadOut",
+        "type": "object"
       },
       "FinanceSettingsOut": {
         "properties": {
@@ -1323,6 +1985,14 @@
             ],
             "title": "Dismissed At"
           },
+          "holder_account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Holder Account Ids",
+            "type": "array"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -1331,10 +2001,20 @@
           "kind": {
             "enum": [
               "uk_bank_account",
-              "ibkr_account"
+              "ibkr_account",
+              "trading212_account",
+              "etoro_account",
+              "card_merchant"
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/IdentifierReference"
+            },
+            "title": "References",
+            "type": "array"
           },
           "sort_code": {
             "anyOf": [
@@ -1359,11 +2039,55 @@
           "sort_code",
           "account_number",
           "account_id",
+          "holder_account_ids",
+          "references",
           "dismissed_at",
           "created_by",
           "created_at"
         ],
         "title": "IdentifierOut",
+        "type": "object"
+      },
+      "IdentifierReference": {
+        "description": "One own account behind a shared payee bank account, told apart by the payment\nreference it is paid with (stored trimmed and upper-cased).",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "reference"
+        ],
+        "title": "IdentifierReference",
+        "type": "object"
+      },
+      "IdentifierReferencesRegister": {
+        "description": "The own accounts payments to a shared payee bank account go into, by reference; none\nremoves them.",
+        "properties": {
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/IdentifierReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "references"
+        ],
+        "title": "IdentifierReferencesRegister",
         "type": "object"
       },
       "ImportBatchDetailOut": {
@@ -2744,6 +3468,7 @@
               "ticker_mic",
               "ibkr_conid",
               "etoro_id",
+              "trading212_ticker",
               "chain_contract",
               "coingecko"
             ],
@@ -2845,6 +3570,34 @@
         ],
         "title": "InstrumentUpdate",
         "type": "object"
+      },
+      "JSONValue": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "MainAccountUpdate": {
         "properties": {
@@ -2972,9 +3725,28 @@
             "title": "Booking Date",
             "type": "string"
           },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
           "description": {
             "title": "Description",
             "type": "string"
+          },
+          "differs": {
+            "anyOf": [
+              {
+                "enum": [
+                  "currency",
+                  "amount"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Differs"
           },
           "occurred_at": {
             "format": "date-time",
@@ -2997,6 +3769,7 @@
           "account_id",
           "account_name",
           "quantity",
+          "currency",
           "occurred_at",
           "booking_date",
           "description"
@@ -3050,6 +3823,11 @@
         ],
         "title": "PdfProfileConfig",
         "type": "object"
+      },
+      "PeriodPattern": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
       },
       "PostingCreate": {
         "properties": {
@@ -3337,6 +4115,125 @@
         "title": "QifProfileConfig",
         "type": "object"
       },
+      "ReviewOut": {
+        "description": "A value two sources of one event disagree on (design \u00a75.7): open, or resolved by the\nowner taking one of them.",
+        "properties": {
+          "api_value": {
+            "title": "Api Value",
+            "type": "string"
+          },
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "event_key": {
+            "title": "Event Key",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "opened_at": {
+            "format": "date-time",
+            "title": "Opened At",
+            "type": "string"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "enum": [
+                  "api",
+                  "statement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "resolved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By"
+          },
+          "statement_value": {
+            "title": "Statement Value",
+            "type": "string"
+          },
+          "transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
+          }
+        },
+        "required": [
+          "id",
+          "connection_id",
+          "transaction_id",
+          "event_key",
+          "field",
+          "api_value",
+          "statement_value",
+          "opened_at",
+          "resolved_at",
+          "resolution",
+          "resolved_by"
+        ],
+        "title": "ReviewOut",
+        "type": "object"
+      },
+      "ReviewResolve": {
+        "description": "Which source's value the owner takes for a review item.",
+        "properties": {
+          "take": {
+            "enum": [
+              "api",
+              "statement"
+            ],
+            "title": "Take",
+            "type": "string"
+          }
+        },
+        "required": [
+          "take"
+        ],
+        "title": "ReviewResolve",
+        "type": "object"
+      },
       "SettingsOut": {
         "properties": {
           "timezone": {
@@ -3520,6 +4417,87 @@
       },
       "TimezoneName": {
         "type": "string"
+      },
+      "Trading212ConnectionIn": {
+        "properties": {
+          "account_kind": {
+            "enum": [
+              "invest",
+              "isa"
+            ],
+            "title": "Account Kind",
+            "type": "string"
+          },
+          "api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Secret",
+            "type": "string",
+            "writeOnly": true
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_key",
+          "api_secret",
+          "display_name",
+          "account_kind"
+        ],
+        "title": "Trading212ConnectionIn",
+        "type": "object"
+      },
+      "Trading212ConnectionUpdate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "format": "password",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Api Secret",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "api_key",
+          "api_secret"
+        ],
+        "title": "Trading212ConnectionUpdate",
+        "type": "object"
+      },
+      "Trading212UploadOut": {
+        "properties": {
+          "raw_records": {
+            "title": "Raw Records",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_records"
+        ],
+        "title": "Trading212UploadOut",
+        "type": "object"
       },
       "TransactionCreate": {
         "properties": {
@@ -3727,7 +4705,8 @@
               {
                 "enum": [
                   "several_candidates",
-                  "amount_differs"
+                  "amount_differs",
+                  "not_listed_in_full"
                 ],
                 "type": "string"
               },
@@ -3911,6 +4890,47 @@
         ]
       }
     },
+    "/api/v1/connections/etoro": {
+      "post": {
+        "operationId": "create_etoro_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EtoroConnectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Etoro Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/ibkr": {
       "post": {
         "operationId": "create_ibkr_connection",
@@ -4013,6 +5033,47 @@
         ]
       }
     },
+    "/api/v1/connections/trading212": {
+      "post": {
+        "operationId": "create_trading212_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Trading212ConnectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Trading212 Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/{connection_id}/authorize": {
       "post": {
         "operationId": "authorize_connection",
@@ -4094,6 +5155,114 @@
           }
         },
         "summary": "Disable Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/etoro": {
+      "put": {
+        "description": "Replace the two keys. The sync's gate checks that they are read-only and belong to\nthe same user; a disabled connection is checked first, as a create is (the read-only\ngate), and is healthy again.",
+        "operationId": "update_etoro_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EtoroConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Etoro Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/etoro-statement": {
+      "post": {
+        "description": "Ingest an eToro account statement (xlsx) the owner downloaded, normalise it with the\nAPI's records and heal the transfers, in one command (design \u00a75.3). Its file is written\nlast, just before the commit: a refused or failed upload leaves none behind.",
+        "operationId": "upload_etoro_statement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_etoro_statement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EtoroUploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Etoro Statement",
         "tags": [
           "connections"
         ]
@@ -4207,6 +5376,111 @@
         ]
       }
     },
+    "/api/v1/connections/{connection_id}/reviews": {
+      "get": {
+        "description": "The connection's review items (design \u00a75.7): open ones first, newest first. Only an\neToro or a Trading 212 connection has them.",
+        "operationId": "list_source_reviews",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewOut"
+                  },
+                  "title": "Response List Source Reviews",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Source Reviews",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/reviews/{review_id}/resolve": {
+      "post": {
+        "description": "Take one source's value, recorded as the owner's decision, and normalise at once so the\ndecision posts now, then heal the transfers the new postings touch.",
+        "operationId": "resolve_source_review",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewResolve"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Source Review",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/{connection_id}/sync": {
       "post": {
         "operationId": "sync_connection_now",
@@ -4247,6 +5521,140 @@
         "summary": "Sync Connection Now",
         "tags": [
           "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/trading212": {
+      "put": {
+        "description": "Replace the key and secret. The sync checks that they belong to the same account; a\ndisabled connection is checked first, as a create is, and is healthy again.",
+        "operationId": "update_trading212_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Trading212ConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Trading212 Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/trading212-export": {
+      "post": {
+        "description": "Ingest a Trading 212 CSV export the owner downloaded, normalise it with the API's\nrecords and heal the transfers, in one command. Optional: it adds what the API lacks.\nIts file is written last, just before the commit: a refused or failed upload leaves none\nbehind.",
+        "operationId": "upload_trading212_export",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_trading212_export"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trading212UploadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Trading212 Export",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/finance/account-types": {
+      "get": {
+        "description": "The account types the owner can pick: where an account's data comes from and how it\nposts. Only a type with no API creates an account here; one with an API is connected.",
+        "operationId": "list_account_types",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountTypeOut"
+                  },
+                  "title": "Response List Account Types",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Account Types",
+        "tags": [
+          "finance"
         ]
       }
     },
@@ -4314,8 +5722,93 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/identifiers/card-merchants": {
+      "post": {
+        "description": "Register a Monzo card merchant as paying into these own accounts (a suggestion, too),\nreplacing the accounts it had; none removes the registration. Every record naming it is\nmatched again; Monzo's next sync names it on the payments made before.",
+        "operationId": "register_card_merchant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardMerchantRegister"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Card Merchant",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/accounts/identifiers/references": {
+      "post": {
+        "description": "Register the own accounts a shared payee bank account pays into, each by the payment\nreference it is paid with, replacing the ones it had; none removes them. The bank account\nmust be registered to no account. Every record naming it is matched again.",
+        "operationId": "register_identifier_references",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierReferencesRegister"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Identifier References",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}": {
       "patch": {
+        "description": "Rename the account, set its type, or both, in one command: if either is refused,\nneither happens. Setting or clearing the type needs an account that can take imports (a\nconnector owns a connected account's); a type must have no API and agree with the\naccount's shape. type_key null clears it.",
         "operationId": "rename_account",
         "parameters": [
           {
@@ -4423,6 +5916,7 @@
     },
     "/api/v1/finance/accounts/{account_id}/close": {
       "post": {
+        "description": "Close the account; it stays a holder of the card merchants it held.",
         "operationId": "close_account",
         "parameters": [
           {
@@ -4674,6 +6168,60 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/{account_id}/reporting": {
+      "post": {
+        "description": "Leave the account out of net worth, holdings and cash flow, or put it back.",
+        "operationId": "set_account_reporting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountReportingUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Account Reporting",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}/snapshots": {
       "post": {
         "operationId": "record_snapshot",
@@ -4727,6 +6275,89 @@
         ]
       }
     },
+    "/api/v1/finance/cash-flow": {
+      "get": {
+        "description": "Income and spending by period, category and payee, without the accounts left out of\nreports; defaults to the 365 days up to and including today.",
+        "operationId": "get_cash_flow",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashFlowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Cash Flow",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/fx-rates": {
       "post": {
         "operationId": "record_fx_rate",
@@ -4763,7 +6394,7 @@
     },
     "/api/v1/finance/holdings": {
       "get": {
-        "description": "Holdings valued in the reporting currency; the date defaults to today.",
+        "description": "Holdings valued in the reporting currency, without the accounts left out of reports\nunless `all_accounts`; the date defaults to today.",
         "operationId": "get_holdings",
         "parameters": [
           {
@@ -4781,6 +6412,16 @@
                 }
               ],
               "title": "Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_accounts",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Accounts",
+              "type": "boolean"
             }
           }
         ],
@@ -5337,7 +6978,7 @@
     },
     "/api/v1/finance/net-worth": {
       "get": {
-        "description": "Daily net worth; defaults to the 365 days up to and including today.",
+        "description": "Daily net worth, without the accounts left out of reports; defaults to the 365 days up\nto and including today.",
         "operationId": "get_net_worth",
         "parameters": [
           {
@@ -5544,7 +7185,7 @@
     },
     "/api/v1/finance/transactions/{transaction_id}/pair": {
       "post": {
-        "description": "The owner says two own records are one transfer, whether or not either is in one.\nUndone by unpairing the resulting transfer.",
+        "description": "The owner says two own records are one transfer, whether or not either is in one:\nin one instrument of opposite, equal amounts, or two currencies of opposite sign that\ndiffer in currency or in amount (the receiving side not larger). Undone by unpairing\nthe resulting transfer.",
         "operationId": "pair_transactions",
         "parameters": [
           {
@@ -5598,7 +7239,7 @@
     },
     "/api/v1/finance/transactions/{transaction_id}/pair-candidates": {
       "get": {
-        "description": "The own records the record could be paired with as one transfer: on another account,\nof the opposite and equal amount, nearest booking date first.",
+        "description": "The own records the record could be paired with as one transfer, on another account:\nthose of the opposite and equal amount first, then those in a currency whose side\ndiffers (`differs`: in currency or in amount) booked within 7 days; each part nearest\nbooking date first, at most 20 in all.",
         "operationId": "list_transaction_pair_candidates",
         "parameters": [
           {
@@ -5690,7 +7331,7 @@
     },
     "/api/v1/finance/transfer-suggestions": {
       "get": {
-        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first. Registering one is add_account_identifier.",
+        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first (registering one is add_account_identifier); then card merchants on a\nconnected platform's domain (kind card_merchant; registering one is\nregister_card_merchant).",
         "operationId": "list_transfer_suggestions",
         "responses": {
           "200": {
@@ -5698,7 +7339,14 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/SuggestionOut"
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/SuggestionOut"
+                      },
+                      {
+                        "$ref": "#/components/schemas/CardMerchantSuggestionOut"
+                      }
+                    ]
                   },
                   "title": "Response List Transfer Suggestions",
                   "type": "array"
@@ -5709,6 +7357,41 @@
           }
         },
         "summary": "List Transfer Suggestions",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transfer-suggestions/card-merchants/dismiss": {
+      "post": {
+        "description": "The owner says the card merchant pays into none of their accounts.",
+        "operationId": "dismiss_card_merchant_suggestion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardMerchantDismiss"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Card Merchant Suggestion",
         "tags": [
           "finance"
         ]
@@ -5865,7 +7548,7 @@
     },
     "/api/v1/finance/transfers/{transfer_id}/pair": {
       "post": {
-        "description": "The owner picks the transfer's missing side among its candidates of the same amount,\nor one they unpaired from it.",
+        "description": "The owner picks the transfer's missing side among its candidates, or one they\nunpaired from it. Two currencies may differ in currency or in amount (settled by a\nconversion, or the difference a fee); anything else must be of the same instrument and\namount.",
         "operationId": "pair_transfer",
         "parameters": [
           {

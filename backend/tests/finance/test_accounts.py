@@ -15,6 +15,7 @@ from lararium.modules.finance.accounts import (
     list_accounts,
     rename_account,
     set_source_details,
+    set_type_key,
 )
 from lararium.modules.finance.errors import AccountAlreadyClosedError, AccountNotFoundError
 
@@ -165,3 +166,35 @@ async def test_set_source_details_keeps_unknown_fields(session, run, make_accoun
 async def test_set_source_details_unknown_account(run) -> None:
     with pytest.raises(AccountNotFoundError):
         await run(set_source_details, uuid.uuid4(), SourceDetails())
+
+
+async def test_create_account_stores_its_type_key(session, make_account) -> None:
+    acc = await make_account(type_key="trading212.cash_isa")
+    assert acc.type_key == "trading212.cash_isa"
+    assert (await get_account(session, acc.id)).type_key == "trading212.cash_isa"
+    assert (await make_account(name="Plain")).type_key is None
+
+
+async def test_set_type_key_changes_it_once(session, run, make_account) -> None:
+    acc = await make_account()
+    before = await _updated_events(session)
+    assert await run(set_type_key, acc.id, "trading212.invest") is True
+    assert (await get_account(session, acc.id)).type_key == "trading212.invest"
+    assert await _updated_events(session) == before + 1
+    assert await run(set_type_key, acc.id, "trading212.invest") is False
+    assert await _updated_events(session) == before + 1
+    changes = await session.scalar(
+        text(
+            "select changes -> :k from core.audit_log"
+            " where changes -> :k is not null order by id desc limit 1"
+        ).bindparams(k=f"account:{acc.id}")
+    )
+    assert changes is not None
+    assert changes["type_key"] == "trading212.invest"
+    assert await run(set_type_key, acc.id, None) is True
+    assert (await get_account(session, acc.id)).type_key is None
+
+
+async def test_set_type_key_unknown_account(run) -> None:
+    with pytest.raises(AccountNotFoundError):
+        await run(set_type_key, uuid.uuid4(), "trading212.invest")

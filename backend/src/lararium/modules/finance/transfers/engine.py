@@ -3,7 +3,7 @@ identified record, and keeping placeholders and settlements in step with the rec
 mirror."""
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -25,11 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
-    identifier_account,
+    get_identifier,
+    named_account,
+    register_card_merchant,
+    register_references,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -50,6 +54,7 @@ from lararium.modules.finance.system_accounts import (
 )
 from lararium.modules.finance.transfers.contra import (
     DERIVED_ORIGINS,
+    LegFee,
     OwnRecord,
     SourceRef,
     bound_id,
@@ -63,11 +68,13 @@ from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.pairs import (
     Pairable,
     PairRelation,
+    conversion_postings,
+    leg_fees,
     pair_relation,
+    settles,
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
-    ReviewReason,
     TransferRecord,
     TransferStatus,
     before_history,
@@ -213,20 +220,37 @@ async def _link(ctx: CommandContext, transfer_id: UUID, record: OwnRecord) -> No
     )
 
 
-async def _link_records(ctx: CommandContext, record: OwnRecord, partner: OwnRecord) -> None:
-    """A matched transfer of two own records neither of which was a leg."""
+async def _link_records(
+    ctx: CommandContext,
+    record: OwnRecord,
+    partner: OwnRecord,
+    conversion: list[PostingInput] | None,
+) -> None:
+    """A matched transfer of two own records neither of which was a leg, in the sent
+    instrument and amount. Of two whose sides differ (in currency, or in amount: only the
+    owner pairs those), `conversion` holds the postings between them (_conversion), which
+    are its settlement."""
     sent, received = (record, partner) if record.role == "out" else (partner, record)
+    settlement_id = None
+    if conversion is not None:
+        description = (
+            "Currency conversion"
+            if sent.instrument_id != received.instrument_id
+            else "Transfer fee"
+        )
+        settlement_id = await _post_conversion(ctx, sent, conversion, description)
     tr = models.Transfer
     transfer_id = await ctx.session.scalar(
         insert(tr)
         .values(
             from_account_id=sent.account_id,
             to_account_id=received.account_id,
-            instrument_id=record.instrument_id,
-            amount=record.amount,
+            instrument_id=sent.instrument_id,
+            amount=sent.amount,
             status="matched",
             out_transaction_id=sent.id,
             in_transaction_id=received.id,
+            settlement_transaction_id=settlement_id,
             opened_at=min(sent.occurred_at, received.occurred_at),
             matched_at=func.now(),
         )
@@ -303,21 +327,64 @@ async def _post_settlement(
     )
 
 
+def _conversion(
+    record: OwnRecord, partner: OwnRecord, fees: Sequence[LegFee], system: _System
+) -> list[PostingInput] | None:
+    """The postings of the settlement between two own records whose sides differ
+    (pairs.conversion_postings), as loaded now; None when they no longer fit one (one
+    instrument and equal amounts, a larger receiving side, or a fee that doesn't fit:
+    changed since the pair relation took them)."""
+    sent, received = (record, partner) if record.role == "out" else (partner, record)
+    if sent.instrument_id == received.instrument_id and sent.amount == received.amount:
+        return None
+    return conversion_postings(
+        (sent.instrument_id, sent.amount),
+        (received.instrument_id, received.amount),
+        fees,
+        in_transit=system.in_transit,
+        unassigned=system.unassigned,
+    )
+
+
+async def _post_conversion(
+    ctx: CommandContext, sending: OwnRecord, postings: list[PostingInput], description: str
+) -> UUID:
+    """Post a transfer's settlement between sides that differ (eToro design §5.12,
+    _conversion: a conversion between two currencies, or a fee in one) on In transit, dated
+    as the sending record, booked by rule: derived, like a placeholder, so it goes when the
+    transfer does and is posted again when it is matched again."""
+    derived = await post_transaction(
+        ctx,
+        TransactionInput(
+            occurred_at=sending.occurred_at,
+            booking_date=sending.booking_date,
+            description=description,
+            status="booked",
+            origin="rule",
+            postings=postings,
+        ),
+    )
+    return derived.id
+
+
 async def _open(
     ctx: CommandContext,
     record: OwnRecord,
     counterpart: AccountRecord,
     system: _System,
     settings: TransferSettings,
-    review_reason: ReviewReason | None,
+    relation: PairRelation,
     previous: TransferRecord | None,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart is already held by that account's history (a manual hybrid account's first
     snapshot, or the days a manual transactions account's imports list or open with,
-    manual_predates; a connected account's first record, before_history); else inferred
-    with a placeholder when the counterpart is manual, or awaiting the counterpart's own
-    record when it is connected.
+    manual_predates; a connected account's first record, before_history); else, when the
+    counterpart is manual, inferred with a placeholder, or awaiting with none while the
+    record has a candidate of the same amount there (PairRelation.candidate_on: a
+    placeholder beside it would count the money twice if it is the real row, account type
+    catalog design §8.3 item 3); else awaiting the counterpart's own record when it is
+    connected. Its review reason is the one `relation` gives (PairRelation.review_reason).
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -332,7 +399,7 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
-        else:
+        elif not relation.candidate_on(record.id, counterpart.id):
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
             status = "inferred"
     elif await session.scalar(
@@ -349,6 +416,7 @@ async def _open(
     ):
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"
+    review_reason = relation.review_reason(record.id, settled=status == "before_history")
     from_id, to_id = _accounts(record, counterpart.id)
     notified_at = None
     if previous is not None and (
@@ -430,12 +498,15 @@ async def _link_pair(
     partner_id: UUID,
     system: _System,
     dissolved: _Dissolved,
+    conversion_fees: Sequence[LegFee] | None = None,
 ) -> tuple[list[UUID], set[UUID]]:
     """Link the record with its unique partner: into the partner's open transfer when it
     has one between the same accounts (so that transfer's placeholder or settlement goes),
-    else as a new matched transfer after dissolving whatever the partner was in. Returns
-    the records left without their transfer, and the partner (none linked when the partner
-    changed under us)."""
+    else as a new matched transfer after dissolving whatever the partner was in. A partner
+    whose side differs, in currency or amount (`conversion_fees` not None: the legs' fees),
+    always makes a new one, in the sent instrument and amount, settled by _conversion.
+    Returns the records left without their transfer, and the partner (none linked when the
+    partner changed under us)."""
     session = ctx.session
     partner = await load_own_record(session, ids, partner_id)
     if partner is None:
@@ -447,10 +518,24 @@ async def _link_pair(
             record.id,
         )
         return [], set()
+    conversion = None
+    if conversion_fees is not None:
+        conversion = _conversion(record, partner, conversion_fees, system)
+        if conversion is None:
+            # The pass's relation found the pair's fee fits, but a concurrent sync has since
+            # re-posted a leg so it doesn't; the heal after that sync decides again.
+            logger.warning(
+                "transaction %s or %s changed while they were matched; left for the next heal",
+                record.id,
+                partner_id,
+            )
+            return [], set()
     others: list[UUID] = []
     waiting = await _waiting_transfer(session, partner.id)
-    if waiting is None or (waiting.from_account_id, waiting.to_account_id) != _accounts(
-        record, partner.account_id
+    if (
+        waiting is None
+        or conversion_fees is not None
+        or (waiting.from_account_id, waiting.to_account_id) != _accounts(record, partner.account_id)
     ):
         others = await _dissolve(ctx, partner.id, dissolved)
         waiting = None
@@ -461,7 +546,7 @@ async def _link_pair(
     if waiting is not None:
         await _link(ctx, waiting.id, record)
     else:
-        await _link_records(ctx, record, partner)
+        await _link_records(ctx, record, partner, conversion)
     return others, {partner.id}
 
 
@@ -498,7 +583,12 @@ async def _match_one(
     # unique pair.
     partner = relation.partner(record.id)
     if partner is not None:
-        more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved)
+        fees = None
+        mine, theirs = relation.records[record.id], relation.records[partner]
+        if settles(mine, theirs):
+            # Across currencies (converts, or the owner's), or of another amount (the owner's).
+            fees = leg_fees(mine, theirs)
+        more, linked = await _link_pair(ctx, ids, record, partner, system, dissolved, fees)
         return others + more, linked
     counterpart_id = _registry_counterpart(record)
     if counterpart_id is None:
@@ -508,13 +598,16 @@ async def _match_one(
     # 3. Identified, with no unique partner: its own transfer, for review if it has any.
     if not await _set_contra(ctx, record, system.in_transit):
         return others, set()
-    review_reason: ReviewReason | None = None
-    if relation.candidates(record.id):
-        review_reason = "several_candidates"
-    elif relation.candidates(record.id, exact=False):
-        review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
-    await _open(ctx, record, counterpart, system, settings, review_reason, dissolved.get(record.id))
+    await _open(
+        ctx,
+        record,
+        counterpart,
+        system,
+        settings,
+        relation,
+        dissolved.get(record.id),
+    )
     return others, set()
 
 
@@ -732,6 +825,8 @@ async def preview_match(
     source: SourceRef | None = None,
     booking_date: date | None = None,
     complete: tuple[date, date] | None = None,
+    timed: bool = False,
+    occurred_tz: str | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -746,14 +841,30 @@ async def preview_match(
     posting would give it (ledger.resolve_booking_date), which the window is counted in.
     `complete`: the days the row's import lists in full, which committing it would add
     (a counterpart found by amount and date is taken only from the first day imports list
-    in full, design §5.8)."""
+    in full, design §5.8).
+    `timed`: the row's file gives its time to the second (its time_unit), as
+    eligible_records' timed reads it once posted (pairs._gate_day); a caller previewing a
+    row timed to the second passes True, else the preview may miss the pair posting forms.
+    `occurred_tz`: the time zone the row's time is read in, which posting stores and the
+    gate reads its booking day in (pairs._gate_day); None, the owner's.
+
+    The row's evidence is its counterparty identifier only, with its payment reference
+    (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
+    read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
-    holder = (
+    named = (
         None
         if counterparty.identifier_id is None
-        else await identifier_account(session, counterparty.identifier_id)
+        else await get_identifier(session, counterparty.identifier_id)
     )
+    # As eligible_records reads it: a card merchant names no bank account and identifies no
+    # account (no holder), only its holders. (The importers that preview give bank accounts
+    # only; this keeps the two definitions one should a card merchant reach it.)
+    merchant = named is not None and named.kind == "card_merchant"
+    a = models.Account
+    type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
         id=_UNPOSTED,
         source=("unposted", "") if source is None else source,
@@ -762,10 +873,21 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        holder=holder,
+        # As eligible_records' holder (contra.named_account_sql): its account, or by the
+        # reference.
+        holder=(
+            None
+            if named is None
+            else await named_account(session, named.id, counterparty.reference)
+        ),
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
-        names_account=counterparty.identifier_id is not None,
+        names_account=named is not None and not merchant,
+        holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
+        # As eligible_records' funded_by_transfer: read from the account's type.
+        funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
+        timed=timed,
+        occurred_tz=occurred_tz,
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
@@ -774,19 +896,59 @@ async def preview_match(
     return relation.partner(row.id)
 
 
+async def rematch_identifiers(
+    ctx: CommandContext, identifier_ids: Collection[UUID], *, heal: bool = True
+) -> None:
+    """Match again every record naming one of the identifiers, then heal (unless `heal` is
+    False: a caller that heals at its end anyway, healing_command)."""
+    await lock_transfers(ctx)
+    t = models.Transaction
+    naming = await ctx.session.scalars(
+        select(t.id)
+        .where(t.counterparty_identifier_id.in_(list(identifier_ids)))
+        .order_by(t.occurred_at, t.id)
+    )
+    await _match_all(ctx, list(naming))
+    if heal:
+        await heal_transfers(ctx)
+
+
+async def _rematch_naming(ctx: CommandContext, identifier_id: UUID) -> None:
+    await rematch_identifiers(ctx, [identifier_id])
+
+
 async def unassign_identifier_and_rematch(
     ctx: CommandContext, identifier_id: UUID
 ) -> IdentifierRecord:
     """unassign_identifier, then match again every record naming that bank account, which
     no longer identifies one of the owner's accounts."""
     record = await unassign_identifier(ctx, identifier_id)
-    await lock_transfers(ctx)
-    t = models.Transaction
-    naming = await ctx.session.scalars(
-        select(t.id)
-        .where(t.counterparty_identifier_id == identifier_id)
-        .order_by(t.occurred_at, t.id)
-    )
-    await _match_all(ctx, list(naming))
-    await heal_transfers(ctx)
+    await _rematch_naming(ctx, identifier_id)
+    return record
+
+
+async def register_card_merchant_and_rematch(
+    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID], *, heal: bool = True
+) -> IdentifierRecord:
+    """register_card_merchant, then match again every record naming the merchant, so the
+    new holders take effect at once (healing unless `heal` is False, as in
+    rematch_identifiers). Records that don't name it yet (posted before it was registered)
+    are named by their connector's next normalize (Monzo's replays them)."""
+    record = await register_card_merchant(ctx, merchant_id, account_ids)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
+    return record
+
+
+async def register_references_and_rematch(
+    ctx: CommandContext,
+    value: str,
+    references: Sequence[tuple[UUID, str]],
+    *,
+    heal: bool = True,
+) -> IdentifierRecord:
+    """register_references, then match again every record naming the bank account, so the
+    changed references take effect at once (healing unless `heal` is False, as in
+    rematch_identifiers)."""
+    record = await register_references(ctx, value, references)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
     return record

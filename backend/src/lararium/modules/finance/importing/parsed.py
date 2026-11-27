@@ -207,6 +207,9 @@ class ParsedStatement:
     # The source lists every transaction of the whole period (a closed, self-checked PDF
     # statement), not just what had posted when the file was taken (Decision 16).
     period_complete: bool = False
+    # The period's first day starts partway through (OFX: DTSTART gives a time of day other
+    # than midnight, as an incremental download may), so that day is listed only in part.
+    period_starts_mid_day: bool = False
     opening_balance: Decimal | None = None
     money_in: Decimal | None = None
     money_out: Decimal | None = None

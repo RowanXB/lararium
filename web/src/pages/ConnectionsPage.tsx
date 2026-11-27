@@ -2,15 +2,22 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useId, useState } from "react";
 
 import {
+  type AccountTypeOut,
   authorizeConnection,
   type ConnectionOut,
+  createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
+  createTrading212Connection,
   disableConnection,
   listConnections,
   syncConnectionNow,
+  updateEtoroConnection,
   updateIbkrConnection,
+  updateTrading212Connection,
+  uploadEtoroStatement,
   uploadIbkrStatement,
+  uploadTrading212Export,
 } from "../api";
 import { TextField } from "../components/TextField";
 import { Button } from "../components/ui/button";
@@ -125,6 +132,111 @@ function useIbkrCredentialsForm(
   return { fields, submit, error, done, pending: mutation.isPending };
 }
 
+// A connector's two keys: the body field each is sent as, and its label.
+type KeyFields<K extends string> = readonly [[K, string], [K, string]];
+
+const TRADING212_KEYS = [
+  ["api_key", "API key"],
+  ["api_secret", "API secret"],
+] as const satisfies KeyFields<string>;
+const ETORO_KEYS = [
+  ["public_api_key", "Public API Key"],
+  ["user_key", "User Key"],
+] as const satisfies KeyFields<string>;
+
+// Two keys as password fields, both cleared as soon as they are sent; the request variables
+// are dropped from the mutation cache (gcTime 0 and reset) so they are never kept.
+function useKeysForm<K extends string>(
+  keys: KeyFields<K>,
+  send: (body: Record<K, string>) => Promise<unknown>,
+  onDone: () => void,
+  doneMessage: string,
+) {
+  const [[firstName, firstLabel], [secondName, secondLabel]] = keys;
+  const [first, setFirst] = useState("");
+  const [second, setSecond] = useState("");
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+  const mutation = useMutation({
+    gcTime: 0,
+    mutationFn: send,
+    onSuccess: () => {
+      setDone(doneMessage);
+      onDone();
+    },
+    onError: (failure) => setError(errorMessage(failure)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setDone(undefined);
+    const body = { [firstName]: first.trim(), [secondName]: second.trim() } as Record<K, string>;
+    mutation.mutate(body, { onSettled: () => mutation.reset() });
+    setFirst("");
+    setSecond("");
+  }
+  const fields = (
+    <>
+      <TextField label={firstLabel} type="password" value={first} onChange={setFirst} required />
+      <TextField
+        label={secondLabel}
+        type="password"
+        value={second}
+        onChange={setSecond}
+        required
+      />
+    </>
+  );
+  return { fields, submit, error, done, pending: mutation.isPending };
+}
+
+function UpdateTrading212KeysForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const form = useKeysForm(
+    TRADING212_KEYS,
+    async (body) =>
+      await updateTrading212Connection({
+        path: { connection_id: connection.id },
+        body,
+        throwOnError: true,
+      }),
+    () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    "Keys updated",
+  );
+  return <UpdateKeysForm form={form} />;
+}
+
+function UpdateEtoroKeysForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const form = useKeysForm(
+    ETORO_KEYS,
+    async (body) =>
+      await updateEtoroConnection({
+        path: { connection_id: connection.id },
+        body,
+        throwOnError: true,
+      }),
+    () => void queryClient.invalidateQueries({ queryKey: ["connections"] }),
+    "Keys updated",
+  );
+  return <UpdateKeysForm form={form} />;
+}
+
+function UpdateKeysForm({ form }: { form: ReturnType<typeof useKeysForm> }) {
+  return (
+    <form aria-label="Update keys" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-2">
+      {form.fields}
+      <div className="flex items-center gap-3 sm:col-span-2">
+        <Button type="submit" variant="outline" disabled={form.pending}>
+          Update keys
+        </Button>
+        {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+        {form.done && <p role="status" className="text-sm">{form.done}</p>}
+      </div>
+    </form>
+  );
+}
+
 function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
   const queryClient = useQueryClient();
   const form = useIbkrCredentialsForm(
@@ -152,19 +264,79 @@ function UpdateIbkrTokenForm({ connection }: { connection: ConnectionOut }) {
 }
 
 function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload a Flex statement"
+      accept=".xml,text/xml"
+      help="To add a closed account (such as a closed ISA), run your Flex query in Client Portal with closed accounts selected, then upload the XML here."
+      send={async (file) =>
+        (
+          await uploadIbkrStatement({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
+function UploadEtoroStatement({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload eToro statement (xlsx)"
+      accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      help="Download it from eToro's web app: Portfolio → History → Account Statement, as Excel. The first one must start on or before the day you opened the account."
+      send={async (file) =>
+        (
+          await uploadEtoroStatement({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
+function UploadTrading212Export({ connection }: { connection: ConnectionOut }) {
+  return (
+    <UploadStatement
+      label="Upload Trading 212 export (CSV, optional)"
+      accept=".csv,text/csv"
+      help="Optional: adds details the API doesn't give. Export it in the Trading 212 app under History."
+      send={async (file) =>
+        (
+          await uploadTrading212Export({
+            path: { connection_id: connection.id },
+            body: { file },
+            throwOnError: true,
+          })
+        ).data
+      }
+    />
+  );
+}
+
+function UploadStatement({
+  label,
+  accept,
+  help,
+  send,
+}: {
+  label: string;
+  accept: string;
+  help: string;
+  send: (file: File) => Promise<{ raw_records: number }>;
+}) {
   const queryClient = useQueryClient();
   const id = useId();
   const [result, setResult] = useState<string>();
   const [error, setError] = useState<string>();
   const upload = useMutation({
-    mutationFn: async (file: File) =>
-      (
-        await uploadIbkrStatement({
-          path: { connection_id: connection.id },
-          body: { file },
-          throwOnError: true,
-        })
-      ).data,
+    mutationFn: send,
     onSuccess: async (data, file) => {
       setError(undefined);
       setResult(`Uploaded ${file.name}: ${data.raw_records} records ingested.`);
@@ -177,11 +349,11 @@ function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
   });
   return (
     <div className="grid gap-1.5">
-      <Label htmlFor={id}>Upload a Flex statement</Label>
+      <Label htmlFor={id}>{label}</Label>
       <Input
         id={id}
         type="file"
-        accept=".xml,text/xml"
+        accept={accept}
         disabled={upload.isPending}
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -189,10 +361,7 @@ function UploadFlexStatement({ connection }: { connection: ConnectionOut }) {
           event.target.value = "";
         }}
       />
-      <p className="text-sm text-muted-foreground">
-        To add a closed account (such as a closed ISA), run your Flex query in Client Portal with
-        closed accounts selected, then upload the XML here.
-      </p>
+      <p className="text-sm text-muted-foreground">{help}</p>
       {result && <p role="status" className="text-sm">{result}</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
     </div>
@@ -219,6 +388,9 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
     },
   });
   const isIbkr = connection.connector === "ibkr";
+  const isTrading212 = connection.connector === "trading212";
+  const isEtoro = connection.connector === "etoro";
+  const isMonzo = connection.connector === "monzo";
   const expiry =
     isIbkr && connection.credential_expires_at
       ? tokenExpiry(connection.credential_expires_at)
@@ -236,7 +408,7 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {!isIbkr && connection.status === "authorising" && (
+        {isMonzo && connection.status === "authorising" && (
           <p role="status" className="rounded-md border border-primary p-3 font-medium">
             Approve the request in the Monzo app within 4 minutes of authorising: only then can
             Lararium fetch your full history. Once you approve, it fetches it, which can take a
@@ -261,12 +433,12 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
           <p className="text-sm text-destructive">Last error: {connection.last_error}</p>
         )}
         {connection.warnings.map((warning) => (
-          <p key={warning} className="text-sm text-amber-600">
+          <p key={warning} className="text-sm text-warning">
             {warning}
           </p>
         ))}
         {expiry && (
-          <p className={expiry.soon ? "text-sm font-medium text-amber-600" : "text-sm"}>
+          <p className={expiry.soon ? "text-sm font-medium text-warning" : "text-sm"}>
             Token expires on {expiry.date}
           </p>
         )}
@@ -275,19 +447,33 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
             IBKR rejected the token or query. Update them to resume syncing.
           </p>
         )}
-        {!isIbkr && !connection.webhook_enabled && (
+        {isMonzo && !connection.webhook_enabled && (
           <p className="text-sm text-muted-foreground">
             Webhooks are off, so new Monzo transactions arrive within 30 minutes.
           </p>
         )}
         {failed && <p className="text-sm text-destructive">{errorMessage(failed.error)}</p>}
+        {isTrading212 && connection.status === "needs_reauth" && (
+          <p role="alert" className="text-sm text-destructive">
+            Trading 212 rejected the key. Update it to resume syncing.
+          </p>
+        )}
+        {isEtoro && connection.status === "needs_reauth" && (
+          <p role="alert" className="text-sm text-destructive">
+            eToro rejected the keys. Update them to resume syncing.
+          </p>
+        )}
         {isIbkr && <UpdateIbkrTokenForm connection={connection} />}
+        {isTrading212 && <UpdateTrading212KeysForm connection={connection} />}
+        {isEtoro && <UpdateEtoroKeysForm connection={connection} />}
         {isIbkr && <UploadFlexStatement connection={connection} />}
+        {isEtoro && <UploadEtoroStatement connection={connection} />}
+        {isTrading212 && <UploadTrading212Export connection={connection} />}
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" disabled={sync.isPending} onClick={() => sync.mutate()}>
             Sync now
           </Button>
-          {!isIbkr && AUTHORISABLE.includes(connection.status) && (
+          {isMonzo && AUTHORISABLE.includes(connection.status) && (
             <Button disabled={authorise.isPending} onClick={() => authorise.mutate()}>
               Authorise
             </Button>
@@ -301,7 +487,13 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
   );
 }
 
-function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
+function AddMonzoForm({
+  redirectUri,
+  onAdded,
+}: {
+  redirectUri: string | undefined;
+  onAdded?: () => void;
+}) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const [clientId, setClientId] = useState("");
@@ -321,6 +513,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
       setDisplayName("");
       setClientId("");
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     onError: (failure) => setError(errorMessage(failure)),
   });
@@ -379,7 +572,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
   );
 }
 
-function AddIbkrForm() {
+function AddIbkrForm({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const form = useIbkrCredentialsForm(
@@ -395,6 +588,7 @@ function AddIbkrForm() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     { doneMessage: "Interactive Brokers connected" },
   );
@@ -428,6 +622,137 @@ function AddIbkrForm() {
   );
 }
 
+function AddTrading212Form({
+  kind,
+  onAdded,
+}: {
+  kind: "invest" | "isa";
+  onAdded?: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const form = useKeysForm(
+    TRADING212_KEYS,
+    async (keys) =>
+      await createTrading212Connection({
+        body: { display_name: displayName.trim(), account_kind: kind, ...keys },
+        throwOnError: true,
+      }),
+    () => {
+      setDisplayName("");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
+    },
+    "Trading 212 connected",
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add Trading 212</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form
+          aria-label="Add Trading 212"
+          onSubmit={form.submit}
+          className="grid gap-4 sm:grid-cols-2"
+        >
+          <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
+          {form.fields}
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Create an API key in the Trading 212 app under Settings → API (Beta), for this account
+            only, with read permissions.
+          </p>
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={form.pending}>
+              Add Trading 212
+            </Button>
+            {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+            {form.done && <p role="status" className="text-sm">{form.done}</p>}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AddEtoroForm({ onAdded }: { onAdded?: () => void }) {
+  const queryClient = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const form = useKeysForm(
+    ETORO_KEYS,
+    async (keys) =>
+      await createEtoroConnection({
+        body: { display_name: displayName.trim(), ...keys },
+        throwOnError: true,
+      }),
+    () => {
+      setDisplayName("");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
+    },
+    "eToro connected",
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add eToro</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form aria-label="Add eToro" onSubmit={form.submit} className="grid gap-4 sm:grid-cols-2">
+          <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
+          {form.fields}
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Create a key in eToro under Settings → Trading → API Key Management, Environment Real,
+            Permission Read.
+          </p>
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={form.pending}>
+              Add eToro
+            </Button>
+            {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+            {form.done && <p role="status" className="text-sm">{form.done}</p>}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+// The form that connects an account type's API; onAdded runs once the connection exists.
+export function ConnectForm({ type, onAdded }: { type: AccountTypeOut; onAdded?: () => void }) {
+  const connector = type.api?.connector;
+  const connections = useQuery({
+    queryKey: ["connections"],
+    queryFn: async () => (await listConnections({ throwOnError: true })).data,
+    enabled: connector === "monzo",
+  });
+  switch (connector) {
+    case "monzo":
+      return (
+        <AddMonzoForm
+          redirectUri={
+            connections.data?.find((connection) => connection.redirect_uri)?.redirect_uri ??
+            undefined
+          }
+          onAdded={onAdded}
+        />
+      );
+    case "ibkr":
+      return <AddIbkrForm onAdded={onAdded} />;
+    case "trading212":
+      return (
+        <AddTrading212Form
+          kind={type.api?.config.account_kind === "isa" ? "isa" : "invest"}
+          onAdded={onAdded}
+        />
+      );
+    case "etoro":
+      return <AddEtoroForm onAdded={onAdded} />;
+    default:
+      return null;
+  }
+}
+
 export function ConnectionsPage() {
   const connections = useQuery({
     queryKey: ["connections"],
@@ -454,10 +779,11 @@ export function ConnectionsPage() {
       {list.map((connection) => (
         <ConnectionCard key={connection.id} connection={connection} />
       ))}
-      <AddMonzoForm
-        redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined}
-      />
-      <AddIbkrForm />
+      {connections.isSuccess && list.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No connections yet. Connect a bank or broker from Accounts → Add account.
+        </p>
+      )}
     </div>
   );
 }

@@ -33,6 +33,7 @@ import { refreshAfterTransferWrite } from "../lib/refresh";
 const REVIEW_REASONS: Record<NonNullable<TransferOut["review_reason"]>, string> = {
   several_candidates: "Several candidates",
   amount_differs: "Amount differs",
+  not_listed_in_full: "Not listed in full",
 };
 
 const STATUS_LABELS: Record<TransferOut["status"], string> = {
@@ -63,7 +64,7 @@ function describeInTransit(transfer: TransferOut): string {
   return `${describe(transfer)} · ${days} ${days === 1 ? "day" : "days"} in transit`;
 }
 
-function needsAttention(transfer: TransferOut): boolean {
+export function needsAttention(transfer: TransferOut): boolean {
   return transfer.status !== "rejected" && (transfer.review_reason !== null || transfer.overdue);
 }
 
@@ -126,12 +127,10 @@ function usePair(transferId: string) {
 }
 
 function CandidateList({
-  transfer,
   candidates,
   busy,
   onPair,
 }: {
-  transfer: TransferOut;
   candidates: CandidateOut[];
   busy: boolean;
   onPair: (transactionId: string) => void;
@@ -148,11 +147,12 @@ function CandidateList({
             {[
               candidate.account_name,
               new Date(candidate.occurred_at).toLocaleDateString("en-GB"),
-              `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${transfer.currency}`,
+              `${formatAmount(candidate.quantity.replace(/^-/, ""))} ${candidate.currency}`,
               candidate.description,
             ].join(" · ")}
           </span>
-          {/* The API pairs a candidate of the same amount, or one the owner unpaired. */}
+          {/* The API pairs any candidate listed; the page offers Pair for one of the same
+              amount, or one the owner unpaired, and leaves one that differs to the API. */}
           {candidate.reason === "amount_differs" ? (
             <span className="text-muted-foreground">Different amount</span>
           ) : (
@@ -189,7 +189,7 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="font-medium">{describe(transfer)}</p>
-          <p className="text-sm text-amber-600">
+          <p className="text-sm text-warning">
             {[
               transfer.review_reason && REVIEW_REASONS[transfer.review_reason],
               transfer.overdue && "Overdue",
@@ -212,7 +212,6 @@ function AttentionItem({ transfer }: { transfer: TransferOut }) {
       </div>
       {candidates.data && (
         <CandidateList
-          transfer={transfer}
           candidates={candidates.data}
           busy={busy}
           onPair={(transactionId) => {
@@ -241,7 +240,6 @@ function OpenCandidates({ transfer }: { transfer: TransferOut }) {
       <div className="mt-2 space-y-2">
         {candidates.data && (
           <CandidateList
-            transfer={transfer}
             candidates={candidates.data}
             busy={busy}
             onPair={(transactionId) => pair.mutate(transactionId)}
@@ -378,6 +376,11 @@ export function TransfersPage() {
     queryFn: async () => (await listAccounts({ throwOnError: true })).data,
   });
   const error = transfers.error ?? suggestions.error ?? accounts.error;
+  // Bank accounts only: card merchants (kind "card_merchant") are registered through the API
+  // for now, as the design adds no screen for them.
+  const bankSuggestions = suggestions.data?.filter(
+    (suggestion): suggestion is SuggestionOut => !("kind" in suggestion),
+  );
 
   const all = transfers.data ?? [];
   const attention = all.filter(needsAttention);
@@ -419,15 +422,15 @@ export function TransfersPage() {
         </ul>
       </Section>
       <Section title="Suggestions">
-        {suggestions.data?.length === 0 && <Empty>No suggestions</Empty>}
-        {!!suggestions.data?.length && snapshotsOnly.length > 0 && (
+        {bankSuggestions?.length === 0 && <Empty>No suggestions</Empty>}
+        {!!bankSuggestions?.length && snapshotsOnly.length > 0 && (
           <p className="mb-3 text-sm text-muted-foreground">
             {`Not listed: ${snapshotsOnly.map((a) => a.name).join(", ")}. ` +
               "Snapshots-only accounts can't have identifiers; switch them to hybrid on Accounts."}
           </p>
         )}
         <ul className="divide-y">
-          {suggestions.data?.map((suggestion) => (
+          {bankSuggestions?.map((suggestion) => (
             <SuggestionItem
               key={suggestion.identifier_id}
               suggestion={suggestion}

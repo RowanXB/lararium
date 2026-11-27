@@ -1,3 +1,4 @@
+import gc
 import time
 from datetime import date, datetime
 from decimal import Decimal
@@ -95,9 +96,16 @@ def test_wide_padded_header_stays_linear() -> None:
     thousands of empty trailing cells cost gigabytes for a small file."""
     header = b"Date,Description,Amount" + b"," * 16_381 + b"\n"
     content = header + b"10/11/2026,Coffee,-3.50\n" * 2_000
-    started = time.perf_counter()
-    rows = _rows(_parse(content))
-    assert time.perf_counter() - started < 2
+    # The parser's own time: late in a full run a collection of the whole heap takes seconds
+    # by itself, and one landing here is not the parser's cost.
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        rows = _rows(_parse(content))
+        elapsed = time.perf_counter() - started
+    finally:
+        gc.enable()
+    assert elapsed < 2
     assert rows[0].raw == {"Date": "10/11/2026", "Description": "Coffee", "Amount": "-3.50"}
 
 

@@ -15,7 +15,7 @@ lares。
 环境要求：Docker（含 buildx，守护进程已启动）、uv、Python 3.13、Node 24、pnpm 11、git。
 
 运行全部检查（lint、格式、类型、导入约束、在一次性 PostgreSQL 容器上跑的后端测试、
-OpenAPI/客户端漂移检查、前端类型检查与测试）。它严格按 `backend/uv.lock` 和
+依赖许可证检查、OpenAPI/客户端漂移检查、前端类型检查与测试）。它严格按 `backend/uv.lock` 和
 `web/pnpm-lock.yaml` 安装依赖，任一锁文件过期都会失败：
 
 ```bash
@@ -221,7 +221,7 @@ API：用 `GET /api/v1/finance/accounts` 列出账户，再对每个账户调用
 ### 手动账户：选 hybrid，并录入期初快照
 
 Bank A 没有连接，报告不了它那一侧的转账。Lararium 一看到 Monzo 那一侧，就在 Bank A 上记一笔
-*推断*（inferred）交易来代替。要让它改变 Bank A 的余额：
+*推断*（inferred）交易来代替，除非 Bank A 上有一行同金额的记录可能就是那一侧（见下文 *Needs attention*）。要让它改变 Bank A 的余额：
 
 1. 在 Accounts 页面创建账户时选 **Balance mode: Hybrid**（ledger type 选 Asset，subtype 选
    Bank）。
@@ -269,9 +269,20 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
     页面列出这些候选；对正确的那条点 **Pair**。完全相同的会自动配对：一笔转账拆成金额相同的几笔
     （同一天、同样两个账户之间、金额相同的两笔转出和两笔转入），按固定顺序配上，怎么配余额都一样。
     如果一侧的记录没有写明对方账户，就和单笔一样按金额和日期认：同一天别人转来的同额款项，可能在你
-    自己那笔到账前被一起认进来，等你那笔到了，它们会转到这里让你处理。
-  - *Amount differs*（金额不同）：两条记录互相指向对方的账户，但金额不同。它们不能配对；如果它不是
-    转账，就 Reject。
+    自己那笔到账前被一起认进来，等你那笔到了，它们会转到这里让你处理。手动账户上不会被自动采用的行
+    （见 *Not listed in full*）和其他候选一样是候选，所以其中有这样一行的完全相同的几笔也会留在这里。
+    在手动账户上，候选旁边不会记推断交易：万一其中一行就是真正的那一行，推断交易会让这笔钱算两次；
+    在你配对之前，净资产会把这笔金额计在 In transit 账户里。
+  - *Amount differs*（金额不同）：两条记录互相指向对方的账户，但金额不同。页面上没有 **Pair**：
+    两条都是资金记录时，通过 API 配对（`POST /api/v1/finance/transfers/{id}/pair`，请求体
+    `{"transaction_id": "<另一条>"}`；见下文“没有写明对方账户的记录”），否则如果它不是转账，就 Reject。
+    手动账户上按 *Not listed in full* 那样不会被自动采用的同额行也会列出，带 **Pair**，旁边不会记推断交易。
+  - *Not listed in full*（未完整列出）：这笔转账唯一的候选是手动账户上的一行，它落在转账窗口里、早于这个账户的
+    上传完整列出的第一天，所以不会被自动采用（见下文“导入与转账”）。它旁边不会记推断交易：万一这行
+    就是真正的那一行，推断交易会让这笔钱算两次。这个账户的余额是对的；在这项审核配对之前，净资产会把这笔金额计在
+    In transit 账户里。上传一份列出那几天的账单，如果两条互为对方唯一的候选，
+    就会自动配对（如果另一笔同金额的转账也在争这一行，两者都进入 *Several candidates*）；也可以自己配对：那一行会作为候选列出，带 **Pair**。已在 before history 结清的转账不会因此进入审核。等待手动账户的转账永远不会 *Overdue*：它等的是一次
+    上传，而不是某个连接。
   - *Overdue*（逾期）：另一个账户有自己的连接，但 7 天内还没报告它那一侧。
 
   在你决定之前什么都不会变：余额和净资产保持原样。
@@ -299,13 +310,14 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
   （其中一条记录应该和另一条配对），就通过 API 取消配对（`POST /api/v1/finance/transfers/{id}/unpair`），
   再按下面“没有写明对方账户的记录”所说，把它和正确的那条配对：Reject 会把两条都标成不是转账，而被拒绝的
   记录不能配对。
-- **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额不同的候选没有这个按钮）：这两条记录是
-  同一笔转账。你的选择优先于其他任何候选。
+- **Pair**（在金额相同的候选上，或 *Unpaired* 的候选上；金额或币种不同的候选在页面上没有这个按钮，
+  改用 API 配对）：这两条记录是同一笔转账。你的选择优先于其他任何候选。候选按它自己的币种显示。
 
 **没有写明对方账户的记录。** 两条记录都没有写明对方账户时（比如银行流水只印着你的名字和一个
 参考号），不会自动生成转账。先在手动账户上手动录入另一侧，再通过 API 把这两条记录配对：
-`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录（另一个账户、
-金额相反且相等、日期最近的在前），`POST /api/v1/finance/transactions/{id}/pair`，请求体
+`GET /api/v1/finance/transactions/{id}/pair-candidates` 列出可能是它另一侧的记录：先是另一个账户上
+金额相反且相等的；对资金记录，再是 7 天内币种或金额不同的资金记录，标为 `differs`（`currency` 或
+`amount`）；每部分日期最近的在前。`POST /api/v1/finance/transactions/{id}/pair`，请求体
 `{"transaction_id": "<另一条>"}`，把它们配成一笔 matched 转账。手动录入的那一侧必须是恰好两条分录的交易（该账户和 Unassigned），
 否则配对会被拒绝。点 Unpair 即可撤销；撤销后，两条没有写明对方账户的记录不再有转账，要恢复只能
 再通过同一个接口把它们重新配对（另一条记录仍会出现在候选列表里）。
@@ -324,6 +336,28 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
 和周三任何时刻的 Monzo 付款配上；7 天后算逾期）在设置 `finance.transfers` 里；目前还没有
 页面可以修改它们。每一项都是 1 到 3650 之间的整天数，前后两个窗口加起来必须短于 7 天，这样每周
 一次的转账不会和下一周的配上。
+
+## Overview（概览）
+
+Overview 显示你选的日期范围（预设，或今天及以前的任意两天）：净值及其变化，收入、支出和结余，
+按日、周或月的收支柱状图，按分类的支出，钱在哪些账户里，钱花到了哪里（按收款方），以及最后一天的
+持仓。全部以报告货币计。
+
+**什么算收入和支出。** 进出你账户的钱：交易记到收入、支出或权益账户（包括 Unassigned）上的
+部分，期初余额（Opening balances）除外。自己账户之间的转账不算，买卖证券不算，凭空到账的证券
+（公司行动）也不算。银行标记为不计入支出的（Monzo 的 `include_in_spending`）不算支出。分类就是
+来源给出的分类；没有分类的记为 Uncategorised。当天没有汇率的外币付款不计入，页面会提示有几笔。
+
+**隐藏账户。** 在 Accounts 页面，资产或负债账户上的眼睛图标可以把它从 Overview 中隐藏；账本和
+Accounts 页面都不受影响。隐藏的账户被当作别人的账户：它的余额不计入净值和持仓，In transit 里
+正在转入或转出它的钱也不计入。它和仍显示的账户之间转移的钱（一笔转账，或 Monzo 储蓄罐划转），
+转出时算支出、转入时算收入，日期按显示一侧动账的那天，所以净值的变化和"收入 − 支出"能对上。
+Overview 会按隐藏账户单独列出这些转移，不混入分类和收款方。
+
+### 已知限制
+
+- 收入和支出由不止一次查询读出。如果同步恰好在两次查询之间配对了一笔转账，那一次加载可能把这笔
+  金额算两遍；重新加载页面即恢复正确。存储的数据不受影响。
 
 ## 连接 Interactive Brokers
 
@@ -390,6 +424,219 @@ Flex Web Service 无法选择已关闭的账户（比如关掉的 ISA）。请�
 3. 等该连接的首次同步完成后，在 Connections 页面的 IBKR 连接上选择 **Upload a Flex statement**，
    上传这个 XML（最大 64 MiB）。请在最近一次同步之后再运行导出：旧文件里某行若已被 IBKR 更正，上传会把更正覆盖回去。
 
+## 连接 Trading 212
+
+Trading 212 是一个连接器：`worker` 通过 Trading 212 的公开 API 每 30 分钟同步一次（点击
+**Sync now** 时也会同步）。它只读取数据：只发送 GET 请求，而且只发给 Trading 212。一个连接对应一个
+账户，所以 Invest 账户和 Stocks ISA 是两个连接，各用各的 key。
+
+### 1. 创建 key
+
+在 Trading 212 app 里打开 Settings，再进入 API (Beta)，为你要连接的那一个账户创建 key。
+
+- 勾选读取权限。Lararium 需要 `account`、`portfolio`、`metadata`、`history:orders`、
+  `history:dividends` 和 `history:transactions`；`orders:read`（挂单）和 `pies:read`（pies）
+  勾选了就会用到，没勾选时跳过这部分，并在一条 “Trading 212 flagged: …” 警告里说明一次。
+- **不要勾选 `orders:execute` 和 `pies:write`。** Lararium 只做读取，没有这两项的 key 即使泄露，
+  也无法下单或修改 pie。
+- 记下 API key 和 API secret。Trading 212 在创建 key 时就定死了它的权限，所以缺了必需的权限时，
+  连接会要求换新 key：新建一个勾选了该权限的 key。
+
+### 2. 添加连接
+
+在 Accounts → Add account 里选择 **Trading 212 Invest** 或 **Trading 212 Stocks ISA**，填写显示
+名称，粘贴 API key 和 API secret，点 **Add Trading 212**。Lararium 会先向 Trading 212
+核验这个 key；如果它对应的账户已经连接过，会被拒绝。
+
+这个连接会创建一个账户，名为 `Trading 212 Invest ···1234` 或 `Trading 212 ISA ···1234`（Trading 212
+账户 ID 的后四位；可以改名），税务账户类型为 GIA 或 ISA。你的订单（每笔成交及其税费）、分红、入金、
+出金、费用和利息都记进这个账户，每次同步还会记下所持每个标的的价格。首次同步读取全部历史；之后只读
+新的部分，每周再完整读一遍。很长的历史分几次同步读完，每次同步每类历史最多 50 页。如果之后
+Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对新的。已停用的连接也这样恢复：
+**Update keys** 像添加时一样用 Trading 212 核验新的一对（必须是同一个账户），再把连接恢复为正常。
+
+### CSV 导出（可选）
+
+没有它一切照常。Trading 212 的 CSV 导出（在 app 的 History 下）有少数 API 不返回的细节，比如卡入金
+写在 Notes 里的交易号。想补上这些，就在首次同步完成后，在该连接上选择 **Upload Trading 212 export
+(CSV, optional)** 上传（最大 16 MiB）。文件必须是这个连接所对应账户的。
+
+导出文件会完整保存，每一列都按类型存储，每一行挂到 API 里 ID 相同的记录上：它丰富那条记录，不会
+再入账一次。API 还没列出的入金或出金会按导出文件入账。其他类型的行（交易、分红、利息）会保存并标记，
+但不入账：这些由 API 入账，而它们的行与 API 记录如何对应还没见过实例。如果导出文件和 API 对金额、币种
+或记账日期说法不一，Lararium 会开一个[待复核项](#待复核项)。
+
+上传之前出现的现金与 Trading 212 报告不符的警告，会保留到下一次同步重新核对为止，即使这次上传已经
+补上了缺的那条记录。
+
+### 转账
+
+- **从 Monzo 用卡或 Apple Pay 入金。** Monzo 把卡充值记为付给 Trading 212 商户的一笔刷卡消费，
+  而不是银行转账。把这个商户登记到你的 Trading 212 账户上一次，此后每笔这样的付款都会与两分钟内
+  金额相同的那笔 Trading 212 入金配对。目前只能通过 API 操作。Monzo 同步到一笔付给网站在
+  `trading212.com` 上的商户的付款后，`GET /api/v1/finance/transfer-suggestions` 会列出它（kind 为
+  `card_merchant`，带有它的 `merchant_id`，以及它能付入的 Trading 212 账户 `account_ids`）。用
+  `POST /api/v1/finance/accounts/identifiers/card-merchants` 和
+  `{"merchant_id": "<merchant_id>", "account_ids": ["<account id>"]}` 登记它，列出你用卡充值的每个
+  Trading 212 账户（Invest 和 ISA 共用一个商户）。Lararium 随后会检查全部历史。如果它不是你的，用
+  `POST /api/v1/finance/transfer-suggestions/card-merchants/dismiss` 和
+  `{"merchant_id": "<merchant_id>"}` 把它去掉。
+- **银行转账入金**在 Trading 212 一侧不带任何账户信息，所以当你银行那笔付款是唯一候选时，按金额和
+  日期配对（见[登记标识](#登记标识)）。有两个候选都符合时（比如两个账户在相近的时间收到同样金额），
+  这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
+- **多个账户共用的收款银行账户。** 如果你的银行用同一个银行账户（同一组 sort code 和账号）向
+  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款只能靠付款参考（reference）说明付给
+  哪一个。把参考登记一次，目前只能通过 API 操作：`POST /api/v1/finance/accounts/identifiers/references`
+  和 `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
+  "reference": "<payment reference>"}]}`（占位符；填你的银行 app 显示的内容，sort code 写成 11-22-33 或
+  112233 都行）。一次调用会替换该标识的全部参考，`references` 为空列表则
+  移除它们。参考的匹配忽略大小写和首尾空格。一个银行账户要么登记到一个账户上（做法见
+  [登记标识](#登记标识)），要么带参考，不能两者兼有。Lararium 随后会检查全部历史：付给该收款账户、
+  参考相符的银行转账会指明对应账户，银行付到 Trading 212 Invest、Stocks ISA 和 Cash ISA 的充值
+  会自动配对。卡充值仍按上面的卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的
+  入金方式当作银行转账来配对。
+- **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
+  状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
+  一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
+  对手账户，需要手动配对：两侧都不指明任何账户，所以哪一侧都无法识别，不会自动配对。只有一个 Invest
+  （或一个 Stocks ISA）加一个 Cash ISA 时，同样不指明对手账户：Cash ISA 没有可指明的
+  Trading 212 id，这类转账也需要手动配对。
+  Lararium 只统计添加到它里面的账户：你持有但没添加的 Cash ISA，
+  仍按两个账户的规则处理，转到它的那笔会被当成转到另一个账户。新添加的同系列账户在每个
+  Trading 212 连接的下一次同步时生效（届时会重放其转账）。
+
+### Cash ISA（没有 API）
+
+Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再上传 app History 页面导出的 CSV：
+在 Accounts → Add account 里选 **Trading 212 Cash ISA** 并在那里上传 History CSV（上传会自己使用现成的
+profile）。请在表单的 **Opened on** 栏填上账户的开户日期：这样从那天开始的导出也能代表之前的
+日子，开户当天的入金就能与银行那边的付款配对。每次导出必须从该账户的第一天开始，
+或从之前某次上传已覆盖的某一天开始。导出文件请保留 Trading 212 给的文件名
+（`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`）：它写明了这次导出的时段，时段内除最后一天外每天都
+完整列出（导出可能在最后一天中途生成）。改过名的导出从首行那天起、到末行前一天为止每天都完整列出，上传时还会
+警告文件名没有给出时段。利息行在其 `Action` 确定之前，按普通行导入。
+
+### 警告
+
+- **“Trading 212 ISA ···1234 SYMBOL differs from Trading 212's report on DATE by AMOUNT”**：每次
+  同步后，Lararium 都把每个标的的数量和现金与 Trading 212 报告的数字对比，绝不悄悄修正差异。
+- **“Trading 212 flagged: …”** 指出 Lararium 还没处理的某个字段、取值或标的类型、某项没勾选的
+  权限，或 Trading 212 不再提供的某一页历史。每条只通知一次。
+
+## 连接 eToro
+
+eToro 是一个连接器：`worker` 通过 eToro 的公开 API 每 30 分钟同步一次（点击 **Sync now** 时也会
+同步），eToro 的账户报表则由你手动上传。它只读取数据：只发送 GET 请求，只发给 eToro，并拒绝不是
+只读的 key。
+
+### 1. 创建 key
+
+在 eToro 打开 Settings，再进入 Trading，再进入 API Key Management，创建一个 Environment 为
+**Real**、Permission 为 **Read** 的 key。记下 Public API Key 和 User Key。Lararium 在你添加它时以及
+每次同步开始时都会读取 key 的 scopes：只要有一个不是读取 scope，这个 key 就会被拒绝（“This eToro
+key can trade or move money. Create a key with Read permission.”），其他什么都不拉取。一个完全
+没有 scope 的 key 也会被拒绝，提示是“This eToro key reports no permissions. Create a key with Read
+permission.”。
+
+### 2. 添加连接
+
+在 Connections 页面的 **Add eToro** 里填写显示名称、Public API Key 和 User Key，点 **Add eToro**。
+一个连接包含一个 eToro 用户的全部账户；同一用户的第二个连接会被拒绝。首次同步为每个账户分别创建
+一个账户：
+
+- **eToro Trading**（broker，GIA）：你的股票和 ETF、每次开仓和平仓，以及它们的价格。它的其他现金
+  变动来自你的报表（第 3 步）。
+- **eToro Money GBP**（bank；每个 eToro Money 币种账户一个）：它的刷卡消费、银行转账，以及与
+  eToro Trading 之间的转账。
+- **MoneyFarm ISA**（snapshots）：每次同步记下 eToro 报告的余额。eToro 的 API 不提供 MoneyFarm 的
+  持仓或交易。
+
+如果之后 eToro 拒绝了 key，连接上会提示：用 **Update keys** 换一对新的。已停用的连接也这样恢复：
+**Update keys** 像添加时一样核验新的一对（只读、同一个 eToro 用户），再把连接恢复为正常。
+
+### 3. 上传报表
+
+eToro 的 API 提供交易，但不提供 Trading 账户上的其他现金变动：费用（隔夜费、SDRT、出金手续费）、
+税、分红、利息、与 eToro Money 之间的转账，以及出金。这些只来自 eToro 的账户报表（account
+statement）。没有报表，这些就缺失，Trading 的现金也对不上 eToro 的。
+
+1. 在 eToro 网页版打开 Portfolio，再进入 History，再进入 Account Statement，选择时间段，下载为
+   Excel（xlsx）。
+2. 等该连接的首次同步完成后，在 eToro 连接上选择 **Upload eToro statement (xlsx)** 上传
+   （最大 16 MiB，最多 100,000 个单元格：太大的报表会被拒绝，改为下载更短的时间段）。
+
+- **第一份报表必须在你开户当天或更早开始**（报表里的 Date Created）。开始得更晚会被拒绝，并指明
+  那一天，这样 API 和你的报表合起来才能覆盖账户的整个存续期。
+- 报表必须属于这个连接：它的用户名和币种必须是该 eToro 用户的、该 Trading 账户的。
+- 报表之间可以重叠：两份共有的行只写一次。在某一天中途结束的报表（在它的结束日当天下载的）不覆盖
+  那天剩下的时间，所以下一份应从那天开始。
+- 报表里的时间按 UTC 读取。
+
+**“eToro Trading: upload an eToro statement covering YYYY-MM-DD onward”** 会显示在连接上并通知一次：
+当 Trading 的现金与 eToro 的不一致，而原因很可能是只有报表才有的内容时，即最近一份报表之后的一笔
+与 eToro Money 之间的转账，或某个持仓上的费用或分红。下载一份在那天或更早开始的报表并上传。
+
+### 转账
+
+- **eToro Money ↔ eToro Trading**（GBP ↔ USD）在两侧互相指明对方、且时间相差不超过两分钟时
+  （eToro 用同一个时钟给两侧打时间戳）自动配对，并带上报表里的换汇手续费。在报表带来 Trading 一侧
+  之前，eToro Money 一侧停在 In transit，净资产不会下跌。
+- **Monzo ↔ eToro Money。** eToro 的 API 不提供 eToro Money 自己的 sort code 和账号。把它们（按
+  eToro 显示的）登记到 eToro Money GBP 账户上，手动登记或在 Monzo 付过款后从 Suggestions 登记，做法
+  见[登记标识](#登记标识)；之后 Monzo 的付款就会与 eToro Money 的配对。
+- **币种或金额不同的记录**（比如从 eToro Trading 出金 USD，你的银行收到 GBP）永远不会自动配对。
+  通过 API 配对，做法同 [Transfers 页面](#transfers-页面) 里“不带账户信息的记录”：
+  `POST /api/v1/finance/transactions/{id}/pair` 加 `{"transaction_id": "<other>"}`，接受两笔方向
+  相反、币种不同（差额是汇率）或同一币种下金额不同（差额记为手续费）的资金记录。
+  `GET /api/v1/finance/transactions/{id}/pair-candidates` 会列出它们，标为 `differs`。两笔币种不同的
+  记录，如果其连接器给出的手续费放不进这次换汇，就不能配对：唯一的选择是 Reject。
+
+### 警告
+
+- **“eToro Trading SYMBOL differs from eToro's report on DATE by AMOUNT”**：每次同步和上传后，
+  Lararium 都把每个账户的持仓和现金与 eToro 自己的报告对比，绝不悄悄修正差异。
+- **“eToro Trading could not be reconciled”**：Lararium 无法对比（比如 eToro 还没报告余额）；
+  上一次检查的警告保留。
+- **“eToro flagged: …”** 指出 Lararium 还没处理的某个工作表、列、字段、取值或类型。每条只通知一次。
+
+### 待复核项
+
+当 eToro 的 API 和报表，或 Trading 212 的 API 和导出文件，对同一件事说法不一时，Lararium 会开一个
+待复核项（review item），两个值都保留，按 API 的值入账，并发一条通知，比如 “eToro: eToro's API and
+statement disagree on close of position ···1234 (cash); they are resolved through the API (README:
+Review items)”。发送失败的通知会在下一次同步时再发。对 eToro，
+这件事是一次开仓或平仓的数量、现金、盈亏或记账日期；对 Trading 212，是一笔入金或出金的金额、币种或
+记账日期。
+
+目前还没有界面；请从 tailnet 里的设备调用 API。`GET /api/v1/connections/<id>/reviews` 列出该连接的
+待复核项，未处理的在前，每项带两个值。`POST /api/v1/connections/<id>/reviews/<review id>/resolve`
+加 `{"take": "api"}` 或 `{"take": "statement"}`（对 Trading 212，`statement` 指导出文件）处理一项：
+你选的值立即入账，之后的同步也会保留。如果之后任一来源改了它的值，该项会重新打开；两个来源变得一致的
+项会自行关闭。
+
+### 已知限制
+
+- 不支持 CFD、杠杆或跟单交易：这类持仓会被标记，不入账。
+- 没有 MoneyFarm 的持仓或交易，只有它的余额。
+- eToro 的费用、税和分红只来自报表。
+- 只在连接之前持有过的 eToro 标的（开仓又平仓，从没在某次同步时持有）要靠报表提供币种：在有报表覆盖
+  它之前，它的交易会被标记，不入账。
+- 报表时间被视为 UTC。这只在冬季得到确认（那时 UTC 与英国时间一致）。如果夏季的报表其实用的是英国
+  时间，只来自报表的事件会差一小时；只有当这一小时让某笔交易落到另一天时，才会出现待复核项。
+- Trading 212 的正负号（出金、费用、转账、订单的税费和净额）以及导出文件里的交易行，还没有用真实交易
+  核对过。
+- 如果 Trading 212 改了某条记录、之后又改回去（一笔入金先是 10，再是 20，又变回 10），Lararium 按 10
+  入账；但新版本的 Lararium 重建该连接的交易时，会按中间那个版本（20）入账。
+- 卡入金只与连接器账户的记录配对，绝不与手动账户或导入账户的配对。
+- 一笔刷卡付款会与商户所属账户里任何一条不指明其他账户、金额相同且在两分钟内的记录配对。所以如果
+  付款金额恰好等于这段时间内的一笔利息入账，就会与它配对。
+- 关闭一个 Trading 212 账户后，它仍登记在它的卡商户下，所以过去的卡入金保持配对；不会再有新的配进来。
+  把它从该商户的账户里移除，才会取消这些配对。
+- 很长的历史分几次同步读完：Trading 212 每次同步每类历史最多 50 页，eToro 每次同步最多查询 50 个订单
+  （已平仓的交易会等它的订单查询，或等一份覆盖它的报表）。
+- 在 Monzo 同步和 Trading 212 同步之间，一笔卡入金会显示为记在 Unassigned 上的支出，净资产会因此
+  下跌，直到两侧都同步进来。
+
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
 不做这一步，每 30 分钟轮询一次也能用。想在大约一分钟内看到付款，就需要给 Monzo 一个它能调用的公网
@@ -445,9 +692,15 @@ SQL
 
 没有连接器同步的账户，可以上传银行导出的账单文件。在你审阅之前，什么都不会进入账本。
 
-1. **上传。** 在 Imports 页面选择账户、一个 profile（怎样读这家银行的文件，见下文）和文件；文件
-   本身不写明币种时，还可以选一个币种。文件最大 5 MiB、20,000 行。文件会作为文档保存（在
-   `documents` 卷中），永不删除。
+1. **上传。** 目录里有的银行（见下文），在 Accounts → Add account 里选这家银行：上传文件后，
+   Lararium 会认出它是这家银行的哪种格式，并为它新建或复用 profile。其他文件在 Data →
+   Statement files 上传，并选一个 profile（怎样读这家银行的文件，见下文）。两种方式都要选择
+   账户（或填一个新账户的名称）；文件本身不写明币种时，还可以选一个币种。文件最大 5 MiB、
+   20,000 行。文件会作为文档保存（在 `documents` 卷中），永不删除。在账户类型出现之前添加的账户，可以用
+`PATCH /api/v1/finance/accounts/{id}`、请求体 `{"type_key": "<key>"}` 为它设置类型；账单类型的 key 有
+`hsbc_uk`、`lloyds`、`boc_uk`、`revolut.current`、`revolut.savings`、`tembo`、`lemfi` 和
+`trading212.cash_isa`。该账户必须是手动的 transactions 账户，且形态与类型相符；设置类型后，它在
+Accounts 上的卡片会出现 **Upload file**。
 2. **审阅。** 批次页面把每一行标为 **new**（新的）、**duplicate**（账本里已有）、**skipped**
    （金额为零，或被 profile 的 `include_only` 排除；会显示原因）或 **error**（无法读取，或与
    滚动余额对不上）。只要有错误行就不能提交：修改 profile 或文件，丢弃这个批次后重新上传。行列表
@@ -482,9 +735,14 @@ SQL
 每一行也会经过转账匹配：如果某行是来自已连接账户的一笔转账的另一侧，它会取代这笔转账的占位交易，
 而不会被算两次，Transfers 页面也像对待其他记录一样对待它。写明对方账户的行通过登记表匹配。没有写明
 对方账户、也不是刷卡类型的行，会仅凭金额和日期被采用，除非这笔转账的时间窗口早于这个账户的导入
-完整列出的第一天（没有写明账单期间的导出文件，第一天和最后一天可能不完整）：那之前，真正的那一行
-可能在账户的期初里，永远不会被导入，不能让一笔金额相同但无关的款项顶替它。已导入的最后一天之后则会
-采用：万一采用的不是真正那一行，下一份账单会带来真正的那一行，这笔转账就会带着两个候选进入
+完整列出的第一天（导出文件的最后一天可能不完整；行带有 `started_at` 的导出，例如 Revolut 的 CSV，以及 `DTSTART` 带有午夜以外时刻的 OFX 文件，第一天也可能不完整）：那之前，真正的那一行
+可能在账户的期初里，永远不会被导入，不能让一笔金额相同但无关的款项顶替它。账户的开户日期（上传时新建账户会询问）
+让转账匹配把它第一次上传之前的日子视为空的：一次上传若从这一天或更早开始完整列出，也就代表了之前的所有时间。写明这个账户的记录是一笔付款时，
+它的时间窗口从付款前一天开始，因为只给日期的账单可能把一笔付款记在钱转出之后。如果文件给出的时间精确到秒，
+这一行不早于那笔付款前两分钟，而那笔付款是已连接账户的记录，这项检查就改从付款当天算起，按这一行的文件读取时用的时区（它的 profile 的时区，Trading 212 Cash ISA 是 UTC；
+没有则用你的时区），这一行就是按这个时区记账的：
+收款不会早于付款。（OFX 的行按它自己时间写的日期记账，不一定是这个时区；夏令时午夜刚过时发出的付款，这项检查仍可能晚一天开始。）导入的付款永远不算，即使时间精确到秒：它的时间可能是银行入账的时间（OFX 文件就是这样），
+晚于钱转出的时间。时间窗口本身，以及候选，都不变。这项检查不采用的一行仍是候选，只是不会被自动采用：它的转账需要处理（*Not listed in full*，还有其他候选时是 *Several candidates*），以它为候选的任何其他转账也一样。已导入的最后一天之后则会采用：万一采用的不是真正那一行，下一份账单会带来真正的那一行，这笔转账就会带着两个候选进入
 “需要处理”。在 Transactions 账户上，如果时间窗口完全落在账单完整列出、或由期初调整
 代表的日子里，这笔转账会直接结清（*before history*），账户余额保持和账单一致。到账太晚、没能配对的
 收款也是这样：那一行留在 Unassigned，这笔转账出现在 Recent 里，而不是“需要处理”。两次导入之间不要
@@ -551,14 +809,17 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   `currency`（文件只写一次而不逐行写币种时，每一行的币种，例如 LemFi 的 `Money in (GBP)`；否则用上传时
   选的币种，或映射的 `currency` 列）和 `interest_descriptions`（支付利息的行的描述，用于不印交易类型
   代码的银行，例如 LemFi 的 `Savings Interest Payout`：和刷卡付款一样，这样的行永远不会仅凭金额和日期
-  被当作一笔转账的另一侧）。
+  被当作一笔转账的另一侧），以及 `period_from_filename`（在上传文件的文件名中搜索的正则表达式，带命名组
+  `start` 和 `end`，各是一个 `YYYY-MM-DD` 日期，用于按时段给导出命名的银行，例如 Trading 212 的
+  Cash ISA：匹配到的就是文件的时段，除最后一天外每天都完整列出；文件名给不出时段，或有行落在范围之外时，
+  上传按原样读取，并附一条警告）。
   重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、
   `fee`（在金额之外另收的费用）、`type`、`value_date`、`payee`、`memo`、`check_number`、
   `counterparty_name`、`counterparty_sort_code`、`counterparty_account_number`、`reference`
   （付款参考）、`started_at`（付款的发起时间，按 `date_format` 解析，这时它必须带时间；`date` 是
-  完成时间），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
+  完成时间；按它读取的导出只部分列出第一天，因为其中的行可能按发起时间选出），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
   例如 Revolut 的 `Product`；每一行都必须相同）。
 - **`extract`** 从一列里读出多个类型化字段：`[{"column": "Details", "patterns": ["<正则>", ...]}]`。
   第一个完整匹配非空单元格的正则，用其命名分组填写同名字段（`payee`、`memo`、`check_number`、
@@ -592,6 +853,12 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
 `example-bank-ofx.json`）。把 profile 的 JSON 粘贴进一个新 profile，上传时选 GBP，导入到一个手动的
 `transactions` 账户，就能试一遍整个流程。
 
+### 已知限制
+
+- profile 按暂存文件那一刻的内容读取。如果你为一次上传选好 profile，点上传之前它在另一个
+  标签页被改了，文件会按改过的 profile 读取。提交之前，批次页面会列出每一行的金额，所以按
+  错误正负号读出的文件会在那里被发现：丢弃它，重新上传即可。
+
 ### 用真实账单验证
 
 测试用的是合成文件。要确认你自己的账单仍能正确导入（例如改了导入代码之后），把每家银行的文件
@@ -608,6 +875,19 @@ make real-check REAL_ROOT="$HOME/Downloads"
 再从新到旧全部回滚，必须都被允许，并且余额回到零。它只打印计数和通过与否：错误信息里的数字和文件名
 都会打码。导入时保存的副本放在一个临时目录里，结束时删除，容器也随之删除。Docker 在哪里运行（比如
 远程 Docker 主机），文件内容就会在运行期间发送到那里。`make check` 和 CI 都会跳过它。
+
+要用同样的方式检查一份 eToro 账户报表，把它作为 `ETORO_STATEMENT` 传入，可以单独传，也可以和
+`REAL_ROOT` 一起传（两者至少要有一个）：
+
+```bash
+make real-check ETORO_STATEMENT="$HOME/Downloads/statement.xlsx"
+```
+
+它读取这份报表，报表必须能解析且没有任何标记；再检查报表自己的滚动余额：按秒计，该秒各行之后的余额
+必须等于之前的余额加上这些行变动的现金。然后把它上传到同一容器里一个临时的 eToro 连接（首次同步用
+替身代替，不用任何 eToro key）：不得有任何拒绝或标记，每一行都必须保存并按类型存储，每笔交易都必须
+平衡。报表里从未平仓的持仓在那里等待 API 的数据，只计数，不算失败。它打印每个工作表读到多少行、生成了
+多少条记录，以及通过与否：不含文件里的任何数值、ID、姓名或日期。
 
 ## 密钥：用 SOPS + age 加密 `infra/.env`
 
@@ -674,6 +954,40 @@ docker run --rm -v lararium_documents:/d -i alpine tar -C /d -xf - < backups/doc
 在全新服务器上，先把 `infra/.env` 里的 `LARARIUM_MASTER_KEY` 设成转储来源那台服务器的主密钥（从你单独
 备份的密钥或 `infra/.env.sops` 里取），不要新生成：转储里存的凭据是用它加密的，换了密钥，每个连接都得
 重新添加。然后运行 `make up`（它会创建角色和一个已迁移的空数据库），再按上面的步骤恢复并交换。
+
+### 恢复演练
+
+不时演练一次恢复，在一台不是生产环境的 Docker 主机上进行（任何有本仓库、并能通过 docker context
+访问那台主机的机器都可以运行）：
+
+```bash
+make restore-rehearsal CONTEXT=<docker context> \
+  DUMP=backups/lararium-20260101T030000Z.dump DOCUMENTS=backups/documents-20260101T030000Z.tar
+```
+
+`infra/backup/rehearse-restore.sh` 会在那台主机上启动一个一次性的 PostgreSQL 18，角色与正式服务相同，
+然后按上面的步骤操作并逐步检查：
+
+1. `restore.sh` 把转储恢复到一个新数据库，然后交换数据库名；
+2. 每张表的行数与转储里该表的行数一致（行数直接从转储本身统计）；
+3. 文档 tar 解压到一个一次性卷里，数据库引用的每个文档都在，API 能读取（同一镜像、用户和路径），
+   且内容与其哈希一致；
+4. 像正式服务的 `migrate` 一样运行 `alembic upgrade head`（较旧的备份会被升级），然后
+   `python -m lararium.restore_check` 检查迁移版本是代码的 head、每笔交易都平衡、转账不变量成立。
+
+它只输出表名、行数、文档哈希和交易 id，从不输出金额或描述；任一检查失败时以非零状态退出。数据库
+不发布任何端口：它在一个内部 Docker 网络上，只有检查容器加入。后端镜像在那台主机上用你的工作区
+构建。容器、卷和网络在运行结束时删除，无论以何种方式结束；`postgres:18`、`alpine` 和
+`lararium-rehearsal` 镜像会保留缓存。运行期间那台主机上有真实的备份数据，所以请用你信得过的主机。
+
+## 依赖许可证
+
+`make check` 会运行 `make license-check`：每个生产依赖（后端 `uv.lock` 中除 dev 组以外的依赖，即镜像
+所安装的；以及前端除 devDependencies 以外的依赖）都必须声明一个与 AGPL-3.0-or-later 兼容的 SPDX
+许可证。允许的许可证，以及元数据不是清晰 SPDX 表达式的包的已审核例外，都在
+[`tools/licenses.toml`](tools/licenses.toml) 中。未知或不兼容的许可证会让检查失败。要接受一个，先审核
+该包的许可证文件，再添加一条 `[[exception]]`：写上检查输出的原样声明字符串、你的结论和理由。不再
+匹配的例外（包已移除，或其声明的许可证变了）同样会让检查失败。
 
 ## 许可证
 

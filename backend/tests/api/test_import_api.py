@@ -119,8 +119,8 @@ async def test_example_csv_end_to_end(client) -> None:
     assert batch["counts"]["new"] == len(lines) - len(zero_rows) + 1
     assert batch["counts"]["skipped"] == 1
     [adjustment] = [row for row in batch["rows"] if row["kind"] == "opening_adjustment"]
-    # An export's first day is partial, so its adjustment is dated on it.
-    assert (adjustment["quantity"], adjustment["booking_date"]) == ("1000.00", "2026-10-01")
+    # An export lists its first day in full, so its adjustment is dated the day before.
+    assert (adjustment["quantity"], adjustment["booking_date"]) == ("1000.00", "2026-09-30")
     assert await _balance(client, account_id) == Decimal("1676.37")  # the last Balance
     # Date-only rows occur at local midnight of their date (Decision 6).
     assert all(
@@ -354,4 +354,5 @@ def test_import_operation_ids() -> None:
         "discard_import",
         "rollback_import",
         "get_import_catalog",
+        "list_account_types",
     } <= operation_ids

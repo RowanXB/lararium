@@ -510,6 +510,27 @@ def test_period_from_dtstart_dtend() -> None:
     assert _parse(content).period == (date(2026, 11, 1), date(2026, 11, 30))
 
 
+@pytest.mark.parametrize(
+    ("dtstart", "mid_day"),
+    [
+        (b"20261101", False),
+        (b"20261101000000", False),
+        (b"20261101000000.000[-5:EST]", False),  # midnight in its own offset
+        (b"20261101120000", True),  # an incremental download starting at noon
+        (b"20261101000001[0:GMT]", True),
+    ],
+)
+def test_a_period_starts_mid_day_when_dtstart_gives_a_time_of_day(
+    dtstart: bytes, mid_day: bool
+) -> None:
+    content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(
+        b"<DTSTART>20261101", b"<DTSTART>" + dtstart
+    )
+    statement = _parse(content)
+    assert statement.period == (date(2026, 11, 1), date(2026, 11, 30))
+    assert statement.period_starts_mid_day is mid_day
+
+
 @pytest.mark.parametrize("leaf", [b"<DTSTART>20261101\n", b"<DTEND>20261130\n"])
 def test_period_needs_both_dates(leaf: bytes) -> None:
     content = _sgml(_sgml_statement(SGML_TRANSACTIONS)).replace(leaf, b"")

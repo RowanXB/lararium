@@ -3,7 +3,13 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useId, useState } from "react";
 
 import {
+  type AccountCreate,
+  type AccountOut,
+  type AccountTypeOut,
   type BodyStageImport,
+  createAccount,
+  createImportProfile,
+  type ImportCatalogEntryOut,
   getFinanceSettings,
   type ImportProfileOut,
   listAccounts,
@@ -13,6 +19,8 @@ import {
   stageImport,
 } from "../api";
 import { LabelledSelect } from "../components/LabelledSelect";
+import { Segmented } from "../components/Segmented";
+import { TextField } from "../components/TextField";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Input } from "../components/ui/input";
@@ -33,6 +41,11 @@ import {
   isImportable,
   isoCode,
 } from "../lib/imports";
+import { type Detection, detectFormat, fileFormat, firstLineOf } from "../lib/detectFormat";
+import { accountBody, SIDES, type Side } from "../lib/newAccount";
+
+// The account select's value for "a new account, named here".
+const NEW_ACCOUNT = "new";
 
 // The currency select's value for "use the currency the file states".
 const FROM_FILE = "file";
@@ -41,16 +54,79 @@ const FROM_FILE = "file";
 // statements state one, and so do CSVs that map a currency column or whose profile sets
 // the one the file states once, so the choice can be left to the file (a row still without
 // one becomes an error the review page shows).
-function fileStatesCurrency(profile: ImportProfileOut | undefined): boolean {
-  if (profile === undefined) return false;
-  if (profile.config.format === "ofx" || profile.config.format === "pdf") return true;
-  return (
-    profile.config.format === "csv" &&
-    Boolean(profile.config.columns.currency || profile.config.currency)
-  );
+function fileStatesCurrency(config: ImportProfileOut["config"] | undefined): boolean {
+  if (config === undefined) return false;
+  if (config.format === "ofx" || config.format === "pdf") return true;
+  return config.format === "csv" && Boolean(config.columns.currency || config.currency);
 }
 
-function UploadForm() {
+// The name a catalog format's profile gets, as the profiles page names it.
+function catalogProfileName(entry: ImportCatalogEntryOut): string {
+  return `${entry.institution} ${entry.label}`;
+}
+
+// Profile names are unique as the database compares them (lower(btrim(name))): "HSBC UK
+// CSV", else "HSBC UK CSV (2)" and on.
+function freeName(name: string, profiles: ImportProfileOut[]): string {
+  const key = (value: string) => value.trim().toLowerCase();
+  const taken = new Set(profiles.map((p) => key(p.name)));
+  let candidate = name;
+  for (let n = 2; taken.has(key(candidate)); n++) candidate = `${name} (${n})`;
+  return candidate;
+}
+
+// Both configs come from the server's one model, so equal values serialise alike once
+// their keys are in order.
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
+  }
+  return value;
+}
+
+export function sameConfig(a: unknown, b: unknown): boolean {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+type UploadFormProps = {
+  // One bank's formats from the catalog: the form asks for a format instead of a profile,
+  // and makes the profile itself.
+  formats?: ImportCatalogEntryOut[];
+  // The account type a new account is made as: its shape, its key and its name.
+  type?: AccountTypeOut;
+  // The one account to upload to: the form asks for no account.
+  account?: AccountOut;
+};
+
+// A new account of a catalog type takes the type's shape and key; the side is asked only
+// when the shape leaves it open. The type stands for the institution. The opening date,
+// when given, vouches for the days before the first upload (no row exists before it).
+function newAccountBody(
+  name: string,
+  side: Side,
+  openedOn: string,
+  type: AccountTypeOut | undefined,
+): AccountCreate {
+  const body = { ...accountBody({ name, side, balance: "files" }), opened_on: openedOn || null };
+  if (!type?.shape) return body;
+  const { ledger_type, subtype, tax_wrapper, balance_mode } = type.shape;
+  return {
+    ...body,
+    ledger_type: ledger_type ?? body.ledger_type,
+    subtype,
+    tax_wrapper,
+    balance_mode,
+    institution_name: null,
+    type_key: type.key,
+  };
+}
+
+export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const fileId = useId();
@@ -72,15 +148,49 @@ function UploadForm() {
   });
 
   const [accountId, setAccountId] = useState<string>();
+  const [newName, setNewName] = useState(type?.name ?? "");
+  const [newSide, setNewSide] = useState<Side>("have");
+  const [newOpenedOn, setNewOpenedOn] = useState("");
   const [profileId, setProfileId] = useState<string>();
+  // Which of the bank's formats the chosen file is; picked by hand only when it can't be told.
+  const [detection, setDetection] = useState<Detection>();
+  const [formatLabel, setFormatLabel] = useState<string>();
   const [currency, setCurrency] = useState<string>();
   const [file, setFile] = useState<File>();
   const [incomplete, setIncomplete] = useState(false);
 
-  const importable = (accounts.data ?? []).filter(isImportable);
+  // A type's file carries no account identity the server could check, so a type's upload
+  // goes only into an account of that type; an older account is given its type first.
+  const importable = (accounts.data ?? []).filter(
+    (option) => isImportable(option) && (!type || option.type_key === type.key),
+  );
+  // With no account to pick, the form starts at a new one.
+  const selectedAccount =
+    account?.id ??
+    accountId ??
+    (accounts.data && importable.length === 0 ? NEW_ACCOUNT : undefined);
+  const askSide = !type?.shape || type.shape.ledger_type === null;
+  const creating = selectedAccount === NEW_ACCOUNT;
   const fiat = (instruments.data ?? []).filter((instrument) => instrument.kind === "fiat");
+  const format =
+    detection?.kind === "found"
+      ? detection.entry
+      : detection?.kind === "ambiguous"
+        ? detection.entries.find((entry) => entry.label === formatLabel)
+        : undefined;
+
+  async function chooseFile(chosen: File | undefined) {
+    setFile(chosen);
+    setFormatLabel(undefined);
+    if (!formats || !chosen) {
+      setDetection(undefined);
+      return;
+    }
+    const firstLine = fileFormat(chosen.name) === "csv" ? await firstLineOf(chosen) : "";
+    setDetection(detectFormat(formats, chosen.name, firstLine));
+  }
   const profile = profiles.data?.find((p) => p.id === profileId);
-  const fromFileAllowed = fileStatesCurrency(profile);
+  const fromFileAllowed = fileStatesCurrency(formats ? format?.config : profile?.config);
   const reportingCurrencyId = fiat.find(
     (instrument) => isoCode(instrument) === settings.data?.reporting_currency,
   )?.id;
@@ -91,8 +201,39 @@ function UploadForm() {
       : currency;
 
   const mutation = useMutation({
-    mutationFn: async (body: BodyStageImport) =>
-      (await stageImport({ body, throwOnError: true })).data,
+    mutationFn: async (body: Omit<BodyStageImport, "account_id"> & { account_id?: string }) => {
+      let account_id = body.account_id;
+      if (account_id === undefined) {
+        const created = (
+          await createAccount({
+            body: newAccountBody(newName, newSide, newOpenedOn, type),
+            throwOnError: true,
+          })
+        ).data;
+        account_id = created.id;
+        // Picked from now on, so trying again after a failed upload makes no second account.
+        setAccountId(created.id);
+        await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      }
+      let profile_id = body.profile_id;
+      if (format) {
+        // Only a profile that reads the file exactly as the catalog format does: one of the
+        // same name may have been edited since (another sign convention, say).
+        const existing = profiles.data ?? [];
+        profile_id =
+          existing.find((p) => sameConfig(p.config, format.config))?.id ??
+          (
+            await createImportProfile({
+              body: { name: freeName(catalogProfileName(format), existing), config: format.config },
+              throwOnError: true,
+            })
+          ).data.id;
+        await queryClient.invalidateQueries({ queryKey: ["import-profiles"] });
+      }
+      return (
+        await stageImport({ body: { ...body, account_id, profile_id }, throwOnError: true })
+      ).data;
+    },
     onSuccess: async (batch) => {
       await queryClient.invalidateQueries({ queryKey: ["imports"] });
       await navigate({ to: "/imports/$batchId", params: { batchId: batch.id } });
@@ -101,14 +242,21 @@ function UploadForm() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!accountId || !profileId || !file || !selectedCurrency) {
+    if (
+      !selectedAccount ||
+      (creating && !newName.trim()) ||
+      !(formats ? format : profileId) ||
+      !file ||
+      !selectedCurrency
+    ) {
       setIncomplete(true);
       return;
     }
     setIncomplete(false);
     mutation.mutate({
-      account_id: accountId,
-      profile_id: profileId,
+      account_id: creating ? undefined : selectedAccount,
+      // A catalog format's profile is found or made just before staging.
+      profile_id: profileId ?? "",
       file,
       // Left out, the server takes each row's currency from the file.
       ...(selectedCurrency === FROM_FILE ? {} : { instrument_id: selectedCurrency }),
@@ -124,32 +272,61 @@ function UploadForm() {
       </CardHeader>
       <CardContent className="space-y-4">
         {error && <p className="text-sm text-destructive">{errorMessage(error)}</p>}
-        {accounts.data && importable.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No account accepts imports. Imports need an open manual account whose balance mode
-            is Transactions or Hybrid.
-          </p>
-        )}
-        {profiles.data?.length === 0 && (
+        {!formats && profiles.data?.length === 0 && (
           <p className="text-sm text-muted-foreground">
             No profiles yet. <Link to="/import-profiles">Add one</Link> first.
           </p>
         )}
         <form aria-label="Upload statement" onSubmit={submit} className="grid gap-4 sm:grid-cols-4">
-          <LabelledSelect
-            label="Account"
-            value={accountId}
-            options={importable.map((account) => ({ value: account.id, label: account.name }))}
-            onChange={setAccountId}
-            placeholder="Account"
-          />
-          <LabelledSelect
-            label="Profile"
-            value={profileId}
-            options={(profiles.data ?? []).map((p) => ({ value: p.id, label: p.name }))}
-            onChange={setProfileId}
-            placeholder="Profile"
-          />
+          {!account && (
+            <LabelledSelect
+              label="Account"
+              value={selectedAccount}
+              options={[
+                ...importable.map((option) => ({ value: option.id, label: option.name })),
+                { value: NEW_ACCOUNT, label: "New account…" },
+              ]}
+              onChange={setAccountId}
+              placeholder="Account"
+            />
+          )}
+          {creating && (
+            <div className="flex flex-wrap items-end gap-4 rounded-lg border border-dashed p-3 sm:col-span-4">
+              <div className="min-w-56">
+                <TextField label="New account name" value={newName} onChange={setNewName} />
+              </div>
+              <div className="min-w-40">
+                <TextField
+                  label="Opened on"
+                  type="date"
+                  value={newOpenedOn}
+                  onChange={setNewOpenedOn}
+                />
+              </div>
+              {askSide && (
+                <Segmented
+                  label="What it holds"
+                  value={newSide}
+                  options={SIDES}
+                  onChange={setNewSide}
+                />
+              )}
+              <p className="w-full text-sm text-muted-foreground">
+                {askSide && "A credit card or a loan is money you owe. "}The account is created
+                when you upload. The opening date is optional: with it, a file from the account's
+                first day speaks for the days before it too.
+              </p>
+            </div>
+          )}
+          {!formats && (
+            <LabelledSelect
+              label="Profile"
+              value={profileId}
+              options={(profiles.data ?? []).map((p) => ({ value: p.id, label: p.name }))}
+              onChange={setProfileId}
+              placeholder="Profile"
+            />
+          )}
           <LabelledSelect
             label="Currency"
             value={selectedCurrency}
@@ -165,9 +342,38 @@ function UploadForm() {
             <Input
               id={fileId}
               type="file"
-              onChange={(e) => setFile(e.target.files?.[0])}
+              onChange={(e) => void chooseFile(e.target.files?.[0])}
             />
           </div>
+          {formats && detection && (
+            <div className="sm:col-span-4">
+              {detection.kind === "found" && (
+                <p role="status" className="text-sm text-income">
+                  Recognised as {detection.entry.institution} {detection.entry.label}
+                </p>
+              )}
+              {detection.kind === "ambiguous" && (
+                <div className="max-w-sm">
+                  <LabelledSelect
+                    label="Which file is it?"
+                    value={formatLabel}
+                    options={detection.entries.map((entry) => ({
+                      value: entry.label,
+                      label: entry.label,
+                    }))}
+                    onChange={setFormatLabel}
+                    placeholder="File format"
+                  />
+                </div>
+              )}
+              {detection.kind === "unknown" && (
+                <p role="alert" className="text-sm text-warning">
+                  This isn't a file {formats[0]?.institution} exports. Upload one of:{" "}
+                  {formats.map((entry) => entry.label).join(", ")}.
+                </p>
+              )}
+            </div>
+          )}
           <p className="text-sm text-muted-foreground sm:col-span-4">
             The currency is used for rows whose file states none.
           </p>
@@ -177,7 +383,13 @@ function UploadForm() {
             </Button>
             {incomplete && (
               <p className="text-sm text-destructive">
-                Choose an account, a profile, a currency and a file
+                {creating && !newName.trim()
+                  ? "Name the new account"
+                  : formats
+                    ? file && !format
+                      ? "Choose which file it is"
+                      : "Choose an account, a currency and a file"
+                    : "Choose an account, a profile, a currency and a file"}
               </p>
             )}
             {mutation.isError && (

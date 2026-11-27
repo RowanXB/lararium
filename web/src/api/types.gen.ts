@@ -50,6 +50,10 @@ export type AccountCreate = {
      * Tax Wrapper
      */
     tax_wrapper?: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+    /**
+     * Type Key
+     */
+    type_key?: string | null;
 };
 
 /**
@@ -64,6 +68,10 @@ export type AccountOut = {
      * Closed On
      */
     closed_on: string | null;
+    /**
+     * Excluded From Reports
+     */
+    excluded_from_reports: boolean;
     /**
      * Id
      */
@@ -116,16 +124,129 @@ export type AccountOut = {
      * Tax Wrapper
      */
     tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+    /**
+     * Type Key
+     */
+    type_key: string | null;
 };
 
 /**
  * AccountRename
+ *
+ * Rename the account, set its type (one with no API), or both; type_key null clears it.
  */
 export type AccountRename = {
     /**
      * Name
      */
+    name?: string | null;
+    /**
+     * Type Key
+     */
+    type_key?: string | null;
+};
+
+/**
+ * AccountReportingUpdate
+ */
+export type AccountReportingUpdate = {
+    /**
+     * Excluded
+     */
+    excluded: boolean;
+};
+
+/**
+ * AccountShapeOut
+ */
+export type AccountShapeOut = {
+    /**
+     * Balance Mode
+     */
+    balance_mode: 'transactions' | 'snapshots' | 'hybrid';
+    /**
+     * Ledger Type
+     */
+    ledger_type: 'asset' | 'liability' | 'income' | 'expense' | 'equity' | null;
+    /**
+     * Subtype
+     */
+    subtype: 'bank' | 'savings_pot' | 'broker' | 'exchange' | 'wallet' | 'in_transit' | 'manual_asset' | 'other';
+    /**
+     * Tax Wrapper
+     */
+    tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+};
+
+/**
+ * AccountTypeApiOut
+ */
+export type AccountTypeApiOut = {
+    /**
+     * Config
+     */
+    config: {
+        [key: string]: JsonValue;
+    };
+    /**
+     * Connector
+     */
+    connector: string;
+};
+
+/**
+ * AccountTypeFileOut
+ */
+export type AccountTypeFileOut = {
+    config: ProfileConfig | null;
+    /**
+     * Format
+     */
+    format: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Recommended
+     */
+    recommended: boolean;
+};
+
+/**
+ * AccountTypeOut
+ */
+export type AccountTypeOut = {
+    api: AccountTypeApiOut | null;
+    /**
+     * Family
+     */
+    family: string | null;
+    /**
+     * Files
+     */
+    files: Array<AccountTypeFileOut>;
+    /**
+     * Funding
+     */
+    funding: Array<string>;
+    /**
+     * Institution
+     */
+    institution: string;
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Name
+     */
     name: string;
+    shape: AccountShapeOut | null;
 };
 
 /**
@@ -185,9 +306,29 @@ export type BodyStageImport = {
 };
 
 /**
+ * Body_upload_etoro_statement
+ */
+export type BodyUploadEtoroStatement = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
  * Body_upload_ibkr_statement
  */
 export type BodyUploadIbkrStatement = {
+    /**
+     * File
+     */
+    file: Blob | File;
+};
+
+/**
+ * Body_upload_trading212_export
+ */
+export type BodyUploadTrading212Export = {
     /**
      * File
      */
@@ -206,6 +347,10 @@ export type CandidateOut = {
      * Account Name
      */
     account_name: string;
+    /**
+     * Currency
+     */
+    currency: string;
     /**
      * Description
      */
@@ -228,7 +373,200 @@ export type CandidateOut = {
     transaction_id: string;
 };
 
+/**
+ * CardMerchantDismiss
+ */
+export type CardMerchantDismiss = {
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+};
+
+/**
+ * CardMerchantRegister
+ *
+ * The own accounts card payments to a Monzo merchant go into; none removes it.
+ */
+export type CardMerchantRegister = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+};
+
+/**
+ * CardMerchantSuggestionOut
+ *
+ * A card merchant whose website is on a connected platform's domain, offering the
+ * platform's accounts; registering it is register_card_merchant.
+ */
+export type CardMerchantSuggestionOut = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Host
+     */
+    host: string;
+    /**
+     * Incoming
+     */
+    incoming: number;
+    /**
+     * Kind
+     */
+    kind: 'card_merchant';
+    /**
+     * Latest
+     */
+    latest: string;
+    /**
+     * Merchant Id
+     */
+    merchant_id: string;
+    /**
+     * Name
+     */
+    name: string | null;
+    /**
+     * Outgoing
+     */
+    outgoing: number;
+};
+
 export type CardTypes = Array<string>;
+
+/**
+ * CashFlowCategoryOut
+ */
+export type CashFlowCategoryOut = {
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Spending
+     */
+    spending: string;
+};
+
+/**
+ * CashFlowHiddenAccountOut
+ *
+ * Money moved between an account left out of reports and those still in them.
+ */
+export type CashFlowHiddenAccountOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Moved In
+     */
+    moved_in: string;
+    /**
+     * Moved Out
+     */
+    moved_out: string;
+    /**
+     * Name
+     */
+    name: string;
+};
+
+/**
+ * CashFlowOut
+ *
+ * Income and spending in the reporting currency; spending is positive.
+ */
+export type CashFlowOut = {
+    /**
+     * Bucket
+     */
+    bucket: 'day' | 'week' | 'month';
+    /**
+     * Categories
+     */
+    categories: Array<CashFlowCategoryOut>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Hidden Accounts
+     */
+    hidden_accounts: Array<CashFlowHiddenAccountOut>;
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Missing Count
+     */
+    missing_count: number;
+    /**
+     * Net
+     */
+    net: string;
+    /**
+     * Payees
+     */
+    payees: Array<CashFlowPayeeOut>;
+    /**
+     * Periods
+     */
+    periods: Array<CashFlowPeriodOut>;
+    /**
+     * Spending
+     */
+    spending: string;
+    /**
+     * Start
+     */
+    start: string;
+};
+
+/**
+ * CashFlowPayeeOut
+ */
+export type CashFlowPayeeOut = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Spending
+     */
+    spending: string;
+};
+
+/**
+ * CashFlowPeriodOut
+ */
+export type CashFlowPeriodOut = {
+    /**
+     * Income
+     */
+    income: string;
+    /**
+     * Spending
+     */
+    spending: string;
+    /**
+     * Start
+     */
+    start: string;
+};
 
 /**
  * ConnectionOut
@@ -431,6 +769,7 @@ export type CsvProfileConfig = {
      */
     interest_descriptions?: Array<string>;
     overdraft_footer_label?: FooterLabel | null;
+    period_from_filename?: PeriodPattern | null;
     /**
      * Row Order
      */
@@ -452,6 +791,40 @@ export type DateFormat = string;
 export type Delimiter = string;
 
 export type Encoding = 'utf-8-sig' | 'utf-8' | 'cp1252' | 'latin-1';
+
+/**
+ * EtoroConnectionIn
+ */
+export type EtoroConnectionIn = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+/**
+ * EtoroConnectionUpdate
+ */
+export type EtoroConnectionUpdate = {
+    /**
+     * Public Api Key
+     */
+    public_api_key: string;
+    /**
+     * User Key
+     */
+    user_key: string;
+};
+
+/**
+ * EtoroUploadOut
+ */
+export type EtoroUploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
 
 /**
  * FinanceSettingsOut
@@ -644,17 +1017,59 @@ export type IdentifierOut = {
      */
     dismissed_at: string | null;
     /**
+     * Holder Account Ids
+     */
+    holder_account_ids: Array<string>;
+    /**
      * Id
      */
     id: string;
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant';
+    /**
+     * References
+     */
+    references: Array<IdentifierReference>;
     /**
      * Sort Code
      */
     sort_code: string | null;
+    /**
+     * Value
+     */
+    value: string;
+};
+
+/**
+ * IdentifierReference
+ *
+ * One own account behind a shared payee bank account, told apart by the payment
+ * reference it is paid with (stored trimmed and upper-cased).
+ */
+export type IdentifierReference = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Reference
+     */
+    reference: string;
+};
+
+/**
+ * IdentifierReferencesRegister
+ *
+ * The own accounts payments to a shared payee bank account go into, by reference; none
+ * removes them.
+ */
+export type IdentifierReferencesRegister = {
+    /**
+     * References
+     */
+    references: Array<IdentifierReference>;
     /**
      * Value
      */
@@ -1220,7 +1635,7 @@ export type InstrumentIdentifierModel = {
     /**
      * Scheme
      */
-    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'chain_contract' | 'coingecko';
+    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko';
     /**
      * Value
      */
@@ -1274,6 +1689,10 @@ export type InstrumentUpdate = {
      */
     hidden: boolean;
 };
+
+export type JsonValue = boolean | number | string | Array<JsonValue> | {
+    [key: string]: JsonValue;
+} | null;
 
 /**
  * MainAccountUpdate
@@ -1349,9 +1768,17 @@ export type PairCandidateOut = {
      */
     booking_date: string;
     /**
+     * Currency
+     */
+    currency: string;
+    /**
      * Description
      */
     description: string;
+    /**
+     * Differs
+     */
+    differs?: 'currency' | 'amount' | null;
     /**
      * Occurred At
      */
@@ -1383,6 +1810,8 @@ export type PdfProfileConfig = {
     layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'revolut_current_statement' | 'revolut_savings_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
+
+export type PeriodPattern = string;
 
 /**
  * PostingCreate
@@ -1525,6 +1954,71 @@ export type QifProfileConfig = {
 };
 
 /**
+ * ReviewOut
+ *
+ * A value two sources of one event disagree on (design §5.7): open, or resolved by the
+ * owner taking one of them.
+ */
+export type ReviewOut = {
+    /**
+     * Api Value
+     */
+    api_value: string;
+    /**
+     * Connection Id
+     */
+    connection_id: string;
+    /**
+     * Event Key
+     */
+    event_key: string;
+    /**
+     * Field
+     */
+    field: string;
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Opened At
+     */
+    opened_at: string;
+    /**
+     * Resolution
+     */
+    resolution: 'api' | 'statement' | null;
+    /**
+     * Resolved At
+     */
+    resolved_at: string | null;
+    /**
+     * Resolved By
+     */
+    resolved_by: string | null;
+    /**
+     * Statement Value
+     */
+    statement_value: string;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string | null;
+};
+
+/**
+ * ReviewResolve
+ *
+ * Which source's value the owner takes for a review item.
+ */
+export type ReviewResolve = {
+    /**
+     * Take
+     */
+    take: 'api' | 'statement';
+};
+
+/**
  * SettingsOut
  */
 export type SettingsOut = {
@@ -1647,6 +2141,44 @@ export type TimeUnit = 'day' | 'minute' | 'second';
 export type TimezoneName = string;
 
 /**
+ * Trading212ConnectionIn
+ */
+export type Trading212ConnectionIn = {
+    /**
+     * Account Kind
+     */
+    account_kind: 'invest' | 'isa';
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+/**
+ * Trading212ConnectionUpdate
+ */
+export type Trading212ConnectionUpdate = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret: string;
+};
+
+/**
+ * Trading212UploadOut
+ */
+export type Trading212UploadOut = {
+    /**
+     * Raw Records
+     */
+    raw_records: number;
+};
+
+/**
  * TransactionCreate
  */
 export type TransactionCreate = {
@@ -1764,7 +2296,7 @@ export type TransferOut = {
     /**
      * Review Reason
      */
-    review_reason: 'several_candidates' | 'amount_differs' | null;
+    review_reason: 'several_candidates' | 'amount_differs' | 'not_listed_in_full' | null;
     /**
      * Status
      */
@@ -1822,6 +2354,24 @@ export type ValidationError = {
 };
 
 /**
+ * EtoroConnectionIn
+ */
+export type EtoroConnectionInWritable = {
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Public Api Key
+     */
+    public_api_key: string;
+    /**
+     * User Key
+     */
+    user_key: string;
+};
+
+/**
  * IbkrConnectionCreate
  */
 export type IbkrConnectionCreateWritable = {
@@ -1861,6 +2411,10 @@ export type IbkrConnectionUpdateWritable = {
     token_expires_on: string;
 };
 
+export type JsonValueWritable = boolean | number | string | Array<JsonValueWritable> | {
+    [key: string]: JsonValueWritable;
+} | null;
+
 /**
  * MonzoConnectionCreate
  */
@@ -1873,6 +2427,28 @@ export type MonzoConnectionCreateWritable = {
      * Client Secret
      */
     client_secret: string;
+    /**
+     * Display Name
+     */
+    display_name: string;
+};
+
+/**
+ * Trading212ConnectionIn
+ */
+export type Trading212ConnectionInWritable = {
+    /**
+     * Account Kind
+     */
+    account_kind: 'invest' | 'isa';
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret: string;
     /**
      * Display Name
      */
@@ -1921,6 +2497,31 @@ export type CreateMonzoConnectionResponses = {
 };
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
+
+export type CreateEtoroConnectionData = {
+    body: EtoroConnectionInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/etoro';
+};
+
+export type CreateEtoroConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateEtoroConnectionError = CreateEtoroConnectionErrors[keyof CreateEtoroConnectionErrors];
+
+export type CreateEtoroConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateEtoroConnectionResponse = CreateEtoroConnectionResponses[keyof CreateEtoroConnectionResponses];
 
 export type CreateIbkrConnectionData = {
     body: IbkrConnectionCreateWritable;
@@ -1971,6 +2572,31 @@ export type MonzoOauthCallbackErrors = {
 };
 
 export type MonzoOauthCallbackError = MonzoOauthCallbackErrors[keyof MonzoOauthCallbackErrors];
+
+export type CreateTrading212ConnectionData = {
+    body: Trading212ConnectionInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/trading212';
+};
+
+export type CreateTrading212ConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateTrading212ConnectionError = CreateTrading212ConnectionErrors[keyof CreateTrading212ConnectionErrors];
+
+export type CreateTrading212ConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateTrading212ConnectionResponse = CreateTrading212ConnectionResponses[keyof CreateTrading212ConnectionResponses];
 
 export type AuthorizeConnectionData = {
     body?: never;
@@ -2032,6 +2658,66 @@ export type DisableConnectionResponses = {
 
 export type DisableConnectionResponse = DisableConnectionResponses[keyof DisableConnectionResponses];
 
+export type UpdateEtoroConnectionData = {
+    body: EtoroConnectionUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/etoro';
+};
+
+export type UpdateEtoroConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateEtoroConnectionError = UpdateEtoroConnectionErrors[keyof UpdateEtoroConnectionErrors];
+
+export type UpdateEtoroConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateEtoroConnectionResponse = UpdateEtoroConnectionResponses[keyof UpdateEtoroConnectionResponses];
+
+export type UploadEtoroStatementData = {
+    body: BodyUploadEtoroStatement;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/etoro-statement';
+};
+
+export type UploadEtoroStatementErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadEtoroStatementError = UploadEtoroStatementErrors[keyof UploadEtoroStatementErrors];
+
+export type UploadEtoroStatementResponses = {
+    /**
+     * Successful Response
+     */
+    202: EtoroUploadOut;
+};
+
+export type UploadEtoroStatementResponse = UploadEtoroStatementResponses[keyof UploadEtoroStatementResponses];
+
 export type UpdateIbkrConnectionData = {
     body: IbkrConnectionUpdateWritable;
     path: {
@@ -2092,6 +2778,72 @@ export type UploadIbkrStatementResponses = {
 
 export type UploadIbkrStatementResponse = UploadIbkrStatementResponses[keyof UploadIbkrStatementResponses];
 
+export type ListSourceReviewsData = {
+    body?: never;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/reviews';
+};
+
+export type ListSourceReviewsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSourceReviewsError = ListSourceReviewsErrors[keyof ListSourceReviewsErrors];
+
+export type ListSourceReviewsResponses = {
+    /**
+     * Response List Source Reviews
+     *
+     * Successful Response
+     */
+    200: Array<ReviewOut>;
+};
+
+export type ListSourceReviewsResponse = ListSourceReviewsResponses[keyof ListSourceReviewsResponses];
+
+export type ResolveSourceReviewData = {
+    body: ReviewResolve;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+        /**
+         * Review Id
+         */
+        review_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/reviews/{review_id}/resolve';
+};
+
+export type ResolveSourceReviewErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ResolveSourceReviewError = ResolveSourceReviewErrors[keyof ResolveSourceReviewErrors];
+
+export type ResolveSourceReviewResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type ResolveSourceReviewResponse = ResolveSourceReviewResponses[keyof ResolveSourceReviewResponses];
+
 export type SyncConnectionNowData = {
     body?: never;
     path: {
@@ -2121,6 +2873,84 @@ export type SyncConnectionNowResponses = {
 };
 
 export type SyncConnectionNowResponse = SyncConnectionNowResponses[keyof SyncConnectionNowResponses];
+
+export type UpdateTrading212ConnectionData = {
+    body: Trading212ConnectionUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/trading212';
+};
+
+export type UpdateTrading212ConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateTrading212ConnectionError = UpdateTrading212ConnectionErrors[keyof UpdateTrading212ConnectionErrors];
+
+export type UpdateTrading212ConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateTrading212ConnectionResponse = UpdateTrading212ConnectionResponses[keyof UpdateTrading212ConnectionResponses];
+
+export type UploadTrading212ExportData = {
+    body: BodyUploadTrading212Export;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/trading212-export';
+};
+
+export type UploadTrading212ExportErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadTrading212ExportError = UploadTrading212ExportErrors[keyof UploadTrading212ExportErrors];
+
+export type UploadTrading212ExportResponses = {
+    /**
+     * Successful Response
+     */
+    202: Trading212UploadOut;
+};
+
+export type UploadTrading212ExportResponse = UploadTrading212ExportResponses[keyof UploadTrading212ExportResponses];
+
+export type ListAccountTypesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/account-types';
+};
+
+export type ListAccountTypesResponses = {
+    /**
+     * Response List Account Types
+     *
+     * Successful Response
+     */
+    200: Array<AccountTypeOut>;
+};
+
+export type ListAccountTypesResponse = ListAccountTypesResponses[keyof ListAccountTypesResponses];
 
 export type ListAccountsData = {
     body?: never;
@@ -2164,6 +2994,56 @@ export type CreateAccountResponses = {
 };
 
 export type CreateAccountResponse = CreateAccountResponses[keyof CreateAccountResponses];
+
+export type RegisterCardMerchantData = {
+    body: CardMerchantRegister;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/accounts/identifiers/card-merchants';
+};
+
+export type RegisterCardMerchantErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegisterCardMerchantError = RegisterCardMerchantErrors[keyof RegisterCardMerchantErrors];
+
+export type RegisterCardMerchantResponses = {
+    /**
+     * Successful Response
+     */
+    200: IdentifierOut;
+};
+
+export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
+
+export type RegisterIdentifierReferencesData = {
+    body: IdentifierReferencesRegister;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/accounts/identifiers/references';
+};
+
+export type RegisterIdentifierReferencesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegisterIdentifierReferencesError = RegisterIdentifierReferencesErrors[keyof RegisterIdentifierReferencesErrors];
+
+export type RegisterIdentifierReferencesResponses = {
+    /**
+     * Successful Response
+     */
+    200: IdentifierOut;
+};
+
+export type RegisterIdentifierReferencesResponse = RegisterIdentifierReferencesResponses[keyof RegisterIdentifierReferencesResponses];
 
 export type RenameAccountData = {
     body: AccountRename;
@@ -2381,6 +3261,36 @@ export type SetMainAccountResponses = {
 
 export type SetMainAccountResponse = SetMainAccountResponses[keyof SetMainAccountResponses];
 
+export type SetAccountReportingData = {
+    body: AccountReportingUpdate;
+    path: {
+        /**
+         * Account Id
+         */
+        account_id: string;
+    };
+    query?: never;
+    url: '/api/v1/finance/accounts/{account_id}/reporting';
+};
+
+export type SetAccountReportingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetAccountReportingError = SetAccountReportingErrors[keyof SetAccountReportingErrors];
+
+export type SetAccountReportingResponses = {
+    /**
+     * Successful Response
+     */
+    200: AccountOut;
+};
+
+export type SetAccountReportingResponse = SetAccountReportingResponses[keyof SetAccountReportingResponses];
+
 export type RecordSnapshotData = {
     body: SnapshotCreate;
     path: {
@@ -2410,6 +3320,44 @@ export type RecordSnapshotResponses = {
 };
 
 export type RecordSnapshotResponse = RecordSnapshotResponses[keyof RecordSnapshotResponses];
+
+export type GetCashFlowData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Start
+         */
+        start?: string | null;
+        /**
+         * End
+         */
+        end?: string | null;
+        /**
+         * Bucket
+         */
+        bucket?: 'day' | 'week' | 'month';
+    };
+    url: '/api/v1/finance/cash-flow';
+};
+
+export type GetCashFlowErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCashFlowError = GetCashFlowErrors[keyof GetCashFlowErrors];
+
+export type GetCashFlowResponses = {
+    /**
+     * Successful Response
+     */
+    200: CashFlowOut;
+};
+
+export type GetCashFlowResponse = GetCashFlowResponses[keyof GetCashFlowResponses];
 
 export type RecordFxRateData = {
     body: FxRateCreate;
@@ -2444,6 +3392,10 @@ export type GetHoldingsData = {
          * Date
          */
         date?: string | null;
+        /**
+         * All Accounts
+         */
+        all_accounts?: boolean;
     };
     url: '/api/v1/finance/holdings';
 };
@@ -3041,10 +3993,35 @@ export type ListTransferSuggestionsResponses = {
      *
      * Successful Response
      */
-    200: Array<SuggestionOut>;
+    200: Array<SuggestionOut | CardMerchantSuggestionOut>;
 };
 
 export type ListTransferSuggestionsResponse = ListTransferSuggestionsResponses[keyof ListTransferSuggestionsResponses];
+
+export type DismissCardMerchantSuggestionData = {
+    body: CardMerchantDismiss;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/transfer-suggestions/card-merchants/dismiss';
+};
+
+export type DismissCardMerchantSuggestionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DismissCardMerchantSuggestionError = DismissCardMerchantSuggestionErrors[keyof DismissCardMerchantSuggestionErrors];
+
+export type DismissCardMerchantSuggestionResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DismissCardMerchantSuggestionResponse = DismissCardMerchantSuggestionResponses[keyof DismissCardMerchantSuggestionResponses];
 
 export type DismissTransferSuggestionData = {
     body?: never;

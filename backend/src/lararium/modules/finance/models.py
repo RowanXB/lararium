@@ -62,6 +62,8 @@ class Account(Base):
     locked: Mapped[bool | None]
     round_up: Mapped[bool | None]
     round_up_multiplier: Mapped[Decimal | None] = mapped_column(Numeric)
+    # A key of the account type catalog (account_types.py); stored only.
+    type_key: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -79,6 +81,40 @@ class AccountIdentifier(Base):
     # The actor type that registered it (the owner's "user", or a "connector").
     created_by: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountIdentifierHolder(Base):
+    """An own account a card merchant pays into: a card_merchant identifier names its holders
+    here (it may have several), every other kind its one account in account_id."""
+
+    __tablename__ = "account_identifier_holders"
+    __table_args__ = FINANCE_SCHEMA
+
+    identifier_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.account_identifiers.id"), primary_key=True
+    )
+    # Its identifier's kind, always card_merchant: with the identifier id, a foreign key to
+    # (id, kind), so no other kind's row can have holders.
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'card_merchant'"))
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
+
+
+class AccountIdentifierReference(Base):
+    """A shared payee bank account's reference for one own account: a uk_bank_account
+    identifier registered to no account may carry several, one per account (design §8.1)."""
+
+    __tablename__ = "account_identifier_references"
+    __table_args__ = FINANCE_SCHEMA
+
+    identifier_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.account_identifiers.id"), primary_key=True
+    )
+    # Its identifier's kind, always uk_bank_account: with the identifier id, a foreign key to
+    # (id, kind), so no other kind's row can have references.
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'uk_bank_account'"))
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
+    # Stored as normalize_reference gives it: trimmed, upper-case.
+    reference: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
 class Transaction(Base):
@@ -107,6 +143,8 @@ class Transaction(Base):
     counterparty_name: Mapped[str | None] = mapped_column(Text)
     payment_reference: Mapped[str | None] = mapped_column(Text)
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The other side's account number, when the source gives it without a sort code.
+    counterparty_account_number: Mapped[str | None] = mapped_column(Text)
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(
@@ -193,6 +231,18 @@ class BalanceSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ReportSighting(Base):
+    """A sync's sighting of a report record it stored or found stored (report_sightings)."""
+
+    __tablename__ = "report_sightings"
+    __table_args__ = FINANCE_SCHEMA
+
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"), primary_key=True)
+    raw_record_id: Mapped[UUID] = mapped_column(ForeignKey("core.raw_records.id"), primary_key=True)
+    sync_id: Mapped[UUID] = mapped_column(primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Price(Base):
@@ -422,3 +472,52 @@ class TransferDecision(Base):
         ForeignKey("finance.transfers.id", ondelete="CASCADE")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceReview(Base):
+    """A value two sources of one event disagree on, open until the owner takes one
+    (source_reviews)."""
+
+    __tablename__ = "source_reviews"
+    __table_args__ = FINANCE_SCHEMA
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=UUIDV7)
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"))
+    transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="SET NULL")
+    )
+    event_key: Mapped[str] = mapped_column(Text)
+    field: Mapped[str] = mapped_column(Text)
+    api_value: Mapped[str] = mapped_column(Text)
+    statement_value: Mapped[str] = mapped_column(Text)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[str | None] = mapped_column(Text)  # api | statement
+    resolved_by: Mapped[str | None] = mapped_column(Text)
+
+
+class SourceDecision(Base):
+    """The owner's take on a field of an event, which the normalizer replays."""
+
+    __tablename__ = "source_decisions"
+    __table_args__ = FINANCE_SCHEMA
+
+    connection_id: Mapped[UUID] = mapped_column(ForeignKey("core.connections.id"), primary_key=True)
+    event_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    field: Mapped[str] = mapped_column(Text, primary_key=True)
+    take: Mapped[str] = mapped_column(Text)  # api | statement
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_by: Mapped[str] = mapped_column(Text)
+
+
+class TransferLegFee(Base):
+    """A transfer leg's conversion fee, supplied by its connector (design §5.12)."""
+
+    __tablename__ = "transfer_leg_fees"
+    __table_args__ = FINANCE_SCHEMA
+
+    transaction_id: Mapped[UUID] = mapped_column(
+        ForeignKey("finance.transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("finance.instruments.id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric)  # not negative

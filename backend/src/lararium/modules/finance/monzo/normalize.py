@@ -14,7 +14,9 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   and a pending one that comes back declined or zero is voided;
 - what a transaction says about its counterparty is stored in typed fields, its bank
   account in the identifier registry; each Monzo account's own bank details are registered
-  to it (M4 Decisions 10 and 11);
+  to it (M4 Decisions 10 and 11); a card payment or refund to a merchant the owner registered
+  as a card merchant names that registry row (M6 design §5.12), resolved on every
+  normalize, so a change of registrations is replayed into the history (see below);
 - after each full backfill of an account, and when an account is first seen outside one,
   the difference from Monzo's balance is posted as its opening balance adjustment, replaced
   in place, so older history fetched later corrects it instead of adding to it (ruling R18);
@@ -23,12 +25,14 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   fee as a posting of its own, and a declined transaction outside the ledger (the
   structured-fields plan, Decisions 5-11); a field in a shape not mapped yet stays in the raw
   records, with a warning on the connection, and never fails the sync;
-- the first sync under a new NORMALIZER_VERSION first replays the latest raw record of every
-  transaction the connection fetched (structured-fields Decision 12), so what a new version
-  stores is filled in for the history an older one saw too; the replay never posts a
-  transaction the ledger does not already hold.
+- the first sync under a new NORMALIZER_VERSION, or after the registered card merchants
+  changed, first replays the latest raw record of every transaction the connection fetched
+  (structured-fields Decision 12), so what a new version stores is filled in for the history
+  an older one saw too; the replay never posts a transaction the ledger does not already
+  hold.
 """
 
+import hashlib
 import logging
 import re
 from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
@@ -69,6 +73,7 @@ from lararium.modules.finance.identifiers import (
     ensure_identifier,
     get_or_create_identifier,
     normalize_identifier,
+    registered_card_merchants,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency
 from lararium.modules.finance.ledger import (
@@ -92,7 +97,7 @@ from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-4"
+NORMALIZER_VERSION = "monzo-norm-5"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
 # makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
@@ -106,6 +111,10 @@ NOTIFIED_KEY = "reconciliation_notified"
 OPENING_DESCRIPTION = "Opening balance adjustment"
 # Set once the transactions posted before counterparty fields existed have been given them.
 COUNTERPARTY_FIELDS_KEY = "counterparty_fields_v1"
+# A digest of the card merchants registered when the connection was last normalized: when
+# it differs, the history is replayed, so a payment names its merchant's row (or no longer
+# does). A digest, so the merchant ids stay out of the config.
+CARD_MERCHANTS_KEY = "card_merchants"
 # The payment schemes that move money between bank accounts.
 _BANK_TRANSFER_SCHEMES = frozenset({"payport_faster_payments", "bacs", "monzo_to_monzo"})
 
@@ -557,8 +566,16 @@ async def _snapshot_still_holds(
 
 
 class _Normalizer:
-    def __init__(self, ctx: SyncContext, tz: ZoneInfo, config: dict[str, JSONValue]) -> None:
+    def __init__(
+        self,
+        ctx: SyncContext,
+        tz: ZoneInfo,
+        config: dict[str, JSONValue],
+        card_merchants: dict[str, UUID],
+    ) -> None:
         self.command = ctx.command
+        # Registered card merchants: Monzo merchant id → its registry row.
+        self.card_merchants = card_merchants
         self.session = ctx.command.session
         self.session_factory = ctx.session_factory
         self.connection_id = ctx.connection.id
@@ -657,11 +674,18 @@ class _Normalizer:
             counterparty.text("account_number"),
             f"transaction {tx['id']}",
         )
+        bank_transfer = read.text("scheme") in _BANK_TRANSFER_SCHEMES
+        identifier_id = None if value is None else await self.identifier(value)
+        if identifier_id is None and not bank_transfer:
+            # A card payment or refund names its merchant's row once the owner registers it.
+            merchant_id = read.object("merchant").text("id")
+            if merchant_id is not None:
+                identifier_id = self.card_merchants.get(merchant_id)
         return CounterpartyFields(
-            identifier_id=None if value is None else await self.identifier(value),
+            identifier_id=identifier_id,
             name=counterparty.text("name"),
             reference=read.text("notes"),
-            bank_transfer=read.text("scheme") in _BANK_TRANSFER_SCHEMES,
+            bank_transfer=bank_transfer,
         )
 
     async def fill_counterparty_fields(self) -> None:
@@ -702,6 +726,7 @@ class _Normalizer:
             source=("connection", f"{self.connection_id}:{external_id}"),
             own_account_id=own_account_id,
             counterparty_identifier_id=fields.identifier_id,
+            payment_reference=fields.reference,
             other_postings=other_postings,
         )
 
@@ -1301,6 +1326,11 @@ class _Normalizer:
         )
 
 
+def _digest(card_merchants: dict[str, UUID]) -> str:
+    """What CARD_MERCHANTS_KEY stores of the registered card merchants."""
+    return hashlib.sha256("\n".join(sorted(card_merchants)).encode()).hexdigest()
+
+
 async def normalize(
     ctx: SyncContext,
     fetched: Sequence[FetchedRecord],
@@ -1332,7 +1362,9 @@ async def _normalize(
 ) -> NormalizeReport:
     session = ctx.command.session
     connection = await get_connection(session, ctx.connection.id)
-    n = _Normalizer(ctx, await get_timezone(session), connection.config)
+    card_merchants = await registered_card_merchants(session)
+    merchants_digest = _digest(card_merchants)
+    n = _Normalizer(ctx, await get_timezone(session), connection.config, card_merchants)
     records = await get_raw_records(session, [f.record_id for f in fetched])
     responses = [
         (record.record_type, f.request, f.fetched_at, cast(Any, record.content))
@@ -1372,6 +1404,7 @@ async def _normalize(
     replayed = (
         await n.replay_copies(skipping={tx["id"] for _, content in pages for tx in content})
         if connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
+        or connection.config.get(CARD_MERCHANTS_KEY) != merchants_digest
         else []
     )
     # Every merchant's place from all it is said to be in this sync, before anything links it.
@@ -1426,6 +1459,7 @@ async def _normalize(
         ACCOUNT_MAP_KEY: n.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
         COUNTERPARTY_FIELDS_KEY: True,
+        CARD_MERCHANTS_KEY: merchants_digest,
     }
     if n.opening_boundaries:
         values[OPENING_BOUNDARIES_KEY] = n.opening_boundaries

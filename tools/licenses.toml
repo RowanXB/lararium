@@ -1,0 +1,106 @@
+# Licence policy for production dependencies, read by tools/license_check.py
+# (`make license-check`, part of `make check`).
+#
+# Lararium is AGPL-3.0-or-later. A dependency may carry any licence the FSF lists as
+# compatible with GPLv3 (https://www.gnu.org/licenses/license-list.html): AGPLv3 section 13
+# lets AGPL code be combined with GPLv3 code, so the GPLv3-compatible set is the AGPL one too.
+# `X WITH exception` passes only when listed so in full (e.g. "GPL-2.0-or-later WITH
+# Classpath-exception-2.0"), after reviewing the exception: nothing stops a package writing a
+# restriction there. None of ours uses one yet.
+# Not here, so they fail: GPL-2.0-only and LGPL-2.0-only (no "or later" to reach v3),
+# EPL-1.0, CDDL-1.0, the original 4-clause BSD, SSPL and the non-commercial or no-derivatives
+# Creative Commons licences, among others.
+allowed = [
+  "0BSD",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+  "Apache-2.0",       # compatible with v3 (not v2)
+  "BlueOak-1.0.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC-BY-4.0",
+  "CC0-1.0",
+  "GPL-2.0-or-later",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "ISC",
+  "LGPL-2.1-only",    # section 3 allows conveying it under the GPL
+  "LGPL-2.1-or-later",
+  "LGPL-3.0-only",
+  "LGPL-3.0-or-later",
+  "MIT",
+  "MIT-0",
+  "MIT-CMU",
+  "MPL-2.0",          # section 3.3; none of ours is "Incompatible With Secondary Licenses"
+  "PSF-2.0",
+  "Python-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "X11",
+  "Zlib",
+]
+
+# Reviewed exceptions: a package whose declared licence isn't an allowed SPDX expression but
+# was checked by hand. `license` is the declared string exactly as the check prints it (a
+# change upstream makes the exception stop matching, so the package is reviewed again);
+# `concluded` is what the review found, as SPDX; `reason` says how. `version`, optional, limits
+# the exception to the version reviewed: for packages that bundle other software, whose
+# declared string can stay the same while what they bundle changes.
+
+[[exception]]
+ecosystem = "python"
+package = "pdfplumber"
+license = "classifiers: OSI Approved :: MIT License"
+concluded = "MIT"
+reason = "Only a classifier in the metadata; the wheel's licenses/LICENSE.txt is the MIT licence."
+
+[[exception]]
+ecosystem = "python"
+package = "procrastinate"
+license = "classifiers: OSI Approved :: MIT License"
+concluded = "MIT"
+reason = "Only a classifier in the metadata; the wheel's licenses/LICENSE.md is the MIT licence."
+
+[[exception]]
+ecosystem = "python"
+package = "uvloop"
+license = "MIT License"
+concluded = "MIT OR Apache-2.0"
+reason = """
+Free text in the License field; the wheel ships licenses/LICENSE-MIT and LICENSE-APACHE, and
+the classifiers list both: dual-licensed, either of which is allowed.
+"""
+
+[[exception]]
+ecosystem = "python"
+package = "pypdfium2"
+version = "5.15.2"
+license = "BSD-3-Clause, Apache-2.0, dependency licenses"
+concluded = """
+(BSD-3-Clause OR Apache-2.0) AND CC-BY-4.0 AND MIT AND BSD-2-Clause AND FTL AND IJG
+AND libpng-2.0 AND libtiff AND Unicode-3.0 AND Zlib AND Apache-2.0 WITH LLVM-exception
+"""
+reason = """
+Free text, and the bundled PDFium build changes from release to release, so this covers
+5.15.2 only. Reviewed in the manylinux x86_64 wheel the Docker image installs (PDFium 159.0.8149,
+source build). licenses/LICENSES: pypdfium2's own BSD-3-Clause/Apache-2.0, and CC-BY-4.0 for
+data files. licenses/BUILD_LICENSES: pdfium-binaries (MIT); PDFium, V8, libyuv and brotli
+(BSD-3-Clause or MIT); abseil and highway (Apache-2.0); llvm-libc (Apache-2.0 WITH
+LLVM-exception); FreeType (FTL); ICU (Unicode-3.0); libjpeg-turbo (IJG and BSD-3-Clause);
+libpng (libpng-2.0); libtiff (libtiff); OpenJPEG (BSD-2-Clause); zlib and lcms (permissive). The FSF lists all of these
+as GPLv3-compatible. libpdfium.so links the system libgcc_s.so.1 dynamically (the image's
+Debian copy, under the GCC Runtime Library Exception); the libgcc/libstdc++ and musl notices
+are for the musl wheels, which bundle them and which Lararium doesn't use.
+"""
+
+[[exception]]
+ecosystem = "npm"
+package = "@fontsource-variable/geist"
+license = "OFL-1.1"
+concluded = "OFL-1.1"
+reason = """
+The Geist font files the web app serves. The SIL Open Font License lets the font be bundled
+and distributed with any software; the font stays under OFL-1.1 as a separate work and no
+code is combined with it, so AGPL compatibility doesn't arise.
+"""

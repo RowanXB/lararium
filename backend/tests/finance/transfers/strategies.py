@@ -134,6 +134,11 @@ class Transfer:
 
 
 type Item = tuple[Literal["record", "snapshot", "register"], str]
+# A transfer's status, and its review reason, where the coverage gate refuses its rows.
+type GatedOutcome = tuple[
+    Literal["before_history", "awaiting", "inferred"],
+    Literal["not_listed_in_full", "several_candidates"] | None,
+]
 
 
 @dataclass(frozen=True)
@@ -245,8 +250,11 @@ class Scenario:
                     continue  # its own row is in the ledger and taken, not a placeholder
                 if own is not None:
                     # Caveat "a window starting before the days imported" (design §5.8):
-                    # its own row, found by amount and date only, isn't taken.
-                    found.append(f"window_starts_before_imports: transfer {t.index}")
+                    # its own row, found by amount and date only, isn't taken. The transfer
+                    # is settled before history, or else it needs review with no
+                    # placeholder (gated_outcomes), which P4 reads from the ledger.
+                    if self.gated_outcomes()[t.index][0] == "before_history":
+                        found.append(f"window_starts_before_imports: transfer {t.index}")
                     continue
                 if (
                     one_sided
@@ -264,6 +272,53 @@ class Scenario:
                     other_side.at <= account.snapshot_at
                 ):
                     found.append(f"snapshot_in_settlement_gap: transfer {t.index}")
+        return found
+
+    def gated_outcomes(self) -> dict[int, GatedOutcome]:
+        """What the transfers whose connected record names a manual account, and whose
+        window starts before the days that account's imports list in full, end as, by
+        transfer index (account type catalog design §8.3 item 3). The coverage gate (design
+        §5.8) refuses the record every row there found by amount and date: none is taken
+        by itself, but each is still a candidate. Those are the imported bank transfers
+        naming nobody, of the manual side's amount, booked there inside the window (its
+        own row or another). The status: settled before history when the record is at or
+        before the account's opening snapshot (design §5.2); else awaiting with no
+        placeholder while there is a candidate, which a placeholder would count twice if it
+        is the real row; else inferred, with a placeholder. The review reason counts the
+        candidates: with more than one, several_candidates; with one, not_listed_in_full,
+        unless the transfer is settled before history, which waits for no upload; with
+        none, no review."""
+        found: dict[int, GatedOutcome] = {}
+        for t in self.transfers:
+            for manual_side, other_side in ((t.sent, t.received), (t.received, t.sent)):
+                account = self.by_name[manual_side.account]
+                other = self.record_of(t.index, other_side.account)
+                if account.connected or other is None or other.names is None:
+                    continue
+                assert account.snapshot_at is not None
+                earliest, latest = _window(other_side)
+                if account.holds_from(earliest):
+                    continue
+                candidates = sum(
+                    r.kind == "import"
+                    and r.movement.account == account.name
+                    and r.movement.quantity == manual_side.quantity
+                    and r.bank_transfer
+                    and r.names is None
+                    and earliest <= r.movement.day <= latest
+                    for r in self.records
+                )
+                settled = other_side.at <= account.snapshot_at
+                if candidates > 1:
+                    reason = "several_candidates"
+                elif candidates == 1 and not settled:
+                    reason = "not_listed_in_full"
+                else:
+                    reason = None
+                if settled:
+                    found[t.index] = ("before_history", reason)
+                else:
+                    found[t.index] = ("awaiting" if candidates else "inferred", reason)
         return found
 
     def _stand_in(self, t: Transfer, manual_side: Movement, earliest: date, latest: date) -> bool:
@@ -440,3 +495,142 @@ def by_day(scenario: Scenario) -> dict[date, Decimal]:
     """The true net worth on every day compared."""
     days = [FIRST_DAY + timedelta(days=n) for n in range((LAST_DAY - FIRST_DAY).days + 1)]
     return defaultdict(Decimal, {d: scenario.true_net_worth(d) for d in days})
+
+
+# Cross-currency scenarios (eToro design §5.12) ------------------------------------------------
+#
+# The GBP-only scenarios above are left as they are. These are eToro's moves between eToro
+# Money (GBP) and eToro Trading (USD): both legs connector records naming each other's
+# account (`etoro_account`), stamped by one clock, so the two sides are at most the near
+# window apart (Task 0: the same second), with the statement's conversion fee on the USD leg
+# or none. Moves are hours apart, so each leg is the only candidate for the other (two within
+# the window are the owner's, a case test_cross_currency pins). With `owner_actions`, there
+# are also payouts the engine cannot see as transfers: a Withdraw Request of USD from Trading
+# that a UK bank receives in GBP a day or so later, neither naming the other (design §5.12,
+# "Owner pairs records whose sides differ"); and the owner pairs and unpairs records at
+# drawn points of the arrival order.
+
+CROSS_START = datetime(2026, 11, 2, 9, 0, tzinfo=LONDON)
+GBP_AMOUNTS = (Decimal("250.50"), Decimal("1000.00"), Decimal("500.00"))
+USD_PER_GBP = (Decimal("1.26"), Decimal("1.3125"))
+CONVERSION_FEES = (None, Decimal("6.30"), Decimal("0.01"))
+# The seconds between a move's two legs: within the near window (settings.DEFAULTS, 2 min).
+LEG_GAPS = (0, 0, 0, 1, 59, 120)
+MONEY = "eToro Money"
+TRADING = "eToro Trading"
+BANK = "Bank"
+
+
+@dataclass(frozen=True)
+class Leg:
+    """One connector record of a cross-currency scenario."""
+
+    key: str  # its external id, unique in the scenario
+    account: str
+    currency: str
+    quantity: Decimal  # signed
+    at: datetime
+    names: str | None  # the account it names, by name (etoro_account), or None
+    fee: Decimal | None = None  # the USD conversion fee its connector gives
+    bank_transfer: bool = False
+
+
+@dataclass(frozen=True)
+class CrossTransfer:
+    index: int
+    kind: Literal["move", "payout"]  # a payout names nobody: only the owner can pair it
+    sent: str  # leg keys
+    received: str
+
+
+@dataclass(frozen=True)
+class CrossScenario:
+    legs: tuple[Leg, ...]
+    transfers: tuple[CrossTransfer, ...]
+    # Owner actions, each applied after this many arrivals: (position, "pair" | "unpair",
+    # transfer index).
+    actions: tuple[tuple[int, str, int], ...] = ()
+
+    def leg(self, key: str) -> Leg:
+        return next(leg for leg in self.legs if leg.key == key)
+
+
+def _usd(gbp: Decimal, rate: Decimal) -> Decimal:
+    return (gbp * rate).quantize(Decimal("0.01"))
+
+
+@st.composite
+def cross_currency_scenarios(draw: st.DrawFn, *, owner_actions: bool = False) -> CrossScenario:
+    legs: list[Leg] = []
+    transfers: list[CrossTransfer] = []
+    kinds = ["move", "payout"] if owner_actions else ["move"]
+    for n in range(draw(st.integers(1, 3))):
+        kind = draw(st.sampled_from(kinds))
+        at = CROSS_START + timedelta(hours=3 * n, minutes=draw(st.integers(0, 59)))
+        gbp = draw(st.sampled_from(GBP_AMOUNTS))
+        usd = _usd(gbp, draw(st.sampled_from(USD_PER_GBP)))
+        if kind == "move":
+            to_trading = draw(st.booleans())
+            fee = draw(st.sampled_from(CONVERSION_FEES))
+            gap = timedelta(seconds=draw(st.sampled_from(LEG_GAPS)))
+            # Either side may be stamped first.
+            money_at, trading_at = (at, at + gap) if draw(st.booleans()) else (at + gap, at)
+            money = Leg(
+                f"cash:{n}",
+                MONEY,
+                "GBP",
+                -gbp if to_trading else gbp,
+                money_at,
+                TRADING,
+            )
+            trading = Leg(
+                f"activity:{n}",
+                TRADING,
+                "USD",
+                usd if to_trading else -usd,
+                trading_at,
+                MONEY,
+                fee,
+            )
+            legs += [money, trading]
+            sent, received = (money, trading) if to_trading else (trading, money)
+        else:
+            # USD out of Trading to a UK bank, which books GBP a day or two later.
+            sent = Leg(f"activity:{n}", TRADING, "USD", -usd, at, None, bank_transfer=True)
+            received = Leg(
+                f"bank:{n}",
+                BANK,
+                "GBP",
+                gbp,
+                at + timedelta(days=draw(st.integers(1, 2)), hours=draw(st.integers(0, 5))),
+                None,
+                bank_transfer=True,
+            )
+            legs += [sent, received]
+        transfers.append(CrossTransfer(n, kind, sent.key, received.key))
+    actions: list[tuple[int, str, int]] = []
+    if owner_actions:
+        arrivals = len(legs) + 3  # the three accounts' opening deposits arrive too
+        for _ in range(draw(st.integers(1, 5))):
+            actions.append(
+                (
+                    draw(st.one_of(st.just(arrivals), st.integers(0, arrivals))),
+                    draw(st.sampled_from(("pair", "unpair"))),
+                    draw(st.integers(0, len(transfers) - 1)),
+                )
+            )
+        actions.sort(key=lambda a: a[0])
+    return CrossScenario(tuple(legs), tuple(transfers), tuple(actions))
+
+
+def describe_cross(scenario: CrossScenario) -> str:
+    lines = [
+        f"{leg.key}: {leg.account} {leg.quantity} {leg.currency} at {leg.at:%a %d %H:%M:%S},"
+        f" names {leg.names}, fee {leg.fee}"
+        for leg in scenario.legs
+    ]
+    lines += [
+        f"transfer {t.index} ({t.kind}): {t.sent} -> {t.received}" for t in scenario.transfers
+    ]
+    lines += [f"action {a}" for a in scenario.actions]
+    return "\n".join(lines)

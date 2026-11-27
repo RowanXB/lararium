@@ -18,6 +18,8 @@ from pydantic import (
     model_validator,
 )
 
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance.account_types import account_type
 from lararium.modules.finance.accounts import (
     AccountStatus,
     AccountSubtype,
@@ -26,6 +28,7 @@ from lararium.modules.finance.accounts import (
     SourceKind,
     TaxWrapper,
 )
+from lararium.modules.finance.cashflow import Bucket
 from lararium.modules.finance.identifiers import IdentifierKind
 from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
@@ -116,10 +119,23 @@ class AccountCreate(BaseModel):
     tax_wrapper: TaxWrapper = "none"
     parent_account_id: UUID | None = None
     opened_on: date | None = None
+    # An account type with no API; the institution is then the type's.
+    type_key: str | None = None
 
 
 class AccountRename(BaseModel):
-    name: str
+    """Rename the account, set its type (one with no API), or both; type_key null clears it."""
+
+    name: str | None = None
+    type_key: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> Self:
+        if not self.model_fields_set:
+            raise ValueError("send name, type_key or both")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name can't be null")
+        return self
 
 
 class AccountClose(BaseModel):
@@ -143,6 +159,50 @@ class AccountOut(_Out):
     closed_on: date | None
     # One the ledger keeps for itself (Unassigned, Opening balances, In transit).
     system: bool
+    # Left out of net worth, holdings and cash flow by the owner.
+    excluded_from_reports: bool
+    type_key: str | None
+
+    @field_validator("type_key")
+    @classmethod
+    def _known_type(cls, value: str | None) -> str | None:
+        # A key no longer in the catalog reads as no type.
+        return value if account_type(value) is not None else None
+
+
+class AccountShapeOut(_Out):
+    ledger_type: LedgerType | None  # None: either side
+    subtype: AccountSubtype
+    tax_wrapper: TaxWrapper
+    balance_mode: BalanceMode
+
+
+class AccountTypeApiOut(_Out):
+    connector: str
+    config: dict[str, JSONValue]
+
+
+class AccountTypeFileOut(_Out):
+    label: str
+    format: str
+    recommended: bool
+    config: ProfileConfig | None  # the profile; None when the type's API reads the file
+
+
+class AccountTypeOut(_Out):
+    key: str
+    institution: str
+    label: str
+    name: str
+    shape: AccountShapeOut | None
+    api: AccountTypeApiOut | None
+    files: list[AccountTypeFileOut]
+    funding: list[str]  # sorted
+    family: str | None
+
+
+class AccountReportingUpdate(BaseModel):
+    excluded: bool
 
 
 class SnapshotCreate(BaseModel):
@@ -264,6 +324,49 @@ class NetWorthPointOut(_Out):
     day: date
     value: DecimalStr
     missing_count: int
+
+
+class CashFlowPeriodOut(_Out):
+    start: date
+    income: DecimalStr
+    spending: DecimalStr
+
+
+class CashFlowCategoryOut(_Out):
+    category: str | None
+    income: DecimalStr
+    spending: DecimalStr
+
+
+class CashFlowPayeeOut(_Out):
+    name: str
+    spending: DecimalStr
+
+
+class CashFlowHiddenAccountOut(_Out):
+    """Money moved between an account left out of reports and those still in them."""
+
+    account_id: UUID
+    name: str
+    moved_in: DecimalStr  # from the hidden account: income
+    moved_out: DecimalStr  # into the hidden account: spending
+
+
+class CashFlowOut(_Out):
+    """Income and spending in the reporting currency; spending is positive."""
+
+    start: date
+    end: date
+    bucket: Bucket
+    income: DecimalStr
+    spending: DecimalStr
+    net: DecimalStr
+    missing_count: int
+    periods: list[CashFlowPeriodOut]
+    categories: list[CashFlowCategoryOut]
+    payees: list[CashFlowPayeeOut]
+    # Also in the totals and periods, apart from categories and payees.
+    hidden_accounts: list[CashFlowHiddenAccountOut]
 
 
 # Imports
@@ -416,6 +519,14 @@ class IdentifierCreate(BaseModel):
     value: str  # a sort code and account number, e.g. "11-22-33 12345678"
 
 
+class IdentifierReference(BaseModel):
+    """One own account behind a shared payee bank account, told apart by the payment
+    reference it is paid with (stored trimmed and upper-cased)."""
+
+    account_id: UUID
+    reference: str
+
+
 class IdentifierOut(BaseModel):
     id: UUID
     kind: IdentifierKind
@@ -423,9 +534,33 @@ class IdentifierOut(BaseModel):
     sort_code: str | None  # a UK bank account's only
     account_number: str | None
     account_id: UUID | None
+    # A card merchant's own accounts (it has no account_id); empty for every other kind.
+    holder_account_ids: list[UUID]
+    # A shared payee bank account's own accounts by reference (it has no account_id), sorted
+    # by reference; empty for every other row.
+    references: list[IdentifierReference]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
+
+
+class CardMerchantRegister(BaseModel):
+    """The own accounts card payments to a Monzo merchant go into; none removes it."""
+
+    merchant_id: str  # Monzo's merchant id, merch_…
+    account_ids: list[UUID]
+
+
+class IdentifierReferencesRegister(BaseModel):
+    """The own accounts payments to a shared payee bank account go into, by reference; none
+    removes them."""
+
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+    references: list[IdentifierReference]
+
+
+class CardMerchantDismiss(BaseModel):
+    merchant_id: str
 
 
 class BalanceModeUpdate(BaseModel):
@@ -434,6 +569,30 @@ class BalanceModeUpdate(BaseModel):
 
 class MainAccountUpdate(BaseModel):
     main_account_id: UUID | None
+
+
+class ReviewOut(BaseModel):
+    """A value two sources of one event disagree on (design §5.7): open, or resolved by the
+    owner taking one of them."""
+
+    id: UUID
+    connection_id: UUID
+    transaction_id: UUID | None
+    event_key: str  # e.g. "close:<positionId>"
+    # eToro: units | cash | profit | booking_date; Trading 212: amount | currency | booking_date
+    field: str
+    api_value: str
+    statement_value: str
+    opened_at: AwareDatetime
+    resolved_at: AwareDatetime | None
+    resolution: Literal["api", "statement"] | None
+    resolved_by: str | None
+
+
+class ReviewResolve(BaseModel):
+    """Which source's value the owner takes for a review item."""
+
+    take: Literal["api", "statement"]
 
 
 class TransferOut(BaseModel):
@@ -467,6 +626,7 @@ class CandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the transfer's
     occurred_at: AwareDatetime
     description: str
     reason: Literal["exact", "amount_differs", "unpaired"]
@@ -479,14 +639,33 @@ class PairCandidateOut(BaseModel):
     account_id: UUID
     account_name: str
     quantity: DecimalStr  # signed, as posted on the account
+    currency: str  # its own instrument's symbol, which may differ from the record's
     occurred_at: AwareDatetime
     booking_date: date
     description: str
+    # How its side differs from the record's (two currencies), or None for one in the same
+    # instrument of the opposite and equal amount.
+    differs: Literal["currency", "amount"] | None = None
 
 
 class TransferPair(BaseModel):
-    # One of the transfer's candidates of the same amount, or one unpaired from it.
+    # One of the transfer's candidates, or one unpaired from it; or, pairing two records,
+    # the other record.
     transaction_id: UUID
+
+
+class CardMerchantSuggestionOut(_Out):
+    """A card merchant whose website is on a connected platform's domain, offering the
+    platform's accounts; registering it is register_card_merchant."""
+
+    kind: Literal["card_merchant"]
+    merchant_id: str
+    name: str | None
+    host: str
+    outgoing: int
+    incoming: int
+    latest: date
+    account_ids: list[UUID]
 
 
 class SuggestionOut(_Out):

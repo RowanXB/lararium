@@ -155,7 +155,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-4"
+    assert NORMALIZER_VERSION == "monzo-norm-5"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
@@ -2035,7 +2035,7 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
     ]
     assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
     config = (await get_connection(session, connection.id)).config
-    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-4"
+    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-5"
 
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:

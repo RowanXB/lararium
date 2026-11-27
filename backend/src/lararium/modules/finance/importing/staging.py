@@ -6,6 +6,7 @@ Nothing is posted here: commit.py turns a staged batch's new rows into transacti
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
@@ -72,6 +73,12 @@ ROW_STATUSES: tuple[RowStatus, ...] = get_args(RowStatus)
 # everything up to (an OFX LEDGERBAL as of the download day, after its period, isn't).
 NO_BALANCES_WARNING = (
     "This file gives no balance to take its opening from, so its opening balance can't be checked"
+)
+# The profile reads a file's period from its name, and this file's name gives none (account
+# type catalog design §8.3).
+NO_PERIOD_IN_FILE_NAME_WARNING = (
+    "This file's name gives no period, so only the days from its first row's to the day before "
+    "its last row's count as listed in full: upload the export under the name its bank gave it"
 )
 OPENING_DESCRIPTION = "Opening balance adjustment"
 OUTSIDE_COVERED_DAY = (
@@ -626,9 +633,9 @@ def plan_openings(
     movement before its first day, except those it lists itself. Its own rows and the
     originals its duplicates stand for come after its opening even when a duplicate's
     original is dated earlier (an id matched across days). On a first day it lists only in
-    part (an export may start partway through a day), another file's movement it doesn't
-    list came before it too; on a first day it lists in full there is no such movement
-    (staging refuses one), and none is counted.
+    part (only an export whose rows carry a started date may start partway through a day),
+    another file's movement it doesn't list came before it too; on a first day it lists in
+    full there is no such movement (staging refuses one), and none is counted.
     """
 
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)
@@ -1860,19 +1867,8 @@ def _statement_values(statement: ParsedStatement) -> dict[str, Any] | None:
     return values
 
 
-def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
-    """Decision 16: the days a file covers, its stated period and its importable rows' days
-    together (OFX rows may fall outside DTSTART..DTEND), and the days it lists in full.
-
-    A statement whose source vouches for its period (a closed, self-checked PDF statement)
-    lists all of it, up to the day before it was made: one made on or before its period's
-    last day (Revolut's, which end on the day they are generated) was made partway through
-    that day, so lists neither it nor later days in full. An export may be taken partway
-    through a day, so it lists in full only the days strictly between its first and last;
-    and one whose include_only filter left rows out (a pending payment, say, that later
-    appears completed) lists no day in full.
-    """
-    days = [
+def _importable_days(rows: list[_Row]) -> list[date]:
+    return [
         row.parsed.booking_date
         for row in rows
         if row.kind == "statement"
@@ -1880,6 +1876,67 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
         and row.status != "skipped"
         and row.instrument_id is not None
     ]
+
+
+_ISO_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _iso_day(text: str | None) -> date | None:
+    if text is None or not _ISO_DAY.fullmatch(text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _period_from_filename(
+    statement: ParsedStatement, rows: list[_Row], config: ProfileConfigModel, filename: str
+) -> tuple[ParsedStatement, list[str]]:
+    """The statement with the period its file name gives, for a profile that reads one
+    (account type catalog design §8.3), and the batch's warnings. A name that gives no
+    period, one that starts after it ends, or one an importable row falls outside: the
+    statement as read, and a warning."""
+    if not isinstance(config, CsvProfileConfig) or config.period_from_filename is None:
+        return statement, []
+    if statement.period is not None:  # no CSV states one today
+        return statement, []
+    found = re.search(config.period_from_filename, filename)
+    start, end = (None, None) if found is None else map(_iso_day, found.group("start", "end"))
+    if start is None or end is None or start > end:
+        return statement, [NO_PERIOD_IN_FILE_NAME_WARNING]
+    if not all(start <= day <= end for day in _importable_days(rows)):
+        return statement, [NO_PERIOD_IN_FILE_NAME_WARNING]
+    return replace(statement, period=(start, end)), []
+
+
+def _first_day_partial(config: ProfileConfigModel) -> bool:
+    """The profile reads a second date for its rows (Revolut's CSV: booked on the completed
+    date, perhaps picked by the started date), so its export's first day may be partial."""
+    return isinstance(config, CsvProfileConfig) and config.columns.started_at is not None
+
+
+def _covered(
+    statement: ParsedStatement, rows: list[_Row], *, first_day_partial: bool = False
+) -> _Coverage:
+    """Decision 16: the days a file covers, its stated period and its importable rows' days
+    together (OFX rows may fall outside DTSTART..DTEND), and the days it lists in full.
+
+    A statement whose source vouches for its period (a closed, self-checked PDF statement)
+    lists all of it, up to the day before it was made: one made on or before its period's
+    last day (Revolut's, which end on the day they are generated) was made partway through
+    that day, so lists neither it nor later days in full. An export, with or without a
+    stated period, lists every day but its last, which it may have been taken partway
+    through: a file never starts partway through a day (owner, 2026-11-21). Its first day is
+    partial too when its rows carry a second date (first_day_partial): Revolut's CSV books a
+    row on its completed date but may pick rows by their started date, so a payment started
+    the day before and completed on the first day may be missing (account type catalog
+    design §8.3). A period that starts partway through its first day (an OFX whose DTSTART
+    gives a time of day, period_starts_mid_day) is listed from the day after it. An export
+    whose include_only filter left rows out (a pending payment, say,
+    that later appears completed) lists no day in full.
+    """
+    days = _importable_days(rows)
     if statement.period is not None:
         days += list(statement.period)
     if not days:
@@ -1892,7 +1949,11 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
             return _Coverage((first, last), (None, None))
         return _Coverage((first, last), (first, end))
     filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
-    start, end = first + timedelta(days=1), last - timedelta(days=1)
+    start = first + timedelta(days=1) if first_day_partial else first
+    if statement.period_starts_mid_day and statement.period is not None:
+        # Nothing vouches for the days before it either, a row's on them included.
+        start = statement.period[0] + timedelta(days=1)
+    end = last - timedelta(days=1)
     if filtered or start > end:
         return _Coverage((first, last), (None, None))
     return _Coverage((first, last), (start, end))
@@ -1905,9 +1966,9 @@ async def _stage_openings(
     rows: list[_Row],
     instruments: dict[UUID, InstrumentRecord],
     local_tz: ZoneInfo,
-) -> None:
-    """Decision 13: the staged batch's adjustment rows and warnings, from the walk with it
-    included. Its statement rows must be stored already."""
+) -> list[str]:
+    """Decision 13: stores the staged batch's adjustment rows, from the walk with it included,
+    and returns its warnings. Its statement rows must be stored already."""
     preview = await preview_openings(session, batch_id)
     if preview.conflicts:
         raise ImportNotAllowedError(preview.conflicts[0])
@@ -1956,9 +2017,7 @@ async def _stage_openings(
             insert(models.ImportRow),
             [_row_values(row, batch_id, account_id, local_tz) for row in adjustments],
         )
-    if warnings:
-        b = models.ImportBatch
-        await session.execute(update(b).where(b.id == batch_id).values(warnings=warnings))
+    return warnings
 
 
 async def stage_import(
@@ -1994,7 +2053,8 @@ async def stage_import(
     rows = _classify(statement)
     instruments = await _resolve_currencies(session, rows, default_currency)
     await _deduplicate(session, account_id, rows)
-    coverage = _covered(statement, rows)
+    statement, warnings = _period_from_filename(statement, rows, profile.config, filename)
+    coverage = _covered(statement, rows, first_day_partial=_first_day_partial(profile.config))
     await _match_covered_days(session, account_id, rows, coverage)
     # Before the chain check: a matched row it fails is still listed by this file.
     missing = await _missing_committed_row(session, account_id, rows, coverage.complete)
@@ -2055,7 +2115,11 @@ async def stage_import(
         [_row_values(row, batch_id, account_id, local_tz) for row in rows],
     )
     if account.balance_mode == "transactions" and all(row.status != "error" for row in rows):
-        await _stage_openings(session, account_id, batch_id, rows, instruments, local_tz)
+        warnings += await _stage_openings(
+            session, account_id, batch_id, rows, instruments, local_tz
+        )
+    if warnings:
+        await session.execute(update(b).where(b.id == batch_id).values(warnings=warnings))
     # The bytes last, once nothing can refuse the file: a refused one leaves no bank
     # statement on disk (or in the backups).
     store.put(document.sha256, content)

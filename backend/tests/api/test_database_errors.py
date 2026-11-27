@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.api.app import create_app
 from lararium.config import Settings
-from lararium.deps import SessionDep, get_session
+from lararium.deps import SessionDep
+
+from .overrides import use_session
 
 UNUSED_DATABASE_URL = "postgresql+psycopg://unused@localhost/unused"  # never connected to
 
@@ -42,10 +44,7 @@ async def failing_client(session: AsyncSession) -> AsyncIterator[httpx.AsyncClie
             for statement in STATEMENTS[kind]:
                 await db.execute(text(statement))
 
-    async def _test_session() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    app.dependency_overrides[get_session] = _test_session
+    use_session(app, session)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
