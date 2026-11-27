@@ -30,11 +30,15 @@ NEXT = DAY + timedelta(days=1)
 
 
 @pytest.mark.parametrize(
-    ("opened_on", "complete_from", "pairs"),
+    ("opened_on", "complete_from", "received", "pairs"),
     [
-        (DAY, DAY, True),  # opened the day its first upload lists in full from
-        (None, DAY, False),  # no opening date: the gate is unchanged
-        (DAY, NEXT, False),  # the upload lists in full only from after the opening
+        (DAY, DAY, DAY, True),  # opened the day its first upload lists in full from
+        (None, DAY, DAY, False),  # no opening date: the gate is unchanged
+        (DAY, NEXT, DAY, False),  # the upload lists in full only from after the opening
+        # Opened the day after its first upload lists in full from, and the money received
+        # that day: the upload lists from before the opening.
+        (NEXT, DAY, NEXT, True),
+        (None, DAY, NEXT, False),  # as before, the window starts before the upload lists
     ],
 )
 async def test_an_account_s_opening_date_vouches_for_the_days_before(
@@ -46,11 +50,12 @@ async def test_an_account_s_opening_date_vouches_for_the_days_before(
     heal: Heal,
     opened_on: date | None,
     complete_from: date,
+    received: date,
     pairs: bool,
 ) -> None:
     """A's bank transfer on DAY names the manual account B, so B's counterpart may be
     booked from the day before (its window). B's one upload lists in full from
-    `complete_from`, with a same-amount bank-transfer row on DAY."""
+    `complete_from`, with a same-amount bank-transfer row on `received`."""
     a = await connected_bank("A")
     b = await run(
         create_account,
@@ -65,7 +70,9 @@ async def test_an_account_s_opening_date_vouches_for_the_days_before(
     sent = await connector_tx(
         a, "-100", occurred_at=datetime.combine(DAY, time(12), UTC), identifier_id=identifier
     )
-    row = await statement_row(b, "100", complete=(complete_from, DAY + timedelta(days=60)))
+    row = await statement_row(
+        b, "100", day=received, complete=(complete_from, DAY + timedelta(days=60))
+    )
     await heal()
 
     relation = await pair_relation(
