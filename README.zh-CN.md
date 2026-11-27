@@ -540,6 +540,9 @@ History CSV 的 `Notes` 写明每一笔 `Deposit` 或 `Withdrawal` 属于哪一�
 Notes 之前提交的批次，其各行没有这样的证据（暂时按两分钟规则配对，见[转账](#转账)）：把每个这样的批次
 回滚，再从该账户的 **Upload file** 卡片重新上传它的文件。
 
+添加（或给某个账户设置类型）一个没有从开户日起列出历史的系列账户，会使已配对的 Invest 与 Stocks ISA
+之间的转账分开，回到 Unassigned，直到上传该账户从开户日起的文件。
+
 ### 警告
 
 - **“Trading 212 ISA ···1234 SYMBOL differs from Trading 212's report on DATE by AMOUNT”**：每次
@@ -667,7 +670,9 @@ Review items)”。发送失败的通知会在下一次同步时再发。对 eTo
 - 没有 Notes 的记录（只来自 API）与系列内另一个账户上一笔转账相差两分钟以内的一笔金额相同的真实充值，
   会被当作那笔转账的另一侧；之后上传的 Notes 会纠正它。
 - Trading 212 没有说明 TRANSFER 涵盖什么。如果从别的机构转入 ISA 的转账也是 TRANSFER，它会错误地指明
-  系列，什么也配不上；把它 Reject。尚未见过。
+  系列，什么也配不上（系列里只有另外一个账户时，则是等着那里出现一条记录，然后逾期）；把它 Reject。尚未见过。
+- 添加（或给某个账户设置类型）一个没有从开户日起列出历史的系列账户，会使已配对的 Invest 与 Stocks ISA
+  之间的转账分开，回到 Unassigned，直到上传该账户从开户日起的文件。
 
 ## 连接 Binance
 

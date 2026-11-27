@@ -18,6 +18,7 @@ from lararium.modules.finance.importing.profiles import (
     ProfileConfigModel,
     QifProfileConfig,
 )
+from lararium.modules.finance.trading212_notes import SENT_TO_BANK_NOTES, TRANSACTION_ID_NOTES
 
 
 @dataclass(frozen=True)
@@ -242,8 +243,8 @@ CATALOG: tuple[CatalogEntry, ...] = (
                 types=["Deposit", "Withdrawal"],
                 within=[r""],
                 outside=[
-                    r"Transaction ID: [0-9A-Fa-f-]+",
-                    r"Sent to Bank Account \d{2}-\d{2}-\d{2} / \d{8}",
+                    TRANSACTION_ID_NOTES,
+                    SENT_TO_BANK_NOTES,
                 ],
             ),
         ),

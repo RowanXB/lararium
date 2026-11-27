@@ -346,16 +346,13 @@ async def rename_account(
     # The audit records what was sent, not the fields left out.
     args = _args(account_id=account_id) | body.model_dump(mode="json", exclude_unset=True)
     set_type = "type_key" in body.model_fields_set
-    account = await accounts.get_account(session, account_id) if set_type else None
-    # An account joining or leaving a family changes which accounts the family's records
-    # name: heal at once, as a registered identifier does.
-    families = {
-        account_types.family_of(body.type_key),
-        account_types.family_of(account.type_key) if account else None,
-    }
-    command = healing_command if set_type and families - {None} else command_context
+    # Setting the type can move the account into or out of a family, which changes which
+    # accounts the family's records name: heal at once, as a registered identifier does. The
+    # old type is read inside the command, after its lock.
+    command = healing_command if set_type else command_context
     async with command(session, actor, "rename_account", args) as ctx:
-        if account is not None:
+        if set_type:
+            account = await accounts.get_account(session, account_id)
             staging.require_importable(account)
             if body.type_key is not None:
                 found, shape = _settable_type(body.type_key)

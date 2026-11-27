@@ -32,6 +32,7 @@ from lararium.modules.finance.identifiers import (
     HeldKind,
     IdentifierRecord,
     get_identifier,
+    named_accounts,
     register_holders,
     unassign_identifier,
 )
@@ -859,6 +860,13 @@ async def preview_match(
     # (payee_holders).
     merchant = named is not None and named.kind == "card_merchant"
     payee = named is not None and named.kind == "uk_bank_account"
+    # An account family names its other accounts (identifiers.named_accounts): one is the
+    # holder, two or more are the set, as eligible_records reads it.
+    family = named is not None and named.kind == "account_family"
+    holder: UUID | None = None
+    family_others: frozenset[UUID] = frozenset()
+    if named is not None:
+        holder, family_others = await named_accounts(session, named.id, account_id)
     a = models.Account
     type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
@@ -869,12 +877,19 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        holder=None if named is None else named.account_id,
+        holder=holder,
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
         holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
-        payee_holders=frozenset(named.holders) if payee and named is not None else frozenset(),
+        payee_holders=(
+            family_others
+            if family
+            else frozenset(named.holders)
+            if payee and named is not None
+            else frozenset()
+        ),
+        family=family,
         # As eligible_records' funded_by_transfer: read from the account's type.
         funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
         outside_family=counterparty.outside_family,

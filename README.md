@@ -593,6 +593,10 @@ once. A batch committed before Lararium read the Notes has no such evidence on i
 pair by the two-minute rule meanwhile, see [Transfers](#transfers)): roll each back and upload
 its file again from the account's **Upload file** tile.
 
+Adding a family account (or giving one its type) with no history listed from its opening makes
+matched Invest to Stocks ISA moves come apart, to Unassigned, until that account's file from its
+opening is uploaded.
+
 ### Transfers
 
 - **Card or Apple Pay deposits from Monzo.** Monzo files a card top-up as a card payment to
@@ -819,7 +823,11 @@ itself.
   on another account of the family would be taken as that move's side; an upload's Notes
   correct it.
 - Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider
-  were one, it would name the family wrongly and pair with nothing; reject it. Not seen.
+  were one, it would name the family wrongly and pair with nothing (or, with one other account of
+  the family, await a record there and go overdue); reject it. Not seen.
+- Adding a family account (or giving one its type) with no history listed from its opening makes
+  matched Invest to Stocks ISA moves come apart, to Unassigned, until that account's file from
+  its opening is uploaded.
 
 ## Connecting Binance
 

@@ -87,7 +87,7 @@ OUTSIDE_COVERED_DAY = (
 )
 NO_FAMILY = (
     "the file says this row moved money within its provider's family of accounts, but this "
-    "account's type has no family: set the account's type, or import into the right account"
+    "account's type has no family: set the account's type, then upload the file again"
 )
 
 

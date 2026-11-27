@@ -29,8 +29,7 @@ _several): a group of interchangeable records, one side of which is alike, pairs
 order (_twins), and stays whole; every other record pairs with the one of its candidates
 that is, both timed, its only candidate of any tier time doesn't rule out (an untimed one
 is never ruled out: its real time is unknown), within the near window, when it is that
-one's only one too and the pair is takeable (_near_split). A group alike on one side only
-after that split pairs in time order too."""
+one's only one too and the pair is takeable (_near_split)."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -1246,13 +1245,12 @@ def _several(
     """(exact, twins) once the rules for several candidates have applied (account family
     identifier design §5.10 and §5.7, owner's decisions 2026-11-27), in this order: the
     groups interchangeable on the candidates as found (_twins) are kept whole, to pair in
-    time order; every other record is split by the near window (_near_split); and the
-    groups interchangeable on what that leaves pair in time order (_twins again: the first
-    ones, untouched, and any the split makes, if it can). The split is for records that
-    would otherwise go to review, and such a group doesn't."""
-    whole = _twins(records, exact, untakeable).keys()
-    split = _near_split(records, tiers, exact, untakeable, near_window, whole)
-    return split, _twins(records, split, untakeable)
+    time order; every other record is split by the near window (_near_split). The split
+    is for records that would otherwise go to review, and such a group doesn't; it only
+    leaves singletons, so the twins are those of the first pass."""
+    twins = _twins(records, exact, untakeable)
+    split = _near_split(records, tiers, exact, untakeable, near_window, twins.keys())
+    return split, twins
 
 
 async def pair_relation(
@@ -1299,8 +1297,7 @@ async def pair_relation(
     (_twins). Every other record pairs with the one candidate that is, both timed, each
     the other's only candidate of any tier time doesn't rule out, within the near window,
     when that pair is takeable (_near_split); an untimed candidate is never ruled out, its
-    real time being unknown. A group alike on one side only after that split pairs in time
-    order too. Whatever is left with several is for review.
+    real time being unknown. Whatever is left with several is for review.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about

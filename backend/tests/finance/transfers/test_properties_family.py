@@ -15,7 +15,7 @@ only a pair both timed, each the other's only candidate of any tier within the w
 takeable. A group alike on one side pairs in time order (§5.7, pairs._twins), and any
 assignment of it gives the same balances."""
 
-from collections import defaultdict
+from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
@@ -539,13 +539,12 @@ def _mutual(senders: list[Pairable], receivers: list[Pairable]) -> dict[UUID, fr
     }
 
 
-def _balances(links: list[tuple[Pairable, Pairable]]) -> dict[tuple[UUID, UUID], Decimal]:
-    """Per (account, instrument), the sum of the linked records' quantities."""
-    found: dict[tuple[UUID, UUID], Decimal] = defaultdict(Decimal)
-    for s, c in links:
-        for x in (s, c):
-            found[(x.account_id, x.instrument_id)] += x.quantity
-    return found
+def _transfers(links: list[tuple[Pairable, Pairable]]) -> Counter[tuple[object, ...]]:
+    """The transfers the links make, as a multiset of (sender account, receiver account,
+    amount, sender booking date, receiver booking date): which record is which is dropped."""
+    return Counter(
+        (s.account_id, c.account_id, c.quantity, s.booking_date, c.booking_date) for s, c in links
+    )
 
 
 def _time_order(records: list[Pairable]) -> list[Pairable]:
@@ -554,11 +553,12 @@ def _time_order(records: list[Pairable]) -> list[Pairable]:
 
 @settings(max_examples=200, deadline=None)
 @given(group=_group(), extra=st.sampled_from(("none", "outside", "untakeable", "neither")))
-def test_one_side_alike_any_assignment_gives_the_same_balances(
+def test_one_side_alike_any_assignment_gives_the_same_transfers(
     group: tuple[list[Pairable], list[Pairable]], extra: str
 ) -> None:
     """For an n-by-n group, receivers alike, senders on n accounts, all mutually
-    candidates: every assignment gives the same balances per account and instrument, and
+    candidates: every assignment gives the same transfers (the multiset of sender and receiver
+    account, amount and booking dates of each side), and
     _twins links the two sides in time order (each sorted by instant, then reference). A
     group with a record having a candidate outside it, with an untakeable pair, or with
     neither side alike pairs none."""
@@ -575,16 +575,15 @@ def test_one_side_alike_any_assignment_gives_the_same_balances(
         exact[outside.id] = frozenset({senders[0].id})
     elif extra == "untakeable":
         untakeable = frozenset({frozenset((senders[-1].id, receivers[0].id))})
-    balances = {
-        tuple(sorted(_balances(list(zip(senders, order, strict=True))).items()))
-        for order in permutations(receivers)
-    }
+    transfers = [
+        _transfers(list(zip(senders, order, strict=True))) for order in permutations(receivers)
+    ]
     twins = _twins(by_id, exact, untakeable)
     if extra != "none":
         assert twins == {}
         event(f"no twins: {extra}")
         return
-    assert len(balances) == 1  # one ledger, whichever row each links
+    assert all(t == transfers[0] for t in transfers)  # the same transfers, whichever row each links
     expected = dict(
         zip(
             (x.id for x in _time_order(senders)),

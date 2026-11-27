@@ -40,6 +40,7 @@ from lararium.modules.finance.trading212.fields import (
     NOTES_TRANSACTION_ID,
 )
 from lararium.modules.finance.trading212.state import LONDON, Run, Trading212DataError
+from lararium.modules.finance.trading212_notes import SENT_TO_BANK_NOTES, TRANSACTION_ID_NOTES
 from lararium.modules.finance.typed_tables import (
     TypedValueError,
     parse_decimal,
@@ -57,9 +58,9 @@ TOGETHER = {"booking_date": ("occurred_at",)}
 ACTIONS: Mapping[str, tuple[int, str]] = {"Deposit": (1, "DEPOSIT"), "Withdrawal": (-1, "WITHDRAW")}
 # The API's types an export row is compared with.
 COMPARED = frozenset({"DEPOSIT", "WITHDRAW"})
-NOTES_ID = re.compile(r"^Transaction ID: (\S+)$")
+NOTES_ID = re.compile(rf"^{TRANSACTION_ID_NOTES}$")
 # A withdrawal's Notes name the bank account it was sent to (design §5.9).
-NOTES_SENT = re.compile(r"^Sent to Bank Account (\d{2})-(\d{2})-(\d{2}) / (\d{8})$")
+NOTES_SENT = re.compile(rf"^{SENT_TO_BANK_NOTES}$")
 # An action fit to name in a flag: words, as Trading 212 writes them ("Market buy").
 _ACTION_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 ()/.,'-]{0,59}")
 
