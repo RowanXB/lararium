@@ -342,7 +342,10 @@ class ConnectorRun:
         description: str,
         postings: Sequence[PostingInput],
         counterparty: CounterpartyFields | None = None,
+        cancels: UUID | None = None,
     ) -> UUID:
+        """Post the connection's transaction under the key (`cancels`: the transaction it
+        cancels, cancelled-withdrawal design §4.2)."""
         record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -354,6 +357,7 @@ class ConnectorRun:
                 connection_id=self.connection_id,
                 external_id=key,
                 counterparty=counterparty or CounterpartyFields(),
+                cancels_transaction_id=cancels,
             ),
         )
         self.count(outcome)

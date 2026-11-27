@@ -4791,6 +4791,18 @@
             "title": "Booking Date",
             "type": "string"
           },
+          "cancels_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancels Transaction Id"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -4841,7 +4853,8 @@
           "description",
           "status",
           "origin",
-          "postings"
+          "postings",
+          "cancels_transaction_id"
         ],
         "title": "TransactionOut",
         "type": "object"

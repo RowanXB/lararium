@@ -58,6 +58,7 @@ from lararium.modules.finance.transfers.contra import (
     OwnRecord,
     SourceRef,
     bound_id,
+    in_cancelled_pair,
     is_active_leg,
     load_own_record,
     rejection_of,
@@ -453,8 +454,9 @@ async def _open(
 
 async def _release_stray(ctx: CommandContext, transaction_id: UUID, system: _System) -> None:
     """Re-point the In transit posting of a recorded transaction that can't be a leg (one
-    with a fee posting besides, say) back to Unassigned: only a transfer's leg posts there
-    (design §5.5). Its transfer, if it had one, is dissolved already."""
+    with a fee posting besides, say) back to Unassigned: only a transfer's leg, or one of a
+    cancelled pair, which stays, posts there (design §5.5). Its transfer, if it had one, is
+    dissolved already."""
     t, p = models.Transaction, models.Posting
     on_in_transit = await ctx.session.scalar(
         select(func.count())
@@ -467,7 +469,11 @@ async def _release_stray(ctx: CommandContext, transaction_id: UUID, system: _Sys
             t.origin.not_in(DERIVED_ORIGINS),
         )
     )
-    if not on_in_transit or await is_active_leg(ctx.session, transaction_id):
+    if (
+        not on_in_transit
+        or await is_active_leg(ctx.session, transaction_id)
+        or await ctx.session.scalar(select(in_cancelled_pair(transaction_id)))
+    ):
         return
     if on_in_transit > 1:
         # Which one is the contra is ambiguous; find_transfer_violations reports it.

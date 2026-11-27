@@ -2312,6 +2312,10 @@ export type TransactionOut = {
      */
     booking_date: string;
     /**
+     * Cancels Transaction Id
+     */
+    cancels_transaction_id: string | null;
+    /**
      * Description
      */
     description: string;
