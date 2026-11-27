@@ -27,7 +27,6 @@ from lararium.modules.finance.transfers.pairs import (
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
-    ReviewReason,
     before_history,
     history_starts,
     manual_predates,
@@ -112,13 +111,11 @@ async def _pair_states(
     a unique pair (each the other's only candidate) not yet matched; a matched pair that
     is no longer unique, or whose conversion (its settlement, for two currencies) is not
     the one its records and their fees give now; and an open transfer whose review reason
-    is not the one its own record's candidates give (several_candidates if it has several,
-    PairRelation.several, else amount_differs if it has any of another amount, else
-    not_listed_in_full if a row the coverage gate alone refused holds it back,
-    PairRelation.held_back, unless the transfer is settled before history, else none:
+    is not the one its own record's candidates give (PairRelation.review_reason, as
     engine._open's), or, on a manual counterpart, whose status is not the one engine._open
-    gives: awaiting, with no placeholder, when such a row holds the record back, else
-    inferred (one settled before history instead is checked by (d))."""
+    gives: awaiting, with no placeholder, while its record has a candidate of the same
+    amount there (PairRelation.candidate_on), else inferred (one settled before history
+    instead is checked by (d))."""
     tr, a = models.Transfer, models.Account
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
@@ -133,6 +130,7 @@ async def _pair_states(
                 tr.in_transaction_id,
                 tr.review_reason,
                 tr.settlement_transaction_id,
+                counterpart.label("counterpart_id"),
                 exists()
                 .where(a.id == counterpart, a.source_kind == "manual")
                 .label("manual_counterpart"),
@@ -164,22 +162,15 @@ async def _pair_states(
         present = row.out_transaction_id or row.in_transaction_id
         if present is None or (row.out_transaction_id and row.in_transaction_id):
             continue
-        expected: ReviewReason | None = None
-        if relation.several(present):
-            expected = "several_candidates"
-        elif relation.candidates(present, exact=False):
-            expected = "amount_differs"
-        elif row.status != "before_history" and relation.held_back(present):
-            # Whether it is settled before history instead is checked by (d) below.
-            expected = "not_listed_in_full"
         # (e) an open transfer whose review reason disagrees with its record's candidates.
-        if row.review_reason != expected:
+        settled = row.status == "before_history"
+        if row.review_reason != relation.review_reason(present, settled=settled):
             due.add(present)
-        # (e) one on a manual counterpart with a placeholder while a row the gate alone
-        # refused holds it back, or with none and no such row (account type catalog design
-        # §8.3 item 3).
-        elif row.manual_counterpart and row.status != "before_history":
-            if (row.status == "awaiting") != relation.held_back(present):
+        # (e) one on a manual counterpart with a placeholder beside a candidate of the same
+        # amount there, or with none and no such candidate (account type catalog design §8.3
+        # item 3). Whether it is settled before history instead is checked by (d).
+        elif row.manual_counterpart and not settled:
+            if (row.status == "awaiting") != relation.candidate_on(present, row.counterpart_id):
                 due.add(present)
     # (c) a unique pair not yet a matched transfer.
     for record_id in chain(relation.exact, relation.converts, relation.by_card):
@@ -300,8 +291,8 @@ async def records_to_heal(
             )
             # (d) a lone record whose manual counterpart's first snapshot (in its
             # instrument) now contains it, or no longer does (an earlier one was recorded):
-            # the same manual_predates engine._open decides by. One awaiting there (held back
-            # by a row the gate alone refused, with no placeholder) is settled the same way.
+            # the same manual_predates engine._open decides by. One awaiting there (beside a
+            # candidate, with no placeholder) is settled the same way.
             manual = aliased(models.Account, name="manual_counterpart")
             contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(

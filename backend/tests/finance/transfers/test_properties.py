@@ -15,11 +15,11 @@ the worker runs it.
 - P5 decisions survive: with owner actions, after every connector record is upserted again
   (a re-sync) and healed, every rejected record's contra is Unassigned, no never_pair'd
   records are linked, and P1 and P2 still hold.
-- P6 no placeholder beside a row that may be the counterpart: without owner actions, a
-  transfer whose window starts before the days its manual account's imports list in full
-  ends settled, awaiting review with no placeholder when a row there may be its
-  counterpart, or with a placeholder when none can be (Scenario.gated_outcomes; account
-  type catalog design §8.3 item 3).
+- P6 a refused row is still a candidate: without owner actions, a transfer whose window
+  starts before the days its manual account's imports list in full ends settled, or
+  awaiting review with no placeholder while a row there may be its counterpart, or with a
+  placeholder when none can be; its review reason counts those rows
+  (Scenario.gated_outcomes; account type catalog design §8.3 item 3).
 
 Each run of a scenario is one transaction on a connection of its own, rolled back at the
 end, so examples never see each other. Profiles: "ci" (the default, derandomized, a modest
@@ -426,9 +426,9 @@ class Ledger:
 
     async def check_gated(self) -> None:
         """P6: each transfer whose window starts before the days its manual account's
-        imports list in full ends as Scenario.gated_outcomes says: a review with no
-        placeholder beside a row that may be its counterpart, a placeholder only where there
-        is none."""
+        imports list in full ends as Scenario.gated_outcomes says: its status and review
+        reason, with a placeholder only when it is inferred (no row may be its
+        counterpart)."""
         found = await list_transfers(self.session)
         for index, outcome in self.scenario.gated_outcomes().items():
             keys = {
@@ -443,11 +443,7 @@ class Ledger:
                 transfer.status,
                 transfer.review_reason,
                 transfer.placeholder_transaction_id is not None,
-            ) == {
-                "before_history": ("before_history", None, False),
-                "not_listed_in_full": ("awaiting", "not_listed_in_full", False),
-                "inferred": ("inferred", None, True),
-            }[outcome], (index, outcome, transfer)
+            ) == (*outcome, outcome[0] == "inferred"), (index, outcome, transfer)
 
     async def net_worth(self) -> dict[date, Decimal]:
         return {p.day: p.value for p in await net_worth_series(self.session, FIRST_DAY, LAST_DAY)}
@@ -507,8 +503,10 @@ async def test_matching_is_consistent_order_independent_and_true(
     """P1 to P4, and P6."""
     note(describe(scenario))
     event(f"transfers: {min(len(scenario.transfers), 5)}")
-    for outcome in sorted(set(scenario.gated_outcomes().values())):
-        event(f"P6 checked: {outcome}")
+    for status, reason in sorted(
+        set(scenario.gated_outcomes().values()), key=lambda outcome: (outcome[0], outcome[1] or "")
+    ):
+        event(f"P6 checked: {status} ({reason or 'no review'})")
     items = scenario.items()
     first = data.draw(st.permutations(items), label="first order")
     second = data.draw(st.permutations(items), label="second order")

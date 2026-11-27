@@ -48,6 +48,12 @@ MUTUAL: Tier = 2
 ONE_SIDED: Tier = 3
 WEAK: Tier = 4
 
+# Why the rule could not decide, apart from the status ("needs review"; PairRelation's
+# review_reason): several candidates; a mutually identified one of another amount; or one
+# candidate of the same amount that can't be taken by itself, refused only because no upload
+# lists its days in full (account type catalog design §8.3 item 3).
+ReviewReason = Literal["several_candidates", "amount_differs", "not_listed_in_full"]
+
 
 @dataclass(frozen=True)
 class Pairable:
@@ -677,18 +683,19 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
 
 def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
-    nobody) is taken only if the identified record's window doesn't start before the days
-    the counterpart's account's imports list (Known.holds_from): there the real row may be
-    inside the opening, and an unrelated one stand in for it for good. A timed receipt is
-    asked only from its payment's day (_gate_day)."""
+    nobody) is taken automatically only if the identified record's window doesn't start
+    before the days the counterpart's account's imports list (Known.holds_from): there the
+    real row may be inside the opening, and an unrelated one stand in for it for good. A
+    timed receipt is asked only from its payment's day (_gate_day). A pair it refuses is
+    still a candidate, one that can't be taken by itself (PairRelation.untakeable)."""
     identified, other = (s, c) if s.identified else (c, s)
     return known.holds_from(other, _gate_day(identified, other, settings, known))
 
 
 def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """The same gate for a weak pair (weak_tier), from the record whose sort code names the
-    other's account: its counterpart, found by amount and date, is taken only where the
-    ledger would hold the real one."""
+    other's account: its counterpart, found by amount and date, is taken automatically only
+    where the ledger would hold the real one."""
     w, other = (s, c) if _names_weakly(s, c) else (c, s)
     return known.holds_from(other, _gate_day(w, other, settings, known))
 
@@ -699,18 +706,17 @@ def _registry_edges(
     decisions: _Decisions,
     known: Known,
     carded: Collection[UUID] = (),
-    gated: _Edges | None = None,
-) -> tuple[_Edges, _Edges]:
-    """(same amount, another amount) pairs the registry gives. Of the same amount, both
-    tiers, a one-sided one only where the ledger would hold the real counterpart
-    (_one_sided_known), and, where the registry gives none, a weak one under the same gate
-    (_weak_known); of another amount, only mutually identified ones (Ruling 8: a payment
-    naming nobody is no evidence of a differing transfer). Card evidence comes first: a
-    record with a card payment's candidate (`carded`, card_partners') gets no edge through
-    its account's funding alone (_funded_only), so a card top-up stays the card payment's.
-    `gated`, when given, collects the same-amount pairs the coverage gate alone refused,
-    with their tier."""
+) -> tuple[_Edges, _Edges, set[frozenset[UUID]]]:
+    """(same amount, another amount, refused) pairs the registry gives. Of the same amount,
+    both tiers, and, where the registry gives none, a weak one; `refused`, those of them the
+    coverage gate refuses to take automatically (_one_sided_known, _weak_known), which stay
+    candidates all the same. Of another amount, only mutually identified ones (Ruling 8: a
+    payment naming nobody is no evidence of a differing transfer). Card evidence comes
+    first: a record with a card payment's candidate (`carded`, card_partners') gets no edge
+    through its account's funding alone (_funded_only), so a card top-up stays the card
+    payment's."""
     same, differing = _Edges(), _Edges()
+    refused: set[frozenset[UUID]] = set()
     # Same amount: a sender meets the receivers in its instrument of its amount.
     receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
     for x in records:
@@ -739,9 +745,7 @@ def _registry_edges(
             if (tier == ONE_SIDED and not _one_sided_known(s, c, settings, known)) or (
                 tier == WEAK and not _weak_known(s, c, settings, known)
             ):
-                if gated is not None:
-                    gated.add(s.id, c.id, tier)
-                continue
+                refused.add(frozenset((s.id, c.id)))
             same.add(s.id, c.id, tier)
         if not s.identified or s.holder is None:
             continue
@@ -749,22 +753,27 @@ def _registry_edges(
         for c in timeline.between(*window) if timeline else ():
             if c.quantity != -s.quantity and not decisions.apart(s, c):
                 differing.add(s.id, c.id, MUTUAL)
-    return same, differing
+    return same, differing, refused
 
 
-def _decided_edges(records: list[Pairable], decisions: _Decisions, edges: _Edges) -> None:
-    """The pairs the owner made (Decision 6 step 2), added to `edges`: still pairs the
-    owner could make (owner_pair_refusal: in one instrument of opposite, equal amounts, or
-    two currencies differing in currency or amount whose settlement fits); the window does
-    not apply. They outrank every other tier, those across currencies and of cards
-    included."""
+def _decided_edges(
+    records: list[Pairable], decisions: _Decisions, edges: _Edges
+) -> set[frozenset[UUID]]:
+    """The pairs the owner made (Decision 6 step 2), added to `edges` and returned: still
+    pairs the owner could make (owner_pair_refusal: in one instrument of opposite, equal
+    amounts, or two currencies differing in currency or amount whose settlement fits); the
+    window does not apply. They outrank every other tier, those across currencies and of
+    cards included, and the coverage gate doesn't apply to them either."""
     by_source = {x.source: x for x in records}
+    decided: set[frozenset[UUID]] = set()
     for subject, other in decisions.paired:
         r, c = by_source.get(subject), by_source.get(other)
         if r is None or c is None:
             continue
         if owner_pair_refusal(r, c) is None and not decisions.apart(r, c):
             edges.add(r.id, c.id, DECIDED)
+            decided.add(frozenset((r.id, c.id)))
+    return decided
 
 
 def _cross_currency_edges(
@@ -811,6 +820,11 @@ class PairRelation:
     # A record's candidates of the same amount, or the owner's: those in the strongest tier
     # it has any in, for which that is also their own strongest (Ruling 7).
     exact: Mapping[UUID, frozenset[UUID]]
+    # The pairs of the same amount that can't be taken by themselves: the coverage gate
+    # refused them (_one_sided_known, _weak_known). They are candidates all the same
+    # (account type catalog design §8.3 item 3); only the owner pairs them, until an upload
+    # lists their days.
+    untakeable: frozenset[frozenset[UUID]]
     # A record's candidates of another amount: mutually identified ones.
     differing: Mapping[UUID, frozenset[UUID]]
     # Partners within groups of interchangeable candidates (_twins).
@@ -827,59 +841,32 @@ class PairRelation:
     # another tier either.
     cards: Mapping[UUID, frozenset[UUID]]
     by_card: Mapping[UUID, UUID]
-    # A record's candidates of the same amount that the coverage gate alone refused
-    # (_one_sided_known, _weak_known): those that would be in `exact` if it took them.
-    gated: Mapping[UUID, frozenset[UUID]]
-
-    def unlisted(self, record_id: UUID) -> frozenset[UUID]:
-        """The record's candidates the coverage gate alone refused (`gated`): rows on a
-        manual account, found by amount and date, on days no upload lists in full. For an
-        identified record they are on the account it names. Account type catalog design
-        §8.3 item 3: they hold it back (held_back), and its transfer's review, for whatever
-        reason (not_listed_in_full if none other), lists them as its candidates."""
-        return self.gated.get(record_id, frozenset())
-
-    def held_back(self, record_id: UUID) -> bool:
-        """Whether a row the coverage gate alone refused (`gated`) keeps the record from
-        pairing (partner): the record's own, or one refused a record whose candidate, or
-        twin, this one's are too. Its transfer then has no placeholder on a manual
-        counterpart, beside a row that may be its counterpart or another record's (account
-        type catalog design §8.3 item 3)."""
-        if record_id in self.gated:
-            return True
-        found = self.exact.get(record_id, frozenset())
-        twin = self.twins.get(record_id)
-        return any(c in self.gated for c in found) or (twin is not None and twin in self.gated)
 
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
         found = (self.exact if exact else self.differing).get(record_id, frozenset())
         return sorted(found)
 
-    def partner(self, record_id: UUID) -> UUID | None:
-        """The record's unique partner: its only candidate, whose only candidate it is; or,
-        among interchangeable candidates, the one a fixed order gives it (_twins). With no
-        candidate of the same amount, the one it converts with across currencies
-        (`converts`), else the card payment or deposit it pairs with (`by_card`).
+    def takeable(self, record_id: UUID, other_id: UUID) -> bool:
+        """Whether the pair may be taken automatically (not `untakeable`)."""
+        return frozenset((record_id, other_id)) not in self.untakeable
 
-        A record with candidates the coverage gate alone refused (`gated`) has none among
-        its candidates of the same amount, and is none's: a refused row is as plausible as
-        one the gate took (one a per-candidate rule, a timed receipt's or an opening date,
-        let through), so taking the other would pass it over (account type catalog design
-        §8.3 item 3)."""
+    def partner(self, record_id: UUID) -> UUID | None:
+        """The record's unique partner: its only candidate, whose only candidate it is, when
+        the pair is takeable; or, among interchangeable candidates, the one a fixed order
+        gives it (_twins). With no candidate of the same amount, the one it converts with
+        across currencies (`converts`), else the card payment or deposit it pairs with
+        (`by_card`)."""
         found = self.exact.get(record_id, frozenset())
         if not found:
             across = self.converts.get(record_id)
             return across if across is not None else self.by_card.get(record_id)
-        if record_id in self.gated:
-            return None
         if len(found) != 1:
-            twin = self.twins.get(record_id)
-            return None if twin is None or twin in self.gated else twin
+            return self.twins.get(record_id)
         [partner] = found
-        if partner in self.gated:
+        if len(self.exact.get(partner, frozenset())) != 1:
             return None
-        return partner if len(self.exact.get(partner, frozenset())) == 1 else None
+        return partner if self.takeable(record_id, partner) else None
 
     def several(self, record_id: UUID) -> bool:
         """Whether the record has candidates the rule can't choose between: any of the same
@@ -894,9 +881,41 @@ class PairRelation:
             return True
         return bool(self.cards.get(record_id)) and record_id not in self.by_card
 
+    def review_reason(self, record_id: UUID, *, settled: bool = False) -> ReviewReason | None:
+        """Why the rule leaves a record with no partner for review: the one definition
+        matching opens its transfer with and heal expects (account type catalog design §8.3
+        item 3). several_candidates when it has candidates the rule can't choose between
+        (several), unless all it has, but for one of another amount, is one candidate of the
+        same amount it can't take by itself (`untakeable`); else amount_differs when it has
+        a mutually identified one of another amount; else not_listed_in_full for that one it
+        can't take, unless its transfer is `settled` before history (before_history comes
+        first: the other account's history holds the transfer, so it waits for no upload);
+        else none."""
+        found = self.exact.get(record_id, frozenset())
+        refused = (
+            len(found) == 1
+            and not self.takeable(record_id, next(iter(found)))
+            and not self.across.get(record_id)
+            and not self.cards.get(record_id)
+        )
+        if self.several(record_id) and not refused:
+            return "several_candidates"
+        if self.differing.get(record_id):
+            return "amount_differs"
+        return "not_listed_in_full" if refused and not settled else None
+
+    def candidate_on(self, record_id: UUID, account_id: UUID) -> bool:
+        """Whether the record has a candidate of the same amount on the account: a
+        placeholder there beside it would count the money twice if it is the real row
+        (account type catalog design §8.3 item 3)."""
+        found = self.exact.get(record_id, frozenset())
+        return any(self.records[c].account_id == account_id for c in found)
+
 
 def _twins(
-    records: Mapping[UUID, Pairable], exact: Mapping[UUID, frozenset[UUID]]
+    records: Mapping[UUID, Pairable],
+    exact: Mapping[UUID, frozenset[UUID]],
+    untakeable: Collection[frozenset[UUID]],
 ) -> dict[UUID, UUID]:
     """Partners for groups of interchangeable records: n records whose candidates are
     exactly the same n others, and the reverse, each side alike (account, instrument,
@@ -905,7 +924,9 @@ def _twins(
     which doesn't depend on which side arrived first. Anything less alike stays for the
     owner's review. A side naming no account is found by amount and date, as a single
     counterpart is: an unrelated row can be among it until the real one arrives, and the
-    group then no longer matches (design §5.8)."""
+    group then no longer matches (design §5.8). A group with a pair that can't be taken by
+    itself (`untakeable`) pairs none: which of its rows are the real ones is unknown until
+    an upload lists their days, and a group pairs as a whole or not at all."""
 
     def alike(group: frozenset[UUID]) -> bool:
         return (
@@ -934,6 +955,7 @@ def _twins(
             and all(exact.get(x) == found for x in others)
             and alike(found)
             and alike(others)
+            and not any(frozenset((x, y)) in untakeable for x in found for y in others)
         ):
             for x, y in zip(order(others), order(found), strict=True):
                 twins[x], twins[y] = y, x
@@ -965,7 +987,9 @@ async def pair_relation(
     (conversion_postings), else they are for review as of another amount. A card payment
     and a deposit on one of its merchant's holder accounts pair when card_tier takes them,
     each the other's only such candidate and neither with a candidate in another tier
-    (card_partners). The owner pairs two records with a pair decision.
+    (card_partners). The owner pairs two records with a pair decision. A pair of the same
+    amount the coverage gate refuses (design §5.8) is a candidate like any other, one that
+    can't be taken by itself (`untakeable`).
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
@@ -974,32 +998,16 @@ async def pair_relation(
     records = await _load_records(session, system, decisions, excluding) + list(adding)
     # The records a card payment could have paid (and the payments), whatever else pairs.
     carded, _ = card_partners(records, settings.near_window, decisions.apart, ())
-    refused = _Edges()
-    same, differing = _registry_edges(
-        records,
-        settings,
-        decisions,
-        await _load_known(session, listing),
-        carded=carded.keys(),
-        gated=refused,
+    same, differing, refused = _registry_edges(
+        records, settings, decisions, await _load_known(session, listing), carded=carded.keys()
     )
-    _decided_edges(records, decisions, same)
+    untakeable = frozenset(refused - _decided_edges(records, decisions, same))
     best = {r: min(found.values()) for r, found in same.tiers.items()}
     exact = {
         r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])
         for r, found in same.tiers.items()
     }
     exact = {r: found for r, found in exact.items() if found}
-    # A refused pair counts where, taken, it would be exact: in the strongest tier of both.
-    gated = {
-        r: frozenset(
-            c
-            for c, tier in found.items()
-            if tier <= best.get(r, tier) and tier <= best.get(c, tier)
-        )
-        for r, found in refused.tiers.items()
-    }
-    gated = {r: found for r, found in gated.items() if found}
     by_id = {x.id: x for x in records}
     across = {
         r: frozenset(found)
@@ -1037,12 +1045,12 @@ async def pair_relation(
         rejected=frozenset(x.id for x in records if x.source in decisions.rejected),
         tiers={r: dict(found) for r, found in same.tiers.items()},
         exact=exact,
+        untakeable=untakeable,
         differing={r: frozenset(found) for r, found in differing.tiers.items()},
-        twins=_twins(by_id, exact),
+        twins=_twins(by_id, exact, untakeable),
         across=across,
         alone_across=frozenset(alone),
         converts=converts,
         cards=cards,
         by_card=by_card,
-        gated=gated,
     )

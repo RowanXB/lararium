@@ -134,7 +134,11 @@ class Transfer:
 
 
 type Item = tuple[Literal["record", "snapshot", "register"], str]
-type GatedOutcome = Literal["before_history", "not_listed_in_full", "inferred"]
+# A transfer's status, and its review reason, where the coverage gate refuses its rows.
+type GatedOutcome = tuple[
+    Literal["before_history", "awaiting", "inferred"],
+    Literal["not_listed_in_full", "several_candidates"] | None,
+]
 
 
 @dataclass(frozen=True)
@@ -249,7 +253,7 @@ class Scenario:
                     # its own row, found by amount and date only, isn't taken. The transfer
                     # is settled before history, or else it needs review with no
                     # placeholder (gated_outcomes), which P4 reads from the ledger.
-                    if self.gated_outcomes().get(t.index) == "before_history":
+                    if self.gated_outcomes()[t.index][0] == "before_history":
                         found.append(f"window_starts_before_imports: transfer {t.index}")
                     continue
                 if (
@@ -272,14 +276,18 @@ class Scenario:
 
     def gated_outcomes(self) -> dict[int, GatedOutcome]:
         """What the transfers whose connected record names a manual account, and whose
-        window starts before the days that account's imports list in full, end as (the
-        coverage gate, design §5.8, refuses every row there found by amount and date): by
-        transfer index. Settled before history when the record is at or before the
-        account's opening snapshot (design §5.2); else, when an imported bank transfer
-        naming nobody of the manual side's amount is booked there inside the window (its own
-        row or another), awaiting review (not_listed_in_full) with no placeholder, which
-        would count the money twice if that row is the real one (account type catalog
-        design §8.3 item 3); else inferred, with a placeholder."""
+        window starts before the days that account's imports list in full, end as, by
+        transfer index (account type catalog design §8.3 item 3). The coverage gate (design
+        §5.8) refuses the record every row there found by amount and date: none is taken
+        by itself, but each is still a candidate. Those are the imported bank transfers
+        naming nobody, of the manual side's amount, booked there inside the window (its
+        own row or another). The status: settled before history when the record is at or
+        before the account's opening snapshot (design §5.2); else awaiting with no
+        placeholder while there is a candidate, which a placeholder would count twice if it
+        is the real row; else inferred, with a placeholder. The review reason counts the
+        candidates: with more than one, several_candidates; with one, not_listed_in_full,
+        unless the transfer is settled before history, which waits for no upload; with
+        none, no review."""
         found: dict[int, GatedOutcome] = {}
         for t in self.transfers:
             for manual_side, other_side in ((t.sent, t.received), (t.received, t.sent)):
@@ -291,9 +299,7 @@ class Scenario:
                 earliest, latest = _window(other_side)
                 if account.holds_from(earliest):
                     continue
-                if other_side.at <= account.snapshot_at:
-                    found[t.index] = "before_history"
-                elif any(
+                candidates = sum(
                     r.kind == "import"
                     and r.movement.account == account.name
                     and r.movement.quantity == manual_side.quantity
@@ -301,10 +307,18 @@ class Scenario:
                     and r.names is None
                     and earliest <= r.movement.day <= latest
                     for r in self.records
-                ):
-                    found[t.index] = "not_listed_in_full"
+                )
+                settled = other_side.at <= account.snapshot_at
+                if candidates > 1:
+                    reason = "several_candidates"
+                elif candidates == 1 and not settled:
+                    reason = "not_listed_in_full"
                 else:
-                    found[t.index] = "inferred"
+                    reason = None
+                if settled:
+                    found[t.index] = ("before_history", reason)
+                else:
+                    found[t.index] = ("awaiting" if candidates else "inferred", reason)
         return found
 
     def _stand_in(self, t: Transfer, manual_side: Movement, earliest: date, latest: date) -> bool:

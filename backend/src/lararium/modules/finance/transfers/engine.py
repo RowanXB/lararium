@@ -74,7 +74,6 @@ from lararium.modules.finance.transfers.pairs import (
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
-    ReviewReason,
     TransferRecord,
     TransferStatus,
     before_history,
@@ -373,25 +372,18 @@ async def _open(
     counterpart: AccountRecord,
     system: _System,
     settings: TransferSettings,
-    review_reason: ReviewReason | None,
+    relation: PairRelation,
     previous: TransferRecord | None,
-    *,
-    held_back: bool,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart is already held by that account's history (a manual hybrid account's first
     snapshot, or the days a manual transactions account's imports list or open with,
-    manual_predates; a connected account's first record, before_history); else inferred
-    with a placeholder when the counterpart is manual, or awaiting the counterpart's own
-    record when it is connected.
-
-    `held_back`: a row the coverage gate alone refused keeps the record from pairing
-    (PairRelation.held_back): one refused it on the manual counterpart, or one refused a
-    record whose candidate one of its own is. Unless the account's history holds the
-    counterpart, the transfer then awaits review with no placeholder, which would count the
-    money twice if a candidate is the real row (account type catalog design §8.3 item 3):
-    for its other review reason if it has one (several_candidates, amount_differs), else
-    not_listed_in_full.
+    manual_predates; a connected account's first record, before_history); else, when the
+    counterpart is manual, inferred with a placeholder, or awaiting with none while the
+    record has a candidate of the same amount there (PairRelation.candidate_on: a
+    placeholder beside it would count the money twice if it is the real row, account type
+    catalog design §8.3 item 3); else awaiting the counterpart's own record when it is
+    connected. Its review reason is the one `relation` gives (PairRelation.review_reason).
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -406,9 +398,7 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
-        elif held_back:
-            review_reason = review_reason or "not_listed_in_full"
-        else:
+        elif not relation.candidate_on(record.id, counterpart.id):
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
             status = "inferred"
     elif await session.scalar(
@@ -425,6 +415,7 @@ async def _open(
     ):
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"
+    review_reason = relation.review_reason(record.id, settled=status == "before_history")
     from_id, to_id = _accounts(record, counterpart.id)
     notified_at = None
     if previous is not None and (
@@ -606,11 +597,6 @@ async def _match_one(
     # 3. Identified, with no unique partner: its own transfer, for review if it has any.
     if not await _set_contra(ctx, record, system.in_transit):
         return others, set()
-    review_reason: ReviewReason | None = None
-    if relation.several(record.id):
-        review_reason = "several_candidates"
-    elif relation.candidates(record.id, exact=False):
-        review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
     await _open(
         ctx,
@@ -618,9 +604,8 @@ async def _match_one(
         counterpart,
         system,
         settings,
-        review_reason,
+        relation,
         dissolved.get(record.id),
-        held_back=relation.held_back(record.id),
     )
     return others, set()
 

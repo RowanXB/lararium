@@ -79,11 +79,11 @@ async def test_an_account_s_opening_date_vouches_for_the_days_before(
         session, await system_account_ids(session), await load_transfer_settings(session)
     )
     [transfer] = [t for t in await list_transfers(session) if t.out_transaction_id == sent.id]
+    assert relation.tiers[sent.id][row] == ONE_SIDED  # a candidate either way
+    assert relation.takeable(sent.id, row) is pairs
     if pairs:
-        assert relation.tiers[sent.id][row] == ONE_SIDED
         assert (transfer.status, transfer.in_transaction_id) == ("matched", row)
     else:
-        assert row not in relation.tiers.get(sent.id, {})
         assert transfer.in_transaction_id is None
     assert await heal() == 0
     await assert_consistent(session)

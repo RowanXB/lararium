@@ -1,12 +1,13 @@
-"""No placeholder beside a row that may be the counterpart (account type catalog design §8.3
-item 3).
+"""A refused row is still a candidate; it just can't be taken by itself (account type
+catalog design §8.3 item 3).
 
 M4 §5.8's import-coverage gate takes a counterpart found by amount and date on a manual
-account only from the first day that account's imports list in full. When the gate is all
-that keeps an identified record from such a candidate, a placeholder there would count the
-money twice if the candidate is the real row: the record's transfer opens instead with no
-placeholder and the review reason `not_listed_in_full`. When a later upload lists the days,
-the pair forms by itself."""
+account automatically only from the first day that account's imports list in full. A row
+it refuses stays the record's candidate (PairRelation.untakeable): every rule asking about
+candidates sees it. A record whose one candidate is such a row opens its transfer for
+review as `not_listed_in_full`; a transfer to a manual account gets no placeholder while it
+has a candidate of the same amount there, which a placeholder would count twice if it is
+the real row. When a later upload lists the days, the pair forms by itself if unique."""
 
 import importlib.util
 from datetime import UTC, date, datetime, timedelta
@@ -23,7 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord
 from lararium.modules.finance.identifiers import get_or_create_identifier
-from lararium.modules.finance.ledger import void_transaction
+from lararium.modules.finance.instruments import InstrumentRecord
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    post_transaction,
+    void_transaction,
+)
 from lararium.modules.finance.transfers import (
     TransferRecord,
     candidates,
@@ -31,6 +39,7 @@ from lararium.modules.finance.transfers import (
     list_transfers,
     load_transfer_settings,
     pair,
+    transfer_contra,
 )
 
 from .conftest import (
@@ -264,7 +273,8 @@ async def test_a_later_upload_holding_the_window_settles_it(
 ) -> None:
     """A later upload lists in full from the day after the row's to well after A's window:
     the row's day still isn't listed, but the window now ends on days B's statements list,
-    so the transfer is settled before history, as one opened then would be."""
+    so the transfer is settled before history, as one opened then would be: before_history
+    comes first, so the row, still its one candidate, asks for no review."""
     b, sent, _ = await _setup(
         session, run, connected_bank, connector_tx, imported_bank, statement_row
     )
@@ -560,9 +570,10 @@ async def test_a_row_the_gate_refused_another_sender_holds_back_its_one_candidat
 ) -> None:
     """B's uploads list in full from DAY for two days (so they hold no window), with two
     rows of 100 naming nobody, on DAY and four days later. S's payment of 100 on DAY names
-    B: its window starts the day before, so the gate refuses it both rows. A's of 100 three
-    days later names B too, and its gate takes the later row, its only candidate. That row
-    may be S's: A is paired with neither, and its transfer waits for review with no
+    B: its window starts the day before, so the gate refuses it both rows, which stay its
+    two candidates (several_candidates). A's of 100 three days later names B too, and its
+    gate takes the later row, its only candidate. That row may be S's: it has two
+    candidates, so A is paired with neither, and its transfer waits for review with no
     placeholder beside the row, which it lists. When an upload lists from the day before
     DAY, the gate takes both rows for S: nothing is paired around either (S has two
     candidates, the later row two)."""
@@ -582,7 +593,8 @@ async def test_a_row_the_gate_refused_another_sender_holds_back_its_one_candidat
     await heal()
 
     transfer_s = await _transfer_of(session, sent_s)
-    assert (transfer_s.status, transfer_s.review_reason) == ("awaiting", "not_listed_in_full")
+    assert (transfer_s.status, transfer_s.review_reason) == ("awaiting", "several_candidates")
+    assert transfer_s.placeholder_transaction_id is None
     transfer_a = await _transfer_of(session, sent_a)
     assert (transfer_a.status, transfer_a.review_reason) == ("awaiting", "several_candidates")
     assert transfer_a.in_transaction_id is None
@@ -605,5 +617,176 @@ async def test_a_row_the_gate_refused_another_sender_holds_back_its_one_candidat
         transfer = await _transfer_of(session, sent)
         assert transfer.in_transaction_id is None
         assert transfer.review_reason == "several_candidates"
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_refused_row_beside_a_receipt_in_another_currency_keeps_both_for_review(
+    session: AsyncSession,
+    run: Run,
+    registered: Any,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    eur: InstrumentRecord,
+    heal: Heal,
+) -> None:
+    """A's payment of 100 GBP at WHEN names B. B holds a receipt of 115 EUR 30 s later naming
+    A (mutually identified, across currencies) and a GBP row of 100 naming nobody on days no
+    upload lists in full. The refused row is a candidate of the same amount, so the
+    payment is left for review rather than converted with the receipt around it (the
+    cross-currency rule's safe side): no conversion, no placeholder, and the review lists
+    both. Without the row, the two convert."""
+    a, a_id = await registered("A", A_IDENTIFIER)
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    contra = await transfer_contra(
+        session,
+        source=None,
+        own_account_id=b.id,
+        counterparty_identifier_id=a_id,
+        other_postings=0,
+    )
+    received = (
+        await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=WHEN + timedelta(seconds=30),
+                description="Transfer in euros",
+                origin="manual",
+                postings=[
+                    PostingInput(b.id, eur.id, Decimal(115)),
+                    PostingInput(contra, eur.id, Decimal(-115)),
+                ],
+                counterparty=CounterpartyFields(identifier_id=a_id, bank_transfer=True),
+            ),
+        )
+    ).id
+    row = await statement_row(b, "100", day=DAY)
+    await _list_no_full_day(session, b)
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "several_candidates")
+    assert transfer.in_transaction_id is None
+    assert (transfer.placeholder_transaction_id, transfer.settlement_transaction_id) == (
+        None,
+        None,
+    )
+    assert await placeholders(session) == []
+    assert await placeholders(session, "rule") == []  # no conversion
+    found = await candidates(session, transfer.id)
+    assert [(c.transaction_id, c.reason) for c in found] == [
+        (row, "exact"),
+        (received, "amount_differs"),
+    ]
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    await run(void_transaction, row)
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.in_transaction_id) == ("matched", received)
+    assert transfer.settlement_transaction_id is not None  # the conversion
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_two_equal_deposits_on_days_not_listed_pair_neither_and_post_no_placeholder(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    duplicate_row: DuplicateRow,
+    heal: Heal,
+) -> None:
+    """A pays B 100 twice on one day, and B's upload holds two rows of 100 naming nobody on
+    the next, on days no upload lists in full. Interchangeable as they are (pairs._twins),
+    no pair can be taken by itself: each payment is for review with both rows its
+    candidates, and no placeholder stands anywhere. A later upload listing the days pairs
+    them, in their fixed order."""
+    a = await connected_bank("A")
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = [
+        (
+            await connector_tx(
+                a,
+                "-100",
+                external_id=f"tx_{n}",
+                occurred_at=WHEN + timedelta(hours=n),
+                identifier_id=identifier,
+            )
+        ).id
+        for n in (1, 2)
+    ]
+    rows = [await statement_row(b, "100", day=DAY) for _ in range(2)]
+    await _list_no_full_day(session, b)
+    await heal()
+
+    for record in sent:
+        transfer = await _transfer_of(session, record)
+        assert (transfer.status, transfer.review_reason) == ("awaiting", "several_candidates")
+        assert transfer.in_transaction_id is None
+        assert transfer.placeholder_transaction_id is None
+        found = await candidates(session, transfer.id)
+        assert sorted(c.transaction_id for c in found) == sorted(rows)
+    assert await placeholders(session) == []
+    balances = await balances_on(session)
+    assert balances[b.id] == Decimal(200)  # the two rows, once each
+    assert balances[ids.in_transit] == Decimal(200)
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    for row in rows:
+        await duplicate_row(row, RowDetails())
+    await heal()
+
+    paired = {(await _transfer_of(session, record)).in_transaction_id for record in sent}
+    assert paired == set(rows)
+    for record in sent:
+        assert (await _transfer_of(session, record)).status == "matched"
+    assert (await balances_on(session)).get(ids.in_transit, Decimal(0)) == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_several_candidates_on_a_manual_account_post_no_placeholder(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """B's upload lists in full from the start of A's window for a few days (not to its end,
+    which would settle the transfer before history), and A's payment of 100 has two rows of
+    100 naming nobody there, the gate taking both: several candidates, as in M4, but now
+    with no placeholder beside them, which would count the money twice in B (it stays in In
+    transit until the owner pairs one)."""
+    a = await connected_bank("A")
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    listed = (WHEN.date() - timedelta(days=1), WHEN.date() + timedelta(days=2))
+    rows = [await statement_row(b, "100", day=DAY, complete=listed) for _ in range(2)]
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "several_candidates")
+    assert transfer.placeholder_transaction_id is None
+    assert await placeholders(session) == []
+    found = await candidates(session, transfer.id)
+    assert sorted(c.transaction_id for c in found) == sorted(rows)
+    balances = await balances_on(session)
+    assert balances[b.id] == Decimal(200)
+    assert balances[ids.in_transit] == Decimal(100)
     await assert_consistent(session)
     assert await heal() == 0

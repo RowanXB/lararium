@@ -56,7 +56,11 @@ from lararium.modules.finance.transfers.contra import (
     names_source,
     source_ref,
 )
-from lararium.modules.finance.transfers.pairs import owner_pair_refusal, pair_relation
+from lararium.modules.finance.transfers.pairs import (
+    ReviewReason,
+    owner_pair_refusal,
+    pair_relation,
+)
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
 # What the ledger holds for the transfer: one own record waiting for the connected other
@@ -64,15 +68,9 @@ from lararium.modules.finance.transfers.settings import TransferSettings, load_t
 # (matched), one whose other side predates that account's history (before_history: the
 # connected account's first record, or the manual account's first snapshot), or the
 # owner's word that it is not a transfer (rejected). A transfer of a manual other side
-# awaits too, with no placeholder, while a row the coverage gate alone refused holds it
-# back (PairRelation.held_back), whatever its review reason.
+# awaits too, with no placeholder, while its record has a candidate of the same amount
+# there (PairRelation.candidate_on), whatever its review reason.
 TransferStatus = Literal["awaiting", "inferred", "matched", "before_history", "rejected"]
-# Why the rule could not decide, apart from the status ("needs review"): several
-# candidates; a mutually identified one of another amount; or a row on the manual other
-# side that may be the counterpart, refused only because no upload lists its days in full
-# (PairRelation.unlisted, account type catalog design §8.3 item 3). A refused row is listed
-# on a review for any reason, and holds back any record whose candidate it is too.
-ReviewReason = Literal["several_candidates", "amount_differs", "not_listed_in_full"]
 # The statuses of a transfer that still misses one own record.
 OPEN_STATUSES: tuple[TransferStatus, ...] = ("awaiting", "inferred", "before_history")
 
@@ -686,10 +684,10 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     pair can link again), each oldest first, each once. Only those pair would accept: not
     a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
     make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
-    (the owner paired it, so its side differs) is labelled amount_differs. A transfer
-    awaiting review, for whatever reason, lists the rows the coverage gate refused it
-    (PairRelation.unlisted) with those of the same amount, so the owner can pair one by hand
-    (account type catalog design §8.3 item 3). Empty for a transfer with both sides."""
+    (the owner paired it, so its side differs) is labelled amount_differs. Those of the same
+    amount include the rows the coverage gate refused to take by themselves
+    (PairRelation.untakeable), so the owner can pair one by hand (account type catalog design
+    §8.3 item 3). Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
@@ -701,9 +699,8 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
         return []
     system = await system_account_ids(session)
     relation = await pair_relation(session, system, await load_transfer_settings(session))
-    unlisted = sorted(relation.unlisted(present_id)) if transfer.review_reason is not None else []
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
-        ("exact", relation.candidates(present_id) + unlisted),
+        ("exact", relation.candidates(present_id)),
         ("amount_differs", relation.candidates(present_id, exact=False)),
         ("amount_differs", sorted(relation.across.get(present_id, frozenset()))),
         ("unpaired", await unpaired_from(session, present_id)),
@@ -944,8 +941,8 @@ def is_overdue(
     """Whether an awaiting transfer has been in transit too long, as due_notifications
     judges it: its connected other side hasn't reported. One awaiting a manual account
     (`manual`: the manual accounts' ids) never is: it waits for an upload, not a
-    connection's report, and is awaiting only while held for review, which already asks the
-    owner (PairRelation.held_back)."""
+    connection's report, and is awaiting only while a candidate there holds it for review,
+    which already asks the owner (PairRelation.candidate_on)."""
     counterpart = (
         transfer.to_account_id if transfer.out_transaction_id else transfer.from_account_id
     )

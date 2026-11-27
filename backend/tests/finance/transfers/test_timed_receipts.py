@@ -11,9 +11,12 @@ in the candidate's booking frame: the zone its file is read in, else the owner's
 to the second: its time may be a posting time (OFX's DTPOSTED), after the money left. It
 only ever lets the gate accept a pair it used to refuse: windows and tiers are unchanged.
 
-E11 (the property): for generated records, turning their `timed` on only adds same-amount
-edges, each a one-sided or weak pair the rule above lets through, and never removes or
-changes one."""
+A pair the gate refuses is still a candidate, one that can't be taken by itself
+(PairRelation.untakeable, §8.3 item 3).
+
+E11 (the property): for generated records, turning their `timed` on changes no same-amount
+candidate; it only lets the gate take more of them, each a one-sided or weak pair the rule
+above lets through, and never refuses or changes one it took."""
 
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -40,7 +43,7 @@ from lararium.modules.finance.transfers.pairs import (
     WEAK,
     Known,
     Pairable,
-    Tier,
+    PairRelation,
     _Decisions,
     _registry_edges,
     counterpart_bounds,
@@ -71,8 +74,8 @@ def _at(day: date, hour: int, minute: int = 0, second: int = 0) -> datetime:
 
 async def _relation_and_transfer(
     session: AsyncSession, sent: UUID
-) -> tuple[dict[UUID, Tier], TransferRecord]:
-    """The sent record's candidates in the pair relation, with their tiers, and its transfer."""
+) -> tuple[PairRelation, TransferRecord]:
+    """The pair relation, and the sent record's transfer."""
     relation = await pair_relation(
         session, await system_account_ids(session), await load_transfer_settings(session)
     )
@@ -81,7 +84,7 @@ async def _relation_and_transfer(
         for t in await list_transfers(session)
         if sent in (t.out_transaction_id, t.in_transaction_id)
     ]
-    return dict(relation.tiers.get(sent, {})), transfer
+    return relation, transfer
 
 
 @pytest.mark.parametrize(
@@ -131,12 +134,12 @@ async def test_a_timed_receipt_is_taken_from_its_payment_s_day(
     )
     await heal()
 
-    tiers, transfer = await _relation_and_transfer(session, sent.id)
+    relation, transfer = await _relation_and_transfer(session, sent.id)
+    assert relation.tiers[sent.id][row] == ONE_SIDED  # a candidate either way
+    assert relation.takeable(sent.id, row) is pairs
     if pairs:
-        assert tiers[row] == ONE_SIDED
         assert (transfer.status, transfer.in_transaction_id) == ("matched", row)
     else:
-        assert row not in tiers
         assert transfer.in_transaction_id is None
     assert await heal() == 0
     await assert_consistent(session)
@@ -185,12 +188,12 @@ async def test_a_timed_receipt_is_asked_from_its_payment_s_day_in_its_own_frame(
     )
     await heal()
 
-    tiers, transfer = await _relation_and_transfer(session, sent.id)
+    relation, transfer = await _relation_and_transfer(session, sent.id)
+    assert relation.tiers[sent.id][row] == ONE_SIDED  # a candidate either way
+    assert relation.takeable(sent.id, row) is pairs
     if pairs:
-        assert tiers[row] == ONE_SIDED
         assert (transfer.status, transfer.in_transaction_id) == ("matched", row)
     else:
-        assert row not in tiers
         assert transfer.in_transaction_id is None
     assert await heal() == 0
     await assert_consistent(session)
@@ -231,8 +234,9 @@ async def test_an_imported_sender_never_relaxes_the_gate(
     )
     await heal()
 
-    tiers, transfer = await _relation_and_transfer(session, sent)
-    assert row not in tiers
+    relation, transfer = await _relation_and_transfer(session, sent)
+    assert relation.tiers[sent][row] == ONE_SIDED
+    assert not relation.takeable(sent, row)
     assert transfer.out_transaction_id == sent
     assert transfer.in_transaction_id is None
     assert await heal() == 0
@@ -273,8 +277,11 @@ def _pairable(account: UUID, quantity: str, at: datetime, **kw) -> Pairable:
 
 
 def _pairs(sender: Pairable, receiver: Pairable, known: Known) -> bool:
-    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, known)
-    return receiver.id in same.tiers.get(sender.id, {})
+    """Whether the gate lets the pair be taken: it is a candidate (the receiver in the
+    window), and not one refused (pairs._registry_edges)."""
+    same, _, refused = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, known)
+    assert receiver.id in same.tiers.get(sender.id, {})
+    return frozenset((sender.id, receiver.id)) not in refused
 
 
 def _listed(zone: ZoneInfo | None = LONDON) -> Known:
@@ -458,19 +465,29 @@ def _relaxed(sender: Pairable, other: Pairable, known: Known) -> bool:
 def test_turning_timed_on_only_adds_pairs_a_timed_receipt_lets_through(
     case: tuple[list[Pairable], Known],
 ) -> None:
-    """E11: the same-amount edges with every record's `timed` off are kept, with their
-    tiers, when it is on; each one added is ONE_SIDED or WEAK, and the rule lets it
-    through (_relaxed)."""
+    """E11: the same-amount candidates are the same with every record's `timed` off or on;
+    those the gate lets be taken with it off still are, with their tiers, when it is on;
+    each one it adds is ONE_SIDED or WEAK, and the rule lets it through (_relaxed)."""
     records, known = case
     by_id = {x.id: x for x in records}
     untimed = [replace(x, timed=False) for x in records]
-    off, _ = _registry_edges(untimed, DEFAULTS, _NO_DECISIONS, known)
-    on, _ = _registry_edges(records, DEFAULTS, _NO_DECISIONS, known)
+    off, _, off_refused = _registry_edges(untimed, DEFAULTS, _NO_DECISIONS, known)
+    on, _, on_refused = _registry_edges(records, DEFAULTS, _NO_DECISIONS, known)
+    # Every candidate stays one: `timed` only decides whether the gate lets it be taken.
+    assert on.tiers == off.tiers
 
-    def edges(found: dict[UUID, dict[UUID, int]]) -> dict[tuple[UUID, UUID], int]:
-        return {(r, c): tier for r, others in found.items() for c, tier in others.items()}
+    def edges(
+        found: dict[UUID, dict[UUID, int]], refused: set[frozenset[UUID]]
+    ) -> dict[tuple[UUID, UUID], int]:
+        """The pairs the gate lets be taken, with their tiers."""
+        return {
+            (r, c): tier
+            for r, others in found.items()
+            for c, tier in others.items()
+            if frozenset((r, c)) not in refused
+        }
 
-    before, after = edges(off.tiers), edges(on.tiers)
+    before, after = edges(off.tiers, off_refused), edges(on.tiers, on_refused)
     note(f"edges off {len(before)}, on {len(after)}")
     assert {pair: after.get(pair) for pair in before} == before
     added = {pair: tier for pair, tier in after.items() if pair not in before}
