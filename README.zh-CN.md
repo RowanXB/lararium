@@ -488,8 +488,9 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 - **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
   状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
   一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
-  对手账户，按金额配对或手动配对。只有一个 Invest（或一个 Stocks ISA）加一个 Cash ISA 时，同样
-  不指明对手账户：Cash ISA 没有可指明的 Trading 212 id，这类转账也按金额配对或手动配对。
+  对手账户，需要手动配对：两侧都不指明任何账户，也都不是银行转账，不会自动配对。只有一个 Invest
+  （或一个 Stocks ISA）加一个 Cash ISA 时，同样不指明对手账户：Cash ISA 没有可指明的
+  Trading 212 id，这类转账也需要手动配对。
   Lararium 只统计添加到它里面的账户：你持有但没添加的 Cash ISA，
   仍按两个账户的规则处理，转到它的那笔会被当成转到另一个账户。新添加的同系列账户在每个
   Trading 212 连接的下一次同步时生效（届时会重放其转账）。
