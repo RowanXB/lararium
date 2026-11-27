@@ -95,12 +95,24 @@ def counterpart_bounds(record: Pairable, settings: TransferSettings) -> tuple[da
 
 
 def _may_be_transfer(x: Pairable) -> bool:
-    """Whether an unidentified record can be a transfer's side the registry pairs: it is
-    marked a bank transfer, or it is on an account funded by bank transfer and names
-    nobody: no own account, no card merchant, no bank account (_card_receiver's test
-    without its "from a connection" clause)."""
-    return x.bank_transfer or (
-        x.funded_by_transfer and x.holder is None and not x.holders and not x.names_account
+    """Whether a record can be the side of a registry pair that doesn't name the other's
+    account (registry_tier asks it of an unidentified one only): it is marked a bank
+    transfer, or it is on an account funded by bank transfer and names nobody: no own
+    account, no card merchant, no bank account (_card_receiver's test without its "from a
+    connection" clause)."""
+    return x.bank_transfer or _funded_only(x)
+
+
+def _funded_only(x: Pairable) -> bool:
+    """Whether the record is a transfer's possible side through its account's funding alone
+    (_may_be_transfer's second arm): not marked a bank transfer, naming nobody, on an
+    account funded by bank transfer."""
+    return (
+        not x.bank_transfer
+        and x.funded_by_transfer
+        and x.holder is None
+        and not x.holders
+        and not x.names_account
     )
 
 
@@ -621,13 +633,19 @@ def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Kno
 
 
 def _registry_edges(
-    records: list[Pairable], settings: TransferSettings, decisions: _Decisions, known: Known
+    records: list[Pairable],
+    settings: TransferSettings,
+    decisions: _Decisions,
+    known: Known,
+    carded: Collection[UUID] = (),
 ) -> tuple[_Edges, _Edges]:
     """(same amount, another amount) pairs the registry gives. Of the same amount, both
     tiers, a one-sided one only where the ledger would hold the real counterpart
     (_one_sided_known), and, where the registry gives none, a weak one under the same gate
     (_weak_known); of another amount, only mutually identified ones (Ruling 8: a payment
-    naming nobody is no evidence of a differing transfer)."""
+    naming nobody is no evidence of a differing transfer). Card evidence comes first: a
+    record with a card payment's candidate (`carded`, card_partners') gets no edge through
+    its account's funding alone (_funded_only), so a card top-up stays the card payment's."""
     same, differing = _Edges(), _Edges()
     # Same amount: a sender meets the receivers in its instrument of its amount.
     receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
@@ -648,6 +666,8 @@ def _registry_edges(
         timeline = by_amount.get((s.instrument_id, -s.quantity))
         for c in timeline.between(*window) if timeline else ():
             tier = registry_tier(s, c)
+            if tier is not None and any(_funded_only(x) and x.id in carded for x in (s, c)):
+                tier = None
             if tier is None:
                 tier = weak_tier(s, c)
             if tier is None or decisions.apart(s, c):
@@ -836,9 +856,10 @@ async def pair_relation(
     instrument, of opposite sign; the receiving one is booked in the sending one's window; at
     least one is identified through the registry; each identified one names the other's
     account; each other one is a bank transfer, or names nobody on an account funded by bank
-    transfer (_may_be_transfer); and neither is rejected nor decided never to pair with the
-    other. Where the registry doesn't pair two records, a sort code alone may, as the
-    weakest tier (weak_tier). Two records in different currencies pair when
+    transfer (_may_be_transfer) and no card payment could have paid it (card evidence comes
+    first); and neither is rejected nor decided never to pair with the other. Where the
+    registry doesn't pair two records, a sort code alone may, as the weakest tier
+    (weak_tier). Two records in different currencies pair when
     cross_currency_tier takes them, within the near window, each the other's only such
     candidate and neither with one of the same amount; their conversion's fee must fit
     (conversion_postings), else they are for review as of another amount. A card payment
@@ -851,8 +872,10 @@ async def pair_relation(
     their references included; `listing`, the days their import would list in full."""
     decisions = await _load_decisions(session)
     records = await _load_records(session, system, decisions, excluding) + list(adding)
+    # The records a card payment could have paid (and the payments), whatever else pairs.
+    carded, _ = card_partners(records, settings.near_window, decisions.apart, ())
     same, differing = _registry_edges(
-        records, settings, decisions, await _load_known(session, listing)
+        records, settings, decisions, await _load_known(session, listing), carded=carded.keys()
     )
     _decided_edges(records, decisions, same)
     best = {r: min(found.values()) for r, found in same.tiers.items()}

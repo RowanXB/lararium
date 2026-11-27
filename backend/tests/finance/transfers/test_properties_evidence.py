@@ -71,8 +71,9 @@ Accounts funded by bank transfer (account type catalog design §8.2; `funding_sc
 payee scenario with some rows not marked bank transfers, run once as it is and once with a
 drawn set of accounts given a type funded by bank transfer:
 - E10 funding changes only the pairs of unmarked records naming nobody on those accounts:
-  every other edge of the pair relation, with its tier, is the same in both runs, and each
-  one funding adds is ONE_SIDED, with a record naming the deposit's account.
+  every other same-currency edge of the pair relation (card and cross-currency edges are
+  outside it), with its tier, is the same in both runs, and each one funding adds is
+  ONE_SIDED, with a record naming the deposit's account.
 
 Settings and example counts are the "ci" and "deep" profiles' (tests/finance/conftest.py)."""
 
@@ -1174,6 +1175,7 @@ async def test_a_reference_names_its_account_as_a_registration_would(
 
 
 # Accounts funded by bank transfer (account type catalog design §8.2; E10).
+# A typed bank account here stands in for a Trading 212 one: the engine reads only type_key.
 FUNDED_KEY = min(keys_funded_by("bank_transfer"))
 
 
@@ -1288,8 +1290,10 @@ async def test_funding_changes_only_the_pairs_of_unmarked_deposits_on_funded_acc
     """E10: marking a set of accounts as funded by bank transfer never changes any pair
     (an edge of the pair relation, with its tier) that involves no unmarked record naming
     nobody on those accounts; each pair it adds is ONE_SIDED, between such a record and
-    one naming its account. (A transfer may still change: a deposit that gains a pair can
-    take an identified record's only candidate from it.)"""
+    one naming its account. It compares the same-currency tiers (PairRelation.tiers): card
+    and cross-currency edges are outside it, and the scenarios have neither. (A transfer may
+    still change: a deposit that gains a pair can take an identified record's only candidate
+    from it.)"""
     note(describe_payee(scenario.payee))
     note(f"unmarked rows {sorted(scenario.unmarked)}, funded accounts {sorted(scenario.funded)}")
     h = Harness(

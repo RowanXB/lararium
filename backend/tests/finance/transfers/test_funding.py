@@ -4,7 +4,8 @@ account whose type lists `bank_transfer` among its funding methods, a record nam
 naming its account, as one marked a bank transfer would (pairs.registry_tier's ONE_SIDED).
 The type is read at pairing time (contra.eligible_records' funded_by_transfer); the record's
 stored bank_transfer flag is left as its source gave it. weak_tier and card_tier don't
-change."""
+change, and card evidence comes first: a deposit a card payment could have paid gets no edge
+through its account's funding alone."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -21,7 +22,7 @@ from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import create_account, set_type_key
-from lararium.modules.finance.identifiers import get_or_create_identifier
+from lararium.modules.finance.identifiers import get_or_create_identifier, register_card_merchant
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import CounterpartyFields
 from lararium.modules.finance.system_accounts import system_account_ids
@@ -410,4 +411,111 @@ async def test_preview_match_reads_the_type(
     await heal()
     [own] = _including(await list_transfers(session), sent.id)
     assert own.in_transaction_id == (received if typed else None)
+    await assert_consistent(session)
+
+
+async def test_a_type_set_or_cleared_later_is_read_at_the_next_heal(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    trading212: MakeTyped,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+) -> None:
+    """Decision 4: the type is read at pairing time, so the next heal brings the ledger in
+    line with a type set after the records were posted, and with one cleared again."""
+    m = await connected_bank("M")
+    invest = await trading212("Invest", None)
+    payee = await _payee(run, (invest.account.id, "REF-INVEST"))
+    deposit = await connector_tx(invest, "100", external_id="deposit", bank_transfer=False)
+    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-INVEST")
+    await heal()
+
+    async def deposit_is_paired() -> bool:
+        [own] = _including(await list_transfers(session), sent.id)
+        contra = await contra_account(session, deposit.id, invest.account.id)
+        if own.in_transaction_id == deposit.id:
+            assert (own.status, contra) == ("matched", ids.in_transit)
+            return True
+        assert (own.in_transaction_id, contra) == (None, ids.unassigned)
+        return False
+
+    assert not await deposit_is_paired()
+    await run(set_type_key, invest.account.id, INVEST)
+    await heal()
+    assert await deposit_is_paired()
+    await assert_consistent(session)
+    await run(set_type_key, invest.account.id, None)
+    await heal()
+    assert not await deposit_is_paired()
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+MERCHANT = "merch_TESTFUND"
+
+
+@pytest.mark.parametrize("bank_deposit", [True, False])
+async def test_card_evidence_comes_first(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    trading212: MakeTyped,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+    bank_deposit: bool,
+) -> None:
+    """A card top-up D1 that the card rule pairs with Monzo's card payment C stays C's when
+    a referenced bank transfer B of the same amount to its account is in the window: B pairs
+    with its own deposit D2 (no card payment near it), or, without D2, with nothing."""
+    m = await connected_bank("M")
+    invest = await trading212("Invest", INVEST)
+    merchant = await run(register_card_merchant, MERCHANT, [invest.account.id])
+    payee = await _payee(run, (invest.account.id, "REF-INVEST"))
+    card = await connector_tx(
+        m, "-50", external_id="card", identifier_id=merchant.id, bank_transfer=False
+    )
+    top_up = await connector_tx(
+        invest, "50", external_id="top_up", occurred_at=WHEN + NEAR / 2, bank_transfer=False
+    )
+    sent = await connector_tx(
+        m,
+        "-50",
+        external_id="bank",
+        occurred_at=WHEN + timedelta(hours=3),
+        identifier_id=payee,
+        reference="REF-INVEST",
+    )
+    received = (
+        await connector_tx(
+            invest,
+            "50",
+            external_id="deposit",
+            occurred_at=WHEN + timedelta(hours=4),
+            bank_transfer=False,
+        )
+        if bank_deposit
+        else None
+    )
+    await heal()
+
+    transfers = await list_transfers(session)
+    [by_card] = _including(transfers, card.id)
+    assert (by_card.status, by_card.out_transaction_id, by_card.in_transaction_id) == (
+        "matched",
+        card.id,
+        top_up.id,
+    )
+    [own] = _including(transfers, sent.id)
+    assert own.to_account_id == invest.account.id
+    if received is not None:
+        assert (own.status, own.in_transaction_id) == ("matched", received.id)
+        assert own.review_reason is None
+    else:
+        assert own.in_transaction_id is None
+        assert own.review_reason is None
+    assert top_up.id not in (await _tiers(session)).get(sent.id, {})
+    assert await heal() == 0
     await assert_consistent(session)
