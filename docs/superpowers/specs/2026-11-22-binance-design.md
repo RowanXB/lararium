@@ -370,6 +370,7 @@ Holdings and net worth need no new page.
 | A transfer between wallets older than 6 months | Not listed; it is inside the two wallets' opening adjustments. |
 | The owner's P2P purchase 13 months ago | The opening adjustment of that asset. |
 | A reward and its dividend arrive in different syncs | The reward is posted on the product until the dividend arrives, then linked and its posting removed; the 7-day overlap covers it. |
+| Equal rewards of one asset whose dividends each come more than half the time between the rewards after them | Known limit: pairs are taken nearest first, so a dividend can be paired with the next reward and the first reward stays posted on Earn, counting that amount twice until the records change. Binance pays the dividend soon after its reward, well inside that half, so nearest first pairs each with its own. |
 | Two flexible rewards identical in every field | The occurrence number is in the raw content and the key, so both are kept. |
 | A margin account that does not exist, a product not offered in the account's region | Recorded as not present; skipped. |
 | A borrowed margin asset | A negative quantity; valued negative. |
