@@ -1,6 +1,6 @@
 # Design: an identifier held by every account of a family
 
-Status: draft for the owner's approval, 2026-11-27. Builds on PR #48 (a payee bank account held by several own accounts, migration 0045). Replaces §9 of the account type catalog design (`2026-11-26-account-type-catalog-design.md`) and closes the last known limitation of its §8.1.
+Status: approved by the owner, 2026-11-27, with the owner's later decisions recorded in §5.7, §5.9 and §5.10. Builds on PR #48 (a payee bank account held by several own accounts, migration 0045). Replaces §9 of the account type catalog design (`2026-11-26-account-type-catalog-design.md`) and closes the last known limitation of its §8.1.
 
 ## 1. Intent
 
@@ -189,9 +189,17 @@ Only these run locally (remote Docker host); CI runs the rest.
 - PR #51 (separate) teaches the Cash ISA profile to read a Withdrawal's bank account from its Notes and to make Notes of another form a row error. This design's profile option (§5.9) sits on the same catalog entry; whichever merges second takes the other's entry.
 - To check (§10 item 3): whether each Cash ISA row's `Time (UTC)` is within two minutes of its TRANSFER's `dateTime`.
 
-## 10. After deploy
+## 10. Before and after deploy
+
+Before deploy:
+- Run `make real-check` with the Cash ISA's real files (the profile now reads Notes strictly: another form is a row error).
+- Check the Notes forms of a real Invest or Stocks ISA History CSV (production holds no export rows to count, 2026-11-27): count its `Deposit` and `Withdrawal` rows by form (empty, transaction id, sent to a bank account, other). An external deposit with empty Notes would be taken as a family move; another form refuses the upload. If either appears, the owner decides before deploy.
+- Snapshot the matched transfers (ids, sides, status) to diff after the first heal: the near-window split and one-side-alike groups (§5.7, §5.10) are generic and may change pairs of any provider.
+
+After deploy:
 
 1. Each Trading 212 connection replays once at its next sync (`trading212-norm-4`); check both production TRANSFERs name `account_family:trading212` and how they pair (or why not).
 2. Check no shared-payee or card pair includes a TRANSFER.
 2a. Cash ISA batches committed before deploy were read without Notes (their rows carry no evidence, §5.9; they pair by the two-minute rule meanwhile). Roll each back and upload its file again from the account's **Upload file** tile, which makes a profile that reads Notes.
-3. Once the owner uploads the Cash ISA export covering 2026-11-26: check each incoming row is within two minutes of its TRANSFER (§5.3 item 2) and the four records pair (§5.7). If they are further apart, the owner pairs them by hand and the near window is revisited with the real gap.
+3. Diff the matched transfers against the snapshot and review what changed.
+4. Once the owner uploads the Cash ISA export covering 2026-11-26: check each incoming row is within two minutes of its TRANSFER (§5.3 item 2) and the four records pair (§5.7). If they are further apart, the owner pairs them by hand and the near window is revisited with the real gap.
