@@ -468,6 +468,9 @@ class ImportRowOut(_Out):
     time_unit: TimeUnit | None
     # The row pays interest, so it is never a bank transfer.
     interest: bool
+    # What the profile's family_notes read of it: a move within its account's family, one
+    # outside it, or None, nothing said (account family identifier design §5.9).
+    family_move: bool | None
     value_date: date | None
     description: str
     payee: str | None

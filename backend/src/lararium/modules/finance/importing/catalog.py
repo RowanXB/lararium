@@ -12,6 +12,7 @@ from lararium.modules.finance.importing.profiles import (
     CsvColumns,
     CsvExtract,
     CsvProfileConfig,
+    FamilyNotes,
     OfxProfileConfig,
     PdfProfileConfig,
     ProfileConfigModel,
@@ -233,6 +234,18 @@ CATALOG: tuple[CatalogEntry, ...] = (
             card_types=[],
             # The export states no period; Trading 212 names it by the one chosen.
             period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
+            # What a deposit's or withdrawal's Notes say (account family identifier design
+            # §5.9, owner's decision 2026-11-27): empty, a move from or to another Trading 212
+            # account; a transaction id or the bank account it went to, a movement outside.
+            family_notes=FamilyNotes(
+                column="Notes",
+                types=["Deposit", "Withdrawal"],
+                within=[r""],
+                outside=[
+                    r"Transaction ID: [0-9A-Fa-f-]+",
+                    r"Sent to Bank Account \d{2}-\d{2}-\d{2} / \d{8}",
+                ],
+            ),
         ),
         recommended=True,
     ),

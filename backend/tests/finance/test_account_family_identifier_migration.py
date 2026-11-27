@@ -1,4 +1,6 @@
-"""Migration 0046: the account_family kind, which never has an account."""
+"""Migration 0046: the account_family kind, which never has an account, and the typed Notes
+evidence (account family identifier design §5.9): transactions.outside_family and
+import_rows.family_move."""
 
 import importlib.util
 from datetime import UTC, datetime
@@ -54,10 +56,27 @@ def _rejected(connection: Connection, statement: str, **params: Any) -> None:
     savepoint.rollback()
 
 
+def _columns(connection: Connection) -> dict[tuple[str, str], tuple[str, str, str | None]]:
+    """(table, column): (type, nullable, default) of the two Notes columns, where they exist."""
+    rows = connection.execute(
+        text(
+            "select table_name, column_name, data_type, is_nullable, column_default"
+            " from information_schema.columns where table_schema = 'finance'"
+            " and (table_name, column_name) in"
+            " (('transactions', 'outside_family'), ('import_rows', 'family_move'))"
+        )
+    )
+    return {(row[0], row[1]): (row[2], row[3], row[4]) for row in rows}
+
+
 def test_0046_and_its_downgrade(owner_url: str, migrated: None) -> None:
     engine = create_engine(owner_url)
     try:
         with engine.connect() as connection:
+            assert _columns(connection) == {
+                ("transactions", "outside_family"): ("boolean", "NO", "false"),
+                ("import_rows", "family_move"): ("boolean", "YES", None),
+            }
             account_id = connection.execute(
                 text(
                     "insert into finance.accounts (name, ledger_type, subtype, balance_mode,"
@@ -92,6 +111,7 @@ def test_0046_and_its_downgrade(owner_url: str, migrated: None) -> None:
                 )
             ).scalar_one()
             assert left == 0
+            assert _columns(connection) == {}
             _rejected(
                 connection,
                 "insert into finance.account_identifiers (kind, value, created_by)"

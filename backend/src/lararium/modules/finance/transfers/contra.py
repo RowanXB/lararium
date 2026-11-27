@@ -165,6 +165,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     more), family (it names an account family: with exactly one other account of the family
     holder is that account, with none holder is NULL and the set is empty; account family
     identifier design §5.2, whose Python twin is identifiers.named_accounts),
+    outside_family (its source says the money went outside its account's family, so it is
+    never a family move's counterpart: account family identifier design §5.9),
     bank_transfer, funded_by_transfer (its account's type lists bank transfer among the ways
     it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
     bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
@@ -459,6 +461,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 "payee_holders"
             ),
             named_family.c.value.is_not(None).label("family"),
+            t.outside_family,
             t.bank_transfer,
             funded_by_transfer.label("funded_by_transfer"),
             timed.label("timed"),
@@ -500,6 +503,7 @@ _OWN_RECORDS = Table(
     Column("holders", ARRAY(Uuid)),
     Column("payee_holders", ARRAY(Uuid)),
     Column("family", Boolean, nullable=False),
+    Column("outside_family", Boolean, nullable=False),
     Column("bank_transfer", Boolean, nullable=False),
     Column("funded_by_transfer", Boolean, nullable=False),
     Column("timed", Boolean, nullable=False),

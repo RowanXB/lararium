@@ -27,6 +27,7 @@ from lararium.core.entities import get_self_entity_id
 from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_timezone
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import family_of
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import (
     FileFormatError,
@@ -84,6 +85,10 @@ OPENING_DESCRIPTION = "Opening balance adjustment"
 OUTSIDE_COVERED_DAY = (
     "this period was already imported from another file, and this row is not in it"
 )
+NO_FAMILY = (
+    "the file says this row moved money within its provider's family of accounts, but this "
+    "account's type has no family: set the account's type, or import into the right account"
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,9 @@ class ImportRowRecord:
     occurred_at: datetime | None
     time_unit: TimeUnit | None  # what the file gave occurred_at to; None with it
     interest: bool  # the row pays interest: never a bank transfer
+    # A move within the account's family, one outside it, or None, nothing said (the
+    # profile's family_notes, account family identifier design §5.9).
+    family_move: bool | None
     description: str
     quantity: Decimal | None
     fee: Decimal  # NOT NULL: 0 when the file states none
@@ -1770,6 +1778,17 @@ def _check_chain(rows: list[_Row], row_order: str) -> None:
             row.fail(message)
 
 
+def _check_family(rows: list[_Row], account: AccountRecord) -> None:
+    """A row the file says moved money within its account's family posts naming the
+    family (account family identifier design §5.9), so it needs an account of a family
+    type; on another it is an error, one with a valid amount."""
+    if family_of(account.type_key) is not None:
+        return
+    for row in rows:
+        if row.status == "new" and row.parsed is not None and row.parsed.family_move:
+            row.fail(NO_FAMILY, real=True)
+
+
 def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo) -> dict[str, Any]:
     values: dict[str, Any] = {
         "batch_id": batch_id,
@@ -1793,6 +1812,7 @@ def _row_values(row: _Row, batch_id: UUID, account_id: UUID, local_tz: ZoneInfo)
         "occurred_at": parsed.occurred_at or _midnight(parsed.booking_date, local_tz),
         "time_unit": parsed.time_unit,
         "interest": parsed.interest,
+        "family_move": parsed.family_move,
         "occurred_tz": local_tz.key,
         "description": parsed.description,
         "quantity": parsed.quantity,
@@ -2060,6 +2080,7 @@ async def stage_import(
     missing = await _missing_committed_row(session, account_id, rows, coverage.complete)
     if missing is not None:
         raise ImportNotAllowedError(missing)
+    _check_family(rows, account)
     _check_chain(rows, row_order)
 
     document = await record_document(

@@ -4,8 +4,9 @@ over in-memory records through pairs._registry_edges.
 A record naming an account family pairs only within the family: with a record naming the
 family back, on one of the accounts it names and naming its account (MUTUAL when each is
 identified to the other's account, else ONE_SIDED); or with a record there naming nobody,
-when both are timed and their instants are at most the near window apart (ONE_SIDED). No
-other rule gives it an edge (item 2). A record naming nobody that is a family move's
+when both are timed and their instants are at most the near window apart (ONE_SIDED), unless
+its source says it moved money outside the family (§5.9, outside_family). No other rule
+gives it an edge (item 2). A record naming nobody that is a family move's
 counterpart so (item 3) gets no edge from a record naming a shared payee and none through
 its account's funding alone; its other edges are as without the family moves.
 
@@ -80,8 +81,8 @@ def _record(
 ) -> Pairable:
     """A record naming the family (on a family account: §5.2's holder or set), a shared
     payee all three Trading 212 accounts hold (on an account that leaves two or more of
-    them), an own account, or nobody; marked a bank transfer, funded by bank transfer and
-    timed or not, as drawn."""
+    them), an own account, or nobody; marked a bank transfer, funded by bank transfer, timed
+    and (unless it names the family) outside the family or not, as drawn."""
     names = draw(st.sampled_from(naming))
     holder: UUID | None = None
     payee_holders: frozenset[UUID] = frozenset()
@@ -112,6 +113,7 @@ def _record(
         family=names == "family",
         funded_by_transfer=draw(st.booleans()),
         timed=draw(st.sampled_from((True, True, False))),
+        outside_family=names != "family" and draw(st.sampled_from((False, False, True))),
     )
 
 
@@ -199,8 +201,8 @@ def test_a_family_record_pairs_only_inside_its_family(
     its other side, if it names no family, names nobody, is timed and is at most the near
     window from it. Exactly, the edges are §5.3 item 2's: two family moves each naming the
     other's account (MUTUAL when each is identified to it, else ONE_SIDED), or a family
-    move and a record naming nobody on an account it names, both timed and at most the
-    near window apart (ONE_SIDED)."""
+    move and a record naming nobody on an account it names, its source not saying it went
+    outside the family, both timed and at most the near window apart (ONE_SIDED)."""
     family, records = case
     same, _, _ = _registry_edges(records, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     given_edges = {
@@ -226,6 +228,7 @@ def test_a_family_record_pairs_only_inside_its_family(
             and other.holder is None
             and not other.payee_holders
             and not other.names_account
+            and not other.outside_family
             and x.timed
             and other.timed
             and abs(x.occurred_at - other.occurred_at) <= NEAR
@@ -235,6 +238,7 @@ def test_a_family_record_pairs_only_inside_its_family(
     for pair in given_edges:
         a, b = (by_id[x] for x in pair)
         assert {a.account_id, b.account_id} <= family, (a, b)
+        assert not (a.outside_family or b.outside_family), (a, b)
         for x, other in ((a, b), (b, a)):
             if x.family and not other.family:
                 assert _names_nobody(other) and x.timed and other.timed, (x, other)

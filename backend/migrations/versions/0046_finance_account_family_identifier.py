@@ -7,8 +7,14 @@ the accounts' `type_key` when it is resolved (identifiers.named_accounts). So an
 as it is: it can't hold one. That the value is a family of the catalog is checked in code,
 as the catalog is code.
 
+What a History CSV's Notes say of a row (account family identifier design §5.9, owner's
+decision 2026-11-27), typed: `import_rows.family_move` (true: a move within the account's
+family; false: a movement outside it; NULL: the profile says nothing), and
+`transactions.outside_family` (the source says the money went outside the family, so the
+record is never a family move's counterpart).
+
 Downgrading clears `counterparty_identifier_id` on the transactions naming such a row,
-deletes the rows and restores the kind CHECK as 0041 left it.
+deletes the rows, restores the kind CHECK as 0041 left it and drops the two columns.
 
 Revision ID: 0046
 Revises: 0045
@@ -44,6 +50,8 @@ UPGRADE = [
       ADD CONSTRAINT account_identifiers_account_family_check
         CHECK (kind <> 'account_family' OR account_id IS NULL)
     """,
+    "ALTER TABLE finance.transactions ADD COLUMN outside_family boolean NOT NULL DEFAULT false",
+    "ALTER TABLE finance.import_rows ADD COLUMN family_move boolean",
 ]
 
 DOWNGRADE = [
@@ -56,6 +64,8 @@ DOWNGRADE = [
       DROP CONSTRAINT account_identifiers_account_family_check
     """,
     _kind_check(""),
+    "ALTER TABLE finance.import_rows DROP COLUMN family_move",
+    "ALTER TABLE finance.transactions DROP COLUMN outside_family",
 ]
 
 

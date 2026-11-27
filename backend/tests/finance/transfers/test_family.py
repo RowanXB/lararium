@@ -2,13 +2,13 @@
 eligible_records resolves to the family's other accounts, as identifiers.named_accounts does.
 It pairs only within the family (§5.3): with a record naming the family back, or with one
 naming nobody when both are timed within the near window; and such a record naming nobody
-is that move's, not a shared payee's or its account's funding's. Several candidates split by
-the only one within the near window (§5.10); a group alike on one side pairs in time order
-(§5.7)."""
+is that move's, not a shared payee's or its account's funding's, unless its source says it
+went outside the family (§5.9). Several candidates split by the only one within the near
+window (§5.10); a group alike on one side pairs in time order (§5.7)."""
 
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -281,6 +281,108 @@ def test_family_evidence_comes_first() -> None:
     assert same.tiers[row.id] == {sent.id: ONE_SIDED, named.id: ONE_SIDED}
 
 
+def test_an_outside_record_is_no_family_counterpart() -> None:
+    """A Cash ISA row whose Notes give a transaction id (§5.9) went outside the family: near
+    a family move or not, it is never its counterpart."""
+    sent = _move(INVEST, "-100", THREE)
+    near = T0 + timedelta(seconds=30)
+    outside = _pairable(
+        CASH, "100", bank_transfer=True, timed=True, outside_family=True, occurred_at=near
+    )
+    assert registry_tier(sent, outside) is None and registry_tier(outside, sent) is None
+    inside = replace(outside, outside_family=False)
+    assert registry_tier(sent, inside) == registry_tier(inside, sent) == ONE_SIDED
+    # So it is no family move's first: the shared payee's payment keeps its edge to it.
+    payment = _pairable(
+        MONZO,
+        "-100",
+        bank_transfer=True,
+        names_account=True,
+        payee_holders=frozenset(THREE),
+        occurred_at=T0 - timedelta(hours=3),
+    )
+    same, _, _ = _registry_edges([sent, outside, payment], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
+    assert same.tiers[outside.id] == {payment.id: ONE_SIDED}
+
+
+def test_the_owner_s_decisions_win_over_family_evidence() -> None:
+    """A row the owner decided never pairs with the family move near it is not that move's
+    first: it keeps its shared payee's and its funding's edges (controller's ruling,
+    2026-11-27)."""
+    sent = _move(INVEST, "-100", THREE)
+    row = _pairable(
+        CASH, "100", bank_transfer=True, occurred_at=T0 + timedelta(seconds=18), source=("i", "r")
+    )
+    payment = _pairable(
+        MONZO,
+        "-100",
+        bank_transfer=True,
+        names_account=True,
+        payee_holders=frozenset(THREE),
+        occurred_at=T0 - timedelta(hours=3),
+    )
+    for decisions in (
+        _Decisions(frozenset(), frozenset({(sent.source, row.source)}), ()),
+        _Decisions(frozenset(), frozenset({(row.source, sent.source)}), ()),
+        _Decisions(frozenset({sent.source}), frozenset(), ()),
+    ):
+        same, _, _ = _registry_edges([sent, row, payment], DEFAULTS, decisions, _ALL_KNOWN)
+        assert same.tiers[row.id] == {payment.id: ONE_SIDED}, decisions
+    # The row is no less the move's when the owner kept another pair apart.
+    other = _Decisions(frozenset(), frozenset({(payment.source, ("i", "x"))}), ())
+    same, _, _ = _registry_edges([sent, row, payment], DEFAULTS, other, _ALL_KNOWN)
+    assert same.tiers[row.id] == {sent.id: ONE_SIDED}
+
+
+def test_the_coverage_gate_holds_every_account_a_family_record_names() -> None:
+    """Controller's ruling (2026-11-27): a pair with a family record is gated on the accounts
+    the family side names (its holder or its set), the other record's from _gate_day and
+    every other manual one from the start of that side's window; never on the family
+    record's own account. A Cash ISA row naming the family of three (a manual account, its
+    Notes empty) and an Invest TRANSFER (connected) naming it too, ten minutes apart (two
+    family records pair by the date window alone): ONE_SIDED, taken only when the Cash ISA
+    is listed from before the TRANSFER's window."""
+    gbp = UUID(int=1)
+    row = _move(
+        CASH, "100", THREE, source=("import", "cash"), occurred_at=T0 + timedelta(minutes=10)
+    )
+    transfer = _move(INVEST, "-100", THREE)
+    start = T0.date() - timedelta(days=DEFAULTS.window_before.days)
+
+    def known(cash_from: date) -> Known:
+        # Stocks ISA manual and listed for all time; Invest connected.
+        return Known(frozenset({CASH, STOCKS}), {(STOCKS, gbp): date.min, (CASH, gbp): cash_from})
+
+    for cash_from, taken in ((start, True), (start + timedelta(days=1), False)):
+        same, _, refused = _registry_edges(
+            [transfer, row], DEFAULTS, _NO_DECISIONS, known(cash_from)
+        )
+        assert same.tiers[row.id] == {transfer.id: ONE_SIDED}  # a candidate either way
+        assert (frozenset((row.id, transfer.id)) not in refused) == taken, cash_from
+    # The family side's other manual account (Stocks ISA, in the Cash ISA row's set) is
+    # held from the start of the row's window.
+    unlisted = Known(frozenset({CASH, STOCKS}), {(CASH, gbp): date.min})
+    _, _, refused = _registry_edges([transfer, row], DEFAULTS, _NO_DECISIONS, unlisted)
+    assert refused == {frozenset((row.id, transfer.id))}
+    # The Cash ISA row sending, naming the family, to an Invest record naming nobody
+    # (whatever it is marked): the Cash ISA's own listing is not asked, only the accounts the
+    # row names (Invest, connected; Stocks ISA, listed).
+    sent = _move(CASH, "-100", THREE, source=("import", "cash-out"))
+    received = _pairable(INVEST, "100", occurred_at=T0 + timedelta(seconds=5))
+    late = known(date.max)
+    same, _, refused = _registry_edges([sent, received], DEFAULTS, _NO_DECISIONS, late)
+    assert same.tiers[sent.id] == {received.id: ONE_SIDED} and not refused
+    # A family of two: the record is identified to the one other account, and gated as any
+    # identified record is, on that account.
+    two = _move(CASH, "-100", {CASH, STOCKS}, source=("import", "cash-two"))
+    on_stocks = _pairable(STOCKS, "100", occurred_at=T0 + timedelta(seconds=5))
+    for stocks_from, taken in ((start, True), (start + timedelta(days=1), False)):
+        gate = Known(frozenset({CASH, STOCKS}), {(STOCKS, gbp): stocks_from})
+        same, _, refused = _registry_edges([two, on_stocks], DEFAULTS, _NO_DECISIONS, gate)
+        assert same.tiers[two.id] == {on_stocks.id: ONE_SIDED}
+        assert (not refused) == taken, stocks_from
+
+
 def _exact(
     records: list[Pairable],
 ) -> tuple[dict[UUID, dict[UUID, Tier]], dict[UUID, frozenset[UUID]], frozenset[frozenset[UUID]]]:
@@ -532,5 +634,53 @@ async def test_repeated_top_ups_pair_one_by_one(
     assert sorted((t.out_transaction_id, t.in_transaction_id) for t in matched) == sorted(
         zip(paid, received, strict=True)
     )
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+async def test_an_outside_deposit_near_a_family_move_pairs_with_its_payee_payment(
+    session: AsyncSession,
+    run: Run,
+    connected_bank: MakeConnected,
+    family_accounts: MakeFamily,
+    connector_tx: ConnectorTx,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """§5.9: a Cash ISA deposit whose Notes give a transaction id went outside the family.
+    Thirty seconds after a TRANSFER of the same amount out of Invest, it is still the
+    payment from Monzo to the payee the three accounts hold, a day earlier, and the TRANSFER
+    stays unpaired."""
+    m = await connected_bank("M")
+    invest, (stocks, cash) = await family_accounts(3)
+    payee = (
+        await run(
+            register_holders_and_rematch,
+            "uk_bank_account",
+            PAYEE,
+            [invest.account.id, stocks.id, cash.id],
+        )
+    ).id
+    # Stocks ISA's imports list in full from before the payment's window.
+    listed = (WHEN.date() - timedelta(days=10), WHEN.date() + timedelta(days=60))
+    await statement_row(stocks, "-7", complete=listed)
+    family_id = await run(family_identifier, "trading212")
+    await connector_tx(invest, "-100", external_id="move", identifier_id=family_id)
+    paid = await connector_tx(
+        m, "-100", external_id="pay", occurred_at=WHEN - timedelta(days=1), identifier_id=payee
+    )
+    received = await statement_row(
+        cash,
+        "100",
+        at=WHEN + timedelta(seconds=30),
+        time_unit="second",
+        key="deposit",
+        outside_family=True,
+    )
+    await heal()
+
+    # The one matched transfer: the TRANSFER is in none.
+    matched = await list_transfers(session, statuses=["matched"])
+    assert [(t.out_transaction_id, t.in_transaction_id) for t in matched] == [(paid.id, received)]
     assert await heal() == 0
     await assert_consistent(session)

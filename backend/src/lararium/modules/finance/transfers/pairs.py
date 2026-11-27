@@ -14,7 +14,14 @@ owner's decision 2026-11-27): with a record on an account it names that names th
 back, or with one there naming nobody when both are timed and at most the near window
 apart. No other tier pairs it, so it is never an external top-up or withdrawal. A record
 naming nobody that is such a move's counterpart is that move's first: no shared payee's
-record and no funding alone gives it another edge (_registry_edges).
+record and no funding alone gives it another edge (_registry_edges), unless the owner
+decided the two apart.
+
+Where the source says which kind a movement is, that decides (account family identifier
+design §5.9, owner's decision 2026-11-27): Trading 212's History CSV gives an internal move
+empty Notes, and its record names the family; an external one a transaction id or a bank
+account, and its record is outside the family (outside_family), never a family move's
+counterpart however close in time to one, so it pairs with its payment as any deposit does.
 
 Where a record has several candidates of the same amount, two more rules apply
 (account family identifier design §5.10 and §5.7, owner's decisions 2026-11-27;
@@ -102,6 +109,10 @@ class Pairable:
     # design §5.2): `holder` is the family's one other account, or NULL with the other
     # accounts in `payee_holders` (two or more) or none at all.
     family: bool = False
+    # Its source says the money went outside its account's family (contra.eligible_records'
+    # outside_family, account family identifier design §5.9): never a family move's
+    # counterpart (_family_pair).
+    outside_family: bool = False
     # Its account's type lists bank transfer among the ways it is funded
     # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
     # one, though its source doesn't say (account type catalog design §8.2).
@@ -180,16 +191,19 @@ def _family_pair(x: Pairable, other: Pairable, near_window: timedelta) -> bool:
     """Whether x, naming an account family, and other may be one move within the family
     (account family identifier design §5.3 item 2): other is on an account x names (its
     holder, or one of its set), and either names the family back, x's account among those
-    it names, or names nobody, both timed (a connector's record, or an imported row timed to
-    the second) and their instants at most `near_window` apart. A source books an internal
-    move on both sides at about the same instant, and a real bank top-up or withdrawal
-    practically never falls within two minutes of one (owner, 2026-11-27)."""
+    it names, or names nobody, its source not saying it went outside the family
+    (outside_family, §5.9), both timed (a connector's record, or an imported row timed to the
+    second) and their instants at most `near_window` apart. A source books an internal move
+    on both sides at about the same instant, and a real bank top-up or withdrawal practically
+    never falls within two minutes of one (owner, 2026-11-27); where the source says the
+    record went outside the family, that decides, however near it is."""
     if not x.family or not (other.account_id == x.holder or other.account_id in x.payee_holders):
         return False
     if other.family:
         return x.account_id == other.holder or x.account_id in other.payee_holders
     return (
         _names_nobody(other)
+        and not other.outside_family
         and x.timed
         and other.timed
         and abs(x.occurred_at - other.occurred_at) <= near_window
@@ -686,6 +700,7 @@ async def _load_records(
         e.c.holders,
         e.c.payee_holders,
         e.c.family,
+        e.c.outside_family,
         e.c.funded_by_transfer,
         e.c.timed,
         e.c.occurred_tz,
@@ -711,6 +726,7 @@ async def _load_records(
             holders=frozenset(row.holders or ()),
             payee_holders=frozenset(row.payee_holders or ()),
             family=row.family,
+            outside_family=row.outside_family,
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
             occurred_tz=row.occurred_tz,
@@ -787,6 +803,27 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
     return earliest
 
 
+def _family_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
+    """The coverage gate for a pair with a family record (controller's ruling, 2026-11-27,
+    on #48's rule): every account a family side names (its holder, or its set) is held,
+    the one the other record is on from _gate_day's day and every other manual one from the
+    start of that side's window. A family record identified to one account (a family of two)
+    is so gated as any identified record is, on that account. The family record's own
+    account is never asked, nor is a side guessed to be the identified one."""
+    for x, y in ((s, c), (c, s)):
+        if not x.family:
+            continue
+        named = x.payee_holders if x.holder is None else x.payee_holders | {x.holder}
+        start = counterpart_bounds(x, settings)[0]
+        gate = _gate_day(x, y, settings, known)
+        if not all(
+            known.holds_account(h, y.instrument_id, gate if h == y.account_id else start)
+            for h in named
+        ):
+            return False
+    return True
+
+
 def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
     nobody) is taken automatically only if the identified record's window doesn't start
@@ -799,7 +836,10 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     names (payee_holders) is held to the gate from the start of that side's window: the
     real row may be on any of them, inside its opening. Only the holder the other record is
     on is asked from _gate_day's day instead: a timed receipt's evidence is about its own
-    account alone."""
+    account alone. A pair with a family record is gated by the accounts the family side
+    names (_family_known)."""
+    if s.family or c.family:
+        return _family_known(s, c, settings, known)
     if s.identified or c.identified:
         identified, other = (s, c) if s.identified else (c, s)
     else:
@@ -862,17 +902,21 @@ def _registry_edges(
 
     Family evidence comes first too (account family identifier design §5.3 item 3): a
     record naming nobody that is a family move's counterpart (_family_pair, within the near
-    window: `familied`) gets no edge from a record naming a shared payee (payee_holders)
-    and none through its account's funding alone. By the owner's reasoning (2026-11-27), a
-    row within two minutes of a same-amount family move is that move's other side; else a
-    Cash ISA row of an internal move would also be the candidate of any same-amount
-    shared-payee payment in the window, and neither would pair. Its other edges stand."""
+    window, the owner not having decided the two apart: `familied`) gets no edge from a
+    record naming a shared payee (payee_holders) and none through its account's funding
+    alone. By the owner's reasoning (2026-11-27), a row within two minutes of a same-amount
+    family move is that move's other side; else a Cash ISA row of an internal move would
+    also be the candidate of any same-amount shared-payee payment in the window, and neither
+    would pair. Its other edges stand. The owner's decisions win: a record whose only family
+    counterparts the owner ruled out keeps its shared-payee and funding edges. A record its
+    source says went outside the family (§5.9) is no family move's counterpart at all."""
     same, differing = _Edges(), _Edges()
     refused: set[frozenset[UUID]] = set()
     pairs = list(_same_amount(records, settings))
     familied = {
         x.id
         for s, c in pairs
+        if not decisions.apart(s, c)
         for x, y in ((s, c), (c, s))
         if not x.family and _family_pair(y, x, settings.near_window)
     }

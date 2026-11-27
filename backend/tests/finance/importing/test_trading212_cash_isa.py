@@ -11,7 +11,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
+from lararium.modules.finance.accounts import AccountRecord
 from lararium.modules.finance.errors import FileFormatError
+from lararium.modules.finance.identifiers import family_identifier
 from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.csv_parser import parse_csv
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement, RowError
@@ -21,7 +23,7 @@ from lararium.modules.finance.importing.staging import (
     NO_PERIOD_IN_FILE_NAME_WARNING,
 )
 
-from .conftest import Run
+from .conftest import MakeAccount, Run
 from .staging_helpers import Commit, Stage, _rows, _statuses
 
 LONDON = ZoneInfo("Europe/London")
@@ -32,6 +34,18 @@ CSV = (
     '01aaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee,25.00,"GBP"\n'
     'Withdrawal,2026-01-06 10:00:00+00:00,,01aaaaaa-bbbb-7ccc-8ddd-ffffffffffff,-10.00,"GBP"\n'
 )
+
+
+@pytest.fixture
+async def account(make_account: MakeAccount) -> AccountRecord:
+    """The account the files are staged into: a Cash ISA, of the Trading 212 family."""
+    return await make_account(
+        name="Cash ISA",
+        subtype="savings_pot",
+        tax_wrapper="isa",
+        balance_mode="transactions",
+        type_key="trading212.cash_isa",
+    )
 
 
 def _entry_config() -> CsvProfileConfig:
@@ -200,3 +214,82 @@ async def test_a_profile_without_the_pattern_ignores_the_file_name(
     )
     assert batch.statement is not None and batch.statement.period_from is None
     assert batch.warnings == []
+
+
+# What a row's Notes say (account family identifier design §5.9, owner's decision
+# 2026-11-27): a transaction id, an external movement; a bank account, a withdrawal to it;
+# empty, a move from or to another Trading 212 account.
+NOTES = (
+    HEADER + "Deposit,2026-01-05 09:10:11+00:00,"
+    '"Transaction ID: 11111111-2222-3333-4444-555555555555",01aaaaaa-0000-7000-8000-000000000001,'
+    '25.00,"GBP"\n'
+    'Deposit,2026-01-05 09:12:00+00:00,,01aaaaaa-0000-7000-8000-000000000002,40.00,"GBP"\n'
+    'Withdrawal,2026-01-06 10:00:00+00:00,,01aaaaaa-0000-7000-8000-000000000003,-10.00,"GBP"\n'
+    'Withdrawal,2026-01-06 10:01:00+00:00,"Sent to Bank Account 12-34-56 / 87654321",'
+    '01aaaaaa-0000-7000-8000-000000000004,-5.00,"GBP"\n'
+)
+
+
+def test_notes_say_whether_a_row_moved_within_the_family() -> None:
+    rows = _parse(NOTES).rows
+    assert all(isinstance(row, ParsedRow) for row in rows)
+    assert [row.family_move for row in rows if isinstance(row, ParsedRow)] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    # A row of another type: the Notes say nothing of it.
+    trade = (
+        "Action,Time (UTC),Notes,ID,Total,Currency (Total)\n"
+        "Market buy,2026-01-07 11:00:00+00:00,,01aaaaaa-0000-7000-8000-000000000005,-30.00,GBP\n"
+    )
+    [row] = _parse(trade).rows
+    assert isinstance(row, ParsedRow) and row.family_move is None
+
+
+def test_notes_of_another_form_are_a_row_error() -> None:
+    content = HEADER + "Deposit,2026-01-05 09:10:11+00:00,Something new,id1,1.00,GBP\n"
+    [row] = _parse(content).rows
+    assert isinstance(row, RowError)
+    # It names the column and the rule, never the value.
+    assert "Notes" in row.message and "family_notes" in row.message
+    assert "Something" not in row.message
+
+
+async def _transaction(session: AsyncSession, batch_id: UUID, position: int) -> Any:
+    r, t = models.ImportRow, models.Transaction
+    return (
+        await session.execute(
+            select(r.family_move, t.counterparty_identifier_id, t.outside_family)
+            .join(t, t.id == r.transaction_id)
+            .where(r.batch_id == batch_id, r.position == position)
+        )
+    ).one()
+
+
+async def test_an_internal_move_commits_naming_the_family(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    commit: Commit,
+    make_account: MakeAccount,
+) -> None:
+    profile = await run(create_profile, name="Cash ISA", config=_entry_config())
+    batch = await stage(profile, NOTES)
+    assert _statuses(await _rows(session, batch)) == ["new"] * 4
+    await commit(batch.id)
+    family_id = await run(family_identifier, "trading212")
+    assert tuple(await _transaction(session, batch.id, 0)) == (False, None, True)
+    assert tuple(await _transaction(session, batch.id, 1)) == (True, family_id, False)
+    assert tuple(await _transaction(session, batch.id, 2)) == (True, family_id, False)
+    assert tuple(await _transaction(session, batch.id, 3)) == (False, None, True)
+
+    # On an account of no type, the rows the Notes call internal moves are row errors: the
+    # account has no family to name.
+    plain = await make_account(name="Untyped", balance_mode="transactions")
+    other = await stage(profile, NOTES, account_id=plain.id)
+    rows = await _rows(session, other)
+    assert _statuses(rows) == ["new", "error", "error", "new"]
+    assert [row.family_move for row in rows] == [False, True, True, False]
+    assert rows[1].error is not None and "family" in rows[1].error

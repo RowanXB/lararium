@@ -877,6 +877,7 @@ async def preview_match(
         payee_holders=frozenset(named.holders) if payee and named is not None else frozenset(),
         # As eligible_records' funded_by_transfer: read from the account's type.
         funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
+        outside_family=counterparty.outside_family,
         timed=timed,
         occurred_tz=occurred_tz,
     )
