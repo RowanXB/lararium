@@ -36,9 +36,10 @@ IdentifierScheme = Literal[
     "trading212_ticker",
     "chain_contract",
     "coingecko",
+    "binance_asset",
 ]
 
-_UPPERCASE_SCHEMES = frozenset({"iso4217", "isin", "figi"})
+_UPPERCASE_SCHEMES = frozenset({"iso4217", "isin", "figi", "binance_asset"})
 _LOWERCASE_SCHEMES = frozenset({"coingecko", "chain_contract"})
 
 

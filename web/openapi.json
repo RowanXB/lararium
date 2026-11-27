@@ -600,6 +600,208 @@
         "title": "BalanceModeUpdate",
         "type": "object"
       },
+      "BinanceConnectionCreate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Secret"
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "key_type": {
+            "enum": [
+              "hmac",
+              "ed25519"
+            ],
+            "title": "Key Type",
+            "type": "string"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "private_key_passphrase": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key Passphrase"
+          }
+        },
+        "required": [
+          "key_type",
+          "api_key",
+          "display_name"
+        ],
+        "title": "BinanceConnectionCreate",
+        "type": "object"
+      },
+      "BinanceConnectionState": {
+        "properties": {
+          "differences": {
+            "items": {
+              "$ref": "#/components/schemas/BinanceDifferenceOut"
+            },
+            "title": "Differences",
+            "type": "array"
+          },
+          "first_sync_done": {
+            "title": "First Sync Done",
+            "type": "boolean"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "wallets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Wallets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "wallets",
+          "first_sync_done",
+          "differences",
+          "flags"
+        ],
+        "title": "BinanceConnectionState",
+        "type": "object"
+      },
+      "BinanceConnectionUpdate": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "title": "Api Key",
+            "type": "string",
+            "writeOnly": true
+          },
+          "api_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Secret"
+          },
+          "key_type": {
+            "enum": [
+              "hmac",
+              "ed25519"
+            ],
+            "title": "Key Type",
+            "type": "string"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "private_key_passphrase": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key Passphrase"
+          }
+        },
+        "required": [
+          "key_type",
+          "api_key"
+        ],
+        "title": "BinanceConnectionUpdate",
+        "type": "object"
+      },
+      "BinanceDifferenceOut": {
+        "description": "A reconciliation difference that still holds: where and when, never an amount.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "from_at": {
+            "format": "date-time",
+            "title": "From At",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "to_at": {
+            "format": "date-time",
+            "title": "To At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "symbol",
+          "from_at",
+          "to_at"
+        ],
+        "title": "BinanceDifferenceOut",
+        "type": "object"
+      },
       "Body_stage_import": {
         "properties": {
           "account_id": {
@@ -1041,6 +1243,16 @@
       },
       "ConnectionOut": {
         "properties": {
+          "binance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BinanceConnectionState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "connector": {
             "title": "Connector",
             "type": "string"
@@ -1923,7 +2135,10 @@
       "IdentifierCreate": {
         "properties": {
           "kind": {
-            "const": "uk_bank_account",
+            "enum": [
+              "uk_bank_account",
+              "chain_address"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -1937,6 +2152,38 @@
           "value"
         ],
         "title": "IdentifierCreate",
+        "type": "object"
+      },
+      "IdentifierHoldersRegister": {
+        "description": "The own accounts payments to an identifier go into: a card merchant (`value` its\nMonzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts\nare paid through (`value` its sort code and account number, e.g. \"11-22-33 12345678\");\nnone removes them.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "card_merchant",
+              "uk_bank_account"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value",
+          "account_ids"
+        ],
+        "title": "IdentifierHoldersRegister",
         "type": "object"
       },
       "IdentifierOut": {
@@ -2004,17 +2251,11 @@
               "ibkr_account",
               "trading212_account",
               "etoro_account",
-              "card_merchant"
+              "card_merchant",
+              "chain_address"
             ],
             "title": "Kind",
             "type": "string"
-          },
-          "references": {
-            "items": {
-              "$ref": "#/components/schemas/IdentifierReference"
-            },
-            "title": "References",
-            "type": "array"
           },
           "sort_code": {
             "anyOf": [
@@ -2040,54 +2281,11 @@
           "account_number",
           "account_id",
           "holder_account_ids",
-          "references",
           "dismissed_at",
           "created_by",
           "created_at"
         ],
         "title": "IdentifierOut",
-        "type": "object"
-      },
-      "IdentifierReference": {
-        "description": "One own account behind a shared payee bank account, told apart by the payment\nreference it is paid with (stored trimmed and upper-cased).",
-        "properties": {
-          "account_id": {
-            "format": "uuid",
-            "title": "Account Id",
-            "type": "string"
-          },
-          "reference": {
-            "title": "Reference",
-            "type": "string"
-          }
-        },
-        "required": [
-          "account_id",
-          "reference"
-        ],
-        "title": "IdentifierReference",
-        "type": "object"
-      },
-      "IdentifierReferencesRegister": {
-        "description": "The own accounts payments to a shared payee bank account go into, by reference; none\nremoves them.",
-        "properties": {
-          "references": {
-            "items": {
-              "$ref": "#/components/schemas/IdentifierReference"
-            },
-            "title": "References",
-            "type": "array"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "value",
-          "references"
-        ],
-        "title": "IdentifierReferencesRegister",
         "type": "object"
       },
       "ImportBatchDetailOut": {
@@ -3470,7 +3668,8 @@
               "etoro_id",
               "trading212_ticker",
               "chain_contract",
-              "coingecko"
+              "coingecko",
+              "binance_asset"
             ],
             "title": "Scheme",
             "type": "string"
@@ -4349,8 +4548,15 @@
       "SuggestionOut": {
         "properties": {
           "account_number": {
-            "title": "Account Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Number"
           },
           "identifier_id": {
             "format": "uuid",
@@ -4360,6 +4566,14 @@
           "incoming": {
             "title": "Incoming",
             "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "uk_bank_account",
+              "chain_address"
+            ],
+            "title": "Kind",
+            "type": "string"
           },
           "latest": {
             "format": "date",
@@ -4378,12 +4592,25 @@
             "type": "integer"
           },
           "sort_code": {
-            "title": "Sort Code",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Code"
+          },
+          "value": {
+            "title": "Value",
             "type": "string"
           }
         },
         "required": [
           "identifier_id",
+          "kind",
+          "value",
           "sort_code",
           "account_number",
           "names",
@@ -4546,6 +4773,18 @@
             "title": "Booking Date",
             "type": "string"
           },
+          "cancels_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancels Transaction Id"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -4596,7 +4835,8 @@
           "description",
           "status",
           "origin",
-          "postings"
+          "postings",
+          "cancels_transaction_id"
         ],
         "title": "TransactionOut",
         "type": "object"
@@ -4890,6 +5130,47 @@
         ]
       }
     },
+    "/api/v1/connections/binance": {
+      "post": {
+        "operationId": "create_binance_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BinanceConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Binance Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
     "/api/v1/connections/etoro": {
       "post": {
         "operationId": "create_etoro_connection",
@@ -5112,6 +5393,60 @@
           }
         },
         "summary": "Authorize Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/{connection_id}/binance": {
+      "put": {
+        "description": "Replace the key (a new one after the old was rejected). It must belong to the account\nalready connected. It is also how a disabled connection is brought back (adding the account\nagain is refused as a duplicate): the ledger, cursors and config are kept. Only a\nconnection disabled when the update began is brought back: a disable made while the key\nwas checked stands.",
+        "operationId": "update_binance_connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BinanceConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Binance Connection",
         "tags": [
           "connections"
         ]
@@ -5764,15 +6099,15 @@
         ]
       }
     },
-    "/api/v1/finance/accounts/identifiers/references": {
+    "/api/v1/finance/accounts/identifiers/holders": {
       "post": {
-        "description": "Register the own accounts a shared payee bank account pays into, each by the payment\nreference it is paid with, replacing the ones it had; none removes them. The bank account\nmust be registered to no account. Every record naming it is matched again.",
-        "operationId": "register_identifier_references",
+        "description": "Register the own accounts an identifier pays into, replacing the ones it had; none\nremoves them. A UK bank account several of your accounts are paid through (a platform's\nclient money account) must be registered to no account. Every record naming it is\nmatched again.",
+        "operationId": "register_identifier_holders",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/IdentifierReferencesRegister"
+                "$ref": "#/components/schemas/IdentifierHoldersRegister"
               }
             }
           },
@@ -5800,7 +6135,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Register Identifier References",
+        "summary": "Register Identifier Holders",
         "tags": [
           "finance"
         ]
@@ -7331,7 +7666,7 @@
     },
     "/api/v1/finance/transfer-suggestions": {
       "get": {
-        "description": "Bank accounts that own records name and that are neither registered nor dismissed,\nmost named first (registering one is add_account_identifier); then card merchants on a\nconnected platform's domain (kind card_merchant; registering one is\nregister_card_merchant).",
+        "description": "Bank accounts and chain addresses that own records name and that are neither\nregistered nor dismissed, most named first (registering one is add_account_identifier);\nthen card merchants on a connected platform's domain (kind card_merchant; registering\none is register_card_merchant).",
         "operationId": "list_transfer_suggestions",
         "responses": {
           "200": {

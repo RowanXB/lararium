@@ -22,7 +22,11 @@ from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import create_account, set_type_key
-from lararium.modules.finance.identifiers import get_or_create_identifier, register_card_merchant
+from lararium.modules.finance.identifiers import (
+    assign_identifier,
+    get_or_create_identifier,
+    register_card_merchant,
+)
 from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.ledger import CounterpartyFields
 from lararium.modules.finance.system_accounts import system_account_ids
@@ -31,7 +35,6 @@ from lararium.modules.finance.transfers import (
     list_transfers,
     load_transfer_settings,
     preview_match,
-    register_references_and_rematch,
 )
 from lararium.modules.finance.transfers.contra import eligible_records
 from lararium.modules.finance.transfers.pairs import (
@@ -62,7 +65,7 @@ from .conftest import (
     contra_account,
 )
 
-PAYEE = "131313:24242424"  # a platform's client money account, registered to no account
+NAMED = "131313:24242424"  # the bank account a transfer names, registered to its account
 STRANGER = "500000:50000001"  # someone else's bank account
 NEAR = DEFAULTS.near_window
 INVEST, STOCKS_ISA, CASH_ISA = "trading212.invest", "trading212.stocks_isa", "trading212.cash_isa"
@@ -92,8 +95,7 @@ def _pairable(account: UUID, quantity: str, **kw: Any) -> Pairable:
     return Pairable(account_id=account, quantity=Decimal(quantity), **(defaults | kw))
 
 
-# A bank transfer naming X (its counterparty bank account registered to X, or a shared
-# payee's reference naming X).
+# A bank transfer naming X (its counterparty bank account registered to X).
 SENT = _pairable(M, "-100", holder=X, bank_transfer=True, names_account=True)
 
 
@@ -207,8 +209,9 @@ def trading212(run: Run) -> MakeTyped:
     return _make
 
 
-async def _payee(run: Run, *references: tuple[UUID, str]) -> UUID:
-    record = await run(register_references_and_rematch, PAYEE, list(references))
+async def _named(run: Run, account_id: UUID) -> UUID:
+    """The bank account a transfer names, registered to the account."""
+    record = await run(assign_identifier, account_id, "uk_bank_account", NAMED)
     return record.id
 
 
@@ -240,13 +243,13 @@ async def test_an_identified_bank_transfer_pairs_with_an_unmarked_deposit(
     typed: bool,
 ) -> None:
     """A Trading 212 Invest DEPOSIT (not marked a bank transfer, naming nobody) and a
-    connected bank's bank transfer naming the shared payee with Invest's reference: they
+    connected bank's bank transfer naming a bank account registered to Invest: they
     pair, though Invest is no card merchant's holder. Untyped, they don't."""
     m = await connected_bank("M")
     invest = await trading212("Invest", INVEST if typed else None)
-    payee = await _payee(run, (invest.account.id, "REF-INVEST"))
+    named = await _named(run, invest.account.id)
     deposit = await connector_tx(invest, "100", external_id="deposit", bank_transfer=False)
-    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-INVEST")
+    sent = await connector_tx(m, "-100", identifier_id=named)
     await heal()
 
     assert (await session.scalars(select(models.AccountIdentifierHolder))).all() == []
@@ -283,13 +286,13 @@ async def test_only_the_named_account_s_one_deposit(
     heal: Heal,
     second: str,
 ) -> None:
-    """Review Focus 3: a bank transfer whose reference names X, with same-amount unmarked
+    """Review Focus 3: a bank transfer naming X, with same-amount unmarked
     deposits on X and on Y in the window, pairs with X's only; with two on X, with
     neither."""
     m = await connected_bank("M")
     x = await trading212("X", INVEST)
     y = await trading212("Y", STOCKS_ISA)
-    payee = await _payee(run, (x.account.id, "REF-X"), (y.account.id, "REF-Y"))
+    named = await _named(run, x.account.id)
     first = await connector_tx(x, "100", external_id="first", bank_transfer=False)
     other = await connector_tx(
         y if second == "on_y" else x,
@@ -298,7 +301,7 @@ async def test_only_the_named_account_s_one_deposit(
         occurred_at=WHEN + timedelta(days=1),
         bank_transfer=False,
     )
-    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-X")
+    sent = await connector_tx(m, "-100", identifier_id=named)
     await heal()
 
     transfers = await list_transfers(session)
@@ -344,7 +347,7 @@ async def test_a_deposit_naming_a_bank_account_is_no_funded_deposit(
     else:
         account = await imported_bank("Cash ISA")
         await run(set_type_key, account.id, CASH_ISA)
-    payee = await _payee(run, (account.id, "REF-T"))
+    named = await _named(run, account.id)
     if invest is not None:
         stranger = await run(get_or_create_identifier, "uk_bank_account", STRANGER)
         deposit = (
@@ -359,7 +362,7 @@ async def test_a_deposit_naming_a_bank_account_is_no_funded_deposit(
     else:
         printed = RowDetails(account_number=STRANGER.split(":")[1]) if names else None
         deposit = await statement_row(account, "100", details=printed, bank_transfer=False)
-    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-T")
+    sent = await connector_tx(m, "-100", identifier_id=named)
     await heal()
 
     row = await _eligible_row(session, deposit)
@@ -392,8 +395,8 @@ async def test_preview_match_reads_the_type(
     cash_isa = await imported_bank("Cash ISA")
     if typed:
         await run(set_type_key, cash_isa.id, CASH_ISA)
-    payee = await _payee(run, (cash_isa.id, "REF-C"))
-    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-C")
+    named = await _named(run, cash_isa.id)
+    sent = await connector_tx(m, "-100", identifier_id=named)
     await heal()
 
     previewed = await preview_match(
@@ -427,9 +430,9 @@ async def test_a_type_set_or_cleared_later_is_read_at_the_next_heal(
     line with a type set after the records were posted, and with one cleared again."""
     m = await connected_bank("M")
     invest = await trading212("Invest", None)
-    payee = await _payee(run, (invest.account.id, "REF-INVEST"))
+    named = await _named(run, invest.account.id)
     deposit = await connector_tx(invest, "100", external_id="deposit", bank_transfer=False)
-    sent = await connector_tx(m, "-100", identifier_id=payee, reference="REF-INVEST")
+    sent = await connector_tx(m, "-100", identifier_id=named)
     await heal()
 
     async def deposit_is_paired() -> bool:
@@ -468,12 +471,12 @@ async def test_card_evidence_comes_first(
     bank_deposit: bool,
 ) -> None:
     """A card top-up D1 that the card rule pairs with Monzo's card payment C stays C's when
-    a referenced bank transfer B of the same amount to its account is in the window: B pairs
+    an identified bank transfer B of the same amount to its account is in the window: B pairs
     with its own deposit D2 (no card payment near it), or, without D2, with nothing."""
     m = await connected_bank("M")
     invest = await trading212("Invest", INVEST)
     merchant = await run(register_card_merchant, MERCHANT, [invest.account.id])
-    payee = await _payee(run, (invest.account.id, "REF-INVEST"))
+    named = await _named(run, invest.account.id)
     card = await connector_tx(
         m, "-50", external_id="card", identifier_id=merchant.id, bank_transfer=False
     )
@@ -485,8 +488,7 @@ async def test_card_evidence_comes_first(
         "-50",
         external_id="bank",
         occurred_at=WHEN + timedelta(hours=3),
-        identifier_id=payee,
-        reference="REF-INVEST",
+        identifier_id=named,
     )
     received = (
         await connector_tx(

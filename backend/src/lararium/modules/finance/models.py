@@ -9,6 +9,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from lararium.core.json_types import JSONValue
 from lararium.core.models import UUIDV7, Base
 
+# The Binance tables are built from the catalogue (binance/layout.py); importing them here puts
+# them in the metadata with the rest of the finance schema.
+from lararium.modules.finance.binance.models import AccountReport as AccountReport
+from lararium.modules.finance.binance.models import AssetsSeen as AssetsSeen
+from lararium.modules.finance.binance.models import (
+    ReconciliationDifference as ReconciliationDifference,
+)
+
 FINANCE_SCHEMA = {"schema": "finance"}
 
 
@@ -84,8 +92,10 @@ class AccountIdentifier(Base):
 
 
 class AccountIdentifierHolder(Base):
-    """An own account a card merchant pays into: a card_merchant identifier names its holders
-    here (it may have several), every other kind its one account in account_id."""
+    """An own account a card merchant, or a payee bank account several own accounts share,
+    pays into: a card_merchant identifier names its holders here (it may have several), and
+    so may a uk_bank_account one registered to no account (account type catalog design §8.1);
+    every other row its one account in account_id."""
 
     __tablename__ = "account_identifier_holders"
     __table_args__ = FINANCE_SCHEMA
@@ -93,28 +103,10 @@ class AccountIdentifierHolder(Base):
     identifier_id: Mapped[UUID] = mapped_column(
         ForeignKey("finance.account_identifiers.id"), primary_key=True
     )
-    # Its identifier's kind, always card_merchant: with the identifier id, a foreign key to
-    # (id, kind), so no other kind's row can have holders.
-    kind: Mapped[str] = mapped_column(Text, server_default=text("'card_merchant'"))
+    # Its identifier's kind, card_merchant or uk_bank_account: with the identifier id, a
+    # foreign key to (id, kind), so no other kind's row can have holders.
+    kind: Mapped[str] = mapped_column(Text)
     account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
-
-
-class AccountIdentifierReference(Base):
-    """A shared payee bank account's reference for one own account: a uk_bank_account
-    identifier registered to no account may carry several, one per account (design §8.1)."""
-
-    __tablename__ = "account_identifier_references"
-    __table_args__ = FINANCE_SCHEMA
-
-    identifier_id: Mapped[UUID] = mapped_column(
-        ForeignKey("finance.account_identifiers.id"), primary_key=True
-    )
-    # Its identifier's kind, always uk_bank_account: with the identifier id, a foreign key to
-    # (id, kind), so no other kind's row can have references.
-    kind: Mapped[str] = mapped_column(Text, server_default=text("'uk_bank_account'"))
-    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
-    # Stored as normalize_reference gives it: trimmed, upper-case.
-    reference: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
 class Transaction(Base):
@@ -145,6 +137,14 @@ class Transaction(Base):
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The other side's account number, when the source gives it without a sort code.
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
+    # The transaction this one cancels. A transaction is cancelled by at most one that is not
+    # void (the partial unique index transactions_cancels_once, migration 0045).
+    cancels_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id")
+    )
+    # The source says this movement was not a transfer (a withdrawal that failed after it
+    # left the balance), so it is never a transfer's leg.
+    never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(

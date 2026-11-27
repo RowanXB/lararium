@@ -297,6 +297,26 @@ class ConnectorRun:
             {**parent, "keep": keep},
         )
 
+    async def replace_moved(
+        self, table: str, parent: Mapping[str, object], column: str, items: Sequence[object]
+    ) -> None:
+        """Delete the parent's child rows whose index now holds another item (by `column`, the
+        item's own id) or none. A row is one item's: one whose index another item took starts
+        afresh, rather than keeping the old item's fields and its unique snapshot link."""
+        where = " and ".join(f"{name} = :{name}" for name in parent)
+        held = await self.session.execute(
+            text(f"select item_index, {column} from finance.{table} where {where}"), dict(parent)
+        )
+        stale = [n for n, value in held.all() if n >= len(items) or items[n] != value]
+        if stale:
+            await self.session.execute(
+                text(
+                    f"delete from finance.{table} where {where}"
+                    " and item_index = any(cast(:stale as integer[]))"
+                ),
+                {**parent, "stale": stale},
+            )
+
     # The ledger -----------------------------------------------------------------------------
 
     async def live(self, key: str) -> UUID | None:
@@ -322,7 +342,10 @@ class ConnectorRun:
         description: str,
         postings: Sequence[PostingInput],
         counterparty: CounterpartyFields | None = None,
+        cancels: UUID | None = None,
     ) -> UUID:
+        """Post the connection's transaction under the key (`cancels`: the transaction it
+        cancels, cancelled-withdrawal design §4.2)."""
         record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -334,22 +357,17 @@ class ConnectorRun:
                 connection_id=self.connection_id,
                 external_id=key,
                 counterparty=counterparty or CounterpartyFields(),
+                cancels_transaction_id=cancels,
             ),
         )
         self.count(outcome)
         return record.id
 
     async def contra_for(
-        self,
-        key: str,
-        account_id: UUID,
-        other_postings: int,
-        identifier_id: UUID | None,
-        payment_reference: str | None = None,
+        self, key: str, account_id: UUID, other_postings: int, identifier_id: UUID | None
     ) -> UUID:
         """Unassigned or In transit for the account's record under the key, as
-        transfer_contra says (`payment_reference`, the record's, for a bank account that
-        names an own account by its reference)."""
+        transfer_contra says."""
         await self.system_account("unassigned")
         await self.system_account("in_transit")
         return await transfer_contra(
@@ -357,6 +375,5 @@ class ConnectorRun:
             source=("connection", f"{self.connection_id}:{key}"),
             own_account_id=account_id,
             counterparty_identifier_id=identifier_id,
-            payment_reference=payment_reference,
             other_postings=other_postings,
         )

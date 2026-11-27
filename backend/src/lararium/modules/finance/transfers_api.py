@@ -30,9 +30,8 @@ from lararium.modules.finance.schemas import (
     CardMerchantRegister,
     CardMerchantSuggestionOut,
     IdentifierCreate,
+    IdentifierHoldersRegister,
     IdentifierOut,
-    IdentifierReference,
-    IdentifierReferencesRegister,
     MainAccountUpdate,
     PairCandidateOut,
     SuggestionOut,
@@ -90,10 +89,6 @@ def _identifier_out(record: identifiers.IdentifierRecord) -> IdentifierOut:
         account_number=account_number,
         account_id=record.account_id,
         holder_account_ids=list(record.holders),
-        references=[
-            IdentifierReference(account_id=account_id, reference=reference)
-            for account_id, reference in record.references
-        ],
         dismissed_at=record.dismissed_at,
         created_by=record.created_by,
         created_at=record.created_at,
@@ -142,12 +137,15 @@ async def remove_account_identifier(
             if record.id == identifier_id and account_id in record.holders
         ]
         if held:
-            # A card merchant: the account leaves its holders, the others stay.
-            [merchant] = held
-            await transfers.register_card_merchant_and_rematch(
+            # A card merchant or a shared payee: the account leaves its holders, the others
+            # stay.
+            [identifier] = held
+            assert identifier.kind in ("card_merchant", "uk_bank_account")  # only they're held
+            await transfers.register_holders_and_rematch(
                 ctx,
-                merchant.value,
-                [a for a in merchant.holders if a != account_id],
+                identifier.kind,
+                identifier.value,
+                [a for a in identifier.holders if a != account_id],
                 heal=False,  # healing_command heals once, at the end
             )
             return
@@ -171,19 +169,21 @@ async def register_card_merchant(
     return _identifier_out(record)
 
 
-@router.post("/accounts/identifiers/references", name="register_identifier_references")
-async def register_identifier_references(
-    body: IdentifierReferencesRegister, session: SessionDep, actor: ActorDep
+@router.post("/accounts/identifiers/holders", name="register_identifier_holders")
+async def register_identifier_holders(
+    body: IdentifierHoldersRegister, session: SessionDep, actor: ActorDep
 ) -> IdentifierOut:
-    """Register the own accounts a shared payee bank account pays into, each by the payment
-    reference it is paid with, replacing the ones it had; none removes them. The bank account
-    must be registered to no account. Every record naming it is matched again."""
+    """Register the own accounts an identifier pays into, replacing the ones it had; none
+    removes them. A UK bank account several of your accounts are paid through (a platform's
+    client money account) must be registered to no account. Every record naming it is
+    matched again."""
     args = _args(body.model_dump(mode="json"))
-    async with healing_command(session, actor, "register_identifier_references", args) as ctx:
-        record = await transfers.register_references_and_rematch(
+    async with healing_command(session, actor, "register_identifier_holders", args) as ctx:
+        record = await transfers.register_holders_and_rematch(
             ctx,
+            body.kind,
             body.value,
-            [(reference.account_id, reference.reference) for reference in body.references],
+            body.account_ids,
             heal=False,  # healing_command heals once, at the end
         )
     return _identifier_out(record)
@@ -401,10 +401,10 @@ async def pair_transactions(
 async def list_transfer_suggestions(
     session: SessionDep,
 ) -> list[SuggestionOut | CardMerchantSuggestionOut]:
-    """Bank accounts that own records name and that are neither registered nor dismissed,
-    most named first (registering one is add_account_identifier); then card merchants on a
-    connected platform's domain (kind card_merchant; registering one is
-    register_card_merchant)."""
+    """Bank accounts and chain addresses that own records name and that are neither
+    registered nor dismissed, most named first (registering one is add_account_identifier);
+    then card merchants on a connected platform's domain (kind card_merchant; registering
+    one is register_card_merchant)."""
     banks: list[SuggestionOut | CardMerchantSuggestionOut] = [
         SuggestionOut.model_validate(s) for s in await transfers.suggestions(session)
     ]

@@ -30,7 +30,7 @@ _CATEGORY = re.compile(r"[A-Z]{1,12}")
 
 @dataclass
 class NormalizeReport:
-    """What a normalize run changed, and what it could not map (for warnings, Task 6)."""
+    """What a normalize run changed, and what it could not map (for warnings)."""
 
     accounts_created: int = 0
     accounts_updated: int = 0
