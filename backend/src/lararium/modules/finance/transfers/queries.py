@@ -188,7 +188,8 @@ async def list_transfers(
 async def weak_transfers(
     session: AsyncSession, transfers: Collection[TransferRecord]
 ) -> frozenset[UUID]:
-    """The ids of those of the transfers that a sort code alone paired (pairs.WEAK): matched,
+    """The ids of those of the transfers that neither leg names an own account for (a sort code
+    alone, a card merchant's or a held payee's holders; pairs.WEAK): matched,
     neither own record naming another own account (eligible_records' holder), and no pair
     decision linking them. Read from their records, not from the pair relation, since the
     Transfers page asks on every load."""
@@ -774,12 +775,12 @@ class SuggestionRecord:
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
     """Unregistered, undismissed identifiers of a kind the owner can register
     (`SUGGESTED_KINDS`) that own records name, most named first, then the most recently
-    named. A shared payee carrying references is registered already (account type catalog
-    design §8.1): it is offered again once they are removed."""
+    named. One held by several own accounts (a shared payee's, account type catalog design
+    §8.1) is registered already: it is offered again once its holders are removed."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
-    r = models.AccountIdentifierReference
+    h = models.AccountIdentifierHolder
     outgoing = func.count().filter(e.c.quantity < 0)
     incoming = func.count().filter(e.c.quantity > 0)
     latest = func.max(e.c.booking_date)
@@ -799,7 +800,7 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
             i.kind.in_(SUGGESTED_KINDS),
             i.account_id.is_(None),
             i.dismissed_at.is_(None),
-            ~exists().where(r.identifier_id == i.id),
+            ~exists().where(h.identifier_id == i.id),
         )
         .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)

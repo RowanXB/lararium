@@ -233,6 +233,20 @@ CATALOG: tuple[CatalogEntry, ...] = (
             card_types=[],
             # The export states no period; Trading 212 names it by the one chosen.
             period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
+            # Notes: a deposit by bank transfer gives Trading 212's transaction id; a withdrawal
+            # the bank account it was sent to, which names the own account it went to. An
+            # internal move leaves Notes empty. Any other Notes makes the row an error, so a
+            # new form is seen rather than dropped.
+            extract=[
+                CsvExtract(
+                    column="Notes",
+                    patterns=[
+                        r"Transaction ID: [0-9A-Fa-f-]+",
+                        r"Sent to Bank Account (?P<counterparty_sort_code>\d{2}-\d{2}-\d{2})"
+                        r" / (?P<counterparty_account_number>\d{8})",
+                    ],
+                )
+            ],
         ),
         recommended=True,
     ),
