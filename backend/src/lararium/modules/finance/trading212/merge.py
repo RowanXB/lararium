@@ -200,7 +200,9 @@ def notes_transaction_id(notes: str) -> str | None:
 def notes_bank_account(notes: str) -> tuple[str, str] | None:
     """(sort code, account number), digits only, of a "Sent to Bank Account" note."""
     found = NOTES_SENT.match(notes.strip())
-    return ("".join(found.group(1, 2, 3)), found.group(4)) if found else None
+    if found is None:
+        return None
+    return found["counterparty_sort_code"].replace("-", ""), found["counterparty_account_number"]
 
 
 @dataclass(frozen=True)

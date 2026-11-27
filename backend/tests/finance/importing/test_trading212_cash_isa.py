@@ -252,8 +252,8 @@ def test_notes_of_another_form_are_a_row_error() -> None:
     content = HEADER + "Deposit,2026-01-05 09:10:11+00:00,Something new,id1,1.00,GBP\n"
     [row] = _parse(content).rows
     assert isinstance(row, RowError)
-    # It names the column and the rule, never the value.
-    assert "Notes" in row.message and "family_notes" in row.message
+    # It names the column, never the value (the profile's Notes extract refuses it first).
+    assert "Notes" in row.message
     assert "Something" not in row.message
 
 
@@ -283,7 +283,12 @@ async def test_an_internal_move_commits_naming_the_family(
     assert tuple(await _transaction(session, batch.id, 0)) == (False, None, True)
     assert tuple(await _transaction(session, batch.id, 1)) == (True, family_id, False)
     assert tuple(await _transaction(session, batch.id, 2)) == (True, family_id, False)
-    assert tuple(await _transaction(session, batch.id, 3)) == (False, None, True)
+    # A withdrawal sent to a bank account names that account (the extract reads it) and is
+    # outside the family.
+    sent = await _transaction(session, batch.id, 3)
+    assert (sent.family_move, sent.outside_family) == (False, True)
+    named = await session.get(models.AccountIdentifier, sent.counterparty_identifier_id)
+    assert named is not None and named.kind == "uk_bank_account"
 
     # On an account of no type, the rows the Notes call internal moves are row errors: the
     # account has no family to name.
@@ -293,3 +298,37 @@ async def test_an_internal_move_commits_naming_the_family(
     assert _statuses(rows) == ["new", "error", "error", "new"]
     assert [row.family_move for row in rows] == [False, True, True, False]
     assert rows[1].error is not None and "family" in rows[1].error
+
+
+NOTES_CSV = (
+    HEADER + "Deposit,2026-01-05 09:10:11+00:00,"
+    '"Transaction ID: 11111111-2222-3333-4444-555555555555",'
+    '01aaaaaa-bbbb-7ccc-8ddd-000000000001,25.00,"GBP"\n'
+    'Deposit,2026-01-06 10:00:00+00:00,,01aaaaaa-bbbb-7ccc-8ddd-000000000002,1.00,"GBP"\n'
+    'Withdrawal,2026-01-06 10:05:00+00:00,"Sent to Bank Account 12-34-56 / 87654321",'
+    '01aaaaaa-bbbb-7ccc-8ddd-000000000003,-1.00,"GBP"\n'
+)
+
+
+def test_a_withdrawal_names_the_bank_account_it_was_sent_to() -> None:
+    deposit, internal, withdrawal = _parse(NOTES_CSV).rows
+    assert isinstance(deposit, ParsedRow) and isinstance(internal, ParsedRow)
+    assert isinstance(withdrawal, ParsedRow)
+    assert withdrawal.counterparty is not None
+    assert (withdrawal.counterparty.sort_code, withdrawal.counterparty.account_number) == (
+        "123456",
+        "87654321",
+    )
+    assert withdrawal.memo == "Sent to Bank Account 12-34-56 / 87654321"
+    # A deposit's transaction id and an internal move's empty Notes name no bank account.
+    for row in (deposit, internal):
+        assert row.counterparty is None or row.counterparty.sort_code is None
+
+
+def test_notes_of_another_form_make_the_row_an_error() -> None:
+    content = (
+        HEADER + 'Deposit,2026-01-05 09:10:11+00:00,"Something new",'
+        '01aaaaaa-bbbb-7ccc-8ddd-000000000004,5.00,"GBP"\n'
+    )
+    [row] = _parse(content).rows
+    assert isinstance(row, RowError)

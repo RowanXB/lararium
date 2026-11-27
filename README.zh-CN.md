@@ -535,7 +535,8 @@ profile）。请在表单的 **Opened on** 栏填上账户的开户日期：这�
 
 History CSV 的 `Notes` 写明每一笔 `Deposit` 或 `Withdrawal` 属于哪一种，现成的 profile 会读取它
 （它的 `family_notes` 选项，见 [Profile](#profile)）：Notes 为空是从你的另一个 Trading 212 账户转入或
-转出，`Transaction ID: …` 是来自外部的入金，`Sent to Bank Account …` 是转到该银行账户的出金。Notes
+转出，`Transaction ID: …` 是来自外部的入金，`Sent to Bank Account …` 是转到该银行账户的出金（会读出分行代码和账号，所以它会指明你在那里的账户，
+并与该账户的入账配对）。Notes
 是其他形式的行是错误，会使整个批次无法提交，所以 Trading 212 改了措辞时马上就能发现。在 Lararium 读取
 Notes 之前提交的批次，其各行没有这样的证据（暂时按两分钟规则配对，见[转账](#转账)）：把每个这样的批次
 回滚，再从该账户的 **Upload file** 卡片重新上传它的文件。

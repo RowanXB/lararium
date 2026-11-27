@@ -237,15 +237,18 @@ CATALOG: tuple[CatalogEntry, ...] = (
             period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
             # What a deposit's or withdrawal's Notes say (account family identifier design
             # §5.9, owner's decision 2026-11-27): empty, a move from or to another Trading 212
-            # account; a transaction id or the bank account it went to, a movement outside.
+            # account; Trading 212's transaction id (a deposit by bank transfer or card), or the
+            # bank account a withdrawal was sent to, a movement outside the family. The extract
+            # reads that bank account, which names the own account it went to; Notes of any
+            # other form make the row an error, so a new form is seen rather than dropped.
+            extract=[
+                CsvExtract(column="Notes", patterns=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES])
+            ],
             family_notes=FamilyNotes(
                 column="Notes",
                 types=["Deposit", "Withdrawal"],
                 within=[r""],
-                outside=[
-                    TRANSACTION_ID_NOTES,
-                    SENT_TO_BANK_NOTES,
-                ],
+                outside=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES],
             ),
         ),
         recommended=True,

@@ -587,9 +587,10 @@ until their `Action` is known.
 The History CSV's `Notes` say which kind each `Deposit` or `Withdrawal` is, and the ready
 profile reads them (its `family_notes` option, see [Profiles](#profiles)): empty Notes are a
 move from or to another of your Trading 212 accounts, `Transaction ID: …` a deposit from
-outside, `Sent to Bank Account …` a withdrawal to that bank account. A row with Notes of
-another form is an error and blocks the batch, so a change in Trading 212's wording is seen at
-once. A batch committed before Lararium read the Notes has no such evidence on its rows (they
+outside, `Sent to Bank Account …` a withdrawal to that bank account (its sort code and
+account number are read, so it names your own account there and pairs with that account's
+receipt). A row with Notes of another form is an error and blocks the batch, so a change in
+Trading 212's wording is seen at once. A batch committed before Lararium read the Notes has no such evidence on its rows (they
 pair by the two-minute rule meanwhile, see [Transfers](#transfers)): roll each back and upload
 its file again from the account's **Upload file** tile.
 
