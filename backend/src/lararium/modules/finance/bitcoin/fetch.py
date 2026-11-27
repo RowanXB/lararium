@@ -9,13 +9,15 @@ account and identifiers.
 Everything fetched commits as it goes, in short transactions of its own through
 `ctx.session_factory`, so a sync that fails keeps it. What survives is the history: the next
 sync still asks every address's stats from index 0, but asks a history only where the reported
-count (chain + mempool) differs from the one its last complete history held
-(`bitcoin_addresses.history_tx_count`). An address's history commits whole, with that count,
-so a history cut short is asked again in full. A transaction the recheck finds gone or back in
-the mempool clears that count on the wallet's addresses it touches, so the scan that follows
-asks their histories again and finds what replaced it (a fee bump, a double spend), though
-every count is unchanged; so does one it finds in a block whose time the status does not give,
-which the history's transaction then supplies.
+count (chain + mempool) or its confirmed part differs from the one its last complete history
+held (`bitcoin_addresses.history_tx_count`, `history_chain_count`): a transaction that confirms
+after the recheck read it in the mempool leaves the total as it was. An address's history
+commits whole, with those counts, so a history cut short is asked again in full. A
+transaction the recheck finds gone or back in the mempool clears those counts on the wallet's
+addresses it touches, so the scan that follows asks their histories again and finds what
+replaced it (a fee bump, a double spend), though every count is unchanged; so does one it
+finds in a block whose time the status does not give, which the history's transaction then
+supplies.
 
 What still needs normalizing is kept in the database too: every write that inserts a
 transaction or changes its status or which of its inputs and outputs are the wallet's sets
@@ -59,11 +61,7 @@ from lararium.modules.finance.bitcoin.parse import (
     Tx,
     unknown_fields,
 )
-from lararium.modules.finance.identifiers import (
-    ensure_identifier,
-    get_or_create_identifier,
-    identifier_account,
-)
+from lararium.modules.finance.identifiers import ensure_identifier, normalize_identifier
 from lararium.modules.finance.readonly_http import JSONValue as ApiValue
 from lararium.modules.finance.readonly_http import record_json
 from lararium.modules.finance.report_sightings import record_sighting
@@ -147,6 +145,16 @@ class _Page:
     request: dict[str, JSONValue]
     body: ApiValue
     txs: list[Tx]
+
+
+@dataclass(frozen=True)
+class _Stored:
+    """What an address's last complete history held: its transactions, the confirmed of
+    them, and the tip then (all None until one completes)."""
+
+    count: int | None = None
+    chain_count: int | None = None
+    height: int | None = None
 
 
 def _now() -> datetime:
@@ -280,7 +288,7 @@ _MARK_PENDING = text(
 # asks those histories again.
 _FORGET_HISTORIES = text(
     """
-    update finance.bitcoin_addresses set history_tx_count = null
+    update finance.bitcoin_addresses set history_tx_count = null, history_chain_count = null
     where connection_id = :c and address in (
       select prevout_scriptpubkey_address from finance.bitcoin_inputs
       where connection_id = :c and txid = :t
@@ -361,7 +369,7 @@ class _Fetch:
         self.tip = 0
         # From before the scan: each address's last complete history (count, tip), and the
         # transactions stored as confirmed.
-        self.histories: dict[str, tuple[int | None, int | None]] = {}
+        self.histories: dict[str, _Stored] = {}
         self.stored_confirmed: set[str] = set()
         self.scanned: dict[str, AddressStats] = {}
         self.unknown: set[str] = set()
@@ -466,12 +474,15 @@ class _Fetch:
         async with self.ctx.session_factory() as session:
             rows = await session.execute(
                 text(
-                    "select address, history_tx_count, history_height"
+                    "select address, history_tx_count, history_chain_count, history_height"
                     " from finance.bitcoin_addresses where connection_id = :c"
                 ),
                 params,
             )
-            self.histories = {r.address: (r.history_tx_count, r.history_height) for r in rows}
+            self.histories = {
+                r.address: _Stored(r.history_tx_count, r.history_chain_count, r.history_height)
+                for r in rows
+            }
             found = await session.execute(
                 text(
                     "select txid from finance.bitcoin_transactions"
@@ -533,9 +544,9 @@ class _Fetch:
                     "m_ss": mempool.spent_txo_sum,
                 },
             )
-        stored_count, stored_height = self.histories.get(address, (None, None))
-        if total != (stored_count or 0):
-            await self._history(position, address, stats, stored_height)
+        stored = self.histories.get(address, _Stored())
+        if total != (stored.count or 0) or chain.tx_count != (stored.chain_count or 0):
+            await self._history(position, address, stats, stored.height)
         return total > 0
 
     def _reaches_stored(self, txs: Sequence[Tx], stored_height: int | None) -> bool:
@@ -561,7 +572,8 @@ class _Fetch:
         never end) and fails the sync. The count is recorded only when the history is known
         whole: the walk's own count when it ran to the end, the stats' when it reached what
         was stored, none when the first page left out mempool transactions (Esplora lists 50
-        at most), so the next sync asks again."""
+        at most), so the next sync asks again. Of that count, the confirmed are those less the
+        mempool's, which are all on the first page."""
         total = stats.chain.tx_count + stats.mempool.tx_count
         txs, body = await self.client.txs(address)
         for tx in txs:
@@ -589,6 +601,8 @@ class _Fetch:
                 raise MalformedResponse("txs", "the body")
             pages.append(_Page(position.request(TXS_AFTER, last_seen_txid=after), body, txs))
         count = None if truncated else len(seen) if ended else total
+        mempool = sum(1 for tx in pages[0].txs if not tx.status.confirmed)
+        chain_count = None if count is None else count - mempool
         seen_at = _now()
         async with self._command("history", position.args(self.ctx.connection.id)) as cmd:
             for page in pages:
@@ -597,11 +611,17 @@ class _Fetch:
             await self._store_txs(cmd.session, [tx for page in pages for tx in page.txs], seen_at)
             await cmd.session.execute(
                 text(
-                    "update finance.bitcoin_addresses"
-                    " set history_tx_count = :n, history_height = :tip"
+                    "update finance.bitcoin_addresses set history_tx_count = :n,"
+                    " history_chain_count = :chain, history_height = :tip"
                     " where connection_id = :c and address = :a"
                 ),
-                {"n": count, "tip": self.tip, "c": self.ctx.connection.id, "a": address},
+                {
+                    "n": count,
+                    "chain": chain_count,
+                    "tip": self.tip,
+                    "c": self.ctx.connection.id,
+                    "a": address,
+                },
             )
 
     async def _store_txs(self, session: AsyncSession, txs: Sequence[Tx], seen_at: datetime) -> None:
@@ -767,14 +787,23 @@ class _Fetch:
     async def _register(self, account_id: UUID) -> list[str]:
         """Make every scanned address a `chain_address` of the account; those registered to
         another account stay there and are returned."""
-        conflicts: list[str] = []
         async with self._command("identifiers") as cmd:
             for address in self.scanned:
-                identifier_id = await get_or_create_identifier(cmd, "chain_address", address)
                 await ensure_identifier(cmd, account_id, "chain_address", address)
-                if await identifier_account(cmd.session, identifier_id) != account_id:
-                    conflicts.append(address)
-        return conflicts
+            held = set(
+                await cmd.session.scalars(
+                    text(
+                        "select value from finance.account_identifiers"
+                        " where kind = 'chain_address' and account_id = :a"
+                    ),
+                    {"a": account_id},
+                )
+            )
+        return [
+            address
+            for address in self.scanned
+            if normalize_identifier("chain_address", address) not in held
+        ]
 
     async def _pending(self) -> tuple[set[str], set[str]]:
         """(changed, left the chain) among the pending transactions."""

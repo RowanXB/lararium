@@ -7,6 +7,7 @@ hashes and times are invented; the wallet is the BIP84 test vector's."""
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +52,7 @@ async def _account_of(session: AsyncSession, connection_id) -> object:
     )
 
 
+@pytest.mark.parametrize("spelling", ["lower", "upper"])
 async def test_binance_withdrawal_pairs_with_the_synced_wallet_receipt(
     session: AsyncSession,
     run: Run,
@@ -58,16 +60,18 @@ async def test_binance_withdrawal_pairs_with_the_synced_wallet_receipt(
     heal: Heal,
     usd,
     gbp,
+    spelling: str,
 ) -> None:
     """Binance sends 0.01 BTC to the wallet's first receiving address two days before the
     block confirms it, and charges 0.0001 BTC: one matched transfer, the fee its own
-    transaction, and net worth down by the fee only."""
+    transaction, and net worth down by the fee only. Binance may write the bech32 address in
+    upper case, which is the same address (BIP173): the pair is found either way."""
     chain = FakeEsplora()
     receipt_tx = chain.add(make_tx(1, [(receiving(0), SENT_SATS)], height=HEIGHT))
     tx_hash = receipt_tx["txid"]
     confirmed_at = at(HEIGHT)
     applied_ms = int((confirmed_at - timedelta(days=2)).timestamp()) * 1000
-    address = receiving(0)
+    address = receiving(0).upper() if spelling == "upper" else receiving(0)
 
     # (a) Binance's withdrawal, normalized while nobody holds the address.
     binance = await binance_connection(run)

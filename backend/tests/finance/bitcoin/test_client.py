@@ -121,6 +121,27 @@ async def test_missing_prevout_is_malformed() -> None:
         await Env(ok([bad])).client().txs(fx.RECEIVING_0)
 
 
+_BAD_TXIDS = ["AA" * 32, "aa" * 31, "aa" * 33, "zz" * 32, "0x" + "aa" * 31, ""]
+
+
+@pytest.mark.parametrize("txid", _BAD_TXIDS)
+async def test_a_txid_that_is_not_64_lower_case_hex_is_malformed(txid: str) -> None:
+    body = fx.tx()
+    body["txid"] = txid
+    with pytest.raises(MalformedResponse) as caught:
+        await Env(ok([body])).client().txs(fx.RECEIVING_0)
+    assert str(caught.value) == "The Esplora txs response is malformed at txid"
+
+
+@pytest.mark.parametrize("txid", _BAD_TXIDS)
+async def test_an_input_txid_that_is_not_64_lower_case_hex_is_malformed(txid: str) -> None:
+    body = fx.tx()
+    body["vin"][0]["txid"] = txid
+    with pytest.raises(MalformedResponse) as caught:
+        await Env(ok([body])).client().txs(fx.RECEIVING_0)
+    assert str(caught.value) == "The Esplora txs response is malformed at vin[].txid"
+
+
 async def test_missing_fee_is_malformed() -> None:
     with pytest.raises(MalformedResponse):
         await Env(ok([fx.without(fx.tx(), "fee")])).client().txs(fx.RECEIVING_0)

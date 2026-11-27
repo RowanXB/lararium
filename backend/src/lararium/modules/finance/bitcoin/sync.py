@@ -58,6 +58,7 @@ from lararium.modules.finance.bitcoin.normalize import (
     NORMALIZER_VERSION,
     NORMALIZER_VERSION_KEY,
     SHARED_FLAG,
+    BitcoinDataError,
     normalize,
 )
 from lararium.modules.finance.bitcoin.prices import (
@@ -272,7 +273,9 @@ class BitcoinConnector:
         recorded = (await get_connection(ctx.command.session, connection.id)).config.get(
             ACCOUNT_KEY
         )
-        assert isinstance(recorded, str), "the fetch made the wallet's account"
+        if not isinstance(recorded, str):
+            # The fetch makes the wallet's account before it returns.
+            raise BitcoinDataError("The Bitcoin wallet has no account yet.")
         account_id = UUID(recorded)
         priced = await self._update_prices(ctx, account_id)
 

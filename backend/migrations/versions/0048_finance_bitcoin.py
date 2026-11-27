@@ -67,10 +67,12 @@ UPGRADE = [
       script_type text NOT NULL,
       first_used_at timestamptz,
       last_used_at timestamptz,
-      -- What the address's last complete history held (chain + mempool transactions) and the
-      -- chain tip then: a sync asks the history again only when the count differs, and stops
+      -- What the address's last complete history held (chain + mempool transactions, and of
+      -- them the confirmed) and the chain tip then: a sync asks the history again only when
+      -- either count differs (a transaction confirming leaves the first as it was), and stops
       -- paging at a transaction that was 6 blocks deep at that tip. NULL until one completes.
       history_tx_count bigint,
+      history_chain_count bigint,
       history_height bigint,
       PRIMARY KEY (connection_id, source, branch, address_index),
       UNIQUE (connection_id, address)

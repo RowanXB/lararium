@@ -67,13 +67,14 @@ def chain_fields(label: str, row: Row) -> ChainFields | None:
     """The chain, hash and address the transfer engine pairs an on-chain movement with a
     wallet's on, or None for a network not in `CHAINS` or a hash that is not 64 hex digits
     (the database requires it). The address is the row's own: a withdrawal's destination, a
-    deposit's Binance address."""
+    deposit's Binance address, lower-cased when it is bech32 (`bc1`, case-insensitive), as
+    the Bitcoin wallet stores its own."""
     found = chain_hash(row)
     chain = CHAINS.get(text(row, "network") or "")
     if found is None or chain is None or _HASH.fullmatch(found) is None:
         return None
     address = text(row, "address")
-    if address is not None and address.startswith("0x"):
+    if address is not None and (address.startswith("0x") or address.lower().startswith("bc1")):
         address = address.lower()
     return ChainFields(chain, found, address)
 

@@ -1,15 +1,17 @@
 """Esplora responses, parsed fail-closed.
 
-Every amount is a whole number of satoshis; a fraction, an exponent, a negative amount, a missing
-field or a wrong type raises `MalformedResponse`, never a guess. The sync stores the amounts as
-integers and checks them against the chain's own totals, so a value silently coerced here would
-be a wrong balance there. An error names the endpoint and the field path (`vin[].prevout`),
+Every amount is a whole number of satoshis, and every transaction id 64 lower-case hex digits; a
+fraction, an exponent, a negative amount, an id spelt otherwise, a missing field or a wrong type
+raises `MalformedResponse`, never a guess. The sync stores the amounts as integers and checks
+them against the chain's own totals, so a value silently coerced here would be a wrong balance
+there. An error names the endpoint and the field path (`vin[].prevout`),
 never a value, an address or a transaction id.
 
 A field the documented format does not list is not an error: `unknown_fields` names it so the
 sync can flag it (mempool.space adds fields now and then, and none can change a parsed amount).
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +52,9 @@ _INPUT = (
     "witness",
     "prevout",
 )
+# A transaction id as Esplora writes it, and as `finance.transactions.tx_hash` requires: 64
+# lower-case hex digits. Any other spelling would never match an exchange's hash.
+_TXID = re.compile(r"[0-9a-f]{64}")
 _TX = ("txid", "version", "locktime", "size", "weight", "sigops", "fee", "vin", "vout", "status")
 _STATS = ("address", "chain_stats", "mempool_stats")
 
@@ -170,6 +175,12 @@ class _Reader:
             raise self.bad(key)
         return value
 
+    def txid(self, key: str) -> str:
+        value = self.string(key)
+        if _TXID.fullmatch(value) is None:
+            raise self.bad(key)
+        return value
+
     def optional_string(self, key: str) -> str | None:
         return self.string(key) if self.has(key) else None
 
@@ -264,7 +275,7 @@ def _input(reader: _Reader) -> Input:
             raise reader.bad("witness")
         witness.append(item)
     return Input(
-        reader.string("txid"),
+        reader.txid("txid"),
         reader.integer("vout"),
         is_coinbase,
         reader.string("scriptsig"),
@@ -284,7 +295,7 @@ def _tx(value: JSONValue, endpoint: str, path: str) -> Tx:
         _prevout(_Reader(endpoint, f"{path}vout[].", item)) for item in reader.items("vout")
     )
     return Tx(
-        reader.string("txid"),
+        reader.txid("txid"),
         reader.integer("version", minimum=None),
         reader.integer("locktime"),
         reader.integer("size"),

@@ -253,6 +253,33 @@ async def test_normalizer_flags_are_published_and_kept(session) -> None:
     assert _flag(FEE_FLAG) in warnings and _flag(LEFT_CHAIN_FLAG) in warnings
 
 
+async def test_a_receipt_confirming_between_the_recheck_and_the_scan_posts(session) -> None:
+    """A receipt seen in the mempool, rechecked still there, confirms before its address's
+    stats are read: chain + mempool is the count the last history held, but the confirmed
+    count is not, so the history is asked again and the receipt posts in that sync."""
+    chain = FakeEsplora()
+    receipt = chain.add(make_tx(1, [(receiving(0), 30_000)], height=None))
+    wallet = await Wallet.create(session, chain)
+    await wallet.run()
+    assert await wallet.live() == {}
+
+    serve = chain.handler
+
+    def confirm_after_recheck(request: httpx.Request) -> httpx.Response:
+        response = serve(request)
+        if request.url.path.endswith(f"/tx/{receipt['txid']}/status"):
+            chain.move(receipt["txid"], TIP - 1)
+        return response
+
+    wallet.handler = confirm_after_recheck
+    await wallet.run(requested=True)
+
+    assert chain.asked_status() == [receipt["txid"]]
+    assert set(await wallet.live()) == {f"{receipt['txid']}:0"}
+    assert await wallet.balance() == btc(30_000)
+    assert await wallet.warnings() == []
+
+
 async def test_a_block_stamped_after_now_is_checked_at_its_time(session) -> None:
     chain = FakeEsplora()
     chain.add(make_tx(1, [(receiving(0), 100_000)], height=TIP))

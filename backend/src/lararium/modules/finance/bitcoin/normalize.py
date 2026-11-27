@@ -210,6 +210,8 @@ class _Normalizer:
         rows = await self.run.session.scalars(
             select(t.external_id).where(
                 t.connection_id == self.run.connection_id,
+                # The chain too, so the lookup uses transactions_chain_hash_idx.
+                t.chain == CHAIN,
                 t.tx_hash == txid,
                 t.status != "void",
             )
@@ -224,7 +226,9 @@ class _Normalizer:
 
     async def _post(self, stored: _Stored, movement: Movement) -> UUID:
         run, key = self.run, movement.key
-        assert stored.block_time is not None  # confirmed
+        if stored.block_time is None:
+            # `apply` posts only a confirmed transaction whose block time is known.
+            raise BitcoinDataError("A Bitcoin movement to post has no block time.")
         quantity = _btc(movement.sats)
         own = PostingInput(self.account_id, self.instrument_id, quantity)
         counterparty: CounterpartyFields | None = None

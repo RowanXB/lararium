@@ -498,6 +498,27 @@ async def test_wallet_account_is_made_once(session, run, chain: FakeEsplora) -> 
     assert (await get_account(session, account_id)).opened_on == first_day
 
 
+async def test_a_wallet_empty_at_its_first_sync_opens_when_first_used(
+    session, run, chain: FakeEsplora
+) -> None:
+    """Made before the wallet had a confirmed transaction, the account has no open date; the
+    first sync that finds one gives it that block's day, once: a later, earlier-looking
+    date never moves it."""
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    account_id = await _account_id(session, connection)
+    assert (await get_account(session, account_id)).opened_on is None
+
+    chain.add(_receive(1, receiving(0), height=TIP - 10))
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+
+    first_day = datetime.fromtimestamp(block_time(TIP - 10), UTC).date()
+    assert (await get_account(session, account_id)).opened_on == first_day
+    chain.add(_receive(2, receiving(1), height=TIP - 300))
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert (await get_account(session, account_id)).opened_on == first_day
+
+
 async def test_address_list_asks_each_address_once(session, run, chain: FakeEsplora) -> None:
     listed = (receiving(3), change(2), receiving(0))
     chain.add(_receive(1, change(2)))
