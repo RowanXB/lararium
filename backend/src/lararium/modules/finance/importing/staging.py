@@ -1911,8 +1911,12 @@ def _period_from_filename(
 
 
 def _first_day_partial(config: ProfileConfigModel) -> bool:
-    """The profile reads a second date for its rows (Revolut's CSV: booked on the completed
-    date, perhaps picked by the started date), so its export's first day may be partial."""
+    """Its export's first day may be partial: the profile reads a second date for its rows
+    (Revolut's CSV: booked on the completed date, perhaps picked by the started date), or it
+    reads OFX, whose DTSTART may carry a time of day (an incremental download starting at
+    noon) that the parser drops, keeping only its date."""
+    if isinstance(config, OfxProfileConfig):
+        return True
     return isinstance(config, CsvProfileConfig) and config.columns.started_at is not None
 
 
@@ -1931,7 +1935,8 @@ def _covered(
     partial too when its rows carry a second date (first_day_partial): Revolut's CSV books a
     row on its completed date but may pick rows by their started date, so a payment started
     the day before and completed on the first day may be missing (account type catalog
-    design §8.3). An export whose include_only filter left rows out (a pending payment, say,
+    design §8.3); an OFX's too, since its DTSTART may fall partway through its day. An
+    export whose include_only filter left rows out (a pending payment, say,
     that later appears completed) lists no day in full.
     """
     days = _importable_days(rows)

@@ -523,8 +523,9 @@ async def test_opening_from_ofx_ledgerbal(session: AsyncSession, run: Run, stage
 
     (adjustment,) = _adjustments(await _rows(session, batch))
     assert adjustment.quantity == Decimal("500.00")
-    # It lists 1-29 Nov in full, so its opening is the balance as 1 Nov starts.
-    assert adjustment.booking_date == date(2026, 10, 31)
+    # It lists 2-29 Nov in full (DTSTART may fall partway through 1 Nov), so its opening
+    # is the balance as 2 Nov starts.
+    assert adjustment.booking_date == date(2026, 11, 1)
     assert batch.warnings == []
     assert batch.statement is not None
     assert batch.statement.closing_balance == Decimal("2496.50")
@@ -1259,7 +1260,8 @@ async def test_covered_range_includes_rows_outside_the_period(
 ) -> None:
     """A file covers its stated period and every day it has a row on (OFX's DTSTART/DTEND
     don't bound its rows the way a PDF's period does). An export may be taken partway
-    through a day, so it lists in full every day but its last."""
+    through a day, so it lists in full every day but its last, and an OFX's first day too,
+    since its DTSTART may fall partway through it."""
     profile = await _profile(run, format="ofx")
     content = _ofx(
         [("20261120", "-3.50", "A"), ("20261127", "-1.00", "B"), ("20261203", "-2.00", "C")],
@@ -1279,7 +1281,7 @@ async def test_covered_range_includes_rows_outside_the_period(
     assert tuple(covered) == (
         date(2026, 11, 20),
         date(2026, 12, 3),
-        date(2026, 11, 20),
+        date(2026, 11, 21),
         date(2026, 12, 2),
     )
 
@@ -1397,17 +1399,20 @@ async def test_a_started_date_keeps_an_exports_first_day_partial(
     assert await _complete(session, batch) == (date(2026, 11, 2), date(2026, 11, 9))
 
 
-async def test_an_ofx_lists_from_its_start_to_the_day_before_its_last(
+async def test_an_ofx_lists_from_the_day_after_its_start_to_the_day_before_its_last(
     session: AsyncSession, run: Run, stage: Stage
 ) -> None:
+    """DTSTART may carry a time of day (an incremental download starting at noon) and is
+    read by its date alone, so an OFX's first day is listed only in part (spec §8.3)."""
     profile = await _profile(run, format="ofx")
-    content = _ofx(
-        [("20261105", "-3.50", "A"), ("20261108", "-1.00", "B")],
-        start="20261101",
-        end="20261110",
-    )
-    batch = await stage(profile, content, filename="statement.ofx")
-    assert await _complete(session, batch) == (date(2026, 11, 1), date(2026, 11, 9))
+    for start in ("20261101", "20261101120000"):
+        content = _ofx(
+            [("20261105", "-3.50", "A"), ("20261108", "-1.00", "B")],
+            start=start,
+            end="20261110",
+        )
+        batch = await stage(profile, content, filename=f"statement-{start}.ofx")
+        assert await _complete(session, batch) == (date(2026, 11, 2), date(2026, 11, 9))
 
 
 @pytest.mark.parametrize(
