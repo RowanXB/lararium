@@ -216,15 +216,14 @@ Format `csv`, `recommended`, with this profile (staged for the owner's review, a
 
 Needed for goal 6. Two pieces of transfer evidence, both generic.
 
-### 8.1 References on a shared payee account
+### 8.1 A payee bank account held by several own accounts (replaces references, 2026-11-27)
 
-- A `uk_bank_account` identifier registered to no account may carry **references**: pairs of (own account, reference), a reference unique within the identifier. An identifier carries either an account (as today) or references, never both.
-- A record naming that identifier whose payment reference matches a registered reference names that reference's account, as if the identifier were registered to it. The existing tiers then apply. "The account a record's identifier names" is read in three places today (`contra.eligible_records` for pairing, `contra.transfer_contra` for which contra a new record posts to, `engine.preview_match` for import previews); all three resolve it the same way, through one definition.
-- An identifier carrying references is not offered as a suggestion to register (`queries.suggestions`), and can't be dismissed while it carries any.
-- Registering an account on an identifier that carries references is refused, and so is adding references to one that has an account.
-- Matching is exact after trimming surrounding spaces and upper-casing both sides. No reference, or one matching none, leaves the record unidentified; it still names a bank account (`names_account`), so the weak sort-code tier never pairs it.
-- Registering, changing or removing references re-runs matching, as registering a card merchant does.
-- No provider's account number or reference is in code. The owner registers what their own app shows.
+Built first as per-account payment references (PR #46). Production showed Trading 212's reference is not fixed: the one a payment used and the three the app shows share every character but four, and those four differ between payments. A reference can't tell the three accounts apart, so it is dropped (table, route and resolution) and replaced by the model card merchants already use:
+
+- A `uk_bank_account` identifier may be **held by several own accounts** (`finance.account_identifier_holders`, as a card merchant is), instead of being registered to one. An identifier has either one account (`account_id`) or holders, never both.
+- A record naming a held bank account is identified **to that set**: in the one-sided registry tier its counterpart is a record on any holder account that may be a transfer (marked a bank transfer, or funded by bank transfer and naming nobody, §8.2), by amount and date window as today. The set decides only which accounts may hold the other side; uniqueness, the coverage gate, card precedence and every other rule are unchanged.
+- It is not a suggestion to register while it has holders, and can't be dismissed. Registering holders re-runs matching. The owner registers the bank details their app shows once; no provider's details are in code.
+- Its contra at posting is Unassigned, as a record naming a card merchant's holders is, until it pairs.
 
 ### 8.2 A deposit whose method the source doesn't state
 
@@ -291,7 +290,7 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
 ## 12. Open, for the owner
 
 - Interest: once a real interest row exists, export from the account's first day; a follow-up sets its `Action` in `card_types` (and adds a statement PDF if one is offered).
-- TODO (owner, 2026-11-27): a web form for a shared payee's references, to list, add and remove them, with a read-back of the current set. Part B registers them through the API only (the plan's Decision 2), and the only read-back is the registration response.
+- TODO (owner, 2026-11-27): a web form to register a shared payee bank account's holders, with a read-back of the current set (API only today).
 - TODO (2026-11-27): setting or changing an existing account's opening date (§8.3 item 2). It is set only when an account is created (the Add account upload form asks for it); no route sets or changes it on an account that exists.
 
 ## 13. After deploy
