@@ -746,6 +746,9 @@ Lararium 从 Binance 读取的内容：
     P2P 订单在“Binance Funding”上同样处理，按其单价。只有已完成的才入账。Pay 交易把付出或收到的金额
     记在它动用的每个钱包上（组合支付会涉及多个钱包），对 Unassigned 入账；返佣是 Spot 上的收入，若由
     资产分红发放则只入账一次。Binance 只提供 2020 年 6 月 10 日以来的返佣，这让首次同步多出大约 7 分钟。
+    有杠杆账户时，借款和还款历史按 6 天的时间窗一直提供到 2017 年：首次同步因此多出约 1,150 个请求
+    （大约 2 分钟），每个逐仓交易对还要再多同样数量。每次同步还会对每个有序的逐仓交易对组合各请求一次
+    逐仓之间的划转，N 个交易对就是 N × (N − 1) 个请求。
 
 已用真实账户核对：密钥检查，以及在 `api.binance.com`、`fapi.binance.com` 和 `dapi.binance.com` 上的
 HMAC 签名；Spot 和 Earn 的余额；充值、提现、现货交易、闪兑、资产分红和活期 Earn，包括 Spot 的精确对账
@@ -771,9 +774,13 @@ HMAC 签名；Spot 和 Earn 的余额；充值、提现、现货交易、闪兑�
 在 Binance 创建一个 API 密钥，只勾选 **Enable Reading**。Lararium 在每次同步开始时检查密钥的
 权限：只要开启了其他任何权限，无论已知还是未知，同步都会拒绝这个密钥；没有 **Enable Reading**
 的密钥同样会被拒绝。IP 限制可选。两种密钥类型都支持：HMAC（“system generated”）和 Ed25519
-（“self-generated”）。注意 Binance 只为 `api.binance.com` 提供 Ed25519 密钥的文档。如果合约或期权
-主机不接受 Ed25519 密钥，连接不会被拒绝：该主机不再被读取（一周后再次询问，更新密钥后则立即询问），
-它的钱包此前的余额在再次读取之前继续计入，并有一条警告指出主机名，建议改用 HMAC 密钥以包含它。
+（“self-generated”）。注意 Binance 只为 `api.binance.com` 提供 Ed25519 密钥的文档。如果合约、期权或
+Portfolio Margin 主机在 `api.binance.com` 已接受密钥之后拒绝它，连接不会被拒绝：该主机不再被读取
+（一周后再次询问，更新密钥后则立即询问），并有一条警告指出主机名（若是 Ed25519 密钥，还会建议改用
+HMAC 密钥以包含它）。它的钱包此前的余额在再次读取之前继续计入，Portfolio Margin 除外：Portfolio
+Margin 开启时，它所承载的 Cross Margin 和合约钱包不计入任何余额，所以如果 `papi.binance.com` 拒绝
+密钥（Ed25519 密钥就可能如此），Portfolio Margin 的资产完全不会被计入。被 `api.binance.com` 拒绝的
+密钥则视为被拒绝。
 
 ### 2. 添加连接
 

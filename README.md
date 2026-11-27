@@ -918,7 +918,11 @@ What Lararium reads from Binance:
     ones are posted. A Pay transaction moves what it paid or received on each wallet it drew
     on (a combined payment on several) against Unassigned; a rebate is income on Spot, posted
     once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
-    makes the first sync about 7 minutes longer.
+    makes the first sync about 7 minutes longer. With a margin account, the borrow and repay
+    history is served in 6-day windows back to 2017: about 1,150 more requests on the first
+    sync (roughly 2 minutes), and as many again for each isolated margin pair. Each sync also
+    asks transfers between two isolated pairs once per ordered pair of pairs, N × (N − 1)
+    requests for N pairs.
 
 Checked against a real account: the key check and HMAC signing on `api.binance.com`,
 `fapi.binance.com` and `dapi.binance.com`; the Spot and Earn balances; deposits, withdrawals,
@@ -947,10 +951,14 @@ permissions at the start of every sync: any other permission that is on, known o
 makes the sync refuse the key, and a key without **Enable Reading** is refused too. An IP
 restriction is optional. Both key types are accepted: HMAC ("system generated") and Ed25519
 ("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only. If
-the futures or options host refuses an Ed25519 key, the connection is not rejected: that host
-is not read (it is asked again a week later, or at once when you update the key), its wallets'
-earlier balances keep counting until it is read again, and a warning names the host and asks
-for an HMAC key to include it.
+a futures, options or Portfolio Margin host refuses the key after `api.binance.com` accepted
+it, the connection is not rejected: that host is not read (it is asked again a week later, or
+at once when you update the key), and a warning names the host (for an Ed25519 key, it asks
+for an HMAC key to include it). Its wallets' earlier balances keep counting until it is read
+again, except Portfolio Margin's: while Portfolio Margin is on, the Cross Margin and futures
+wallets it holds count nothing, so if `papi.binance.com` refuses the key (as it may an Ed25519
+key), Portfolio Margin's assets are not counted at all. A key `api.binance.com` refuses is
+rejected.
 
 ### 2. Add the connection
 
