@@ -16,6 +16,7 @@ from lararium.modules.finance.ledger import (
     post_transaction,
 )
 from lararium.modules.finance.owner_categories import set_owner_category
+from lararium.modules.finance.pricing import record_price
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 
 from .importing.staging_helpers import isolated_example
@@ -103,9 +104,13 @@ async def test_entries_totals_and_filters(session, run, make_account, post, btc)
     assert salary.id not in [e.transaction_id for e in none.entries]
 
 
+OWNER_CATEGORIES = [None, "family_money", "gift"]
+
+
 @st.composite
 def moves(draw):
-    """Signed fiat flows on two accounts, some categorised, and one hidden-pot move."""
+    """Signed fiat flows on two accounts, some with the source's category, some with the
+    owner's; a coin reward, priced or not; and one hidden-pot move."""
     return {
         "flows": draw(
             st.lists(
@@ -114,8 +119,19 @@ def moves(draw):
                     st.integers(-5000, 5000).filter(bool),
                     st.integers(1, 60),
                     st.sampled_from([None, "salary", "gift", "interest"]),
+                    st.sampled_from(OWNER_CATEGORIES),
                 ),
                 max_size=8,
+            )
+        ),
+        # (satoshis, day offset, a GBP price or None for none, the owner's category)
+        "reward": draw(
+            st.none()
+            | st.tuples(
+                st.integers(1, 100_000),
+                st.integers(1, 60),
+                st.none() | st.integers(1_000, 90_000),
+                st.sampled_from(OWNER_CATEGORIES),
             )
         ),
         "pot": draw(st.integers(1, 900)),
@@ -124,20 +140,42 @@ def moves(draw):
 
 @settings(max_examples=25)
 @given(scenario=moves())
-async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, scenario) -> None:
+async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, btc, scenario) -> None:
     async with isolated_example(session):
         a = await make_account(name="A", balance_mode="transactions")
         b = await make_account(name="B", balance_mode="transactions")
+        wallet = await make_account(name="W", subtype="wallet", balance_mode="transactions")
         pot = await make_account(name="Pot", subtype="savings_pot", balance_mode="hybrid")
         accounts = {"A": a, "B": b}
-        for which, pence, offset, category in scenario["flows"]:
+        for which, pence, offset, category, owner in scenario["flows"]:
             day = date.fromordinal(START.toordinal() + offset)
-            await post(
+            record = await post(
                 accounts[which],
                 str(Decimal(pence) / 100),
                 day,
                 **({"category": category} if category else {}),
             )
+            if owner:
+                await run(set_owner_category, [record.id], owner)
+        if scenario["reward"] is not None:
+            satoshis, offset, price, owner = scenario["reward"]
+            if price is not None:
+                await run(
+                    record_price,
+                    instrument_id=btc.id,
+                    quote_instrument_id=gbp.id,
+                    price=Decimal(price),
+                    as_of_date=START,
+                )
+            reward = await post(
+                wallet,
+                str(Decimal(satoshis).scaleb(-8)),
+                date.fromordinal(START.toordinal() + offset),
+                instrument=btc,
+                income_kind="reward",
+            )
+            if owner:
+                await run(set_owner_category, [reward.id], owner)
         # Money moved in from a hidden pot: income for the Overview, not an entry here.
         await run(
             post_transaction,
@@ -160,3 +198,11 @@ async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, scen
             assert sum((p.total for p in report.periods), Decimal(0)) == report.total
             for period in report.periods:
                 assert sum((c.amount for c in period.by_category), Decimal(0)) == period.total
+            # The owner's category decides each entry it is set on; with no category splits
+            # drawn, both reports then agree category by category too.
+            for entry in report.entries:
+                if entry.owner_category is not None:
+                    assert entry.category == entry.owner_category
+            assert {c.category: c.amount for c in report.categories} == {
+                c.category: c.income for c in flow.categories if c.income
+            }
