@@ -625,7 +625,10 @@ until their `Action` is known.
   made this way shows **Reject** on the Transfers page, not Unpair, like a card pair: neither
   record is a transfer without the other. With three Trading 212 accounts, a transfer between
   them names no counterpart (see below), so its incoming side may be taken as the top-up for a
-  same-amount payment to the shared payee until the real deposit arrives; then both go to review.
+  same-amount payment to the shared payee until the real deposit arrives. Then the pair comes
+  apart and both records go back to Unassigned, with no review item on the Transfers page (the
+  payment names no single account, so it carries no transfer): pair them by hand. If the real
+  deposit is booked after the window, the wrong pair stays until you reject it.
 - **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
