@@ -192,8 +192,8 @@ Only these run locally (remote Docker host); CI runs the rest.
 ## 10. Before and after deploy
 
 Before deploy:
-- Run `make real-check` with the Cash ISA's real files (the profile now reads Notes strictly: another form is a row error).
-- Check the Notes forms of a real Invest or Stocks ISA History CSV (production holds no export rows to count, 2026-11-27): count its `Deposit` and `Withdrawal` rows by form (empty, transaction id, sent to a bank account, other). An external deposit with empty Notes would be taken as a family move; another form refuses the upload. If either appears, the owner decides before deploy.
+- Run `make real-check` with the Cash ISA's real files (the profile now reads Notes strictly: another form is a row error). Done 2026-11-27 on 0732ac8: both Cash ISA History CSVs commit in both orders with no error rows; their Notes are a transaction id, empty, and a sent-to bank account. The later change to one shared `Transaction ID: \S+` form only widens what is accepted.
+- Check the Notes forms of a real Invest or Stocks ISA History CSV (production holds no export rows to count, 2026-11-27): count its `Deposit` and `Withdrawal` rows by form (empty, transaction id, sent to a bank account, other). An external deposit with empty Notes would be taken as a family move; another form refuses the upload. If either appears, the owner decides before deploy. Checked 2026-11-27 on the owner's two Invest/Stocks ISA exports (one row each): both a `Deposit` with `Transaction ID: <id>`, the id of uppercase letters and digits (not hex), which the shared form accepts as outside the family. No empty-Notes external deposit seen, but two card top-ups can't rule out a bank-transfer deposit with empty Notes; check the first export that holds one.
 - Snapshot the matched transfers (ids, sides, status) to diff after the first heal: the near-window split and one-side-alike groups (§5.7, §5.10) are generic and may change pairs of any provider.
 
 After deploy:
