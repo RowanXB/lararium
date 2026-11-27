@@ -71,11 +71,13 @@ beforeEach(() => {
 });
 
 function renderPage() {
+  const client = new QueryClient();
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={client}>
       <IncomePage />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 function rowOf(text: string) {
@@ -127,7 +129,7 @@ it("sets one entry's category", async () => {
   renderPage();
   await screen.findByText("ACME LTD");
 
-  await user.type(rowOf("ACME LTD").getByLabelText("Category"), "salary{Enter}");
+  await user.type(rowOf("ACME LTD").getByLabelText(/^Category for/), "salary{Enter}");
 
   await waitFor(() =>
     expect(setTransactionCategories).toHaveBeenCalledWith({
@@ -179,7 +181,7 @@ it("shows the source column unchanged after categorising", async () => {
   await screen.findByText("Gross Interest");
   const row = rowOf("Gross Interest");
   expect(row.getByText("Interest")).toBeInTheDocument();
-  expect(row.getByLabelText("Category")).toHaveValue("family");
+  expect(row.getByLabelText(/^Category for/)).toHaveValue("family");
 });
 
 it("shows a coin reward's quantity and No price when unpriced", async () => {
@@ -207,4 +209,108 @@ it("shows a coin reward's quantity and No price when unpriced", async () => {
   expect(row.getByText("No price")).toBeInTheDocument();
   expect(row.getByText("0.00001 BTC")).toBeInTheDocument();
   expect(row.getByText("Reward")).toBeInTheDocument();
+});
+
+async function pickAccount(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.click(await screen.findByRole("combobox", { name: "Account" }));
+  await user.click(await screen.findByRole("option", { name }));
+}
+
+it("drops the bulk selection when the view changes, and sends nothing", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await screen.findByText("ACME LTD");
+  await user.click(rowOf("ACME LTD").getByRole("checkbox"));
+  expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+  await pickAccount(user, "Savings");
+
+  await waitFor(() => expect(screen.queryByText(/selected$/)).toBeNull());
+  expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
+  expect(setTransactionCategories).not.toHaveBeenCalled();
+});
+
+it("keeps the bulk selection when one row is written", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await screen.findByText("ACME LTD");
+  await user.click(rowOf("Gross Interest").getByRole("checkbox"));
+
+  await user.type(rowOf("ACME LTD").getByLabelText(/^Category for/), "salary{Enter}");
+  await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(getIncome).toHaveBeenCalledTimes(2));
+
+  expect(screen.getByText("1 selected")).toBeInTheDocument();
+});
+
+const SET = { ...ENTRY, owner_category: "salary", category: "salary" };
+
+it("sends nothing when a set row is emptied and left", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getIncome).mockResolvedValue({ data: { ...INCOME, entries: [SET] } } as never);
+  renderPage();
+  await screen.findByText("ACME LTD");
+
+  const field = rowOf("ACME LTD").getByLabelText(/^Category for/);
+  await user.clear(field);
+  await user.tab();
+
+  expect(setTransactionCategories).not.toHaveBeenCalled();
+  expect(field).toHaveValue("salary");
+});
+
+it("sends once when Enter is followed by a blur", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await screen.findByText("ACME LTD");
+
+  await user.type(rowOf("ACME LTD").getByLabelText(/^Category for/), "salary{Enter}");
+  await user.tab();
+
+  await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(1));
+});
+
+it("clears a row's category with its clear button", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getIncome).mockResolvedValue({ data: { ...INCOME, entries: [SET] } } as never);
+  renderPage();
+  await screen.findByText("ACME LTD");
+
+  await user.click(screen.getByRole("button", { name: "Clear category for Pay" }));
+
+  await waitFor(() =>
+    expect(setTransactionCategories).toHaveBeenCalledWith({
+      body: { transaction_ids: ["t1"], category: null },
+      throwOnError: true,
+    }),
+  );
+});
+
+it("lets the category filter be cleared when nothing matches", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await screen.findByText("ACME LTD");
+  vi.mocked(getIncome).mockResolvedValue({
+    data: { ...INCOME, total: "0", categories: [], entries: [], periods: [] },
+  } as never);
+  await user.click(screen.getByRole("button", { name: /Interest/ }));
+  expect(await screen.findByText("Showing Interest")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Clear filter" }));
+
+  await waitFor(() =>
+    expect(vi.mocked(getIncome).mock.lastCall?.[0]?.query).not.toHaveProperty("category"),
+  );
+});
+
+it("reads the cash flow again after a write", async () => {
+  const user = userEvent.setup();
+  const client = renderPage();
+  const spy = vi.spyOn(client, "invalidateQueries");
+  await screen.findByText("ACME LTD");
+
+  await user.type(rowOf("ACME LTD").getByLabelText(/^Category for/), "salary{Enter}");
+
+  await waitFor(() =>
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ["cash-flow"] })),
+  );
 });

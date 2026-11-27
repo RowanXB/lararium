@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Input } from "./ui/input";
 
@@ -8,7 +8,7 @@ const SUGGESTIONS = ["salary", "family"];
 type Props = {
   value: string | null;
   known: readonly string[];
-  onChange: (category: string | null) => void;
+  onChange: (category: string) => void;
   label?: string;
 };
 
@@ -18,11 +18,23 @@ type Props = {
 export function CategoryPicker({ value, known, onChange, label = "Category" }: Props) {
   const listId = useId();
   const [draft, setDraft] = useState(value ?? "");
-  useEffect(() => setDraft(value ?? ""), [value]);
+  // What was last sent, so Enter followed by a blur before the refetch lands sends once.
+  const sent = useRef<string | null>(null);
+  useEffect(() => {
+    setDraft(value ?? "");
+    sent.current = null;
+  }, [value]);
 
+  // An empty or unchanged field sends nothing: clearing is an explicit button, never a
+  // side effect of leaving the field.
   function commit() {
-    const next = draft.trim() === "" ? null : draft.trim();
-    if (next !== value) onChange(next);
+    const next = draft.trim();
+    if (next === "" || next === value || next === sent.current) {
+      setDraft(value ?? "");
+      return;
+    }
+    sent.current = next;
+    onChange(next);
   }
 
   return (

@@ -1,5 +1,6 @@
+import { X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   getFinanceSettings,
@@ -197,11 +198,24 @@ function EntriesTable({ entries, currency, known, selected, onToggle, onCategory
               <AmountCell entry={entry} currency={currency} />
               <TableCell>{source}</TableCell>
               <TableCell>
-                <CategoryPicker
-                  value={entry.owner_category}
-                  known={known}
-                  onChange={(category) => onCategory([id], category)}
-                />
+                <div className="flex items-center gap-1">
+                  <CategoryPicker
+                    label={`Category for ${entry.description}`}
+                    value={entry.owner_category}
+                    known={known}
+                    onChange={(category) => onCategory([id], category)}
+                  />
+                  {entry.owner_category !== null && (
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Clear category for ${entry.description}`}
+                      onClick={() => onCategory([id], null)}
+                    >
+                      <X aria-hidden />
+                    </Button>
+                  )}
+                </div>
               </TableCell>
             </TableRow>
           );
@@ -247,17 +261,26 @@ export function IncomePage() {
   });
 
   const write = useMutation({
-    mutationFn: (v: { ids: string[]; category: string | null }) =>
+    mutationFn: (v: { ids: string[]; category: string | null; bulk?: boolean }) =>
       setTransactionCategories({
         body: { transaction_ids: v.ids, category: v.category },
         throwOnError: true,
       }),
-    onSuccess: async () => {
-      setSelected(new Set());
-      setBulk(null);
+    onSuccess: async (_, v) => {
+      // A single row's write leaves a bulk selection in progress alone.
+      if (v.bulk) {
+        setSelected(new Set());
+        setBulk(null);
+      }
       await refreshAfterCategoryWrite(queryClient);
     },
   });
+
+  // What the selection was made on is gone when the view changes; never act on rows unseen.
+  useEffect(() => {
+    setSelected(new Set());
+    setBulk(null);
+  }, [start, end, accountId, category]);
 
   const toggle = (ids: string[], on: boolean) =>
     setSelected((prev) => {
@@ -271,6 +294,9 @@ export function IncomePage() {
 
   const currency = settings.data?.reporting_currency;
   const data = income.data;
+  // A refetch can drop rows: only the ones still shown count and are sent.
+  const shownIds = useMemo(() => new Set((data?.entries ?? []).map((e) => e.transaction_id)), [data]);
+  const chosen = useMemo(() => [...selected].filter((id) => shownIds.has(id)), [selected, shownIds]);
   const own = (accounts.data ?? []).filter((a) => !a.system);
   const accountOptions = [
     { value: ALL_ACCOUNTS, label: "All accounts" },
@@ -315,7 +341,17 @@ export function IncomePage() {
               <CardHeader>
                 <CardTitle>By category</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-3">
+                {category !== null && (
+                  <p className="flex items-center gap-2 text-sm">
+                    <span>
+                      Showing {category === UNCATEGORISED ? "Uncategorised" : categoryLabel(category)}
+                    </span>
+                    <Button size="sm" variant="outline" onClick={() => setCategory(null)}>
+                      Clear filter
+                    </Button>
+                  </p>
+                )}
                 <ByCategory
                   income={data}
                   currency={currency}
@@ -336,9 +372,9 @@ export function IncomePage() {
 
           <Card>
             <CardContent className="space-y-4">
-              {selected.size > 0 && (
+              {chosen.length > 0 && (
                 <div className="flex flex-wrap items-center gap-3 text-sm">
-                  <span>{selected.size} selected</span>
+                  <span aria-live="polite">{chosen.length} selected</span>
                   <CategoryPicker
                     label="Category for selected"
                     value={bulk}
@@ -348,7 +384,7 @@ export function IncomePage() {
                   <Button
                     size="sm"
                     disabled={bulk === null || write.isPending}
-                    onClick={() => write.mutate({ ids: [...selected], category: bulk })}
+                    onClick={() => write.mutate({ ids: chosen, category: bulk, bulk: true })}
                   >
                     Apply
                   </Button>
@@ -356,7 +392,7 @@ export function IncomePage() {
                     size="sm"
                     variant="outline"
                     disabled={write.isPending}
-                    onClick={() => write.mutate({ ids: [...selected], category: null })}
+                    onClick={() => write.mutate({ ids: chosen, category: null, bulk: true })}
                   >
                     Clear category
                   </Button>
@@ -369,7 +405,7 @@ export function IncomePage() {
                   entries={data.entries}
                   currency={currency}
                   known={data.known_categories}
-                  selected={selected}
+                  selected={new Set(chosen)}
                   onToggle={toggle}
                   onCategory={(ids, next) => write.mutate({ ids, category: next })}
                 />
