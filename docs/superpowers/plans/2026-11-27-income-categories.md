@@ -18,7 +18,7 @@
 - Effective category, in order: the owner's category (every flow of its transaction); else `income_kind` for a positive flow only; else the source's `category`; else none. An owner category replaces category splits.
 - A non-fiat posting is a flow only when its transaction has an `income_kind`, of either sign. It is valued at the instrument's latest price on or before the booking day (`as_of_date desc, source = 'manual' desc, recorded_at desc`), times `finance.v1_fx_rate(price currency, reporting, booking day)`. Without a price or rate it is left out and counted in `missing_count`.
 - Migration `0048`, revises `0047` (renumbered from 0047 when #53 merged first).
-- `NORMALIZER_VERSION` bumps: `trading212-norm-4`, `etoro-norm-5`, `ibkr-norm-5`, `binance-norm-3`. Monzo is unchanged.
+- `NORMALIZER_VERSION` bumps: `trading212-norm-4`, `etoro-norm-6` (#53 took etoro-norm-5), `ibkr-norm-5`, `binance-norm-3`. Monzo is unchanged.
 - Money is Decimal / Decimal strings, never floats. Tests and docs use invented amounts and names.
 - UI copy is English. Docs English only.
 - Tests: run only the new or changed test file (TDD red/green), plus `ruff check`, `ruff format --check`, `pyright`, `lint-imports` (backend) or `pnpm lint`, `pnpm typecheck` if present (web). Never run whole test directories: CI runs the rest. Backend tests run with `DOCKER_HOST=ssh://docker-test`.
