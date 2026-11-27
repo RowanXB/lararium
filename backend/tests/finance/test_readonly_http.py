@@ -368,3 +368,20 @@ async def test_concurrent_callers_respect_the_limit() -> None:
     await asyncio.gather(*(client.get("/a", pool="default") for _ in range(3)))
     times = [t for t, _ in env.requests]
     assert all(b - a >= 5 for a, b in itertools.pairwise(times))
+
+
+async def test_default_reset_wait_applies_without_header() -> None:
+    env = Env(httpx.Response(429), ok())
+    http = httpx.AsyncClient(transport=httpx.MockTransport(env.handler))
+    client = ReadOnlyClient(
+        http,
+        BASE,
+        dict,
+        {"default": RateLimit(100, 1)},
+        sleep=env.sleep,
+        clock=env.clock,
+        wall_clock=env.clock,
+        default_reset_wait=Decimal(60),
+    )
+    await client.get("/v1/x", pool="default")
+    assert env.sleeps == [60]
