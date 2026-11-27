@@ -54,22 +54,11 @@ nothing after every heal:
 - E7 decisions survive a later file and a re-sync: a rejected transfer stays rejected, its
   records on Unassigned, and unpaired records are never linked again.
 
-References on a shared payee (account type catalog design §8.1; `payee_scenarios`): a bank
-account registered to no account carries (account, reference) pairs, and records name it
-with a payment reference, each matching one of them (spelled with other case and spaces) or
-none, beside other sides naming nobody (some printing the connected account's sort code
-alone) and noise. Run once with the references registered (before the rows arrive, or after
-them, which matches again), and once with each record naming instead a bank account
-registered directly to the account its reference names (a record matching none names the
-payee, registered to nothing):
-- E8 a reference names its account: both runs end with the same transfers and contras.
-- E9 a reference matching none names nobody: its record identifies no account (no
-  holder) yet names a bank account (names_account), so no tier pairs it on its own
-  evidence: never MUTUAL nor WEAK, and ONE_SIDED only with a record naming its account.
-
-Accounts funded by bank transfer (account type catalog design §8.2; `funding_scenarios`): the
-payee scenario with some rows not marked bank transfers, run once as it is and once with a
-drawn set of accounts given a type funded by bank transfer:
+Accounts funded by bank transfer (account type catalog design §8.2; `funding_scenarios`):
+records naming a bank account, registered to an account or to none (`payee_scenarios`),
+beside other sides naming nobody (some printing the connected account's sort code alone) and
+noise, some rows not marked bank transfers, run once as it is and once with a drawn set of
+accounts given a type funded by bank transfer:
 - E10 funding changes only the pairs of unmarked records naming nobody on those accounts:
   every other same-currency edge of the pair relation (card and cross-currency edges are
   outside it), with its tier, is the same in both runs, and each one funding adds is
@@ -100,7 +89,6 @@ from lararium.modules.finance.transfers import (
     TransferSettings,
     list_transfers,
     load_transfer_settings,
-    register_references_and_rematch,
     reject,
     unpair,
 )
@@ -931,39 +919,29 @@ async def test_e5_waits_for_no_record_whose_row_pairs_with_another(
         await _run(h, scenario, order, every_heal_twice=True)
 
 
-# References on a shared payee (E8, E9).
-PAYEE = "707070:70707070"  # a platform's client money account, registered to no account
+# Records naming a bank account (E10's scenarios).
+PAYEE = "707070:70707070"  # someone's bank account, registered to no account
 PAYEE_ACCOUNTS = ("A", "B", "C", CONNECTED)
-# The bank account each account is registered under directly, in the run that names it.
+# The bank account an account is registered under, when a row names it.
 DIRECT = {
     "A": "717171:71717171",
     "B": "727272:72727272",
     "C": "737373:73737373",
     CONNECTED: "747474:74747474",
 }
-REFERENCES = ("REF-1", "REF-2", "REF-3", "REF-4")
-# A payment reference matching none: none at all, another, or one spelled with a space.
-UNMATCHED = (None, "REF-9", "REF 1")
-
-
-def _spellings(reference: str) -> tuple[str, ...]:
-    """A registered reference as a record may give it: matching is exact after trimming
-    surrounding spaces and upper-casing."""
-    return (reference, reference.lower(), f"  {reference.lower()} ")
 
 
 @dataclass(frozen=True)
 class PayeeRow:
-    """A row: one naming the shared payee with a payment reference (`reference`), and the
-    account that reference names (`names`, None when it matches none); or one naming
-    nobody, its import row printing a sort code alone or nothing."""
+    """A row: one naming a bank account (`payee`), the one registered to the account
+    `names`, or one registered to no account when `names` is None; or one naming nobody,
+    its import row printing a sort code alone or nothing."""
 
     key: str
     account: str
     quantity: Decimal  # signed
     day: date
     payee: bool = False
-    reference: str | None = None
     names: str | None = None
     sort_code: str | None = None
 
@@ -974,9 +952,8 @@ class PayeeRow:
 
 @dataclass(frozen=True)
 class PayeeScenario:
-    references: tuple[tuple[str, str], ...]  # (account, reference) the payee carries
+    targets: tuple[str, ...]  # the accounts registered under their DIRECT bank account
     rows: tuple[PayeeRow, ...]  # in the order they arrive
-    registered_first: bool  # the references are registered before the rows, else after
 
     @property
     def complete(self) -> tuple[date, date]:
@@ -987,19 +964,16 @@ class PayeeScenario:
 @st.composite
 def payee_scenarios(draw: st.DrawFn) -> PayeeScenario:
     targets = draw(st.lists(st.sampled_from(PAYEE_ACCOUNTS), min_size=1, max_size=4, unique=True))
-    references = tuple(zip(targets, draw(st.permutations(REFERENCES)), strict=False))
-    of = dict(references)
     rows: list[PayeeRow] = []
     for index in range(draw(st.integers(1, 4))):
         account = draw(st.sampled_from(PAYEE_ACCOUNTS))
         quantity = draw(st.sampled_from(AMOUNTS)) * draw(st.sampled_from((-1, 1)))
         day = START + timedelta(days=draw(st.integers(0, 3)))
         names = draw(st.sampled_from((*targets, None)))
-        reference = draw(st.sampled_from(UNMATCHED if names is None else _spellings(of[names])))
-        rows.append(PayeeRow(f"p{index}", account, quantity, day, True, reference, names))
+        rows.append(PayeeRow(f"p{index}", account, quantity, day, True, names))
         if draw(st.integers(0, 3)) == 0:
             continue  # no other side
-        # Its other side, naming nobody: on the account the reference names, else elsewhere.
+        # Its other side, naming nobody: on the account it names, else elsewhere.
         others = [a for a in PAYEE_ACCOUNTS if a != account]
         other = names if names in others else draw(st.sampled_from(others))
         # An imported one may print the connected account's sort code alone (weak_tier's).
@@ -1018,160 +992,18 @@ def payee_scenarios(draw: st.DrawFn) -> PayeeScenario:
         quantity = draw(st.sampled_from(AMOUNTS)) * draw(st.sampled_from((-1, 1)))
         day = START + timedelta(days=draw(st.integers(0, 5)))
         rows.append(PayeeRow(f"n{index}", account, quantity, day))
-    return PayeeScenario(
-        references, tuple(draw(st.permutations(rows))), registered_first=draw(st.booleans())
-    )
+    return PayeeScenario(tuple(targets), tuple(draw(st.permutations(rows))))
 
 
 def describe_payee(scenario: PayeeScenario) -> str:
-    when = "before" if scenario.registered_first else "after"
-    carried = ", ".join(f"{a} {r}" for a, r in scenario.references)
-    lines = [f"the payee carries {carried}, registered {when} the rows"]
+    lines = [f"registered under their bank account: {', '.join(scenario.targets)}"]
     for r in scenario.rows:
         if r.payee:
-            shows = f"names the payee with {r.reference!r} ({r.names or 'matching none'})"
+            shows = f"names {r.names or 'a bank account registered to no account'}"
         else:
             shows = f"names nobody, prints {r.sort_code or 'nothing'}"
         lines.append(f"row {r.key}: {r.account} {r.quantity} on {r.day:%a %d %b}, {shows}")
     return "\n".join(lines)
-
-
-async def _payee_run(h: Harness, scenario: PayeeScenario, *, direct: bool) -> Outcome:
-    """One run: with the payee's references registered, or (`direct`) with each record
-    naming a bank account registered directly to the account its reference names. Checks
-    M4's invariants after every heal, and E9 at the end; returns what E8 compares."""
-    accounts = {name: await h.imported_bank(name) for name in PAYEE_ACCOUNTS[:3]}
-    bank = await h.connected_bank(CONNECTED)
-    await h.run(assign_identifier, bank.account.id, "uk_bank_account", CONNECTED_ID)
-    await history(h.connector_tx, bank)
-    accounts[CONNECTED] = bank.account
-    payee = await h.run(get_or_create_identifier, "uk_bank_account", PAYEE)
-    directly: dict[str, UUID] = {}
-    if direct:
-        for name, _ in scenario.references:
-            identifier = await h.run(
-                assign_identifier, accounts[name].id, "uk_bank_account", DIRECT[name]
-            )
-            directly[name] = identifier.id
-
-    async def register() -> None:
-        pairs = [(accounts[name].id, reference) for name, reference in scenario.references]
-        await h.run(register_references_and_rematch, PAYEE, pairs)
-        await assert_consistent(h.session)
-
-    if not direct and scenario.registered_first:
-        await register()
-    posted: dict[str, UUID] = {}
-    for row in scenario.rows:
-        value, identifier = None, None
-        if row.payee and direct and row.names is not None:
-            value, identifier = DIRECT[row.names], directly[row.names]
-        elif row.payee:
-            value, identifier = PAYEE, payee
-        if row.connected:
-            record = await h.connector_tx(
-                bank,
-                str(row.quantity),
-                external_id=row.key,
-                occurred_at=datetime.combine(row.day, time(), UTC),
-                identifier_id=identifier,
-                reference=row.reference,
-            )
-            posted[row.key] = record.id
-        else:
-            sort_code, number = value.split(":") if value else (row.sort_code, None)
-            posted[row.key] = await h.statement_row(
-                accounts[row.account],
-                str(row.quantity),
-                day=row.day,
-                details=RowDetails(sort_code=sort_code, account_number=number),
-                identifier_id=identifier,
-                reference=row.reference,
-                complete=scenario.complete,
-                key=row.key,
-            )
-        await h.heal()
-        await assert_consistent(h.session)
-    if not direct and not scenario.registered_first:
-        await register()  # matches every record naming the payee again, and heals
-    assert await h.heal() == 0
-
-    # E9
-    system = await system_account_ids(h.session)
-    relation = await pair_relation(h.session, system, await load_transfer_settings(h.session))
-    for row in scenario.rows:
-        if row.payee and row.names is None:
-            x = relation.records[posted[row.key]]
-            assert (x.holder, x.names_account) == (None, True), row.key
-            for other, tier in relation.tiers.get(x.id, {}).items():
-                y = relation.records[other]
-                assert tier == ONE_SIDED and y.holder == x.account_id, (row.key, tier)
-
-    names = {a.id: name for name, a in accounts.items()}
-    names |= {h.ids.unassigned: "Unassigned", h.ids.in_transit: "In transit"}
-    keys = {transaction_id: key for key, transaction_id in posted.items()}
-
-    def key_of(transaction_id: UUID | None) -> str:
-        return "-" if transaction_id is None else keys[transaction_id]
-
-    def described(t: TransferRecord) -> str:
-        out, in_ = key_of(t.out_transaction_id), key_of(t.in_transaction_id)
-        return (
-            f"{names[t.from_account_id]} -> {names[t.to_account_id]} {t.amount} {t.status}"
-            f" ({t.review_reason or 'no review'}), out {out}, in {in_}"
-        )
-
-    contras = {
-        row.key: await contra_account(h.session, posted[row.key], accounts[row.account].id)
-        for row in scenario.rows
-    }
-    return Outcome(
-        tuple(sorted(described(t) for t in await list_transfers(h.session))),
-        {key: names.get(contra, str(contra)) for key, contra in contras.items()},
-    )
-
-
-@given(scenario=payee_scenarios())
-async def test_a_reference_names_its_account_as_a_registration_would(
-    session: AsyncSession,
-    run: Run,
-    ids: SystemIds,
-    imported_bank: ImportedBank,
-    statement_row: StatementRow,
-    duplicate_row: DuplicateRow,
-    connected_bank: MakeConnected,
-    connector_tx: ConnectorTx,
-    heal: Heal,
-    scenario: PayeeScenario,
-) -> None:
-    """E8 and E9."""
-    note(describe_payee(scenario))
-    h = Harness(
-        session,
-        run,
-        ids,
-        imported_bank,
-        statement_row,
-        duplicate_row,
-        connected_bank,
-        connector_tx,
-        heal,
-    )
-    async with isolated_example(session):
-        referenced = await _payee_run(h, scenario, direct=False)
-    async with isolated_example(session):
-        registered = await _payee_run(h, scenario, direct=True)
-    assert referenced == registered  # E8
-
-    event(f"references: {len(scenario.references)}")
-    event(f"registered {'before' if scenario.registered_first else 'after'} the rows")
-    for row in scenario.rows:
-        if row.payee:
-            event("a reference matching none" if row.names is None else "a matching reference")
-        elif row.sort_code is not None:
-            event("an other side printing the connected account's sort code")
-    for status in sorted({line.split(" ")[4] for line in referenced.transfers}):
-        event(f"status {status}")
 
 
 # Accounts funded by bank transfer (account type catalog design §8.2; E10).
@@ -1223,18 +1055,20 @@ async def _funding_run(h: Harness, scenario: FundingScenario, funded: frozenset[
     accounts[CONNECTED] = bank.account
     for name in sorted(funded):
         await h.run(set_type_key, accounts[name].id, FUNDED_KEY)
+    directly = {
+        name: (
+            await h.run(assign_identifier, accounts[name].id, "uk_bank_account", DIRECT[name])
+        ).id
+        for name in payee.targets
+    }
     payee_id = await h.run(get_or_create_identifier, "uk_bank_account", PAYEE)
-
-    async def register() -> None:
-        pairs = [(accounts[name].id, reference) for name, reference in payee.references]
-        await h.run(register_references_and_rematch, PAYEE, pairs)
-        await assert_consistent(h.session)
-
-    if payee.registered_first:
-        await register()
     posted: dict[str, UUID] = {}
     for row in payee.rows:
-        identifier = payee_id if row.payee else None
+        value, identifier = None, None
+        if row.payee and row.names is not None:
+            value, identifier = DIRECT[row.names], directly[row.names]
+        elif row.payee:
+            value, identifier = PAYEE, payee_id
         bank_transfer = row.key not in scenario.unmarked
         if row.connected:
             record = await h.connector_tx(
@@ -1243,27 +1077,23 @@ async def _funding_run(h: Harness, scenario: FundingScenario, funded: frozenset[
                 external_id=row.key,
                 occurred_at=datetime.combine(row.day, time(), UTC),
                 identifier_id=identifier,
-                reference=row.reference,
                 bank_transfer=bank_transfer,
             )
             posted[row.key] = record.id
         else:
-            sort_code, number = PAYEE.split(":") if row.payee else (row.sort_code, None)
+            sort_code, number = value.split(":") if value else (row.sort_code, None)
             posted[row.key] = await h.statement_row(
                 accounts[row.account],
                 str(row.quantity),
                 day=row.day,
                 details=RowDetails(sort_code=sort_code, account_number=number),
                 identifier_id=identifier,
-                reference=row.reference,
                 bank_transfer=bank_transfer,
                 complete=payee.complete,
                 key=row.key,
             )
         await h.heal()
         await assert_consistent(h.session)
-    if not payee.registered_first:
-        await register()
     assert await h.heal() == 0
 
     system = await system_account_ids(h.session)

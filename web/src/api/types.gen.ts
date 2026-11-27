@@ -1029,47 +1029,9 @@ export type IdentifierOut = {
      */
     kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant';
     /**
-     * References
-     */
-    references: Array<IdentifierReference>;
-    /**
      * Sort Code
      */
     sort_code: string | null;
-    /**
-     * Value
-     */
-    value: string;
-};
-
-/**
- * IdentifierReference
- *
- * One own account behind a shared payee bank account, told apart by the payment
- * reference it is paid with (stored trimmed and upper-cased).
- */
-export type IdentifierReference = {
-    /**
-     * Account Id
-     */
-    account_id: string;
-    /**
-     * Reference
-     */
-    reference: string;
-};
-
-/**
- * IdentifierReferencesRegister
- *
- * The own accounts payments to a shared payee bank account go into, by reference; none
- * removes them.
- */
-export type IdentifierReferencesRegister = {
-    /**
-     * References
-     */
-    references: Array<IdentifierReference>;
     /**
      * Value
      */
@@ -3019,31 +2981,6 @@ export type RegisterCardMerchantResponses = {
 };
 
 export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
-
-export type RegisterIdentifierReferencesData = {
-    body: IdentifierReferencesRegister;
-    path?: never;
-    query?: never;
-    url: '/api/v1/finance/accounts/identifiers/references';
-};
-
-export type RegisterIdentifierReferencesErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type RegisterIdentifierReferencesError = RegisterIdentifierReferencesErrors[keyof RegisterIdentifierReferencesErrors];
-
-export type RegisterIdentifierReferencesResponses = {
-    /**
-     * Successful Response
-     */
-    200: IdentifierOut;
-};
-
-export type RegisterIdentifierReferencesResponse = RegisterIdentifierReferencesResponses[keyof RegisterIdentifierReferencesResponses];
 
 export type RenameAccountData = {
     body: AccountRename;

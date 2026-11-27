@@ -31,9 +31,7 @@ from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
     get_identifier,
-    named_account,
     register_card_merchant,
-    register_references,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -843,9 +841,8 @@ async def preview_match(
     `occurred_tz`: the time zone the row's time is read in, which posting stores and the
     gate reads its booking day in (pairs._gate_day); None, the owner's.
 
-    The row's evidence is its counterparty identifier only, with its payment reference
-    (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
-    read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    The row's evidence is its counterparty identifier only: `counterparty.account_number` is
+    not read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
     post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
@@ -868,13 +865,7 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        # As eligible_records' holder (contra.named_account_sql): its account, or by the
-        # reference.
-        holder=(
-            None
-            if named is None
-            else await named_account(session, named.id, counterparty.reference)
-        ),
+        holder=None if named is None else named.account_id,
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
@@ -930,20 +921,5 @@ async def register_card_merchant_and_rematch(
     rematch_identifiers). Records that don't name it yet (posted before it was registered)
     are named by their connector's next normalize (Monzo's replays them)."""
     record = await register_card_merchant(ctx, merchant_id, account_ids)
-    await rematch_identifiers(ctx, [record.id], heal=heal)
-    return record
-
-
-async def register_references_and_rematch(
-    ctx: CommandContext,
-    value: str,
-    references: Sequence[tuple[UUID, str]],
-    *,
-    heal: bool = True,
-) -> IdentifierRecord:
-    """register_references, then match again every record naming the bank account, so the
-    changed references take effect at once (healing unless `heal` is False, as in
-    rematch_identifiers)."""
-    record = await register_references(ctx, value, references)
     await rematch_identifiers(ctx, [record.id], heal=heal)
     return record

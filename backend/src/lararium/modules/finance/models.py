@@ -99,24 +99,6 @@ class AccountIdentifierHolder(Base):
     account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
 
 
-class AccountIdentifierReference(Base):
-    """A shared payee bank account's reference for one own account: a uk_bank_account
-    identifier registered to no account may carry several, one per account (design §8.1)."""
-
-    __tablename__ = "account_identifier_references"
-    __table_args__ = FINANCE_SCHEMA
-
-    identifier_id: Mapped[UUID] = mapped_column(
-        ForeignKey("finance.account_identifiers.id"), primary_key=True
-    )
-    # Its identifier's kind, always uk_bank_account: with the identifier id, a foreign key to
-    # (id, kind), so no other kind's row can have references.
-    kind: Mapped[str] = mapped_column(Text, server_default=text("'uk_bank_account'"))
-    account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"))
-    # Stored as normalize_reference gives it: trimmed, upper-case.
-    reference: Mapped[str] = mapped_column(Text, primary_key=True)
-
-
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = FINANCE_SCHEMA

@@ -2009,13 +2009,6 @@
             "title": "Kind",
             "type": "string"
           },
-          "references": {
-            "items": {
-              "$ref": "#/components/schemas/IdentifierReference"
-            },
-            "title": "References",
-            "type": "array"
-          },
           "sort_code": {
             "anyOf": [
               {
@@ -2040,54 +2033,11 @@
           "account_number",
           "account_id",
           "holder_account_ids",
-          "references",
           "dismissed_at",
           "created_by",
           "created_at"
         ],
         "title": "IdentifierOut",
-        "type": "object"
-      },
-      "IdentifierReference": {
-        "description": "One own account behind a shared payee bank account, told apart by the payment\nreference it is paid with (stored trimmed and upper-cased).",
-        "properties": {
-          "account_id": {
-            "format": "uuid",
-            "title": "Account Id",
-            "type": "string"
-          },
-          "reference": {
-            "title": "Reference",
-            "type": "string"
-          }
-        },
-        "required": [
-          "account_id",
-          "reference"
-        ],
-        "title": "IdentifierReference",
-        "type": "object"
-      },
-      "IdentifierReferencesRegister": {
-        "description": "The own accounts payments to a shared payee bank account go into, by reference; none\nremoves them.",
-        "properties": {
-          "references": {
-            "items": {
-              "$ref": "#/components/schemas/IdentifierReference"
-            },
-            "title": "References",
-            "type": "array"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "value",
-          "references"
-        ],
-        "title": "IdentifierReferencesRegister",
         "type": "object"
       },
       "ImportBatchDetailOut": {
@@ -5759,48 +5709,6 @@
           }
         },
         "summary": "Register Card Merchant",
-        "tags": [
-          "finance"
-        ]
-      }
-    },
-    "/api/v1/finance/accounts/identifiers/references": {
-      "post": {
-        "description": "Register the own accounts a shared payee bank account pays into, each by the payment\nreference it is paid with, replacing the ones it had; none removes them. The bank account\nmust be registered to no account. Every record naming it is matched again.",
-        "operationId": "register_identifier_references",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/IdentifierReferencesRegister"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdentifierOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Register Identifier References",
         "tags": [
           "finance"
         ]
