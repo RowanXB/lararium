@@ -460,7 +460,12 @@ async def test_dividends_interest_and_fees_are_never_a_transfer(session, run) ->
     ledger = Ledger(session, await _connection(run))
     kinds = ("DEPOSIT", "WITHDRAW", "TRANSFER", "FEE", "INTEREST_ON_FREE_CASH", "LENDING_INTEREST")
     entries = [("transactions", transaction_item(reference=kind, kind=kind)) for kind in kinds]
-    await ledger.normalize(SUMMARY, META, ("dividends", dividend_item()), *entries)
+    # A corporate action paying cash alone: two postings against Unassigned, as a dividend.
+    cash_only = _fill(type="CASH_AND_STOCK_ACQUISITION", price=Decimal(0), quantity=Decimal(0))
+    cash_only["fill"]["walletImpact"] |= {"netValue": Decimal(50), "taxes": []}
+    await ledger.normalize(
+        SUMMARY, META, ("dividends", dividend_item()), ("orders", cash_only), *entries
+    )
     marked = {kind: await _never_transfer(session, f"transaction:{kind}") for kind in kinds}
     assert marked == {
         "DEPOSIT": False,
@@ -471,6 +476,8 @@ async def test_dividends_interest_and_fees_are_never_a_transfer(session, run) ->
         "LENDING_INTEREST": True,
     }
     assert await _never_transfer(session, "dividend:div-0001") is True
+    assert len(await _postings(session, "order:700001")) == 2
+    assert await _never_transfer(session, "order:700001") is True
 
     # As posted before the marker: the replay marks them again.
     await session.execute(text("update finance.transactions set never_transfer = false"))
