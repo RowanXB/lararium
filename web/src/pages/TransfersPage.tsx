@@ -293,13 +293,12 @@ function SuggestionItem({
   accounts: AccountOut[];
 }) {
   const [accountId, setAccountId] = useState<string>();
+  const bank = suggestion.kind === "uk_bank_account";
+  const registrable = bank || suggestion.kind === "chain_address";
   const register = useWrite(async (account: string) =>
     addAccountIdentifier({
       path: { account_id: account },
-      body: {
-        kind: "uk_bank_account",
-        value: `${suggestion.sort_code}:${suggestion.account_number}`,
-      },
+      body: { kind: bank ? "uk_bank_account" : "chain_address", value: suggestion.value },
       throwOnError: true,
     }),
   );
@@ -316,7 +315,9 @@ function SuggestionItem({
     <li className="space-y-2 py-4 first:pt-0 last:pb-0">
       <div>
         <p className="font-medium">
-          {`${formatSortCode(suggestion.sort_code)} · ${suggestion.account_number}`}
+          {bank && suggestion.sort_code && suggestion.account_number
+            ? `${formatSortCode(suggestion.sort_code)} · ${suggestion.account_number}`
+            : suggestion.value}
         </p>
         <p className="text-sm text-muted-foreground">
           {[
@@ -329,23 +330,27 @@ function SuggestionItem({
         </p>
       </div>
       <div className="flex flex-wrap items-end gap-2">
-        <LabelledSelect
-          label="Account"
-          value={accountId}
-          options={accounts.map((account) => ({ value: account.id, label: account.name }))}
-          onChange={setAccountId}
-          placeholder="Pick an account"
-        />
-        <Button
-          disabled={busy || !accountId}
-          onClick={() => {
-            if (!accountId) return;
-            dismiss.reset();
-            register.mutate(accountId);
-          }}
-        >
-          Register
-        </Button>
+        {registrable && (
+          <>
+            <LabelledSelect
+              label="Account"
+              value={accountId}
+              options={accounts.map((account) => ({ value: account.id, label: account.name }))}
+              onChange={setAccountId}
+              placeholder="Pick an account"
+            />
+            <Button
+              disabled={busy || !accountId}
+              onClick={() => {
+                if (!accountId) return;
+                dismiss.reset();
+                register.mutate(accountId);
+              }}
+            >
+              Register
+            </Button>
+          </>
+        )}
         <Button
           variant="outline"
           disabled={busy}
@@ -376,10 +381,10 @@ export function TransfersPage() {
     queryFn: async () => (await listAccounts({ throwOnError: true })).data,
   });
   const error = transfers.error ?? suggestions.error ?? accounts.error;
-  // Bank accounts only: card merchants (kind "card_merchant") are registered through the API
-  // for now, as the design adds no screen for them.
+  // Bank accounts and chain addresses only: card merchants (kind "card_merchant") are
+  // registered through the API for now, as the design adds no screen for them.
   const bankSuggestions = suggestions.data?.filter(
-    (suggestion): suggestion is SuggestionOut => !("kind" in suggestion),
+    (suggestion): suggestion is SuggestionOut => suggestion.kind !== "card_merchant",
   );
 
   const all = transfers.data ?? [];

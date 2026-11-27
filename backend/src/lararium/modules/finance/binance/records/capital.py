@@ -1,0 +1,212 @@
+"""Deposits and withdrawals (design 5.7 and 5.12).
+
+A deposit is posted once Binance counts it in the balance (`status` 1, or 6: credited but
+locked); a withdrawal from the moment it is applied. Each is a transfer leg: its own posting
+and the contra `transfer_contra` chooses, nothing else, so a fee is a transaction of its own.
+A withdrawal cancelled, rejected or failed after it was posted is not voided, because the
+balance really fell and rose again: it stops being a transfer leg (its contra moves to
+Unassigned) and a refund puts the amount and the fee back. A fee and a refund are never
+transfer legs (`post` marks them so).
+
+The chain address on the other side is the counterparty identifier
+(`counterparty_identifier`); until it is known the contra is Unassigned unless the owner pairs
+the leg.
+"""
+
+from decimal import Decimal
+from uuid import UUID
+
+from lararium.modules.finance.binance.parse import Row
+from lararium.modules.finance.binance.records import (
+    Run,
+    amount,
+    code,
+    fees,
+    integer,
+    live,
+    post,
+    posted_at,
+    text,
+    when,
+)
+from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.identifiers import normalize_identifier
+from lararium.modules.finance.ledger import PostingInput
+from lararium.modules.finance.transfers import transfer_contra
+
+DEPOSITS = "deposits"
+WITHDRAWALS = "withdrawals"
+# `walletType`: 0 Spot, 1 Funding.
+_WALLETS = {0: "spot", 1: "funding"}
+# Deposits Binance counts in the balance: 1 success, 6 credited but cannot withdraw yet.
+_CREDITED = frozenset({1, 6})
+# Withdrawals out of the balance: 0 email sent, 2 awaiting approval, 4 processing, 6 completed.
+_APPLIED = frozenset({0, 2, 4, 6})
+# Withdrawals that gave the amount back: 1 cancelled, 3 rejected, 5 failure.
+_ENDED = frozenset({1, 3, 5})
+# What Binance puts in `txId` for a movement that never went on chain.
+_OFF_CHAIN = ("Off-chain transfer", "Internal transfer")
+
+
+def chain_hash(row: Row) -> str | None:
+    """The lower-cased transaction hash of an on-chain movement (`transferType` 0 with a
+    chain id), else None (design 5.12)."""
+    tx_id = text(row, "txId")
+    if tx_id is None or integer(row, "transferType") != 0 or tx_id.startswith(_OFF_CHAIN):
+        return None
+    return tx_id.lower()
+
+
+async def counterparty_identifier(run: Run, label: str, row: Row) -> UUID | None:
+    """The registry row of the chain address on the other side: a withdrawal's `address`, a
+    deposit's `sourceAddress`. None for a movement inside Binance (it names another user),
+    for no address, and for one that is no chain address (flagged by field name, never
+    value). A deposit's own `address` is Binance's and is never registered."""
+    if integer(row, "transferType") != 0:
+        return None
+    name = "sourceAddress" if label == DEPOSITS else "address"
+    value = text(row, name)
+    if value is None:
+        return None
+    try:
+        address = normalize_identifier("chain_address", value)
+    except FinanceValidationError:
+        run.flag(f"{label}.{name} is not a chain address")
+        return None
+    return await run.chain_address(address)
+
+
+def counterparty_name(row: Row, identifier_id: UUID | None) -> str | None:
+    """What Suggestions shows for an address: its network code, never the address. None when
+    no address was identified."""
+    if identifier_id is None:
+        return None
+    network = code(text(row, "network"))
+    return "address" if network in ("missing", "<other>") else f"{network} address"
+
+
+async def _wallet(run: Run, label: str, row: Row) -> UUID | None:
+    kind = integer(row, "walletType")
+    wallet = _WALLETS.get(kind) if kind is not None else None
+    if wallet is None:
+        run.flag(f"{label}.walletType not known")
+        return None
+    return await run.account(wallet)
+
+
+async def _onchain(run: Run, row: Row) -> None:
+    found = chain_hash(row)
+    await run.typed(tx_hash=found, is_onchain=found is not None)
+
+
+async def _contra(
+    run: Run,
+    key: str,
+    account_id: UUID,
+    identifier_id: UUID | None,
+    *,
+    never_transfer: bool = False,
+) -> UUID:
+    return await transfer_contra(
+        run.session,
+        source=run.source(key),
+        own_account_id=account_id,
+        counterparty_identifier_id=identifier_id,
+        other_postings=0,
+        never_transfer=never_transfer,
+    )
+
+
+async def deposit(run: Run, row: Row) -> None:
+    await _onchain(run, row)
+    if integer(row, "status") not in _CREDITED:
+        return
+    account_id = await _wallet(run, DEPOSITS, row)
+    coin = text(row, "coin") or ""
+    instrument_id = await run.asset(coin)
+    quantity = amount(DEPOSITS, row, "amount")
+    occurred_at = when(DEPOSITS, row, "completeTime") or when(DEPOSITS, row, "insertTime")
+    if account_id is None or instrument_id is None or quantity is None or occurred_at is None:
+        return
+    key = run.record.key
+    identifier_id = await counterparty_identifier(run, DEPOSITS, row)
+    contra = await _contra(run, key, account_id, identifier_id)
+    transaction_id = await post(
+        run,
+        key,
+        occurred_at=occurred_at,
+        description=f"Deposit {coin}",
+        postings=[
+            PostingInput(account_id, instrument_id, quantity),
+            PostingInput(contra, instrument_id, -quantity),
+        ],
+        counterparty_identifier_id=identifier_id,
+        counterparty_name=counterparty_name(row, identifier_id),
+        transfer_leg=True,
+    )
+    await run.typed(transaction_id=transaction_id)
+
+
+async def withdrawal(run: Run, row: Row) -> None:
+    await _onchain(run, row)
+    status = integer(row, "status")
+    key = run.record.key
+    if status not in _APPLIED and not (status in _ENDED and await live(run, key)):
+        # Pending nothing yet, ended before it was posted, or a status the catalogue does
+        # not list (flagged by the parser): nothing to post.
+        return
+    account_id = await _wallet(run, WITHDRAWALS, row)
+    coin = text(row, "coin") or ""
+    instrument_id = await run.asset(coin)
+    quantity = amount(WITHDRAWALS, row, "amount")
+    applied_at = when(WITHDRAWALS, row, "applyTime")
+    if account_id is None or instrument_id is None or quantity is None or applied_at is None:
+        return
+    fee = amount(WITHDRAWALS, row, "transactionFee") or Decimal(0)
+    identifier_id = await counterparty_identifier(run, WITHDRAWALS, row)
+    ended = status in _ENDED
+    # An ended withdrawal was no transfer: marked so, its contra is Unassigned and the
+    # transfer engine dissolves a transfer it was a leg of.
+    contra = await _contra(run, key, account_id, identifier_id, never_transfer=ended)
+    transaction_id = await post(
+        run,
+        key,
+        occurred_at=applied_at,
+        description=f"Withdrawal {coin}",
+        postings=[
+            PostingInput(account_id, instrument_id, -quantity),
+            PostingInput(contra, instrument_id, quantity),
+        ],
+        counterparty_identifier_id=identifier_id,
+        counterparty_name=counterparty_name(row, identifier_id),
+        transfer_leg=not ended,
+    )
+    await run.typed(transaction_id=transaction_id)
+    await post(
+        run,
+        f"{key}:fee",
+        occurred_at=applied_at,
+        description=f"Withdrawal fee {coin}",
+        postings=fees(account_id, run.unassigned, [(instrument_id, fee, "fee")]),
+    )
+    if not ended:
+        return
+    # With no time from Binance, the refund keeps the time it was first given: a later edit of
+    # the record (its `info`, say) comes with a later sync's reads.
+    refund = f"{key}:refund"
+    refunded_at = (
+        when(WITHDRAWALS, row, "completeTime")
+        or await posted_at(run, refund)
+        or await run.report_time()
+    )
+    await post(
+        run,
+        refund,
+        occurred_at=refunded_at,
+        description=f"Withdrawal refund {coin}",
+        postings=[
+            PostingInput(account_id, instrument_id, quantity),
+            PostingInput(account_id, instrument_id, fee, memo="fee"),
+            PostingInput(run.unassigned, instrument_id, -(quantity + fee)),
+        ],
+    )

@@ -142,3 +142,13 @@ def test_webhook_in_errors_quote_neither_the_secret_nor_the_database_password() 
     for error in (bad_secret, missing):
         text = str(error.value)
         assert "SECRETVALUE" not in text and "DBPASSWORD" not in text
+
+
+def test_coingecko_key_is_optional_secret_and_empty_means_unset() -> None:
+    dev = {"database_url": DATABASE_URL, "auth_mode": "dev"}
+    assert Settings(**dev).coingecko_api_key is None
+    assert Settings(**dev, coingecko_api_key="").coingecko_api_key is None
+    settings = Settings(**dev, coingecko_api_key="cg-TEST-0123")
+    assert settings.coingecko_api_key is not None
+    assert settings.coingecko_api_key.get_secret_value() == "cg-TEST-0123"
+    assert "cg-TEST-0123" not in repr(settings)

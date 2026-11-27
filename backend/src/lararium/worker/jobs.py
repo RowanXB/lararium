@@ -20,10 +20,12 @@ from lararium.core.actors import Actor
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import (
     AUTHORISED_AT_KEY,
+    SYNC_REQUESTED_KEY,
     ConnectionStatus,
     get_connection,
     record_sync_failure,
     record_sync_success,
+    settle_sync_request,
     transition_status,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
@@ -35,6 +37,7 @@ from lararium.core.notify import Notifier, notifier_from_settings
 from lararium.core.secrets import Secret
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules import registry
+from lararium.modules.finance.ecb import run_fetch_ecb_rates
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.monzo.webhooks import process_inbox
 from lararium.modules.finance.transfers import (
@@ -104,6 +107,8 @@ async def run_sync(
     connector = registry.connector(connection.connector)
     actor = Actor("connector", connector.name)
     args = {"connection_id": str(connection_id), "connector": connector.name}
+    seen_request = connection.config.get(SYNC_REQUESTED_KEY)
+    requested = seen_request is not None
 
     try:
         async with command_context(session, actor, "connection.sync", args) as ctx:
@@ -120,9 +125,13 @@ async def run_sync(
                     webhook=_webhook_target(settings),
                     full_backfill=backfill,
                     documents=LocalDocumentStore(settings.document_dir),
+                    requested=requested,
+                    coingecko_api_key=_coingecko_key(settings),
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
+            if requested:
+                await settle_sync_request(ctx, connection_id, seen_request)
             from_ = ("authorising",) if backfill else ("failing",)
             moved = await transition_status(
                 ctx, connection_id, "healthy", only_from=from_, authorised_at=backfill_for
@@ -236,6 +245,11 @@ def _webhook_target(settings: Settings) -> WebhookTarget | None:
         return None
     base_url, secret = webhook
     return WebhookTarget(base_url, Secret(secret.get_secret_value()))
+
+
+def _coingecko_key(settings: Settings) -> Secret | None:
+    key = settings.coingecko_api_key
+    return None if key is None else Secret(key.get_secret_value())
 
 
 def _master_key(settings: Settings) -> bytes:
@@ -481,6 +495,17 @@ async def check_transfers(timestamp: int) -> None:
     settings = get_settings()
     async with _job_resources(settings) as (http, sessions), sessions() as session:
         await run_check_transfers(session, notifier=notifier_from_settings(settings, http))
+
+
+# The ECB publishes its reference rates around 16:00 CET.
+@procrastinate_app.periodic(cron="30 16 * * *")
+@procrastinate_app.task(name="fetch_ecb_rates", queueing_lock="fetch_ecb_rates")
+async def fetch_ecb_rates(timestamp: int) -> int:
+    settings = get_settings()
+    async with _job_resources(settings) as (http, sessions):
+        written = await run_fetch_ecb_rates(sessions, http, datetime.now(UTC).date())
+    logger.info("stored %d ECB rates", written)
+    return written
 
 
 @procrastinate_app.periodic(cron="* * * * *")

@@ -5,11 +5,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import {
   authorizeConnection,
+  createBinanceConnection,
   createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
   createTrading212Connection,
   listConnections,
+  updateBinanceConnection,
   updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
@@ -39,6 +41,7 @@ const API_TYPES = [
   apiType("ibkr", "Interactive Brokers", "ibkr"),
   apiType("trading212.stocks_isa", "Trading 212", "trading212", { account_kind: "isa" }),
   apiType("etoro", "eToro", "etoro"),
+  apiType("binance", "Binance", "binance"),
 ];
 
 const CONNECTION = {
@@ -60,6 +63,11 @@ vi.mock("../api", () => ({
   createMonzoConnection: vi.fn(async () => ({ data: {} })),
   createIbkrConnection: vi.fn(async () => ({ data: {} })),
   updateIbkrConnection: vi.fn(async () => ({ data: {} })),
+  createBinanceConnection: vi.fn(async () => ({ data: {} })),
+  updateBinanceConnection: vi.fn(async () => ({ data: {} })),
+  listAccounts: vi.fn(async () => ({
+    data: [{ id: "0190a0b0-0000-7000-8000-0000000000a1", name: "Binance Spot" }],
+  })),
   createTrading212Connection: vi.fn(async () => ({ data: {} })),
   updateTrading212Connection: vi.fn(async () => ({ data: {} })),
   uploadIbkrStatement: vi.fn(async () => ({ data: { raw_records: 3 } })),
@@ -617,4 +625,201 @@ it("shows why an eToro statement upload failed", async () => {
     new File(["PK"], "statement.xlsx"),
   );
   expect(await screen.findByText("this statement is for another eToro user")).toBeInTheDocument();
+});
+
+const BINANCE = {
+  ...CONNECTION,
+  id: "0190a0b0-0000-7000-8000-0000000000b1",
+  connector: "binance",
+  display_name: "Binance main",
+  status: "healthy",
+  redirect_uri: null,
+  webhook_enabled: false,
+  binance: {
+    wallets: ["Spot", "Funding"],
+    first_sync_done: true,
+    differences: [],
+    flags: [],
+  },
+};
+
+it("adds a Binance connection with an HMAC key and clears the secrets", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  renderPage(client);
+  const form = await screen.findByRole("form", { name: "Add Binance" });
+  expect(
+    within(form).getByText(
+      (_, element) =>
+        element?.tagName === "P" &&
+        element.textContent ===
+          "Create an API key on Binance with only Enable Reading ticked. Any other permission is refused.",
+    ),
+  ).toBeInTheDocument();
+  expect(within(form).getByText("Enable Reading").tagName).toBe("STRONG");
+  await user.type(within(form).getByLabelText("Display name"), "Binance main");
+  const key = within(form).getByLabelText("API key");
+  const secret = within(form).getByLabelText("Secret key");
+  expect(key).toHaveAttribute("type", "password");
+  expect(secret).toHaveAttribute("type", "password");
+  expect(within(form).queryByLabelText("Private key")).toBeNull();
+  await user.type(key, "key-123");
+  await user.type(secret, "sec-456");
+  await user.click(within(form).getByRole("button", { name: "Add Binance" }));
+
+  expect(createBinanceConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: {
+        display_name: "Binance main",
+        key_type: "hmac",
+        api_key: "key-123",
+        api_secret: "sec-456",
+      },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("API key")).toHaveValue(""));
+  expect(within(form).getByLabelText("Secret key")).toHaveValue("");
+  expect(document.body.textContent).not.toContain("sec-456");
+  await waitFor(() =>
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not
+      .toContain("sec-456"),
+  );
+});
+
+it("adds a Binance connection with an Ed25519 key and its passphrase", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add Binance" });
+  await user.type(within(form).getByLabelText("Display name"), "Binance ed");
+  await user.click(within(form).getByRole("combobox", { name: "Key type" }));
+  await user.click(await screen.findByRole("option", { name: "Ed25519" }));
+  expect(within(form).queryByLabelText("Secret key")).toBeNull();
+  await user.type(within(form).getByLabelText("API key"), "key-789");
+  const pem = within(form).getByLabelText("Private key");
+  expect(pem).toHaveAttribute("autocomplete", "off");
+  await user.type(pem, "line-one{Enter}line-two");
+  await user.type(within(form).getByLabelText("Passphrase (optional)"), "pass-1");
+  await user.click(within(form).getByRole("button", { name: "Add Binance" }));
+
+  expect(createBinanceConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: {
+        display_name: "Binance ed",
+        key_type: "ed25519",
+        api_key: "key-789",
+        private_key: "line-one\nline-two",
+        private_key_passphrase: "pass-1",
+      },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("Private key")).toHaveValue(""));
+  expect(within(form).getByLabelText("Passphrase (optional)")).toHaveValue("");
+});
+
+it("shows the message of a rejected Binance key and clears the secrets", async () => {
+  vi.mocked(createBinanceConnection).mockRejectedValueOnce({
+    detail: { error: "key_rejected", message: "this key can do more than read: enableWithdrawals" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Add Binance" });
+  await user.type(within(form).getByLabelText("Display name"), "Binance main");
+  await user.type(within(form).getByLabelText("API key"), "key-123");
+  await user.type(within(form).getByLabelText("Secret key"), "sec-456");
+  await user.click(within(form).getByRole("button", { name: "Add Binance" }));
+  expect(
+    await within(form).findByText("this key can do more than read: enableWithdrawals"),
+  ).toBeInTheDocument();
+  expect(within(form).getByLabelText("API key")).toHaveValue("");
+  expect(within(form).getByLabelText("Secret key")).toHaveValue("");
+});
+
+it("shows a Binance connection's wallets, progress, differences and flags", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [
+      {
+        ...BINANCE,
+        binance: {
+          wallets: ["Spot", "Funding"],
+          first_sync_done: false,
+          differences: [
+            {
+              account_id: "0190a0b0-0000-7000-8000-0000000000a1",
+              symbol: "AAA",
+              from_at: "2026-03-01T10:15:00Z",
+              to_at: "2026-03-02T11:45:30Z",
+            },
+            {
+              account_id: "0190a0b0-0000-7000-8000-0000000000ff",
+              symbol: "BBB",
+              from_at: "2026-03-01T00:00:00Z",
+              to_at: "2026-03-01T01:00:00Z",
+            },
+          ],
+          flags: ["Portfolio Margin enabled"],
+        },
+      },
+    ],
+  } as never);
+  renderPage();
+  expect(await screen.findByText("First sync in progress")).toBeInTheDocument();
+  expect(screen.getByText(/Spot, Funding/)).toBeInTheDocument();
+  expect(
+    await screen.findByText("Binance Spot: AAA, 2026-03-01 10:15 to 2026-03-02 11:45 (UTC)"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("Binance account: BBB, 2026-03-01 00:00 to 2026-03-01 01:00 (UTC)"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Portfolio Margin enabled")).toBeInTheDocument();
+});
+
+it("hides the first-sync notice once it is done", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [BINANCE] } as never);
+  renderPage();
+  expect(await screen.findByText("Binance main")).toBeInTheDocument();
+  expect(screen.queryByText("First sync in progress")).toBeNull();
+});
+
+it("updates a Binance key and clears the secrets", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [BINANCE] } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update key" });
+  await user.type(within(form).getByLabelText("API key"), "key-new");
+  await user.type(within(form).getByLabelText("Secret key"), "sec-new");
+  await user.click(within(form).getByRole("button", { name: "Update key" }));
+  expect(updateBinanceConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: BINANCE.id },
+      body: { key_type: "hmac", api_key: "key-new", api_secret: "sec-new" },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("Secret key")).toHaveValue(""));
+  expect(await within(form).findByText("Key updated")).toBeInTheDocument();
+  expect(listConnections).toHaveBeenCalledTimes(2);
+});
+
+it("shows why a Binance key update failed", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [BINANCE] } as never);
+  vi.mocked(updateBinanceConnection).mockRejectedValueOnce({
+    detail: { error: "another_account", message: "this key belongs to another Binance account" },
+  });
+  const user = userEvent.setup();
+  renderPage();
+  const form = await screen.findByRole("form", { name: "Update key" });
+  await user.type(within(form).getByLabelText("API key"), "k");
+  await user.type(within(form).getByLabelText("Secret key"), "s");
+  await user.click(within(form).getByRole("button", { name: "Update key" }));
+  expect(
+    await within(form).findByText("this key belongs to another Binance account"),
+  ).toBeInTheDocument();
+});
+
+it("gives Binance connections no Authorise or IBKR forms", async () => {
+  vi.mocked(listConnections).mockResolvedValue({ data: [BINANCE] } as never);
+  renderPage();
+  expect(await screen.findByText("Binance main")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorise" })).toBeNull();
+  expect(screen.queryByRole("form", { name: "Update token" })).toBeNull();
+  expect(screen.queryByText(/Webhooks are off/)).toBeNull();
 });

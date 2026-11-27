@@ -64,6 +64,8 @@ class CounterpartyFields:
     # Its bank account's number, when the source gives it without a sort code: the record
     # names the own account registered under it (transfers.contra.eligible_records).
     account_number: str | None = None
+    # The source says it was not a transfer at all: it is never a transfer's leg.
+    never_transfer: bool = False
 
 
 @dataclass(frozen=True)
@@ -228,6 +230,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.payment_reference,
                 t.bank_transfer,
                 t.counterparty_account_number,
+                t.never_transfer,
                 t.original_quantity,
                 t.original_instrument_id,
                 t.category,
@@ -276,6 +279,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             reference=row.payment_reference,
             bank_transfer=row.bank_transfer,
             account_number=row.counterparty_account_number,
+            never_transfer=row.never_transfer,
         ),
         postings=tuple(
             PostingRecord(
@@ -365,6 +369,7 @@ def _counterparty_data(fields: CounterpartyFields) -> dict[str, JSONValue]:
         "name": fields.name,
         "reference": fields.reference,
         "bank_transfer": fields.bank_transfer,
+        "never_transfer": fields.never_transfer,
     }
     if fields.account_number is not None:
         data["account_number"] = fields.account_number
@@ -378,6 +383,7 @@ def _counterparty_values(fields: CounterpartyFields) -> dict[str, object]:
         "payment_reference": fields.reference,
         "bank_transfer": fields.bank_transfer,
         "counterparty_account_number": fields.account_number,
+        "never_transfer": fields.never_transfer,
     }
 
 
@@ -554,6 +560,7 @@ async def upsert_connector_transaction(
                 t.payment_reference,
                 t.bank_transfer,
                 t.counterparty_account_number,
+                t.never_transfer,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
     ).one_or_none()
@@ -582,6 +589,7 @@ async def upsert_connector_transaction(
         and existing.payment_reference == tx.counterparty.reference
         and existing.bank_transfer == tx.counterparty.bank_transfer
         and existing.counterparty_account_number == tx.counterparty.account_number
+        and existing.never_transfer == tx.counterparty.never_transfer
     )
     details_unchanged = before.details == tx.details
     # Postings compare by position: the connector emits them in a stable order.

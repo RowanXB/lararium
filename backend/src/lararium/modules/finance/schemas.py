@@ -36,7 +36,7 @@ from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKin
 from lararium.modules.finance.ledger import TransactionOrigin, TransactionStatus
 from lararium.modules.finance.money import to_plain_str
 from lararium.modules.finance.snapshots import SnapshotKind
-from lararium.modules.finance.transfers import ReviewReason, TransferStatus
+from lararium.modules.finance.transfers import ReviewReason, SuggestedKind, TransferStatus
 from lararium.modules.finance.valuation import HoldingStatus
 
 # ASCII digits only (\d matches any script's digits), at most 40 on each side of the point:
@@ -514,9 +514,10 @@ class ImportBatchDetailOut(ImportBatchOut):
 
 
 class IdentifierCreate(BaseModel):
-    # Only a UK bank account is registered by hand; the connectors register their own ids.
-    kind: Literal["uk_bank_account"]
-    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+    # Only a UK bank account or a chain address is registered by hand; the connectors register
+    # their own ids.
+    kind: Literal["uk_bank_account", "chain_address"]
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678", or an address
 
 
 class IdentifierReference(BaseModel):
@@ -670,8 +671,10 @@ class CardMerchantSuggestionOut(_Out):
 
 class SuggestionOut(_Out):
     identifier_id: UUID
-    sort_code: str
-    account_number: str
+    kind: SuggestedKind  # never card_merchant: that is CardMerchantSuggestionOut
+    value: str  # as stored
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     names: list[str]
     outgoing: int
     incoming: int
