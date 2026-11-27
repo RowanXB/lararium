@@ -30,7 +30,6 @@ Goals
 
 Non-goals
 - Changing any connector other than Trading 212.
-- Making a Cash ISA import row name the family: its export writes an internal move as an ordinary `Deposit` (§5.3, §9).
 - A review item for a move naming a set that can't pair (a general limitation of held identifiers, §8.1).
 
 Anti-goals
@@ -73,14 +72,14 @@ What the sources write (owner's new Cash ISA export, 2026-11-27): Trading 212 bo
 1. **A family move names someone.** A record naming a family identifier counts as naming someone (`names_account` true, as for any identifier that is no card merchant; the builder may reword that column's doc to "names someone"). So `_funded_only` and `_card_receiver` exclude it: no shared-payee or card payment can take a family move, in either direction. Closes goal 2.
 2. **A family move's counterpart.** On one of the accounts it names (its `holder`, or one of its set), a family move pairs with:
    - **a record naming the same family** (both sides are moves): MUTUAL with one other account (each is identified to the other's account), ONE_SIDED with a set. *(My call: with a set, an Invest→Stocks ISA pair is evidence from both sides but neither names the account; ONE_SIDED leaves a competing candidate to the owner rather than outranking it.)*
-   - **a record naming nobody** (no identifier, no account number, no card merchant, identifying no account), a connector's record or an imported row, marked a bank transfer or not, **only when both records are timed** (`Pairable.timed`) **and their instants are within `near_window` (2 minutes)** of each other: ONE_SIDED. Owner's decision, 2026-11-27: Trading 212 books an internal move on both sides at about the same instant, and a real bank top-up practically never falls within two minutes of one, so a family move can't take a real top-up or withdrawal. This lets time decide whether a pair is possible, for family moves only: it narrows again the owner's rule that an imported row's time is display only (2026-11-21/24; already narrowed by the catalog design §8.3 item 4 and §5.7 here), with the owner's explicit approval.
+   - **a record naming nobody** (no identifier, no account number, no card merchant, identifying no account) whose source doesn't say it moved money outside the family (`outside_family` false, §5.9), a connector's record or an imported row, marked a bank transfer or not, **only when both records are timed** (`Pairable.timed`) **and their instants are within `near_window` (2 minutes)** of each other: ONE_SIDED. Owner's decision, 2026-11-27: Trading 212 books an internal move on both sides at about the same instant, and a real bank top-up practically never falls within two minutes of one, so a family move can't take a real top-up or withdrawal. This lets time decide whether a pair is possible, for family moves only: it narrows again the owner's rule that an imported row's time is display only (2026-11-21/24; already narrowed by the catalog design §8.3 item 4 and §5.7 here), with the owner's explicit approval.
    - nothing else. In particular `_may_be_transfer` no longer admits a counterpart of a family move: a bank transfer or a funded deposit naming nobody but further than two minutes away, or untimed, is not one. With one other account this replaces today's §9 behaviour, where a sibling TRANSFER could pair with any bank transfer or funded deposit on the sibling in the window.
    The day window still applies (the near window lies inside it), as do equal amounts, opposite signs, uniqueness and the coverage gate. The existing guard stays: a record with a set pairs only with a record on one of its accounts, on both sides.
-3. **Family evidence comes first** *(my call)*. A record naming nobody that is a family move's counterpart by item 2 (within two minutes) gets no edge from a record naming a shared payee (`_names_held` through `payee_holders`) and none through its account's funding alone (`_funded_only`), as a card top-up already gets none through funding (`carded`). Otherwise a Cash ISA row of an internal move, a bank-transfer row naming nobody, would also be the candidate of any same-amount shared-payee payment in the day window, and neither would pair. By the owner's reasoning above, a row within two minutes of a same-amount family move is that move's other side.
+3. **Family evidence comes first** *(my call)*. A record naming nobody that is a family move's counterpart by item 2 (so never one whose source says it went outside the family, §5.9) (within two minutes) gets no edge from a record naming a shared payee (`_names_held` through `payee_holders`) and none through its account's funding alone (`_funded_only`), as a card top-up already gets none through funding (`carded`). Otherwise a Cash ISA row of an internal move, a bank-transfer row naming nobody, would also be the candidate of any same-amount shared-payee payment in the day window, and neither would pair. By the owner's reasoning above, a row within two minutes of a same-amount family move is that move's other side.
 
 Unchanged: card precedence (`carded`; a family move is never a card's), cross-currency (needs both identified to each other's account), the weak tier (needs both bank transfers), the owner's decisions.
 
-Effect on the Cash ISA: its rows stay as imported, bank transfers naming nobody, timed to the second (`Time (UTC)`). An internal move's row pairs with the TRANSFER within two minutes of it; a bank deposit's row, two minutes from any family move, pairs with its shared-payee payment as #48 has it.
+Effect on the Cash ISA: its rows say by their Notes which kind they are (§5.9). An internal move's row (empty Notes) names the family and pairs with its TRANSFER by the date window alone; a bank deposit's row (a transaction id) is outside the family and pairs with its shared-payee payment as #48 has it, however close in time to a family move.
 
 ### 5.4 The coverage gate
 
@@ -113,6 +112,30 @@ Checked on production (2026-11-27, against the owner's new export, values not co
 
 A manual account may have a main account (`parent_account_id`); its bank transfers naming nobody are then with its main account (`eligible_records`' sub-account rule). A family-type account can be given one through the account create route. Then its rows are identified to the main account and never pair through the family set. *(My call: left as it is. Giving an account a main account is the owner saying its transfers are with that account; no production family account has one, 2026-11-27.)*
 
+### 5.9 What a History CSV's Notes say (owner, 2026-11-27)
+
+Trading 212's History CSV (the Cash ISA's import, and the Invest or Stocks ISA export uploaded to its connection) says in `Notes` which kind of movement a `Deposit` or `Withdrawal` is (the owner's Cash ISA export, 2026-11-27):
+
+| Notes | Meaning |
+|---|---|
+| `Transaction ID: <id>` | an external movement (a deposit by bank transfer or card) |
+| `Sent to Bank Account <sort code> / <account number>` | a withdrawal to that bank account (PR #51 reads it on the Cash ISA) |
+| empty | a move from or to another Trading 212 account |
+
+The owner often makes several movements within minutes (on 2026-11-26 two internal moves and a withdrawal fell within three minutes), so time alone would send a same-amount bank top-up near an internal move to review. Where the source says which it is, that decides, without the two-minute condition:
+
+- **Empty Notes:** the record names the family (its account's type's `family`), exactly as a TRANSFER does: it pairs only within the family, by amount and date window (§5.3 item 2's first arm), and no shared-payee or card payment can take it.
+- **A transaction id:** the record is outside the family: `outside_family` true, a typed column on the transaction. It is never a family move's counterpart (§5.3 item 2) and never kept from other evidence by item 3, so an external deposit near an internal move still pairs with its Monzo payment.
+- **A bank account:** the record names that bank account (it is no longer "naming nobody"), as any row printing a counterparty's account does.
+- **Notes of another form:** fail closed. The Cash ISA profile makes it a row error (PR #51); the Invest or Stocks ISA export upload refuses the file, naming the row's line and the rule, never its value.
+- **No Notes at all** (an API record the export doesn't cover): the source says nothing; §5.3 item 2's two-minute condition applies.
+
+Where it is stored, typed:
+- **Imported rows (the Cash ISA):** a CSV profile option names a column, the row types it applies to (`Deposit`, `Withdrawal`), and the patterns that say "within the family" (an empty cell) and "outside" (the transaction id). The import row stores the answer typed (`family_move`: true, false, or NULL when the profile says nothing); commit posts a true row naming its account's family identifier (refused as a row error on an account of no family type) and a false one with `outside_family` true.
+- **Export rows (Invest, Stocks ISA):** the typed export row already holds `notes_transaction_id`; it gains the sent-to bank account's parts. When an export row merges with the API's record by Trading 212's ID (`merge.py`), the posted record takes its evidence: empty Notes name the family, a transaction id sets `outside_family`, a bank account names it. The API's values still make the postings.
+
+**Evidence arriving later.** A record that could not pair without Notes (an API-only move whose two sides are more than two minutes apart, say) pairs by itself once a later upload brings them: the upload's normalise re-posts the merged record with its evidence, and the upload's heal (`upload_trading212_export` and an import commit both heal) recomputes the pair relation. The owner's decisions (pairs, rejects, never-pair) are unchanged by it.
+
 ## 6. Tests
 
 Hypothesis properties in the style of the existing pairs tests (`Pairable` strategies, the relation built in memory), plus a few integration tests on the remote Docker host:
@@ -123,6 +146,7 @@ Hypothesis properties in the style of the existing pairs tests (`Pairable` strat
 - Near window (§5.3 item 2): a family move and an opposite, equal record naming nobody on another family account (connector's or imported, bank transfer or not) are candidates iff both are timed and their instants are at most `near_window` apart; never when either is untimed or further apart, however close the booking dates.
 - Family first (§5.3 item 3): a record naming nobody within the near window of a family move is no candidate of a shared-payee record or through its funding alone; further away, it is as #48 has it. The real shape: a Cash ISA internal-move row and a same-amount shared-payee payment in the day window, and the row pairs with its TRANSFER, the payment with its own deposit.
 - Interchangeable on one side (§5.7): for an n-by-n group whose one side is alike and whose other side is not, every assignment yields the same balances per account and instrument, and the relation chooses the fixed-order one; a group with neither side alike, with a record having a candidate outside the group, or with an untakeable pair, pairs none. The real shape as an integration test: two equal TRANSFERs out of Invest and Stocks ISA, two identical Cash ISA rows, all four pair. Links follow time order: each side sorted by instant (an untimed record by its booking date), then reference, linked in order; in every case the balances equal every other assignment's.
+- Notes (§5.9): a Cash ISA row with empty Notes names the family and pairs with a same-amount TRANSFER more than two minutes away; one with a transaction id within two minutes of a family move pairs with its shared-payee payment instead; Notes of another form are a row error, and in an export upload refuse the file. Evidence later: an unpaired API-only Invest↔Stocks ISA move (sides more than two minutes apart) pairs within the family after an export upload gives the receiving DEPOSIT empty Notes; a deposit later shown with a transaction id gets no family edge; an owner's never-pair decision between the two still holds.
 - Gate: with three accounts and the manual one unlisted for the window, an Invest↔Stocks ISA pair is a candidate but not takeable; listed, it is taken.
 - Membership change: a TRANSFER paired MUTUAL with two accounts becomes held when a third family account is created, and the heal leaves the ledger agreeing with the rule (contra, pair) with no replay.
 - Connector: `trading212-norm-4` re-posts TRANSFERs naming the family identifier; the identifier is created once per family; DEPOSIT/WITHDRAW unchanged.
@@ -141,15 +165,14 @@ Only these run locally (remote Docker host); CI runs the rest.
 
 - Lararium knows only the accounts added to it. An owner with a Trading 212 account not added (a SIPP, a Crypto account, a Cash ISA not yet added) and exactly one other added gets moves to it named as that other account's, as today.
 - A move naming several accounts that can't pair (several candidates, none, or refused by the gate) opens no transfer and no review item: it shows on Unassigned, as a shared-payee payment does.
-- A real top-up or withdrawal of the same amount within two minutes of a family move, on another family account, would be taken as that move's other side (§5.3 item 2). The owner judges it practically impossible (2026-11-27).
-- If a source's two sides of an internal move are more than two minutes apart, they never pair by themselves: the owner pairs them by hand. Whether Trading 212's are within two minutes is to be checked (§10 item 3).
-- A Cash ISA internal-move row imported before its TRANSFER has synced has no family-move candidate yet, so a same-amount shared-payee payment in the window may take it; when the TRANSFER arrives the row has a family-move candidate within two minutes, item 3 of §5.3 removes the payment's edge, and the pair re-forms correctly at the next heal (the payment's pair dissolves with no review item, as #48's do). The connector syncs daily, so this lasts at most a day.
+- If a source's two sides of an internal move are more than two minutes apart and neither side has Notes (§5.9), they don't pair by themselves until an upload brings Notes; until then the owner may pair them by hand.
+- A record with no Notes (API-only) and a same-amount real top-up within two minutes of a family move on another family account would be taken as that move's side (§5.3 item 2); an upload's Notes correct it at its heal.
 - Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider were a TRANSFER, it would name the family wrongly; it then pairs with nothing (or, with one other account, awaits a record there and goes overdue), and the owner rejects it. Not seen.
 
 ## 9. Open, for the owner
 
-- Answered (owner, 2026-11-27): the two production TRANSFERs of 2026-11-26 went into the Cash ISA. The owner's new export shows them as `Deposit` rows with empty Notes, so no Action tells an internal move apart, and no profile change is needed: the rows stay bank transfers naming nobody and pair by §5.3 item 2. (Their empty Notes, against a bank deposit's `Transaction ID: …`, are not used: the owner chose the time rule.)
-- Separate, not this design: the parent session's small PR teaches the Cash ISA profile to read a Withdrawal's counterparty sort code and account number from its Notes.
+- Answered (owner, 2026-11-27): the two production TRANSFERs of 2026-11-26 went into the Cash ISA. The owner's new export shows them as `Deposit` rows with empty Notes: no Action tells an internal move apart, but Notes do, and the owner decided to use them as evidence (§5.9).
+- PR #51 (separate) teaches the Cash ISA profile to read a Withdrawal's bank account from its Notes and to make Notes of another form a row error. This design's profile option (§5.9) sits on the same catalog entry; whichever merges second takes the other's entry.
 - To check (§10 item 3): whether each Cash ISA row's `Time (UTC)` is within two minutes of its TRANSFER's `dateTime`.
 
 ## 10. After deploy

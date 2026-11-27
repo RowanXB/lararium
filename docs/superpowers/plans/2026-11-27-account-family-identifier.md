@@ -142,7 +142,46 @@
 - [ ] **Step 2: Run to fail.** **Step 3: Implement** (delete the dead code; a stale `family_accounts` key in an existing connection's config is ignored; say so in `normalize.py`'s doc). **Step 4: Run to pass**, only the tests above. Lint/pyright (dead imports).
 - [ ] **Step 5: Commit** `feat: name the Trading 212 family on every TRANSFER and drop the sibling replay`.
 
-### Task 6: Membership changes heal; the real shape end to end; docs
+### Task 6: `outside_family`, and the Cash ISA's Notes as evidence (§5.9)
+
+**Files:**
+- Modify: `backend/migrations/versions/0046_finance_account_family_identifier.py` (not deployed: amend it) and its test: add `finance.transactions.outside_family boolean NOT NULL DEFAULT false` and `finance.import_rows.family_move boolean NULL`; downgrade drops both.
+- Modify: `backend/src/lararium/modules/finance/models.py`, `ledger.py` (`CounterpartyFields.outside_family: bool = False`, written on post, compared where an upsert decides whether a record changed), `transfers/contra.py` (`eligible_records` column `outside_family`, `_OWN_RECORDS`), `transfers/pairs.py` (`Pairable.outside_family: bool = False`, loaded; `_family_pair`'s naming-nobody arm requires `not other.outside_family`)
+- Modify: `backend/src/lararium/modules/finance/importing/profiles.py` (new option), the CSV parser and `ParsedRow` (`family_move: bool | None`), staging (store it; refuse a `True` row on an account whose type has no family as a row error), `importing/commit.py` `_counterparty` (True → `identifier_id = family_identifier(ctx, family)`; False → `outside_family=True`), `importing/catalog.py` (the Cash ISA entry sets the option)
+- Test: `backend/tests/finance/importing/test_trading212_cash_isa.py`, `backend/tests/finance/transfers/test_family.py`, `backend/tests/finance/transfers/test_properties_family.py`
+
+**Interfaces:**
+- Consumes: `identifiers.family_identifier`, `account_types.family_of` (Task 1); `_family_pair`, `familied` (Task 3).
+- Produces:
+  - `class FamilyNotes(BaseModel)` in `profiles.py`, field `family_notes: FamilyNotes | None = None` on `CsvProfileConfig`: `column: str`, `types: list[str]` (the `type` column values it applies to), `within: list[str]` and `outside: list[str]` (regexes, full match on the stripped cell). For a row whose type is in `types`: a `within` match → `family_move=True`, an `outside` match → `False`, neither → `RowError` naming the column and the rule, never the value. Other rows: `None`. `column` counts among the columns the profile reads.
+  - The Cash ISA entry: `FamilyNotes(column="Notes", types=["Deposit", "Withdrawal"], within=[r""], outside=[r"Transaction ID: [0-9A-Fa-f-]+", r"Sent to Bank Account \d{2}-\d{2}-\d{2} / \d{8}"])`. (PR #51 adds an `extract` on the same column for the bank account; whichever merges second keeps both.)
+  - `CounterpartyFields.outside_family`, `Pairable.outside_family`, the `eligible_records` column of the same name.
+
+- [ ] **Step 1: Write the failing tests**:
+  - In `test_trading212_cash_isa.py`: `test_notes_say_whether_a_row_moved_within_the_family`: a CSV with a `Deposit` with `Transaction ID: …` Notes, a `Deposit` with empty Notes, a `Withdrawal` with empty Notes and a `Withdrawal` with `Sent to Bank Account 12-34-56 / 87654321` parses to `family_move` False, True, True, False; `test_notes_of_another_form_are_a_row_error`: `Deposit` with Notes `Something new` → `RowError`; `test_an_internal_move_commits_naming_the_family`: committed on a Cash ISA account (`type_key="trading212.cash_isa"`), the empty-Notes row's transaction names `family_identifier(ctx, "trading212")`, the transaction-id row has `outside_family` true and names nothing; on an account of no type, the empty-Notes row is a row error.
+  - In `test_family.py`: `test_an_outside_record_is_no_family_counterpart`: `_pairable` C +100 `bank_transfer=True, timed=True, outside_family=True` at T0+30s vs I −100 family at T0 → `registry_tier` `None`; the same with `outside_family=False` → `ONE_SIDED`; and `test_an_outside_deposit_near_a_family_move_pairs_with_its_payee_payment` (integration, Docker): a Cash ISA transaction-id row +100 at T0+30s, a TRANSFER −100 family on Invest at T0, and a Monzo −100 naming a payee held by the three, a day earlier: after heal the Cash ISA row is matched with the Monzo payment, and the TRANSFER is unpaired.
+  - In `test_properties_family.py`: extend the strategy with `outside_family`; `test_a_family_record_pairs_only_inside_its_family` additionally asserts no family edge touches an `outside_family` record.
+- [ ] **Step 2: Run to fail.** **Step 3: Implement** per Interfaces; module docs of `profiles.py` (the option), `commit.py` and `pairs.py` say what the evidence means (spec §5.9). **Step 4: Run to pass** (only these tests, plus `tests/finance/test_account_family_identifier_migration.py`). Lint/pyright.
+- [ ] **Step 5: Commit** `feat: read a History CSV's Notes as family evidence on imported rows`.
+
+### Task 7: Notes from the Invest and Stocks ISA export reach the posted record (§5.9)
+
+**Files:**
+- Modify: `backend/src/lararium/modules/finance/trading212/fields.py` (the typed export row gains the sent-to bank account's parts: `notes_sort_code`, `notes_account_number`), the export table's migration columns (amend 0046), `trading212/export.py` (refuse a file with a `Deposit` or `Withdrawal` row whose Notes are of another form: a `DisplayableError` naming the line and the rule), `trading212/merge.py` (a function giving a row's evidence), `trading212/records.py` (`_post_movement` and `export_movement` take it)
+- Test: `backend/tests/finance/trading212/test_export.py`, `backend/tests/finance/trading212/test_normalize.py`, `backend/tests/api/test_trading212_export_api.py`
+
+**Interfaces:**
+- Consumes: `CounterpartyFields.outside_family` (Task 6), the family identifier through `run.shared` (Task 5's `accounts.family_identifier(run)`).
+- Produces: `merge.evidence(record: ExportRecord) -> Evidence` where `Evidence` is a frozen dataclass `(family: bool, outside: bool, sort_code: str | None, account_number: str | None)`: empty Notes → `family`; a transaction id → `outside`; a sent-to bank account → `outside` plus its parts. `_post_movement(run, key, kind, description, values, evidence: Evidence | None)`: a TRANSFER always names the family; a DEPOSIT/WITHDRAW with `evidence.family` names the family; with a bank account names that `uk_bank_account` (get-or-create, as `importing/commit._counterparty` does); with `outside` sets `outside_family`; with `None` (no export row) as today.
+
+- [ ] **Step 1: Write the failing tests**:
+  - `test_export.py`: `test_notes_of_another_form_refuse_the_export` (the error names the line, not the value); `merge.evidence` for the three forms.
+  - `test_normalize.py`: `test_an_export_row_s_empty_notes_name_the_family`: a DEPOSIT from the API, then an export row with its ID and empty Notes → the transaction names the family row; with a transaction id → `outside_family` true and no identifier; with a sent-to bank account on a WITHDRAW → names that `uk_bank_account`.
+  - `test_trading212_export_api.py`: `test_a_later_export_pairs_an_unpaired_move`: Invest and Stocks ISA connected, a TRANSFER −100 on Invest and a DEPOSIT +100 on Stocks ISA ten minutes apart (unpaired after heal); upload Stocks ISA's export with that DEPOSIT's ID and empty Notes → after the upload's own heal they are one matched transfer. And `test_a_later_transaction_id_takes_no_family_edge`: the same with Notes `Transaction ID: …` and the two two minutes apart (paired by the near window before) → after the upload they are unpaired. And the owner's never-pair decision between the two, recorded first, still holds after an empty-Notes upload.
+- [ ] **Step 2: Run to fail.** **Step 3: Implement.** Check the upload path heals after normalising (`connections_api.upload_trading212_export`); if not, it must. **Step 4: Run to pass**, only these tests. Lint/pyright.
+- [ ] **Step 5: Commit** `feat: take a Trading 212 export row's Notes as evidence on its record`.
+
+### Task 8: Membership changes heal; the real shape end to end; docs
 
 **Files:**
 - Modify: `backend/src/lararium/modules/finance/api.py` (`create_account`, `rename_account`)
@@ -154,12 +193,13 @@
 - Consumes: everything above. `transfers_api.healing_command` (lock first, heal at the end); if lint-imports forbids `api.py` importing it, take `transfers.lock_transfers(ctx)` first and `transfers.heal_transfers(ctx)` last inside the existing `command_context`.
 
 - [ ] **Step 1: Write the failing API test** `test_adding_a_family_account_heals_at_once`: Invest and Stocks ISA (connected, typed) with a TRANSFER pair matched MUTUAL; `POST /api/v1/finance/accounts` with `type_key: "trading212.cash_isa"` → right after, a heal returns 0 and the TRANSFERs' contras agree with the rule (In transit while still a matched pair, no stray); the same through `PATCH /accounts/{id}` setting `type_key` on an existing manual account and clearing it again.
-- [ ] **Step 2: Write the failing integration test** `test_two_equal_moves_into_the_cash_isa_pair_by_time`: Invest and Stocks ISA connected, Cash ISA manual listed from its opening; TRANSFER −100 on Stocks at T0 and on Invest at T0+18s (family); two Cash ISA statement rows +100 `bank_transfer` timed to the second at T0 and T0+18s; plus a Monzo payment −100 naming a payee held by all three, two days earlier, with its own +100 bank-transfer Cash ISA row then. After heal: three matched transfers, Stocks→first row, Invest→second row, Monzo→its own row; `assert_consistent`.
+- [ ] **Step 2: Write the failing integration test** `test_two_equal_moves_into_the_cash_isa_pair_by_time`: Invest and Stocks ISA connected, Cash ISA manual listed from its opening; TRANSFER −100 on Stocks at T0 and on Invest at T0+18s (family); two Cash ISA rows imported through the Cash ISA profile, +100 `Deposit` with empty Notes at T0 and T0+18s; plus, within three minutes, a Cash ISA +100 `Deposit` with `Transaction ID: …` Notes and a Monzo −100 naming a payee held by all three a little before it. After heal: three matched transfers, Stocks→first row, Invest→second row, Monzo→the transaction-id row; `assert_consistent`.
 - [ ] **Step 3: Run to fail.** **Step 4: Implement** the healing in both routes when the type set or cleared (old or new) has a family (`account_types.family_of`). **Step 5: Run to pass.** Lint/pyright.
 - [ ] **Step 6: Update the docs** listed above (README.zh-CN.md mirrors README.md).
 - [ ] **Step 7: Commit** `feat: heal when an account joins or leaves a family` and `docs: describe the family identifier in the catalog design and README` (two commits, explicit paths).
 
 ## Execution notes
 
-- Models: Tasks 1, 2, 4, 5, 6 standard; Task 3 most capable (the rule and its properties); final whole-branch review most capable.
+- Models: Tasks 1, 2, 4, 5, 7, 8 standard; Tasks 3 and 6 most capable (the rule, its evidence and their properties); final whole-branch review most capable.
+- Tasks 6 and 7 were added after the owner's decision on Notes (2026-11-27, spec §5.9), while Task 3 ran; Task 6 adds the `outside_family` check to Task 3's `_family_pair`.
 - After #48 merges: merge main, take the next free migration number, push, open the PR; CI runs the full suite.
