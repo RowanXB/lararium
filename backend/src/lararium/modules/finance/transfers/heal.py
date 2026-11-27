@@ -137,12 +137,12 @@ async def _pair_states(
             ).where(tr.status.in_(("matched", *OPEN_STATUSES)))
         )
     )
-    settled = [
+    settlement_ids = [
         row.settlement_transaction_id
         for row in rows
         if row.status == "matched" and row.settlement_transaction_id is not None
     ]
-    conversions = await _conversions(session, settled) if settled else {}
+    conversions = await _conversions(session, settlement_ids) if settlement_ids else {}
     for row in rows:
         if row.status == "matched":
             matched.add((row.out_transaction_id, row.in_transaction_id))

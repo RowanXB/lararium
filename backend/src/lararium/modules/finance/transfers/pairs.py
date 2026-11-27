@@ -875,8 +875,10 @@ class PairRelation:
         transfer carries the reason: an unpaired card payment and its deposits have none
         (no awaiting transfer is opened for either), so for them it is the relation's word
         alone, and they stay on Unassigned for the owner to pair."""
-        if self.exact.get(record_id):
-            return True
+        return bool(self.exact.get(record_id)) or self.several_beyond_exact(record_id)
+
+    def several_beyond_exact(self, record_id: UUID) -> bool:
+        """The part of several() that doesn't come from candidates of the same amount."""
         if self.across.get(record_id) and record_id not in self.alone_across:
             return True
         return bool(self.cards.get(record_id)) and record_id not in self.by_card
@@ -892,11 +894,12 @@ class PairRelation:
         first: the other account's history holds the transfer, so it waits for no upload);
         else none."""
         found = self.exact.get(record_id, frozenset())
+        # several(), not counting a lone untakeable edge: that is only a candidate it
+        # can't take by itself.
         refused = (
             len(found) == 1
             and not self.takeable(record_id, next(iter(found)))
-            and not self.across.get(record_id)
-            and not self.cards.get(record_id)
+            and not self.several_beyond_exact(record_id)
         )
         if self.several(record_id) and not refused:
             return "several_candidates"
