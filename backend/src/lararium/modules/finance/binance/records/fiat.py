@@ -63,6 +63,8 @@ _PAY_DEFAULT = "funding"
 _FUNDS = "fundsDetail"
 _COSTS = "walletAssetCost"
 _COST_PATH = "data[].fundsDetail[].walletAssetCost.<walletType>"
+# Money back from a merchant paid with Binance Pay: a refund (card refunds design 4.1).
+_PAY_REFUND = "PAY_REFUND"
 
 
 async def _asked(run: Run, label: str) -> str | None:
@@ -318,19 +320,52 @@ def _funds(row: Row) -> list[dict[str, ApiValue]]:
     return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
 
 
-def _costs(detail: Mapping[str, ApiValue]) -> list[tuple[str, ApiValue]]:
+def _drawn(
+    run: Run, detail: Mapping[str, ApiValue], own: str, currency: str, quantity: Decimal
+) -> list[tuple[str, str, Decimal]]:
+    """Where one `fundsDetail` element's `quantity` (unsigned) came from: each wallet its
+    `walletAssetCost` names, by that wallet's cost of it (Binance's example: an amount of 1.2,
+    costs `{"1": "0.6", "2": "0.6"}`), a zero cost left out. With no costs, or costs that cannot
+    say it (not a map, a key that is no wallet type the catalogue lists, a missing or negative
+    cost, or costs that do not make the amount), the whole element is on the row's own wallet
+    (`own`), and what is wrong is flagged by name: a row is never left unposted for its costs."""
+    whole = [(own, currency, quantity)]
     found = detail.get(_COSTS)
-    return sorted(found.items()) if isinstance(found, dict) else []
+    if found is None or found == {}:
+        return whole
+    if not isinstance(found, dict):
+        run.flag(f"{PAY}.{_FUNDS}.{_COSTS} is not a map")
+        return whole
+    parts: list[tuple[str, str, Decimal]] = []
+    for name, value in sorted(found.items()):
+        # The wallet first, its key read strictly: ASCII digits only.
+        wallet = _PAY_WALLETS.get(int(name)) if name.isascii() and name.isdigit() else None
+        if wallet is None:
+            run.flag(f"{PAY}.{_FUNDS}.{_COSTS} names a wallet type not known")
+            return whole
+        if value is None:
+            run.flag(f"{PAY}.{_FUNDS}.{_COSTS} has a cost missing")
+            return whole
+        # The fetch's door check stored only costs that read as finite decimals.
+        cost = tables.decimal_value(PAY, _COST_PATH, value)
+        if cost < 0:
+            run.flag(f"{PAY}.{_FUNDS}.{_COSTS} has a negative cost")
+            return whole
+        if cost != 0:
+            parts.append((wallet, currency, cost))
+    if sum((q for _, _, q in parts), Decimal(0)) != quantity:
+        run.flag(f"{PAY}.{_FUNDS}.{_COSTS} does not make the amount")
+        return whole
+    return parts
 
 
 async def pay(run: Run, row: Row) -> None:
     """A Pay transaction: each `fundsDetail` element's `amount` of its `currency`, taken from (or
-    given to) each wallet its `walletAssetCost` names, that wallet's cost of it ("cost from that
-    wallet"), signed by the row's `amount`, against Unassigned (one counterpart per instrument).
-    An element with no costs is on the wallet the row's `walletType` names; a row with no
-    `fundsDetail` moves its own `amount` of its `currency` there. Costs that do not make the
-    element's amount, or name a wallet type the catalogue does not list, are flagged and the row
-    is not posted."""
+    given to) each wallet its `walletAssetCost` names, by that wallet's cost of it ("cost from
+    that wallet"; `_drawn`), signed by the row's `amount`, against Unassigned (one counterpart per
+    instrument). An element whose costs cannot say where it came from is on the wallet the row's
+    `walletType` names; a row with no `fundsDetail` moves its own `amount` of its `currency`
+    there. A `PAY_REFUND` that brought money in is marked a refund (card refunds design 4.1)."""
     signed = amount(PAY, row, "amount")
     occurred_at = when(PAY, row, "transactionTime")
     if signed is None or occurred_at is None:
@@ -346,22 +381,7 @@ async def pay(run: Run, row: Row) -> None:
         if currency is None or quantity is None:
             run.flag(f"{PAY}.{_FUNDS} element without its currency or amount")
             return
-        costs = _costs(detail)
-        if not costs:
-            pieces.append((own, currency, quantity.copy_abs()))
-            continue
-        drawn: list[tuple[str, str, Decimal]] = []
-        for name, value in costs:
-            wallet = _PAY_WALLETS.get(int(name)) if name.isdecimal() else None
-            cost = tables.decimal_value(PAY, _COST_PATH, value)
-            if wallet is None:
-                run.flag(f"{PAY}.{_FUNDS}.{_COSTS} names a wallet type not known")
-                return
-            drawn.append((wallet, currency, cost.copy_abs()))
-        if sum((q for _, _, q in drawn), Decimal(0)) != quantity.copy_abs():
-            run.flag(f"{PAY}.{_FUNDS}.{_COSTS} does not make the amount")
-            return
-        pieces += drawn
+        pieces += _drawn(run, detail, own, currency, quantity.copy_abs())
     if not pieces:
         currency = text(row, "currency")
         if currency is None:
@@ -378,12 +398,14 @@ async def pay(run: Run, row: Row) -> None:
         postings.append(PostingInput(account_id, instrument_id, sign * quantity))
         totals[instrument_id] = totals.get(instrument_id, Decimal(0)) + sign * quantity
     postings += [PostingInput(run.unassigned, i, -q) for i, q in totals.items() if q != 0]
+    order_type = text(row, "orderType")
     transaction_id = await post(
         run,
         run.record.key,
         occurred_at=occurred_at,
-        description=f"Pay {code(text(row, 'orderType'))}",
+        description=f"Pay {code(order_type)}",
         postings=postings,
+        refund=order_type == _PAY_REFUND and signed > 0,
     )
     await run.typed(transaction_id=transaction_id)
 

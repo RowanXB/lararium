@@ -35,6 +35,7 @@ from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     compute_residuals,
     upsert_connector_transaction,
@@ -305,6 +306,7 @@ async def post(
     counterparty_name: str | None = None,
     transfer_leg: bool = False,
     bank_transfer: bool = False,
+    refund: bool = False,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
     postings it creates, changes or removes; its id. A zero posting is left out (the ledger
@@ -316,7 +318,8 @@ async def post(
     leg; every other is marked `never_transfer`, though its two postings (one on Unassigned)
     have a leg's shape. `bank_transfer`: the source says it is a payment between bank accounts
     (a fiat order's, a P2P order's fiat leg), which pairs by amount and date with a bank row
-    that names its account."""
+    that names its account. `refund`: money back from a merchant (a Pay `PAY_REFUND`), which the
+    cash-flow report counts as negative spending (card refunds design 4.1)."""
     postings = [p for p in postings if p.quantity != 0]
     if len(postings) < 2:
         await remove(run, key)
@@ -339,6 +342,7 @@ async def post(
             origin="connector",
             connection_id=run.connection.id,
             external_id=key,
+            details=TransactionDetails(refund=refund),
             counterparty=CounterpartyFields(
                 identifier_id=counterparty_identifier_id,
                 name=counterparty_name,

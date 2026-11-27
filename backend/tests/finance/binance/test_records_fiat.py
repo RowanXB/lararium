@@ -686,23 +686,76 @@ async def test_a_combined_pay_payment_is_taken_from_each_wallet_it_drew_on(sessi
     await assert_balanced_and_quiet(session, connection.id)
 
 
+_COSTS_FLAG = "pay.fundsDetail.walletAssetCost"
+
+
 @pytest.mark.parametrize(
     ("costs", "flag"),
     [
-        ({"1": "1", "2": "1"}, "pay.fundsDetail.walletAssetCost does not make the amount"),
-        ({"7": "3"}, "pay.fundsDetail.walletAssetCost names a wallet type not known"),
+        ({"1": "1", "2": "1"}, f"{_COSTS_FLAG} does not make the amount"),
+        ({"7": "3"}, f"{_COSTS_FLAG} names a wallet type not known"),
+        # Only ASCII digits name a wallet type: an Arabic-Indic three is none.
+        ({"\u0663": "3"}, f"{_COSTS_FLAG} names a wallet type not known"),
+        ({"2": None}, f"{_COSTS_FLAG} has a cost missing"),
+        ({"2": "-3"}, f"{_COSTS_FLAG} has a negative cost"),
     ],
 )
-async def test_pay_costs_that_do_not_say_where_it_came_from_are_flagged(
+async def test_pay_costs_that_cannot_say_where_it_came_from_leave_it_on_the_row_wallet(
     session, run, costs, flag
 ) -> None:
+    # Never left unposted: the whole element is on the row's own wallet (1, Funding), flagged.
     connection = await _connection(run)
     row = _pay(0, fundsDetail=[{"currency": "AAA", "amount": "3", "walletAssetCost": costs}])
 
     report = await _normalize(session, connection.id, PAY, [row])
 
     assert flag in report.new_flags
-    assert await keys(session, connection.id) == []
+    assert plain(await postings(session, f"pay:{row['transactionId']}")) == [
+        ("Binance Funding", "AAA", Decimal(-3)),
+        ("Unassigned", "AAA", Decimal(3)),
+    ]
+    await assert_balanced_and_quiet(session, connection.id)
+
+
+async def test_a_zero_pay_cost_posts_nothing_on_its_wallet(session, run) -> None:
+    connection = await _connection(run)
+    costs = {"1": "3", "2": "0"}
+    row = _pay(0, fundsDetail=[{"currency": "AAA", "amount": "3", "walletAssetCost": costs}])
+
+    report = await _normalize(session, connection.id, PAY, [row])
+
+    assert report.new_flags == []
+    assert plain(await postings(session, f"pay:{row['transactionId']}")) == [
+        ("Binance Funding", "AAA", Decimal(-3)),
+        ("Unassigned", "AAA", Decimal(3)),
+    ]
+    assert "Binance Spot" not in {
+        r.name for r in await session.execute(text("select name from finance.accounts"))
+    }
+
+
+async def _refund(session, key: str) -> bool:
+    return await session.scalar(
+        text("select refund from finance.transactions where external_id = :e"), {"e": key}
+    )
+
+
+async def test_only_a_pay_refund_is_marked_a_refund(session, run) -> None:
+    # Card refunds design 4.1: money back from a merchant. A Pay refund is; a red packet or a
+    # P2P holding given back, a payment, a card sale's payout and a card purchase are not.
+    connection = await _connection(run)
+    refunded = _pay(0, ("AAA", "1"), orderType="PAY_REFUND", amount="1")
+    returned = _pay(1, ("AAA", "1"), orderType="CRYPTO_BOX_RF", amount="1")
+    paid = _pay(2)
+    await ingest(session, connection.id, PAY, [refunded, returned, paid])
+    await ingest(session, connection.id, PAYMENTS, [_payment(0)], request=BUY)
+    await _normalize(
+        session, connection.id, PAYMENTS, [_payment(1, paymentMethod=None)], request=SELL
+    )
+
+    marked = {k for k in await keys(session, connection.id) if await _refund(session, k)}
+    assert marked == {f"pay:{refunded['transactionId']}"}
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 # Rebates.
