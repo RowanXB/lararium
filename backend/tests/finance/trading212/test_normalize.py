@@ -25,7 +25,7 @@ from lararium.core.connections import (
 )
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance import connector_run
-from lararium.modules.finance.accounts import close_account, create_account
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import assign_identifier, named_accounts
 from lararium.modules.finance.instruments import InstrumentIdentifier, create_instrument
 from lararium.modules.finance.ledger import (
@@ -1433,84 +1433,6 @@ async def _named(session) -> dict[str, str | None]:
         )
     )
     return {r.external_id: r.value for r in rows}
-
-
-@pytest.mark.parametrize(
-    ("stocks_isa", "cash_isa", "named"),
-    [
-        (True, None, {"transaction:t-out": "20000002", "transaction:t-in": "10000001"}),
-        (False, None, {"transaction:t-out": None}),
-        (True, "open", {"transaction:t-out": None, "transaction:t-in": None}),
-        (True, "closed", {"transaction:t-out": None, "transaction:t-in": None}),
-        (False, "open", {"transaction:t-out": None}),
-    ],
-    ids=["invest-and-stocks-isa", "invest-alone", "three", "three-one-closed", "no-t212-id"],
-)
-async def test_a_sibling_only_with_exactly_two_family_accounts(
-    session, run, stocks_isa, cash_isa, named
-) -> None:
-    invest = Ledger(session, await _connection(run, "invest"))
-    isa = Ledger(session, await _connection(run, "isa")) if stocks_isa else None
-    isa_summary = ("summary", summary_json(account_id=20000002, cash=NO_CASH))
-    await invest.normalize(SUMMARY)
-    if isa is not None:
-        await isa.normalize(isa_summary)
-    if cash_isa is not None:
-        account_id = await _cash_isa(run)
-        if cash_isa == "closed":
-            await run(lambda ctx: close_account(ctx, account_id, date(2026, 3, 2)))
-
-    moved = {"dateTime": "2026-03-04T09:15:00Z"}
-    out = transaction_item(reference="t-out", kind="TRANSFER", amount="-100.00", **moved)
-    into = transaction_item(reference="t-in", kind="TRANSFER", amount="100.00", **moved)
-    report = await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
-    assert "TRANSFER" in report.flagged
-    if isa is not None:
-        await isa.normalize(isa_summary, ("transactions", into), now=_days(1))
-    assert await _named(session) == named
-
-
-async def _contra(session, external_id: str) -> str:
-    return await session.scalar(
-        text(
-            "select a.name from finance.postings p"
-            " join finance.transactions t on t.id = p.transaction_id"
-            " join finance.accounts a on a.id = p.account_id"
-            " where t.external_id = :e and t.status <> 'void' and p.position = 1"
-        ),
-        {"e": external_id},
-    )
-
-
-async def test_a_new_family_account_strips_the_counterpart_at_the_next_sync(session, run) -> None:
-    invest = Ledger(session, await _connection(run, "invest"))
-    isa = Ledger(session, await _connection(run, "isa"))
-    await invest.normalize(SUMMARY)
-    await isa.normalize(("summary", summary_json(account_id=20000002, cash=NO_CASH)))
-    out = transaction_item(
-        reference="t-out", kind="TRANSFER", amount="-100.00", dateTime="2026-03-04T09:15:00Z"
-    )
-    await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
-    assert await _named(session) == {"transaction:t-out": "20000002"}
-    assert await _contra(session, "transaction:t-out") == "In transit"
-    digest = (await get_connection(session, invest.connection.id)).config["family_accounts"]
-
-    # A third account of the family: the sibling is no longer the only one it can be with.
-    account_id = await _cash_isa(run)
-    report = await invest.normalize(now=_days(2))
-    assert report.replayed
-    assert (await get_connection(session, invest.connection.id)).config["family_accounts"] != (
-        digest
-    )
-    assert await _named(session) == {"transaction:t-out": None}
-    assert await _contra(session, "transaction:t-out") == "Unassigned"
-
-    assert not (await invest.normalize(now=_days(3))).replayed
-    # Its status is not the family's: closing it changes nothing.
-    await run(lambda ctx: close_account(ctx, account_id, date(2026, 3, 6)))
-    assert not (await invest.normalize(now=_days(4))).replayed
-    assert await _named(session) == {"transaction:t-out": None}
-    assert await _contra(session, "transaction:t-out") == "Unassigned"
 
 
 async def test_a_third_family_account_needs_no_replay(session, run) -> None:

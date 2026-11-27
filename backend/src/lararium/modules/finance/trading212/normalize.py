@@ -118,10 +118,9 @@ async def _movements(
 ) -> tuple[list[Record], dict[str, ExportRecord]]:
     """The API's cash movements to apply, and the export's rows (merge), by reference.
 
-    The movements given, and the latest stored copy
-    of each one an export row given (or an owner's decision) concerns; the latest stored copy
-    of each export row given, and the stored one of each movement applied. A replay has
-    every stored record of both."""
+    The movements given, and the latest stored copy of each one an export row given (or an
+    owner's decision) concerns; the latest stored copy of each export row given, and the
+    stored one of each movement applied. A replay has every stored record of both."""
     movements = list(given)
     if replay:
         return movements, await merge.stored(run, None)
