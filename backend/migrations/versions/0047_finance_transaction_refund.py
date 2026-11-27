@@ -120,7 +120,22 @@ def upgrade() -> None:
         op.execute(statement)
 
 
+# What the downgrade undoes in the data before the columns go: the card payment types, which
+# the older code's configs refuse as an unknown key, and Monzo's and eToro's replay markers, so
+# the first sync after upgrading again marks the refunds and pairs dropped here (as 0013).
+DOWNGRADE_DATA = [
+    "UPDATE finance.import_profiles SET config = config - 'card_payment_types'"
+    " WHERE config ? 'card_payment_types'",
+    "UPDATE finance.import_batches SET profile_config = profile_config - 'card_payment_types'"
+    " WHERE profile_config ? 'card_payment_types'",
+    "UPDATE core.connections SET config = config - 'normalizer_version'"
+    " WHERE connector IN ('monzo', 'etoro')",
+]
+
+
 def downgrade() -> None:
+    for statement in DOWNGRADE_DATA:
+        op.execute(statement)
     op.execute(
         "ALTER TABLE finance.transactions"
         " DROP COLUMN card_reversal, DROP COLUMN card_lifecycle_id, DROP COLUMN refund"

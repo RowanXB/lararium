@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lararium.core.connections import create_connection
 from lararium.modules.finance import models
 from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.profiles import PdfProfileConfig
@@ -150,6 +151,36 @@ async def test_committed_rows_are_read_by_the_config_that_parsed_them(
         .where(models.ImportRow.batch_id == batch.id, models.ImportRow.kind == "statement")
     )
     assert refund is True
+
+
+async def test_the_downgrade_leaves_configs_the_older_code_reads(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    """Review: the older code refuses a config with card_payment_types, and without its replay
+    marker reset an upgrade again would not mark the refunds the downgrade dropped."""
+    profile = await _csv_profile(run, columns=COLUMNS, card_payment_types=["VIS"])
+    content = "Date,Type,Description,Amount\n10/11/2026,VIS,Card refund,60.00\n"
+    batch = await stage(profile, content)
+    connection = await run(
+        create_connection,
+        connector="monzo",
+        display_name="Monzo",
+        config={"normalizer_version": "monzo-norm-6"},
+    )
+
+    for statement in _migration().DOWNGRADE_DATA:
+        await session.execute(text(statement))
+    session.expire_all()
+
+    assert "card_payment_types" not in (await _profile_row(session, profile.id)).config
+    staged = await session.scalar(
+        select(models.ImportBatch.profile_config).where(models.ImportBatch.id == batch.id)
+    )
+    assert staged is not None and "card_payment_types" not in staged
+    config = await session.scalar(
+        text("SELECT config FROM core.connections WHERE id = :id"), {"id": connection.id}
+    )
+    assert "normalizer_version" not in config
 
 
 async def test_a_staged_batch_gains_the_types(
