@@ -268,7 +268,6 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
                 source=("import", row.dedupe_key) if row.dedupe_key else None,
                 own_account_id=account_id,
                 counterparty_identifier_id=counterparty.identifier_id,
-                payment_reference=counterparty.reference,
                 other_postings=0 if row.fee == 0 else 1,
             )
             postings = _postings(account_id, contra_id, row.instrument_id, row.quantity, row.fee)

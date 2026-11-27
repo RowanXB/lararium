@@ -29,11 +29,10 @@ from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
+    HeldKind,
     IdentifierRecord,
     get_identifier,
-    named_account,
-    register_card_merchant,
-    register_references,
+    register_holders,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -58,6 +57,7 @@ from lararium.modules.finance.transfers.contra import (
     OwnRecord,
     SourceRef,
     bound_id,
+    in_cancelled_pair,
     is_active_leg,
     load_own_record,
     rejection_of,
@@ -453,8 +453,9 @@ async def _open(
 
 async def _release_stray(ctx: CommandContext, transaction_id: UUID, system: _System) -> None:
     """Re-point the In transit posting of a recorded transaction that can't be a leg (one
-    with a fee posting besides, say) back to Unassigned: only a transfer's leg posts there
-    (design §5.5). Its transfer, if it had one, is dissolved already."""
+    with a fee posting besides, say) back to Unassigned: only a transfer's leg, or one of a
+    cancelled pair, which stays, posts there (design §5.5). Its transfer, if it had one, is
+    dissolved already."""
     t, p = models.Transaction, models.Posting
     on_in_transit = await ctx.session.scalar(
         select(func.count())
@@ -467,7 +468,11 @@ async def _release_stray(ctx: CommandContext, transaction_id: UUID, system: _Sys
             t.origin.not_in(DERIVED_ORIGINS),
         )
     )
-    if not on_in_transit or await is_active_leg(ctx.session, transaction_id):
+    if (
+        not on_in_transit
+        or await is_active_leg(ctx.session, transaction_id)
+        or await ctx.session.scalar(select(in_cancelled_pair(transaction_id)))
+    ):
         return
     if on_in_transit > 1:
         # Which one is the contra is ambiguous; find_transfer_violations reports it.
@@ -843,9 +848,8 @@ async def preview_match(
     `occurred_tz`: the time zone the row's time is read in, which posting stores and the
     gate reads its booking day in (pairs._gate_day); None, the owner's.
 
-    The row's evidence is its counterparty identifier only, with its payment reference
-    (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
-    read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    The row's evidence is its counterparty identifier only: `counterparty.account_number` is
+    not read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
     post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
@@ -856,8 +860,11 @@ async def preview_match(
     )
     # As eligible_records reads it: a card merchant names no bank account and identifies no
     # account (no holder), only its holders. (The importers that preview give bank accounts
-    # only; this keeps the two definitions one should a card merchant reach it.)
+    # only; this keeps the two definitions one should a card merchant reach it.) A bank
+    # account held by several accounts identifies no account either, only its holders
+    # (payee_holders).
     merchant = named is not None and named.kind == "card_merchant"
+    payee = named is not None and named.kind == "uk_bank_account"
     a = models.Account
     type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
@@ -868,17 +875,12 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        # As eligible_records' holder (contra.named_account_sql): its account, or by the
-        # reference.
-        holder=(
-            None
-            if named is None
-            else await named_account(session, named.id, counterparty.reference)
-        ),
+        holder=None if named is None else named.account_id,
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
         holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
+        payee_holders=frozenset(named.holders) if payee and named is not None else frozenset(),
         # As eligible_records' funded_by_transfer: read from the account's type.
         funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
         timed=timed,
@@ -922,28 +924,27 @@ async def unassign_identifier_and_rematch(
     return record
 
 
-async def register_card_merchant_and_rematch(
-    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID], *, heal: bool = True
-) -> IdentifierRecord:
-    """register_card_merchant, then match again every record naming the merchant, so the
-    new holders take effect at once (healing unless `heal` is False, as in
-    rematch_identifiers). Records that don't name it yet (posted before it was registered)
-    are named by their connector's next normalize (Monzo's replays them)."""
-    record = await register_card_merchant(ctx, merchant_id, account_ids)
-    await rematch_identifiers(ctx, [record.id], heal=heal)
-    return record
-
-
-async def register_references_and_rematch(
+async def register_holders_and_rematch(
     ctx: CommandContext,
+    kind: HeldKind,
     value: str,
-    references: Sequence[tuple[UUID, str]],
+    account_ids: Sequence[UUID],
     *,
     heal: bool = True,
 ) -> IdentifierRecord:
-    """register_references, then match again every record naming the bank account, so the
-    changed references take effect at once (healing unless `heal` is False, as in
-    rematch_identifiers)."""
-    record = await register_references(ctx, value, references)
+    """register_holders, then match again every record naming the identifier, so the new
+    holders take effect at once (healing unless `heal` is False, as in rematch_identifiers).
+    Records that don't name a card merchant yet (posted before it was registered) are named
+    by their connector's next normalize (Monzo's replays them)."""
+    record = await register_holders(ctx, kind, value, account_ids)
     await rematch_identifiers(ctx, [record.id], heal=heal)
     return record
+
+
+async def register_card_merchant_and_rematch(
+    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID], *, heal: bool = True
+) -> IdentifierRecord:
+    """register_holders_and_rematch for a card merchant."""
+    return await register_holders_and_rematch(
+        ctx, "card_merchant", merchant_id, account_ids, heal=heal
+    )

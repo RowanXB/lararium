@@ -284,6 +284,100 @@ export type BalanceModeUpdate = {
 };
 
 /**
+ * BinanceConnectionCreate
+ */
+export type BinanceConnectionCreate = {
+    /**
+     * Api Secret
+     */
+    api_secret?: null;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: null;
+};
+
+/**
+ * BinanceConnectionState
+ */
+export type BinanceConnectionState = {
+    /**
+     * Differences
+     */
+    differences: Array<BinanceDifferenceOut>;
+    /**
+     * First Sync Done
+     */
+    first_sync_done: boolean;
+    /**
+     * Flags
+     */
+    flags: Array<string>;
+    /**
+     * Wallets
+     */
+    wallets: Array<string>;
+};
+
+/**
+ * BinanceConnectionUpdate
+ */
+export type BinanceConnectionUpdate = {
+    /**
+     * Api Secret
+     */
+    api_secret?: null;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: null;
+};
+
+/**
+ * BinanceDifferenceOut
+ *
+ * A reconciliation difference that still holds: where and when, never an amount.
+ */
+export type BinanceDifferenceOut = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * From At
+     */
+    from_at: string;
+    /**
+     * Symbol
+     */
+    symbol: string;
+    /**
+     * To At
+     */
+    to_at: string;
+};
+
+/**
  * Body_stage_import
  */
 export type BodyStageImport = {
@@ -572,6 +666,7 @@ export type CashFlowPeriodOut = {
  * ConnectionOut
  */
 export type ConnectionOut = {
+    binance?: BinanceConnectionState | null;
     /**
      * Connector
      */
@@ -985,7 +1080,30 @@ export type IdentifierCreate = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account';
+    kind: 'uk_bank_account' | 'chain_address';
+    /**
+     * Value
+     */
+    value: string;
+};
+
+/**
+ * IdentifierHoldersRegister
+ *
+ * The own accounts payments to an identifier go into: a card merchant (`value` its
+ * Monzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts
+ * are paid through (`value` its sort code and account number, e.g. "11-22-33 12345678");
+ * none removes them.
+ */
+export type IdentifierHoldersRegister = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Kind
+     */
+    kind: 'card_merchant' | 'uk_bank_account';
     /**
      * Value
      */
@@ -1027,49 +1145,11 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant';
-    /**
-     * References
-     */
-    references: Array<IdentifierReference>;
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address';
     /**
      * Sort Code
      */
     sort_code: string | null;
-    /**
-     * Value
-     */
-    value: string;
-};
-
-/**
- * IdentifierReference
- *
- * One own account behind a shared payee bank account, told apart by the payment
- * reference it is paid with (stored trimmed and upper-cased).
- */
-export type IdentifierReference = {
-    /**
-     * Account Id
-     */
-    account_id: string;
-    /**
-     * Reference
-     */
-    reference: string;
-};
-
-/**
- * IdentifierReferencesRegister
- *
- * The own accounts payments to a shared payee bank account go into, by reference; none
- * removes them.
- */
-export type IdentifierReferencesRegister = {
-    /**
-     * References
-     */
-    references: Array<IdentifierReference>;
     /**
      * Value
      */
@@ -1635,7 +1715,7 @@ export type InstrumentIdentifierModel = {
     /**
      * Scheme
      */
-    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko';
+    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko' | 'binance_asset';
     /**
      * Value
      */
@@ -2099,7 +2179,7 @@ export type SuggestionOut = {
     /**
      * Account Number
      */
-    account_number: string;
+    account_number: string | null;
     /**
      * Identifier Id
      */
@@ -2108,6 +2188,10 @@ export type SuggestionOut = {
      * Incoming
      */
     incoming: number;
+    /**
+     * Kind
+     */
+    kind: 'uk_bank_account' | 'chain_address';
     /**
      * Latest
      */
@@ -2123,7 +2207,11 @@ export type SuggestionOut = {
     /**
      * Sort Code
      */
-    sort_code: string;
+    sort_code: string | null;
+    /**
+     * Value
+     */
+    value: string;
 };
 
 /**
@@ -2208,6 +2296,10 @@ export type TransactionOut = {
      * Booking Date
      */
     booking_date: string;
+    /**
+     * Cancels Transaction Id
+     */
+    cancels_transaction_id: string | null;
     /**
      * Description
      */
@@ -2351,6 +2443,62 @@ export type ValidationError = {
      * Error Type
      */
     type: string;
+};
+
+/**
+ * BinanceConnectionCreate
+ */
+export type BinanceConnectionCreateWritable = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret?: string | null;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: string | null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: string | null;
+};
+
+/**
+ * BinanceConnectionUpdate
+ */
+export type BinanceConnectionUpdateWritable = {
+    /**
+     * Api Key
+     */
+    api_key: string;
+    /**
+     * Api Secret
+     */
+    api_secret?: string | null;
+    /**
+     * Key Type
+     */
+    key_type: 'hmac' | 'ed25519';
+    /**
+     * Private Key
+     */
+    private_key?: string | null;
+    /**
+     * Private Key Passphrase
+     */
+    private_key_passphrase?: string | null;
 };
 
 /**
@@ -2498,6 +2646,31 @@ export type CreateMonzoConnectionResponses = {
 
 export type CreateMonzoConnectionResponse = CreateMonzoConnectionResponses[keyof CreateMonzoConnectionResponses];
 
+export type CreateBinanceConnectionData = {
+    body: BinanceConnectionCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/binance';
+};
+
+export type CreateBinanceConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBinanceConnectionError = CreateBinanceConnectionErrors[keyof CreateBinanceConnectionErrors];
+
+export type CreateBinanceConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateBinanceConnectionResponse = CreateBinanceConnectionResponses[keyof CreateBinanceConnectionResponses];
+
 export type CreateEtoroConnectionData = {
     body: EtoroConnectionInWritable;
     path?: never;
@@ -2627,6 +2800,36 @@ export type AuthorizeConnectionResponses = {
 };
 
 export type AuthorizeConnectionResponse = AuthorizeConnectionResponses[keyof AuthorizeConnectionResponses];
+
+export type UpdateBinanceConnectionData = {
+    body: BinanceConnectionUpdateWritable;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/binance';
+};
+
+export type UpdateBinanceConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBinanceConnectionError = UpdateBinanceConnectionErrors[keyof UpdateBinanceConnectionErrors];
+
+export type UpdateBinanceConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateBinanceConnectionResponse = UpdateBinanceConnectionResponses[keyof UpdateBinanceConnectionResponses];
 
 export type DisableConnectionData = {
     body?: never;
@@ -3020,30 +3223,30 @@ export type RegisterCardMerchantResponses = {
 
 export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
 
-export type RegisterIdentifierReferencesData = {
-    body: IdentifierReferencesRegister;
+export type RegisterIdentifierHoldersData = {
+    body: IdentifierHoldersRegister;
     path?: never;
     query?: never;
-    url: '/api/v1/finance/accounts/identifiers/references';
+    url: '/api/v1/finance/accounts/identifiers/holders';
 };
 
-export type RegisterIdentifierReferencesErrors = {
+export type RegisterIdentifierHoldersErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RegisterIdentifierReferencesError = RegisterIdentifierReferencesErrors[keyof RegisterIdentifierReferencesErrors];
+export type RegisterIdentifierHoldersError = RegisterIdentifierHoldersErrors[keyof RegisterIdentifierHoldersErrors];
 
-export type RegisterIdentifierReferencesResponses = {
+export type RegisterIdentifierHoldersResponses = {
     /**
      * Successful Response
      */
     200: IdentifierOut;
 };
 
-export type RegisterIdentifierReferencesResponse = RegisterIdentifierReferencesResponses[keyof RegisterIdentifierReferencesResponses];
+export type RegisterIdentifierHoldersResponse = RegisterIdentifierHoldersResponses[keyof RegisterIdentifierHoldersResponses];
 
 export type RenameAccountData = {
     body: AccountRename;

@@ -128,6 +128,30 @@ async def test_transfers_opening_balances_and_voids_are_not_flows(
     assert (flow.income, flow.spending) == (Decimal("0"), Decimal("0"))
 
 
+async def test_a_cancelled_pair_is_neither_income_nor_spending(
+    session, run, move, bank, gbp
+) -> None:
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    request = await move("-100", date(2026, 11, 2), contra=in_transit, payee="eToro")
+    await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, 3, tzinfo=LON),
+            description="Withdrawal cancelled",
+            postings=[
+                PostingInput(bank.id, gbp.id, Decimal("100")),
+                PostingInput(in_transit, gbp.id, Decimal("-100")),
+            ],
+            counterparty=CounterpartyFields(name="eToro"),
+            cancels_transaction_id=request.id,
+        ),
+    )
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.spending, flow.payees) == (Decimal("0"), Decimal("0"), [])
+
+
 async def test_spending_the_source_says_is_not_spending_is_left_out(session, move) -> None:
     await move("-40", date(2026, 11, 2), include_in_spending=False)
     await move("60", date(2026, 11, 2), include_in_spending=False)

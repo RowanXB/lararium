@@ -211,16 +211,19 @@ async def test_other_kinds_still_single_holder(
     assert (row.holder, row.holders, row.names_account) == (None, None, True)
 
 
-async def test_only_card_merchants_have_holder_rows(
+async def test_a_holder_row_states_its_identifier_s_kind(
     session: AsyncSession, run: Run, platform
 ) -> None:
+    """A holder row's kind is its identifier's (the foreign key to (id, kind)): a bank
+    account's row can't pass for a card merchant's. (Which kinds may have holders at all:
+    test_identifiers.)"""
     monzo, invest, _ = platform
     bank = await run(assign_identifier, monzo.account.id, "uk_bank_account", MONZO_IDENTIFIER)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="foreign key"):
         async with session.begin_nested():
             await session.execute(
                 insert(models.AccountIdentifierHolder).values(
-                    identifier_id=bank.id, account_id=invest.account.id
+                    identifier_id=bank.id, kind="card_merchant", account_id=invest.account.id
                 )
             )
 

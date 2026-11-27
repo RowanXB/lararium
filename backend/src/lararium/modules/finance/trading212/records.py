@@ -77,7 +77,8 @@ TRANSACTIONS = {
     "LENDING_INTEREST": (1, "Share lending interest"),
     "TRANSFER": (None, "Transfer"),
 }
-# Movements with another account of the owner's, or the owner's card (design §5.12).
+# Movements with another account of the owner's, or the owner's card (design §5.12); every
+# other item (a dividend, a fee, interest, a fill but a FOP) is marked never a transfer.
 _THROUGH_CONTRA = frozenset({"DEPOSIT", "WITHDRAW", "TRANSFER"})
 TRANSFER = "TRANSFER"
 # The owner checks the first real TRANSFER's sign (design §10).
@@ -238,7 +239,12 @@ async def _post_fill(run: Run, record: Record, key: str, order: Item, fill: Item
         if price > 0:
             quote_id, in_quote = await run.price(text_at(order, "instrument.currency"), price)
             run.fill_prices[(instrument_id, quote_id, local_date(occurred_at, LONDON))] = in_quote
-    return await run.post(key, occurred_at, description, postings)
+    # Only shares moved free of payment can be a transfer's leg: any other fill is marked
+    # never one, so a fill of cash alone against Unassigned is no bank top-up.
+    never_transfer = fill_type not in _TRANSFER_FILLS
+    return await run.post(
+        key, occurred_at, description, postings, CounterpartyFields(never_transfer=never_transfer)
+    )
 
 
 async def order(run: Run, record: Record) -> None:
@@ -297,6 +303,7 @@ async def dividend(run: Run, record: Record) -> None:
                 PostingInput(run.account, currency.id, amount),
                 PostingInput(unassigned, currency.id, -amount),
             ],
+            CounterpartyFields(never_transfer=True),
         )
     if transaction_id is None:
         await run.void(key)
@@ -329,7 +336,8 @@ async def _post_movement(
             PostingInput(run.account, currency.id, values.amount),
             PostingInput(contra, currency.id, -values.amount),
         ],
-        CounterpartyFields(identifier_id=identifier),
+        # Anything else (a fee, interest) is no transfer: the funding rule must not take it.
+        CounterpartyFields(identifier_id=identifier, never_transfer=kind not in _THROUGH_CONTRA),
     )
 
 

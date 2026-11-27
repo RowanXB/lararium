@@ -7,6 +7,7 @@ import {
   addAccountIdentifier,
   listAccounts,
   listTransferCandidates,
+  listTransferSuggestions,
   listTransfers,
   pairTransfer,
   rejectTransfer,
@@ -78,6 +79,8 @@ const CANDIDATE = {
 
 const SUGGESTION = {
   identifier_id: "0190a0b0-0000-7000-8000-0000000000d1",
+  kind: "uk_bank_account",
+  value: "112233:12345678",
   sort_code: "112233",
   account_number: "12345678",
   names: ["Test Owner"],
@@ -332,6 +335,58 @@ it("registers a suggestion against an account", async () => {
       body: { kind: "uk_bank_account", value: "112233:12345678" },
     }),
   );
+});
+
+it("lists a bank account suggestion but not a card merchant's", async () => {
+  vi.mocked(listTransferSuggestions).mockResolvedValueOnce({
+    data: [
+      {
+        kind: "card_merchant",
+        merchant_id: "merch_0001",
+        name: "Trading 212",
+        host: "trading212.com",
+        outgoing: 3,
+        incoming: 0,
+        latest: "2026-11-12",
+        account_ids: [BANK_A],
+      },
+      SUGGESTION,
+    ],
+  } as never);
+  renderPage();
+  const suggestions = await section("Suggestions");
+  expect(await suggestions.findByText("11-22-33 · 12345678")).toBeInTheDocument();
+  expect(suggestions.queryByText(/Trading 212/)).toBeNull();
+  expect(suggestions.getAllByRole("button", { name: "Register" })).toHaveLength(1);
+});
+
+it("registers a chain-address suggestion against an account", async () => {
+  const address = `0x${"1".repeat(40)}`;
+  vi.mocked(listTransferSuggestions).mockResolvedValueOnce({
+    data: [
+      {
+        ...SUGGESTION,
+        kind: "chain_address",
+        value: address,
+        sort_code: null,
+        account_number: null,
+      },
+    ],
+  } as never);
+  const user = userEvent.setup();
+  renderPage();
+  const suggestions = await section("Suggestions");
+  expect(await suggestions.findByText(address)).toBeInTheDocument();
+  await user.click(await suggestions.findByRole("combobox", { name: "Account" }));
+  await user.click(await screen.findByRole("option", { name: "Bank A" }));
+  await user.click(suggestions.getByRole("button", { name: "Register" }));
+  expect(addAccountIdentifier).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { account_id: BANK_A },
+      body: { kind: "chain_address", value: address },
+    }),
+  );
+  expect(suggestions.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
 });
 
 it("shows no snapshots hint when every account can have identifiers", async () => {

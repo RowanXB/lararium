@@ -37,11 +37,12 @@ from lararium.modules.finance.transfers.contra import (
 from lararium.modules.finance.transfers.settings import TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
-# owner paired them; each names the other's account; only one names the other's account
-# (the other is a bank transfer naming nobody, or names nobody on an account funded by bank
-# transfer); only one prints the sort code of the other's account, and nothing else of it
-# (the other names no bank account at all). Two records in different currencies that name
-# each other's accounts are MUTUAL too (cross_currency_tier).
+# owner paired them; each names the other's account; only one names the other's account, or
+# a bank account the other's account is one of the holders of (the other is a bank transfer
+# naming nobody, or names nobody on an account funded by bank transfer); only one prints
+# the sort code of the other's account, and nothing else of it (the other names no bank
+# account at all). Two records in different currencies that name each other's accounts are
+# MUTUAL too (cross_currency_tier).
 type Tier = Literal[1, 2, 3, 4]
 DECIDED: Tier = 1
 MUTUAL: Tier = 2
@@ -76,6 +77,11 @@ class Pairable:
     # The own accounts the card merchant it names pays into (contra.eligible_records'
     # holders); empty for any other record. Never `holder`: it doesn't identify the record.
     holders: frozenset[UUID] = frozenset()
+    # The own accounts holding the bank account it names, when several share it
+    # (contra.eligible_records' payee_holders, account type catalog design §8.1); empty for
+    # any other record. Never `holder` (it identifies the record to the set, not to one
+    # account), and apart from `holders`, which only card_tier reads.
+    payee_holders: frozenset[UUID] = frozenset()
     # Its account's type lists bank transfer among the ways it is funded
     # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
     # one, though its source doesn't say (account type catalog design §8.2).
@@ -135,26 +141,50 @@ def _funded_only(x: Pairable) -> bool:
     )
 
 
+def _names_held(x: Pairable, other: Pairable) -> bool:
+    """Whether x names a bank account several own accounts hold, other's account among
+    them, and other, identifying no account, may be a transfer (_may_be_transfer): the
+    one-sided evidence of a payee shared by several accounts (account type catalog design
+    §8.1). The set decides only which accounts may hold the other side."""
+    return other.account_id in x.payee_holders and not other.identified and _may_be_transfer(other)
+
+
 def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     """The tier the registry gives two records of opposite sign, in the same instrument,
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
     other's account and each other one a bank transfer, or a record naming nobody on an
-    account funded by bank transfer (_may_be_transfer). A sub-account's move, identified by
-    its main account alone, takes no other one that names a bank account: such a move prints
-    none on either side, so that row is a payment to or from somebody else's account
-    (transfer evidence design §5.2). A record naming a card merchant (holders) is none of
-    these tiers' (card_tier pairs it). Decisions are not considered."""
-    if c.account_id == r.account_id or not (r.identified or c.identified):
+    account funded by bank transfer (_may_be_transfer); or one names a bank account the
+    other's account is one of the holders of, and the other identifies no account and may
+    be a transfer (_names_held: ONE_SIDED). A record naming a bank account several own
+    accounts hold says where its money went: its other side is on one of them, or there is
+    none. A sub-account's move, identified by its main account alone, takes no other one
+    that names a bank account its own account holds no part of: such a move prints none on
+    either side, so that row is a payment to or from somebody else's account (transfer
+    evidence design §5.2). A record naming a card merchant (holders) is none of these tiers'
+    (card_tier pairs it). Decisions are not considered."""
+    if c.account_id == r.account_id:
         return None
     if r.holders or c.holders:
+        return None
+    for x, other in ((r, c), (c, r)):
+        if x.payee_holders and other.account_id not in x.payee_holders:
+            return None
+    if _names_held(r, c) or _names_held(c, r):
+        return ONE_SIDED
+    if not (r.identified or c.identified):
         return None
     for x, other in ((r, c), (c, r)):
         if x.identified and x.holder != other.account_id:
             return None
         if not x.identified and not _may_be_transfer(x):
             return None
-        if x.by_main_account and not other.identified and other.names_account:
+        if (
+            x.by_main_account
+            and not other.identified
+            and other.names_account
+            and x.account_id not in other.payee_holders
+        ):
             return None
     return MUTUAL if r.identified and c.identified else ONE_SIDED
 
@@ -462,9 +492,14 @@ class Known:
         account's opening, never imported, and an unrelated row taken for it would never
         be found out. After the last day imported, one would be: the next statement brings
         the real row, and the two go to review."""
-        if record.account_id not in self.manual:
+        return self.holds_account(record.account_id, record.instrument_id, earliest)
+
+    def holds_account(self, account_id: UUID, instrument_id: UUID, earliest: date) -> bool:
+        """holds_from for any row in the instrument on the account, as for a holder of a
+        held payee whose row was not found (_one_sided_known)."""
+        if account_id not in self.manual:
             return True
-        first = self.first_full_day.get((record.account_id, record.instrument_id))
+        first = self.first_full_day.get((account_id, instrument_id))
         return first is not None and first <= earliest
 
 
@@ -552,7 +587,9 @@ async def _load_records(
     """The own records that can pair at all: those a bank transfer, naming a bank
     account, a card merchant or an own account by its number (the registry's), those on an
     account a card merchant pays into (card_tier's other side) or funded by bank transfer
-    (registry_tier's, _may_be_transfer), and those the owner paired."""
+    (registry_tier's, _may_be_transfer), and those the owner paired. (A record on an account
+    holding a shared payee bank account pairs with one naming it only if it may be a
+    transfer, so it is among those already.)"""
     e = eligible_records(system)
     t = models.Transaction
     h = models.AccountIdentifierHolder
@@ -569,7 +606,7 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.counterparty_identifier_id.is_not(None),
         e.c.holder.is_not(None),
-        e.c.account_id.in_(select(h.account_id)),
+        e.c.account_id.in_(select(h.account_id).where(h.kind == "card_merchant")),
         e.c.funded_by_transfer,
     ]
     if decided_ids is not None:
@@ -589,6 +626,7 @@ async def _load_records(
         e.c.names_account,
         e.c.by_main_account,
         e.c.holders,
+        e.c.payee_holders,
         e.c.funded_by_transfer,
         e.c.timed,
         e.c.occurred_tz,
@@ -613,6 +651,7 @@ async def _load_records(
             names_account=row.names_account,
             by_main_account=row.by_main_account,
             holders=frozenset(row.holders or ()),
+            payee_holders=frozenset(row.payee_holders or ()),
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
             occurred_tz=row.occurred_tz,
@@ -695,9 +734,29 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     before the days the counterpart's account's imports list (Known.holds_from): there the
     real row may be inside the opening, and an unrelated one stand in for it for good. A
     timed receipt is asked only from its payment's day (_gate_day). A pair it refuses is
-    still a candidate, one that can't be taken by itself (PairRelation.untakeable)."""
-    identified, other = (s, c) if s.identified else (c, s)
-    return known.holds_from(other, _gate_day(identified, other, settings, known))
+    still a candidate, one that can't be taken by itself (PairRelation.untakeable). The
+    record naming a bank account the other's account holds (_names_held) is the identified
+    one here. Whichever side is identified, every holder of a bank account either side
+    names (payee_holders) is held to the gate from the start of that side's window: the
+    real row may be on any of them, inside its opening. Only the holder the other record is
+    on is asked from _gate_day's day instead: a timed receipt's evidence is about its own
+    account alone."""
+    if s.identified or c.identified:
+        identified, other = (s, c) if s.identified else (c, s)
+    else:
+        identified, other = (s, c) if _names_held(s, c) else (c, s)
+    if not known.holds_from(other, _gate_day(identified, other, settings, known)):
+        return False
+    for x, y in ((s, c), (c, s)):
+        if x.payee_holders:
+            start = counterpart_bounds(x, settings)[0]
+            gate = _gate_day(x, y, settings, known)
+            if not all(
+                known.holds_account(h, y.instrument_id, gate if h == y.account_id else start)
+                for h in x.payee_holders
+            ):
+                return False
+    return True
 
 
 def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
@@ -990,7 +1049,9 @@ async def pair_relation(
     least one is identified through the registry; each identified one names the other's
     account; each other one is a bank transfer, or names nobody on an account funded by bank
     transfer (_may_be_transfer) and no card payment could have paid it (card evidence comes
-    first); and neither is rejected nor decided never to pair with the other. Where the
+    first); and neither is rejected nor decided never to pair with the other. A record naming
+    a bank account several own accounts hold counts as identified to that set: it pairs so
+    with a record on one of them that identifies no account (_names_held). Where the
     registry doesn't pair two records, a sort code alone may, as the weakest tier
     (weak_tier). Two records in different currencies pair when
     cross_currency_tier takes them, within the near window, each the other's only such

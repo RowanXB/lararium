@@ -473,3 +473,84 @@ async def test_original_amount_needs_both_fields(run, make_account, gbp, usd) ->
     nan_split = TransactionDetails(category_splits=(CategorySplit("x", Decimal("NaN")),))
     with pytest.raises(FinanceValidationError):
         await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=nan_split))
+
+
+def _cancelling(connection_id, a, b, gbp, external_id: str, cancels, amount: str = "5.00"):
+    return dataclasses.replace(
+        _tx(connection_id, a, b, gbp, amount),
+        external_id=external_id,
+        cancels_transaction_id=cancels,
+    )
+
+
+async def test_a_connector_transaction_records_what_it_cancels(
+    session, run, make_account, gbp
+) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    first, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    second, _ = await run(
+        upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_2", first.id)
+    )
+    assert first.cancels_transaction_id is None
+    assert second.cancels_transaction_id == first.id
+    assert (await ledger._load_transaction(session, second.id)).cancels_transaction_id == first.id
+
+
+async def test_the_cancellation_link_is_replaced_in_place(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    first, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    linked = _cancelling(conn.id, b, a, gbp, "tx_2", first.id)
+    second, _ = await run(upsert_connector_transaction, linked)
+    unlinked, outcome = await run(
+        upsert_connector_transaction, dataclasses.replace(linked, cancels_transaction_id=None)
+    )
+    assert outcome == "updated"
+    assert unlinked.id == second.id
+    assert unlinked.cancels_transaction_id is None
+    _, outcome = await run(
+        upsert_connector_transaction, dataclasses.replace(linked, cancels_transaction_id=None)
+    )
+    assert outcome == "unchanged"
+    relinked, outcome = await run(upsert_connector_transaction, linked)
+    assert (outcome, relinked.cancels_transaction_id) == ("updated", first.id)
+
+
+async def test_a_transaction_cannot_cancel_one_that_is_not_there(run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    with pytest.raises(FinanceValidationError):
+        await run(
+            upsert_connector_transaction,
+            _cancelling(conn.id, a, b, gbp, "tx_2", uuid.uuid4()),
+        )
+
+
+async def test_a_void_cancellation_holds_nothing(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    first, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    voided, _ = await run(
+        upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_2", first.id)
+    )
+    await run(void_transaction, voided.id)
+    other, _ = await run(
+        upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_3", first.id)
+    )
+    assert other.cancels_transaction_id == first.id
+    # The void one keeps its link as it was voided.
+    kept = await session.scalar(
+        text("select cancels_transaction_id from finance.transactions where id = :i"),
+        {"i": voided.id},
+    )
+    assert kept == first.id
+
+
+async def test_a_transaction_is_cancelled_by_at_most_one(run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    first, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    await run(upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_2", first.id))
+    with pytest.raises(FinanceValidationError):
+        await run(upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_3", first.id))

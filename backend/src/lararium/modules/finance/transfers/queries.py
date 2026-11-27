@@ -20,6 +20,7 @@ from sqlalchemy import (
     and_,
     any_,
     case,
+    distinct,
     exists,
     func,
     or_,
@@ -49,7 +50,9 @@ from lararium.modules.finance.transfers.contra import (
     LegFee,
     RecordColumns,
     SourceRef,
+    cancelled_pairs,
     eligible_records,
+    in_cancelled_pair,
     is_rejected,
     leg_fee_columns,
     load_own_record,
@@ -185,7 +188,8 @@ async def list_transfers(
 async def weak_transfers(
     session: AsyncSession, transfers: Collection[TransferRecord]
 ) -> frozenset[UUID]:
-    """The ids of those of the transfers that a sort code alone paired (pairs.WEAK): matched,
+    """The ids of those of the transfers that neither leg names an own account for (a sort code
+    alone, a card merchant's or a held payee's holders; pairs.WEAK): matched,
     neither own record naming another own account (eligible_records' holder), and no pair
     decision linking them. Read from their records, not from the pair relation, since the
     Transfers page asks on every load."""
@@ -745,14 +749,23 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     return list(found.values())
 
 
+# The identifier kinds the owner can register from Suggestions by assigning them to one own
+# account; another kind (IBKR's `ibkr_account`, say) is never suggested here, and a card
+# merchant has a suggestion of its own (card_merchant_suggestions).
+SuggestedKind = Literal["uk_bank_account", "chain_address"]
+SUGGESTED_KINDS: tuple[SuggestedKind, ...] = ("uk_bank_account", "chain_address")
+
+
 @dataclass(frozen=True)
 class SuggestionRecord:
-    """A bank account transactions name that isn't registered to an own account nor
-    dismissed: maybe one of the owner's."""
+    """An identifier (a bank account, a chain address) transactions name that isn't
+    registered to an own account nor dismissed: maybe one of the owner's."""
 
     identifier_id: UUID
-    sort_code: str
-    account_number: str
+    kind: SuggestedKind
+    value: str  # as stored
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     names: tuple[str, ...]  # the distinct counterparty names it appeared under, sorted
     outgoing: int  # own records paying it
     incoming: int  # own records paid by it
@@ -760,19 +773,21 @@ class SuggestionRecord:
 
 
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
-    """Unregistered, undismissed bank accounts that own records name, most named first,
-    then the most recently named. A shared payee carrying references is registered already
-    (account type catalog design §8.1): it is offered again once they are removed."""
+    """Unregistered, undismissed identifiers of a kind the owner can register
+    (`SUGGESTED_KINDS`) that own records name, most named first, then the most recently
+    named. One held by several own accounts (a shared payee's, account type catalog design
+    §8.1) is registered already: it is offered again once its holders are removed."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
-    r = models.AccountIdentifierReference
+    h = models.AccountIdentifierHolder
     outgoing = func.count().filter(e.c.quantity < 0)
     incoming = func.count().filter(e.c.quantity > 0)
     latest = func.max(e.c.booking_date)
     rows = await session.execute(
         select(
             i.id,
+            i.kind,
             i.value,
             func.array_agg(t.counterparty_name.distinct()).label("names"),
             outgoing.label("outgoing"),
@@ -782,20 +797,23 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
         .where(
-            i.kind == "uk_bank_account",
+            i.kind.in_(SUGGESTED_KINDS),
             i.account_id.is_(None),
             i.dismissed_at.is_(None),
-            ~exists().where(r.identifier_id == i.id),
+            ~exists().where(h.identifier_id == i.id),
         )
-        .group_by(i.id, i.value)
+        .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )
     found: list[SuggestionRecord] = []
     for row in rows:
-        sort_code, account_number = uk_bank_account_parts(row.value)
+        bank = row.kind == "uk_bank_account"
+        sort_code, account_number = uk_bank_account_parts(row.value) if bank else (None, None)
         found.append(
             SuggestionRecord(
                 identifier_id=row.id,
+                kind=row.kind,
+                value=row.value,
                 sort_code=sort_code,
                 account_number=account_number,
                 names=tuple(sorted(name for name in row.names if name)),
@@ -955,8 +973,9 @@ def is_overdue(
 
 def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
     """(id, occurred_at) of the recorded transactions (not void, not derived) posting on In
-    transit without being a leg of a transfer that is not rejected, whatever their shape:
-    one with a fee posting besides is no leg, yet its posting there still counts."""
+    transit without being a leg of a transfer that is not rejected or one of a cancelled
+    pair (contra.in_cancelled_pair), whatever their shape: one with a fee posting besides is
+    no leg, yet its posting there still counts."""
     t, p, tr = models.Transaction, models.Posting, models.Transfer
     # Set-wise on ids, then a lookup of each (_in_ids).
     legs = [
@@ -968,16 +987,20 @@ def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
         _in_ids(t.id, stray, stray.c.transaction_id),
         t.status != "void",
         t.origin.not_in(DERIVED_ORIGINS),
+        ~in_cancelled_pair(t.id),
     )
 
 
 async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
     """Ids of transactions that break the invariant (design §5.5): recorded transactions
-    posting on In transit without being a leg of a transfer that is not rejected, whatever
-    their shape, and own records that are such a leg with their contra elsewhere;
-    placeholders and settlements whose transfer is gone; those of a transfer that is not
-    rejected which are void or don't post on In transit; and the own record of a transfer
-    whose placeholder or settlement is missing."""
+    posting on In transit without being a leg of a transfer that is not rejected or one of
+    a cancelled pair, whatever their shape, and own records that are such a leg with their
+    contra elsewhere; placeholders and settlements whose transfer is gone; those of a
+    transfer that is not rejected which are void or don't post on In transit; the own
+    record of a transfer whose placeholder or settlement is missing; and both of a
+    cancelled pair that doesn't leave In transit level: unless each posts there exactly
+    once, the two in one instrument and summing to zero (cancelled-withdrawal design
+    §4.4)."""
     system = await system_account_ids(session)
     in_transit = system.get("in_transit")
     if in_transit is None:
@@ -1032,7 +1055,34 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
         )
     )
-    found = union(select(stray.c.id), elsewhere, orphaned, broken, missing).subquery()
+    pairs = cancelled_pairs()
+    q = aliased(models.Posting, name="pair_posting")
+    # Each side's postings there: one row of aggregates, which `having` keeps or drops.
+    level = exists(
+        select(func.count())
+        .where(
+            q.account_id == in_transit,
+            q.transaction_id.in_((pairs.c.cancelling, pairs.c.cancelled)),
+        )
+        .having(
+            and_(
+                func.count() == 2,
+                func.count(distinct(q.transaction_id)) == 2,
+                func.count(distinct(q.instrument_id)) == 1,
+                func.sum(q.quantity) == 0,
+            )
+        )
+    )
+    unsettled = select(pairs.c.cancelling, pairs.c.cancelled).where(~level).cte("unsettled_pairs")
+    found = union(
+        select(stray.c.id),
+        elsewhere,
+        orphaned,
+        broken,
+        missing,
+        select(unsettled.c.cancelling),
+        select(unsettled.c.cancelled),
+    ).subquery()
     return list(await session.scalars(select(found.c.id).order_by(found.c.id)))
 
 

@@ -9,9 +9,9 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, Text, bindparam, case, func, select, update
+from sqlalchemy import ColumnElement, Text, bindparam, case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -279,6 +279,11 @@ async def record_sync_success(
     )
 
 
+async def reset_failures(ctx: CommandContext, connection_id: UUID) -> ConnectionRecord:
+    """Forget the failures in a row, for the owner's fix of what failed (a key replaced)."""
+    return await _update(ctx, connection_id, consecutive_failures=0)
+
+
 async def record_sync_failure(ctx: CommandContext, connection_id: UUID, error: str) -> int:
     """Record a failed sync; return the number of failures in a row, this one included."""
     record = await _update(
@@ -321,6 +326,24 @@ async def update_config(
     if remove:
         config = config.op("-", return_type=JSONB)(bindparam(None, list(remove), type_=ARRAY(Text)))
     return await _update(ctx, connection_id, config=config)
+
+
+# Set when the owner asks for a sync, removed by the next sync that succeeds: it survives a
+# failed one, and whichever queued job runs it sees the request. Each request is a new token,
+# so a sync removes only the one it saw (`settle_sync_request`), not one made while it ran.
+SYNC_REQUESTED_KEY = "sync_requested"
+
+
+async def request_sync(ctx: CommandContext, connection_id: UUID) -> None:
+    """Record that the owner asked for a sync of this connection."""
+    await update_config(ctx, connection_id, {SYNC_REQUESTED_KEY: str(uuid4())})
+
+
+async def settle_sync_request(ctx: CommandContext, connection_id: UUID, seen: JSONValue) -> None:
+    """Remove the request a sync saw when it started, unless a newer one replaced it."""
+    current = (await lock_connection(ctx, connection_id)).config.get(SYNC_REQUESTED_KEY)
+    if current == seen:
+        await update_config(ctx, connection_id, remove=[SYNC_REQUESTED_KEY])
 
 
 OAUTH_STATE_KEY = "oauth_state"
@@ -406,6 +429,17 @@ async def store_credential(
     ctx.record_change(
         f"credential:{connection_id}:{purpose}", {"expires_at": _optional_iso(expires_at)}
     )
+
+
+async def delete_credential(ctx: CommandContext, connection_id: UUID, purpose: str) -> None:
+    """Remove a stored credential, if there is one."""
+    removed = await ctx.session.scalar(
+        delete(Credential)
+        .where(Credential.connection_id == connection_id, Credential.purpose == purpose)
+        .returning(Credential.purpose)
+    )
+    if removed is not None:
+        ctx.record_change(f"credential:{connection_id}:{purpose}", {"deleted": True})
 
 
 async def load_credential(

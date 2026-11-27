@@ -485,16 +485,28 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
   日期配对（见[登记标识](#登记标识)）。有两个候选都符合时（比如两个账户在相近的时间收到同样金额），
   这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
 - **多个账户共用的收款银行账户。** 如果你的银行用同一个银行账户（同一组 sort code 和账号）向
-  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款只能靠付款参考（reference）说明付给
-  哪一个。把参考登记一次，目前只能通过 API 操作：`POST /api/v1/finance/accounts/identifiers/references`
-  和 `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
-  "reference": "<payment reference>"}]}`（占位符；填你的银行 app 显示的内容，sort code 写成 11-22-33 或
-  112233 都行）。一次调用会替换该标识的全部参考，`references` 为空列表则
-  移除它们。参考的匹配忽略大小写和首尾空格。一个银行账户要么登记到一个账户上（做法见
-  [登记标识](#登记标识)），要么带参考，不能两者兼有。Lararium 随后会检查全部历史：付给该收款账户、
-  参考相符的银行转账会指明对应账户，银行付到 Trading 212 Invest、Stocks ISA 和 Cash ISA 的充值
-  会自动配对。卡充值仍按上面的卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的
-  入金方式当作银行转账来配对。
+  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款不会说明付给了哪一个：它的付款参考
+  （reference）不固定，无法区分这几个账户。把这个银行账户登记一次，标明由它们共同持有，目前只能通过
+  API 操作：`POST /api/v1/finance/accounts/identifiers/holders` 和 `{"kind": "uk_bank_account",
+  "value": "<sort code> <account number>", "account_ids": ["<account id>", ...]}`（占位符；填你的
+  银行 app 显示的内容，sort code 写成 11-22-33 或 112233 都行）。一次调用会替换它的全部持有账户，
+  `account_ids` 为空列表则移除它们。一个银行账户要么登记到一个账户上（做法见[登记标识](#登记标识)），
+  要么由多个账户共同持有，不能两者兼有；有持有账户时，它不会出现在建议里，也不能被忽略。Lararium
+  随后会检查全部历史：付给该收款账户的银行转账，会与任一持有账户上、窗口内唯一一笔同金额、可能是
+  银行转账的入金配对（标为银行转账的入金，或在 Trading 212 Invest、Stocks ISA 和 Cash ISA 上不指明
+  任何人的入金；Trading 212 的分红、费用、利息和订单成交永远不算）。它绝不会与持有账户以外的账户上的记录配对，
+  即使那条记录指明了你的银行账户。配对之前，这笔付款留在 Unassigned。无法配对时（两个持有账户上都有
+  符合的入金，或唯一的那笔被覆盖检查拒绝：覆盖检查针对每个手动或导入的持有账户，因为真正的入金可能在
+  其中任何一个上，藏在它的期初里），不会生成转账，
+  也不会有任何提示：这笔付款只出现在 Unassigned，和未配对的刷卡付款一样；持有的收款账户也不会被当作
+  历史之前已结清，不会生成占位记录。在 Unassigned 里找到这笔付款，手动配对正确的那一笔（先 `GET /api/v1/finance/transactions/{id}/pair-candidates`，再
+  `POST /api/v1/finance/transactions/{id}/pair`，见上文“没有写明对方账户的记录”）。卡充值仍按上面的
+  卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的入金方式当作银行转账来配对。这样配上的
+  一对在 Transfers 页面显示 **Reject**，没有 Unpair，和刷卡配对一样：两条记录少了对方都不是转账。有三个 Trading 212
+  账户时，它们之间的转账不指明对手账户（见下文），所以转入的一侧可能被当作一笔付给共用收款账户、金额相同的付款的
+  充值。真正的入金成为第二个合格候选后，Lararium 会自动拆开错配。原来配在一起的两条记录都会回到
+  Unassigned（未分类），Transfers 页面不会生成审核项。请在 Unassigned 找到原付款，手动把它与真正的入金配对。
+  如果真正的入金记在时间窗口之后，错误的配对会一直保留，直到你 Reject。
 - **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
   状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
   一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
@@ -636,6 +648,105 @@ Review items)”。发送失败的通知会在下一次同步时再发。对 eTo
   （已平仓的交易会等它的订单查询，或等一份覆盖它的报表）。
 - 在 Monzo 同步和 Trading 212 同步之间，一笔卡入金会显示为记在 Unassigned 上的支出，净资产会因此
   下跌，直到两侧都同步进来。
+
+## 连接 Binance
+
+Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，使用的密钥只能读取。它不会
+交易、转账、申购或提现：客户端只发送查询。每个有余额的 Binance 钱包会成为 Lararium 里的一个
+账户，其余额就是 Binance 报告的余额，而 Binance 列出的记录（充值、提现、交易等）用来解释余额
+是怎么来的。
+
+目前已实现的部分（阶段 A）：
+
+- **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中其他每个有余额的钱包（Cross Margin、
+  Futures、Trading Bots、未知的钱包等）都按该列表逐个资产计入；在阶段 A 它们没有自己的记录，
+  所以它们的变化会显示为对账差异。Lararium 不认识的钱包会按名称标记，并且仍会得到一个账户；
+  余额不为零却没有列出任何资产的钱包也会按名称标记。加密货币借贷的负债要到阶段 B 才会读取。
+- **Binance 上的法币**（Binance 标记为法定货币的资产，例如 EUR）就是 Lararium 已有的那个币种。
+  如果 Lararium 没有该 ISO 4217 代码的币种，且该代码还没有任何 instrument，该资产不计入：连接会被
+  标记并写出该代码，其余额不计入，其记录保留但不入账。已有 instrument 的代码（在 Binance 标记它为法定
+  货币之前按加密资产计入，或经由另一个连接建立）继续计入在那个 instrument 上。以它交易的另一方也不入账：在该账户最早的报告之后，它显示为对账差异；在那之前，
+  它包含在该资产的期初调整中。要计入该币种，请在 Instruments 页面添加它（类型 Fiat，以 ISO 代码
+  作为 symbol）：之后的同步会计入它的余额和新取得的记录。它的余额起初会显示为对账差异，因为此前的
+  报告把它算作零；此前保留的记录只有在 Lararium 下次重放记录（新的规范化版本）或 Binance 修改这些
+  记录时才会入账。如果添加该币种时，该代码已有一个加密资产 instrument，从此该资产就是该币种：在下一次
+  报告中，加密资产 instrument 读数为 0，该币种读数为该金额，显示为两笔相等且相反的对账差异并保持未结；
+  此前的入账留在加密资产 instrument 上，直到 Lararium 重放其记录。
+- **记录**：充值、提现、现货交易、闪兑（convert）、资产分红，以及活期 Earn（申购、赎回和收益）。
+
+Spot、活期 Earn、充值、提现、交易、闪兑和分红已用真实账户核对过。Funding 和阶段 A 其余的响应
+结构依据 Binance 的文档，尚未用真实账户核对。
+
+### 1. 创建只读 API 密钥
+
+在 Binance 创建一个 API 密钥，只勾选 **Enable Reading**。Lararium 在每次同步开始时检查密钥的
+权限：只要开启了其他任何权限，无论已知还是未知，同步都会拒绝这个密钥；没有 **Enable Reading**
+的密钥同样会被拒绝。IP 限制可选。两种密钥类型都支持：HMAC（“system generated”）和 Ed25519
+（“self-generated”）。注意 Binance 只为 `api.binance.com` 提供 Ed25519 密钥的文档。
+
+### 2. 添加连接
+
+在 Accounts → Add account 里选择 **Binance**，填写显示名称、密钥类型、API key 及其 secret（Ed25519
+密钥则填 PEM 格式的私钥，若有口令则一并填写）。密钥会加密保存，之后不再显示；**Update key**
+可以替换它。同一个 Binance 账户只能连接一次。Binance 不会报告只读密钥的到期时间，因此没有到期
+提醒；密钥被拒绝时，连接会显示需要新密钥，并通知你。
+
+### 首次同步做什么
+
+首次同步会把每个历史端点尽可能往回拉取到 Binance 提供的最早时间，然后对 Binance 列出的每个
+交易对拉取成交记录，因为成交记录端点需要指定交易对。这大约是 3,750 个请求，按 Binance 的
+`/api` 速率限制大约需要 15 分钟；Lararium 会自行控制节奏，保持在限制之下。首次同步可以续传：
+中途中断后，下一次同步会从停下的地方继续。之后每 4 小时同步一次，**Sync now** 则总会运行。
+它们从上一次同步前 7 天开始请求，所以之后才确认的充值也会被收进来。
+
+Binance 并没有列出所有改变过余额的事件（例如很久以前的一笔 P2P 买入）。对每个资产，Binance
+报告的最早余额与记录合计之间的差额，会作为一笔 **Opening balance adjustment** 记一次，日期是
+该账户最早记录的前一天。它在每次同步时重新推导，所以一条早于该余额的迟到记录会让它随之变动。
+
+### 对账差异
+
+每次同步，对每个账户和资产，都会把两次余额报告之间的变化与这期间记录的合计做对比。如果两者
+不一致，连接上会列出一条 **对账差异（reconciliation difference）** 并发送一次通知。余额仍然
+是 Binance 报告的数字；这条差异会一直列着，直到有记录能解释它，而且不会自动修正。通知里不会
+带数值、地址或哈希。
+
+### 提现到你自己的钱包
+
+提现到 Lararium 不认识的链上地址，会进入 Unassigned，该地址出现在 Suggestions 里。要让它成为
+转账，在 Accounts 页面打开某个账户的 **Identifiers**，把钱包地址添加为 **Chain address**，做法
+见[登记标识](#登记标识)。此后提现到该地址会显示为在途转账，网络手续费单独记账。每笔充值和提现
+还会保存交易哈希、网络和地址，以便以后按哈希配对钱包。
+
+### 价格
+
+Binance 持仓按每个资产的每日价格以 EUR 估值：
+
+- **Binance 的日 K 线**，通过 Binance 自己的 EUR 市场换算成 EUR（该资产的 EUR 交易对，或其
+  USDT 交易对除以 `EURUSDT`）。稳定币也同样定价，从不假设等于一。
+- **CoinGecko**，可选。在 `infra/.env` 中设置 `LARARIUM_COINGECKO_API_KEY`（Demo 套餐的密钥
+  即可），然后运行 `make up`。对 Binance 没有定价到昨天的任何资产（在 Binance 上没有市场的
+  资产，或交易对已停止交易的资产），它会填补最近 365 天里没有 Binance 价格的日子；它从不用于
+  Binance 已有价格的日子。设置了密钥时，CoinGecko 对 Binance 市场的列表还会给每个 Binance
+  资产它的 CoinGecko id，由此决定该资产对应哪个已有的 instrument（在别处持有的同一种币）。
+  没有这个密钥时，Binance 无法定价的资产会显示为缺少价格。CoinGecko 的条款要求署名：
+  Price data provided by [CoinGecko](https://www.coingecko.com)。
+- **ECB 参考汇率**，每天通过 Frankfurter（`api.frankfurter.dev`，无需密钥）获取，每个安装都会
+  运行，无论有没有 Binance 连接，使 EUR 价格可以显示为你的报告币种。它们只填补没有任何其他
+  来源提供这两种币种之间汇率的日子。
+
+### 阶段 B 将增加
+
+尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
+
+- 钱包之间的划转、小额资产兑换（dust）和 Cloud Mining，以及 travel rule 的充值和提现历史
+- 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押、Dual Investment、Discount Buy
+  和 Soft Staking
+- 加密货币借贷，记为债务
+- 杠杆，全仓和逐仓
+- USD-M 和 COIN-M 合约
+- 期权
+- 法币订单、银行卡支付、P2P、Pay 和返佣
+- Portfolio Margin，以及 Trading Bots 和 Copy Trading 钱包（Binance 没有为它们提供记录）
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
