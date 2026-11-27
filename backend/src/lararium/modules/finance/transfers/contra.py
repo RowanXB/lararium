@@ -37,6 +37,7 @@ from sqlalchemy import (
     text,
     true,
     type_coerce,
+    union,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,20 +145,36 @@ def named_account_sql(
     return named_account_expression(i, t.payment_reference)
 
 
-def in_cancelled_pair(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
-    """Whether the transaction is one of a cancelled pair: it cancels another
-    (cancels_transaction_id), or another cancels it, and neither of the two is void. Both
-    post their contra on In transit, which the pair leaves level (cancelled-withdrawal
-    design §4.4)."""
-    c = aliased(models.Transaction, name="cancelling")
-    d = aliased(models.Transaction, name="cancelled")
-    pair = and_(d.id == c.cancels_transaction_id, c.status != "void", d.status != "void")
-    # One lookup per side, each by its own index (the primary key; the UNIQUE
-    # cancels_transaction_id).
-    return or_(
-        exists().where(c.id == transaction_id, pair),
-        exists().where(c.cancels_transaction_id == transaction_id, pair),
+def cancelled_pairs() -> Subquery:
+    """Every cancelled pair (cancelling, cancelled): a transaction with
+    cancels_transaction_id and the one it names, neither void. Both post their contra on In
+    transit, which the pair leaves level (cancelled-withdrawal design §4.4)."""
+    c = aliased(models.Transaction, name="cancelling_transaction")
+    d = aliased(models.Transaction, name="cancelled_transaction")
+    # The cancelled one's status looked up by its primary key, not joined: with wrong
+    # estimates (statistics taken while a bulk insert was uncommitted) the planner joined
+    # the two sides by scanning every transaction for each, which took 40 s on 10,000.
+    cancelled_status = select(d.status).where(d.id == c.cancels_transaction_id).scalar_subquery()
+    return (
+        select(c.id.label("cancelling"), c.cancels_transaction_id.label("cancelled"))
+        .where(
+            c.cancels_transaction_id.is_not(None),
+            c.status != "void",
+            cancelled_status != "void",
+        )
+        .subquery("cancelled_pairs")
     )
+
+
+def in_cancelled_pair(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
+    """Whether the transaction is one of a cancelled pair (cancelled_pairs): it cancels
+    another, or another cancels it, and neither of the two is void."""
+    pairs = cancelled_pairs()
+    # Against the pairs' ids gathered once (a handful), not looked up per transaction: a
+    # lookup per row of a large statement turns slow when the planner's estimates are
+    # wrong (statistics taken while a bulk insert was uncommitted).
+    ids = union(select(pairs.c.cancelling), select(pairs.c.cancelled))
+    return type_coerce(transaction_id, Uuid()).in_(ids)
 
 
 # A transfer's leg is exactly two postings, its own posting and its contra: one with others

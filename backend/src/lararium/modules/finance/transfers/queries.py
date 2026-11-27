@@ -50,6 +50,7 @@ from lararium.modules.finance.transfers.contra import (
     LegFee,
     RecordColumns,
     SourceRef,
+    cancelled_pairs,
     eligible_records,
     in_cancelled_pair,
     is_rejected,
@@ -1039,13 +1040,15 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
         )
     )
-    c = aliased(models.Transaction, name="cancelling")
-    d = aliased(models.Transaction, name="cancelled")
+    pairs = cancelled_pairs()
     q = aliased(models.Posting, name="pair_posting")
     # Each side's postings there: one row of aggregates, which `having` keeps or drops.
     level = exists(
         select(func.count())
-        .where(q.account_id == in_transit, or_(q.transaction_id == c.id, q.transaction_id == d.id))
+        .where(
+            q.account_id == in_transit,
+            q.transaction_id.in_((pairs.c.cancelling, pairs.c.cancelled)),
+        )
         .having(
             and_(
                 func.count() == 2,
@@ -1055,12 +1058,7 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             )
         )
     )
-    unsettled = (
-        select(c.id.label("cancelling"), d.id.label("cancelled"))
-        .join(d, d.id == c.cancels_transaction_id)
-        .where(c.status != "void", d.status != "void", ~level)
-        .cte("unsettled_pairs")
-    )
+    unsettled = select(pairs.c.cancelling, pairs.c.cancelled).where(~level).cte("unsettled_pairs")
     found = union(
         select(stray.c.id),
         elsewhere,
