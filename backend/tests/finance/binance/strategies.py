@@ -556,7 +556,8 @@ def _transfer(b: _Builder) -> Record | None:
 
 def _dust(b: _Builder) -> Record | None:
     """One or two small Spot balances converted into BNB, each line with a service charge at
-    times (never more than the BNB it received)."""
+    times: the line buys `transferedAmount + serviceChargeAmount` of BNB and the charge is
+    taken out, so Spot's BNB grows by `transferedAmount`, the BNB credited."""
     choices = [h for h in b.holdings(("spot",)) if h[1] != DUST_TARGET]
     if not choices:
         return None
@@ -570,7 +571,7 @@ def _dust(b: _Builder) -> Record | None:
         if quantity == 0:
             continue
         received = b.amount(at_most=Decimal(1))
-        charge = b.amount(at_most=received) if b.draw(st.booleans()) else Decimal(0)
+        charge = b.amount(at_most=Decimal("0.01")) if b.draw(st.booleans()) else Decimal(0)
         received_total += received
         charged_total += charge
         lines.append(
@@ -586,7 +587,7 @@ def _dust(b: _Builder) -> Record | None:
         )
         effects += [
             Effect(b.now, "spot", asset, -quantity),
-            Effect(b.now, "spot", DUST_TARGET, received),
+            Effect(b.now, "spot", DUST_TARGET, received + charge),
         ]
         if charge:
             effects.append(Effect(b.now, "spot", DUST_TARGET, -charge))

@@ -238,7 +238,7 @@ Every record is one connector transaction on the wallet's account. Fees are sepa
 | Flexible Earn subscription | − `amount` on `sourceAccount` (Spot or Funding), + on Earn | yes |
 | Flexible Earn redemption | − `amount` on Earn, + on `destAccount` | yes |
 | Flexible Earn reward | rule 3: `BONUS` is its dividend; `REALTIME` is + `rewards` on Earn against Unassigned | yes |
-| Dust conversion | per detail: − `amount` of the small asset, + `transferedAmount` of BNB with its cost, − `serviceChargeAmount` (`is_fee`) | no |
+| Dust conversion | per detail: − `amount` of the small asset, + (`transferedAmount` + `serviceChargeAmount`) of BNB with its cost, − `serviceChargeAmount` (`is_fee`): `transferedAmount` is the BNB credited, net of the charge | no |
 | Wallet-to-wallet transfer | rule 1, the two wallets from `type` | no |
 | Locked Earn, on-chain yields: subscription, redemption, reward | as flexible; rewards by rule 3 | no |
 | BFUSD, RWUSD subscription and redemption | a swap of the asset for the token on the wallet that holds it; rewards by rule 3 | no |
@@ -369,7 +369,7 @@ Holdings and net worth need no new page.
 | A symbol was delisted | Its trades cannot be fetched; the change shows as a difference and the symbol is flagged if a record names it. |
 | A transfer between wallets older than 6 months | Not listed; it is inside the two wallets' opening adjustments. |
 | A travel-rule deposit row | Linked to the deposit whose `id` is its `tranId` ("wallet transfer id"; Binance does not say in so many words that it is the deposit's `id`). If it is not, the row stays unlinked: it is never posted either way, so the ledger is unchanged. |
-| A dust line's `transferedAmount` | Posted as the BNB received, and `serviceChargeAmount` as a fee taken from it (§5.7). Binance does not say whether `transferedAmount` is before or after the charge; if it is after, Spot's BNB shows a reconciliation difference of the charge, and the reported balance stays right. |
+| A dust line's `transferedAmount` | Taken as the BNB credited net of the service charge (§5.7): inferred from Binance's documented example (the charge is 2% of the two together), unverified on a real account. |
 | The owner's P2P purchase 13 months ago | The opening adjustment of that asset. |
 | A reward and its dividend arrive in different syncs | The reward is posted on the product until the dividend arrives, then linked and its posting removed; the 7-day overlap covers it. |
 | Equal rewards of one asset whose dividends each come more than half the time between the rewards after them | Known limit: pairs are taken nearest first, so a dividend can be paired with the next reward and the first reward stays posted on Earn, counting that amount twice until the records change. Binance pays the dividend soon after its reward, well inside that half, so nearest first pairs each with its own. |

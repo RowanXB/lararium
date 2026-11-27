@@ -365,35 +365,41 @@ async def test_dust_swaps_into_bnb_with_its_fee(session, run) -> None:
     connection = await binance_connection(run)
     dust = _dust(
         0,
-        _detail("AAA", "0.3", "0.01", "0.0002"),
-        _detail("BBB", "2", "0.04", "0.0008"),
+        _detail("AAA", "0.306", "0.01", "0.0002"),
+        _detail("BBB", "2.04", "0.04", "0.0008"),
     )
     on_margin = _dust(1, _detail("CCC", "0.5", "0.02", "0.0004"))
+    before = await holdings(session, connection.id)
     await ingest(session, connection.id, DUST, [dust], request={"accountType": "SPOT"})
     await ingest(session, connection.id, DUST, [on_margin], request={"accountType": "MARGIN"})
 
     await run_normalize(session, connection.id)
 
-    # One transaction per conversion, each line a swap into BNB weighed by its cost, and
-    # the service charges as fees against one Unassigned posting.
+    # One transaction per conversion, each line a swap into the BNB it bought (credited plus
+    # charge) weighed by its cost, and the service charges as fees against one Unassigned
+    # posting: each line's BNB changes by its transferedAmount, the BNB credited.
     key = f"dust:{dust['transId']}"
     fee = "service charge"
     assert await postings(session, key) == [
-        ("Binance Spot", "AAA", Decimal("-0.3"), None, None, None, None, False, ""),
-        ("Binance Spot", "BNB", Decimal("0.01"), Decimal(30), "AAA", None, None, False, ""),
-        ("Binance Spot", "BBB", Decimal(-2), None, None, None, None, False, ""),
-        ("Binance Spot", "BNB", Decimal("0.04"), Decimal(50), "BBB", None, None, False, ""),
+        ("Binance Spot", "AAA", Decimal("-0.306"), None, None, None, None, False, ""),
+        ("Binance Spot", "BNB", Decimal("0.0102"), Decimal(30), "AAA", None, None, False, ""),
+        ("Binance Spot", "BBB", Decimal("-2.04"), None, None, None, None, False, ""),
+        ("Binance Spot", "BNB", Decimal("0.0408"), Decimal(50), "BBB", None, None, False, ""),
         ("Binance Spot", "BNB", Decimal("-0.0002"), None, None, None, None, True, fee),
         ("Binance Spot", "BNB", Decimal("-0.0008"), None, None, None, None, True, fee),
         ("Unassigned", "BNB", Decimal("0.0010"), None, None, None, None, False, ""),
     ]
     assert plain(await postings(session, f"dust:{on_margin['transId']}")) == [
         ("Binance Cross Margin", "CCC", Decimal("-0.5")),
-        ("Binance Cross Margin", "BNB", Decimal("0.02")),
+        ("Binance Cross Margin", "BNB", Decimal("0.0204")),
         ("Binance Cross Margin", "BNB", Decimal("-0.0004")),
         ("Unassigned", "BNB", Decimal("0.0004")),
     ]
     assert await _never_transfer(session, key) is True
+    after = await holdings(session, connection.id)
+    assert before == {}
+    assert after[("Binance Spot", "BNB")] == Decimal("0.05")  # 0.01 + 0.04 credited
+    assert after[("Binance Cross Margin", "BNB")] == Decimal("0.02")
     rows = {r.trans_id: r for r in await typed(session, "binance_dust", connection.id)}
     assert rows[str(dust["transId"])].account_type == "SPOT"
     assert rows[str(on_margin["transId"])].account_type == "MARGIN"
@@ -548,7 +554,7 @@ async def test_spot_and_funding_reconcile_with_transfers_dust_and_mining(
     dust = _dust(0, _detail("BBB", "1", "0.01", "0.0002", dust_at), at_ms=dust_at)
     fake.add(DUST, dust, when={"accountType": "SPOT"})
     fake.add(CLOUD, build_row(CLOUD, 0, type=248, amount="0.5", createTime=start + 4 * HOUR_MS))
-    fake.set_rows("spot-account", _spot(("AAA", "6.5"), ("BNB", "0.0098")))
+    fake.set_rows("spot-account", _spot(("AAA", "6.5"), ("BNB", "0.01")))
     fake.set_rows("funding-asset", _funding(("AAA", "5")))
     notifier = RecordingNotifier()
 

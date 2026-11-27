@@ -7,7 +7,7 @@ explain. A trade names only its symbol: its base and quote assets come from `exc
 latest report listing it. A convert is a swap on the wallet it names, the received side weighed
 by its cost in the given asset. A dividend is income on Spot. A dust conversion is one
 transaction on the wallet it was asked for: each line a swap of a small balance into BNB
-weighed by its cost, and each line's service charge a fee.
+weighed by its cost, and each line's service charge a fee taken out of that BNB.
 """
 
 from decimal import Decimal
@@ -189,8 +189,10 @@ def _lines(row: Row) -> list[dict[str, ApiValue]]:
 
 
 async def dust(run: Run, row: Row) -> None:
-    """Each line: `-amount` of the small asset, `+transferedAmount` of BNB weighed by its cost
-    in it, `-serviceChargeAmount` of BNB as a fee; all on the wallet the request asked for."""
+    """Each line: `-amount` of the small asset, `+(transferedAmount + serviceChargeAmount)` of
+    BNB weighed by its cost in it, `-serviceChargeAmount` of BNB as a fee; all on the wallet the
+    request asked for. `transferedAmount` is the BNB credited after the charge (Binance's
+    example: the charge is 2% of the two together), so the line's BNB changes by it."""
     asked = run.record.record.request.get("accountType")
     account_type = asked if isinstance(asked, str) else None
     await run.typed(account_type=account_type)
@@ -208,12 +210,16 @@ async def dust(run: Run, row: Row) -> None:
         given = await run.asset(given_code)
         received = await run.asset(received_code)
         given_amount = amount(DUST, line, "amount")
-        received_amount = amount(DUST, line, "transferedAmount")
+        credited = amount(DUST, line, "transferedAmount")
         charge = amount(DUST, line, "serviceChargeAmount") or Decimal(0)
         occurred_at = occurred_at or when(DUST, line, "operateTime")
         if given is None or received is None or given_amount is None:
             continue
-        if received_amount is None or received_amount == 0:
+        if credited is None:
+            continue
+        # What the small balance bought: the BNB credited and the charge taken from it.
+        received_amount = credited + charge
+        if received_amount == 0:
             continue
         if given == received:
             run.flag(f"{DUST} names one asset twice")
