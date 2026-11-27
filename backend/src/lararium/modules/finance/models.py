@@ -146,7 +146,7 @@ class Transaction(Base):
     # left the balance), so it is never a transfer's leg.
     never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The on-chain transaction this is (chain name, lower-case hex hash) and the wallet address
-    # it concerns; chain and hash come together (migration 0046).
+    # it concerns; chain and hash come together (migration 0047).
     chain: Mapped[str | None] = mapped_column(Text)
     tx_hash: Mapped[str | None] = mapped_column(Text)
     chain_address: Mapped[str | None] = mapped_column(Text)

@@ -1,5 +1,5 @@
-"""Migration 0046 (the Bitcoin wallet tables, the chain columns on transactions and the
-`chain_native` instrument scheme) goes down to 0045 and up again, and the CHECKs hold."""
+"""Migration 0047 (the Bitcoin wallet tables, the chain columns on transactions and the
+`chain_native` instrument scheme) goes down to 0046 and up again, and the CHECKs hold."""
 
 import re
 from pathlib import Path
@@ -54,7 +54,7 @@ def _schemes(connection: Connection) -> set[str]:
 
 
 def test_migration_creates_its_own_tables() -> None:
-    [path] = VERSIONS.glob("0046_*.py")
+    [path] = VERSIONS.glob("0047_*.py")
     assert re.findall(r"CREATE TABLE finance\.(\w+)", path.read_text()) == TABLES
 
 
@@ -68,7 +68,7 @@ def test_migration_round_trips(owner_url: str, migrated: None) -> None:
             assert _chain_columns(connection) == {"chain", "tx_hash", "chain_address"}
             assert "chain_native" in _schemes(connection)
         try:
-            command.downgrade(config, "0045")
+            command.downgrade(config, "0046")
             with engine.begin() as connection:
                 assert set(_present(connection).values()) == {False}
                 assert _chain_columns(connection) == set()
