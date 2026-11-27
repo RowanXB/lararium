@@ -10,7 +10,6 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
-import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,11 +28,10 @@ from lararium.modules.finance.bitcoin.derive import Branch, Source, Wallet, buil
 from lararium.modules.finance.bitcoin.fetch import FetchResult, fetch
 from lararium.modules.finance.bitcoin.instruments import SEVERAL_FLAG
 from lararium.modules.finance.bitcoin.normalize import (
-    FEE_MISMATCH,
+    FEE_FLAG,
     LEFT_CHAIN_FLAG,
     NORMALIZER_VERSION,
     SHARED_FLAG,
-    BitcoinDataError,
     NormalizeReport,
     normalize,
 )
@@ -818,12 +816,13 @@ async def test_owner_voided_movement_is_not_linked(session, run) -> None:
     assert row.fee_transaction_id is None
 
 
-async def test_fee_differing_from_inputs_less_outputs_fails(session) -> None:
+async def test_fee_that_does_not_add_up_is_flagged_and_waits(session) -> None:
     chain = FakeEsplora()
+    good = chain.add(make_tx(1, [(receiving(0), 100_000)], height=TIP - 200))
     # The inputs less the outputs are 1,000; the server says the fee is 900.
-    chain.add(
+    bad = chain.add(
         make_tx(
-            1,
+            2,
             [(OTHERS[0], 60_000), (change(0), 39_000)],
             spends=[(receiving(0), 100_000)],
             fee=900,
@@ -831,8 +830,51 @@ async def test_fee_differing_from_inputs_less_outputs_fails(session) -> None:
     )
     wallet = await Synced.start(session, chain)
 
-    with pytest.raises(BitcoinDataError) as raised:
-        await wallet.sync()
+    async def pending(t: str) -> bool:
+        row = await wallet.row(
+            "select pending from finance.bitcoin_transactions"
+            " where connection_id = :c and txid = :t",
+            t=t,
+        )
+        return row.pending
 
-    assert str(raised.value) == FEE_MISMATCH
-    assert txid(1) not in str(raised.value)
+    _, report = await wallet.sync()
+
+    assert set(await wallet.live()) == {f"{good['txid']}:0"}
+    assert FEE_FLAG in report.flagged
+    assert not any(bad["txid"] in flag for flag in report.flagged)
+    assert (await pending(good["txid"]), await pending(bad["txid"])) == (False, True)
+
+    again = await wallet.normalize({good["txid"], bad["txid"]})
+
+    assert FEE_FLAG in again.flagged
+    assert (again.created, again.unchanged) == (0, 1)
+    assert set(await wallet.live()) == {f"{good['txid']}:0"}
+    assert await pending(bad["txid"]) is True
+
+    # A transaction already posted whose stored fee stops adding up: its movements go.
+    spend = chain.add(
+        make_tx(3, [(OTHERS[1], 5_000)], spends=[(receiving(0), 6_000)], height=TIP - 50, fee=1_000)
+    )
+    s = spend["txid"]
+    await wallet.sync()
+    assert {f"{s}:0", f"{s}:fee"} <= set(await wallet.live())
+    # As the fetch stores a changed row: pending.
+    await session.execute(
+        text("update finance.bitcoin_transactions set fee = 1, pending = true where txid = :t"),
+        {"t": s},
+    )
+
+    later = await wallet.normalize({s})
+
+    assert FEE_FLAG in later.flagged
+    ledger = await wallet.ledger()
+    for key in (f"{s}:0", f"{s}:fee"):
+        assert (ledger[key].status, ledger[key].voided_by) == ("void", "connector")
+    assert await pending(s) is True
+    fee_link = await wallet.row(
+        "select fee_transaction_id from finance.bitcoin_transactions"
+        " where connection_id = :c and txid = :t",
+        t=s,
+    )
+    assert fee_link.fee_transaction_id is None

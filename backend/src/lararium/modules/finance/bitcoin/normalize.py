@@ -26,9 +26,11 @@ keys, which the ledger's upsert un-voids, with the new block's time. A movement 
 longer applies (an output found to be the wallet's own) is voided.
 
 Every transaction normalized is marked (`fetch.mark_normalized`) in the sync's own
-transaction, except a confirmed one whose block time is not known, which cannot be dated and
-stays pending. When the connection's `normalizer_version` is not this one, every stored
-transaction is normalized again (the replay), and the version is recorded.
+transaction, except a confirmed one whose block time is not known, which cannot be dated, and
+a spend whose inputs less outputs are not its fee, which posts nothing and is flagged: both
+stay pending, so every later sync tries them again without stopping on them. When the
+connection's `normalizer_version` is not this one, every stored transaction is normalized again
+(the replay), and the version is recorded.
 """
 
 import re
@@ -59,6 +61,7 @@ CHAIN = "bitcoin"
 # Flags name no hash and no address.
 SHARED_FLAG = "shared transaction"
 LEFT_CHAIN_FLAG = "a confirmed transaction left the chain"
+FEE_FLAG = "a transaction's fee does not add up"
 # What Suggestions shows for an address paid.
 COUNTERPARTY_NAME = "Bitcoin address"
 _DESCRIPTIONS = {
@@ -69,11 +72,13 @@ _DESCRIPTIONS = {
 }
 
 
-FEE_MISMATCH = "A Bitcoin transaction's fee differs from its inputs less its outputs."
-
-
 class BitcoinDataError(DisplayableError):
-    """Stored chain data that cannot be posted; names no transaction and no address."""
+    """Stored data the normalizer cannot work from; names no transaction and no address."""
+
+
+class FeeMismatch(Exception):
+    """A spend whose inputs less its outputs are not the server's fee (or are negative): its
+    movements are unknown, so it posts nothing and waits (`_Normalizer.apply`)."""
 
 
 @dataclass
@@ -118,7 +123,7 @@ def movements(
     txid: str, inputs: Collection[Input], outputs: Collection[Output], fee: int | None
 ) -> list[Movement]:
     """The ledger movements of a confirmed chain transaction (module docstring); `fee` is the
-    server's, which a spend's inputs less its outputs must equal."""
+    server's, which a spend's inputs less its outputs must equal (else `FeeMismatch`)."""
     own_in = [i for i in inputs if i.own]
     if not own_in:
         return [
@@ -134,7 +139,7 @@ def movements(
         ]
         paid = sum(i.value for i in inputs) - sum(o.value for o in outputs)
         if paid < 0 or (fee is not None and paid != fee):
-            raise BitcoinDataError(FEE_MISMATCH)
+            raise FeeMismatch
         if paid > 0:
             found.append(Movement(f"{txid}:fee", "fee", -paid))
         return found
@@ -257,16 +262,21 @@ class _Normalizer:
         return posted
 
     async def apply(self, stored: _Stored) -> bool:
-        """Bring the transaction's movements in line with its row; False, changing nothing,
-        for a confirmed one whose block time is not known (a status read that gave none),
-        which stays pending: its movements cannot be dated."""
+        """Bring the transaction's movements in line with its row; whether it is done (else
+        it stays pending). A confirmed one whose block time is not known (a status read that
+        gave none) changes nothing: its movements cannot be dated. A spend whose fee does not
+        add up posts nothing (what it posted is voided) and is flagged; the balance check
+        shows the gap."""
         if stored.confirmed and stored.block_time is None:
             return False
-        wanted = (
-            movements(stored.txid, stored.inputs, stored.outputs, stored.fee)
-            if stored.confirmed
-            else []
-        )
+        done = True
+        wanted: list[Movement] = []
+        if stored.confirmed:
+            try:
+                wanted = movements(stored.txid, stored.inputs, stored.outputs, stored.fee)
+            except FeeMismatch:
+                self.run.flag(FEE_FLAG)
+                done = False
         posted = {m.key: await self._post(stored, m) for m in wanted}
         for key in sorted(await self._live_keys(stored.txid) - set(posted)):
             await self.run.void(key)
@@ -280,7 +290,7 @@ class _Normalizer:
                 {"at": datetime.now(UTC), "c": self.run.connection_id, "t": stored.txid},
             )
             self.run.flag(LEFT_CHAIN_FLAG)
-        return True
+        return done
 
     async def _link(self, stored: _Stored, wanted: list[Movement], posted: dict[str, UUID]) -> None:
         """Each typed row names the ledger transaction it posts now, or none: not one the
@@ -330,7 +340,7 @@ async def normalize(ctx: SyncContext, txids: Collection[str] | None) -> Normaliz
     run = _Run(ctx, connection, report)
     recorded = connection.config.get(ACCOUNT_KEY)
     if not isinstance(recorded, str):
-        raise DisplayableError("The Bitcoin wallet has no account yet.")
+        raise BitcoinDataError("The Bitcoin wallet has no account yet.")
     normalizer = _Normalizer(run, UUID(recorded), await bitcoin(ctx, run.flag))
     stored = await _stored(run, None if replay else txids)
     waiting = {s.txid for s in stored if not await normalizer.apply(s)}
