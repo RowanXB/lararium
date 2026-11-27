@@ -590,15 +590,16 @@ async def test_row_newly_on_a_partly_listed_day_at_commit_is_stale(
     session: AsyncSession, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
 ) -> None:
     """Second review: a file committed after staging made a row overlap a day it lists only
-    in part, and commit posted it without the review its note asks for."""
-    later = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n")
+    in part, and commit posted it without the review its note asks for. The later file has
+    one row, on its last day, so it lists no day in full itself."""
+    later = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n")
     morning = HEADER + "01/11/2026,Pay,100.00\n03/11/2026,Coffee,-3.00\n05/11/2026,Bus,-2.00\n"
     await commit((await stage(csv_profile, morning)).id)
 
     with pytest.raises(ImportBatchStaleError):
         await commit(later.id)
-    restaged = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n07/11/2026,Shop,-1.00\n")
-    first, _ = await _rows(session, restaged)
+    restaged = await stage(csv_profile, HEADER + "05/11/2026,Lunch,-8.00\n")
+    (first,) = await _rows(session, restaged)
     assert first.note is not None and "only in part" in first.note
     await commit(restaged.id)
 
@@ -1088,14 +1089,23 @@ async def test_partial_first_day_counts_the_earlier_rows_of_that_day(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
 ) -> None:
     """An export starting partway through a day: the walk left out another file's earlier
-    rows that day, posting a -5.00 adjustment on top of the -5.00 row (ledger 979.00)."""
-    profile = await _csv_profile(run)
-    first = BALANCE_HEADER + (
-        "19/11/2026,Pay,1000.00,1000.00\n20/11/2026,Shop,-5.00,995.00\n"
-        "20/11/2026,Cafe,-10.00,985.00\n"
+    rows that day, posting a -5.00 adjustment on top of the -5.00 row (ledger 979.00). Only
+    an export whose rows carry a started date lists its first day in part (account type
+    catalog design §8.3)."""
+    profile = await _csv_profile(
+        run, columns=BALANCE_COLUMNS | {"started_at": "Started"}, date_format="%d/%m/%Y %H:%M"
+    )
+    header = "Date,Started,Description,Amount,Balance\n"
+    first = header + (
+        "19/11/2026 09:00,19/11/2026 09:00,Pay,1000.00,1000.00\n"
+        "20/11/2026 09:00,20/11/2026 09:00,Shop,-5.00,995.00\n"
+        "20/11/2026 10:00,20/11/2026 10:00,Cafe,-10.00,985.00\n"
     )
     await commit((await stage(profile, first, filename="a.csv")).id)
-    later = BALANCE_HEADER + "20/11/2026,Cafe,-10.00,985.00\n21/11/2026,Bus,-1.00,984.00\n"
+    later = header + (
+        "20/11/2026 10:00,20/11/2026 10:00,Cafe,-10.00,985.00\n"
+        "21/11/2026 09:00,21/11/2026 09:00,Bus,-1.00,984.00\n"
+    )
     staged = await stage(profile, later, filename="b.csv")
     assert [row.kind for row in await _rows(session, staged)] == ["statement", "statement"]
     await commit(staged.id)
@@ -1192,7 +1202,8 @@ async def test_adjustment_is_dated_before_days_a_file_without_an_opening_lists(
     csv = BALANCE_HEADER + "10/03/2027,Shop,-5.00,945.00\n31/03/2027,Shop,-1.00,944.00\n"
     staged = await stage(await _csv_profile(run), csv, filename="c.csv")
     (adjustment,) = _adjustments(await _rows(session, staged))
-    assert (adjustment.quantity, adjustment.booking_date) == (Decimal("999.00"), date(2027, 2, 1))
+    # The QIF lists 1 Feb in full too, so the opening is carried through it from 31 Jan.
+    assert (adjustment.quantity, adjustment.booking_date) == (Decimal("999.00"), date(2027, 1, 31))
     await commit(staged.id)
     assert await _balance_after(session, staged.account_id, date(2027, 2, 20)) == Decimal("950.00")
     assert await _balance_after(session, staged.account_id, date(2027, 3, 31)) == Decimal("944.00")

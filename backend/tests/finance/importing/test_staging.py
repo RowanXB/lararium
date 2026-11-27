@@ -27,6 +27,7 @@ from lararium.modules.finance.importing.catalog import CATALOG
 from lararium.modules.finance.importing.parsed import ParsedRow, ParsedStatement
 from lararium.modules.finance.importing.pdf import parse_pdf
 from lararium.modules.finance.importing.profiles import (
+    CsvProfileConfig,
     ImportProfileRecord,
     PdfProfileConfig,
     update_profile,
@@ -395,9 +396,8 @@ async def test_opening_adjustment_from_first_balance(
     assert adjustment.position == -1
     assert adjustment.status == "new"
     assert adjustment.quantity == Decimal("1500.00")
-    assert adjustment.booking_date == date(
-        2026, 11, 2
-    )  # an export's first day is partial: dated on it
+    # An export lists its first day in full: dated the day before it.
+    assert adjustment.booking_date == date(2026, 11, 1)
     assert adjustment.description == "Opening balance adjustment"
     assert adjustment.instrument_id == gbp.id
     assert batch.counts["new"] == 3
@@ -524,8 +524,8 @@ async def test_opening_from_ofx_ledgerbal(session: AsyncSession, run: Run, stage
 
     (adjustment,) = _adjustments(await _rows(session, batch))
     assert adjustment.quantity == Decimal("500.00")
-    # It lists 2-29 Nov in full, so its opening is the balance as 2 Nov starts.
-    assert adjustment.booking_date == date(2026, 11, 1)
+    # It lists 1-29 Nov in full, so its opening is the balance as 1 Nov starts.
+    assert adjustment.booking_date == date(2026, 10, 31)
     assert batch.warnings == []
     assert batch.statement is not None
     assert batch.statement.closing_balance == Decimal("2496.50")
@@ -1260,7 +1260,7 @@ async def test_covered_range_includes_rows_outside_the_period(
 ) -> None:
     """A file covers its stated period and every day it has a row on (OFX's DTSTART/DTEND
     don't bound its rows the way a PDF's period does). An export may be taken partway
-    through a day, so it lists in full only the days between its first and last."""
+    through a day, so it lists in full every day but its last."""
     profile = await _profile(run, format="ofx")
     content = _ofx(
         [("20261120", "-3.50", "A"), ("20261127", "-1.00", "B"), ("20261203", "-2.00", "C")],
@@ -1280,7 +1280,7 @@ async def test_covered_range_includes_rows_outside_the_period(
     assert tuple(covered) == (
         date(2026, 11, 20),
         date(2026, 12, 3),
-        date(2026, 11, 21),
+        date(2026, 11, 20),
         date(2026, 12, 2),
     )
 
@@ -1346,14 +1346,92 @@ def test_statement_lists_in_full_only_the_days_before_it_was_made(
         ((date(2026, 10, 1), date(2026, 10, 31)), True, (None, None)),
     ],
 )
-def test_a_period_listed_from_its_start_lists_all_but_its_last_day(
+def test_an_export_lists_all_but_its_last_day(
     period: tuple[date, date], filtered: bool, complete: tuple[date | None, date | None]
 ) -> None:
-    statement = ParsedStatement(rows=[], period=period, period_lists_from_start=True)
+    statement = ParsedStatement(rows=[], period=period)
     rows = [staging._Row(0, "skipped", {})] if filtered else []  # pyright: ignore[reportPrivateUsage]
     coverage = staging._covered(statement, rows)  # pyright: ignore[reportPrivateUsage]
     assert coverage.covered == period
     assert coverage.complete == complete
+
+
+async def _catalog_profile(run: Run, institution: str, label: str) -> ImportProfileRecord:
+    [entry] = [e for e in CATALOG if (e.institution, e.label) == (institution, label)]
+    return await _profile(run, **entry.config.model_dump(mode="json"))
+
+
+async def _complete(session: AsyncSession, batch: staging.ImportBatchRecord) -> tuple[Any, ...]:
+    b = models.ImportBatch
+    found = await session.execute(select(b.complete_from, b.complete_to).where(b.id == batch.id))
+    return tuple(found.one())
+
+
+async def test_a_single_date_csv_export_lists_its_first_day_in_full(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    """Spec §8.3 of the account type catalog (owner, 2026-11-27): a file never starts partway
+    through a day, so only an export's last day may be partial."""
+    profile = await _catalog_profile(run, "HSBC UK", "CSV (transaction list)")
+    content = "".join(f"{day:02}/11/2026,Example Payee,-1.00\n" for day in range(10, 0, -1))
+    batch = await stage(profile, content)
+    assert await _complete(session, batch) == (date(2026, 11, 1), date(2026, 11, 9))
+
+
+async def test_a_started_date_keeps_an_exports_first_day_partial(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    """Revolut books a row on its completed date but may pick rows by their started date, so
+    one started the day before and completed on the first day may be missing."""
+    profile = await _catalog_profile(run, "Revolut Current", "CSV")
+    assert isinstance(profile.config, CsvProfileConfig)
+    assert profile.config.columns.started_at is not None
+    header = (
+        "Type,Product,Started Date,Completed Date,Description,Amount,Fee,Currency,State,Balance\n"
+    )
+    content = header + "".join(
+        f"Transfer,Current,2026-11-{day:02} 10:00:00,2026-11-{day:02} 10:00:00,Example Payee,"
+        f"-1.00,0.00,GBP,COMPLETED,{100 - day}.00\n"
+        for day in range(1, 11)
+    )
+    batch = await stage(profile, content)
+    assert await _complete(session, batch) == (date(2026, 11, 2), date(2026, 11, 9))
+
+
+async def test_an_ofx_lists_from_its_start_to_the_day_before_its_last(
+    session: AsyncSession, run: Run, stage: Stage
+) -> None:
+    profile = await _profile(run, format="ofx")
+    content = _ofx(
+        [("20261105", "-3.50", "A"), ("20261108", "-1.00", "B")],
+        start="20261101",
+        end="20261110",
+    )
+    batch = await stage(profile, content, filename="statement.ofx")
+    assert await _complete(session, batch) == (date(2026, 11, 1), date(2026, 11, 9))
+
+
+@pytest.mark.parametrize(
+    ("days", "complete"),
+    [
+        ([date(2026, 11, 1), date(2026, 11, 2)], (date(2026, 11, 1), date(2026, 11, 1))),
+        # Its one day is its last, which may be partial.
+        ([date(2026, 11, 1)], (None, None)),
+    ],
+)
+async def test_a_short_export_lists_all_but_its_last_day(
+    session: AsyncSession,
+    run: Run,
+    stage: Stage,
+    days: list[date],
+    complete: tuple[date | None, date | None],
+) -> None:
+    profile = await _csv_profile(
+        run, columns={"date": "Date", "description": ["Description"], "amount": "Amount"}
+    )
+    content = HEADER + "".join(f"{day:%d/%m/%Y},Example Payee,-1.00\n" for day in days)
+    batch = await stage(profile, content)
+    assert await _complete(session, batch) == complete
 
 
 async def test_duplicate_that_breaks_the_balance_chain_is_an_error(

@@ -555,9 +555,9 @@ it too, so a deposit on the day the account opened pairs with your bank's paymen
 must start on the account's first day or on a day an earlier upload covers. Keep the export's file name as Trading
 212 gives it (`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`): it carries the period the export lists,
 every day of it in full but the last, which the export may have been taken partway through. A
-renamed export lists in full only the days between its first and last rows, and its upload warns
-that the file name gives no period. Interest rows import as ordinary rows until their `Action` is
-known.
+renamed export lists in full every day from its first row's to the day before its last row's,
+and its upload warns that the file name gives no period. Interest rows import as ordinary rows
+until their `Action` is known.
 
 ### Transfers
 
@@ -874,9 +874,10 @@ matching: a row that is the other side of a transfer from a connected account re
 transfer's placeholder instead of counting twice, and the Transfers page treats it like any
 other record. A row naming the other account is matched through the registry. A row naming no
 account, and not of a card type, is taken by amount and date unless the transfer's window starts
-before the first day the account's imports list in full (an export without a stated period may
-cut its first and last day short): before it, the real row may be inside the account's opening,
-never to be imported, and an unrelated payment of the same amount must not stand in for it.
+before the first day the account's imports list in full (an export may cut its last day
+short, and one whose rows carry a `started_at`, as Revolut's CSV does, its first day too):
+before it, the real row may be inside the account's opening, never to be imported, and an
+unrelated payment of the same amount must not stand in for it.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on
@@ -978,8 +979,9 @@ by amount and date (below).
   `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
   `counterparty_account_number`, `reference` (the payment reference), `started_at` (when the
   payment was started, in `date_format`, which must then have a time; `date` is when it
-  completed), and the statement's own `account_sort_code`, `account_number` and `account_type`
-  (its product, e.g. Revolut's `Product`; every row must give the same).
+  completed; an export read with it lists its first day only in part, since its rows may be
+  picked by when they started), and the statement's own `account_sort_code`, `account_number`
+  and `account_type` (its product, e.g. Revolut's `Product`; every row must give the same).
 - **`extract`** reads typed fields out of a column that holds several:
   `[{"column": "Details", "patterns": ["<regex>", ...]}]`. The first pattern that matches a
   non-empty cell in full fills the fields its named groups name (`payee`, `memo`,

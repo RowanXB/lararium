@@ -77,8 +77,8 @@ NO_BALANCES_WARNING = (
 # The profile reads a file's period from its name, and this file's name gives none (account
 # type catalog design §8.3).
 NO_PERIOD_IN_FILE_NAME_WARNING = (
-    "This file's name gives no period, so only the days between its first and last rows count "
-    "as listed in full: upload the export under the name its bank gave it"
+    "This file's name gives no period, so only the days from its first row's to the day before "
+    "its last row's count as listed in full: upload the export under the name its bank gave it"
 )
 OPENING_DESCRIPTION = "Opening balance adjustment"
 OUTSIDE_COVERED_DAY = (
@@ -1907,21 +1907,32 @@ def _period_from_filename(
         return statement, [NO_PERIOD_IN_FILE_NAME_WARNING]
     if not all(start <= day <= end for day in _importable_days(rows)):
         return statement, [NO_PERIOD_IN_FILE_NAME_WARNING]
-    return replace(statement, period=(start, end), period_lists_from_start=True), []
+    return replace(statement, period=(start, end)), []
 
 
-def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
+def _first_day_partial(config: ProfileConfigModel) -> bool:
+    """The profile reads a second date for its rows (Revolut's CSV: booked on the completed
+    date, perhaps picked by the started date), so its export's first day may be partial."""
+    return isinstance(config, CsvProfileConfig) and config.columns.started_at is not None
+
+
+def _covered(
+    statement: ParsedStatement, rows: list[_Row], *, first_day_partial: bool = False
+) -> _Coverage:
     """Decision 16: the days a file covers, its stated period and its importable rows' days
     together (OFX rows may fall outside DTSTART..DTEND), and the days it lists in full.
 
     A statement whose source vouches for its period (a closed, self-checked PDF statement)
     lists all of it, up to the day before it was made: one made on or before its period's
     last day (Revolut's, which end on the day they are generated) was made partway through
-    that day, so lists neither it nor later days in full. An export may be taken partway
-    through a day, so it lists in full only the days strictly between its first and last,
-    or, when it lists its period from its first day (a period read from its file name),
-    every day but its last; and one whose include_only filter left rows out (a pending
-    payment, say, that later appears completed) lists no day in full.
+    that day, so lists neither it nor later days in full. An export, with or without a
+    stated period, lists every day but its last, which it may have been taken partway
+    through: a file never starts partway through a day (owner, 2026-11-21). Its first day is
+    partial too when its rows carry a second date (first_day_partial): Revolut's CSV books a
+    row on its completed date but may pick rows by their started date, so a payment started
+    the day before and completed on the first day may be missing (account type catalog
+    design §8.3). An export whose include_only filter left rows out (a pending payment, say,
+    that later appears completed) lists no day in full.
     """
     days = _importable_days(rows)
     if statement.period is not None:
@@ -1936,7 +1947,7 @@ def _covered(statement: ParsedStatement, rows: list[_Row]) -> _Coverage:
             return _Coverage((first, last), (None, None))
         return _Coverage((first, last), (first, end))
     filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
-    start = first if statement.period_lists_from_start else first + timedelta(days=1)
+    start = first + timedelta(days=1) if first_day_partial else first
     end = last - timedelta(days=1)
     if filtered or start > end:
         return _Coverage((first, last), (None, None))
@@ -2038,7 +2049,7 @@ async def stage_import(
     instruments = await _resolve_currencies(session, rows, default_currency)
     await _deduplicate(session, account_id, rows)
     statement, warnings = _period_from_filename(statement, rows, profile.config, filename)
-    coverage = _covered(statement, rows)
+    coverage = _covered(statement, rows, first_day_partial=_first_day_partial(profile.config))
     await _match_covered_days(session, account_id, rows, coverage)
     # Before the chain check: a matched row it fails is still listed by this file.
     missing = await _missing_committed_row(session, account_id, rows, coverage.complete)
