@@ -81,6 +81,10 @@ class Pairable:
     # any other record. Never `holder` (it identifies the record to the set, not to one
     # account), and apart from `holders`, which only card_tier reads.
     payee_holders: frozenset[UUID] = frozenset()
+    # It names an account family (contra.eligible_records' family, account family identifier
+    # design §5.2): `holder` is the family's one other account, or NULL with the other
+    # accounts in `payee_holders` (two or more) or none at all.
+    family: bool = False
     # Its account's type lists bank transfer among the ways it is funded
     # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
     # one, though its source doesn't say (account type catalog design §8.2).
@@ -615,6 +619,7 @@ async def _load_records(
         e.c.names_account,
         e.c.holders,
         e.c.payee_holders,
+        e.c.family,
         e.c.funded_by_transfer,
         e.c.timed,
         e.c.occurred_tz,
@@ -639,6 +644,7 @@ async def _load_records(
             names_account=row.names_account,
             holders=frozenset(row.holders or ()),
             payee_holders=frozenset(row.payee_holders or ()),
+            family=row.family,
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
             occurred_tz=row.occurred_tz,

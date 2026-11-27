@@ -44,7 +44,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.types import TypeEngine
 
 from lararium.modules.finance import models
-from lararium.modules.finance.account_types import keys_funded_by
+from lararium.modules.finance.account_types import families, family_keys, keys_funded_by
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import named_accounts
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
@@ -160,7 +160,11 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     is there, pairs.card_tier), payee_holders (the own accounts holding the bank account it
     names, when several share it, account type catalog design §8.1; NULL for any other
     record: it is identified to that set, not to one account, so holder stays NULL and it
-    pairs, pairs.registry_tier, with a record on one of them that may be a transfer),
+    pairs, pairs.registry_tier, with a record on one of them that may be a transfer; for a
+    record naming an account family it is the family's other accounts when there are two or
+    more), family (it names an account family: with exactly one other account of the family
+    holder is that account, with none holder is NULL and the set is empty; account family
+    identifier design §5.2, whose Python twin is identifiers.named_accounts),
     bank_transfer, funded_by_transfer (its account's type lists bank transfer among the ways
     it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
     bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
@@ -334,7 +338,33 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         number_count == 0,
         ~func.coalesce(evidence.c.partial, false()),
     )
+    # An account family the record names (identifiers.named_accounts is the Python twin of
+    # this rule): its other accounts, those whose type is one of the family's, apart from
+    # the record's own, whatever their status. Looked up per record, as the laterals above
+    # are, not joined: the identifier row by its primary key, then the accounts by type.
+    # The family's keys are a literal per family, as funding_keys is.
+    f = aliased(models.AccountIdentifier, name="family_identifier")
+    named_family = (
+        select(f.value)
+        .where(f.id == t.counterparty_identifier_id, f.kind == "account_family")
+        .lateral("named_family")
+    )
+    family_key_lists = case(
+        *(
+            (named_family.c.value == name_, literal(sorted(family_keys(name_)), ARRAY(String())))
+            for name_ in sorted(families())
+        ),
+        else_=None,
+    )
+    fa = aliased(models.Account, name="family_account")
+    family_accounts = (
+        select(type_coerce(func.array_agg(fa.id), ARRAY(Uuid())).label("ids"))
+        .where(fa.type_key == any_(family_key_lists), fa.id != legs.c.account_id)
+        .lateral("family_accounts")
+    )
+    family_count = func.coalesce(func.cardinality(family_accounts.c.ids), 0)
     holder = case(
+        (named_family.c.value.is_not(None), case((family_count == 1, family_accounts.c.ids[1]))),
         (
             t.counterparty_identifier_id.is_not(None),
             select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
@@ -425,7 +455,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
             merchants.c.holders,
-            payees.c.holders.label("payee_holders"),
+            case((family_count >= 2, family_accounts.c.ids), else_=payees.c.holders).label(
+                "payee_holders"
+            ),
+            named_family.c.value.is_not(None).label("family"),
             t.bank_transfer,
             funded_by_transfer.label("funded_by_transfer"),
             timed.label("timed"),
@@ -437,6 +470,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .join(legs, true())
         .join(evidence, true())
         .join(own_account, true())
+        .outerjoin(named_family, true())
+        .join(family_accounts, true())
         .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
         .outerjoin(payees, payees.c.identifier_id == t.counterparty_identifier_id)
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS), ~t.never_transfer)
@@ -464,6 +499,7 @@ _OWN_RECORDS = Table(
     Column("names_account", Boolean, nullable=False),
     Column("holders", ARRAY(Uuid)),
     Column("payee_holders", ARRAY(Uuid)),
+    Column("family", Boolean, nullable=False),
     Column("bank_transfer", Boolean, nullable=False),
     Column("funded_by_transfer", Boolean, nullable=False),
     Column("timed", Boolean, nullable=False),
