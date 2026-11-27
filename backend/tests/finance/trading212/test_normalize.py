@@ -26,10 +26,18 @@ from lararium.core.connections import (
 from lararium.core.connectors import SyncContext
 from lararium.modules.finance import connector_run
 from lararium.modules.finance.accounts import close_account, create_account
+from lararium.modules.finance.identifiers import assign_identifier
 from lararium.modules.finance.instruments import InstrumentIdentifier, create_instrument
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    find_unbalanced_transactions,
+    upsert_connector_transaction,
+)
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
+from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.trading212 import accounts as t212_accounts
 from lararium.modules.finance.trading212 import instruments as t212_instruments
 from lararium.modules.finance.trading212 import sync as t212_sync
@@ -42,6 +50,7 @@ from lararium.modules.finance.trading212.normalize import (
     normalize,
 )
 from lararium.modules.finance.transfers import heal_transfers, list_transfers
+from lararium.modules.finance.transfers.contra import transfer_contra
 
 from .fixtures import (
     ISIN,
@@ -435,6 +444,90 @@ async def test_transaction_signs_and_transfer_flag(session, run) -> None:
         )
     # Until a real transfer shows its sign, the owner is told to check it.
     assert "TRANSFER" in report.flagged
+
+
+async def _never_transfer(session, external_id: str) -> bool:
+    return await session.scalar(
+        text("select never_transfer from finance.transactions where external_id = :e"),
+        {"e": external_id},
+    )
+
+
+async def test_dividends_interest_and_fees_are_never_a_transfer(session, run) -> None:
+    """Only a deposit, a withdrawal or a transfer moves money between own accounts: every
+    other cash item is marked no transfer, so the funding rule can't take it as a top-up.
+    A new normalizer version marks the rows already posted."""
+    ledger = Ledger(session, await _connection(run))
+    kinds = ("DEPOSIT", "WITHDRAW", "TRANSFER", "FEE", "INTEREST_ON_FREE_CASH", "LENDING_INTEREST")
+    entries = [("transactions", transaction_item(reference=kind, kind=kind)) for kind in kinds]
+    await ledger.normalize(SUMMARY, META, ("dividends", dividend_item()), *entries)
+    marked = {kind: await _never_transfer(session, f"transaction:{kind}") for kind in kinds}
+    assert marked == {
+        "DEPOSIT": False,
+        "WITHDRAW": False,
+        "TRANSFER": False,
+        "FEE": True,
+        "INTEREST_ON_FREE_CASH": True,
+        "LENDING_INTEREST": True,
+    }
+    assert await _never_transfer(session, "dividend:div-0001") is True
+
+    # As posted before the marker: the replay marks them again.
+    await session.execute(text("update finance.transactions set never_transfer = false"))
+    await ledger.replay()
+    assert await _never_transfer(session, "dividend:div-0001") is True
+    assert await _never_transfer(session, "transaction:INTEREST_ON_FREE_CASH") is True
+    assert await _never_transfer(session, "transaction:DEPOSIT") is False
+
+
+async def test_interest_is_no_bank_top_up(session, run, gbp) -> None:
+    """On an account funded by bank transfer, a same-amount bank transfer naming it does not
+    pair with its interest: interest names nobody, but it is marked no transfer."""
+    ledger = Ledger(session, await _connection(run))
+    interest = transaction_item(reference="i", kind="INTEREST_ON_FREE_CASH", amount="100.00")
+    await ledger.normalize(SUMMARY, ("transactions", interest))
+    account_id = await session.scalar(
+        text("select id from finance.accounts where source_connection_id = :c"),
+        {"c": ledger.connection.id},
+    )
+    identifier = await run(assign_identifier, account_id, "uk_bank_account", "121212:56565656")
+    await run(get_or_create_system_account, "in_transit")
+    bank = await run(create_connection, connector="monzo", display_name="M", config={})
+    bank_account = await run(
+        create_account,
+        name="M",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+        source_connection_id=bank.id,
+    )
+    contra = await transfer_contra(
+        session,
+        source=("connection", f"{bank.id}:out"),
+        own_account_id=bank_account.id,
+        counterparty_identifier_id=identifier.id,
+        other_postings=0,
+    )
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 3, 1, 9, 0, tzinfo=UTC),
+            description="Transfer",
+            origin="connector",
+            connection_id=bank.id,
+            external_id="out",
+            postings=[
+                PostingInput(bank_account.id, gbp.id, Decimal("-100.00")),
+                PostingInput(contra, gbp.id, Decimal("100.00")),
+            ],
+            counterparty=CounterpartyFields(identifier_id=identifier.id, bank_transfer=True),
+        ),
+    )
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        await heal_transfers(ctx)
+    assert [t for t in await list_transfers(session) if t.status == "matched"] == []
 
 
 async def test_cancelled_order_no_transaction(session, run) -> None:
