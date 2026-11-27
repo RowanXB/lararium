@@ -226,6 +226,7 @@ Built first as per-account payment references (PR #46). Production showed Tradin
 - Its contra at posting is Unassigned, as a record naming a card merchant's holders is, until it pairs.
 - **Known limitation:** a held-payee payment that can't pair (several candidate deposits, or a lone candidate the coverage gate refuses) opens no transfer and shows only on Unassigned, as an unpaired card payment does; the owner pairs it by hand.
 - **Known limitation:** a held payee is never settled before history and never gets an inferred placeholder.
+- **Known limitation:** with three Trading 212 accounts a TRANSFER between them names no counterpart (§9), so its incoming side may be taken as the top-up for a same-amount payment to the shared payee until the real deposit arrives; then both go to review.
 
 ### 8.2 A deposit whose method the source doesn't state
 

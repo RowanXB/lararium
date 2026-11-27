@@ -623,7 +623,9 @@ until their `Action` is known.
   top-ups still pair by the card rule above, and card evidence comes first: a deposit that has
   a card-payment candidate is not paired as a bank transfer by its account's funding. A pair
   made this way shows **Reject** on the Transfers page, not Unpair, like a card pair: neither
-  record is a transfer without the other.
+  record is a transfer without the other. With three Trading 212 accounts, a transfer between
+  them names no counterpart (see below), so its incoming side may be taken as the top-up for a
+  same-amount payment to the shared payee until the real deposit arrives; then both go to review.
 - **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and

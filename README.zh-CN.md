@@ -502,7 +502,9 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
   历史之前已结清，不会生成占位记录。在 Unassigned 里找到这笔付款，手动配对正确的那一笔（先 `GET /api/v1/finance/transactions/{id}/pair-candidates`，再
   `POST /api/v1/finance/transactions/{id}/pair`，见上文“没有写明对方账户的记录”）。卡充值仍按上面的
   卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的入金方式当作银行转账来配对。这样配上的
-  一对在 Transfers 页面显示 **Reject**，没有 Unpair，和刷卡配对一样：两条记录少了对方都不是转账。
+  一对在 Transfers 页面显示 **Reject**，没有 Unpair，和刷卡配对一样：两条记录少了对方都不是转账。有三个 Trading 212
+  账户时，它们之间的转账不指明对手账户（见下文），所以转入的一侧可能被当作一笔付给共用收款账户、金额相同的付款的
+  充值，直到真正的入金到来；那时两者都会进入审核。
 - **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
   状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
   一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
