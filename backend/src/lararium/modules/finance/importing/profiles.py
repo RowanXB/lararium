@@ -1,6 +1,12 @@
 """Parse profiles: how to read one institution's statement files, stored as data.
 
 A profile's config is validated here, before it is stored; parsers trust it.
+
+A config lists two sets of type codes, which are not the same: `card_types` are the codes
+that are not bank transfers (card, cash machine, cheque, interest), for transfer matching;
+`card_payment_types` are the codes of a payment made by card, which decide whether a positive
+row is a card refund. A cash machine, cheque or interest code is in the first and not the
+second.
 """
 
 import re
@@ -114,6 +120,15 @@ def is_bank_transfer(card_types: list[str], bank_type: str | None, card_number: 
     if card_number is not None:
         return False
     return bank_type is None or bank_type.strip() not in card_types
+
+
+def is_card_payment(
+    card_payment_types: list[str], bank_type: str | None, card_number: str | None
+) -> bool:
+    """Whether a row with this type code, paid with this card if any, is a card payment."""
+    if card_number is not None:
+        return True
+    return bank_type is not None and bank_type.strip() in card_payment_types
 
 
 class AmountFormat(BaseModel):
@@ -280,6 +295,7 @@ class CsvProfileConfig(BaseModel):
     sign: Sign = "inflow_positive"
     amount_format: AmountFormat = AmountFormat()
     card_types: CardTypes = Field(default_factory=list[str])
+    card_payment_types: CardTypes = Field(default_factory=list[str])
     # A row whose description is one of these pays interest, for a bank that prints no type
     # codes (LemFi).
     interest_descriptions: list[str] = Field(default_factory=list[str])
@@ -363,6 +379,7 @@ class OfxProfileConfig(BaseModel):
     timezone: TimezoneName | None = None
     # OFX's own TRNTYPE codes for them.
     card_types: CardTypes = Field(default_factory=lambda: ["POS", "ATM", "CHECK"])
+    card_payment_types: CardTypes = Field(default_factory=lambda: ["POS"])
 
 
 class QifProfileConfig(BaseModel):
@@ -376,6 +393,7 @@ class QifProfileConfig(BaseModel):
     sign: Sign = "inflow_positive"
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])
+    card_payment_types: CardTypes = Field(default_factory=list[str])
 
 
 class PdfProfileConfig(BaseModel):
@@ -393,6 +411,7 @@ class PdfProfileConfig(BaseModel):
     ]
     timezone: TimezoneName | None = None
     card_types: CardTypes = Field(default_factory=list[str])
+    card_payment_types: CardTypes = Field(default_factory=list[str])
 
 
 type ProfileConfigModel = CsvProfileConfig | OfxProfileConfig | QifProfileConfig | PdfProfileConfig

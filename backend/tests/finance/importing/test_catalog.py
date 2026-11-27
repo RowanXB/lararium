@@ -148,3 +148,23 @@ def test_tembo_interest_is_no_bank_transfer() -> None:
 
 def test_lemfi_csv_marks_its_interest() -> None:
     assert _csv("LemFi", "CSV").interest_descriptions == ["Savings Interest Payout"]
+
+
+_CARD_PAYMENT_TYPES = {
+    ("HSBC UK", "PDF statement"): [")))", "VIS"],
+    ("HSBC UK", "midata CSV"): [")))", "VIS"],
+    ("Lloyds", "CSV"): ["DEB"],
+    ("Lloyds", "PDF statement"): ["DEB"],
+    ("Revolut Current", "CSV"): ["Card Payment", "Card Refund"],
+    ("BOC UK", "PDF statement"): ["Pre-Authorization Completed"],
+    ("HSBC UK", "OFX"): ["POS"],
+}
+_NOT_CARD_PAYMENTS = {"ATM", "CPT", "CHQ", "CHECK", "Gross Interest", "Interest"}
+
+
+def test_card_payment_types() -> None:
+    for entry in CATALOG:
+        expected = _CARD_PAYMENT_TYPES.get((entry.institution, entry.label), [])
+        assert entry.config.card_payment_types == expected, (entry.institution, entry.label)
+        assert not _NOT_CARD_PAYMENTS & set(entry.config.card_payment_types)
+        assert "Interest Adjustment" not in entry.config.card_payment_types
