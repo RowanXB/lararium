@@ -481,9 +481,14 @@ class Known:
         account's opening, never imported, and an unrelated row taken for it would never
         be found out. After the last day imported, one would be: the next statement brings
         the real row, and the two go to review."""
-        if record.account_id not in self.manual:
+        return self.holds_account(record.account_id, record.instrument_id, earliest)
+
+    def holds_account(self, account_id: UUID, instrument_id: UUID, earliest: date) -> bool:
+        """holds_from for any row in the instrument on the account, as for a holder of a
+        held payee whose row was not found (_one_sided_known)."""
+        if account_id not in self.manual:
             return True
-        first = self.first_full_day.get((record.account_id, record.instrument_id))
+        first = self.first_full_day.get((account_id, instrument_id))
         return first is not None and first <= earliest
 
 
@@ -718,12 +723,17 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     timed receipt is asked only from its payment's day (_gate_day). A pair it refuses is
     still a candidate, one that can't be taken by itself (PairRelation.untakeable). The
     record naming a bank account the other's account holds (_names_held) is the identified
-    one here."""
+    one here, and every holder of that bank account is held to the gate: the real row may
+    be on any of them, inside its opening."""
     if s.identified or c.identified:
         identified, other = (s, c) if s.identified else (c, s)
     else:
         identified, other = (s, c) if _names_held(s, c) else (c, s)
-    return known.holds_from(other, _gate_day(identified, other, settings, known))
+    earliest = _gate_day(identified, other, settings, known)
+    return known.holds_from(other, earliest) and all(
+        known.holds_account(holder, other.instrument_id, earliest)
+        for holder in identified.payee_holders
+    )
 
 
 def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:

@@ -6,7 +6,7 @@ amount and date window as ever; uniqueness, the coverage gate and card precedenc
 unchanged. Until it pairs its contra is Unassigned, as a card merchant's payer's is."""
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -191,6 +191,8 @@ async def test_a_transfer_to_the_payee_pairs_with_its_one_holder_deposit(
     assert (row.holder, row.holders, row.names_account) == (None, None, True)
     assert set(row.payee_holders) == {a.account.id, b.id}
     if on == "a":
+        # B's imports list in full (the coverage gate asks it of every manual holder).
+        await statement_row(b, "-7")
         received = (await connector_tx(a, "100", external_id="deposit", bank_transfer=False)).id
         account_id = a.account.id
     else:
@@ -208,6 +210,47 @@ async def test_a_transfer_to_the_payee_pairs_with_its_one_holder_deposit(
     assert (await _relation(session)).tiers[sent.id][received] == ONE_SIDED
     assert await contra_account(session, sent.id, m.account.id) == ids.in_transit
     assert await contra_account(session, received, account_id) == ids.in_transit
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+@pytest.mark.parametrize("covered", [False, True])
+async def test_every_manual_holder_is_held_to_the_coverage_gate(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    trading212: MakeTyped,
+    imported_bank: ImportedBank,
+    connector_tx: ConnectorTx,
+    statement_row: StatementRow,
+    heal: Heal,
+    covered: bool,
+) -> None:
+    """The payment's real other side may be on any holder: a deposit on the connected A is
+    taken only once the manual B's imports list in full from before the window. Until
+    then it stays the payment's candidate, one the rule can't take."""
+    m = await connected_bank("M")
+    a = await trading212("A")
+    b = await imported_bank("B")
+    payee = await _register(run, a.account, b)
+    if covered:
+        early = WHEN.date() - timedelta(days=30)
+        await statement_row(b, "-7", complete=(early, WHEN.date() + timedelta(days=60)))
+    sent = await connector_tx(m, "-100", identifier_id=payee)
+    on_a = (await connector_tx(a, "100", external_id="deposit", bank_transfer=False)).id
+    await heal()
+
+    relation = await _relation(session)
+    assert relation.candidates(sent.id) == [on_a]
+    assert relation.takeable(sent.id, on_a) is covered
+    matched = [t for t in await list_transfers(session) if t.status == "matched"]
+    if covered:
+        assert [(t.out_transaction_id, t.in_transaction_id) for t in matched] == [(sent.id, on_a)]
+    else:
+        assert matched == []
+        assert relation.review_reason(sent.id) == "not_listed_in_full"
+        assert await contra_account(session, on_a, a.account.id) == ids.unassigned
     assert await heal() == 0
     await assert_consistent(session)
 
@@ -289,6 +332,7 @@ async def test_registering_the_holders_matches_again(
     payee = await run(get_or_create_identifier, "uk_bank_account", PAYEE)
     sent = await connector_tx(m, "-100", identifier_id=payee)
     received = await statement_row(b, "100")
+    await statement_row(a, "-7")  # A's imports list in full too
     await heal()
 
     async def suggested() -> bool:
@@ -339,6 +383,7 @@ async def test_preview_match_reads_the_holders(
         else await run(get_or_create_identifier, "uk_bank_account", PAYEE)
     )
     received = await statement_row(b, "100")
+    await statement_row(a, "-7")  # A's imports list in full too
     await heal()
 
     previewed = await preview_match(
