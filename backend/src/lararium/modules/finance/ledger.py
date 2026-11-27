@@ -103,6 +103,8 @@ class TransactionInput:
     external_id: str | None = None
     counterparty: CounterpartyFields = CounterpartyFields()
     details: TransactionDetails = TransactionDetails()
+    # The transaction this one cancels; at most one transaction cancels any given one.
+    cancels_transaction_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,7 @@ class TransactionRecord:
     counterparty: CounterpartyFields
     postings: tuple[PostingRecord, ...]  # sorted by position
     details: TransactionDetails
+    cancels_transaction_id: UUID | None
 
 
 def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
@@ -238,6 +241,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.include_in_spending,
                 t.payment_scheme,
                 t.place_entity_id,
+                t.cancels_transaction_id,
             ).where(t.id == transaction_id)
         )
     ).one_or_none()
@@ -307,6 +311,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             place_entity_id=row.place_entity_id,
             category_splits=tuple(CategorySplit(r.category, r.quantity) for r in split_rows),
         ),
+        cancels_transaction_id=row.cancels_transaction_id,
     )
 
 
@@ -360,6 +365,7 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
             for posting in record.postings
         ],
         "details": _details_data(record.details),
+        "cancels_transaction_id": _optional_str(record.cancels_transaction_id),
     }
 
 
@@ -392,8 +398,29 @@ def _publish(ctx: CommandContext, event_type: str, record: TransactionRecord) ->
     ctx.record_change(f"transaction:{record.id}", _change_data(record))
 
 
-async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> date:
-    """Everything post_transaction checks before writing; returns the booking date."""
+async def _validate_cancels(
+    session: AsyncSession, cancels_id: UUID, replacing_id: UUID | None
+) -> None:
+    """The transaction a transaction cancels exists, is another one, and is cancelled by no
+    other that is not void: a void one keeps its link but holds nothing. replacing_id is the
+    transaction being replaced in place, which may keep its link."""
+    if cancels_id == replacing_id:
+        raise FinanceValidationError("a transaction can't cancel itself")
+    t = models.Transaction
+    if await session.scalar(select(t.id).where(t.id == cancels_id)) is None:
+        raise FinanceValidationError(f"cancels_transaction_id {cancels_id} is not a transaction")
+    cancelled_by = await session.scalar(
+        select(t.id).where(t.cancels_transaction_id == cancels_id, t.status != "void")
+    )
+    if cancelled_by is not None and cancelled_by != replacing_id:
+        raise FinanceValidationError(f"transaction {cancels_id} is already cancelled")
+
+
+async def _validate_transaction(
+    session: AsyncSession, tx: TransactionInput, replacing_id: UUID | None = None
+) -> date:
+    """Everything post_transaction checks before writing; returns the booking date.
+    replacing_id is the transaction an upsert replaces in place."""
     if tx.occurred_at.utcoffset() is None:
         raise FinanceValidationError("occurred_at needs a timezone")
     if len(tx.postings) < 2:
@@ -404,6 +431,8 @@ async def _validate_transaction(session: AsyncSession, tx: TransactionInput) -> 
     if number is not None and (len(number) != 8 or not number.isascii() or not number.isdigit()):
         raise FinanceValidationError("a counterparty's account number is 8 digits")
     await _validate_details(session, tx.details)
+    if tx.cancels_transaction_id is not None:
+        await _validate_cancels(session, tx.cancels_transaction_id, replacing_id)
     instruments = await _resolve_references(session, tx.postings)
     residuals = compute_residuals(tx.postings)
     for instrument_id, residual in residuals.items():
@@ -501,6 +530,7 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
                 connection_id=tx.connection_id,
                 external_id=tx.external_id,
                 **_details_values(tx.details),
+                cancels_transaction_id=tx.cancels_transaction_id,
                 owner_entity_id=await get_self_entity_id(session),
                 **_counterparty_values(tx.counterparty),
             )
@@ -560,6 +590,7 @@ async def upsert_connector_transaction(
                 t.payment_reference,
                 t.bank_transfer,
                 t.counterparty_account_number,
+                t.cancels_transaction_id,
                 t.never_transfer,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
@@ -575,7 +606,7 @@ async def upsert_connector_transaction(
         # The owner's void is a decision that survives re-syncs. A connector's own void (of a
         # reversed transaction, say) gives way to what the upstream reports now.
         return before, "unchanged"
-    booking_date = await _validate_transaction(session, tx)
+    booking_date = await _validate_transaction(session, tx, replacing_id=existing.id)
     fields_unchanged = (
         existing.occurred_at == tx.occurred_at
         and existing.occurred_tz == tx.occurred_tz
@@ -589,6 +620,7 @@ async def upsert_connector_transaction(
         and existing.payment_reference == tx.counterparty.reference
         and existing.bank_transfer == tx.counterparty.bank_transfer
         and existing.counterparty_account_number == tx.counterparty.account_number
+        and existing.cancels_transaction_id == tx.cancels_transaction_id
         and existing.never_transfer == tx.counterparty.never_transfer
     )
     details_unchanged = before.details == tx.details
@@ -616,6 +648,7 @@ async def upsert_connector_transaction(
             voided_by=ctx.actor.type if tx.status == "void" else None,
             **_counterparty_values(tx.counterparty),
             **_details_values(tx.details),
+            cancels_transaction_id=tx.cancels_transaction_id,
         )
         .returning(t.id)
     )

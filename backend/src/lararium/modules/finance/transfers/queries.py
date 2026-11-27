@@ -20,6 +20,7 @@ from sqlalchemy import (
     and_,
     any_,
     case,
+    distinct,
     exists,
     func,
     or_,
@@ -49,7 +50,9 @@ from lararium.modules.finance.transfers.contra import (
     LegFee,
     RecordColumns,
     SourceRef,
+    cancelled_pairs,
     eligible_records,
+    in_cancelled_pair,
     is_rejected,
     leg_fee_columns,
     load_own_record,
@@ -969,8 +972,9 @@ def is_overdue(
 
 def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
     """(id, occurred_at) of the recorded transactions (not void, not derived) posting on In
-    transit without being a leg of a transfer that is not rejected, whatever their shape:
-    one with a fee posting besides is no leg, yet its posting there still counts."""
+    transit without being a leg of a transfer that is not rejected or one of a cancelled
+    pair (contra.in_cancelled_pair), whatever their shape: one with a fee posting besides is
+    no leg, yet its posting there still counts."""
     t, p, tr = models.Transaction, models.Posting, models.Transfer
     # Set-wise on ids, then a lookup of each (_in_ids).
     legs = [
@@ -982,16 +986,20 @@ def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
         _in_ids(t.id, stray, stray.c.transaction_id),
         t.status != "void",
         t.origin.not_in(DERIVED_ORIGINS),
+        ~in_cancelled_pair(t.id),
     )
 
 
 async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
     """Ids of transactions that break the invariant (design §5.5): recorded transactions
-    posting on In transit without being a leg of a transfer that is not rejected, whatever
-    their shape, and own records that are such a leg with their contra elsewhere;
-    placeholders and settlements whose transfer is gone; those of a transfer that is not
-    rejected which are void or don't post on In transit; and the own record of a transfer
-    whose placeholder or settlement is missing."""
+    posting on In transit without being a leg of a transfer that is not rejected or one of
+    a cancelled pair, whatever their shape, and own records that are such a leg with their
+    contra elsewhere; placeholders and settlements whose transfer is gone; those of a
+    transfer that is not rejected which are void or don't post on In transit; the own
+    record of a transfer whose placeholder or settlement is missing; and both of a
+    cancelled pair that doesn't leave In transit level: unless each posts there exactly
+    once, the two in one instrument and summing to zero (cancelled-withdrawal design
+    §4.4)."""
     system = await system_account_ids(session)
     in_transit = system.get("in_transit")
     if in_transit is None:
@@ -1046,7 +1054,34 @@ async def find_transfer_violations(session: AsyncSession) -> list[UUID]:
             and_(tr.status == "before_history", tr.settlement_transaction_id.is_(None)),
         )
     )
-    found = union(select(stray.c.id), elsewhere, orphaned, broken, missing).subquery()
+    pairs = cancelled_pairs()
+    q = aliased(models.Posting, name="pair_posting")
+    # Each side's postings there: one row of aggregates, which `having` keeps or drops.
+    level = exists(
+        select(func.count())
+        .where(
+            q.account_id == in_transit,
+            q.transaction_id.in_((pairs.c.cancelling, pairs.c.cancelled)),
+        )
+        .having(
+            and_(
+                func.count() == 2,
+                func.count(distinct(q.transaction_id)) == 2,
+                func.count(distinct(q.instrument_id)) == 1,
+                func.sum(q.quantity) == 0,
+            )
+        )
+    )
+    unsettled = select(pairs.c.cancelling, pairs.c.cancelled).where(~level).cte("unsettled_pairs")
+    found = union(
+        select(stray.c.id),
+        elsewhere,
+        orphaned,
+        broken,
+        missing,
+        select(unsettled.c.cancelling),
+        select(unsettled.c.cancelled),
+    ).subquery()
     return list(await session.scalars(select(found.c.id).order_by(found.c.id)))
 
 
