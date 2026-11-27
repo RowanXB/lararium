@@ -680,6 +680,7 @@ def _registry_edges(
     decisions: _Decisions,
     known: Known,
     carded: Collection[UUID] = (),
+    gated: _Edges | None = None,
 ) -> tuple[_Edges, _Edges]:
     """(same amount, another amount) pairs the registry gives. Of the same amount, both
     tiers, a one-sided one only where the ledger would hold the real counterpart
@@ -687,7 +688,9 @@ def _registry_edges(
     (_weak_known); of another amount, only mutually identified ones (Ruling 8: a payment
     naming nobody is no evidence of a differing transfer). Card evidence comes first: a
     record with a card payment's candidate (`carded`, card_partners') gets no edge through
-    its account's funding alone (_funded_only), so a card top-up stays the card payment's."""
+    its account's funding alone (_funded_only), so a card top-up stays the card payment's.
+    `gated`, when given, collects the same-amount pairs the coverage gate alone refused,
+    with their tier."""
     same, differing = _Edges(), _Edges()
     # Same amount: a sender meets the receivers in its instrument of its amount.
     receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
@@ -714,9 +717,11 @@ def _registry_edges(
                 tier = weak_tier(s, c)
             if tier is None or decisions.apart(s, c):
                 continue
-            if tier == ONE_SIDED and not _one_sided_known(s, c, settings, known):
-                continue
-            if tier == WEAK and not _weak_known(s, c, settings, known):
+            if (tier == ONE_SIDED and not _one_sided_known(s, c, settings, known)) or (
+                tier == WEAK and not _weak_known(s, c, settings, known)
+            ):
+                if gated is not None:
+                    gated.add(s.id, c.id, tier)
                 continue
             same.add(s.id, c.id, tier)
         if not s.identified or s.holder is None:
@@ -803,6 +808,17 @@ class PairRelation:
     # another tier either.
     cards: Mapping[UUID, frozenset[UUID]]
     by_card: Mapping[UUID, UUID]
+    # A record's candidates of the same amount that the coverage gate alone refused
+    # (_one_sided_known, _weak_known): those that would be in `exact` if it took them.
+    gated: Mapping[UUID, frozenset[UUID]]
+
+    def unlisted(self, record_id: UUID) -> frozenset[UUID]:
+        """The record's candidates the coverage gate alone refused (`gated`): rows on a
+        manual account, found by amount and date, on days no upload lists in full. For an
+        identified record they are on the account it names. Account type catalog design
+        §8.3 item 3: its transfer then waits for review (not_listed_in_full), with no
+        placeholder beside a row that may be its counterpart."""
+        return self.gated.get(record_id, frozenset())
 
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
@@ -916,8 +932,14 @@ async def pair_relation(
     records = await _load_records(session, system, decisions, excluding) + list(adding)
     # The records a card payment could have paid (and the payments), whatever else pairs.
     carded, _ = card_partners(records, settings.near_window, decisions.apart, ())
+    refused = _Edges()
     same, differing = _registry_edges(
-        records, settings, decisions, await _load_known(session, listing), carded=carded.keys()
+        records,
+        settings,
+        decisions,
+        await _load_known(session, listing),
+        carded=carded.keys(),
+        gated=refused,
     )
     _decided_edges(records, decisions, same)
     best = {r: min(found.values()) for r, found in same.tiers.items()}
@@ -926,6 +948,16 @@ async def pair_relation(
         for r, found in same.tiers.items()
     }
     exact = {r: found for r, found in exact.items() if found}
+    # A refused pair counts where, taken, it would be exact: in the strongest tier of both.
+    gated = {
+        r: frozenset(
+            c
+            for c, tier in found.items()
+            if tier <= best.get(r, tier) and tier <= best.get(c, tier)
+        )
+        for r, found in refused.tiers.items()
+    }
+    gated = {r: found for r, found in gated.items() if found}
     by_id = {x.id: x for x in records}
     across = {
         r: frozenset(found)
@@ -970,4 +1002,5 @@ async def pair_relation(
         converts=converts,
         cards=cards,
         by_card=by_card,
+        gated=gated,
     )

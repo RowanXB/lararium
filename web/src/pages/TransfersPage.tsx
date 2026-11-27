@@ -33,6 +33,7 @@ import { refreshAfterTransferWrite } from "../lib/refresh";
 const REVIEW_REASONS: Record<NonNullable<TransferOut["review_reason"]>, string> = {
   several_candidates: "Several candidates",
   amount_differs: "Amount differs",
+  not_listed_in_full: "Not listed in full",
 };
 
 const STATUS_LABELS: Record<TransferOut["status"], string> = {

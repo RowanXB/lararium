@@ -2296,7 +2296,7 @@ export type TransferOut = {
     /**
      * Review Reason
      */
-    review_reason: 'several_candidates' | 'amount_differs' | null;
+    review_reason: 'several_candidates' | 'amount_differs' | 'not_listed_in_full' | null;
     /**
      * Status
      */

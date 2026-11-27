@@ -316,6 +316,13 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     The page has no **Pair** for them: when both are money records, pair them through the API
     (`POST /api/v1/finance/transfers/{id}/pair` with `{"transaction_id": "<other>"}`; see
     *Records that name no account* below), else Reject the transfer if it isn't one.
+  - *Not listed in full*: a row on a manual account could be the other side, but it lies in
+    the transfer's window before the first day that account's uploads list in full, so it isn't
+    taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
+    which would count the money twice if the row is the real one; the amount waits in In
+    transit. Upload a statement that lists those days and the two pair by themselves, or pair
+    them yourself through the API (`POST /api/v1/finance/transactions/{id}/pair`; see *Records
+    that name no account* below).
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
     days.
 

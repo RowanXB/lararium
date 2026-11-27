@@ -114,7 +114,8 @@ async def _pair_states(
     the one its records and their fees give now; and an open transfer whose review reason
     is not the one its own record's candidates give (several_candidates if it has several,
     PairRelation.several, else amount_differs if it has any of another amount, else
-    none)."""
+    not_listed_in_full if the coverage gate alone refused it one, PairRelation.unlisted,
+    unless the transfer is settled before history, else none: engine._open's)."""
     tr = models.Transfer
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
@@ -159,6 +160,9 @@ async def _pair_states(
             expected = "several_candidates"
         elif relation.candidates(present, exact=False):
             expected = "amount_differs"
+        elif row.status != "before_history" and relation.unlisted(present):
+            # Whether it is settled before history instead is checked by (d) below.
+            expected = "not_listed_in_full"
         # (e) an open transfer whose review reason disagrees with its record's candidates.
         if row.review_reason != expected:
             due.add(present)
@@ -281,7 +285,8 @@ async def records_to_heal(
             )
             # (d) a lone record whose manual counterpart's first snapshot (in its
             # instrument) now contains it, or no longer does (an earlier one was recorded):
-            # the same manual_predates engine._open decides by.
+            # the same manual_predates engine._open decides by. One awaiting there is
+            # not_listed_in_full, with no placeholder, and is settled the same way.
             manual = aliased(models.Account, name="manual_counterpart")
             contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(
@@ -293,7 +298,7 @@ async def records_to_heal(
                     other_leg.is_(None),
                     or_(
                         and_(tr.status == "before_history", ~contained),
-                        and_(tr.status == "inferred", contained),
+                        and_(tr.status.in_(("inferred", "awaiting")), contained),
                     ),
                 )
             )

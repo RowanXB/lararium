@@ -375,6 +375,8 @@ async def _open(
     settings: TransferSettings,
     review_reason: ReviewReason | None,
     previous: TransferRecord | None,
+    *,
+    unlisted: bool,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart is already held by that account's history (a manual hybrid account's first
@@ -382,6 +384,12 @@ async def _open(
     manual_predates; a connected account's first record, before_history); else inferred
     with a placeholder when the counterpart is manual, or awaiting the counterpart's own
     record when it is connected.
+
+    `unlisted`: the coverage gate alone refused the record a candidate on the manual
+    counterpart (PairRelation.unlisted). With no other review reason, and unless the
+    account's history holds the counterpart, the transfer then awaits review
+    (not_listed_in_full) with no placeholder, which would count the money twice if the
+    candidate is the real row (account type catalog design §8.3 item 3).
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -396,6 +404,8 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
+        elif unlisted and review_reason is None:
+            review_reason = "not_listed_in_full"
         else:
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
             status = "inferred"
@@ -600,7 +610,16 @@ async def _match_one(
     elif relation.candidates(record.id, exact=False):
         review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
-    await _open(ctx, record, counterpart, system, settings, review_reason, dissolved.get(record.id))
+    await _open(
+        ctx,
+        record,
+        counterpart,
+        system,
+        settings,
+        review_reason,
+        dissolved.get(record.id),
+        unlisted=bool(relation.unlisted(record.id)),
+    )
     return others, set()
 
 

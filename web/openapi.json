@@ -4705,7 +4705,8 @@
               {
                 "enum": [
                   "several_candidates",
-                  "amount_differs"
+                  "amount_differs",
+                  "not_listed_in_full"
                 ],
                 "type": "string"
               },
