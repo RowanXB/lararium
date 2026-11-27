@@ -226,7 +226,7 @@ Built first as per-account payment references (PR #46). Production showed Tradin
 - Its contra at posting is Unassigned, as a record naming a card merchant's holders is, until it pairs.
 - **Known limitation:** a held-payee payment that can't pair (several candidate deposits, or a lone candidate the coverage gate refuses) opens no transfer and shows only on Unassigned, as an unpaired card payment does; the owner pairs it by hand.
 - **Known limitation:** a held payee is never settled before history and never gets an inferred placeholder.
-- **Known limitation:** with three Trading 212 accounts a TRANSFER between them names no counterpart (§9), so its incoming side may be taken as the top-up for a same-amount payment to the shared payee until the real deposit arrives. Then the pair dissolves and both records go back to Unassigned with no review item (a held-payee payment carries no transfer); the owner pairs them by hand. A real deposit booked after the window leaves the wrong pair in place until the owner rejects it. A family identifier held by all Trading 212 accounts, named by every TRANSFER, would close this; it is a separate design (owner, 2026-11-27).
+- **Known limitation (closed, 2026-11-27):** with three Trading 212 accounts a TRANSFER between them used to name no counterpart, so its incoming side could be taken as the top-up for a same-amount payment to the shared payee. Closed by the account family identifier design (`2026-11-27-account-family-identifier-design.md`): every TRANSFER names the family, and a record naming a family pairs only within it and is never a top-up.
 
 ### 8.2 A deposit whose method the source doesn't state
 
@@ -261,17 +261,7 @@ Three changes, decided by the owner 2026-11-27:
 
 ## 9. Moves between the owner's Trading 212 accounts
 
-A Trading 212 TRANSFER names no other account. Today, when the owner has exactly one `invest` and one `isa` connection, the other is taken to be the counterpart (`trading212/accounts.sibling`). With a Cash ISA a TRANSFER could be to or from it, so the owner decided that once a Cash ISA exists, TRANSFERs name no counterpart, whatever their date (2026-11-26).
-
-With the Cash ISA an account type, that is expressible exactly, and generically: **a record that moves money within a family names the other account only when the owner has exactly two accounts of that family.** `family` is configuration on the type (§6.1). Accounts are counted by their `type_key`. Trading 212's connector asks for "the only other account of my family" in place of counting its own connections:
-
-- Invest and Stocks ISA only: each is the other's counterpart, as today.
-- Invest, Stocks ISA and Cash ISA: no TRANSFER names a counterpart; they pair by the same-amount tiers or by hand.
-- Accounts are counted whatever their status or opening date, so closing one doesn't bring the inference back.
-
-When the set of the owner's accounts in the family changes (one is added, or an old account is given a family type), each Trading 212 connection replays its normalisation at its next sync, so every TRANSFER names what the rule now gives, including earlier ones that named the other account. The connection remembers the set it last normalised with, as Monzo's remembers its card merchants; no account route runs a normalisation itself. Production held no Trading 212 TRANSFER on 2026-11-26 (two DEPOSITs only), so no existing pair comes apart when the Cash ISA is added.
-
-Known limitation, in the README: Lararium knows only the accounts added to it. An owner who holds a Cash ISA at Trading 212 but hasn't added it keeps the two-account inference, and a move to the Cash ISA would be named as the other account's.
+Replaced (2026-11-27) by the account family identifier design, `2026-11-27-account-family-identifier-design.md`. A Trading 212 TRANSFER now always names the family's identifier, held jointly by every account of the family (the catalog's `family`); it no longer names a counterpart only when the owner has exactly two accounts, and the connector no longer counts accounts or replays when the set changes. The earlier rule survives as that design's §5.2 case of one other account: a record naming a family with exactly one other account in it is identified to that account, as before, now for a manual Cash ISA too. With two or more others it is held, pairs only within the family, and is never taken as a bank top-up (§8.1's last known limitation).
 
 ## 10. Building it in two parts
 
@@ -290,7 +280,7 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
   - the profile: a synthetic CSV with the real header stages and commits (signed amounts, UTC times, `memo`, `external_id`, currency; every row a bank transfer); re-importing an overlapping file adds nothing;
   - holders (Hypothesis properties where the engine is involved): a transfer naming the held payee pairs with a deposit on any holder account and with none on a non-holder; with several fitting deposits, with nothing; case and surrounding spaces in the identifier don't matter; an identifier refuses both an account and holders;
   - funding (Hypothesis properties): an identified bank transfer pairs with a same-amount unmarked deposit on an account whose type lists `bank_transfer`; not when the type doesn't, when the deposit names anybody, or when two deposits fit; the weak tier is unchanged; a card payment still pairs only by the card rule;
-  - family: with Invest and Stocks ISA, a TRANSFER names the other; with a Cash ISA added, none does, and the earlier ones are re-posted without a counterpart; closing the Cash ISA changes nothing.
+  - family: replaced by the account family identifier design's tests (§6 there): every TRANSFER names the family; a record naming it resolves to the family's other accounts, pairs only within it, and is never a shared-payee or card top-up; closing an account changes nothing.
 
 ## 12. Open, for the owner
 
