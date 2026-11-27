@@ -23,6 +23,10 @@ MIGRATION = (
 THREE_ROWS = (
     HEADER + "10/11/2026,Own row,1.00\n11/11/2026,Duplicate row,2.00\n12/11/2026,Plain,3.00\n"
 )
+# Two rows alike but for their text (and so their keys), and a later file matched with them
+# by day and amount alone, in file order.
+ALIKE = HEADER + "10/11/2026,Example Shop,5.00\n10/11/2026,Example Savings,5.00\n"
+LATER = HEADER + "10/11/2026,Example Interest,5.00\n10/11/2026,Example Card,5.00\n"
 SAVINGS_CSV = (
     "Date,Description,Money out,Money in,Balance\n"
     '"Oct 1, 2026",Deposit,,"£1,000.00","£1,000.00"\n'
@@ -116,3 +120,22 @@ async def test_revolut_savings_interest_rows_are_marked(
         {"id": profile.id},
     )
     assert config == ["Gross Interest"]
+
+
+async def test_backfill_skips_a_duplicate_among_alike_rows(
+    session: AsyncSession, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
+) -> None:
+    await commit((await stage(csv_profile, ALIKE)).id)
+    later = await stage(csv_profile, LATER, filename="later.csv")
+    await session.execute(
+        text(
+            "update finance.import_rows set interest = true"
+            " where batch_id = :batch and description = 'Example Interest'"
+        ),
+        {"batch": later.id},
+    )
+    await commit(later.id)
+    await session.execute(text("update finance.transactions set income_kind = null"))
+
+    await session.execute(text(_backfill()))
+    assert await _kinds(session) == {"Example Shop": None, "Example Savings": None}

@@ -19,10 +19,10 @@ columns and date format, as 0047 finds its entries), and the stored catalog prof
 staged batches of the Revolut Savings CSV get its interest descriptions.
 
 The backfill then gives `interest` to the transaction of every committed import row that
-states interest, or that has a duplicate in a committed batch stating it: most CSV profiles
-cannot state interest while the PDF layouts do, so with the CSV committed first the PDF's
-rows land as duplicates. Connectors fill the column when their next sync replays under a new
-normalizer version.
+states interest, or that has a duplicate in a committed batch stating it that is surely the
+row's own: most CSV profiles cannot state interest while the PDF layouts do, so with the CSV
+committed first the PDF's rows land as duplicates. Connectors fill the column when their next
+sync replays under a new normalizer version.
 
 Downgrading unmarks those rows, takes the Revolut Savings CSV's interest descriptions off
 again, and drops the table and the column.
@@ -91,6 +91,10 @@ CONFIGS = [
     f" AND {_REVOLUT_SAVINGS_CSV.format(c='profile_config')} AND status = 'staged'",
 ]
 
+# A duplicate speaks for its original only when it is surely that row, mirroring contra's
+# surely_its_original: matched by its key, or the one committed row of its account on that
+# day with that instrument and amount. Otherwise it was matched by day and amount alone
+# (Decision 16), in file order, and among alike rows it may be another's.
 BACKFILL = """
 UPDATE finance.transactions t
 SET income_kind = 'interest'
@@ -107,6 +111,20 @@ WHERE t.income_kind IS NULL
           FROM finance.import_rows d
           JOIN finance.import_batches b ON b.id = d.batch_id
           WHERE d.duplicate_of = r.id AND d.interest AND b.status = 'committed'
+            AND (
+              d.dedupe_key = r.dedupe_key
+              OR NOT EXISTS (
+                SELECT 1
+                FROM finance.import_rows s
+                WHERE s.account_id = d.account_id
+                  AND s.status = 'committed'
+                  AND s.booking_date = d.booking_date
+                  AND s.kind = 'statement'
+                  AND s.instrument_id = d.instrument_id
+                  AND s.quantity = d.quantity
+                  AND s.id <> d.duplicate_of
+              )
+            )
         )
       )
   )

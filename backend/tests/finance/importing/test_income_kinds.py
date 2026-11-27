@@ -8,6 +8,10 @@ from lararium.modules.finance.importing.profiles import ImportProfileRecord
 from .staging_helpers import HEADER, Commit, Rollback, Stage
 
 TWO_ROWS = HEADER + "10/11/2026,Own row,1.00\n11/11/2026,Plain,2.00\n"
+# Two rows alike but for their text (and so their keys): a later file's rows are matched with
+# them by day and amount alone, in file order, so its interest row may be paired with either.
+ALIKE = HEADER + "10/11/2026,Example Shop,5.00\n10/11/2026,Example Savings,5.00\n"
+LATER = HEADER + "10/11/2026,Example Interest,5.00\n10/11/2026,Example Card,5.00\n"
 
 
 async def _kinds(session: AsyncSession) -> dict[str, str | None]:
@@ -84,3 +88,13 @@ async def test_source_category_untouched(
     assert await _categories(session) == before
     await rollback(again.id)
     assert await _categories(session) == before
+
+
+async def test_duplicate_among_alike_rows_marks_neither(
+    session: AsyncSession, stage: Stage, commit: Commit, csv_profile: ImportProfileRecord
+) -> None:
+    await commit((await stage(csv_profile, ALIKE)).id)
+    later = await stage(csv_profile, LATER, filename="later.csv")
+    await _mark_interest(session, later.id, "Example Interest")
+    await commit(later.id)
+    assert await _kinds(session) == {"Example Shop": None, "Example Savings": None}
