@@ -487,14 +487,14 @@ async def test_a_gated_row_beside_one_of_another_amount_posts_no_placeholder(
 ) -> None:
     """A's payment of 100 names B; B's row of 99.30 names A (another amount, mutually
     identified) and its row of 100 names nobody on days no upload lists in full. The
-    transfer is for review as amount_differs, the gated row is among its candidates, and no
+    transfer is for review as amount_differs, the refused row is among its candidates, and no
     placeholder stands beside it."""
     a, a_id = await registered("A", A_IDENTIFIER)
     b = await imported_bank("B", identifier=B_IDENTIFIER)
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
     sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
     net = await statement_row(b, "99.30", day=WHEN.date(), identifier_id=a_id)
-    gated = await statement_row(b, "100", day=WHEN.date())
+    refused = await statement_row(b, "100", day=WHEN.date())
     await _list_no_full_day(session, b)
     await heal()
 
@@ -507,7 +507,7 @@ async def test_a_gated_row_beside_one_of_another_amount_posts_no_placeholder(
     assert await placeholders(session) == []
     found = await candidates(session, transfer.id)
     assert [(c.transaction_id, c.reason) for c in found] == [
-        (gated, "exact"),
+        (refused, "exact"),
         (net, "amount_differs"),
     ]
     assert (await balances_on(session))[b.id] == Decimal("199.30")
@@ -538,7 +538,7 @@ async def test_heal_takes_the_placeholder_away_when_a_gated_row_arrives(
     transfer = await _transfer_of(session, sent)
     assert (transfer.status, transfer.review_reason) == ("inferred", "amount_differs")
 
-    gated = await statement_row(b, "100", day=WHEN.date())
+    refused = await statement_row(b, "100", day=WHEN.date())
     await _list_no_full_day(session, b)
     await heal()
 
@@ -548,7 +548,7 @@ async def test_heal_takes_the_placeholder_away_when_a_gated_row_arrives(
     await assert_consistent(session)
     assert await heal() == 0
 
-    await run(void_transaction, gated)
+    await run(void_transaction, refused)
     await heal()
 
     transfer = await _transfer_of(session, sent)
@@ -558,7 +558,7 @@ async def test_heal_takes_the_placeholder_away_when_a_gated_row_arrives(
     assert await heal() == 0
 
 
-async def test_a_row_the_gate_refused_another_sender_holds_back_its_one_candidate(
+async def test_a_row_refused_for_another_sender_keeps_both_under_review(
     session: AsyncSession,
     run: Run,
     ids: SystemIds,
