@@ -25,7 +25,7 @@ from lararium.modules.finance.binance.notices import FLAG_PREFIX
 from lararium.modules.finance.binance.reconcile import READ_REPORTS
 from lararium.modules.finance.binance.sync import PORTFOLIO_MARGIN_FLAG, delisted_flag
 
-from .fixtures import HOUR_MS, NOW_MS, FakeBinance, build_row
+from .fixtures import DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import ingest, keys, typed
 from .syncing import Clock, RecordingNotifier, binance_connection, later_config, run_binance_sync
 
@@ -483,6 +483,15 @@ async def test_switching_portfolio_margin_never_counts_an_asset_twice(
     fake.margin = True
     fake.set_rows("margin-account", [_cross("STB", "10")])
     fake.set_rows("um-account", [_um("STB", "5")])
+    # A margin pair of STB: a sweep of a Cross Margin difference in STB would ask its trades.
+    pair = build_row(
+        "exchange-info",
+        symbol="AAASTB",
+        baseAsset="AAA",
+        quoteAsset="STB",
+        isMarginTradingAllowed=True,
+    )
+    fake.set_rows("exchange-info", [pair])
     connection = await binance_connection(run, config=later_config())
     before = await run_binance_sync(session, connection.id, fake.handler)
     assert before.status == "healthy", before.last_error
@@ -495,8 +504,12 @@ async def test_switching_portfolio_margin_never_counts_an_asset_twice(
     _pm_on(fake)
     fake.set_rows("pm-balance", [_pm_asset("STB", "15")])
     clock.ms += 5 * HOUR_MS
+    fake.requests.clear()
     on = await run_binance_sync(session, connection.id, fake.handler)
     assert on.status == "healthy", on.last_error
+    # Portfolio Margin has taken the margin trades out: the sweep of Cross Margin's difference
+    # does not ask them.
+    assert fake.calls("margin-trades") == []
     assert await _held(session, on.id, clock) == {(PM, "STB"): Decimal(15)}
     for name in ("Binance Cross Margin", "Binance USDⓈ-M Futures"):
         latest = (await _snapshots(session, on.id, name))[-1]
@@ -519,3 +532,80 @@ async def test_switching_portfolio_margin_never_counts_an_asset_twice(
     }
     assert (await _snapshots(session, off.id, PM))[-1][:2] == ("STB", Decimal(0))
     assert (PM, "STB") in await _differences(session, off.id)
+
+
+def _margin_day(at_ms: int, code: str, net: str) -> dict:
+    """A daily MARGIN snapshot holding `net` of one asset."""
+    row = build_row("snapshot", type="margin", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    entry = {"asset": code, "borrowed": "0", "free": net, "interest": "0", "locked": "0"}
+    data["userAssets"] = [{**entry, "netAsset": net}]
+    return {**row, "data": data}
+
+
+def _futures_day(at_ms: int, code: str, wallet: str) -> dict:
+    """A daily FUTURES snapshot holding a wallet balance of one asset, no position."""
+    row = build_row("snapshot", type="futures", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["assets"] = [{"asset": code, "marginBalance": wallet, "walletBalance": wallet}]
+    data["position"] = []
+    return {**row, "data": data}
+
+
+async def _reports(session, connection_id, accounts: tuple[str, ...]) -> int:
+    """How many report times the named accounts have."""
+    found = await session.scalar(
+        text(
+            "select count(*) from finance.binance_account_reports r"
+            " join finance.accounts a on a.id = r.account_id"
+            " where r.connection_id = :c and a.name = any(:n)"
+        ),
+        {"c": connection_id, "n": list(accounts)},
+    )
+    return int(found)
+
+
+async def test_a_first_sync_with_portfolio_margin_on_counts_no_asset_twice(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # Portfolio Margin on holds 15 STB. The first sync's daily snapshots still show it on Cross
+    # Margin and USDⓈ-M Futures, and an old transfer moved 5 into USDⓈ-M Futures: both make
+    # those accounts after `account-info` was read.
+    fake.margin = True
+    _pm_on(fake)
+    fake.set_rows("pm-balance", [_pm_asset("STB", "15")])
+    day = NOW_MS - 2 * DAY_MS - 1_000
+    fake.add("snapshot", _margin_day(day, "STB", "10"), when={"type": "MARGIN"})
+    fake.add("snapshot", _futures_day(day, "STB", "5"), when={"type": "FUTURES"})
+    kind = "MAIN_UMFUTURE"
+    transfer = build_row(
+        UNIVERSAL,
+        0,
+        asset="STB",
+        amount="5",
+        type=kind,
+        status="CONFIRMED",
+        timestamp=NOW_MS - 10 * DAY_MS,
+    )
+    fake.add(UNIVERSAL, transfer, when={"type": kind})
+    connection = await binance_connection(run)
+
+    first = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert first.status == "healthy", first.last_error
+    assert first.config.get("first_sync_done") is True
+    for name in ("Binance Cross Margin", "Binance USDⓈ-M Futures"):
+        assert await _snapshots(session, first.id, name), name
+    # Counted once, on Portfolio Margin.
+    assert await _held(session, first.id, clock) == {(PM, "STB"): Decimal(15)}
+
+    # A quiet later sync: the replaced wallets' last reports are empty already, so none is
+    # written again.
+    replaced = ("Binance Cross Margin", "Binance USDⓈ-M Futures", "Binance COIN-M Futures")
+    before = await _reports(session, first.id, replaced)
+    clock.ms += 5 * HOUR_MS
+    quiet = await run_binance_sync(session, connection.id, fake.handler)
+    assert quiet.status == "healthy", quiet.last_error
+    assert await _held(session, quiet.id, clock) == {(PM, "STB"): Decimal(15)}
+    assert await _reports(session, quiet.id, replaced) == before
+    assert await _reports(session, quiet.id, (PM,)) == 2

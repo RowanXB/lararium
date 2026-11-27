@@ -6,12 +6,13 @@ no In transit (rule 1): one record describes both sides, so it is never a transf
 the row does not name the pair, so the requested one is stored with it.
 
 A movement two endpoints both list is posted once (rule 2). The listings are taken in order
-(`Listing`; the universal transfer history first, then the margin transfer history and the
-futures income `TRANSFER` rows): a movement of a later listing with one of an earlier listing,
-posted, of the same asset and amount between the same two wallets within 60 seconds is linked
-to it and not posted (`link_movements`). With none, it is posted by rule 1 itself. A futures
-income row names only its own wallet: its other side matches any wallet, and posted by itself
-it is Unassigned.
+(`Listing`, `normalize.MOVEMENT_LISTINGS`; the universal transfer history first, then the
+margin transfer history, the USDⓈ-M and COIN-M futures income `TRANSFER` rows and the options
+bill's `TRANSFER` rows): a movement of a later listing with one of an earlier listing, posted,
+of the same asset and amount between the same two wallets within 60 seconds is linked to it and
+not posted (`link_movements`). With none, it is posted by rule 1 itself. A futures income or
+options bill row names only its own wallet: its other side matches any wallet, and posted by
+itself it is Unassigned.
 
 Cloud Mining has no wallet of its own on Binance: a payment leaves Spot and a refund comes back
 to it, against Unassigned.

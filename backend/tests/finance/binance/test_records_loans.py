@@ -19,20 +19,32 @@ from lararium.modules.finance.binance.balances import (
     settle_reads,
 )
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
+from lararium.modules.finance.binance.client import VIP_LOAN_LABELS
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
+    CURSORS_KEY,
     HISTORY_LABELS,
+    NOT_PRESENT_KEY,
     PHASE_B_BUILT,
     to_json,
     walk,
 )
 from lararium.modules.finance.binance.reconcile import check
 from lararium.modules.finance.binance.records import unit_cost
+from lararium.modules.finance.binance.sync import vip_loan_flag
 from lararium.modules.finance.pricing import record_price
 from lararium.modules.finance.transfers import find_transfer_violations
 from lararium.modules.finance.valuation import holdings_asof
 
-from .fixtures import BASE_TIME_MS, HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
+from .fixtures import (
+    BASE_TIME_MS,
+    DAY_MS,
+    HOUR_MS,
+    NOW_MS,
+    FakeBinance,
+    build_response,
+    build_row,
+)
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
@@ -504,6 +516,47 @@ async def test_a_record_between_the_two_loan_reads_has_both_read_again(
         assert again is not None and again.read_from >= at(start + 20_000) and not again.unclear
     bracket = loan_bracket(settled)
     assert bracket is not None and not ambiguous(bracket, [at(start + 5_000)])
+
+
+async def test_a_vip_loan_refused_to_an_account_that_is_not_vip_is_not_present(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # Ruling R23: Binance does not document what a non-VIP account gets back; an undocumented
+    # refusal of each VIP loan read stops nothing. The VIP histories never answered, so their
+    # first walks have not ended.
+    for label in VIP_LOAN_LABELS:
+        fake.fail(label, status=400, code=-1145)
+    config = later_config()
+    cursors = config[CURSORS_KEY]
+    assert isinstance(cursors, dict)
+    config[CURSORS_KEY] = {k: v for k, v in cursors.items() if not k.startswith("vip-loan-")}
+    connection = await binance_connection(run, config=config)
+    notifier = RecordingNotifier()
+
+    after = await run_binance_sync(session, connection.id, fake.handler, notifier=notifier)
+
+    assert after.status == "healthy", after.last_error
+    missing = after.config[NOT_PRESENT_KEY]
+    assert isinstance(missing, dict) and VIP_LOAN_LABELS <= set(missing)
+    told = sorted(vip_loan_flag(label) for label in VIP_LOAN_LABELS)
+    flags = after.config["flags"]
+    assert isinstance(flags, list)
+    assert sorted(f for f in flags if isinstance(f, str) and "VIP loans" in f) == told
+    assert vip_loan_flag(VIP) == (
+        "vip-loan-ongoing is not served to this account: Binance offers VIP loans to VIP users only"
+    )
+    # The flexible loans are read as usual.
+    assert fake.calls(FLEXIBLE)
+
+    # Not asked for 7 days; then asked again, refused again, and not told again.
+    for days, asked in ((1, False), (7, True)):
+        fake.requests.clear()
+        clock.ms += days * DAY_MS
+        again = await run_binance_sync(session, connection.id, fake.handler, notifier=notifier)
+        assert again.status == "healthy", again.last_error
+        assert bool([s for s in fake.requests if s.label in VIP_LOAN_LABELS]) is asked
+    for flag in told:
+        assert sum(flag in m for m in notifier.messages) == 1
 
 
 # Interest.

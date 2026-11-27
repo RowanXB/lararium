@@ -13,7 +13,7 @@ Nothing here logs or reports an amount, an address or a hash: a flag names a wal
 
 import hashlib
 import json
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -47,6 +47,7 @@ from lararium.modules.finance.binance.catalogue import (
 )
 from lararium.modules.finance.binance.client import BinanceClient
 from lararium.modules.finance.binance.fetch import (
+    ACCOUNT_INFO_LABEL,
     HISTORY_LABELS,
     ISOLATED_MARGIN_LABEL,
     TRADE_LABELS,
@@ -107,6 +108,8 @@ PORTFOLIO_SOURCES = {"portfolio_margin": "pm-balance"}
 # asset's cross margin, UM and CM parts): each gets an empty report when it is seen on, and the
 # Portfolio Margin wallet one when it is seen off (`empty_reports`), so no asset counts twice.
 PORTFOLIO_REPLACED = ("cross_margin", "um_futures", "cm_futures")
+# `account-info`'s word that the account uses Portfolio Margin (design 5.13).
+PORTFOLIO_MARGIN_FIELD = "isPortfolioMarginRetailEnabled"
 # Each derivatives account's quantity per asset: the sum of these fields of its rows.
 _ACCOUNT_FIELDS: dict[str, tuple[str, ...]] = {
     **dict.fromkeys(FUTURES_SOURCES.values(), _FUTURES_FIELDS),
@@ -395,13 +398,19 @@ async def record_times(ctx: SyncContext) -> list[datetime]:
     return found
 
 
+type Reread = Callable[[str], Awaitable[Read | None]]
+type Rewalk = Callable[[str], Awaitable[object]]
+
+
 async def settle_reads(
     ctx: SyncContext,
     client: BinanceClient,
-    reads: dict[str, Read],
+    reads: Mapping[str, Read],
     *,
     trades: Sequence[TradeWalk] = (),
-) -> dict[str, Read]:
+    reread: Reread | None = None,
+    rewalk: Rewalk | None = None,
+) -> dict[str, Read | None]:
     """Make the ambiguous reads again, then walk the history labels forwards again (and the
     trades of `trades`), at most 3 rounds; a read still ambiguous after them is the last one
     made, marked `unclear`.
@@ -410,8 +419,22 @@ async def settle_reads(
     Each read made again is stored as a raw record, as the first one was. After each round
     every source read is checked again against every record this sync fetched, so a record a
     round's walk finds inside a read that was clear until then has that read made again too.
+
+    `reread` makes one read again and `rewalk` walks one history label; the sync's handle a
+    refusal as its first reads and walks do (`sync.read_or_absent`, `sync.on_host`). A read
+    `reread` gives None for (not served now, its host refused the key) is None in the result:
+    its wallet gets no snapshot in this sync, as an unclear one does.
     """
-    settled = dict(reads)
+    settled: dict[str, Read | None] = dict(reads)
+
+    async def read_again(label: str) -> Read | None:
+        return (await read_balances(client, [label]))[label]
+
+    async def walk_again(label: str) -> object:
+        return await walk(ctx, client, label)
+
+    reread = reread or read_again
+    rewalk = rewalk or walk_again
 
     async def unsettled() -> list[str]:
         times = await record_times(ctx)
@@ -420,27 +443,30 @@ async def settle_reads(
         return [
             label
             for label in SOURCE_LABELS
-            if label in settled
-            and (unclear_loans if label in LOAN_READS else ambiguous(settled[label], times))
+            if (read := settled.get(label)) is not None
+            and (unclear_loans if label in LOAN_READS else ambiguous(read, times))
         ]
 
     pending = await unsettled()
     for _ in range(ROUNDS):
         if not pending:
             break
-        again = await read_balances(client, pending)
+        again = {label: await reread(label) for label in pending}
         for read in again.values():
-            await store_read(ctx, read)
+            if read is not None:
+                await store_read(ctx, read)
         # After the reads: what happened while they were made is what the walks must find.
         for label in HISTORY_LABELS:
-            await walk(ctx, client, label)
+            await rewalk(label)
         for trade in trades:
             if trade.symbols:
                 await walk_trades(ctx, client, trade.label, trade.symbols, isolated=trade.isolated)
         settled.update(again)
         pending = await unsettled()
     for label in pending:
-        settled[label] = replace(settled[label], unclear=True)
+        read = settled[label]
+        if read is not None:
+            settled[label] = replace(read, unclear=True)
     return settled
 
 
@@ -673,11 +699,42 @@ def record_less_flag(name: str) -> str:
     return f"{name} has a balance: Binance lists no records for it"
 
 
-def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> list[str]:
+def unread_flag(name: str) -> str:
+    """A wallet the list shows a balance in whose own source this sync did not read
+    (`unread_wallets`): it is not counted."""
+    return f"wallet {name} has a balance but its own report was not read: it is not counted"
+
+
+def portfolio_margin_on(account_info: Read) -> bool:
+    """Whether an `account-info` read says Portfolio Margin is on; a field left out is off."""
+    body = as_api(account_info.body)
+    return isinstance(body, dict) and body.get(PORTFOLIO_MARGIN_FIELD) is True
+
+
+def unread_wallets(reads: Mapping[str, Read | None]) -> set[str]:
+    """The wallets with a source of their own (`OWN_SOURCES`) whose source this sync did not
+    read: not served (`not_present`, a cross margin account not created), its host refused the
+    key, or made again and refused (`settle_reads`). Not those the Portfolio Margin state of
+    this sync's `account-info` read leaves out on purpose: on, the wallets it holds; off, its
+    own. A source read that is only unclear was read."""
+    account_info = reads.get(ACCOUNT_INFO_LABEL)
+    on = account_info is not None and portfolio_margin_on(account_info)
+    replaced = set(PORTFOLIO_REPLACED) if on else set(PORTFOLIO_SOURCES)
+    unread = {wallet for wallet, label in OWN_SOURCES.items() if reads.get(label) is None}
+    cross = reads.get(CROSS_MARGIN_LABEL)
+    if cross is not None and not margin_created(cross):
+        unread.add("cross_margin")
+    return unread - replaced
+
+
+def wallet_flags(
+    wallet_balance: Sequence[Row], derived: Mapping[str, bool], unread: Collection[str] = ()
+) -> list[str]:
     """What the wallet list says that the connector cannot account for: a wallet name it does
     not know, a wallet (by key, in `derived`) whose zero or non-zero state in the list
-    disagrees with its own source, a wallet counted from the list whose `balance` is not
-    zero but which lists no asset to count, and a wallet with no record endpoint (`RECORD_LESS`)
+    disagrees with its own source, a wallet (by key, in `unread`) the list shows a balance in
+    whose own source was not read, a wallet counted from the list whose `balance` is not zero
+    but which lists no asset to count, and a wallet with no record endpoint (`RECORD_LESS`)
     that is not empty."""
     flags: list[str] = []
     for row in wallet_balance:
@@ -687,6 +744,8 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
         key = wallet_key(name)
         if key in derived and _listed_non_zero(row) != derived[key]:
             flags.append(f"wallet {name} disagrees with its own report")
+        if key in unread and _listed_non_zero(row):
+            flags.append(unread_flag(name))
         balance = _amount(WALLET_LIST, "[].balance", row.get("balance"))
         listed = any(quantity != 0 for quantity in _listed_held(row).values())
         if key in OWN_SOURCES:
@@ -847,6 +906,28 @@ async def record_report(
     return gone
 
 
+async def holding_wallets(
+    session: AsyncSession, connection_id: UUID, wallets: Collection[str], at: datetime
+) -> list[str]:
+    """The `wallets` whose account exists and holds something at `at` (`_held_at`, the `hybrid`
+    rule): those an empty report at `at` would change. A wallet whose last report is empty
+    already, with no posting after it, holds nothing."""
+    config = (await get_connection(session, connection_id)).config
+    mapped = config.get(ACCOUNT_MAP_KEY)
+    holding: list[str] = []
+    for wallet in wallets:
+        found = mapped.get(wallet) if isinstance(mapped, dict) else None
+        if not isinstance(found, str):
+            continue
+        try:
+            account = (await get_account(session, UUID(found))).id
+        except (AccountNotFoundError, ValueError):
+            continue
+        if any(quantity != 0 for quantity in (await _held_at(session, account, at)).values()):
+            holding.append(wallet)
+    return holding
+
+
 async def empty_reports(
     ctx: CommandContext, connection: ConnectionRecord, wallets: Collection[str], read: Read
 ) -> list[str]:
@@ -958,7 +1039,8 @@ async def report_balances(
             written[(wallet.key, instrument)] = Decimal(0)
 
     if listed is not None and not listed.unclear:
-        for name in wallet_flags(parse(listed.label, as_api(listed.body)).rows, derived):
+        rows = parse(listed.label, as_api(listed.body)).rows
+        for name in wallet_flags(rows, derived, unread_wallets(reads)):
             flag(name)
     return written
 

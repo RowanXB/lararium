@@ -516,6 +516,27 @@ async def test_a_futures_wallet_reconciles_with_a_consistent_history(
     assert reported == [Decimal(105), Decimal("150.25")]
 
 
+async def test_an_unchanged_live_read_with_unrealised_profit_reconciles_on_wallet_balance(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # The same answer at every sync: its typed report is stored once (`store_reports` keeps
+    # only a changed answer), while each read's snapshot holds the unrealised profit too.
+    fake.set_rows(UM_ACCOUNT, [_asset(UM_ACCOUNT, "STB", "100", "5")])
+    connection = await binance_connection(run, config=later_config())
+    for _ in range(3):
+        after = await run_binance_sync(session, connection.id, fake.handler)
+        assert after.status == "healthy", after.last_error
+        clock.ms += 5 * HOUR_MS
+
+    assert len(await typed(session, "binance_um_account_assets", connection.id)) == 1
+    reported = [q for name, _, q, _ in await _snapshots(session, connection.id) if name == UM_NAME]
+    assert reported == [Decimal(105)] * 3
+    # Each later read is the stored report's (its raw read was made then): its wallet balance,
+    # 100, unchanged, not the snapshot's 105 against it.
+    assert await _differences(session, connection.id) == []
+    assert not [w for w in after.warnings if _CHANGED in w]
+
+
 async def test_futures_trades_are_walked_for_the_symbols_the_income_names(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:

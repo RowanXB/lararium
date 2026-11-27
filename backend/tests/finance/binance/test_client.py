@@ -21,17 +21,19 @@ from lararium.core.secrets import Secret
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, Endpoint
 from lararium.modules.finance.binance.client import (
     ALLOWED,
+    VIP_LOAN_LABELS,
     BinanceBanned,
     BinanceClient,
     BinanceError,
+    BinanceHostRefused,
     BinanceKeyRejected,
-    BinanceKeyTypeRefused,
     BinanceNotPresent,
     Ed25519Signer,
     HmacSigner,
     Limiter,
     RequestRefused,
     Signer,
+    hmac_refused_flag,
     key_type_flag,
 )
 
@@ -304,39 +306,45 @@ def _ed25519() -> Ed25519Signer:
     return Ed25519Signer(Secret(ED25519_PEM), None)
 
 
-@pytest.mark.parametrize("label", ["um-account", "cm-account", "opt-account"])
-@pytest.mark.parametrize(("status", "code"), [(401, None), (400, -1022), (401, -1022)])
-async def test_ed25519_refused_off_api_after_api_accepted_it_is_the_hosts_refusal(
-    label: str, status: int, code: int | None
+@pytest.mark.parametrize("signer", ["hmac", "ed25519"])
+@pytest.mark.parametrize("label", ["um-account", "cm-account", "opt-account", "pm-balance"])
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(401, None), (400, -1022), (401, -1022), (400, -2015), (401, -2015), (400, -2014)],
+)
+async def test_a_key_refused_off_api_after_api_accepted_it_is_the_hosts_refusal(
+    signer: str, label: str, status: int, code: int | None
 ) -> None:
+    # Ruling R22: once `api` has accepted the key, another host's rejection is that host's.
     endpoint = ENDPOINTS[label]
     env = Env(ok(), error(status, code))
-    client = env.client(_ed25519())
+    client = env.client(_ed25519() if signer == "ed25519" else None)
     await client.call(SPOT)
-    with pytest.raises(BinanceKeyTypeRefused) as caught:
+    with pytest.raises(BinanceHostRefused) as caught:
         await client.call(endpoint)
     assert not isinstance(caught.value, CredentialRejectedError)
     assert (caught.value.host, caught.value.limit) == (endpoint.host, endpoint.limit)
-    assert str(caught.value) == key_type_flag(endpoint.host)
-    assert str(caught.value) == (
-        f"{endpoint.host} does not accept this key type; use an HMAC key to include it"
-    )
+    if signer == "ed25519":
+        assert str(caught.value) == key_type_flag(endpoint.host)
+        assert str(caught.value) == (
+            f"{endpoint.host} does not accept this key type; use an HMAC key to include it"
+        )
+    else:
+        assert str(caught.value) == hmac_refused_flag(endpoint.host)
+        assert str(caught.value) == f"{endpoint.host} refused this key: its wallets are not read"
 
 
+@pytest.mark.parametrize("signer", ["hmac", "ed25519"])
 @pytest.mark.parametrize(
-    ("signer", "accepted", "label", "status", "code"),
+    ("accepted", "label", "status", "code"),
     [
-        # An HMAC key refused anywhere is a rejected key.
-        ("hmac", True, "opt-account", 401, None),
-        ("hmac", True, "um-account", 400, -1022),
-        # Before `api` accepted the Ed25519 key, the key itself is in question.
-        ("ed25519", False, "opt-account", 401, None),
+        # Before `api` accepted the key, the key itself is in question.
+        (False, "opt-account", 401, None),
+        (False, "um-account", 400, -2015),
         # Refused on `api` itself.
-        ("ed25519", True, "spot-account", 400, -1022),
-        # Another rejection code is about the key, not its type, even with HTTP 401.
-        ("ed25519", True, "um-account", 400, -2015),
-        ("ed25519", True, "um-account", 401, -2015),
-        ("ed25519", True, "opt-account", 401, -2014),
+        (True, "spot-account", 400, -1022),
+        (True, "spot-account", 401, None),
+        (True, "funding-asset", 400, -2015),
     ],
 )
 async def test_other_refusals_stay_a_rejected_key(
@@ -371,6 +379,50 @@ async def test_the_options_hosts_no_access_code_is_not_present_there_only() -> N
     with pytest.raises(BinanceError) as other:
         await client.call(SPOT)
     assert type(other.value) is BinanceError
+
+
+def test_the_vip_loan_labels_are_the_catalogues_five() -> None:
+    assert VIP_LOAN_LABELS == {
+        "vip-loan-ongoing",
+        "vip-loan-repays",
+        "vip-loan-interest",
+        "vip-loan-collateral-account",
+        "vip-loan-requests",
+    }
+
+
+@pytest.mark.parametrize("label", sorted(VIP_LOAN_LABELS))
+@pytest.mark.parametrize(
+    ("status", "code", "kind"),
+    [
+        # Ruling R23: Binance does not document what a non-VIP account gets: any refusal is
+        # the product's absence...
+        (400, -1145, BinanceNotPresent),
+        (400, None, BinanceNotPresent),
+        (403, -9000, BinanceNotPresent),
+        # ...but not a rejected key on `api`, a ban, the rate limit or a server failure.
+        (401, None, BinanceKeyRejected),
+        (400, -2015, BinanceKeyRejected),
+        (418, None, BinanceBanned),
+        (429, None, BinanceError),
+        (500, None, BinanceError),
+        (503, -1001, BinanceError),
+    ],
+)
+async def test_a_vip_loan_refusal_is_not_present(
+    label: str, status: int, code: int | None, kind: type[BinanceError]
+) -> None:
+    env = Env(error(status, code), repeat_last=True)
+    with pytest.raises(BinanceError) as caught:
+        await env.client().call(ENDPOINTS[label])
+    assert type(caught.value) is kind
+
+
+async def test_another_labels_refusal_is_no_absence() -> None:
+    env = Env(error(400, -1145))
+    with pytest.raises(BinanceError) as caught:
+        await env.client().call(ENDPOINTS["loan-flexible-ongoing"])
+    assert type(caught.value) is BinanceError
 
 
 async def test_a_transport_failure_is_a_binance_error_without_the_url() -> None:

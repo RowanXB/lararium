@@ -57,13 +57,11 @@ from lararium.modules.finance.binance.tables import moment, store_response
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
 NOT_PRESENT_KEY = "not_present"
-# Per derivatives host (its limit kind: `fapi`, `dapi`, `eapi`), when it refused the Ed25519
-# key's type (`client.BinanceKeyTypeRefused`). Kept apart from `not_present`: it is about the
-# key, not the account, so it counts only while the key is an Ed25519 one; a key update clears
-# it, and the sync asks the host again once the retry is due (`due_refusals`).
+# Per derivatives host (its limit kind: `fapi`, `dapi`, `eapi`, `papi`), when it refused the key
+# `api` had accepted (`client.BinanceHostRefused`, ruling R22). Kept apart from `not_present`: it
+# is the host's word on the key, not Binance's on a product, so a key update clears it; the sync
+# asks the host again once the retry is due (`due_refusals`).
 REFUSED_HOSTS_KEY = "refused_hosts"
-KEY_TYPE_KEY = "key_type"
-_ED25519 = "ed25519"
 
 DAY_MS = 86_400_000
 # 2017-07-01 00:00 UTC: Binance opened in July 2017; no history is older.
@@ -328,24 +326,21 @@ def _mapping(value: JSONValue) -> dict[str, JSONValue]:
 
 
 def refused_hosts(config: Mapping[str, JSONValue]) -> dict[str, int]:
-    """The hosts (limit kinds) that refused the connection's key type, and since when: none
-    unless the key is an Ed25519 one."""
-    if config.get(KEY_TYPE_KEY) != _ED25519:
-        return {}
+    """The hosts (limit kinds) that refused the connection's key, and since when."""
     held = _mapping(config.get(REFUSED_HOSTS_KEY))
     return {host: since for host, value in held.items() if (since := _int(value)) is not None}
 
 
 def host_refused(config: Mapping[str, JSONValue], key: str) -> bool:
-    """Whether the key's host refused the connection's key type (`refused_hosts`): a cursor or
-    label key, `<label>[:<more>]`."""
+    """Whether the key's host refused the connection's key (`refused_hosts`): a cursor or label
+    key, `<label>[:<more>]`."""
     endpoint = ENDPOINTS.get(key.split(":", 1)[0])
     return endpoint is not None and endpoint.limit in refused_hosts(config)
 
 
 def due_refusals(config: Mapping[str, JSONValue], now_ms: int) -> list[str]:
-    """The hosts to ask again now: every one held when the key is not an Ed25519 one (the key
-    changed), else those refused 7 days ago or more."""
+    """The hosts to ask again now: those refused 7 days ago or more, and an entry that holds
+    no time."""
     held = _mapping(config.get(REFUSED_HOSTS_KEY))
     kept = refused_hosts(config)
     return sorted(
@@ -355,7 +350,7 @@ def due_refusals(config: Mapping[str, JSONValue], now_ms: int) -> list[str]:
 
 def absent(config: Mapping[str, JSONValue], key: str, now_ms: int) -> bool:
     """Whether Binance said, less than 7 days ago, that it does not serve this key, or the
-    key's host refuses the connection's key type."""
+    key's host refused the connection's key (`refused_hosts`)."""
     since = _int(_mapping(config.get(NOT_PRESENT_KEY)).get(key))
     if since is not None and now_ms - since < NOT_PRESENT_RETRY_MS:
         return True
@@ -671,7 +666,7 @@ async def portfolio_margin(ctx: SyncContext, on: bool, now_ms: int) -> None:
     `config["portfolio_margin"]` records since when. Off after being on: they leave `not_present`
     at once, and the sync asks them as it would any present product; a key Binance itself had
     refused is asked again too, and goes back if Binance refuses it again. Kept apart from
-    `refused_hosts`, which is about the key's type, not the account."""
+    `refused_hosts`, which is a host's word on the key, not the account's products."""
     # An account that never had it writes nothing, and no audit row, on each sync.
     if not on and PORTFOLIO_MARGIN_KEY not in await fresh_config(ctx):
         return
@@ -736,7 +731,7 @@ async def isolated_symbols(ctx: SyncContext) -> frozenset[str]:
 
 def backfill_complete(config: Mapping[str, JSONValue], isolated: Collection[str] = ()) -> bool:
     """Whether every history label's first walk has ended: each of its keys complete, or not
-    served by Binance (`not_present`), or of a host that refuses the key's type. The keys of
+    served by Binance (`not_present`), or of a host that refused the key. The keys of
     the isolated pairs in `isolated` (those known when it is asked, ruling R17) count; a pair
     that appears after the first sync walks its own history from then on."""
     cursors = _mapping(config.get(CURSORS_KEY))
@@ -1097,7 +1092,7 @@ async def walk_symbol_trades(ctx: SyncContext, client: BinanceClient, label: str
     (a futures request takes at most 7 days; an options one has no documented limit and is one
     window, split when full). Only a symbol named within those 3 months is asked: Binance serves
     no older trade, so a symbol traded long ago is not walked for ever. A label Binance said it
-    does not serve, or whose host refuses the key's type (`absent`), is not asked."""
+    does not serve, or whose host refused the key (`absent`), is not asked."""
     endpoint = ENDPOINTS[label]
     if absent(await fresh_config(ctx), label, client.now_ms()):
         return []

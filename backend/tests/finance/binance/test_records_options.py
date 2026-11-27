@@ -21,7 +21,7 @@ from lararium.modules.finance.binance.balances import (
     report_balances,
 )
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
-from lararium.modules.finance.binance.client import key_type_flag
+from lararium.modules.finance.binance.client import host_refused_flag, key_type_flag
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
@@ -499,7 +499,14 @@ def _host_labels(limit: str) -> set[str]:
     return {label for label in built if ENDPOINTS[label].limit == limit}
 
 
-_REFUSALS = [("fapi", 401, None), ("eapi", 400, -1022)]
+# Ruling R22: after `api` accepted the key, a derivatives host's 401, -1022, -2015 or -2014.
+_REFUSALS = [
+    ("fapi", 401, None),
+    ("eapi", 400, -1022),
+    ("eapi", 401, -2015),
+    ("fapi", 400, -2015),
+]
+_KEY_TYPES = ["ed25519", "hmac"]
 
 
 def _symbol_named(fake: FakeBinance, limit: str, at_ms: int) -> str:
@@ -524,24 +531,33 @@ async def _forget_flags(run, connection_id) -> None:
     await run(forget)
 
 
+@pytest.mark.parametrize("key_type", _KEY_TYPES)
 @pytest.mark.parametrize(("limit", "status", "code"), _REFUSALS)
-async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
-    session, run, connector, clock: Clock, limit: str, status: int, code: int | None
+async def test_a_key_refused_on_another_host_is_a_flag_not_a_rejection(
+    session,
+    run,
+    connector,
+    clock: Clock,
+    key_type: str,
+    limit: str,
+    status: int,
+    code: int | None,
 ) -> None:
     fake = FakeBinance(now=clock, options=True)
     _refuse_host(fake, limit, status, code)
     host = f"{limit}.binance.com"
-    connection = await binance_connection(run, config=later_config(), key_type="ed25519")
+    told = host_refused_flag(host, "ed25519" if key_type == "ed25519" else "hmac")
+    connection = await binance_connection(run, config=later_config(), key_type=key_type)
     began = clock.ms
 
     after = await run_binance_sync(session, connection.id, fake.handler)
 
     assert after.status == "healthy", after.last_error
-    assert [f for f in after.config["flags"] if host in f] == [key_type_flag(host)]
+    assert [f for f in after.config["flags"] if host in f] == [told]
     assert not [f for f in after.config["flags"] if "could not be read" in f]
     [(refused_host, since)] = after.config[REFUSED_HOSTS_KEY].items()
     assert refused_host == limit and began <= since <= clock.ms
-    # A refusal of the key's type is not the product's absence.
+    # A host's refusal of the key is not the product's absence.
     assert not _host_labels(limit) & set(after.config.get(NOT_PRESENT_KEY, {}))
     on_host = _asked(fake, limit)
     # Its limits (unsigned), then the first signed request, refused; nothing more of it.
@@ -551,7 +567,7 @@ async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
         assert other not in str(after.config["flags"])
         assert _asked(fake, other)
 
-    # Still an Ed25519 key: not asked for 7 days; then asked again, refused again and told.
+    # The same key: not asked for 7 days; then asked again, refused again and told once.
     await _forget_flags(run, connection.id)
     for days, asked in ((1, 0), (7, 2)):
         fake.requests.clear()
@@ -560,13 +576,24 @@ async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
         after = await run_binance_sync(session, connection.id, fake.handler)
         assert after.status == "healthy", after.last_error
         assert len(_asked(fake, limit)) == asked
-    assert after.config["flags"].count(key_type_flag(host)) == 1
+    assert after.config["flags"].count(told) == 1
     assert began <= after.config[REFUSED_HOSTS_KEY][limit] <= clock.ms
 
-    # An HMAC key the same host refuses is a rejected key.
-    hmac = await binance_connection(run, config=later_config(), key_type="hmac")
-    rejected = await run_binance_sync(session, hmac.id, fake.handler)
-    assert rejected.status == "needs_reauth"
+
+@pytest.mark.parametrize("key_type", _KEY_TYPES)
+@pytest.mark.parametrize(("status", "code"), [(401, None), (400, -2015), (400, -1022)])
+async def test_the_gate_refused_on_api_is_still_a_rejected_key(
+    session, run, connector, clock: Clock, key_type: str, status: int, code: int | None
+) -> None:
+    fake = FakeBinance(now=clock, options=True)
+    fake.fail("api-restrictions", status=status, code=code)
+    connection = await binance_connection(run, config=later_config(), key_type=key_type)
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "needs_reauth"
+    assert after.config.get(REFUSED_HOSTS_KEY, {}) == {}
+    assert [seen.label for seen in fake.requests] == ["time", "api-restrictions"]
 
 
 @pytest.mark.parametrize(("limit", "status", "code"), _REFUSALS)
@@ -581,11 +608,11 @@ async def test_a_new_hmac_key_asks_a_refused_host_again_at_once(
     refused = await run_binance_sync(session, connection.id, fake.handler)
     assert set(refused.config[REFUSED_HOSTS_KEY]) == {limit}
 
-    # The owner switches to an HMAC key, as the flag says (the stored key only: the sync does
-    # not count a refusal of another key type, whatever the config still holds).
+    # The owner switches to an HMAC key, as the flag says; a key update clears the refusals
+    # (as the route does).
     async def switch(ctx) -> None:
         await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
-        await update_config(ctx, connection.id, {"key_type": "hmac"})
+        await update_config(ctx, connection.id, {"key_type": "hmac"}, remove=[REFUSED_HOSTS_KEY])
 
     await run(switch)
     await _forget_flags(run, connection.id)

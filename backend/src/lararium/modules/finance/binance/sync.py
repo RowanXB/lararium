@@ -18,9 +18,9 @@ The connection's `config` keys, what each holds and who writes it:
   (`fetch.portfolio_margin`).
 - `portfolio_margin`: when `account-info` first said Portfolio Margin is on; removed, with the
   replaced labels' `not_present` entries, by the sync that sees it off (`fetch.portfolio_margin`).
-- `refused_hosts`: per derivatives host (`fapi`, `dapi`, `eapi`, `papi`), when it refused the
-  Ed25519 key's type (`refuse_host`); counted only while the key is an Ed25519 one, removed when
-  the host is asked again (`ask_refused_again`) and by a key update (the route).
+- `refused_hosts`: per derivatives host (`fapi`, `dapi`, `eapi`, `papi`), when it refused the key
+  `api` had accepted (`refuse_host`, ruling R22); removed when the host is asked again
+  (`ask_refused_again`) and by a key update (the route).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
 - `normalizer_version`: the NORMALIZER_VERSION that applied them; another replays all
@@ -65,7 +65,6 @@ from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import layout, notices
-from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY
 from lararium.modules.finance.binance.balances import (
     CROSS_MARGIN_LABEL,
     PORTFOLIO_REPLACED,
@@ -74,8 +73,10 @@ from lararium.modules.finance.binance.balances import (
     backfill_daily_snapshots,
     daily_rows,
     empty_reports,
+    holding_wallets,
     margin_created,
     millis,
+    portfolio_margin_on,
     read_assets,
     read_balances,
     record_assets,
@@ -87,11 +88,12 @@ from lararium.modules.finance.binance.balances import (
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import (
     MAX_RETRIES,
+    VIP_LOAN_LABELS,
     BinanceBanned,
     BinanceClient,
     BinanceError,
+    BinanceHostRefused,
     BinanceKeyRejected,
-    BinanceKeyTypeRefused,
     BinanceNotPresent,
     Clock,
     Ed25519Signer,
@@ -106,6 +108,7 @@ from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
     HISTORY_LABELS,
+    ISOLATED_MARGIN_LABEL,
     LIMITS_INFO,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
@@ -164,6 +167,16 @@ SWEPT_WALLETS: dict[str, tuple[str, bool]] = {
     "cross_margin": (MARGIN_TRADES, False),
     "isolated_margin": (MARGIN_TRADES, True),
 }
+
+
+def sweep_key(wallet: str) -> str:
+    """The key whose absence (`fetch.absent`) leaves a wallet's trades unasked, so unswept: its
+    trade label; for Isolated Margin, whose pairs' trades are asked apart (Portfolio Margin's
+    taking the margin trades out leaves them), its account."""
+    label, isolated = SWEPT_WALLETS[wallet]
+    return ISOLATED_MARGIN_LABEL if isolated else label
+
+
 _SPOT = "spot"
 
 GATE_LABEL = "api-restrictions"
@@ -171,9 +184,20 @@ ACCOUNT_LABEL = "spot-account"
 COIN_CONFIG_LABEL = "coin-config"
 ASSET_DETAIL_LABEL = "asset-detail"
 EXCHANGE_INFO_LABEL = "exchange-info"
-# `account-info`'s word that the account uses Portfolio Margin (design 5.13).
-PORTFOLIO_MARGIN_FIELD = "isPortfolioMarginRetailEnabled"
 PORTFOLIO_MARGIN_FLAG = "Portfolio Margin is on: its balance is counted, its records are not posted"
+
+
+def vip_loan_flag(label: str) -> str:
+    """A VIP loan read Binance does not serve this account (ruling R23, `client.VIP_LOAN_LABELS`):
+    it is not asked again for 7 days (`fetch.absent`)."""
+    return f"{label} is not served to this account: Binance offers VIP loans to VIP users only"
+
+
+def vip_loan_flags(config: Mapping[str, JSONValue]) -> list[str]:
+    """A flag for each VIP loan label Binance does not serve (`not_present`); told once."""
+    missing = config.get(NOT_PRESENT_KEY)
+    held = missing if isinstance(missing, dict) else {}
+    return [vip_loan_flag(label) for label in sorted(VIP_LOAN_LABELS) if label in held]
 
 
 def delisted_flag(symbol: str) -> str:
@@ -193,26 +217,34 @@ async def replaced_reports(ctx: SyncContext, account_info: Read, portfolio: bool
     """Ruling R21, at the `account-info` read: with Portfolio Margin on, an empty report for each
     wallet it holds (Cross Margin, USDⓈ-M, COIN-M) that has an account; off, for the Portfolio
     Margin wallet if it has one (`balances.empty_reports`). So the switch shows as reconciliation
-    differences (or in the openings), never as an asset counted twice. In a transaction of its
-    own, only when one of the wallets has an account."""
+    differences (or in the openings), never as an asset counted twice.
+
+    Only for a wallet that holds something at that time (`balances.holding_wallets`): one whose
+    last report is empty already writes nothing, and no audit row, sync after sync. In a
+    transaction of its own. Run again after each normalising run (`replaced_again`): the first
+    sync's daily snapshots and older records can make one of those accounts after the read."""
     wallets = PORTFOLIO_REPLACED if portfolio else tuple(PORTFOLIO_SOURCES)
-    mapped = (await fresh_config(ctx)).get(ACCOUNT_MAP_KEY)
-    if not isinstance(mapped, dict) or not any(wallet in mapped for wallet in wallets):
-        return
     connection_id = ctx.connection.id
+    async with ctx.session_factory() as session:
+        holding = await holding_wallets(session, connection_id, wallets, account_info.read_from)
+    if not holding:
+        return
     args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
     async with (
         ctx.session_factory() as session,
         command_context(session, ctx.command.actor, "binance.report", args) as cmd,
     ):
         connection = await get_connection(session, connection_id)
-        await empty_reports(cmd, connection, wallets, account_info)
+        await empty_reports(cmd, connection, holding, account_info)
 
 
-def portfolio_margin_on(account_info: Read) -> bool:
-    """Whether an `account-info` read says Portfolio Margin is on; a field left out is off."""
-    body = as_api(account_info.body)
-    return isinstance(body, dict) and body.get(PORTFOLIO_MARGIN_FIELD) is True
+async def replaced_again(ctx: SyncContext, reads: Mapping[str, Read | None]) -> None:
+    """`replaced_reports` again at this sync's `account-info` read, after a normalising run and
+    before the openings: an account the run made (from a daily snapshot, an old universal
+    transfer) for a wallet Portfolio Margin's state replaces holds nothing at that read."""
+    account_info = reads.get(ACCOUNT_INFO_LABEL)
+    if account_info is not None:
+        await replaced_reports(ctx, account_info, portfolio_margin_on(account_info))
 
 
 def due(cursor: JSONValue, now: datetime, requested: bool) -> bool:
@@ -398,7 +430,9 @@ async def sweep(
     wallets) whose asset was not swept for that interval yet: every trade of the wallet, in the
     interval, of every symbol with the asset on either side (for Isolated Margin, every
     isolated pair with it), so a round trip through an asset never seen is found (design 5.2).
-    Each (asset, interval start, wallet) is swept once (`config["swept"]`); whether any was."""
+    Each (asset, interval start, wallet) is swept once (`config["swept"]`); whether any was. A
+    wallet whose trades are not asked now (`sweep_key` absent: not served, refused, or taken out
+    by Portfolio Margin) is not swept."""
     config = await fresh_config(ctx)
     held = config.get(SWEPT_KEY)
     swept: list[JSONValue] = list(held) if isinstance(held, list) else []
@@ -408,7 +442,7 @@ async def sweep(
         owned = await wallets(session, ctx.connection.id)
         for difference in found:
             wallet = owned.get(difference.account_id)
-            if wallet not in SWEPT_WALLETS:
+            if wallet not in SWEPT_WALLETS or absent(config, sweep_key(wallet), client.now_ms()):
                 continue
             code = await asset_code(session, difference.instrument_id)
             mark = (code, millis(difference.from_at), wallet)
@@ -513,6 +547,8 @@ class BinanceConnector:
         # After the income and bill histories: their rows name the symbols traded.
         for label in SYMBOL_TRADES:
             await on_host(ctx, client, walk_symbol_trades(ctx, client, label), flag=flags.append)
+        # After the balance reads and the walks, which put a refused VIP loan label there.
+        flags += vip_loan_flags(await fresh_config(ctx))
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
@@ -526,13 +562,15 @@ class BinanceConnector:
         ]
 
         traded = [await _traded(ctx, trade, first) for trade in trades]
-        settled = await settle_reads(ctx, client, reads, trades=traded)
+        settled = await settle(ctx, client, reads, trades=traded, flag=flags.append)
         await _report(ctx, reference, settled, first=first, flag=flags.append)
         touched = set((await normalize(ctx, flags=flags, reads=settled, daily=first)).touched)
+        await replaced_again(ctx, settled)
         touched |= await opening(ctx)
         # The first sync asked every symbol from its first trade: a sweep finds nothing more.
         if not first and await sweep(ctx, client, info, await differences(ctx, touched)):
             touched |= (await normalize(ctx, reads=settled)).touched
+            await replaced_again(ctx, settled)
             touched |= await opening(ctx)
         await reconciliation(ctx, touched)
         await update_prices(ctx, client, sleep=self._sleep)
@@ -555,19 +593,10 @@ class BinanceConnector:
                 continue
             if label in PORTFOLIO_MARGIN_PRODUCTS and not portfolio:
                 continue
-            try:
-                read = (await read_balances(client, [label]))[label]
-            except BinanceNotPresent:
-                await commit(ctx, label, absent_since=client.now_ms())
-                continue
-            except BinanceKeyTypeRefused as refused:
-                await refuse_host(ctx, client, refused, flag=flag)
-                # The host's other labels are not asked now (`fetch.absent`).
+            read = await read_or_absent(ctx, client, label, flag=flag)
+            if read is None:
+                # A refused host's other labels are not asked now (`fetch.absent`).
                 config = await fresh_config(ctx)
-                continue
-            if label == CROSS_MARGIN_LABEL and not margin_created(read):
-                # The account Binance has not opened: not present, as a refused product is.
-                await commit(ctx, label, absent_since=client.now_ms())
                 continue
             reads[label] = read
             if label in missing:
@@ -584,6 +613,48 @@ class BinanceConnector:
         return reads
 
 
+async def read_or_absent(
+    ctx: SyncContext, client: BinanceClient, label: str, *, flag: Callable[[str], None]
+) -> Read | None:
+    """One balance read, or None when it is not to be had: a product Binance does not serve
+    (`BinanceNotPresent`, or a cross margin account not created) goes to `not_present`; a host
+    that refused the key, to `refused_hosts` (`refuse_host`). The sync's first reads and those
+    it makes again (`balances.settle_reads`) both go through it."""
+    try:
+        read = (await read_balances(client, [label]))[label]
+    except BinanceNotPresent:
+        await commit(ctx, label, absent_since=client.now_ms())
+        return None
+    except BinanceHostRefused as refused:
+        await refuse_host(ctx, client, refused, flag=flag)
+        return None
+    if label == CROSS_MARGIN_LABEL and not margin_created(read):
+        # The account Binance has not opened: not present, as a refused product is.
+        await commit(ctx, label, absent_since=client.now_ms())
+        return None
+    return read
+
+
+async def settle(
+    ctx: SyncContext,
+    client: BinanceClient,
+    reads: Mapping[str, Read],
+    *,
+    trades: Sequence[TradeWalk],
+    flag: Callable[[str], None],
+) -> dict[str, Read | None]:
+    """`balances.settle_reads`, its reads made again and its walks handling a refusal as the
+    sync's first ones do (`read_or_absent`, `on_host`)."""
+
+    async def reread(label: str) -> Read | None:
+        return await read_or_absent(ctx, client, label, flag=flag)
+
+    async def rewalk(label: str) -> object:
+        return await on_host(ctx, client, walk(ctx, client, label), flag=flag)
+
+    return await settle_reads(ctx, client, reads, trades=trades, reread=reread, rewalk=rewalk)
+
+
 def limits_unread_flag(label: str) -> str:
     return f"{label} could not be read: its host's request limit stays at the assumed 600 a minute"
 
@@ -591,23 +662,22 @@ def limits_unread_flag(label: str) -> str:
 async def refuse_host(
     ctx: SyncContext,
     client: BinanceClient,
-    refused: BinanceKeyTypeRefused,
+    refused: BinanceHostRefused,
     *,
     flag: Callable[[str], None],
 ) -> None:
-    """A host that does not take the key's type (an Ed25519 key off `api`, design 5.1): it goes
-    to `refused_hosts`, so nothing more is asked of it while the key is an Ed25519 one, for 7
-    days (`ask_refused_again`), and the owner is told by the host's name to use an HMAC key. A
-    key update asks it again at once. The rest of the sync goes on; the connection is not
-    rejected."""
+    """A derivatives host that refused the key `api` accepted (design 5.1, ruling R22: an Ed25519
+    key's type, or a product the account does not have): it goes to `refused_hosts`, so nothing
+    more is asked of it for 7 days (`ask_refused_again`), and the owner is told by the host's
+    name (`client.host_refused_flag`; for an Ed25519 key, to use an HMAC key). A key update asks
+    it again at once. The rest of the sync goes on; the connection is not rejected."""
     await _refusals(ctx, set_to={refused.limit: client.now_ms()})
     flag(str(refused))
 
 
 async def ask_refused_again(ctx: SyncContext, now_ms: int) -> None:
-    """At the start of a sync: the refused hosts to ask again (`fetch.due_refusals`: every one
-    once the key is no longer an Ed25519 one, else each refused 7 days ago) leave
-    `refused_hosts`."""
+    """At the start of a sync: the refused hosts to ask again (`fetch.due_refusals`: each
+    refused 7 days ago) leave `refused_hosts`."""
     due = due_refusals(await fresh_config(ctx), now_ms)
     if due:
         await _refusals(ctx, remove=due)
@@ -638,11 +708,11 @@ async def on_host[T](
     *,
     flag: Callable[[str], None],
 ) -> T | None:
-    """Run one walk; a host that refuses the key's type there is left out (`refuse_host`) and
-    the sync goes on."""
+    """Run one walk; a host that refuses the key there is left out (`refuse_host`) and the sync
+    goes on."""
     try:
         return await step
-    except BinanceKeyTypeRefused as refused:
+    except BinanceHostRefused as refused:
         await refuse_host(ctx, client, refused, flag=flag)
         return None
 
@@ -657,8 +727,8 @@ async def read_limits(
     be fetched (any Binance error but a ban or a rejected key, which stop every request) or
     typed (`BinanceDataError`: an answer whose shape the catalogue refuses) leaves that host at
     the assumed limit, is flagged by its label (never a value), and nothing of it is stored.
-    It is unsigned, so it says nothing of the key's type. A host that refuses the key's type is
-    not asked (`fetch.absent`)."""
+    It is unsigned, so it says nothing of the key. A host that refused the key is not asked
+    (`fetch.absent`)."""
     reads: dict[str, Read] = {}
     for label in LIMITS_INFO:
         if absent(await fresh_config(ctx), label, client.now_ms()):
