@@ -48,7 +48,7 @@ Anti-goals
 
 - New kind `account_family`. Its value is a family key from the catalog (`trading212`): `normalize_identifier` accepts only a key some type in `ACCOUNT_TYPES` has as its `family`. One row per family, created on first use (`get_or_create_identifier`).
 - It never has an `account_id` and never has holder rows: assigning, unassigning, registering holders and dismissing refuse it, and it is not a suggestion (`queries` suggested kinds unchanged). Its holders are derived (§5.2).
-- Migration 0047 (after main's 0045 transaction cancels and #48's 0046 shared payee holders): add `account_family` to `account_identifiers_kind_check`; a CHECK that an `account_family` row has `account_id IS NULL`; the holders table's kind CHECK stays `('card_merchant', 'uk_bank_account')`, so it can't hold one. The value is checked in code, not SQL (the catalog is code). Downgrade: clear `counterparty_identifier_id` on transactions naming such a row, delete the rows, restore the CHECK.
+- Migration 0048 (after main's 0045 transaction cancels, #48's 0046 shared payee holders and #53's 0047 transaction refund): add `account_family` to `account_identifiers_kind_check`; a CHECK that an `account_family` row has `account_id IS NULL`; the holders table's kind CHECK stays `('card_merchant', 'uk_bank_account')`, so it can't hold one. The value is checked in code, not SQL (the catalog is code). Downgrade: clear `counterparty_identifier_id` on transactions naming such a row, delete the rows, restore the CHECK.
 
 ### 5.2 Whom a record naming a family names
 
