@@ -203,9 +203,11 @@ class ConnectorRun:
     """One normalize run of a connection: its command, the shared rows it finds or creates in
     transactions of their own, its typed-table writes, and its connector transactions."""
 
-    # Endpoint → table → known path → column, and endpoint → record type (fields.py).
+    # Endpoint → table → known path → column, endpoint → record type, and table → its row
+    # key's columns (fields.py).
     COLUMNS: ClassVar[Mapping[str, Mapping[str, Mapping[str, str]]]]
     RECORD_TYPES: ClassVar[Mapping[str, str]]
+    KEYS: ClassVar[Mapping[str, tuple[str, ...]]]
     # An enum value fit to name in a flag.
     CODE: ClassVar[re.Pattern[str]]
 
@@ -274,16 +276,22 @@ class ConnectorRun:
     async def typed(
         self, endpoint: str, table: str, values: Mapping[str, Value], under: str = ""
     ) -> dict[str, object]:
-        """The values that are known fields of the table's rows, by column, typed. `under`:
-        the path of the array or map the values are an entry of."""
+        """Every known field of the table's rows under `under` (the path of the array or map
+        the values are an entry of), by column, typed: one the values leave out is NULL, so a
+        row written over another's (its index reused, a field dropped) keeps none of its. A
+        key column is left to the caller's key when the values do not give it."""
         columns = self.COLUMNS[endpoint][table]
+        keys = self.KEYS[table]
         by_column: dict[str, Value] = {}
         labels: dict[str, str] = {}
-        for path, value in values.items():
-            column = columns.get(f"{under}{path}")
-            if column is not None:
-                by_column[column] = value
-                labels[column] = f"{self.RECORD_TYPES[endpoint]} {under}{path}"
+        for path, column in columns.items():
+            if not path.startswith(under):
+                continue
+            below = path[len(under) :]
+            if below not in values and column in keys:
+                continue
+            by_column[column] = values.get(below)
+            labels[column] = f"{self.RECORD_TYPES[endpoint]} {path}"
         return dict(await typed_values(self.session, table, by_column, labels))
 
     async def upsert(self, table: str, key: Fields, values: Fields) -> None:

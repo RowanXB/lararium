@@ -1084,6 +1084,41 @@ async def test_aggregate_that_drops_an_instrument_the_same_day(session, ledger) 
     assert await _linked(session, ledger, "etoro_aggregate_instruments") == [kept]
 
 
+async def test_a_moved_item_keeps_none_of_the_rows_it_replaces(session, ledger) -> None:
+    """A field the item leaves out is NULL, not the value of the row its index held."""
+    day = NOW.date() - timedelta(days=1)
+    cash = (CASH_ACCOUNT, "Cash", "GBP", "350.00")
+    trading = (TRADING_ACCOUNT, "Trading", "USD", "5")
+    await ledger.normalize(BALANCES, ("balance_history", history_body([(day, [cash, trading])])))
+    moved = history_body([(day, [trading, cash])])
+    del moved["snapshots"][0]["accountSnapshots"][1]["cash"]
+    await ledger.normalize(("balance_history", moved), now=NOW + timedelta(hours=1))
+    rows = await _rows(
+        session,
+        "select account_type, cash, snapshot_id from finance.etoro_balance_account_snapshots"
+        " where connection_id = :c and snapshot_date = :day order by item_index",
+        c=ledger.connection.id,
+        day=day,
+    )
+    assert [(r.account_type, r.cash) for r in rows] == [("Trading", Decimal(5)), ("Cash", None)]
+    assert rows[0].snapshot_id is not None and rows[1].snapshot_id is None
+
+    other = (INSTRUMENT_ID + 1, "GBP", "3")
+    await ledger.normalize(
+        BALANCES, ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "4"), other]))
+    )
+    dropped = aggregate_body([other])
+    del dropped["instrumentAggregates"][0]["assetCurrency"]
+    await ledger.normalize(("aggregate", dropped), now=NOW + timedelta(hours=1))
+    assert await _rows(
+        session,
+        "select instrument_id, asset_currency from finance.etoro_aggregate_instruments"
+        " where connection_id = :c and as_of_date = :day order by item_index",
+        c=ledger.connection.id,
+        day=NOW.date(),
+    ) == [(INSTRUMENT_ID + 1, None)]
+
+
 # Regeneration (parent §6.6) ------------------------------------------------------------------
 
 

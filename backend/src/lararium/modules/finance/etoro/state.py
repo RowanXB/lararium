@@ -34,7 +34,7 @@ from lararium.modules.finance.connector_items import (
     value_at,
 )
 from lararium.modules.finance.connector_run import LONDON, ConnectorRun
-from lararium.modules.finance.etoro.fields import COLUMNS, ENDPOINTS
+from lararium.modules.finance.etoro.fields import COLUMNS, ENDPOINTS, KEYS
 from lararium.modules.finance.etoro.instruments import listing
 from lararium.modules.finance.instruments import find_by_identifier
 from lararium.modules.finance.report_sightings import Sighting
@@ -255,6 +255,7 @@ def record_key(record: Record) -> str:
 
 class Run(ConnectorRun):
     COLUMNS: ClassVar = COLUMNS
+    KEYS: ClassVar = KEYS
     RECORD_TYPES: ClassVar = {name: spec.record_type for name, spec in ENDPOINTS.items()}
     # eToro's enum values are camelCase words, or numbers.
     CODE: ClassVar = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]{0,39}")

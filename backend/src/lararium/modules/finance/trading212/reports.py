@@ -21,7 +21,6 @@ from sqlalchemy import select, text
 from lararium.modules.finance import models
 from lararium.modules.finance.connector_run import reported_snapshot
 from lararium.modules.finance.pricing import record_price
-from lararium.modules.finance.trading212.fields import COLUMNS
 from lararium.modules.finance.trading212.instruments import reclassify
 from lararium.modules.finance.trading212.state import (
     SOURCE,
@@ -37,8 +36,6 @@ from lararium.modules.finance.trading212.state import (
 )
 
 _CASH = ("availableToTrade", "reservedForOrders", "inPies")
-# The pie row's columns a detail fills: cleared on a day its sync fetched no detail.
-_DETAIL_COLUMNS = tuple(sorted(COLUMNS["pie"]["trading212_pies"].values()))
 
 
 # Metadata --------------------------------------------------------------------------------
@@ -225,10 +222,8 @@ async def _pie(run: Run, listed: Report, detail: Report | None) -> None:
     the detail's columns and rows cleared). Typed only; no postings."""
     values = await run.typed("pies", "trading212_pies", flat(listed.content))
     pie_id = values.pop("id")
-    if detail is not None:
-        values |= await run.typed("pie", "trading212_pies", flat(detail.content))
-    else:
-        values |= dict.fromkeys(_DETAIL_COLUMNS)
+    content = flat(detail.content) if detail is not None else {}
+    values |= await run.typed("pie", "trading212_pies", content)
     await run.upsert(
         "trading212_pies",
         {"connection_id": run.connection_id, "id": pie_id, "as_of_date": listed.day},
