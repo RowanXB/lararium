@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Statement of Funds, MTM Performance, Prior Period Positions, the derivable trade and position
 # values). Each bump replays the stored rows into the new columns; rows of a section that was
 # not stored before (the three that were skipped as derivable until 4) come only with a fetch.
-NORMALIZER_VERSION = "ibkr-norm-4"
+NORMALIZER_VERSION = "ibkr-norm-5"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
 ACCOUNT_MAP_KEY = "account_map"

@@ -19,7 +19,7 @@ Opening balances, the day before the account's earliest record; every run sets i
 history arriving later moves it, and a full history leaves none.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -36,7 +36,7 @@ from lararium.modules.finance.connector_run import (
     settle_rounding,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
+from lararium.modules.finance.ledger import CounterpartyFields, IncomeKind, PostingInput
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import first_sighting, list_sightings
 from lararium.modules.finance.trading212 import accounts, merge, reports
@@ -76,6 +76,11 @@ TRANSACTIONS = {
     "INTEREST_ON_FREE_CASH": (1, "Interest on cash"),
     "LENDING_INTEREST": (1, "Share lending interest"),
     "TRANSFER": (None, "Transfer"),
+}
+# What the API states a movement's income to be; any other type is none.
+_INCOME_KINDS: Mapping[str, IncomeKind] = {
+    "INTEREST_ON_FREE_CASH": "interest",
+    "LENDING_INTEREST": "share_lending",
 }
 # Movements with another account of the owner's, or the owner's card (design §5.12); every
 # other item (a dividend, a fee, interest, a fill but a FOP) is marked never a transfer.
@@ -304,6 +309,7 @@ async def dividend(run: Run, record: Record) -> None:
                 PostingInput(unassigned, currency.id, -amount),
             ],
             CounterpartyFields(never_transfer=True),
+            income_kind="dividend",
         )
     if transaction_id is None:
         await run.void(key)
@@ -338,6 +344,7 @@ async def _post_movement(
         ],
         # Anything else (a fee, interest) is no transfer: the funding rule must not take it.
         CounterpartyFields(identifier_id=identifier, never_transfer=kind not in _THROUGH_CONTRA),
+        income_kind=_INCOME_KINDS.get(kind),
     )
 
 

@@ -26,7 +26,9 @@ from lararium.modules.finance import models
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
+    IncomeKind,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     compute_residuals,
     upsert_connector_transaction,
@@ -343,9 +345,11 @@ class ConnectorRun:
         postings: Sequence[PostingInput],
         counterparty: CounterpartyFields | None = None,
         cancels: UUID | None = None,
+        income_kind: IncomeKind | None = None,
     ) -> UUID:
         """Post the connection's transaction under the key (`cancels`: the transaction it
-        cancels, cancelled-withdrawal design §4.2)."""
+        cancels, cancelled-withdrawal design §4.2; `income_kind`: what the source says the
+        income is)."""
         record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -358,6 +362,7 @@ class ConnectorRun:
                 external_id=key,
                 counterparty=counterparty or CounterpartyFields(),
                 cancels_transaction_id=cancels,
+                details=TransactionDetails(income_kind=income_kind),
             ),
         )
         self.count(outcome)

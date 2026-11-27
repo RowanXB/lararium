@@ -914,6 +914,13 @@ async def test_dividend_with_withholding_tax(session, ledger) -> None:
     found = await _ledger(session, ledger)
     dividend = found[f"activity:{_key(body, 'Dividend')}"]
     assert dividend[2] == "Dividend"
+    assert (
+        await session.scalar(
+            text("select income_kind from finance.transactions where external_id = :e"),
+            {"e": f"activity:{_key(body, 'Dividend')}"},
+        )
+        == "dividend"
+    )
     assert dividend[5] == [
         (TRADING, "USD", Decimal("1.00"), None, None, False),
         ("Unassigned", "USD", Decimal("-1.00"), None, None, False),
@@ -936,6 +943,30 @@ async def test_dividend_with_withholding_tax(session, ledger) -> None:
         SYMBOL,
     )
     assert await find_unbalanced_transactions(session) == []
+
+
+async def test_income_kinds_from_activity_types(session, ledger) -> None:
+    """Each activity type that states what an income is marks its transaction; a fee does
+    not."""
+    await ledger.normalize(*BASE)
+    kinds = {
+        "Interest": "interest",
+        "Interest Payment": "interest",
+        "Stocks Lending": "share_lending",
+        "Overnight Fee": None,
+    }
+    rows = [
+        activity_row(f"0{n}/10/2026 09:00:00", kind, "-0.50" if kind == "Overnight Fee" else "0.50")
+        for n, kind in enumerate(kinds, start=1)
+    ]
+    body = build_statement(summary(username=USERNAME), [transfer_in(), *rows])
+    await ledger.upload(body)
+    for kind, expected in kinds.items():
+        found = await session.scalar(
+            text("select income_kind from finance.transactions where external_id = :e"),
+            {"e": f"activity:{_key(body, kind)}"},
+        )
+        assert found == expected, kind
 
 
 async def test_unknown_activity_type_flagged(session, ledger) -> None:

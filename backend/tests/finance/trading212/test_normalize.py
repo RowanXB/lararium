@@ -487,6 +487,28 @@ async def test_dividends_interest_and_fees_are_never_a_transfer(session, run) ->
     assert await _never_transfer(session, "transaction:DEPOSIT") is False
 
 
+async def _income_kind(session, external_id: str):
+    return await session.scalar(
+        text("select income_kind from finance.transactions where external_id = :e"),
+        {"e": external_id},
+    )
+
+
+async def test_income_kinds(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(
+        SUMMARY,
+        ("dividends", dividend_item()),
+        ("transactions", transaction_item(reference="i", kind="INTEREST_ON_FREE_CASH", amount="1")),
+        ("transactions", transaction_item(reference="l", kind="LENDING_INTEREST", amount="2")),
+        ("transactions", transaction_item(reference="d", kind="DEPOSIT")),
+    )
+    assert await _income_kind(session, "dividend:div-0001") == "dividend"
+    assert await _income_kind(session, "transaction:i") == "interest"
+    assert await _income_kind(session, "transaction:l") == "share_lending"
+    assert await _income_kind(session, "transaction:d") is None
+
+
 async def test_interest_is_no_bank_top_up(session, run, gbp) -> None:
     """On an account funded by bank transfer, a same-amount bank transfer naming it does not
     pair with its interest: interest names nobody, but it is marked no transfer."""
