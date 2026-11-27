@@ -294,8 +294,17 @@ function SnapshotForm({
   );
 }
 
+type IdentifierKind = "uk_bank_account" | "chain_address";
+
+const IDENTIFIER_KINDS: { value: IdentifierKind; label: string }[] = [
+  { value: "uk_bank_account", label: "UK bank account" },
+  { value: "chain_address", label: "Chain address" },
+];
+
 function IdentifierList({ account }: { account: AccountOut }) {
   const queryClient = useQueryClient();
+  const [kind, setKind] = useState<IdentifierKind>("uk_bank_account");
+  const [address, setAddress] = useState("");
   const [sortCode, setSortCode] = useState("");
   const [accountNumber, setAccountNumber] = useState("");
   const identifiers = useQuery({
@@ -305,15 +314,16 @@ function IdentifierList({ account }: { account: AccountOut }) {
         .data,
   });
   const add = useMutation({
-    mutationFn: async (value: string) =>
+    mutationFn: async (body: { kind: IdentifierKind; value: string }) =>
       addAccountIdentifier({
         path: { account_id: account.id },
-        body: { kind: "uk_bank_account", value },
+        body,
         throwOnError: true,
       }),
     onSuccess: () => {
       setSortCode("");
       setAccountNumber("");
+      setAddress("");
     },
     onSettled: () => refreshAfterTransferWrite(queryClient),
   });
@@ -330,7 +340,11 @@ function IdentifierList({ account }: { account: AccountOut }) {
   function submit(event: FormEvent) {
     event.preventDefault();
     // The API accepts either part with spaces or dashes and checks the digits.
-    add.mutate(`${sortCode.trim()}:${accountNumber.trim()}`);
+    add.mutate(
+      kind === "chain_address"
+        ? { kind, value: address.trim() }
+        : { kind, value: `${sortCode.trim()}:${accountNumber.trim()}` },
+    );
   }
 
   return (
@@ -362,13 +376,20 @@ function IdentifierList({ account }: { account: AccountOut }) {
         onSubmit={submit}
         className="flex flex-wrap items-end gap-3"
       >
-        <TextField label="Sort code" value={sortCode} onChange={setSortCode} required />
-        <TextField
-          label="Account number"
-          value={accountNumber}
-          onChange={setAccountNumber}
-          required
-        />
+        <LabelledSelect label="Kind" value={kind} options={IDENTIFIER_KINDS} onChange={setKind} />
+        {kind === "chain_address" ? (
+          <TextField label="Chain address" value={address} onChange={setAddress} required />
+        ) : (
+          <>
+            <TextField label="Sort code" value={sortCode} onChange={setSortCode} required />
+            <TextField
+              label="Account number"
+              value={accountNumber}
+              onChange={setAccountNumber}
+              required
+            />
+          </>
+        )}
         <Button type="submit" disabled={add.isPending}>
           Add
         </Button>

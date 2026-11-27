@@ -84,6 +84,7 @@ async def test_counterparty_fields_round_trip(session, run, make_account, gbp) -
         "name": "Test Owner",
         "reference": "rent",
         "bank_transfer": True,
+        "never_transfer": False,
     }
     # A transaction posted without them gets the defaults.
     plain = await run(

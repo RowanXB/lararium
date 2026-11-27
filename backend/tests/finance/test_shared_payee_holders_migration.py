@@ -1,4 +1,4 @@
-"""Migration 0041: the references table goes, and a uk_bank_account may have holder rows."""
+"""Migration 0045: the references table goes, and a uk_bank_account may have holder rows."""
 
 import importlib.util
 from pathlib import Path
@@ -12,7 +12,7 @@ from lararium.modules.finance import models
 from lararium.modules.finance.identifiers import register_card_merchant, register_holders
 
 MIGRATION = (
-    Path(__file__).parents[2] / "migrations" / "versions" / "0041_finance_shared_payee_holders.py"
+    Path(__file__).parents[2] / "migrations" / "versions" / "0045_finance_shared_payee_holders.py"
 )
 
 
@@ -48,7 +48,7 @@ def _schema(connection: Connection) -> tuple[int, str | None, str]:
     return tables, default, check
 
 
-def test_0041_and_its_downgrade(owner_url: str, migrated: None) -> None:
+def test_0045_and_its_downgrade(owner_url: str, migrated: None) -> None:
     engine = create_engine(owner_url)
     try:
         with engine.connect() as connection:
@@ -70,7 +70,7 @@ def test_0041_and_its_downgrade(owner_url: str, migrated: None) -> None:
         engine.dispose()
 
 
-async def test_downgrading_0041_first_deletes_the_bank_accounts_holders(
+async def test_downgrading_0045_first_deletes_the_bank_accounts_holders(
     session, run, make_account
 ) -> None:
     """Its downgrade deletes the bank accounts' holder rows first, so the narrower CHECK can

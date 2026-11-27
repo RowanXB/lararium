@@ -92,6 +92,7 @@ ACCOUNT_TYPES: tuple[AccountType, ...] = (
         Api("etoro", {}),
         (FileFormat("Account statement", "xlsx", None),),
     ),
+    AccountType("binance", "Binance", "", None, Api("binance", {}), ()),
     AccountType(
         "trading212.invest",
         "Trading 212",

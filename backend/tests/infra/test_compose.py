@@ -124,6 +124,14 @@ def test_api_and_worker_get_the_connector_settings(name: str) -> None:
         assert variable in environment, variable
 
 
+def test_the_worker_gets_the_optional_coingecko_key() -> None:
+    # The worker fetches the prices; without the key the stack runs and Binance's own
+    # markets price what they can.
+    environment = _services()["worker"]["environment"]
+    assert environment["LARARIUM_COINGECKO_API_KEY"] == "${LARARIUM_COINGECKO_API_KEY:-}"
+    assert _resolve(REQUIRED_SETTINGS).returncode == 0
+
+
 @pytest.mark.parametrize("name", ["webhook-in", "cloudflared"])
 def test_ingress_services_are_only_in_the_webhook_profile(name: str) -> None:
     assert _services()[name]["profiles"] == ["webhook"]

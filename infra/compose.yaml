@@ -94,6 +94,8 @@ services:
       LARARIUM_WEBHOOK_SECRET: ${LARARIUM_WEBHOOK_SECRET:-}
       LARARIUM_FEISHU_WEBHOOK_URL: ${LARARIUM_FEISHU_WEBHOOK_URL:-}
       LARARIUM_FEISHU_SECRET: ${LARARIUM_FEISHU_SECRET:-}
+      # Optional: prices assets Binance's own markets cannot. Without it they show no price.
+      LARARIUM_COINGECKO_API_KEY: ${LARARIUM_COINGECKO_API_KEY:-}
       LARARIUM_DOCUMENT_DIR: /var/lib/lararium/documents
     depends_on:
       migrate: { condition: service_completed_successfully }

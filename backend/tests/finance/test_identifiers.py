@@ -287,6 +287,24 @@ def test_normalize_ibkr_account_rejects_anything_else(bad) -> None:
         normalize_identifier("ibkr_account", bad)
 
 
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        ("  0xAbCd" + "0" * 36 + " ", "0xabcd" + "0" * 36),
+        ("0X" + "A" * 40, "0x" + "a" * 40),
+        ("T" + "Ab1" * 11, "T" + "Ab1" * 11),  # not 0x: the case is kept
+    ],
+)
+def test_chain_address_is_lower_cased_only_when_evm(given, stored) -> None:
+    assert normalize_identifier("chain_address", given) == stored
+
+
+@pytest.mark.parametrize("bad", ["", "0x123", "a" * 19, "a" * 129, "0x" + "g!" * 20])
+def test_chain_address_rejects_what_the_database_would(bad) -> None:
+    with pytest.raises(FinanceValidationError, match="chain address"):
+        normalize_identifier("chain_address", bad)
+
+
 # A payee bank account held by several own accounts (account type catalog design §8.1)
 
 PAYEE = "11-22-33 87654321"

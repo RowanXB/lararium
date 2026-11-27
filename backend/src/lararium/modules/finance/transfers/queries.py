@@ -746,14 +746,23 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     return list(found.values())
 
 
+# The identifier kinds the owner can register from Suggestions by assigning them to one own
+# account; another kind (IBKR's `ibkr_account`, say) is never suggested here, and a card
+# merchant has a suggestion of its own (card_merchant_suggestions).
+SuggestedKind = Literal["uk_bank_account", "chain_address"]
+SUGGESTED_KINDS: tuple[SuggestedKind, ...] = ("uk_bank_account", "chain_address")
+
+
 @dataclass(frozen=True)
 class SuggestionRecord:
-    """A bank account transactions name that isn't registered to an own account nor
-    dismissed: maybe one of the owner's."""
+    """An identifier (a bank account, a chain address) transactions name that isn't
+    registered to an own account nor dismissed: maybe one of the owner's."""
 
     identifier_id: UUID
-    sort_code: str
-    account_number: str
+    kind: SuggestedKind
+    value: str  # as stored
+    sort_code: str | None  # a UK bank account's only
+    account_number: str | None
     names: tuple[str, ...]  # the distinct counterparty names it appeared under, sorted
     outgoing: int  # own records paying it
     incoming: int  # own records paid by it
@@ -761,10 +770,10 @@ class SuggestionRecord:
 
 
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
-    """Unregistered, undismissed bank accounts that own records name, most named first,
-    then the most recently named. One held by several own accounts (a shared payee's,
-    account type catalog design §8.1) is registered already: it is offered again once its
-    holders are removed."""
+    """Unregistered, undismissed identifiers of a kind the owner can register
+    (`SUGGESTED_KINDS`) that own records name, most named first, then the most recently
+    named. One held by several own accounts (a shared payee's, account type catalog design
+    §8.1) is registered already: it is offered again once its holders are removed."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
@@ -775,6 +784,7 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
     rows = await session.execute(
         select(
             i.id,
+            i.kind,
             i.value,
             func.array_agg(t.counterparty_name.distinct()).label("names"),
             outgoing.label("outgoing"),
@@ -784,20 +794,23 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
         .where(
-            i.kind == "uk_bank_account",
+            i.kind.in_(SUGGESTED_KINDS),
             i.account_id.is_(None),
             i.dismissed_at.is_(None),
             ~exists().where(h.identifier_id == i.id),
         )
-        .group_by(i.id, i.value)
+        .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )
     found: list[SuggestionRecord] = []
     for row in rows:
-        sort_code, account_number = uk_bank_account_parts(row.value)
+        bank = row.kind == "uk_bank_account"
+        sort_code, account_number = uk_bank_account_parts(row.value) if bank else (None, None)
         found.append(
             SuggestionRecord(
                 identifier_id=row.id,
+                kind=row.kind,
+                value=row.value,
                 sort_code=sort_code,
                 account_number=account_number,
                 names=tuple(sorted(name for name in row.names if name)),

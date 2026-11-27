@@ -399,15 +399,17 @@ _CASH_ISA = {
 
 async def test_account_types_lists_the_catalog(client) -> None:
     types = (await client.get(f"{API}/account-types")).json()
-    assert [t["key"] for t in types][:6] == [
+    assert [t["key"] for t in types][:7] == [
         "monzo",
         "ibkr",
         "etoro",
+        "binance",
         "trading212.invest",
         "trading212.stocks_isa",
         "trading212.cash_isa",
     ]
-    cash = types[5]
+    by_key = {t["key"]: t for t in types}
+    cash = by_key["trading212.cash_isa"]
     assert cash["api"] is None and cash["family"] == "trading212"
     assert cash["name"] == "Trading 212 Cash ISA"
     assert cash["shape"] == {
@@ -419,7 +421,7 @@ async def test_account_types_lists_the_catalog(client) -> None:
     assert cash["funding"] == ["bank_transfer"]
     assert [f["label"] for f in cash["files"]] == ["History CSV"]
     assert cash["files"][0]["config"]["format"] == "csv"
-    invest = types[3]
+    invest = by_key["trading212.invest"]
     assert invest["api"] == {"connector": "trading212", "config": {"account_kind": "invest"}}
     assert invest["funding"] == ["bank_transfer", "card"]
     assert invest["shape"] is None and invest["files"][0]["config"] is None

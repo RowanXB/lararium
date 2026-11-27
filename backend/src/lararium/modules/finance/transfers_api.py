@@ -401,10 +401,10 @@ async def pair_transactions(
 async def list_transfer_suggestions(
     session: SessionDep,
 ) -> list[SuggestionOut | CardMerchantSuggestionOut]:
-    """Bank accounts that own records name and that are neither registered nor dismissed,
-    most named first (registering one is add_account_identifier); then card merchants on a
-    connected platform's domain (kind card_merchant; registering one is
-    register_card_merchant)."""
+    """Bank accounts and chain addresses that own records name and that are neither
+    registered nor dismissed, most named first (registering one is add_account_identifier);
+    then card merchants on a connected platform's domain (kind card_merchant; registering
+    one is register_card_merchant)."""
     banks: list[SuggestionOut | CardMerchantSuggestionOut] = [
         SuggestionOut.model_validate(s) for s in await transfers.suggestions(session)
     ]
