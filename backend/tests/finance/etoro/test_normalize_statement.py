@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from lararium.core import models as core_models
 from lararium.core.connections import get_connection
@@ -32,7 +32,9 @@ from lararium.modules.finance.instruments import (
 )
 from lararium.modules.finance.ledger import find_unbalanced_transactions, void_transaction
 from lararium.modules.finance.source_reviews import list_reviews, resolve_review
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import find_transfer_violations
+from lararium.modules.finance.transfers.contra import snapshot_own_records
 
 from .fixtures import (
     CASH_ACCOUNT,
@@ -764,6 +766,12 @@ async def test_a_request_after_the_cancellation_is_a_withdrawal(session, ledger)
         True,
         None,
     )
+    withdrawn_id = await session.scalar(
+        text("select id from finance.transactions where connection_id = :c and external_id = :e"),
+        {"c": ledger.connection.id, "e": withdrawn},
+    )
+    own = await snapshot_own_records(session, await system_account_ids(session))
+    assert withdrawn_id in set(await session.scalars(select(own.c.transaction_id)))
 
 
 async def test_a_cancellation_without_a_number_cancels_nothing(session, ledger) -> None:

@@ -839,7 +839,7 @@ async def _pair(
 ) -> dict[str, UUID | None]:
     """Post a cancelled pair (module doc), by row key: the cancelled row first, the
     cancelling one naming its transaction; each as in no pair when either is not live after
-    (the owner voided it meanwhile: one voided before is in no pair, _pairs)."""
+    (the owner voided it meanwhile: one voided before is in no pair, _settle_pairs)."""
     keys = [f"{ACTIVITY}{cancelled.key}", f"{ACTIVITY}{cancelling.key}"]
     first = await _in_transit(run, cancelled, keys[0], currency, None)
     second = await _in_transit(run, cancelling, keys[1], currency, first)
@@ -848,15 +848,15 @@ async def _pair(
     return {row.key: await _alone(run, statement, row, currency) for row in (cancelled, cancelling)}
 
 
-async def _pairs(
+async def _settle_pairs(
     run: Run, statement: Statement, currency: str
 ) -> tuple[dict[str, tuple[str, str]], list[Row]]:
     """Each row of a cancelled pair → (the cancelled row's key, the cancelling row's), a pair
     with a side the owner voided left out; and the stored rows of the pairs' Types whose
     transaction says otherwise (in a pair or not, or naming another): a run re-posts those
-    too, so the ledger is the same whatever order the statements came in. Before it returns,
-    each of those whose link goes or moves is posted as in no pair, so no transaction
-    names a target another is about to."""
+    too, so the ledger is the same whatever order the statements came in. It also re-posts, as
+    in no pair, each stored row whose link goes away or moves, before it returns the pairs, so
+    no transaction names a target another is about to."""
     rows = [r for r in statement.stored if r.sheet == ACCOUNT_ACTIVITY and r.type in _PAIRED]
     posted = await _posted(run, [f"{ACTIVITY}{r.key}" for r in rows])
     pairs: dict[str, tuple[str, str]] = {}
@@ -905,7 +905,7 @@ async def cash_events(run: Run, statement: Statement) -> None:
     currency = run.account_currency
     links, unattached = _fee_links(statement.stored, currency)
     by_key = {row.key: row for row in statement.stored}
-    pairs, stale = await _pairs(run, statement, currency)
+    pairs, stale = await _settle_pairs(run, statement, currency)
     for row in sorted(statement.of(ACCOUNT_ACTIVITY), key=lambda r: (_when(r), r.id)):
         if row.type in (OPEN_POSITION, POSITION_CLOSED):
             continue  # a trade: records.position

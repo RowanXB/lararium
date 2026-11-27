@@ -132,3 +132,4 @@ async def test_a_pair_with_a_void_side_is_no_pair(
     await heal()
 
     assert await contra_account(session, request.id, bank.account.id) == ids.unassigned
+    await assert_consistent(session)
