@@ -34,7 +34,7 @@ from lararium.modules.finance.connector_items import (
 )
 from lararium.modules.finance.connector_run import LONDON, ConnectorRun
 from lararium.modules.finance.report_sightings import Sighting
-from lararium.modules.finance.trading212.fields import COLUMNS, ENDPOINTS, KEYS
+from lararium.modules.finance.trading212.fields import COLUMNS, ENDPOINTS
 from lararium.modules.finance.trading212.instruments import listing
 
 __all__ = ["LONDON", "Item", "flat", "object_at", "objects_at", "text_at", "value_at"]
@@ -196,7 +196,6 @@ def record_key(record: Record) -> str:
 
 class Run(ConnectorRun):
     COLUMNS: ClassVar = COLUMNS
-    KEYS: ClassVar = KEYS
     RECORD_TYPES: ClassVar = {name: spec.record_type for name, spec in ENDPOINTS.items()}
     CODE: ClassVar = re.compile(r"[A-Z][A-Z0-9_]{0,39}")
 

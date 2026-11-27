@@ -203,11 +203,9 @@ class ConnectorRun:
     """One normalize run of a connection: its command, the shared rows it finds or creates in
     transactions of their own, its typed-table writes, and its connector transactions."""
 
-    # Endpoint → table → known path → column, endpoint → record type, and table → its row
-    # key's columns (fields.py).
+    # Endpoint → table → known path → column, and endpoint → record type (fields.py).
     COLUMNS: ClassVar[Mapping[str, Mapping[str, Mapping[str, str]]]]
     RECORD_TYPES: ClassVar[Mapping[str, str]]
-    KEYS: ClassVar[Mapping[str, tuple[str, ...]]]
     # An enum value fit to name in a flag.
     CODE: ClassVar[re.Pattern[str]]
 
@@ -276,22 +274,16 @@ class ConnectorRun:
     async def typed(
         self, endpoint: str, table: str, values: Mapping[str, Value], under: str = ""
     ) -> dict[str, object]:
-        """Every known field of the table's rows under `under` (the path of the array or map
-        the values are an entry of), by column, typed: one the values leave out is NULL, so a
-        row written over another's (its index reused, a field dropped) keeps none of its. A
-        key column is left to the caller's key when the values do not give it."""
+        """The values that are known fields of the table's rows, by column, typed. `under`:
+        the path of the array or map the values are an entry of."""
         columns = self.COLUMNS[endpoint][table]
-        keys = self.KEYS[table]
         by_column: dict[str, Value] = {}
         labels: dict[str, str] = {}
-        for path, column in columns.items():
-            if not path.startswith(under):
-                continue
-            below = path[len(under) :]
-            if below not in values and column in keys:
-                continue
-            by_column[column] = values.get(below)
-            labels[column] = f"{self.RECORD_TYPES[endpoint]} {path}"
+        for path, value in values.items():
+            column = columns.get(f"{under}{path}")
+            if column is not None:
+                by_column[column] = value
+                labels[column] = f"{self.RECORD_TYPES[endpoint]} {under}{path}"
         return dict(await typed_values(self.session, table, by_column, labels))
 
     async def upsert(self, table: str, key: Fields, values: Fields) -> None:
@@ -305,26 +297,25 @@ class ConnectorRun:
             {**parent, "keep": keep},
         )
 
-    async def release(
-        self, table: str, parent: Mapping[str, object], snapshots: Mapping[int, object]
+    async def replace_moved(
+        self, table: str, parent: Mapping[str, object], column: str, items: Sequence[object]
     ) -> None:
-        """Unlink each snapshot (by the index about to take it) from the parent's child row
-        at any other index. `snapshot_id` is unique, and an array that reordered or shrank
-        moves a snapshot it still reports to a new index."""
-        moved = {n: s for n, s in snapshots.items() if isinstance(s, UUID)}
-        if not moved:
-            return
-        where = " and ".join(f"t.{column} = :{column}" for column in parent)
-        await self.session.execute(
-            text(
-                f"update finance.{table} t set snapshot_id = null"
-                " from unnest(cast(:indexes as integer[]), cast(:ids as uuid[]))"
-                " as w(item_index, snapshot_id)"
-                f" where {where} and t.snapshot_id = w.snapshot_id"
-                " and t.item_index <> w.item_index"
-            ),
-            {**parent, "indexes": list(moved), "ids": list(moved.values())},
+        """Delete the parent's child rows whose index now holds another item (by `column`, the
+        item's own id) or none. A row is one item's: one whose index another item took starts
+        afresh, rather than keeping the old item's fields and its unique snapshot link."""
+        where = " and ".join(f"{name} = :{name}" for name in parent)
+        held = await self.session.execute(
+            text(f"select item_index, {column} from finance.{table} where {where}"), dict(parent)
         )
+        stale = [n for n, value in held.all() if n >= len(items) or items[n] != value]
+        if stale:
+            await self.session.execute(
+                text(
+                    f"delete from finance.{table} where {where}"
+                    " and item_index = any(cast(:stale as integer[]))"
+                ),
+                {**parent, "stale": stale},
+            )
 
     # The ledger -----------------------------------------------------------------------------
 

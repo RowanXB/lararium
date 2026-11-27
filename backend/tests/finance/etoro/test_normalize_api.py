@@ -1119,6 +1119,21 @@ async def test_a_moved_item_keeps_none_of_the_rows_it_replaces(session, ledger) 
     ) == [(INSTRUMENT_ID + 1, None)]
 
 
+async def test_an_item_that_stays_keeps_a_field_it_leaves_out(session, ledger) -> None:
+    """The same instrument at its index, a field left out: the row keeps what it gave."""
+    gbp = aggregate_body([(INSTRUMENT_ID, "GBP", "3")])
+    await ledger.normalize(BALANCES, ("aggregate", gbp))
+    del gbp["instrumentAggregates"][0]["assetCurrency"]
+    await ledger.normalize(("aggregate", gbp), now=NOW + timedelta(hours=1))
+    assert await _rows(
+        session,
+        "select instrument_id, asset_currency from finance.etoro_aggregate_instruments"
+        " where connection_id = :c and as_of_date = :day order by item_index",
+        c=ledger.connection.id,
+        day=NOW.date(),
+    ) == [(INSTRUMENT_ID, "GBP")]
+
+
 # Regeneration (parent §6.6) ------------------------------------------------------------------
 
 

@@ -312,23 +312,24 @@ async def _rows(
     table: str,
     child: str,
     under: str,
+    identity: str,
     parent: dict[str, object],
     links: dict[int, dict[str, object]],
 ) -> None:
-    """A report's row for its day, and its array's items as child rows."""
+    """A report's row for its day, and its array's items as child rows (`identity`: the
+    column of an item's own id)."""
     endpoint = report.endpoint
     values = await run.typed(endpoint, table, flat(report.content))
     await run.upsert(table, parent, values | {"raw_record_id": report.record.id})
     items = objects_at(report.content, under.removesuffix("[]."))
-    await run.release(child, parent, {n: link.get("snapshot_id") for n, link in links.items()})
-    for n, item in enumerate(items):
-        values = await run.typed(endpoint, child, flat(item), under)
+    rows = [await run.typed(endpoint, child, flat(item), under) for item in items]
+    await run.replace_moved(child, parent, identity, [row.get(identity) for row in rows])
+    for n, values in enumerate(rows):
         await run.upsert(
             child,
             parent | {"item_index": n},
             values | links.get(n, {}) | {"raw_record_id": report.record.id},
         )
-    await run.prune(child, parent, len(items))
 
 
 async def _instrument_link(run: Run, record: Record, item: Item, path: str) -> dict[str, object]:
@@ -365,6 +366,7 @@ async def _breakdown(run: Run, report: Report) -> None:
         "etoro_breakdowns",
         "etoro_breakdown_instruments",
         "instruments[].",
+        "instrument_id",
         parent,
         links,
     )
@@ -453,10 +455,9 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
                 }
             )
         table = "etoro_balance_account_snapshots"
-        await run.release(table, parent, {n: row["snapshot_id"] for n, row in enumerate(rows)})
+        await run.replace_moved(table, parent, "account_id", [r.get("account_id") for r in rows])
         for n, row in enumerate(rows):
             await run.upsert(table, parent | {"item_index": n}, row)
-        await run.prune(table, parent, len(rows))
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:
@@ -505,6 +506,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_balances",
                     "etoro_balance_accounts",
                     "balances[].",
+                    "account_id",
                     parent,
                     links,
                 )
@@ -521,6 +523,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_pnl",
                     "etoro_pnl_positions",
                     "clientPortfolio.positions[].",
+                    "position_id",
                     parent,
                     links,
                 )
@@ -536,6 +539,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_aggregates",
                     "etoro_aggregate_instruments",
                     "instrumentAggregates[].",
+                    "instrument_id",
                     parent,
                     links,
                 )
