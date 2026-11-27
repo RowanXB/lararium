@@ -128,6 +128,13 @@ async def connection(backend_url: str, migrated: None) -> AsyncIterator[AsyncCon
 
 # The fake as the history at Binance's clock.
 
+# The variant each label's row is listed under: a transfer under its own type, a dust
+# conversion under Spot (the only wallet the histories convert dust on).
+_ASKED_FOR: dict[str, Callable[[dict[str, ApiValue]], dict[str, str]]] = {
+    "universal-transfer": lambda row: {"type": str(row["type"])},
+    "dust": lambda row: {"accountType": "SPOT"},
+}
+
 
 class World:
     """Sets, before each request, what the fake lists and reports at that moment."""
@@ -175,7 +182,14 @@ class World:
                 if shown:
                     listed[label].append(dict(shown[-1]))
         for label, rows in listed.items():
-            self.fake.set_rows(label, rows)
+            asked = _ASKED_FOR.get(label)
+            if asked is None:
+                self.fake.set_rows(label, rows)
+                continue
+            # A row answers only the request for its own variant.
+            self.fake.set_rows(label, [])
+            for row in rows:
+                self.fake.add(label, row, when=asked(row))
         held = self.history.balance(now_ms)
         spot, funding, earn = (holdings_of(held, w) for w in WALLET_KEYS)
         self.fake.set_rows(

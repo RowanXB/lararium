@@ -724,9 +724,17 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 
 ### 阶段 B 将增加
 
+已依据 Binance 的文档实现，尚未用真实账户核对：
+
+- 钱包之间的划转（`universal-transfer`）：每笔是两个钱包账户上的一笔交易，从不作为在途转账。
+  与逐仓杠杆之间的划转要等读取逐仓杠杆之后才会拉取。
+- 小额资产兑换成 BNB（`dust`），手续费单独记为费用
+- Cloud Mining 的付款和退款（`cloud-mining`），记在 Spot 上
+- travel rule 的充值和提现历史（`travel-deposits`、`travel-withdrawals`）：保存下来并关联到它们
+  描述的那笔充值或提现，不会再入账一次
+
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- 钱包之间的划转、小额资产兑换（dust）和 Cloud Mining，以及 travel rule 的充值和提现历史
 - 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押、Dual Investment、Discount Buy
   和 Soft Staking
 - 加密货币借贷，记为债务

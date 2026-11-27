@@ -28,7 +28,13 @@ from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.binance import layout, notices, tables
-from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS, Endpoint, paging_params
+from lararium.modules.finance.binance.catalogue import (
+    ENDPOINTS,
+    FIELDS,
+    ISOLATED_TRANSFER_TYPES,
+    Endpoint,
+    paging_params,
+)
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
     ApiValue,
@@ -62,18 +68,31 @@ TRADES_LABEL = "my-trades"
 # my-trades says it "can't be longer than 24 hours".
 TRADE_SPAN_MS = DAY_MS - 1
 
-# The phases built so far: what a sync reads (kind account, balance or position) and walks.
-BALANCE_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind in ("account", "balance", "position")
-]
+# The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
+# or walks them as it does Phase A's.
+PHASE_B_BUILT = (
+    "universal-transfer",
+    "dust",
+    "cloud-mining",
+    "travel-deposits",
+    "travel-withdrawals",
+)
+UNIVERSAL_TRANSFER = "universal-transfer"
+
+
+def _built() -> list[Endpoint]:
+    """The endpoints built so far: Phase A's in the catalogue's order, then Phase B's in the
+    order they were built."""
+    return [
+        *(e for e in ENDPOINTS.values() if e.phase == "A"),
+        *(ENDPOINTS[label] for label in PHASE_B_BUILT),
+    ]
+
+
+# What a sync reads (kind account, balance or position) and walks.
+BALANCE_LABELS = [e.label for e in _built() if e.kind in ("account", "balance", "position")]
 # Trades are walked by symbol and trade id (walk_trades), not by window.
-HISTORY_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
-]
+HISTORY_LABELS = [e.label for e in _built() if e.kind == "history" and e.paging != "from_id"]
 
 
 def record_type(label: str) -> str:
@@ -415,6 +434,34 @@ def cursor_keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
     ]
 
 
+def walk_keys(label: str, isolated: Collection[str] = ()) -> list[tuple[str, dict[str, str]]]:
+    """Every cursor key of a label and its fixed parameters: one per variant (`cursor_keys`)
+    and, for `universal-transfer`, each isolated-margin type once per isolated pair in
+    `isolated` (`universal-transfer:ISOLATEDMARGIN_MARGIN:<pair>`), once per ordered pair of
+    two pairs for a transfer from one isolated pair to another."""
+    keys = cursor_keys(ENDPOINTS[label])
+    if label != UNIVERSAL_TRANSFER:
+        return keys
+    symbols = sorted(isolated)
+    for symbol in symbols:
+        for kind, names in ISOLATED_TRANSFER_TYPES.items():
+            if len(names) == 1:
+                keys.append((f"{label}:{kind}:{symbol}", {"type": kind, names[0]: symbol}))
+    for kind, names in ISOLATED_TRANSFER_TYPES.items():
+        if len(names) == 2:
+            for pair in itertools.permutations(symbols, 2):
+                fixed = {"type": kind, **dict(zip(names, pair, strict=True))}
+                keys.append((":".join([label, kind, *pair]), fixed))
+    return keys
+
+
+async def isolated_symbols(ctx: SyncContext) -> frozenset[str]:
+    """The isolated margin pairs whose universal transfers a walk asks for (ruling R1). None
+    yet: the isolated margin account is not read before Phase B's margin task, which fills
+    this from it."""
+    return frozenset()
+
+
 def backfill_complete(config: Mapping[str, JSONValue]) -> bool:
     """Whether every history label's first walk has ended: each of its keys complete, or not
     served by Binance (`not_present`)."""
@@ -428,10 +475,12 @@ def backfill_complete(config: Mapping[str, JSONValue]) -> bool:
 
 
 async def walk(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
-    """Fetch one history label (every variant) from its cursor; the raw record ids stored."""
+    """Fetch one history label (every key `walk_keys` gives it) from its cursor; the raw record
+    ids stored."""
     endpoint = ENDPOINTS[label]
+    isolated = await isolated_symbols(ctx) if label == UNIVERSAL_TRANSFER else frozenset[str]()
     ids: list[UUID] = []
-    for key, fixed in cursor_keys(endpoint):
+    for key, fixed in walk_keys(label, isolated):
         ids += await _walk_key(ctx, client, endpoint, key, fixed)
     return ids
 

@@ -368,6 +368,8 @@ Holdings and net worth need no new page.
 | An asset bought and sold between two syncs, never seen before | The quote asset's change is unexplained; the symbol sweep finds both trades. |
 | A symbol was delisted | Its trades cannot be fetched; the change shows as a difference and the symbol is flagged if a record names it. |
 | A transfer between wallets older than 6 months | Not listed; it is inside the two wallets' opening adjustments. |
+| A travel-rule deposit row | Linked to the deposit whose `id` is its `tranId` ("wallet transfer id"; Binance does not say in so many words that it is the deposit's `id`). If it is not, the row stays unlinked: it is never posted either way, so the ledger is unchanged. |
+| A dust line's `transferedAmount` | Posted as the BNB received, and `serviceChargeAmount` as a fee taken from it (§5.7). Binance does not say whether `transferedAmount` is before or after the charge; if it is after, Spot's BNB shows a reconciliation difference of the charge, and the reported balance stays right. |
 | The owner's P2P purchase 13 months ago | The opening adjustment of that asset. |
 | A reward and its dividend arrive in different syncs | The reward is posted on the product until the dividend arrives, then linked and its posting removed; the 7-day overlap covers it. |
 | Equal rewards of one asset whose dividends each come more than half the time between the rewards after them | Known limit: pairs are taken nearest first, so a dividend can be paired with the next reward and the first reward stays posted on Earn, counting that amount twice until the records change. Binance pays the dividend soon after its reward, well inside that half, so nearest first pairs each with its own. |

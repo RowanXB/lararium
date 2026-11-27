@@ -48,9 +48,16 @@ def contents(label: str, rows: Rows) -> list[JSONValue]:
 
 
 async def ingest(
-    session, connection_id: UUID, label: str, rows: Rows, *, sync_id: UUID | None = None
+    session,
+    connection_id: UUID,
+    label: str,
+    rows: Rows,
+    *,
+    sync_id: UUID | None = None,
+    request: dict[str, JSONValue] | None = None,
 ) -> list[UUID]:
-    """Store the rows as one response set of the label."""
+    """Store the rows as one response set of the label, answering `request` (its parameters:
+    a variant's value, an isolated symbol)."""
     sync = sync_id or uuid.uuid4()
     async with command_context(session, CONNECTOR, "binance.fetch", {}) as ctx:
         return [
@@ -58,7 +65,7 @@ async def ingest(
                 ctx,
                 connection_id=connection_id,
                 record_type=record_type(label),
-                request={},
+                request=request or {},
                 content=content,
                 connector_version=VERSION,
                 sync_id=sync,

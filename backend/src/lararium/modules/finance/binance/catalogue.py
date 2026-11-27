@@ -3014,6 +3014,18 @@ WALLETS: dict[str, str] = {
 }
 
 
+# The universal-transfer types that need an isolated margin pair, and the parameters it goes in
+# (the catalogue document: `fromSymbol` for ISOLATEDMARGIN_MARGIN and
+# ISOLATEDMARGIN_ISOLATEDMARGIN, `toSymbol` for MARGIN_ISOLATEDMARGIN and
+# ISOLATEDMARGIN_ISOLATEDMARGIN). They are not variants of the endpoint: each is asked once per
+# isolated pair the account has (`fetch.walk_keys`).
+ISOLATED_TRANSFER_TYPES: dict[str, tuple[str, ...]] = {
+    "ISOLATEDMARGIN_MARGIN": ("fromSymbol",),
+    "MARGIN_ISOLATEDMARGIN": ("toSymbol",),
+    "ISOLATEDMARGIN_ISOLATEDMARGIN": ("fromSymbol", "toSymbol"),
+}
+
+
 def wallet_key(wallet_name: str) -> str:
     """The key of a wallet; one Binance adds later gets `other:<name>`."""
     return WALLETS.get(wallet_name, f"other:{wallet_name}")

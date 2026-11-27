@@ -1,16 +1,21 @@
-"""Spot trades, converts and asset dividends (design 5.7, plan Decision 10).
+"""Spot trades, converts, asset dividends and dust conversions (design 5.7, plan Decision 10).
 
 A trade is a swap on Spot: the buyer's base is weighed by Binance's `price` in the quote
 (`cost_per_unit`), the seller's by the same price (`price_per_unit`), and the other side is
 `quoteQty`; what a rounded price leaves is one "rounding" posting, within what rounding can
 explain. A trade names only its symbol: its base and quote assets come from `exchangeInfo`, the
 latest report listing it. A convert is a swap on the wallet it names, the received side weighed
-by its cost in the given asset. A dividend is income on Spot.
+by its cost in the given asset. A dividend is income on Spot. A dust conversion is one
+transaction on the wallet it was asked for: each line a swap of a small balance into BNB
+weighed by its cost, and each line's service charge a fee.
 """
+
+from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import text as sql
 
-from lararium.modules.finance.binance.parse import Row
+from lararium.modules.finance.binance.parse import ApiValue, Row
 from lararium.modules.finance.binance.records import (
     Run,
     amount,
@@ -28,8 +33,14 @@ from lararium.modules.finance.ledger import PostingInput
 TRADES = "my-trades"
 CONVERT = "convert"
 DIVIDENDS = "dividends"
+DUST = "dust"
 _CONVERT_WALLETS = {"SPOT": "spot", "FUNDING": "funding"}
 _CONVERTED = "SUCCESS"
+# The request's `accountType` (the row does not say it): SPOT and MARGIN (cross margin).
+_DUST_WALLETS = {"SPOT": "spot", "MARGIN": "cross_margin"}
+_DUST_LINES = "userAssetDribbletDetails"
+# Binance converts dust into BNB; a line that does not name what it received received BNB.
+_DUST_TARGET = "BNB"
 
 
 async def _pair(run: Run, symbol: str) -> tuple[str, str] | None:
@@ -168,5 +179,63 @@ async def dividend(run: Run, row: Row) -> None:
             PostingInput(account_id, instrument_id, quantity),
             PostingInput(run.unassigned, instrument_id, -quantity),
         ],
+    )
+    await run.typed(transaction_id=transaction_id)
+
+
+def _lines(row: Row) -> list[dict[str, ApiValue]]:
+    found = row.get(_DUST_LINES)
+    return [line for line in found if isinstance(line, dict)] if isinstance(found, list) else []
+
+
+async def dust(run: Run, row: Row) -> None:
+    """Each line: `-amount` of the small asset, `+transferedAmount` of BNB weighed by its cost
+    in it, `-serviceChargeAmount` of BNB as a fee; all on the wallet the request asked for."""
+    asked = run.record.record.request.get("accountType")
+    account_type = asked if isinstance(asked, str) else None
+    await run.typed(account_type=account_type)
+    wallet = _DUST_WALLETS.get(account_type or "")
+    if wallet is None:
+        run.flag(f"{DUST}.accountType {'missing' if account_type is None else 'not known'}")
+        return
+    account_id = await run.account(wallet)
+    occurred_at = when(DUST, row, "operateTime")
+    swaps: list[PostingInput] = []
+    charged: list[tuple[UUID, Decimal, str]] = []
+    for line in _lines(row):
+        given_code = text(line, "fromAsset") or ""
+        received_code = text(line, "targetAsset") or _DUST_TARGET
+        given = await run.asset(given_code)
+        received = await run.asset(received_code)
+        given_amount = amount(DUST, line, "amount")
+        received_amount = amount(DUST, line, "transferedAmount")
+        charge = amount(DUST, line, "serviceChargeAmount") or Decimal(0)
+        occurred_at = occurred_at or when(DUST, line, "operateTime")
+        if given is None or received is None or given_amount is None:
+            continue
+        if received_amount is None or received_amount == 0:
+            continue
+        if given == received:
+            run.flag(f"{DUST} names one asset twice")
+            continue
+        swaps += [
+            PostingInput(account_id, given, -given_amount),
+            PostingInput(
+                account_id,
+                received,
+                received_amount,
+                cost_per_unit=unit_cost(given_amount, received_amount),
+                cost_instrument_id=given,
+            ),
+        ]
+        charged.append((received, charge, "service charge"))
+    if occurred_at is None:
+        return
+    transaction_id = await post(
+        run,
+        run.record.key,
+        occurred_at=occurred_at,
+        description="Dust conversion",
+        postings=[*swaps, *fees(account_id, run.unassigned, charged)],
     )
     await run.typed(transaction_id=transaction_id)

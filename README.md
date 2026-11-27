@@ -882,11 +882,19 @@ Binance holdings are valued in EUR from a daily price for each asset:
 
 ### What phase B adds
 
+Built from Binance's documentation and not checked against a real account:
+
+- Wallet-to-wallet transfers (`universal-transfer`): each is one transaction on the two
+  wallets' accounts, never a transfer in transit. Transfers to and from isolated margin are
+  fetched once isolated margin is read.
+- Dust conversions into BNB (`dust`), with the service charge as a fee
+- Cloud Mining payments and refunds (`cloud-mining`), on Spot
+- The travel-rule deposit and withdrawal histories (`travel-deposits`, `travel-withdrawals`):
+  stored and linked to the deposit or withdrawal they describe, never posted a second time
+
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Wallet-to-wallet transfers, dust conversion and Cloud Mining, and the travel-rule deposit and
-  withdrawal histories
 - The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking, Dual
   Investment, Discount Buy and Soft Staking
 - Crypto loans, as debt

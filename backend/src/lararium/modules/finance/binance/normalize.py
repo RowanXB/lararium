@@ -4,8 +4,9 @@ A run applies every history raw record after `config["normalized_through"]` (raw
 are UUIDv7, so in the order they were stored): each is checked against the catalogue (a field
 or value it does not list becomes a flag), its typed row upserted, and its label's handler
 run. A row that changed (a withdrawal that failed) is a new raw record, so it is applied again
-and updates its typed row and transactions in place. Then rewards are linked to the dividends
-that paid them (rule 3), and the new flags published.
+and updates its typed row and transactions in place. Then a movement two endpoints list is
+posted once (rule 2), rewards are linked to the dividends that paid them (rule 3), travel-rule
+rows to the deposits and withdrawals they describe, and the new flags published.
 
 The run writes in a transaction of its own: making a wallet's account and setting the
 connection's config lock its row, which a later step of the sync that walks (in short
@@ -51,10 +52,12 @@ from lararium.modules.finance.binance.records import (
     post,
     remove,
     spot,
+    transfers,
 )
 
 __all__ = [
     "HANDLERS",
+    "MOVEMENT_LISTINGS",
     "NORMALIZER_VERSION",
     "BinanceRecordError",
     "Handler",
@@ -86,7 +89,14 @@ HANDLERS: dict[str, Handler] = {
     earn.SUBSCRIPTIONS: earn.flexible_subscription,
     earn.REDEMPTIONS: earn.flexible_redemption,
     earn.REWARDS: earn.flexible_reward,
+    transfers.UNIVERSAL: transfers.universal,
+    spot.DUST: spot.dust,
+    transfers.CLOUD_MINING: transfers.cloud_mining,
 }
+# Rule 2: the endpoints that list wallet-to-wallet movements, the one that posts a movement first
+# (`transfers.link_movements`). Later tasks add the margin transfer history, the futures income
+# TRANSFER rows and the options bill transfers after it.
+MOVEMENT_LISTINGS: tuple[transfers.Listing, ...] = (transfers.UNIVERSAL_LISTING,)
 # The history labels whose rows have typed tables, by raw record type.
 _LABEL_OF = {
     record_type(label): label for label in layout.TABLE_LABELS if ENDPOINTS[label].kind == "history"
@@ -280,7 +290,9 @@ async def _normalize(
             for record in await _records(run, after):
                 await _apply(run, record)
                 last = record.id
+            await transfers.link_movements(run, MOVEMENT_LISTINGS)
             await link_payouts(run)
+            await capital.link_travel_rule(run)
             if reads is not None:
                 await record_reads(cmd, connection, reads, daily=daily, flag=run.flag)
             run.report.new_flags = await publish_flags(run)

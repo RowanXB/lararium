@@ -218,6 +218,29 @@ def test_deposit_and_withdrawal_extras() -> None:
     assert layout.layout("earn-flexible-rewards")[0].column("dividend_id").sql == "text"
 
 
+def test_transfer_family_tables_and_extras() -> None:
+    family = ("universal-transfer", "dust", "cloud-mining", "travel-deposits", "travel-withdrawals")
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # What a row does not say itself: the request's isolated symbols and wallet, and the
+    # deposit or withdrawal a travel-rule row describes.
+    transfer = layout.layout("universal-transfer")[0]
+    assert (transfer.column("from_symbol").sql, transfer.column("to_symbol").sql) == (
+        "text",
+        "text",
+    )
+    assert layout.layout("dust")[0].column("account_type").sql == "text"
+    assert layout.layout("travel-deposits")[0].column("deposit_id").sql == "text"
+    assert layout.layout("travel-withdrawals")[0].column("withdrawal_id").sql == "text"
+    # A dust conversion's lines are a child table keyed by the conversion.
+    dust = layout.layout("dust")
+    assert [t.name for t in dust] == [
+        "binance_dust",
+        "binance_dust_user_asset_dribblet_details",
+        "binance_dust_responses",
+    ]
+    assert dust[0].key == ("connection_id", "trans_id")
+
+
 # The models are what the migration made.
 
 

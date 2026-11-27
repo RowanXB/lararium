@@ -11,10 +11,16 @@ transfer legs (`post` marks them so).
 The chain address on the other side is the counterparty identifier
 (`counterparty_identifier`); until it is known the contra is Unassigned unless the owner pairs
 the leg.
+
+The travel-rule histories describe the same deposits and withdrawals with more fields: their
+rows are typed and linked to the deposit or withdrawal of the same id (`link_travel_rule`),
+never posted.
 """
 
 from decimal import Decimal
 from uuid import UUID
+
+from sqlalchemy import text as sql
 
 from lararium.modules.finance.binance.parse import Row
 from lararium.modules.finance.binance.records import (
@@ -210,3 +216,30 @@ async def withdrawal(run: Run, row: Row) -> None:
             PostingInput(run.unassigned, instrument_id, -(quantity + fee)),
         ],
     )
+
+
+# Each travel-rule table, its link column, the table it describes and the columns that hold
+# the same id: a travel-rule deposit's `tranId` is the deposit's `id`, a travel-rule
+# withdrawal's `id` the withdrawal's.
+_TRAVEL_RULE = (
+    ("binance_travel_deposits", "deposit_id", "binance_deposits", "tran_id", "id"),
+    ("binance_travel_withdrawals", "withdrawal_id", "binance_withdrawals", "id", "id"),
+)
+
+
+async def link_travel_rule(run: Run) -> None:
+    """Link every travel-rule row of the connection to the deposit or withdrawal of the same id
+    that is stored (none: unlinked), writing only a link that changes. Whichever arrives first,
+    the movement is posted once, by the deposit or withdrawal."""
+    for table, link, described, own, theirs in _TRAVEL_RULE:
+        match = (
+            f"select m.{theirs} from finance.{described} m"
+            f" where m.connection_id = t.connection_id and m.{theirs} = t.{own}"
+        )
+        await run.session.execute(
+            sql(
+                f"update finance.{table} t set {link} = ({match})"
+                f" where t.connection_id = :c and t.{link} is distinct from ({match})"
+            ),
+            {"c": run.connection.id},
+        )

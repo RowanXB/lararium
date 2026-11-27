@@ -5,8 +5,10 @@ held before it (the opening the records no longer explain) and a time-ordered li
 over four assets: deposits (some pending first), withdrawals (some failing after they were
 applied), spot trades (some with a rounded `quoteQty`), converts, asset dividends, flexible
 Earn subscriptions, redemptions and `REALTIME` rewards (two identical ones at once, at
-times), and `BONUS` payouts (a reward row and the dividend that paid it, within 26 hours).
-No wallet ever holds less than nothing.
+times), `BONUS` payouts (a reward row and the dividend that paid it, within 26 hours),
+wallet-to-wallet transfers between Spot and Funding (some failed) and dust conversions on Spot
+(one or two small balances into BNB, with a service charge at times). No wallet ever holds
+less than nothing.
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -43,7 +45,9 @@ SECOND_MS = 1_000
 MINUTE_MS = 60 * SECOND_MS
 # The first moment a history may start: a day after the fetch floor.
 START_MS = LAUNCH_MS + DAY_MS
-ASSETS = ("AAA", "BBB", "CCC", "STB")
+# BNB is what dust converts into.
+DUST_TARGET = "BNB"
+ASSETS = ("AAA", "BBB", "CCC", "STB", DUST_TARGET)
 # What `exchange-info` lists: (symbol, base, quote).
 PAIRS = (
     ("AAASTB", "AAA", "STB"),
@@ -62,7 +66,7 @@ _UNIT = Decimal("0.0001")
 _REALTIME_DIGIT, _DIVIDEND_DIGIT, _PAYOUT_DIGIT = 3, 7, 5
 # The kinds whose removal leaves one (account, instrument) changed.
 SINGLE_SIDED = frozenset({"deposit", "withdrawal", "dividend", "payout", "reward"})
-TWO_SIDED = frozenset({"trade", "convert", "subscription", "redemption"})
+TWO_SIDED = frozenset({"trade", "convert", "subscription", "redemption", "transfer", "dust"})
 
 
 @dataclass(frozen=True)
@@ -522,6 +526,83 @@ def _redemption(b: _Builder) -> Record | None:
     return Record("redemption", (("earn-flexible-redemptions", ((b.now, row),)),), effects)
 
 
+def _transfer(b: _Builder) -> Record | None:
+    """A universal transfer between Spot and Funding; a failed one moves nothing."""
+    choices = b.holdings(("spot", "funding"))
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    other = "funding" if wallet == "spot" else "spot"
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    failed = b.draw(st.integers(0, 5)) == 0
+    row = build_row(
+        "universal-transfer",
+        asset=asset,
+        amount=_plain(quantity),
+        type="MAIN_FUNDING" if wallet == "spot" else "FUNDING_MAIN",
+        status="FAILED" if failed else "CONFIRMED",
+        tranId=b.id(),
+        timestamp=b.now,
+    )
+    effects = (
+        ()
+        if failed
+        else (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
+    )
+    return Record("transfer", (("universal-transfer", ((b.now, row),)),), effects)
+
+
+def _dust(b: _Builder) -> Record | None:
+    """One or two small Spot balances converted into BNB, each line with a service charge at
+    times (never more than the BNB it received)."""
+    choices = [h for h in b.holdings(("spot",)) if h[1] != DUST_TARGET]
+    if not choices:
+        return None
+    picked = b.draw(st.lists(st.sampled_from(choices), min_size=1, max_size=2, unique=True))
+    trans_id = b.id()
+    lines: list[ApiValue] = []
+    effects: list[Effect] = []
+    received_total = charged_total = Decimal(0)
+    for _, asset in picked:
+        quantity = b.amount(at_most=b.held[("spot", asset)])
+        if quantity == 0:
+            continue
+        received = b.amount(at_most=Decimal(1))
+        charge = b.amount(at_most=received) if b.draw(st.booleans()) else Decimal(0)
+        received_total += received
+        charged_total += charge
+        lines.append(
+            {
+                "transId": trans_id,
+                "serviceChargeAmount": _plain(charge),
+                "amount": _plain(quantity),
+                "operateTime": b.now,
+                "transferedAmount": _plain(received),
+                "fromAsset": asset,
+                "targetAsset": DUST_TARGET,
+            }
+        )
+        effects += [
+            Effect(b.now, "spot", asset, -quantity),
+            Effect(b.now, "spot", DUST_TARGET, received),
+        ]
+        if charge:
+            effects.append(Effect(b.now, "spot", DUST_TARGET, -charge))
+    if not lines:
+        return None
+    row = build_row(
+        "dust",
+        transId=trans_id,
+        operateTime=b.now,
+        totalTransferedAmount=_plain(received_total),
+        totalServiceChargeAmount=_plain(charged_total),
+        userAssetDribbletDetails=lines,
+    )
+    return Record("dust", (("dust", ((b.now, row),)),), tuple(effects))
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -532,6 +613,8 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "reward": _reward,
     "subscription": _subscription,
     "redemption": _redemption,
+    "transfer": _transfer,
+    "dust": _dust,
 }
 
 

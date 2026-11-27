@@ -33,7 +33,12 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
-from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys, record_type
+from lararium.modules.finance.binance.fetch import (
+    CURSORS_KEY,
+    PHASE_B_BUILT,
+    cursor_keys,
+    record_type,
+)
 from lararium.modules.finance.binance.layout import TABLE_LABELS, layout
 from lararium.modules.finance.binance.sync import (
     BALANCE_LABELS,
@@ -69,9 +74,16 @@ def test_connector_identity() -> None:
     assert connector.capabilities == frozenset({"balances", "holdings", "transactions"})
 
 
-def test_the_phase_a_labels() -> None:
+def test_the_labels_built_so_far() -> None:
     assert "my-trades" not in HISTORY_LABELS
-    assert all(ENDPOINTS[label].phase == "A" for label in HISTORY_LABELS + BALANCE_LABELS)
+    built = [label for label in HISTORY_LABELS + BALANCE_LABELS if ENDPOINTS[label].phase == "B"]
+    assert sorted(built) == sorted(PHASE_B_BUILT)
+    # Phase A's labels are walked first, in the catalogue's order.
+    assert HISTORY_LABELS[: -len(PHASE_B_BUILT)] == [
+        e.label
+        for e in ENDPOINTS.values()
+        if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
+    ]
     assert {"spot-account", "api-restrictions", "funding-asset"} <= set(BALANCE_LABELS)
     assert "rebate" not in HISTORY_LABELS
 

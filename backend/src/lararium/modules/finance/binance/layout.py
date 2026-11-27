@@ -52,6 +52,12 @@ TABLE_LABELS: tuple[str, ...] = (
     "earn-flexible-rewards",
     "my-trades",
     "klines",
+    # Phase B: wallet-to-wallet transfers, dust and Cloud Mining, the travel-rule histories.
+    "universal-transfer",
+    "dust",
+    "cloud-mining",
+    "travel-deposits",
+    "travel-withdrawals",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -60,6 +66,13 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "withdrawals": (("tx_hash", "text"), ("is_onchain", "boolean")),
     # The key of the dividend a reward is linked to (rule 3).
     "earn-flexible-rewards": (("dividend_id", "text"),),
+    # The isolated pair a transfer was asked for: the row does not name it (the catalogue).
+    "universal-transfer": (("from_symbol", "text"), ("to_symbol", "text")),
+    # The wallet a conversion was asked for (`accountType`): the row does not name it.
+    "dust": (("account_type", "text"),),
+    # The id of the deposit or withdrawal a travel-rule row describes, once it is stored.
+    "travel-deposits": (("deposit_id", "text"),),
+    "travel-withdrawals": (("withdrawal_id", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),
