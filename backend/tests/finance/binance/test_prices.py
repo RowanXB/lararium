@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from lararium.core.connections import get_connection
 from lararium.core.connectors import SyncContext
+from lararium.core.errors import DisplayableError
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import instruments, notices
 from lararium.modules.finance.binance.prices import (
@@ -32,6 +33,7 @@ from lararium.modules.finance.binance.prices import (
 )
 from lararium.modules.finance.instruments import (
     InstrumentIdentifier,
+    add_identifiers,
     create_instrument,
     find_by_identifier,
     get_currency,
@@ -409,6 +411,44 @@ async def test_more_than_a_thousand_days_come_in_several_requests(
     assert len(fake.calls("klines")) == 2
 
 
+async def test_older_days_cut_short_by_an_error_leave_no_gap(session, run, fake, clock) -> None:
+    """Days before the stored bars come newest first, so a request that fails leaves what is
+    stored one run of days and the next run asks for the rest (bars are shared by every
+    connection, so the stored ones may be another's)."""
+    start = date(2023, 11, 1)
+    span = (LAST - start).days + 1
+    assert span > 1_000 + len(DAYS)
+    connection = await _scenario(
+        session,
+        run,
+        fake,
+        holds={"AAA": FIRST},
+        pairs=[("AAAEUR", "AAA", "EUR")],
+        bars={"AAAEUR": {start + timedelta(days=n): "2" for n in range(span)}},
+    )
+    async with _world(session, connection.id, fake, clock) as (ctx, client):
+        await price_assets(ctx, client)
+    # AAA is now held from much earlier: two requests' worth of older days.
+    await ingest(session, connection.id, "deposits", [_deposit(9, start, "5", "AAA")])
+    await run_normalize(session, connection.id)
+    before = len(fake.calls("klines"))
+
+    def hook(asked: int) -> None:
+        if asked == before + 1:
+            fake.fail("klines", status=503)
+
+    fake.when_asked("klines", hook)
+    with pytest.raises(DisplayableError):
+        async with _world(session, connection.id, fake, clock) as (ctx, client):
+            await price_assets(ctx, client)
+    fake.when_asked("klines", None)
+    fake.clear_failures()
+    async with _world(session, connection.id, fake, clock) as (ctx, client):
+        await price_assets(ctx, client)
+
+    assert len(await _prices(session, "AAA")) == span
+
+
 async def test_later_runs_fetch_only_the_days_not_stored(session, run, fake, clock) -> None:
     connection = await _scenario(
         session,
@@ -706,6 +746,21 @@ async def test_coingecko_id_never_guessed_by_symbol(session, run, fake, clock) -
     assert [tuple(r) for r in ids] == [("OTHER", "other-coin"), ("USDT", "tether")]
     assert await find_by_identifier(session, "coingecko", "noc") is None
     assert (await get_connection(session, connection.id)).config["flags"] == ["no price for NOC"]
+
+
+async def test_a_coingecko_id_given_by_hand_prices_the_asset(session, run, fake, clock) -> None:
+    """No Binance ticker names NOC, so the map has no id for it; the owner gave its
+    instrument one (design §5.11, "No price"), which is the one asked for."""
+    connection = await _scenario(session, run, fake, holds={"NOC": FIRST})
+    noc = await find_by_identifier(session, "binance_asset", "NOC")
+    assert noc is not None
+    await run(add_identifiers, noc.id, [InstrumentIdentifier("coingecko", "noc-coin")])
+    gecko = FakeGecko(tickers=[], charts={"noc-coin": _midnights(DAYS, ["7"] * 5)})
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        report = await update_prices(ctx, client)
+
+    assert report.unpriced == []
+    assert await _prices(session, "NOC", "coingecko") == _all("7")
 
 
 async def test_two_ids_for_one_asset_are_not_chosen_between(session, run, fake, clock) -> None:

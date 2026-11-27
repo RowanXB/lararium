@@ -411,14 +411,25 @@ def _to_fetch(
 
 
 async def _fetch_bars(
-    ctx: SyncContext, client: BinanceClient, symbol: str, start: date, end: date
+    ctx: SyncContext,
+    client: BinanceClient,
+    symbol: str,
+    start: date,
+    end: date,
+    *,
+    newest_first: bool = False,
 ) -> None:
     """The closed days from `start` to `end` of a symbol, at most 1,000 bars a request, each
-    request's bars stored in a short transaction of their own."""
+    request's bars stored in a short transaction of their own. Days before the stored ones are
+    asked `newest_first`, so a request that fails leaves what is known one run of days
+    (`_joined`), which the next run extends."""
     endpoint = ENDPOINTS[layout.BARS_LABEL]
+    chunks: list[tuple[date, date]] = []
     first = start
     while first <= end:
-        last = min(end, first + timedelta(days=MAX_BARS - 1))
+        chunks.append((first, min(end, first + timedelta(days=MAX_BARS - 1))))
+        first = chunks[-1][1] + timedelta(days=1)
+    for first, last in reversed(chunks) if newest_first else chunks:
         try:
             body = await client.call(
                 endpoint,
@@ -449,7 +460,6 @@ async def _fetch_bars(
                 for row in bars:
                     await store(cmd, layout.BARS_LABEL, {"symbol": symbol}, row)
         await _mark_asked(ctx, symbol, first, last)
-        first = last + timedelta(days=1)
 
 
 async def _closes(session: AsyncSession, symbols: Sequence[str]) -> dict[tuple[str, date], Decimal]:
@@ -558,7 +568,8 @@ async def price_assets(ctx: SyncContext, client: BinanceClient) -> PriceReport:
     for symbol in sorted(needs):
         known = _joined(spans.get(symbol), asked.get(symbol))
         for start, end in _to_fetch(needs[symbol], yesterday, known):
-            await _fetch_bars(ctx, client, symbol, start, end)
+            older = known is not None and end < known[0]
+            await _fetch_bars(ctx, client, symbol, start, end, newest_first=older)
     async with ctx.session_factory() as session:
         closes = await _closes(session, list(needs))
     priced = 0
@@ -781,7 +792,8 @@ async def coingecko_prices(
 ) -> int:
     """With a CoinGecko key set (`SyncContext.coingecko_api_key`): the id of each of `assets` and
     `id_only` (from Binance's tickers, stored as the instrument's `coingecko` identifier), then
-    the prices of `assets` for the days within the last 365 that have no `binance` or
+    the prices of `assets`, by the instrument's `coingecko` identifier (one the owner gave it
+    too), else the tickers' id, for the days within the last 365 that have no `binance` or
     `coingecko` price (an asset whose newest `binance` price is yesterday is skipped). A no-op
     without a key. Returns the prices written."""
     key = ctx.coingecko_api_key
@@ -804,7 +816,11 @@ async def coingecko_prices(
     for code in sorted(set(assets) & held.keys()):
         one = held[code]
         async with ctx.session_factory() as session:
+            # The instrument's own id (from the tickers, or given by hand) first.
+            i = models.InstrumentIdentifier
             coin = await session.scalar(
+                select(i.value).where(i.instrument_id == one.instrument_id, i.scheme == "coingecko")
+            ) or await session.scalar(
                 select(CoingeckoId.coingecko_id).where(CoingeckoId.asset == code)
             )
             newest = await session.scalar(
