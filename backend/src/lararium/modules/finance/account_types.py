@@ -123,6 +123,7 @@ ACCOUNT_TYPES: tuple[AccountType, ...] = (
         frozenset({"bank_transfer"}),
         "trading212",
     ),
+    AccountType("bitcoin_wallet", "Bitcoin", "wallet", None, Api("bitcoin", {}), ()),
     _statement_type("hsbc_uk", "HSBC UK"),
     _statement_type("lloyds", "Lloyds"),
     _statement_type("boc_uk", "BOC UK"),
