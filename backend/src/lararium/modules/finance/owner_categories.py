@@ -94,7 +94,7 @@ async def set_owner_category(
     sources = {(row[2], row[3]) for row in rows}
     o = models.TransactionOwnerCategory
     if normalised is None:
-        for source_kind, source_ref in sources:
+        for source_kind, source_ref in sorted(sources):
             await session.execute(
                 delete(o).where(o.source_kind == source_kind, o.source_ref == source_ref)
             )
