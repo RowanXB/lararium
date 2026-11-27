@@ -395,7 +395,13 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     fa = aliased(models.Account, name="family_account")
     family_accounts = (
         select(type_coerce(func.array_agg(fa.id), ARRAY(Uuid())).label("ids"))
-        .where(fa.type_key == any_(family_key_lists), fa.id != legs.c.account_id)
+        .where(
+            # Only for a record naming a family: the planner then skips the scan for every
+            # other record (a one-time filter on the outer row), which is nearly all.
+            named_family.c.value.is_not(None),
+            fa.type_key == any_(family_key_lists),
+            fa.id != legs.c.account_id,
+        )
         .lateral("family_accounts")
     )
     family_count = func.coalesce(func.cardinality(family_accounts.c.ids), 0)
