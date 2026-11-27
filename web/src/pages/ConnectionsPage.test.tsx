@@ -19,7 +19,30 @@ import {
   uploadIbkrStatement,
   uploadTrading212Export,
 } from "../api";
-import { ConnectForm, ConnectionsPage, PROVIDERS } from "./ConnectionsPage";
+import { ConnectForm, ConnectionsPage } from "./ConnectionsPage";
+
+function apiType(key: string, institution: string, connector: string, config = {}) {
+  return {
+    key,
+    institution,
+    label: "",
+    name: institution,
+    shape: null,
+    api: { connector, config },
+    files: [],
+    funding: [],
+    family: null,
+  };
+}
+
+// One API type per connector; the Stocks ISA stands for Trading 212.
+const API_TYPES = [
+  apiType("monzo", "Monzo", "monzo"),
+  apiType("ibkr", "Interactive Brokers", "ibkr"),
+  apiType("trading212.stocks_isa", "Trading 212", "trading212", { account_kind: "isa" }),
+  apiType("etoro", "eToro", "etoro"),
+  apiType("binance", "Binance", "binance"),
+];
 
 const CONNECTION = {
   id: "0190a0b0-0000-7000-8000-0000000000d1",
@@ -73,8 +96,8 @@ function renderPage(client = new QueryClient()) {
     <QueryClientProvider client={client}>
       <ConnectionsPage />
       {/* The add forms live on the add-account page; they're tested here beside the list. */}
-      {PROVIDERS.map((provider) => (
-        <ConnectForm key={provider.value} provider={provider.value} />
+      {API_TYPES.map((type) => (
+        <ConnectForm key={type.key} type={type} />
       ))}
     </QueryClientProvider>,
   );
@@ -376,7 +399,7 @@ it("adds a Trading 212 connection and clears the keys", async () => {
     ),
   ).toBeInTheDocument();
   await user.type(within(form).getByLabelText("Display name"), "Trading 212 ISA");
-  await user.selectOptions(within(form).getByLabelText("Account type"), "isa");
+  expect(within(form).queryByLabelText("Account type")).toBeNull();
   const key = within(form).getByLabelText("API key");
   const secret = within(form).getByLabelText("API secret");
   expect(key).toHaveAttribute("type", "password");

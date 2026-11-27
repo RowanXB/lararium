@@ -77,7 +77,7 @@ def _record(at: datetime, quantity: str, *, identified: bool) -> Pairable:
 def _pairs(sender: Pairable, receiver: Pairable) -> bool:
     # The receiver names the sender's account; the sender names nobody (a statement row).
     receiver = replace(receiver, holder=sender.account_id)
-    same, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
+    same, _, _ = _registry_edges([sender, receiver], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     return receiver.id in same.tiers.get(sender.id, {})
 
 

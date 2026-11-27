@@ -50,6 +50,10 @@ export type AccountCreate = {
      * Tax Wrapper
      */
     tax_wrapper?: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+    /**
+     * Type Key
+     */
+    type_key?: string | null;
 };
 
 /**
@@ -120,16 +124,26 @@ export type AccountOut = {
      * Tax Wrapper
      */
     tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+    /**
+     * Type Key
+     */
+    type_key: string | null;
 };
 
 /**
  * AccountRename
+ *
+ * Rename the account, set its type (one with no API), or both; type_key null clears it.
  */
 export type AccountRename = {
     /**
      * Name
      */
-    name: string;
+    name?: string | null;
+    /**
+     * Type Key
+     */
+    type_key?: string | null;
 };
 
 /**
@@ -140,6 +154,99 @@ export type AccountReportingUpdate = {
      * Excluded
      */
     excluded: boolean;
+};
+
+/**
+ * AccountShapeOut
+ */
+export type AccountShapeOut = {
+    /**
+     * Balance Mode
+     */
+    balance_mode: 'transactions' | 'snapshots' | 'hybrid';
+    /**
+     * Ledger Type
+     */
+    ledger_type: 'asset' | 'liability' | 'income' | 'expense' | 'equity' | null;
+    /**
+     * Subtype
+     */
+    subtype: 'bank' | 'savings_pot' | 'broker' | 'exchange' | 'wallet' | 'in_transit' | 'manual_asset' | 'other';
+    /**
+     * Tax Wrapper
+     */
+    tax_wrapper: 'none' | 'isa' | 'sipp' | 'lisa' | 'gia';
+};
+
+/**
+ * AccountTypeApiOut
+ */
+export type AccountTypeApiOut = {
+    /**
+     * Config
+     */
+    config: {
+        [key: string]: JsonValue;
+    };
+    /**
+     * Connector
+     */
+    connector: string;
+};
+
+/**
+ * AccountTypeFileOut
+ */
+export type AccountTypeFileOut = {
+    config: ProfileConfig | null;
+    /**
+     * Format
+     */
+    format: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Recommended
+     */
+    recommended: boolean;
+};
+
+/**
+ * AccountTypeOut
+ */
+export type AccountTypeOut = {
+    api: AccountTypeApiOut | null;
+    /**
+     * Family
+     */
+    family: string | null;
+    /**
+     * Files
+     */
+    files: Array<AccountTypeFileOut>;
+    /**
+     * Funding
+     */
+    funding: Array<string>;
+    /**
+     * Institution
+     */
+    institution: string;
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Label
+     */
+    label: string;
+    /**
+     * Name
+     */
+    name: string;
+    shape: AccountShapeOut | null;
 };
 
 /**
@@ -757,6 +864,7 @@ export type CsvProfileConfig = {
      */
     interest_descriptions?: Array<string>;
     overdraft_footer_label?: FooterLabel | null;
+    period_from_filename?: PeriodPattern | null;
     /**
      * Row Order
      */
@@ -1016,9 +1124,47 @@ export type IdentifierOut = {
      */
     kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address';
     /**
+     * References
+     */
+    references: Array<IdentifierReference>;
+    /**
      * Sort Code
      */
     sort_code: string | null;
+    /**
+     * Value
+     */
+    value: string;
+};
+
+/**
+ * IdentifierReference
+ *
+ * One own account behind a shared payee bank account, told apart by the payment
+ * reference it is paid with (stored trimmed and upper-cased).
+ */
+export type IdentifierReference = {
+    /**
+     * Account Id
+     */
+    account_id: string;
+    /**
+     * Reference
+     */
+    reference: string;
+};
+
+/**
+ * IdentifierReferencesRegister
+ *
+ * The own accounts payments to a shared payee bank account go into, by reference; none
+ * removes them.
+ */
+export type IdentifierReferencesRegister = {
+    /**
+     * References
+     */
+    references: Array<IdentifierReference>;
     /**
      * Value
      */
@@ -1639,6 +1785,10 @@ export type InstrumentUpdate = {
     hidden: boolean;
 };
 
+export type JsonValue = boolean | number | string | Array<JsonValue> | {
+    [key: string]: JsonValue;
+} | null;
+
 /**
  * MainAccountUpdate
  */
@@ -1755,6 +1905,8 @@ export type PdfProfileConfig = {
     layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'revolut_current_statement' | 'revolut_savings_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
+
+export type PeriodPattern = string;
 
 /**
  * PostingCreate
@@ -2247,7 +2399,7 @@ export type TransferOut = {
     /**
      * Review Reason
      */
-    review_reason: 'several_candidates' | 'amount_differs' | null;
+    review_reason: 'several_candidates' | 'amount_differs' | 'not_listed_in_full' | null;
     /**
      * Status
      */
@@ -2417,6 +2569,10 @@ export type IbkrConnectionUpdateWritable = {
      */
     token_expires_on: string;
 };
+
+export type JsonValueWritable = boolean | number | string | Array<JsonValueWritable> | {
+    [key: string]: JsonValueWritable;
+} | null;
 
 /**
  * MonzoConnectionCreate
@@ -2992,6 +3148,24 @@ export type UploadTrading212ExportResponses = {
 
 export type UploadTrading212ExportResponse = UploadTrading212ExportResponses[keyof UploadTrading212ExportResponses];
 
+export type ListAccountTypesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/account-types';
+};
+
+export type ListAccountTypesResponses = {
+    /**
+     * Response List Account Types
+     *
+     * Successful Response
+     */
+    200: Array<AccountTypeOut>;
+};
+
+export type ListAccountTypesResponse = ListAccountTypesResponses[keyof ListAccountTypesResponses];
+
 export type ListAccountsData = {
     body?: never;
     path?: never;
@@ -3059,6 +3233,31 @@ export type RegisterCardMerchantResponses = {
 };
 
 export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
+
+export type RegisterIdentifierReferencesData = {
+    body: IdentifierReferencesRegister;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/accounts/identifiers/references';
+};
+
+export type RegisterIdentifierReferencesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegisterIdentifierReferencesError = RegisterIdentifierReferencesErrors[keyof RegisterIdentifierReferencesErrors];
+
+export type RegisterIdentifierReferencesResponses = {
+    /**
+     * Successful Response
+     */
+    200: IdentifierOut;
+};
+
+export type RegisterIdentifierReferencesResponse = RegisterIdentifierReferencesResponses[keyof RegisterIdentifierReferencesResponses];
 
 export type RenameAccountData = {
     body: AccountRename;

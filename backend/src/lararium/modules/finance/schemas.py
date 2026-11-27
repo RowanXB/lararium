@@ -18,6 +18,8 @@ from pydantic import (
     model_validator,
 )
 
+from lararium.core.json_types import JSONValue
+from lararium.modules.finance.account_types import account_type
 from lararium.modules.finance.accounts import (
     AccountStatus,
     AccountSubtype,
@@ -117,10 +119,23 @@ class AccountCreate(BaseModel):
     tax_wrapper: TaxWrapper = "none"
     parent_account_id: UUID | None = None
     opened_on: date | None = None
+    # An account type with no API; the institution is then the type's.
+    type_key: str | None = None
 
 
 class AccountRename(BaseModel):
-    name: str
+    """Rename the account, set its type (one with no API), or both; type_key null clears it."""
+
+    name: str | None = None
+    type_key: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> Self:
+        if not self.model_fields_set:
+            raise ValueError("send name, type_key or both")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name can't be null")
+        return self
 
 
 class AccountClose(BaseModel):
@@ -146,6 +161,44 @@ class AccountOut(_Out):
     system: bool
     # Left out of net worth, holdings and cash flow by the owner.
     excluded_from_reports: bool
+    type_key: str | None
+
+    @field_validator("type_key")
+    @classmethod
+    def _known_type(cls, value: str | None) -> str | None:
+        # A key no longer in the catalog reads as no type.
+        return value if account_type(value) is not None else None
+
+
+class AccountShapeOut(_Out):
+    ledger_type: LedgerType | None  # None: either side
+    subtype: AccountSubtype
+    tax_wrapper: TaxWrapper
+    balance_mode: BalanceMode
+
+
+class AccountTypeApiOut(_Out):
+    connector: str
+    config: dict[str, JSONValue]
+
+
+class AccountTypeFileOut(_Out):
+    label: str
+    format: str
+    recommended: bool
+    config: ProfileConfig | None  # the profile; None when the type's API reads the file
+
+
+class AccountTypeOut(_Out):
+    key: str
+    institution: str
+    label: str
+    name: str
+    shape: AccountShapeOut | None
+    api: AccountTypeApiOut | None
+    files: list[AccountTypeFileOut]
+    funding: list[str]  # sorted
+    family: str | None
 
 
 class AccountReportingUpdate(BaseModel):
@@ -467,6 +520,14 @@ class IdentifierCreate(BaseModel):
     value: str  # a sort code and account number, e.g. "11-22-33 12345678", or an address
 
 
+class IdentifierReference(BaseModel):
+    """One own account behind a shared payee bank account, told apart by the payment
+    reference it is paid with (stored trimmed and upper-cased)."""
+
+    account_id: UUID
+    reference: str
+
+
 class IdentifierOut(BaseModel):
     id: UUID
     kind: IdentifierKind
@@ -476,6 +537,9 @@ class IdentifierOut(BaseModel):
     account_id: UUID | None
     # A card merchant's own accounts (it has no account_id); empty for every other kind.
     holder_account_ids: list[UUID]
+    # A shared payee bank account's own accounts by reference (it has no account_id), sorted
+    # by reference; empty for every other row.
+    references: list[IdentifierReference]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
@@ -486,6 +550,14 @@ class CardMerchantRegister(BaseModel):
 
     merchant_id: str  # Monzo's merchant id, merch_…
     account_ids: list[UUID]
+
+
+class IdentifierReferencesRegister(BaseModel):
+    """The own accounts payments to a shared payee bank account go into, by reference; none
+    removes them."""
+
+    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
+    references: list[IdentifierReference]
 
 
 class CardMerchantDismiss(BaseModel):

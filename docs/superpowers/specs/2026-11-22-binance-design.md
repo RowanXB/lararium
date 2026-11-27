@@ -2,7 +2,7 @@
 
 - Date: 2026-11-22 (brainstormed with the owner 2026-11-22 to 2026-11-23)
 - Status: approved by the owner 2026-11-23; plan `docs/superpowers/plans/2026-11-22-binance.md`
-- Builds on: `main` at `68e0bec` (M0–M5 and the transfer work through PR #31 merged; migrations up to `0029`). M7 does not need M6 (PR #32): it works before or after it, and uses two of M6's transfer rules where they exist (§5.12). Migrations are numbered after whatever is on `main` when implementation starts: after M6's `0030`–`0037`, Phase A's are `0038`–`0041`.
+- Builds on: `main` at `68e0bec` (M0–M5 and the transfer work through PR #31 merged; migrations up to `0029`). M7 does not need M6 (PR #32): it works before or after it, and uses two of M6's transfer rules where they exist (§5.12). Migrations are numbered after whatever is on `main` when implementation starts: after M6's `0030`–`0037` and the account type catalog's `0038`–`0040`, Phase A's are `0041`–`0044`.
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§6.3, §7.4, §8, §9, §11.2, §13 M7 and M8, §14)
 - Related:
   - the M5 IBKR design (`2026-11-18-ibkr-flex-design.md`), whose structure, typed-table rule, fail-closed parsing and reconciliation this follows;

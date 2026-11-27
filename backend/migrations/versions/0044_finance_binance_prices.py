@@ -2,8 +2,8 @@
 per position of a bar, market data shared by every connection) and the CoinGecko id each
 asset was looked up under (design 5.10, plan Decision 13).
 
-Revision ID: 0041
-Revises: 0040
+Revision ID: 0044
+Revises: 0043
 Create Date: 2026-11-23
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0041"
-down_revision: str | None = "0040"
+revision: str = "0044"
+down_revision: str | None = "0043"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

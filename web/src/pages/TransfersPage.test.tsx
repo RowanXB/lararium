@@ -201,6 +201,15 @@ it("renders sections from the API", async () => {
   expect(recent.getByText("Monzo → Bank A · 40.00 GBP · matched")).toBeInTheDocument();
 });
 
+it("labels a review waiting for an upload that lists the days in full", async () => {
+  vi.mocked(listTransfers).mockResolvedValue({
+    data: [transfer({ review_reason: "not_listed_in_full" })],
+  } as never);
+  renderPage();
+  const attention = await section("Needs attention");
+  expect(await attention.findByText("Not listed in full")).toBeInTheDocument();
+});
+
 it("shows a candidate's own currency", async () => {
   vi.mocked(listTransferCandidates).mockResolvedValue({
     data: [{ ...CANDIDATE, quantity: "126", currency: "USD", reason: "amount_differs" }],

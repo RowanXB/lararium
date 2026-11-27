@@ -5,6 +5,7 @@ from decimal import Decimal
 from functools import partial
 from typing import Any, Literal
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, insert, select, text
@@ -15,6 +16,7 @@ from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
 from lararium.core.documents import record_document
 from lararium.core.entities import get_self_entity_id
+from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
 from lararium.modules.finance.identifiers import assign_identifier
@@ -131,7 +133,8 @@ def connector_tx(
     session: AsyncSession, run: Run, gbp: InstrumentRecord, ids: SystemIds
 ) -> ConnectorTx:
     """Post (or re-post) a connector transaction as a normalizer would: its contra from
-    transfer_contra, and the given counterparty fields."""
+    transfer_contra, and the given counterparty fields (`reference`, its payment
+    reference)."""
 
     async def _post(
         bank: Connected,
@@ -140,6 +143,7 @@ def connector_tx(
         external_id: str = "tx_1",
         occurred_at: datetime = WHEN,
         identifier_id: UUID | None = None,
+        reference: str | None = None,
         bank_transfer: bool = True,
         status: TransactionStatus = "booked",
         description: str = "Transfer",
@@ -150,6 +154,7 @@ def connector_tx(
             source=("connection", f"{bank.connection_id}:{external_id}"),
             own_account_id=bank.account.id,
             counterparty_identifier_id=identifier_id,
+            payment_reference=reference,
             other_postings=0,
             never_transfer=never_transfer,
         )
@@ -170,6 +175,7 @@ def connector_tx(
                 counterparty=CounterpartyFields(
                     identifier_id=identifier_id,
                     name="Test Owner",
+                    reference=reference,
                     bank_transfer=bank_transfer,
                     never_transfer=never_transfer,
                 ),
@@ -348,13 +354,15 @@ async def record_import_rows(
     *,
     keys: list[str] | None = None,
     details: Sequence[RowDetails] | None = None,
+    time_unit: str = "day",
 ) -> None:
     """Record posted transactions as the rows of a committed statement import (M2) of their
     account, listing `complete` in full. Matching takes a counterpart found by amount and
     date only on days imports list in full (design §5.8), so a row posted as an import
     is recorded as one. `keys`: the rows' dedupe keys, which a row imported again keeps
     (its reference, source kind "import"); by default one per transaction. `details`: what
-    each row prints of its counterparty's bank account; by default nothing."""
+    each row prints of its counterparty's bank account; by default nothing. `time_unit`:
+    what the file gave the rows' times to; by default a date only, as a QIF gives."""
     r, t, p = models.ImportRow, models.Transaction, models.Posting
     batch_id = await insert_batch(session, run, account_id, complete)
     if keys is None:
@@ -380,7 +388,7 @@ async def record_import_rows(
                 status="committed",
                 booking_date=posted.booking_date,
                 occurred_at=posted.occurred_at,
-                time_unit="day",  # a QIF gives dates only
+                time_unit=time_unit,
                 description=posted.description,
                 quantity=posted.quantity,
                 instrument_id=posted.instrument_id,
@@ -439,8 +447,12 @@ def statement_row(
 ) -> StatementRow:
     """Post a row as an M2 import would, naming nobody (its contra from transfer_contra),
     and record it as a committed import row printing `details`. `identifier_id`: the bank
-    account the posted transaction names, which a row naming one does. `key`: the row's
-    dedupe key (record_import_rows), its reference; by default one from the transaction."""
+    account the posted transaction names, which a row naming one does; `reference`, its
+    payment reference. `key`: the row's dedupe key (record_import_rows), its reference; by
+    default one from the transaction. `at`: the row's time, which its file gives to
+    `time_unit`; by default `day`'s midnight, a date only. `zone`: the time zone its file
+    is read in (its import profile's), which it is booked on `at`'s date in; by default the
+    owner's, as posting gives."""
 
     async def _post(
         account: AccountRecord,
@@ -449,22 +461,30 @@ def statement_row(
         day: date = DAY,
         details: RowDetails | None = None,
         identifier_id: UUID | None = None,
+        reference: str | None = None,
         bank_transfer: bool = True,
         complete: tuple[date, date] = IMPORTED,
         key: str | None = None,
+        at: datetime | None = None,
+        time_unit: str = "day",
+        zone: str | None = None,
     ) -> UUID:
+        occurred_at = datetime.combine(day, time(), UTC) if at is None else at
         contra = await transfer_contra(
             session,
             source=None,
             own_account_id=account.id,
             counterparty_identifier_id=identifier_id,
+            payment_reference=reference,
             other_postings=0,
         )
         amount = Decimal(quantity)
         row = await run(
             post_transaction,
             TransactionInput(
-                occurred_at=datetime.combine(day, time(), UTC),
+                occurred_at=occurred_at,
+                booking_date=None if zone is None else local_date(occurred_at, ZoneInfo(zone)),
+                occurred_tz=zone,
                 description="Faster payment",
                 origin="manual",
                 postings=[
@@ -472,7 +492,7 @@ def statement_row(
                     PostingInput(contra, gbp.id, -amount),
                 ],
                 counterparty=CounterpartyFields(
-                    identifier_id=identifier_id, bank_transfer=bank_transfer
+                    identifier_id=identifier_id, reference=reference, bank_transfer=bank_transfer
                 ),
             ),
         )
@@ -482,6 +502,7 @@ def statement_row(
             complete,
             keys=None if key is None else [key],
             details=[details or RowDetails()],
+            time_unit=time_unit,
         )
         return row.id
 

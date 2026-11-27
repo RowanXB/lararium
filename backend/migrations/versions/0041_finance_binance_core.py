@@ -13,8 +13,8 @@ emitted once from the catalogue and are frozen here: this migration never import
 choose the trade symbols to ask for. The `binance_asset` instrument scheme and the
 `chain_address` account identifier kind are new (design 5.5, 5.12).
 
-Revision ID: 0038
-Revises: 0037
+Revision ID: 0041
+Revises: 0040
 Create Date: 2026-11-23
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0038"
-down_revision: str | None = "0037"
+revision: str = "0041"
+down_revision: str | None = "0040"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -892,7 +892,7 @@ _TABLES = [
     """,
 ]
 
-# The lists as 0037 leaves them (0030 added `trading212_ticker` and `trading212_account`, 0031
+# The lists as 0040 leaves them (0030 added `trading212_ticker` and `trading212_account`, 0031
 # `etoro_account`, 0035 `card_merchant`); the downgrade restores exactly these.
 _SCHEMES = """'iso4217', 'isin', 'figi', 'ticker_mic', 'ibkr_conid', 'etoro_id',
           'chain_contract', 'coingecko', 'trading212_ticker'"""

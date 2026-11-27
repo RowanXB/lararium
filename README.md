@@ -248,7 +248,8 @@ other's only candidate, and it never makes a transfer on its own.
 ### Manual accounts: hybrid, with an opening snapshot
 
 Bank A has no connection, so it can't report its side of a transfer. Lararium posts an
-*inferred* transaction on it instead, as soon as it sees Monzo's side. For that to move Bank A's
+*inferred* transaction on it instead, as soon as it sees Monzo's side, unless a row of the same
+amount on Bank A may be that side (see *Needs attention* below). For that to move Bank A's
 balance:
 
 1. On the Accounts page, create the account with **Balance mode: Hybrid** (ledger type Asset,
@@ -312,10 +313,27 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     fixed order, as any pairing gives the same balances. Where one side's rows name no account,
     they are found by amount and date, like a single one: a payment from someone else of that
     amount on that day can be taken among them until your own arrives, and then they go here.
+    A row on a manual account that isn't taken by itself (see *Not listed in full*) is a
+    candidate like any other, so identical ones with such a row among them wait here too. On a
+    manual account no inferred transaction is posted beside the candidates, which would count
+    the money twice if one is the real row: net worth counts the amount in the In transit
+    account until you pair.
   - *Amount differs*: the two records name each other's accounts but their amounts differ.
     The page has no **Pair** for them: when both are money records, pair them through the API
     (`POST /api/v1/finance/transfers/{id}/pair` with `{"transaction_id": "<other>"}`; see
-    *Records that name no account* below), else Reject the transfer if it isn't one.
+    *Records that name no account* below), else Reject the transfer if it isn't one. A row of
+    the same amount on a manual account that isn't taken by itself, as under *Not listed in
+    full*, is listed too, with **Pair**, and no inferred transaction is posted beside it.
+  - *Not listed in full*: the transfer's one candidate is a row on a manual account that lies
+    in its window before the first day that account's uploads list in full, so it isn't taken
+    by itself (see *Imports and transfers* below). No inferred transaction is posted beside it,
+    which would count the money twice if the row is the real one. The account's balance is
+    right; net worth counts the amount in the In transit account until the review is paired.
+    Upload a statement that lists those days and the two pair by themselves if each is the
+    other's only candidate (if another transfer of the same amount competes for the row, both
+    are under *Several candidates*), or pair them yourself: the row is listed as a candidate,
+    with **Pair**. A transfer settled before history is not under review for it. A transfer
+    waiting for a manual account is never *Overdue*: it waits for an upload, not a connection.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
     days.
 
@@ -513,8 +531,8 @@ you are connecting.
 
 ### 2. Add the connection
 
-On Connections, under **Add Trading 212**, enter a display name, choose the **Account type**
-(Invest or Stocks ISA), paste the API key and API secret, and choose **Add Trading 212**.
+On Accounts → Add account, pick **Trading 212 Invest** or **Trading 212 Stocks ISA**, enter a
+display name, paste the API key and API secret, and choose **Add Trading 212**.
 Lararium checks the key with Trading 212 first, and refuses a key whose account is already
 connected.
 
@@ -545,6 +563,20 @@ booking date differently, Lararium opens a [review item](#review-items).
 A warning that Lararium's cash differs from Trading 212's report, raised before an upload,
 stays until the next sync checks again, even when the upload supplied the missing record.
 
+### Cash ISA (no API)
+
+A Trading 212 Cash ISA has no API. Add it as an account of its own, then upload the CSV from the
+app's History page: on Accounts → Add account pick the **Trading 212 Cash ISA** tile and upload
+the History CSV there (the upload uses the ready profile itself). Give the account's opening
+date in the form's **Opened on** field: an export from that day then speaks for the days before
+it too, so a deposit on the day the account opened pairs with your bank's payment. Each export
+must start on the account's first day or on a day an earlier upload covers. Keep the export's file name as Trading
+212 gives it (`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`): it carries the period the export lists,
+every day of it in full but the last, which the export may have been taken partway through. A
+renamed export lists in full every day from its first row's to the day before its last row's,
+and its upload warns that the file name gives no period. Interest rows import as ordinary rows
+until their `Action` is known.
+
 ### Transfers
 
 - **Card or Apple Pay deposits from Monzo.** Monzo files a card top-up as a card payment to
@@ -565,8 +597,31 @@ stays until the next sync checks again, even when the upload supplied the missin
   identifiers](#registering-identifiers)). When two candidates fit (two accounts receiving
   the same amount close together, say), the transfer waits under Needs attention on the
   Transfers page: **Pair** the right one.
-- **Invest ↔ ISA.** With exactly two Trading 212 connections, one Invest and one ISA, a
-  transfer between them pairs by itself.
+- **Bank top-ups to a payee shared by several accounts.** If your bank pays Trading 212 Invest,
+  Stocks ISA and Cash ISA through one bank account (one sort code and account number), the
+  payment names which of them only by its payment reference. Register the references once, in the
+  API only, with `POST /api/v1/finance/accounts/identifiers/references` and
+  `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
+  "reference": "<payment reference>"}]}` (placeholders; use what your banking app shows, the sort code as
+  in 11-22-33 or 112233). One call replaces the identifier's whole
+  set of references, and an empty `references` list removes them. References match ignoring case and
+  surrounding spaces. A bank account carries either an account (registered as in [Registering
+  identifiers](#registering-identifiers)) or references, never both. Lararium then goes through the
+  whole history: a bank transfer to that payee with a matching reference names that account, and
+  bank top-ups to Trading 212 Invest, Stocks ISA and Cash ISA pair on their own. Card top-ups
+  still pair by the card rule above, and card evidence comes first: a deposit that has a
+  card-payment candidate is not paired as a bank transfer by its account's funding.
+- **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
+  you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
+  accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
+  the transfer pairs by itself. With a Cash ISA added as well, transfers name no counterpart and
+  are paired by hand: both sides name nobody, so neither is identified and nothing pairs them
+  on its own. With only an Invest (or a Stocks ISA) and a Cash ISA, no counterpart is named
+  either: a Cash ISA has no Trading 212 id to name, so such transfers are also paired by hand.
+  Lararium counts only the accounts added to it: a Cash ISA you hold
+  but haven't added leaves the two-account rule in force, so a move to it would be named as the
+  other account's. A newly added family account takes effect at each Trading 212 connection's next
+  sync, which replays its transfers.
 
 ### Warnings
 
@@ -909,7 +964,11 @@ the ledger until you have reviewed it.
    profile (how to read this bank's file; see below). Either way, choose the account (or name
    a new one) and optionally a currency for files that don't state one. Files are at most
    5 MiB and 20,000 rows. The file is kept as a document (in the `documents` volume) and never
-   deleted.
+   deleted. An account added before account types existed can be given its type with
+   `PATCH /api/v1/finance/accounts/{id}` and the body `{"type_key": "<key>"}`; the statement
+   keys are `hsbc_uk`, `lloyds`, `boc_uk`, `revolut.current`, `revolut.savings`, `tembo`,
+   `lemfi` and `trading212.cash_isa`. The account must be a manual transactions account whose
+   shape matches the type; once typed, its card on Accounts shows **Upload file**.
 2. **Review.** The batch page lists every row as **new**, **duplicate** (already in the
    ledger), **skipped** (a zero amount, or left out by the profile's `include_only`; the reason
    is shown) or **error** (couldn't be read, or breaks the running balance). Any error blocks
@@ -958,9 +1017,26 @@ matching: a row that is the other side of a transfer from a connected account re
 transfer's placeholder instead of counting twice, and the Transfers page treats it like any
 other record. A row naming the other account is matched through the registry. A row naming no
 account, and not of a card type, is taken by amount and date unless the transfer's window starts
-before the first day the account's imports list in full (an export without a stated period may
-cut its first and last day short): before it, the real row may be inside the account's opening,
-never to be imported, and an unrelated payment of the same amount must not stand in for it.
+before the first day the account's imports list in full (an export may cut its last day
+short, and one whose rows carry a `started_at`, as Revolut's CSV does, or an OFX file whose
+`DTSTART` gives a time of day other than midnight, its first day too):
+before it, the real row may be inside the account's opening, never to be imported, and an
+unrelated payment of the same amount must not stand in for it. An account's opening date (asked
+for when an upload creates the account) lets matching count the days before its first upload as
+empty: an upload listing in full from on or before that date lists all time before it too. When
+the record naming the account
+is a payment, its window starts the day before it, since a statement giving only dates can date
+a payment after the money left. A row whose file gives its time to the second, received no
+earlier than two minutes before a payment that is a connected account's record, is checked
+from the payment's own day instead, in the time zone the row's file is read in (its profile's,
+UTC for a Trading 212 Cash ISA; else yours), which the row is booked in: a receipt does not come
+before its payment. (An OFX row is booked on the date its own time is written in, which may not be
+that zone; this check can then still start a day late after a payment made just after midnight in
+summer.) An imported payment never counts, even one timed to the second: its time may be when
+the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
+candidates, stay as they are. A row the check refuses is still a candidate, just not one taken
+by itself: its transfer needs attention (*Not listed in full*, or *Several candidates* when there
+are others), and so does any other whose candidate it is too.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on
@@ -1050,16 +1126,21 @@ by amount and date (below).
   (GBP)`; otherwise the one picked at upload, or a mapped `currency` column) and
   `interest_descriptions` (the descriptions of rows that pay interest, for a bank that prints
   no type codes, such as LemFi's `Savings Interest Payout`: like a card payment, such a row
-  is never taken as the other side of a transfer by amount and date). A line that repeats
-  the header is not a row.
+  is never taken as the other side of a transfer by amount and date), and
+  `period_from_filename` (a regular expression searched in the uploaded file's name, with named
+  groups `start` and `end`, each a `YYYY-MM-DD` date, for a bank that names its export by its
+  period, such as Trading 212's Cash ISA: a match is the file's period, every day of it listed in
+  full but the last; a name that gives none, or a range a row falls outside, leaves the upload
+  as read, with a warning). A line that repeats the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,
   `payee`, `memo`, `check_number`, `counterparty_name`, `counterparty_sort_code`,
   `counterparty_account_number`, `reference` (the payment reference), `started_at` (when the
   payment was started, in `date_format`, which must then have a time; `date` is when it
-  completed), and the statement's own `account_sort_code`, `account_number` and `account_type`
-  (its product, e.g. Revolut's `Product`; every row must give the same).
+  completed; an export read with it lists its first day only in part, since its rows may be
+  picked by when they started), and the statement's own `account_sort_code`, `account_number`
+  and `account_type` (its product, e.g. Revolut's `Product`; every row must give the same).
 - **`extract`** reads typed fields out of a column that holds several:
   `[{"column": "Details", "patterns": ["<regex>", ...]}]`. The first pattern that matches a
   non-empty cell in full fills the fields its named groups name (`payee`, `memo`,

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useId, useState } from "react";
 
 import {
+  type AccountTypeOut,
   authorizeConnection,
   type BinanceConnectionCreateWritable,
   type ConnectionOut,
@@ -816,11 +817,15 @@ function AddIbkrForm({ onAdded }: { onAdded?: () => void }) {
   );
 }
 
-function AddTrading212Form({ onAdded }: { onAdded?: () => void }) {
+function AddTrading212Form({
+  kind,
+  onAdded,
+}: {
+  kind: "invest" | "isa";
+  onAdded?: () => void;
+}) {
   const queryClient = useQueryClient();
-  const kindId = useId();
   const [displayName, setDisplayName] = useState("");
-  const [kind, setKind] = useState<"invest" | "isa">("invest");
   const form = useKeysForm(
     TRADING212_KEYS,
     async (keys) =>
@@ -847,18 +852,6 @@ function AddTrading212Form({ onAdded }: { onAdded?: () => void }) {
           className="grid gap-4 sm:grid-cols-2"
         >
           <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
-          <div className="grid gap-1.5">
-            <Label htmlFor={kindId}>Account type</Label>
-            <select
-              id={kindId}
-              value={kind}
-              onChange={(event) => setKind(event.target.value === "isa" ? "isa" : "invest")}
-              className="h-9 rounded-md border bg-transparent px-3 text-sm"
-            >
-              <option value="invest">Invest</option>
-              <option value="isa">Stocks ISA</option>
-            </select>
-          </div>
           {form.fields}
           <p className="text-sm text-muted-foreground sm:col-span-2">
             Create an API key in the Trading 212 app under Settings → API (Beta), for this account
@@ -962,24 +955,15 @@ function AddBinanceForm({ onAdded }: { onAdded?: () => void }) {
   );
 }
 
-export type Provider = "monzo" | "ibkr" | "trading212" | "etoro" | "binance";
-
-export const PROVIDERS: { value: Provider; label: string }[] = [
-  { value: "monzo", label: "Monzo" },
-  { value: "ibkr", label: "Interactive Brokers" },
-  { value: "trading212", label: "Trading 212" },
-  { value: "etoro", label: "eToro" },
-  { value: "binance", label: "Binance" },
-];
-
-// The form that connects one provider; onAdded runs once the connection exists.
-export function ConnectForm({ provider, onAdded }: { provider: Provider; onAdded?: () => void }) {
+// The form that connects an account type's API; onAdded runs once the connection exists.
+export function ConnectForm({ type, onAdded }: { type: AccountTypeOut; onAdded?: () => void }) {
+  const connector = type.api?.connector;
   const connections = useQuery({
     queryKey: ["connections"],
     queryFn: async () => (await listConnections({ throwOnError: true })).data,
-    enabled: provider === "monzo",
+    enabled: connector === "monzo",
   });
-  switch (provider) {
+  switch (connector) {
     case "monzo":
       return (
         <AddMonzoForm
@@ -993,11 +977,18 @@ export function ConnectForm({ provider, onAdded }: { provider: Provider; onAdded
     case "ibkr":
       return <AddIbkrForm onAdded={onAdded} />;
     case "trading212":
-      return <AddTrading212Form onAdded={onAdded} />;
+      return (
+        <AddTrading212Form
+          kind={type.api?.config.account_kind === "isa" ? "isa" : "invest"}
+          onAdded={onAdded}
+        />
+      );
     case "etoro":
       return <AddEtoroForm onAdded={onAdded} />;
     case "binance":
       return <AddBinanceForm onAdded={onAdded} />;
+    default:
+      return null;
   }
 }
 

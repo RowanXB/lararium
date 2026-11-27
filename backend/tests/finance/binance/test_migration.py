@@ -1,7 +1,7 @@
-"""Migration 0038 goes down to 0037 and up again, taking what it added and leaving the rest;
-migration 0039 (`never_transfer`) likewise down to 0038, 0040 (the reconciliation
-differences and the account report times) down to 0039, and 0041 (the daily bars and the
-CoinGecko ids) down to 0040. Each table a migration creates is checked on its own, and each
+"""Migration 0041 goes down to 0040 and up again, taking what it added and leaving the rest;
+migration 0042 (`never_transfer`) likewise down to 0041, 0043 (the reconciliation
+differences and the account report times) down to 0042, and 0044 (the daily bars and the
+CoinGecko ids) down to 0043. Each table a migration creates is checked on its own, and each
 downgrade takes from a Binance connection's config what says what is in what it drops."""
 
 import json
@@ -66,10 +66,10 @@ _CONFIG: dict[str, object] = {
 }
 # What each downgrade removes, by the revision it goes down to.
 _REMOVED = {
-    "0040": {"bars_asked", "coingecko_ids_asked"},
-    "0039": {"bars_asked", "coingecko_ids_asked", "reconciled_through"},
-    "0038": {"bars_asked", "coingecko_ids_asked", "reconciled_through", "normalized_through"},
-    "0037": {
+    "0043": {"bars_asked", "coingecko_ids_asked"},
+    "0042": {"bars_asked", "coingecko_ids_asked", "reconciled_through"},
+    "0041": {"bars_asked", "coingecko_ids_asked", "reconciled_through", "normalized_through"},
+    "0040": {
         "bars_asked",
         "coingecko_ids_asked",
         "reconciled_through",
@@ -120,11 +120,11 @@ def _unseed(engine: Engine, seeded: tuple[object, object, object]) -> None:
 
 
 def test_each_migration_creates_its_own_tables() -> None:
-    assert len(_created("0038")) == 44
-    assert "binance_assets_seen" in _created("0038")
-    assert _created("0039") == []
-    assert _created("0040") == ["binance_account_reports", "binance_reconciliation_differences"]
-    assert _created("0041") == ["binance_klines", "binance_coingecko_ids"]
+    assert len(_created("0041")) == 44
+    assert "binance_assets_seen" in _created("0041")
+    assert _created("0042") == []
+    assert _created("0043") == ["binance_account_reports", "binance_reconciliation_differences"]
+    assert _created("0044") == ["binance_klines", "binance_coingecko_ids"]
 
 
 _CHECK = (
@@ -144,7 +144,7 @@ def _allowed(definition: str | None) -> set[str]:
     return set(re.findall(r"'(\w+)'", definition))
 
 
-# What 0037 (main's M6) leaves: 0038 adds to these lists and its downgrade restores them.
+# What 0040 (main before Binance) leaves: 0041 adds to these lists and its downgrade restores them.
 _M6_KINDS = {
     "uk_bank_account",
     "ibkr_account",
@@ -185,7 +185,7 @@ def _assert_lists(connection: Connection, *, binance: bool) -> None:
 
 def test_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    core, later = _created("0038"), [*_created("0040"), *_created("0041")]
+    core, later = _created("0041"), [*_created("0043"), *_created("0044")]
     engine = create_engine(owner_url)
     try:
         with engine.begin() as connection:
@@ -215,8 +215,8 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
             ).scalar_one()
             seeded = _seed(connection)
         try:
-            command.downgrade(config, "0037")
-            _assert_config(engine, seeded, "0037")
+            command.downgrade(config, "0040")
+            _assert_config(engine, seeded, "0040")
             with engine.begin() as connection:
                 assert _present(connection, core + later) == _all(core + later, False)
                 kept = connection.execute(
@@ -257,14 +257,14 @@ _NEVER_TRANSFER = (
 
 def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    core = _created("0038")
+    core = _created("0041")
     engine = create_engine(owner_url)
     try:
         with engine.begin() as connection:
             seeded = _seed(connection)
         try:
-            command.downgrade(config, "0038")
-            _assert_config(engine, seeded, "0038")
+            command.downgrade(config, "0041")
+            _assert_config(engine, seeded, "0041")
             with engine.begin() as connection:
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 0
                 assert _present(connection, core) == _all(core, True)
@@ -279,14 +279,14 @@ def test_never_transfer_migration_round_trip(owner_url: str, migrated: None) -> 
 
 def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    tables = _created("0040")
+    tables = _created("0043")
     engine = create_engine(owner_url)
     try:
         with engine.begin() as connection:
             seeded = _seed(connection)
         try:
-            command.downgrade(config, "0039")
-            _assert_config(engine, seeded, "0039")
+            command.downgrade(config, "0042")
+            _assert_config(engine, seeded, "0042")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert connection.execute(text(_NEVER_TRANSFER)).scalar() == 1
@@ -301,14 +301,14 @@ def test_reconcile_migration_round_trip(owner_url: str, migrated: None) -> None:
 
 def test_prices_migration_round_trip(owner_url: str, migrated: None) -> None:
     config = _config(owner_url)
-    tables, before = _created("0041"), _created("0040")
+    tables, before = _created("0044"), _created("0043")
     engine = create_engine(owner_url)
     try:
         with engine.begin() as connection:
             seeded = _seed(connection)
         try:
-            command.downgrade(config, "0040")
-            _assert_config(engine, seeded, "0040")
+            command.downgrade(config, "0043")
+            _assert_config(engine, seeded, "0043")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert _present(connection, before) == _all(before, True)

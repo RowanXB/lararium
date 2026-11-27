@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -64,6 +65,8 @@ class AccountRecord:
     locked: bool | None
     round_up: bool | None
     round_up_multiplier: Decimal | None
+    # A key of the account type catalog; stored here as text, not read for posting.
+    type_key: str | None
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,7 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             a.locked,
             a.round_up,
             a.round_up_multiplier,
+            a.type_key,
         )
         .where(*conditions)
         .order_by(a.name, a.id)
@@ -148,6 +152,7 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             locked=row.locked,
             round_up=row.round_up,
             round_up_multiplier=row.round_up_multiplier,
+            type_key=row.type_key,
         )
         for row in rows
     ]
@@ -179,6 +184,7 @@ def _change_data(record: AccountRecord) -> dict[str, JSONValue]:
         "locked": record.locked,
         "round_up": record.round_up,
         "round_up_multiplier": _optional_str(record.round_up_multiplier),
+        "type_key": record.type_key,
     }
 
 
@@ -196,6 +202,12 @@ async def get_account(session: AsyncSession, account_id: UUID) -> AccountRecord:
 
 async def list_accounts(session: AsyncSession) -> list[AccountRecord]:
     return await _load(session)
+
+
+async def accounts_of_types(session: AsyncSession, keys: Collection[str]) -> list[UUID]:
+    """The ids of the accounts whose type is one of `keys`, whatever their status, sorted."""
+    a = models.Account
+    return sorted(await session.scalars(select(a.id).where(a.type_key.in_(sorted(keys)))))
 
 
 def require_owner_account(record: AccountRecord, action: str) -> None:
@@ -251,6 +263,7 @@ async def create_account(
     parent_account_id: UUID | None = None,
     opened_on: date | None = None,
     source_connection_id: UUID | None = None,
+    type_key: str | None = None,
 ) -> AccountRecord:
     """A manual account's parent_account_id is its main account (set_main_account's rules);
     a connected account's is its connector's to give (a Monzo pot's main account)."""
@@ -277,6 +290,7 @@ async def create_account(
                 source_kind="manual" if source_connection_id is None else "connection",
                 source_connection_id=source_connection_id,
                 opened_on=opened_on,
+                type_key=type_key,
             )
             .returning(models.Account.id)
         )
@@ -356,6 +370,22 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
     differs = or_(*(getattr(a, name).is_distinct_from(value) for name, value in values.items()))
     written = await ctx.session.scalar(
         update(a).where(a.id == account_id, differs).values(**values).returning(a.id)
+    )
+    if written is None:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    _publish(ctx, "finance.account.updated", await get_account(ctx.session, account_id))
+    return True
+
+
+async def set_type_key(ctx: CommandContext, account_id: UUID, type_key: str | None) -> bool:
+    """Set the account's type key (None clears it); False (and no event) if it is the same."""
+    a = models.Account
+    written = await ctx.session.scalar(
+        update(a)
+        .where(a.id == account_id, a.type_key.is_distinct_from(type_key))
+        .values(type_key=type_key)
+        .returning(a.id)
     )
     if written is None:
         await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing

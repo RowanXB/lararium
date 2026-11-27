@@ -56,17 +56,21 @@ from lararium.modules.finance.transfers.contra import (
     names_source,
     source_ref,
 )
-from lararium.modules.finance.transfers.pairs import owner_pair_refusal, pair_relation
+from lararium.modules.finance.transfers.pairs import (
+    ReviewReason,
+    owner_pair_refusal,
+    pair_relation,
+)
 from lararium.modules.finance.transfers.settings import TransferSettings, load_transfer_settings
 
 # What the ledger holds for the transfer: one own record waiting for the connected other
 # side's (awaiting), one plus a placeholder on the manual other side (inferred), both
 # (matched), one whose other side predates that account's history (before_history: the
 # connected account's first record, or the manual account's first snapshot), or the
-# owner's word that it is not a transfer (rejected).
+# owner's word that it is not a transfer (rejected). A transfer of a manual other side
+# awaits too, with no placeholder, while its record has a candidate of the same amount
+# there (PairRelation.candidate_on), whatever its review reason.
 TransferStatus = Literal["awaiting", "inferred", "matched", "before_history", "rejected"]
-# Why the rule could not decide, apart from the status ("needs review").
-ReviewReason = Literal["several_candidates", "amount_differs"]
 # The statuses of a transfer that still misses one own record.
 OPEN_STATUSES: tuple[TransferStatus, ...] = ("awaiting", "inferred", "before_history")
 
@@ -680,8 +684,10 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     pair can link again), each oldest first, each once. Only those pair would accept: not
     a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
     make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
-    (the owner paired it, so its side differs) is labelled amount_differs. Empty for a
-    transfer with both sides."""
+    (the owner paired it, so its side differs) is labelled amount_differs. Those of the same
+    amount include the rows the coverage gate refused to take by themselves
+    (PairRelation.untakeable), so the owner can pair one by hand (account type catalog design
+    §8.3 item 3). Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
@@ -765,10 +771,12 @@ class SuggestionRecord:
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
     """Unregistered, undismissed identifiers of a kind the owner can register
     (`SUGGESTED_KINDS`) that own records name, most named first, then the most recently
-    named."""
+    named. A shared payee carrying references is registered already (account type catalog
+    design §8.1): it is offered again once they are removed."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
+    r = models.AccountIdentifierReference
     outgoing = func.count().filter(e.c.quantity < 0)
     incoming = func.count().filter(e.c.quantity > 0)
     latest = func.max(e.c.booking_date)
@@ -784,7 +792,12 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         )
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
-        .where(i.kind.in_(SUGGESTED_KINDS), i.account_id.is_(None), i.dismissed_at.is_(None))
+        .where(
+            i.kind.in_(SUGGESTED_KINDS),
+            i.account_id.is_(None),
+            i.dismissed_at.is_(None),
+            ~exists().where(r.identifier_id == i.id),
+        )
         .group_by(i.id, i.kind, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )
@@ -936,10 +949,22 @@ async def card_merchant_suggestions(session: AsyncSession) -> list[CardMerchantS
     return found
 
 
-def is_overdue(transfer: TransferRecord, now: datetime, settings: TransferSettings) -> bool:
+def is_overdue(
+    transfer: TransferRecord, now: datetime, settings: TransferSettings, *, manual: Collection[UUID]
+) -> bool:
     """Whether an awaiting transfer has been in transit too long, as due_notifications
-    judges it."""
-    return transfer.status == "awaiting" and transfer.opened_at < now - settings.overdue
+    judges it: its connected other side hasn't reported. One awaiting a manual account
+    (`manual`: the manual accounts' ids) never is: it waits for an upload, not a
+    connection's report, and is awaiting only while a candidate there holds it for review,
+    which already asks the owner (PairRelation.candidate_on)."""
+    counterpart = (
+        transfer.to_account_id if transfer.out_transaction_id else transfer.from_account_id
+    )
+    return (
+        transfer.status == "awaiting"
+        and counterpart not in manual
+        and transfer.opened_at < now - settings.overdue
+    )
 
 
 def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:

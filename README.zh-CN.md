@@ -221,7 +221,7 @@ API：用 `GET /api/v1/finance/accounts` 列出账户，再对每个账户调用
 ### 手动账户：选 hybrid，并录入期初快照
 
 Bank A 没有连接，报告不了它那一侧的转账。Lararium 一看到 Monzo 那一侧，就在 Bank A 上记一笔
-*推断*（inferred）交易来代替。要让它改变 Bank A 的余额：
+*推断*（inferred）交易来代替，除非 Bank A 上有一行同金额的记录可能就是那一侧（见下文 *Needs attention*）。要让它改变 Bank A 的余额：
 
 1. 在 Accounts 页面创建账户时选 **Balance mode: Hybrid**（ledger type 选 Asset，subtype 选
    Bank）。
@@ -269,10 +269,20 @@ Accounts 页面用它的 **Main account** 下拉框选择（只限手动账户�
     页面列出这些候选；对正确的那条点 **Pair**。完全相同的会自动配对：一笔转账拆成金额相同的几笔
     （同一天、同样两个账户之间、金额相同的两笔转出和两笔转入），按固定顺序配上，怎么配余额都一样。
     如果一侧的记录没有写明对方账户，就和单笔一样按金额和日期认：同一天别人转来的同额款项，可能在你
-    自己那笔到账前被一起认进来，等你那笔到了，它们会转到这里让你处理。
+    自己那笔到账前被一起认进来，等你那笔到了，它们会转到这里让你处理。手动账户上不会被自动采用的行
+    （见 *Not listed in full*）和其他候选一样是候选，所以其中有这样一行的完全相同的几笔也会留在这里。
+    在手动账户上，候选旁边不会记推断交易：万一其中一行就是真正的那一行，推断交易会让这笔钱算两次；
+    在你配对之前，净资产会把这笔金额计在 In transit 账户里。
   - *Amount differs*（金额不同）：两条记录互相指向对方的账户，但金额不同。页面上没有 **Pair**：
     两条都是资金记录时，通过 API 配对（`POST /api/v1/finance/transfers/{id}/pair`，请求体
     `{"transaction_id": "<另一条>"}`；见下文“没有写明对方账户的记录”），否则如果它不是转账，就 Reject。
+    手动账户上按 *Not listed in full* 那样不会被自动采用的同额行也会列出，带 **Pair**，旁边不会记推断交易。
+  - *Not listed in full*（未完整列出）：这笔转账唯一的候选是手动账户上的一行，它落在转账窗口里、早于这个账户的
+    上传完整列出的第一天，所以不会被自动采用（见下文“导入与转账”）。它旁边不会记推断交易：万一这行
+    就是真正的那一行，推断交易会让这笔钱算两次。这个账户的余额是对的；在这项审核配对之前，净资产会把这笔金额计在
+    In transit 账户里。上传一份列出那几天的账单，如果两条互为对方唯一的候选，
+    就会自动配对（如果另一笔同金额的转账也在争这一行，两者都进入 *Several candidates*）；也可以自己配对：那一行会作为候选列出，带 **Pair**。已在 before history 结清的转账不会因此进入审核。等待手动账户的转账永远不会 *Overdue*：它等的是一次
+    上传，而不是某个连接。
   - *Overdue*（逾期）：另一个账户有自己的连接，但 7 天内还没报告它那一侧。
 
   在你决定之前什么都不会变：余额和净资产保持原样。
@@ -434,8 +444,8 @@ Trading 212 是一个连接器：`worker` 通过 Trading 212 的公开 API 每 3
 
 ### 2. 添加连接
 
-在 Connections 页面的 **Add Trading 212** 里填写显示名称，选择 **Account type**（Invest 或
-Stocks ISA），粘贴 API key 和 API secret，点 **Add Trading 212**。Lararium 会先向 Trading 212
+在 Accounts → Add account 里选择 **Trading 212 Invest** 或 **Trading 212 Stocks ISA**，填写显示
+名称，粘贴 API key 和 API secret，点 **Add Trading 212**。Lararium 会先向 Trading 212
 核验这个 key；如果它对应的账户已经连接过，会被拒绝。
 
 这个连接会创建一个账户，名为 `Trading 212 Invest ···1234` 或 `Trading 212 ISA ···1234`（Trading 212
@@ -474,7 +484,37 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 - **银行转账入金**在 Trading 212 一侧不带任何账户信息，所以当你银行那笔付款是唯一候选时，按金额和
   日期配对（见[登记标识](#登记标识)）。有两个候选都符合时（比如两个账户在相近的时间收到同样金额），
   这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
-- **Invest ↔ ISA。** 恰好有两个 Trading 212 连接、一个 Invest 一个 ISA 时，两者之间的转账会自动配对。
+- **多个账户共用的收款银行账户。** 如果你的银行用同一个银行账户（同一组 sort code 和账号）向
+  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款只能靠付款参考（reference）说明付给
+  哪一个。把参考登记一次，目前只能通过 API 操作：`POST /api/v1/finance/accounts/identifiers/references`
+  和 `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
+  "reference": "<payment reference>"}]}`（占位符；填你的银行 app 显示的内容，sort code 写成 11-22-33 或
+  112233 都行）。一次调用会替换该标识的全部参考，`references` 为空列表则
+  移除它们。参考的匹配忽略大小写和首尾空格。一个银行账户要么登记到一个账户上（做法见
+  [登记标识](#登记标识)），要么带参考，不能两者兼有。Lararium 随后会检查全部历史：付给该收款账户、
+  参考相符的银行转账会指明对应账户，银行付到 Trading 212 Invest、Stocks ISA 和 Cash ISA 的充值
+  会自动配对。卡充值仍按上面的卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的
+  入金方式当作银行转账来配对。
+- **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
+  状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
+  一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
+  对手账户，需要手动配对：两侧都不指明任何账户，所以哪一侧都无法识别，不会自动配对。只有一个 Invest
+  （或一个 Stocks ISA）加一个 Cash ISA 时，同样不指明对手账户：Cash ISA 没有可指明的
+  Trading 212 id，这类转账也需要手动配对。
+  Lararium 只统计添加到它里面的账户：你持有但没添加的 Cash ISA，
+  仍按两个账户的规则处理，转到它的那笔会被当成转到另一个账户。新添加的同系列账户在每个
+  Trading 212 连接的下一次同步时生效（届时会重放其转账）。
+
+### Cash ISA（没有 API）
+
+Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再上传 app History 页面导出的 CSV：
+在 Accounts → Add account 里选 **Trading 212 Cash ISA** 并在那里上传 History CSV（上传会自己使用现成的
+profile）。请在表单的 **Opened on** 栏填上账户的开户日期：这样从那天开始的导出也能代表之前的
+日子，开户当天的入金就能与银行那边的付款配对。每次导出必须从该账户的第一天开始，
+或从之前某次上传已覆盖的某一天开始。导出文件请保留 Trading 212 给的文件名
+（`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`）：它写明了这次导出的时段，时段内除最后一天外每天都
+完整列出（导出可能在最后一天中途生成）。改过名的导出从首行那天起、到末行前一天为止每天都完整列出，上传时还会
+警告文件名没有给出时段。利息行在其 `Action` 确定之前，按普通行导入。
 
 ### 警告
 
@@ -755,7 +795,11 @@ SQL
    Lararium 会认出它是这家银行的哪种格式，并为它新建或复用 profile。其他文件在 Data →
    Statement files 上传，并选一个 profile（怎样读这家银行的文件，见下文）。两种方式都要选择
    账户（或填一个新账户的名称）；文件本身不写明币种时，还可以选一个币种。文件最大 5 MiB、
-   20,000 行。文件会作为文档保存（在 `documents` 卷中），永不删除。
+   20,000 行。文件会作为文档保存（在 `documents` 卷中），永不删除。在账户类型出现之前添加的账户，可以用
+`PATCH /api/v1/finance/accounts/{id}`、请求体 `{"type_key": "<key>"}` 为它设置类型；账单类型的 key 有
+`hsbc_uk`、`lloyds`、`boc_uk`、`revolut.current`、`revolut.savings`、`tembo`、`lemfi` 和
+`trading212.cash_isa`。该账户必须是手动的 transactions 账户，且形态与类型相符；设置类型后，它在
+Accounts 上的卡片会出现 **Upload file**。
 2. **审阅。** 批次页面把每一行标为 **new**（新的）、**duplicate**（账本里已有）、**skipped**
    （金额为零，或被 profile 的 `include_only` 排除；会显示原因）或 **error**（无法读取，或与
    滚动余额对不上）。只要有错误行就不能提交：修改 profile 或文件，丢弃这个批次后重新上传。行列表
@@ -790,9 +834,14 @@ SQL
 每一行也会经过转账匹配：如果某行是来自已连接账户的一笔转账的另一侧，它会取代这笔转账的占位交易，
 而不会被算两次，Transfers 页面也像对待其他记录一样对待它。写明对方账户的行通过登记表匹配。没有写明
 对方账户、也不是刷卡类型的行，会仅凭金额和日期被采用，除非这笔转账的时间窗口早于这个账户的导入
-完整列出的第一天（没有写明账单期间的导出文件，第一天和最后一天可能不完整）：那之前，真正的那一行
-可能在账户的期初里，永远不会被导入，不能让一笔金额相同但无关的款项顶替它。已导入的最后一天之后则会
-采用：万一采用的不是真正那一行，下一份账单会带来真正的那一行，这笔转账就会带着两个候选进入
+完整列出的第一天（导出文件的最后一天可能不完整；行带有 `started_at` 的导出，例如 Revolut 的 CSV，以及 `DTSTART` 带有午夜以外时刻的 OFX 文件，第一天也可能不完整）：那之前，真正的那一行
+可能在账户的期初里，永远不会被导入，不能让一笔金额相同但无关的款项顶替它。账户的开户日期（上传时新建账户会询问）
+让转账匹配把它第一次上传之前的日子视为空的：一次上传若从这一天或更早开始完整列出，也就代表了之前的所有时间。写明这个账户的记录是一笔付款时，
+它的时间窗口从付款前一天开始，因为只给日期的账单可能把一笔付款记在钱转出之后。如果文件给出的时间精确到秒，
+这一行不早于那笔付款前两分钟，而那笔付款是已连接账户的记录，这项检查就改从付款当天算起，按这一行的文件读取时用的时区（它的 profile 的时区，Trading 212 Cash ISA 是 UTC；
+没有则用你的时区），这一行就是按这个时区记账的：
+收款不会早于付款。（OFX 的行按它自己时间写的日期记账，不一定是这个时区；夏令时午夜刚过时发出的付款，这项检查仍可能晚一天开始。）导入的付款永远不算，即使时间精确到秒：它的时间可能是银行入账的时间（OFX 文件就是这样），
+晚于钱转出的时间。时间窗口本身，以及候选，都不变。这项检查不采用的一行仍是候选，只是不会被自动采用：它的转账需要处理（*Not listed in full*，还有其他候选时是 *Several candidates*），以它为候选的任何其他转账也一样。已导入的最后一天之后则会采用：万一采用的不是真正那一行，下一份账单会带来真正的那一行，这笔转账就会带着两个候选进入
 “需要处理”。在 Transactions 账户上，如果时间窗口完全落在账单完整列出、或由期初调整
 代表的日子里，这笔转账会直接结清（*before history*），账户余额保持和账单一致。到账太晚、没能配对的
 收款也是这样：那一行留在 Unassigned，这笔转账出现在 Recent 里，而不是“需要处理”。两次导入之间不要
@@ -859,14 +908,17 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   `currency`（文件只写一次而不逐行写币种时，每一行的币种，例如 LemFi 的 `Money in (GBP)`；否则用上传时
   选的币种，或映射的 `currency` 列）和 `interest_descriptions`（支付利息的行的描述，用于不印交易类型
   代码的银行，例如 LemFi 的 `Savings Interest Payout`：和刷卡付款一样，这样的行永远不会仅凭金额和日期
-  被当作一笔转账的另一侧）。
+  被当作一笔转账的另一侧），以及 `period_from_filename`（在上传文件的文件名中搜索的正则表达式，带命名组
+  `start` 和 `end`，各是一个 `YYYY-MM-DD` 日期，用于按时段给导出命名的银行，例如 Trading 212 的
+  Cash ISA：匹配到的就是文件的时段，除最后一天外每天都完整列出；文件名给不出时段，或有行落在范围之外时，
+  上传按原样读取，并附一条警告）。
   重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、
   `fee`（在金额之外另收的费用）、`type`、`value_date`、`payee`、`memo`、`check_number`、
   `counterparty_name`、`counterparty_sort_code`、`counterparty_account_number`、`reference`
   （付款参考）、`started_at`（付款的发起时间，按 `date_format` 解析，这时它必须带时间；`date` 是
-  完成时间），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
+  完成时间；按它读取的导出只部分列出第一天，因为其中的行可能按发起时间选出），以及账单自身账户的 `account_sort_code`、`account_number` 和 `account_type`（产品，
   例如 Revolut 的 `Product`；每一行都必须相同）。
 - **`extract`** 从一列里读出多个类型化字段：`[{"column": "Details", "patterns": ["<正则>", ...]}]`。
   第一个完整匹配非空单元格的正则，用其命名分组填写同名字段（`payee`、`memo`、`check_number`、
