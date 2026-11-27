@@ -1951,6 +1951,9 @@
               "thousands_separator": ""
             }
           },
+          "card_payment_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
           "card_types": {
             "$ref": "#/components/schemas/CardTypes"
           },
@@ -4195,6 +4198,9 @@
       "OfxProfileConfig": {
         "additionalProperties": false,
         "properties": {
+          "card_payment_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
           "card_types": {
             "$ref": "#/components/schemas/CardTypes"
           },
@@ -4301,6 +4307,9 @@
       "PdfProfileConfig": {
         "additionalProperties": false,
         "properties": {
+          "card_payment_types": {
+            "$ref": "#/components/schemas/CardTypes"
+          },
           "card_types": {
             "$ref": "#/components/schemas/CardTypes"
           },
@@ -4593,6 +4602,9 @@
               "decimal_separator": ".",
               "thousands_separator": ","
             }
+          },
+          "card_payment_types": {
+            "$ref": "#/components/schemas/CardTypes"
           },
           "card_types": {
             "$ref": "#/components/schemas/CardTypes"
@@ -5102,6 +5114,28 @@
             ],
             "title": "Cancels Transaction Id"
           },
+          "card_lifecycle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Card Lifecycle Id"
+          },
+          "card_reversal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Card Reversal"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -5133,6 +5167,10 @@
             "title": "Postings",
             "type": "array"
           },
+          "refund": {
+            "title": "Refund",
+            "type": "boolean"
+          },
           "status": {
             "enum": [
               "pending",
@@ -5153,7 +5191,10 @@
           "status",
           "origin",
           "postings",
-          "cancels_transaction_id"
+          "cancels_transaction_id",
+          "refund",
+          "card_lifecycle_id",
+          "card_reversal"
         ],
         "title": "TransactionOut",
         "type": "object"

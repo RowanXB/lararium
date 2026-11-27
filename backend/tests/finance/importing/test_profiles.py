@@ -13,10 +13,12 @@ from lararium.modules.finance.importing.profiles import (
     AmountFormat,
     CsvColumns,
     CsvProfileConfig,
+    OfxProfileConfig,
     ProfileConfig,
     create_profile,
     get_profile,
     is_bank_transfer,
+    is_card_payment,
     list_profiles,
     update_profile,
 )
@@ -281,3 +283,12 @@ def test_currency_set_once_or_by_column() -> None:
     columns = {"date": "Date", "description": ["D"], "amount": "A", "currency": "Currency"}
     with pytest.raises(ValidationError, match="not both"):
         PROFILE_CONFIG.validate_python(_csv(columns=columns, currency="GBP"))
+
+
+def test_a_card_number_or_a_card_payment_type_is_a_card_payment() -> None:
+    assert is_card_payment(["VIS"], "VIS", None)
+    assert is_card_payment(["VIS"], " VIS ", None)
+    assert is_card_payment([], None, "123456******1234")
+    assert not is_card_payment(["VIS"], "CHQ", None)
+    assert not is_card_payment([], None, None)
+    assert OfxProfileConfig(format="ofx").card_payment_types == ["POS"]

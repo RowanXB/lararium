@@ -28,6 +28,7 @@ from lararium.modules.finance.ledger import (
     ChainFields,
     CounterpartyFields,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     compute_residuals,
     upsert_connector_transaction,
@@ -345,6 +346,7 @@ class ConnectorRun:
         counterparty: CounterpartyFields | None = None,
         cancels: UUID | None = None,
         chain: ChainFields | None = None,
+        details: TransactionDetails | None = None,
     ) -> UUID:
         """Post the connection's transaction under the key (`cancels`: the transaction it
         cancels, cancelled-withdrawal design §4.2; `chain`: the on-chain transaction it is)."""
@@ -361,6 +363,7 @@ class ConnectorRun:
                 counterparty=counterparty or CounterpartyFields(),
                 cancels_transaction_id=cancels,
                 chain=chain,
+                details=details or TransactionDetails(),
             ),
         )
         self.count(outcome)

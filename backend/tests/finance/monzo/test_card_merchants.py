@@ -1,7 +1,8 @@
 """Monzo naming registered card merchants (eToro design §5.12, Task 15), and the suggestion to
 register one whose website is on a connected platform's domain."""
 
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -11,17 +12,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import AccountRecord, create_account
+from lararium.modules.finance.cashflow import cash_flow
 from lararium.modules.finance.identifiers import (
     dismiss_card_merchant,
     register_card_merchant,
 )
 from lararium.modules.finance.instruments import get_currency
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    upsert_connector_transaction,
+)
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import (
     card_merchant_suggestions,
     find_transfer_violations,
     list_transfers,
     reject,
+    transfer_contra,
 )
 from tests.finance.monzo.fixtures import ACCOUNT_ID, make_merchant, make_transaction
 from tests.finance.monzo.test_normalize_transfers import (
@@ -98,6 +107,59 @@ async def test_monzo_card_payment_identified_after_register(session: AsyncSessio
     await run(register_card_merchant, MERCHANT, [])
     await sync_monzo(session, connection, transactions={})
     assert (await transaction_row(session, "tx_CARD0001")).counterparty_identifier_id is None
+
+
+async def test_a_card_refund_from_a_registered_merchant_still_pairs(
+    session: AsyncSession, run
+) -> None:
+    """A Trading 212 withdrawal paid back to the registered card pairs with the Monzo refund
+    as before; the refund flag leaves it out of the cash-flow report."""
+    gbp = await get_currency(session, "GBP")
+    invest, isa = await platform_accounts(run)
+    await run(register_card_merchant, MERCHANT, [invest.id, isa.id])
+    connection = await monzo_connection(run)
+    await sync_monzo(
+        session,
+        connection,
+        transactions={ACCOUNT_ID: [card_payment(5000, website="https://www.trading212.com")]},
+    )
+    when = datetime(2026, 3, 1, 12, 0, 5, tzinfo=UTC)
+    contra_id = await transfer_contra(
+        session,
+        source=("connection", f"{invest.source_connection_id}:wd_1"),
+        own_account_id=invest.id,
+        counterparty_identifier_id=None,
+        other_postings=0,
+        never_transfer=False,
+    )
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=when,
+            description="Withdrawal",
+            status="booked",
+            origin="connector",
+            connection_id=invest.source_connection_id,
+            external_id="wd_1",
+            postings=[
+                PostingInput(invest.id, gbp.id, Decimal("-50")),
+                PostingInput(contra_id, gbp.id, Decimal("50")),
+            ],
+            counterparty=CounterpartyFields(name="Withdrawal", bank_transfer=False),
+        ),
+    )
+    await heal(session)
+
+    row = await transaction_row(session, "tx_CARD0001")
+    refund = await session.scalar(
+        text("select refund from finance.transactions where id = :i"), {"i": row.id}
+    )
+    assert refund is True
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.in_transaction_id) == ("matched", row.id)
+    flow = await cash_flow(session, date(2026, 3, 1), date(2026, 3, 31))
+    assert (flow.income, flow.spending) == (Decimal(0), Decimal(0))
+    assert await find_transfer_violations(session) == []
 
 
 async def _replay_state(session: AsyncSession) -> dict[str, Any]:
