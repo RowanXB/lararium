@@ -1269,13 +1269,18 @@ function UpdateBitcoinGapsForm({ connection }: { connection: ConnectionOut }) {
   const [error, setError] = useState<string>();
   const [done, setDone] = useState<string>();
   const mutation = useMutation({
-    mutationFn: async (branches: Record<string, number>) =>
-      await updateBitcoinGaps({
+    mutationFn: async (branches: Record<string, number>) => {
+      // The PATCH replaces the whole map, and this form edits only the first descriptor's
+      // limits: every other descriptor's are sent back as stored. Every field empty restores
+      // the first descriptor's defaults.
+      const { d0: _first, ...others } = connection.bitcoin?.gaps ?? {};
+      const gaps = Object.keys(branches).length > 0 ? { ...others, d0: branches } : others;
+      return await updateBitcoinGaps({
         path: { connection_id: connection.id },
-        // Every field empty restores the defaults.
-        body: { gaps: Object.keys(branches).length > 0 ? { d0: branches } : {} },
+        body: { gaps },
         throwOnError: true,
-      }),
+      });
+    },
     onSuccess: () => {
       setDone("Gap limits saved; syncing");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });

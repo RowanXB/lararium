@@ -967,3 +967,44 @@ it("shows a Bitcoin wallet's state, never its key", async () => {
   );
   expect(await within(gaps).findByText("Gap limits saved; syncing")).toBeInTheDocument();
 });
+
+it("keeps another descriptor's gap limits when saving the first one's", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [
+      {
+        ...CONNECTION,
+        id: "0190a0b0-0000-7000-8000-0000000000c2",
+        connector: "bitcoin",
+        display_name: "Descriptor wallet",
+        status: "healthy",
+        redirect_uri: null,
+        bitcoin: {
+          form: "descriptor",
+          electrum_type: null,
+          scanned: { receiving: 21, change: 11 },
+          used: { receiving: 1, change: 1 },
+          last_check: "agrees",
+          unconfirmed: 0,
+          server: "mempool.space",
+          gaps: { d0: { "0": 40 }, d1: { "0": 30 } },
+        },
+      },
+    ],
+  } as never);
+  renderPage();
+  const gaps = await screen.findByRole("form", { name: "Gap limits" });
+  const user = userEvent.setup();
+  const receiving = within(gaps).getByLabelText("Receiving gap limit");
+  await user.clear(receiving);
+  await user.type(receiving, "60");
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenLastCalledWith(
+    expect.objectContaining({ body: { gaps: { d0: { "0": 60 }, d1: { "0": 30 } } } }),
+  );
+  // Emptying the fields restores the first descriptor's defaults only.
+  await user.clear(receiving);
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenLastCalledWith(
+    expect.objectContaining({ body: { gaps: { d1: { "0": 30 } } } }),
+  );
+});

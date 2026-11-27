@@ -33,9 +33,12 @@ from lararium.modules.finance.transfers import (
     TransferRecord,
     list_transfers,
     load_transfer_settings,
+    reject,
     rematch_identifiers,
     transfer_contra,
     unassign_identifier_and_rematch,
+    unpair,
+    weak_transfers,
 )
 from lararium.modules.finance.transfers.pairs import (
     HASH,
@@ -397,6 +400,146 @@ async def test_hash_ignores_the_window(
     await heal()
     assert _pairs(await list_transfers(session)) == {(withdrawal.id, receipt.id, "matched")}
     await assert_consistent(session)
+
+
+async def _matched_hash_pair(
+    session: AsyncSession, run: Run, chain: Chain, binance: Connected, wallet: Connected, heal: Heal
+) -> tuple[TransferRecord, TransactionRecord, TransactionRecord]:
+    """Binance's withdrawal to the wallet's A and the wallet's receipt there, matched."""
+    a = await _address(run, wallet.account, A)
+    withdrawal = await chain.movement(binance, "-0.01", names=a)
+    receipt = await chain.movement(wallet, "0.01", at=WHEN + timedelta(hours=1))
+    await heal()
+    [transfer] = await list_transfers(session)
+    assert (transfer.status, transfer.out_transaction_id, transfer.in_transaction_id) == (
+        "matched",
+        withdrawal.id,
+        receipt.id,
+    )
+    return transfer, withdrawal, receipt
+
+
+async def test_unpaired_hash_pair_stays_apart(
+    session: AsyncSession,
+    run: Run,
+    chain: Chain,
+    binance: Connected,
+    wallet: Connected,
+    heal: Heal,
+) -> None:
+    """The owner unpairs the hash's pair (a never-pair decision both ways): a heal leaves the
+    two apart, and the hash gives them no edge."""
+    transfer, withdrawal, receipt = await _matched_hash_pair(
+        session, run, chain, binance, wallet, heal
+    )
+
+    await run(unpair, transfer.id)
+    await heal()
+
+    found = await list_transfers(session)
+    assert all(
+        {t.out_transaction_id, t.in_transaction_id} != {withdrawal.id, receipt.id} for t in found
+    )
+    assert receipt.id not in (await _relation(session)).tiers.get(withdrawal.id, {})
+    await assert_consistent(session)
+
+
+async def test_rejected_hash_pair_stays_apart(
+    session: AsyncSession,
+    run: Run,
+    chain: Chain,
+    binance: Connected,
+    wallet: Connected,
+    ids: SystemIds,
+    heal: Heal,
+) -> None:
+    """The owner rejects the hash's pair: it stays rejected across a heal, both records on
+    Unassigned, and the hash gives them no edge."""
+    transfer, withdrawal, receipt = await _matched_hash_pair(
+        session, run, chain, binance, wallet, heal
+    )
+
+    await run(reject, transfer.id)
+    await heal()
+
+    [rejected] = await list_transfers(session)
+    assert (rejected.id, rejected.status) == (transfer.id, "rejected")
+    for record, on in ((withdrawal, binance), (receipt, wallet)):
+        assert await contra_account(session, record.id, on.account.id) == ids.unassigned
+    assert receipt.id not in (await _relation(session)).tiers.get(withdrawal.id, {})
+    await assert_consistent(session)
+
+
+async def test_hash_pair_naming_nobody_is_not_weak(
+    session: AsyncSession, chain: Chain, binance: Connected, wallet: Connected, heal: Heal
+) -> None:
+    """Neither leg names an own account (the withdrawal's address is in no registry yet), but
+    both are one chain transaction: that is no weak evidence, so the page offers Unpair, not
+    Reject."""
+    withdrawal = await chain.movement(binance, "-0.01")
+    receipt = await chain.movement(wallet, "0.01", at=WHEN + timedelta(hours=1))
+    await heal()
+
+    transfers = await list_transfers(session)
+    assert _pairs(transfers) == {(withdrawal.id, receipt.id, "matched")}
+    assert await weak_transfers(session, transfers) == frozenset()
+
+
+async def test_hash_pair_is_taken_where_the_coverage_gate_refuses(
+    session: AsyncSession, run: Run, binance: Connected, btc: InstrumentRecord
+) -> None:
+    """A withdrawal naming a manual account, and a receipt there naming nobody whose days no
+    import lists: the coverage gate refuses the registry's one-sided pair (an unrelated row
+    could stand in for the real one), but the same chain transaction, address and amount is
+    no such guess, so the hash's pair is taken. Only connectors give records chain fields,
+    and their accounts are connected, so the shape is built here with `adding`."""
+    cold = await run(
+        create_account,
+        name="Cold storage",
+        ledger_type="asset",
+        subtype="wallet",
+        balance_mode="transactions",
+    )
+    sent = Pairable(
+        id=uuid4(),
+        source=("connection", f"{binance.connection_id}:w1"),
+        account_id=binance.account.id,
+        instrument_id=btc.id,
+        quantity=Decimal("-0.01"),
+        occurred_at=WHEN,
+        booking_date=WHEN.date(),
+        holder=cold.id,
+        bank_transfer=False,
+        timed=True,
+    )
+    received_id = uuid4()
+    received = replace(
+        sent,
+        id=received_id,
+        source=("transaction", str(received_id)),
+        account_id=cold.id,
+        quantity=Decimal("0.01"),
+        holder=None,
+        bank_transfer=True,
+    )
+
+    async def relation(*records: Pairable):
+        return await pair_relation(
+            session,
+            await system_account_ids(session),
+            await load_transfer_settings(session),
+            adding=records,
+        )
+
+    gated = await relation(sent, received)
+    assert not gated.takeable(sent.id, received.id)
+    assert gated.partner(sent.id) is None
+
+    on_chain = {"chain": "bitcoin", "tx_hash": H, "chain_address": A}
+    hashed = await relation(replace(sent, **on_chain), replace(received, **on_chain))
+    assert hashed.tiers[sent.id][received.id] == HASH
+    assert hashed.takeable(sent.id, received.id)
+    assert hashed.partner(sent.id) == received.id
 
 
 _WALLET, _BINANCE = uuid4(), uuid4()
