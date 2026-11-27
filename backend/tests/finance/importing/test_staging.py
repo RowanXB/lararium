@@ -427,9 +427,8 @@ async def test_gap_creates_adjustment(
     (adjustment,) = _adjustments(await _rows(session, await stage(profile, january)))
 
     assert adjustment.quantity == Decimal("-75.00")  # 1405.00 opening, 1480.00 in the ledger
-    assert adjustment.booking_date == date(
-        2027, 1, 5
-    )  # an export's first day is partial: dated on it
+    # The file's one row is on its last day, which it lists only in part: dated on it.
+    assert adjustment.booking_date == date(2027, 1, 5)
 
 
 async def test_older_statement_after_newer_realigns(
@@ -1432,6 +1431,29 @@ async def test_a_short_export_lists_all_but_its_last_day(
     content = HEADER + "".join(f"{day:%d/%m/%Y},Example Payee,-1.00\n" for day in days)
     batch = await stage(profile, content)
     assert await _complete(session, batch) == complete
+
+
+async def test_an_export_whose_first_day_misses_a_committed_row_is_refused(
+    run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Spec §8.3 of the account type catalog: a plain export lists its first day in full,
+    so a committed row of that day it doesn't list contradicts it (Decision 16 the other
+    way), as one starting partway through the day used to be let off."""
+    profile = await _csv_profile(
+        run, columns={"date": "Date", "description": ["Description"], "amount": "Amount"}
+    )
+    earlier = HEADER + (
+        "19/11/2026,Pay,100.00\n20/11/2026,Coffee,-3.00\n20/11/2026,Cafe,-5.00\n"
+        "21/11/2026,Shop,-1.00\n"
+    )
+    await commit((await stage(profile, earlier, filename="a.csv")).id)
+
+    later = HEADER + "20/11/2026,Cafe,-5.00\n22/11/2026,Bus,-1.00\n"
+    with pytest.raises(
+        ImportNotAllowedError,
+        match=r"a\.csv has -3\.00 on 2026-11-20, which this file doesn't list",
+    ):
+        await stage(profile, later, filename="b.csv")
 
 
 async def test_duplicate_that_breaks_the_balance_chain_is_an_error(

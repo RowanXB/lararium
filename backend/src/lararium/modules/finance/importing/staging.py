@@ -633,9 +633,9 @@ def plan_openings(
     movement before its first day, except those it lists itself. Its own rows and the
     originals its duplicates stand for come after its opening even when a duplicate's
     original is dated earlier (an id matched across days). On a first day it lists only in
-    part (an export may start partway through a day), another file's movement it doesn't
-    list came before it too; on a first day it lists in full there is no such movement
-    (staging refuses one), and none is counted.
+    part (only an export whose rows carry a started date may start partway through a day),
+    another file's movement it doesn't list came before it too; on a first day it lists in
+    full there is no such movement (staging refuses one), and none is counted.
     """
 
     assigned: dict[UUID, Decimal] = defaultdict(Decimal)

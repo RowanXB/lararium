@@ -453,9 +453,8 @@ async def test_rollback_realigns_adjustments(
 
     (adjustment,) = _adjustments(await _rows(session, december))
     assert (adjustment.status, adjustment.quantity) == ("committed", Decimal("1480.00"))
-    assert adjustment.booking_date == date(
-        2026, 12, 1
-    )  # an export's first day is partial: dated on it
+    # December's one row is on its last day, which it lists only in part: dated on it.
+    assert adjustment.booking_date == date(2026, 12, 1)
     assert adjustment.position == -1
     assert await _balance(session, account.id) == Decimal("1450.00")
 
@@ -1257,14 +1256,16 @@ async def test_repeated_balance_rows_are_each_a_transaction(
 async def test_repeated_balance_row_mistaken_across_exports_is_flagged(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
 ) -> None:
-    """The cost of the 2026-11-19 ruling: an export starting partway through a day can list
-    the day's second identical row first, and its key is then the earlier export's first
-    one. It is taken as that row's duplicate, but the export's balances then disagree with
-    the ledger, so the export is refused rather than the row silently lost."""
+    """The cost of the 2026-11-19 ruling: an export lacking a day's first row lists the
+    day's second identical row first, and its key is then the earlier export's first one.
+    A file never starts partway through a day (account type catalog design §8.3), so its
+    first day counts as listed in full and the row is taken as that row's duplicate; the
+    export's balances then disagree with the ledger, so it is refused rather than the row
+    silently lost."""
     profile = await _csv_profile(run)
     early = BALANCE_HEADER + "19/11/2026,Pay,100.00,100.00\n20/11/2026,From savings,10.00,110.00\n"
     await commit((await stage(profile, early, filename="a.csv")).id)
-    # Taken later: from partway through 20 Nov, after the payment that followed.
+    # Its 20 Nov lacks the day's first row, the transfer the earlier export ends on.
     late = BALANCE_HEADER + (
         "20/11/2026,Shop,-10.00,100.00\n20/11/2026,From savings,10.00,110.00\n"
         "21/11/2026,Bus,-1.00,109.00\n"
