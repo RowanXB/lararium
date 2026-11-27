@@ -382,3 +382,29 @@ it("opens on the preset it was given", async () => {
     "true",
   );
 });
+
+it("opens a preset link from another day on the dates it was made with", async () => {
+  // "This month" linked in January 2020 still shows January 2020, not this month.
+  renderPage({ preset: "month", start: "2020-01-01", end: "2020-01-31" });
+  await waitFor(() =>
+    expect(getIncome).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({ start: "2020-01-01", end: "2020-01-31" }),
+      }),
+    ),
+  );
+  expect(screen.getByRole("button", { name: "Custom" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("opens a preset link whose dates are today's as the preset", async () => {
+  renderPage({ preset: "month", ...presetRange("month") });
+  await waitFor(() =>
+    expect(getIncome).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: expect.objectContaining(presetRange("month")) }),
+    ),
+  );
+  expect(screen.getByRole("button", { name: "This month" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});

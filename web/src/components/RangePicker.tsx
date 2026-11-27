@@ -29,11 +29,18 @@ export function readRangeSearch(search: Record<string, unknown>): RangeSearch {
   };
 }
 
-// A preset is taken by name, so it ends today wherever the link was made; a custom range
-// only when it is one. Anything else opens on the default.
+// A link opens on the dates it was made with: a preset whose dates were another day's
+// ("This month" linked on 30 November, opened on 1 December) opens them as custom, one
+// without dates or with today's as the preset; a custom range only when it is one. Anything
+// else opens on the default.
 export function choiceFrom(search: RangeSearch): RangeChoice {
-  if (search.preset && search.preset !== "custom") return initialChoice(search.preset);
   const range = { start: search.start ?? "", end: search.end ?? "" };
+  if (search.preset && search.preset !== "custom") {
+    const today = presetRange(search.preset);
+    const moved = range.start !== today.start || range.end !== today.end;
+    if (moved && isValidRange(range)) return { preset: "custom", range };
+    return initialChoice(search.preset);
+  }
   if (search.preset === "custom" && isValidRange(range)) return { preset: "custom", range };
   return initialChoice();
 }
