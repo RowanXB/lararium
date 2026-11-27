@@ -29,6 +29,7 @@ from lararium.modules.finance.identifiers import (
     get_or_create_identifier,
     normalize_identifier,
 )
+from lararium.modules.finance.importing.income_kinds import refresh_income_kinds
 from lararium.modules.finance.importing.profiles import is_bank_transfer
 from lararium.modules.finance.importing.staging import (
     BatchStatus,
@@ -296,6 +297,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
         .where(b.id == batch_id)
         .values(status="committed", committed_at=func.clock_timestamp())
     )
+    await refresh_income_kinds(session, batch_id)
     # Pair the new rows with the transfers they are a side of, replacing placeholders, and
     # whatever else the commit changed (M4, design §5.8: the registration, the span).
     await heal_transfers(ctx)
@@ -339,7 +341,8 @@ async def rollback_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchReco
     await session.execute(
         update(b).where(b.id == batch_id).values(status="rolled_back", rolled_back_at=func.now())
     )
-    # Without this batch, the remaining batches' adjustments follow (Decision 13).
+    # Another batch's event may have been interest only through this batch's duplicate row.
+    await refresh_income_kinds(session, batch_id)
     await _unregister_own_account(ctx, batch_id, account_id)
     await heal_transfers(ctx)
     # Without this batch, the remaining batches' adjustments follow (Decision 13).
