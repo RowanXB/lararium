@@ -166,10 +166,23 @@ def eur_path(asset: str, day: date, closes: Mapping[tuple[str, date], Decimal]) 
 class CoinGeckoError(DisplayableError):
     """CoinGecko did not answer well. Never carries the key, a URL or a body."""
 
+    status: int | None = None
+
+
+class CoinGeckoNoChart(CoinGeckoError):
+    """One coin's chart cannot be had (an id that is no coin, or no id at all), as an id given
+    by hand can be: that asset goes without, the others do not."""
+
 
 def _failed(status: int | None) -> CoinGeckoError:
     shown = "no response" if status is None else f"HTTP {status}"
-    return CoinGeckoError(f"CoinGecko request failed ({shown})")
+    failed = CoinGeckoError(f"CoinGecko request failed ({shown})")
+    failed.status = status
+    return failed
+
+
+def no_chart_flag(asset: str) -> str:
+    return f"CoinGecko has no chart for {asset}'s id"
 
 
 class CoinGeckoClient:
@@ -238,11 +251,16 @@ class CoinGeckoClient:
         self, coin_id: str, vs_currency: str, from_seconds: int, to_seconds: int
     ) -> ApiValue:
         if not _ID.fullmatch(coin_id):
-            raise CoinGeckoError("CoinGecko gave an id that cannot be used")
-        return await self._get(
-            f"coins/{coin_id}/market_chart/range",
-            {"vs_currency": vs_currency, "from": from_seconds, "to": to_seconds},
-        )
+            raise CoinGeckoNoChart("the CoinGecko id cannot be used")
+        try:
+            return await self._get(
+                f"coins/{coin_id}/market_chart/range",
+                {"vs_currency": vs_currency, "from": from_seconds, "to": to_seconds},
+            )
+        except CoinGeckoError as error:
+            if error.status == 404:
+                raise CoinGeckoNoChart("CoinGecko has no such coin") from None
+            raise
 
 
 # Days.
@@ -338,25 +356,10 @@ def _needs(held: Mapping[str, Held], pairs: Mapping[str, tuple[str, str]]) -> di
 # Bars.
 
 
-async def _stored_span(
-    session: AsyncSession, symbols: Sequence[str]
-) -> dict[str, tuple[date, date]]:
-    if not symbols:
-        return {}
-    rows = await session.execute(
-        text(
-            "select symbol, min(open_time) as low, max(open_time) as high"
-            " from finance.binance_klines where symbol in :s group by symbol"
-        ).bindparams(bindparam("s", expanding=True)),
-        {"s": list(symbols)},
-    )
-    return {
-        row.symbol: (row.low.astimezone(UTC).date(), row.high.astimezone(UTC).date())
-        for row in rows
-    }
-
-
 def _asked(config: Mapping[str, JSONValue]) -> dict[str, tuple[date, date]]:
+    """The days this connection has asked for, per symbol: one run of days, as it only ever
+    asks next to what it asked before (`_fetch_bars`). Bars are shared, but another
+    connection's are never taken for asked: it may store some while this one walks a range."""
     raw = config.get(ASKED_KEY)
     found: dict[str, tuple[date, date]] = {}
     for symbol, span in (raw if isinstance(raw, dict) else {}).items():
@@ -366,17 +369,6 @@ def _asked(config: Mapping[str, JSONValue]) -> dict[str, tuple[date, date]]:
             except ValueError:
                 continue
     return found
-
-
-def _joined(
-    stored: tuple[date, date] | None, asked: tuple[date, date] | None
-) -> tuple[date, date] | None:
-    """The days a symbol is known for: stored bars and days already asked for. Both are built
-    outwards from one another, so together they are one run of days."""
-    spans = [span for span in (stored, asked) if span is not None]
-    if not spans:
-        return None
-    return min(low for low, _ in spans), max(high for _, high in spans)
 
 
 async def _mark_asked(ctx: SyncContext, symbol: str, first: date, last: date) -> None:
@@ -396,12 +388,12 @@ async def _mark_asked(ctx: SyncContext, symbol: str, first: date, last: date) ->
 
 
 def _to_fetch(
-    need_from: date, last: date, stored: tuple[date, date] | None
+    need_from: date, last: date, asked: tuple[date, date] | None
 ) -> list[tuple[date, date]]:
-    """The day ranges of a symbol that are not stored yet: before what is stored and after it."""
-    if stored is None:
+    """The day ranges of a symbol not asked for yet: before what was asked and after it."""
+    if asked is None:
         return [(need_from, last)] if need_from <= last else []
-    low, high = stored
+    low, high = asked
     found: list[tuple[date, date]] = []
     if need_from < low:
         found.append((need_from, low - timedelta(days=1)))
@@ -420,9 +412,9 @@ async def _fetch_bars(
     newest_first: bool = False,
 ) -> None:
     """The closed days from `start` to `end` of a symbol, at most 1,000 bars a request, each
-    request's bars stored in a short transaction of their own. Days before the stored ones are
-    asked `newest_first`, so a request that fails leaves what is known one run of days
-    (`_joined`), which the next run extends."""
+    request's bars stored in a short transaction of their own and marked asked. Days before
+    the asked ones are asked `newest_first`, so a request that fails leaves the asked days one
+    run (`_asked`), which the next run extends."""
     endpoint = ENDPOINTS[layout.BARS_LABEL]
     chunks: list[tuple[date, date]] = []
     first = start
@@ -563,10 +555,9 @@ async def price_assets(ctx: SyncContext, client: BinanceClient) -> PriceReport:
         eur = (await get_currency(session, EUR)).id
     needs = _needs(held, pairs)
     async with ctx.session_factory() as session:
-        spans = await _stored_span(session, list(needs))
         asked = _asked((await get_connection(session, ctx.connection.id)).config)
     for symbol in sorted(needs):
-        known = _joined(spans.get(symbol), asked.get(symbol))
+        known = asked.get(symbol)
         for start, end in _to_fetch(needs[symbol], yesterday, known):
             older = known is not None and end < known[0]
             await _fetch_bars(ctx, client, symbol, start, end, newest_first=older)
@@ -853,7 +844,11 @@ async def coingecko_prices(
             vs = await _vs_currency(client, str(reporting))
         async with ctx.session_factory() as session:
             quote = (await get_currency(session, vs.upper())).id
-        chart = await _chart_prices(client, coin, vs, missing[0], now_ms)
+        try:
+            chart = await _chart_prices(client, coin, vs, missing[0], now_ms)
+        except CoinGeckoNoChart:
+            await _flag(ctx, [no_chart_flag(code)])
+            continue
         wanted_prices = {day: price for day, price in chart.items() if day in missing}
         written += await _record(
             ctx, code, one.instrument_id, quote, wanted_prices, COINGECKO_SOURCE

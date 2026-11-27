@@ -412,9 +412,8 @@ async def test_more_than_a_thousand_days_come_in_several_requests(
 
 
 async def test_older_days_cut_short_by_an_error_leave_no_gap(session, run, fake, clock) -> None:
-    """Days before the stored bars come newest first, so a request that fails leaves what is
-    stored one run of days and the next run asks for the rest (bars are shared by every
-    connection, so the stored ones may be another's)."""
+    """Days before the asked ones come newest first, so a request that fails leaves the asked
+    days one run and the next run asks for the rest."""
     start = date(2023, 11, 1)
     span = (LAST - start).days + 1
     assert span > 1_000 + len(DAYS)
@@ -444,6 +443,48 @@ async def test_older_days_cut_short_by_an_error_leave_no_gap(session, run, fake,
     fake.when_asked("klines", None)
     fake.clear_failures()
     async with _world(session, connection.id, fake, clock) as (ctx, client):
+        await price_assets(ctx, client)
+
+    assert len(await _prices(session, "AAA")) == span
+
+
+async def test_another_connections_bars_never_count_as_asked(session, run, fake, clock) -> None:
+    """Bars are shared, so another connection can store some while this one walks a range: a
+    connection goes only by the days it asked itself, or a request that fails would leave a
+    gap that the bars around it hide."""
+    start = date(2023, 11, 1)
+    span = (LAST - start).days + 1
+    assert span > 1_000 + len(DAYS)
+    short = await _scenario(
+        session,
+        run,
+        fake,
+        holds={"AAA": FIRST},
+        pairs=[("AAAEUR", "AAA", "EUR")],
+        bars={"AAAEUR": {start + timedelta(days=n): "2" for n in range(span)}},
+    )
+    long = await _scenario(
+        session, run, fake, holds={"AAA": start}, pairs=[("AAAEUR", "AAA", "EUR")]
+    )
+
+    async def short_prices() -> None:
+        async with _world(session, short.id, fake, clock) as (ctx, client):
+            await price_assets(ctx, client)
+
+    def hook(asked: int):
+        if asked == 0:  # the long one's first request: the short one stores the recent days
+            return short_prices()
+        if asked == 2:  # the long one's second request
+            fake.fail("klines", status=503)
+        return None
+
+    fake.when_asked("klines", hook)
+    with pytest.raises(DisplayableError):
+        async with _world(session, long.id, fake, clock) as (ctx, client):
+            await price_assets(ctx, client)
+    fake.when_asked("klines", None)
+    fake.clear_failures()
+    async with _world(session, long.id, fake, clock) as (ctx, client):
         await price_assets(ctx, client)
 
     assert len(await _prices(session, "AAA")) == span
@@ -578,12 +619,14 @@ class FakeGecko:
         charts: Mapping[str, Sequence[tuple[int, str]]] = {},
         currencies: Sequence[str] = ("usd", "eur", "gbp"),
         clock: Clock | None = None,
+        unknown: Sequence[str] = (),
     ) -> None:
         self.tickers = [
             {"base": base, "target": "USDT", "coin_id": coin, "target_coin_id": "tether"}
             for base, coin in tickers
         ]
         self.charts = charts
+        self.unknown = set(unknown)  # coins CoinGecko answers 404 for
         self.currencies = list(currencies)
         self.requests: list[httpx.Request] = []
         self._clock = clock
@@ -612,6 +655,8 @@ class FakeGecko:
             return httpx.Response(200, content=json.dumps(self.currencies).encode())
         if path.startswith("coins/") and path.endswith("/market_chart/range"):
             coin = path.removeprefix("coins/").removesuffix("/market_chart/range")
+            if coin in self.unknown:
+                return httpx.Response(404, content=b'{"error":"coin not found"}')
             low, high = int(params["from"]) * 1000, int(params["to"]) * 1000
             points = [
                 f"[{ms},{price}]" for ms, price in self.charts.get(coin, []) if low <= ms <= high
@@ -761,6 +806,36 @@ async def test_a_coingecko_id_given_by_hand_prices_the_asset(session, run, fake,
 
     assert report.unpriced == []
     assert await _prices(session, "NOC", "coingecko") == _all("7")
+
+
+@pytest.mark.parametrize("given", ["no-such-coin", "Not An Id!"])
+async def test_a_coin_coingecko_cannot_chart_is_skipped_and_flagged(
+    session, run, fake, clock, given: str
+) -> None:
+    """An id given by hand may be wrong: CoinGecko knows no such coin, or it is no id at all.
+    Only that asset goes without; the others are still priced."""
+    connection = await _scenario(session, run, fake, holds={"AAA": FIRST, "ZZZ": FIRST})
+    aaa = await find_by_identifier(session, "binance_asset", "AAA")
+    assert aaa is not None
+    await session.execute(
+        text(
+            "insert into finance.instrument_identifiers (instrument_id, scheme, value)"
+            " values (:i, 'coingecko', :v)"
+        ),
+        {"i": aaa.id, "v": given},
+    )
+    gecko = FakeGecko(
+        tickers=[("ZZZ", "zzz-coin")],
+        charts={"zzz-coin": _midnights(DAYS, ["3"] * 5)},
+        unknown=["no-such-coin"],
+    )
+    async with _world(session, connection.id, fake, clock, gecko=gecko, key=KEY) as (ctx, client):
+        report = await update_prices(ctx, client)
+
+    assert report.unpriced == ["AAA"]
+    assert await _prices(session, "ZZZ", "coingecko") == _all("3")
+    flags = (await get_connection(session, connection.id)).config["flags"]
+    assert "CoinGecko has no chart for AAA's id" in flags
 
 
 async def test_two_ids_for_one_asset_are_not_chosen_between(session, run, fake, clock) -> None:
