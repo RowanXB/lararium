@@ -6,6 +6,13 @@ in the source's instrument (a reward of 0.00012 BTC is one entry) beside its val
 reporting currency. An entry without a price or an FX rate is listed with no amount and left
 out of every total, as the cash-flow report leaves out such a flow (income-categories design
 §4.5).
+
+Unlike the cash-flow report (and so the Overview's income card), this one does not share an
+amount between its transaction's category splits: an entry has one effective category, and
+the category totals are its entries added up, so they always agree with the entries listed.
+A split income (a Monzo one the owner has not categorised) is therefore counted under its
+category here and shared between its splits there, and the per-category numbers of the two
+can differ while their totals agree.
 """
 
 from collections import defaultdict

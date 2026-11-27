@@ -123,7 +123,7 @@ Rewards are many and small: in the owner's data about one Earn reward a day per 
 - `known_categories`: every owner category in use, for the picker;
 - `hidden_moved_in`: money moved in from hidden accounts over the range, which the Overview counts as income and this page does not list (goal 7). Zero with an account filter.
 
-An entry's account is the asset or liability account the transaction posts to, other than In transit; with several, the first by posting position. `account_id` filters on it. Entries come from the same flows query as the cash-flow report (positive flows only), restructured so both share it.
+An entry's account is the asset or liability account the transaction posts to, other than In transit; with several, the first by posting position. `account_id` filters on it. Entries come from the same flows query as the cash-flow report (positive flows only), restructured so both share it. Unlike the cash-flow report, it does not share an entry between category splits: an entry has one effective category and the category totals add up the entries, so for a split income the per-category numbers can differ from the Overview's while the totals agree.
 
 `PUT /finance/transaction-categories` — body `{transaction_ids: [1..500 ids], category: string | null}`. Sets the owner's category on each transaction's source reference, or clears it with null. All or nothing: an unknown or void transaction fails the whole request. Runs through `CommandContext`, so it is audited. It accepts any transaction, not only income.
 
