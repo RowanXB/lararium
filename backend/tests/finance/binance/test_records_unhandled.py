@@ -4,6 +4,7 @@ replaces are not asked; Trading Bots and Copy Trading are counted from the walle
 names no record of theirs; a symbol `exchangeInfo` no longer lists is named; and every new flag
 of a sync is told once, together on one line."""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -38,10 +39,55 @@ def _pm_on(fake: FakeBinance, on: bool = True) -> None:
     fake.set_rows("account-info", [build_row("account-info", isPortfolioMarginRetailEnabled=on)])
 
 
-def _pm_asset(code: str, total: str, um: str = "0", cm: str = "0") -> dict:
+def _pm_asset(
+    code: str,
+    total: str,
+    um: str = "0",
+    cm: str = "0",
+    *,
+    borrowed: str = "0",
+    interest: str = "0",
+) -> dict:
     return build_row(
-        "pm-balance", asset=code, totalWalletBalance=total, umUnrealizedPNL=um, cmUnrealizedPNL=cm
+        "pm-balance",
+        asset=code,
+        totalWalletBalance=total,
+        umUnrealizedPNL=um,
+        cmUnrealizedPNL=cm,
+        crossMarginBorrowed=borrowed,
+        crossMarginInterest=interest,
     )
+
+
+def _cross(code: str, net: str) -> dict:
+    return build_row(
+        "margin-account",
+        asset=code,
+        free=net,
+        locked="0",
+        borrowed="0",
+        interest="0",
+        netAsset=net,
+    )
+
+
+def _um(code: str, wallet: str) -> dict:
+    return build_row("um-account", asset=code, walletBalance=wallet, unrealizedProfit="0")
+
+
+async def _held(session, connection_id, clock: Clock) -> dict[tuple[str, str], Decimal]:
+    """Each Binance account's balance per asset tomorrow, as valuation counts it."""
+    day = (datetime.fromtimestamp(clock.ms / 1000, UTC) + timedelta(days=1)).date()
+    rows = await session.execute(
+        text(
+            "select a.name, i.symbol, b.quantity from finance.v1_balances_asof(:d) b"
+            " join finance.accounts a on a.id = b.account_id"
+            " join finance.instruments i on i.id = b.instrument_id"
+            " where a.source_connection_id = :c"
+        ),
+        {"d": day, "c": connection_id},
+    )
+    return {(r.name, r.symbol): r.quantity for r in rows if r.quantity != 0}
 
 
 def _listed(name: str, balance: str, *held: tuple[str, str]) -> dict:
@@ -93,7 +139,11 @@ def test_the_family_is_read_and_replaces_the_classic_wallets() -> None:
     assert set(PORTFOLIO_MARGIN_PRODUCTS) <= set(PHASE_B_BUILT) & set(BALANCE_LABELS)
     assert OWN_SOURCES["portfolio_margin"] == "pm-balance"
     # Reconciled and opened on the wallet balance, as a futures wallet is (design 5.11).
-    assert READ_REPORTS["portfolio_margin"] == ("pm-balance", "totalWalletBalance")
+    # Net of its debt, as Cross Margin's `netAsset` is (ruling R20).
+    assert READ_REPORTS["portfolio_margin"] == (
+        "pm-balance",
+        (("totalWalletBalance", 1), ("crossMarginBorrowed", -1), ("crossMarginInterest", -1)),
+    )
     # Portfolio Margin unifies Cross Margin and the futures wallets; Isolated Margin stays.
     assert {"margin-account", "um-account", "cm-account", "um-income", "cm-income"} <= set(
         PORTFOLIO_MARGIN_REPLACES
@@ -315,14 +365,15 @@ async def test_delisted_symbol_is_flagged(
     await ingest(session, connection.id, "margin-trades", [{**cross, "isIsolated": False}])
     await ingest(session, connection.id, "margin-trades", [isolated])
 
-    first = await run_binance_sync(session, connection.id, fake.handler)
+    notifier = RecordingNotifier()
+    first = await run_binance_sync(session, connection.id, fake.handler, notifier=notifier)
     assert first.status == "healthy", first.last_error
     assert not [f for f in first.config["flags"] if "no longer listed" in f]  # pyright: ignore[reportGeneralTypeIssues]
 
     # Binance delists two of them: their trades cannot be fetched any more.
     fake.set_rows("exchange-info", [listed])
     clock.ms += 5 * HOUR_MS
-    after = await run_binance_sync(session, connection.id, fake.handler)
+    after = await run_binance_sync(session, connection.id, fake.handler, notifier=notifier)
 
     assert after.status == "healthy", after.last_error
     flags = after.config["flags"]
@@ -334,6 +385,14 @@ async def test_delisted_symbol_is_flagged(
     ]
     # Its trades stored before stay posted: the latest listing of it gives its pair.
     assert "spot_trade:OLDBBB:" + str(build_row("my-trades")["id"]) in await keys(session, after.id)
+    told = [m for m in notifier.messages if "no longer listed" in m]
+    assert len(told) == 1
+
+    # Still delisted: flagged once, so a later sync tells nothing of it again.
+    clock.ms += 5 * HOUR_MS
+    quiet = await run_binance_sync(session, connection.id, fake.handler, notifier=notifier)
+    assert quiet.status == "healthy", quiet.last_error
+    assert [m for m in notifier.messages if "no longer listed" in m] == told
 
 
 async def test_flags_are_notified_once_on_one_line(
@@ -377,3 +436,86 @@ async def test_flags_are_notified_once_on_one_line(
     assert again.status == "healthy", again.last_error
     assert len([m for m in notifier.messages if FLAG_PREFIX in m]) == 1
     assert "pending_flags" not in again.config
+
+
+async def test_portfolio_margin_is_counted_net_of_its_debt(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    _pm_on(fake)
+    fake.set_rows("pm-balance", [_pm_asset("STB", "100", um="2", borrowed="10", interest="0.5")])
+    connection = await binance_connection(run, config=later_config())
+    first = await run_binance_sync(session, connection.id, fake.handler)
+    assert first.status == "healthy", first.last_error
+
+    # A borrowed asset is negative, as in Cross Margin: 100 - 10 - 0.5 + 2.
+    assert [q for _, q, _ in await _snapshots(session, first.id, PM)] == [Decimal("91.5")]
+
+    # Interest accrues: no record of it is posted, so the net wallet balance's change is a
+    # difference; the unrealised profit's change alone is not one.
+    fake.set_rows("pm-balance", [_pm_asset("STB", "100", um="7", borrowed="10", interest="0.5")])
+    clock.ms += 5 * HOUR_MS
+    moved = await run_binance_sync(session, connection.id, fake.handler)
+    assert moved.status == "healthy", moved.last_error
+    assert await _differences(session, moved.id) == []
+    fake.set_rows("pm-balance", [_pm_asset("STB", "100", um="7", borrowed="10", interest="0.75")])
+    clock.ms += 5 * HOUR_MS
+    accrued = await run_binance_sync(session, connection.id, fake.handler)
+    assert accrued.status == "healthy", accrued.last_error
+    assert await _differences(session, accrued.id) == [(PM, "STB")]
+    # The opening is the net wallet balance before any record: 100 - 10 - 0.5.
+    [opening] = [k for k in await keys(session, accrued.id) if k.startswith("opening:portfolio")]
+    rows = await session.execute(
+        text(
+            "select p.quantity from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " join finance.accounts a on a.id = p.account_id"
+            " where t.external_id = :e and a.name = :n"
+        ),
+        {"e": opening, "n": PM},
+    )
+    assert [r.quantity for r in rows] == [Decimal("89.5")]
+
+
+async def test_switching_portfolio_margin_never_counts_an_asset_twice(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    # Before Portfolio Margin: 10 STB on Cross Margin, 5 on USDⓈ-M Futures.
+    fake.margin = True
+    fake.set_rows("margin-account", [_cross("STB", "10")])
+    fake.set_rows("um-account", [_um("STB", "5")])
+    connection = await binance_connection(run, config=later_config())
+    before = await run_binance_sync(session, connection.id, fake.handler)
+    assert before.status == "healthy", before.last_error
+    assert await _held(session, before.id, clock) == {
+        ("Binance Cross Margin", "STB"): Decimal(10),
+        ("Binance USDⓈ-M Futures", "STB"): Decimal(5),
+    }
+
+    # Switched on: Portfolio Margin holds the same 15; the wallets it replaces report nothing.
+    _pm_on(fake)
+    fake.set_rows("pm-balance", [_pm_asset("STB", "15")])
+    clock.ms += 5 * HOUR_MS
+    on = await run_binance_sync(session, connection.id, fake.handler)
+    assert on.status == "healthy", on.last_error
+    assert await _held(session, on.id, clock) == {(PM, "STB"): Decimal(15)}
+    for name in ("Binance Cross Margin", "Binance USDⓈ-M Futures"):
+        latest = (await _snapshots(session, on.id, name))[-1]
+        assert latest[:2] == ("STB", Decimal(0)), name
+    # The switch shows: the replaced wallets' change is unexplained, Portfolio Margin's first
+    # report is its opening.
+    assert await _differences(session, on.id) == [
+        ("Binance Cross Margin", "STB"),
+        ("Binance USDⓈ-M Futures", "STB"),
+    ]
+
+    # Switched off: the classic wallets hold it again; Portfolio Margin reports nothing.
+    _pm_on(fake, on=False)
+    clock.ms += 5 * HOUR_MS
+    off = await run_binance_sync(session, connection.id, fake.handler)
+    assert off.status == "healthy", off.last_error
+    assert await _held(session, off.id, clock) == {
+        ("Binance Cross Margin", "STB"): Decimal(10),
+        ("Binance USDⓈ-M Futures", "STB"): Decimal(5),
+    }
+    assert (await _snapshots(session, off.id, PM))[-1][:2] == ("STB", Decimal(0))
+    assert (PM, "STB") in await _differences(session, off.id)

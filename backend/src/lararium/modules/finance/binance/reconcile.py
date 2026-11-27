@@ -92,20 +92,39 @@ class Difference:
 # its snapshots, but a futures wallet's quantities are its account's `wallet_balance` (Decision
 # 11), and the Options wallet's its margin account's `margin_balance`: their snapshots also carry
 # unrealised profit, which no record explains.
-# The derivatives wallets' typed account reports, by wallet key: the report table, its table of
-# assets, and the column that holds what the records change.
-ACCOUNT_REPORTS: dict[str, tuple[str, str, str]] = {
-    "um_futures": ("binance_um_account", "binance_um_account_assets", "wallet_balance"),
-    "cm_futures": ("binance_cm_account", "binance_cm_account_assets", "wallet_balance"),
-    "options": ("binance_opt_account", "binance_opt_account_asset", "margin_balance"),
+# The derivatives wallets' typed account reports, by wallet key: the label read, the report
+# table, its table of assets, and the column that holds what the records change.
+ACCOUNT_REPORTS: dict[str, tuple[str, str, str, str]] = {
+    "um_futures": (
+        "um-account",
+        "binance_um_account",
+        "binance_um_account_assets",
+        "wallet_balance",
+    ),
+    "cm_futures": (
+        "cm-account",
+        "binance_cm_account",
+        "binance_cm_account_assets",
+        "wallet_balance",
+    ),
+    "options": (
+        "opt-account",
+        "binance_opt_account",
+        "binance_opt_account_asset",
+        "margin_balance",
+    ),
 }
 # The wallets whose report has no row of its own per read (its answer is the list of its assets,
 # so an empty one stores nothing typed): the read itself, by the raw record of the read its
-# snapshots were cut from, and the field of each asset that holds what the records change. The
-# Portfolio Margin wallet's is its `totalWalletBalance`, without the unrealised profit its
-# snapshot also carries (design 5.11).
-READ_REPORTS: dict[str, tuple[str, str]] = {
-    "portfolio_margin": ("pm-balance", "totalWalletBalance"),
+# snapshots were cut from, and the fields of each asset, with their signs, that hold what the
+# records change. The Portfolio Margin wallet's is its `totalWalletBalance` less what it owes
+# (`crossMarginBorrowed`, `crossMarginInterest`), without the unrealised profit its snapshot also
+# carries (design 5.11).
+READ_REPORTS: dict[str, tuple[str, tuple[tuple[str, int], ...]]] = {
+    "portfolio_margin": (
+        "pm-balance",
+        (("totalWalletBalance", 1), ("crossMarginBorrowed", -1), ("crossMarginInterest", -1)),
+    ),
 }
 
 
@@ -127,10 +146,11 @@ async def reported_at(
     time). A report is complete: an instrument it does not list is 0 there.
 
     A futures wallet's (`wallet`, `ACCOUNT_REPORTS`) is its wallet balance instead, the Options
-    wallet's its margin balance (`_wallet_balances`), when its account has a typed report then;
-    a daily snapshot of the first sync has none, and is a wallet balance itself. The Portfolio
-    Margin wallet's (`READ_REPORTS`) is its wallet balance in the read made then
-    (`_read_balances`)."""
+    wallet's its margin balance (`_wallet_balances`), when its account was read then; a daily
+    snapshot of the first sync was no read, and is a wallet balance itself; nor is the empty
+    report of a wallet Portfolio Margin holds (`balances.empty_reports`), which is 0. The
+    Portfolio Margin wallet's (`READ_REPORTS`) is its wallet balance net of its debt in the read
+    made then (`_read_balances`)."""
     if wallet in ACCOUNT_REPORTS:
         found = await _wallet_balances(session, account_id, ACCOUNT_REPORTS[wallet], at)
         if found is not None:
@@ -149,16 +169,31 @@ async def reported_at(
     return {row.instrument_id: row.quantity for row in rows}
 
 
+async def _read_at(
+    session: AsyncSession, connection_id: UUID | None, label: str, at: datetime
+) -> UUID | None:
+    """The raw record of the label's read made at `at` (its `read_from`), the latest if several;
+    None when no read of the label was made then."""
+    return await session.scalar(
+        text(
+            "select id from core.raw_records where connection_id = :c and record_type = :t"
+            " and (content ->> 'read_from_ms')::bigint = :ms order by id desc limit 1"
+        ),
+        {"c": connection_id, "t": record_type(label), "ms": millis(at)},
+    )
+
+
 async def _wallet_balances(
-    session: AsyncSession, account_id: UUID, report: tuple[str, str, str], at: datetime
+    session: AsyncSession, account_id: UUID, report: tuple[str, str, str, str], at: datetime
 ) -> dict[UUID, Decimal] | None:
     """Each instrument's balance without unrealised profit (`report`'s column: a futures
     account's `wallet_balance`, the options account's `margin_balance`) in the account's typed
     report at `at`: the latest stored at or before it, since an answer is stored only when it
     changed (`balances.store_reports`), so the one before is what the read at `at` said. None
-    when there is none: every read of the account comes after the first sync's daily snapshots.
-    A report states the column for every asset (`balances` refuses one that does not)."""
-    table, assets, column = report
+    when the account was not read at `at` (a daily snapshot, an empty report): nothing typed is
+    stored then and no raw read of the label was made then. A report states the column for
+    every asset (`balances` refuses one that does not)."""
+    label, table, assets, column = report
     connection_id = await session.scalar(
         select(models.Account.source_connection_id).where(models.Account.id == account_id)
     )
@@ -170,6 +205,8 @@ async def _wallet_balances(
         {"c": connection_id, "t": at},
     )
     if read is None:
+        return None
+    if read != at and await _read_at(session, connection_id, label, at) is None:
         return None
     rows = await session.execute(
         text(
@@ -186,35 +223,38 @@ async def _wallet_balances(
 
 
 async def _read_balances(
-    session: AsyncSession, account_id: UUID, report: tuple[str, str], at: datetime
+    session: AsyncSession,
+    account_id: UUID,
+    report: tuple[str, tuple[tuple[str, int], ...]],
+    at: datetime,
 ) -> dict[UUID, Decimal] | None:
-    """Each instrument's `report` field (the Portfolio Margin wallet's `totalWalletBalance`) in
-    the read made at `at` (its `read_from`, the snapshots' `as_of`), summed per asset; None when
-    no read was made then. An empty answer is an empty report. A read states the field for every
-    asset (`balances` refuses one that does not)."""
-    label, field = report
+    """Each instrument's `report` fields, signed (the Portfolio Margin wallet's
+    `totalWalletBalance` less its debt), in the read made at `at` (its `read_from`, the
+    snapshots' `as_of`), summed per asset; None when no read was made then (an empty report).
+    An empty answer is an empty report. A read states each field for every asset (`balances`
+    refuses one that does not)."""
+    label, fields = report
     connection_id = await session.scalar(
         select(models.Account.source_connection_id).where(models.Account.id == account_id)
     )
-    read = await session.scalar(
-        text(
-            "select id from core.raw_records where connection_id = :c and record_type = :t"
-            " and (content ->> 'read_from_ms')::bigint = :ms order by id desc limit 1"
-        ),
-        {"c": connection_id, "t": record_type(label), "ms": millis(at)},
-    )
+    read = await _read_at(session, connection_id, label, at)
     if read is None:
         return None
+    terms = " + ".join(f":s{i} * (e ->> :f{i})::numeric" for i in range(len(fields)))
     rows = await session.execute(
         text(
-            "select i.instrument_id, sum((e ->> :f)::numeric) as held"
+            f"select i.instrument_id, sum({terms}) as held"
             " from core.raw_records r"
             " cross join lateral jsonb_array_elements(r.content -> 'body') e"
             " join finance.instrument_identifiers i"
             "  on i.scheme = 'binance_asset' and i.value = e ->> 'asset'"
             " where r.id = :r group by i.instrument_id"
         ),
-        {"f": field, "r": read},
+        {
+            "r": read,
+            **{f"f{i}": name for i, (name, _) in enumerate(fields)},
+            **{f"s{i}": sign for i, (_, sign) in enumerate(fields)},
+        },
     )
     return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
 

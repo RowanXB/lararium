@@ -672,6 +672,9 @@ async def portfolio_margin(ctx: SyncContext, on: bool, now_ms: int) -> None:
     at once, and the sync asks them as it would any present product; a key Binance itself had
     refused is asked again too, and goes back if Binance refuses it again. Kept apart from
     `refused_hosts`, which is about the key's type, not the account."""
+    # An account that never had it writes nothing, and no audit row, on each sync.
+    if not on and PORTFOLIO_MARGIN_KEY not in await fresh_config(ctx):
+        return
     connection_id = ctx.connection.id
     args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
     async with (

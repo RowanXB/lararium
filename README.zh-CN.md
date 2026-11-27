@@ -822,9 +822,10 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
   记在它动用的每个钱包上（组合支付会涉及多个钱包），对 Unassigned 入账；返佣是 Spot 上的收入，若由资产分红发放则只入账一次。
   Binance 只提供 2020 年 6 月 10 日以来的返佣，这让首次同步多出大约 7 分钟。
 - 统一账户 Portfolio Margin（`pm-balance`、`pm-account`），在 Binance 的账户信息显示已开启时：
-  “Binance Portfolio Margin”持有每种资产的钱包余额加 USDⓈ-M 和 COIN-M 的未实现盈亏，对账只用
-  钱包余额。它的记录不入账。Portfolio Margin 取代了 Cross Margin 和两个合约钱包，所以开启期间不会
-  请求它们；看到它关闭的那次同步会重新请求它们。
+  “Binance Portfolio Margin”持有每种资产的钱包余额减去借入额及其利息（借入的资产是负持仓），再加
+  USDⓈ-M 和 COIN-M 的未实现盈亏，对账时不含未实现盈亏。它的记录不入账。Portfolio Margin 取代了
+  Cross Margin 和两个合约钱包，所以开启期间不会请求它们，它们报告为空；看到它关闭的那次同步会重新
+  请求它们，而 Portfolio Margin 报告为空。同一资产绝不会在两边各算一次：切换会显示为对账差异。
 - Trading Bots 和 Copy Trading，按 Binance 钱包列表逐个资产计入。Binance 没有为它们提供记录。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook

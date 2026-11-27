@@ -1010,10 +1010,13 @@ Built from Binance's documentation and not checked against a real account:
   once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
   makes the first sync about 7 minutes longer.
 - Portfolio Margin (`pm-balance`, `pm-account`), when Binance's account information says it is
-  on: "Binance Portfolio Margin" holds each asset's wallet balance plus its unrealised USDⓈ-M
-  and COIN-M profit, and is reconciled on the wallet balance alone. Its records are not posted.
+  on: "Binance Portfolio Margin" holds each asset's wallet balance less what it borrowed and the
+  interest on it (a borrowed asset is a negative holding) plus its unrealised USDⓈ-M and COIN-M
+  profit, and is reconciled without the unrealised profit. Its records are not posted.
   Portfolio Margin takes the place of Cross Margin and the two futures wallets, so those are not
-  asked while it is on; the sync that sees it off asks them again.
+  asked while it is on and report nothing; the sync that sees it off asks them again and
+  Portfolio Margin reports nothing. An asset is never counted on both sides: the switch shows as
+  reconciliation differences.
 - Trading Bots and Copy Trading, counted per asset from Binance's wallet list. Binance lists no
   records for them.
 

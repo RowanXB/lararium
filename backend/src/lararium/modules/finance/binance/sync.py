@@ -65,11 +65,15 @@ from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import layout, notices
+from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY
 from lararium.modules.finance.binance.balances import (
     CROSS_MARGIN_LABEL,
+    PORTFOLIO_REPLACED,
+    PORTFOLIO_SOURCES,
     Read,
     backfill_daily_snapshots,
     daily_rows,
+    empty_reports,
     margin_created,
     millis,
     read_assets,
@@ -183,6 +187,26 @@ async def delisted_flags(ctx: SyncContext, exchange_info: ApiValue) -> list[str]
     `exchangeInfo` does not list."""
     listed = listed_symbols(exchange_info)
     return [delisted_flag(s) for s in sorted(await traded_symbols(ctx)) if s not in listed]
+
+
+async def replaced_reports(ctx: SyncContext, account_info: Read, portfolio: bool) -> None:
+    """Ruling R21, at the `account-info` read: with Portfolio Margin on, an empty report for each
+    wallet it holds (Cross Margin, USDⓈ-M, COIN-M) that has an account; off, for the Portfolio
+    Margin wallet if it has one (`balances.empty_reports`). So the switch shows as reconciliation
+    differences (or in the openings), never as an asset counted twice. In a transaction of its
+    own, only when one of the wallets has an account."""
+    wallets = PORTFOLIO_REPLACED if portfolio else tuple(PORTFOLIO_SOURCES)
+    mapped = (await fresh_config(ctx)).get(ACCOUNT_MAP_KEY)
+    if not isinstance(mapped, dict) or not any(wallet in mapped for wallet in wallets):
+        return
+    connection_id = ctx.connection.id
+    args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.report", args) as cmd,
+    ):
+        connection = await get_connection(session, connection_id)
+        await empty_reports(cmd, connection, wallets, account_info)
 
 
 def portfolio_margin_on(account_info: Read) -> bool:
@@ -551,6 +575,7 @@ class BinanceConnector:
             if label == ACCOUNT_INFO_LABEL:
                 portfolio = portfolio_margin_on(read)
                 await portfolio_margin(ctx, portfolio, client.now_ms())
+                await replaced_reports(ctx, read, portfolio)
                 if portfolio:
                     flag(PORTFOLIO_MARGIN_FLAG)
                 config = await fresh_config(ctx)

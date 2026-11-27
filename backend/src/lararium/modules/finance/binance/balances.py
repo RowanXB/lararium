@@ -96,15 +96,26 @@ _FUTURES_FIELDS = ("walletBalance", "unrealizedProfit")
 # (`reconcile.reported_at`), as a futures wallet's with its wallet balance.
 OPTIONS_SOURCES = {"options": "opt-account"}
 # The Portfolio Margin wallet's report (while `account-info` says it is on): its balance's rows,
-# an asset's balance its `totalWalletBalance` plus its unrealised USDⓈ-M and COIN-M profit.
-# Reconciliation compares the records with the change of the wallet balance alone
+# an asset's balance its `totalWalletBalance` less what it owes (`crossMarginBorrowed`,
+# `crossMarginInterest`: a borrowed asset is negative, as in Cross Margin) plus its unrealised
+# USDⓈ-M and COIN-M profit (design 5.6). Binance's example has `totalWalletBalance` equal to the
+# cross margin free and locked amounts plus the UM and CM wallet balances, debt not netted.
+# Reconciliation compares the records with the change of the net wallet balance alone
 # (`reconcile.reported_at`), as a futures wallet's.
 PORTFOLIO_SOURCES = {"portfolio_margin": "pm-balance"}
+# The wallets Portfolio Margin holds the content of while it is on (its balance states each
+# asset's cross margin, UM and CM parts): each gets an empty report when it is seen on, and the
+# Portfolio Margin wallet one when it is seen off (`empty_reports`), so no asset counts twice.
+PORTFOLIO_REPLACED = ("cross_margin", "um_futures", "cm_futures")
 # Each derivatives account's quantity per asset: the sum of these fields of its rows.
 _ACCOUNT_FIELDS: dict[str, tuple[str, ...]] = {
     **dict.fromkeys(FUTURES_SOURCES.values(), _FUTURES_FIELDS),
     "opt-account": ("equity",),
     "pm-balance": ("totalWalletBalance", "umUnrealizedPNL", "cmUnrealizedPNL"),
+}
+# Fields an account's rows owe, taken from the sum: Portfolio Margin's debt.
+_ACCOUNT_OWED: dict[str, tuple[str, ...]] = {
+    "pm-balance": ("crossMarginBorrowed", "crossMarginInterest"),
 }
 # Fields a derivatives account must state for each asset beside those summed: what reconciliation
 # compares with the records (`reconcile.ACCOUNT_REPORTS`). A futures account sums its wallet
@@ -625,6 +636,8 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
             prefix = row_prefix(label)
             rows = _source_rows(account)
             held = _per_asset(label, prefix, rows, _ACCOUNT_FIELDS[label])
+            owed = _per_asset(label, prefix, rows, _ACCOUNT_OWED.get(label, ()))
+            held = {code: quantity - owed.get(code, Decimal(0)) for code, quantity in held.items()}
             # Never read as 0 where it is left out.
             _per_asset(label, prefix, rows, _ACCOUNT_STATED.get(label, ()))
             wallets.append(_Wallet(key, account, held))
@@ -832,6 +845,23 @@ async def record_report(
     for instrument in gone:
         await _snapshot(ctx, account_id, instrument, Decimal(0), as_of)
     return gone
+
+
+async def empty_reports(
+    ctx: CommandContext, connection: ConnectionRecord, wallets: Collection[str], read: Read
+) -> list[str]:
+    """An empty, complete report at the `read`'s bracket for each of the wallets that has an
+    account: another report holds their content now (ruling R21: Portfolio Margin on holds
+    Cross Margin's and the futures wallets'; off, the classic wallets hold its), so what their
+    last reports said must stop counting. Each instrument they held gets a snapshot of 0
+    (`record_report`); the wallets reported."""
+    reported: list[str] = []
+    for wallet in wallets:
+        account = await _mapped_account(ctx, connection, wallet)
+        if account is not None:
+            await record_report(ctx, connection, account, read.read_from, read.read_to, listed=())
+            reported.append(wallet)
+    return reported
 
 
 class _Assets:
