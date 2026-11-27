@@ -114,11 +114,11 @@ async def _pair_states(
     the one its records and their fees give now; and an open transfer whose review reason
     is not the one its own record's candidates give (several_candidates if it has several,
     PairRelation.several, else amount_differs if it has any of another amount, else
-    not_listed_in_full if the coverage gate alone refused it one, PairRelation.unlisted,
-    unless the transfer is settled before history, else none: engine._open's), or, on a
-    manual counterpart, whose status is not the one engine._open gives: awaiting, with no
-    placeholder, when the gate alone refused the record a candidate, else inferred (one
-    settled before history instead is checked by (d))."""
+    not_listed_in_full if a row the coverage gate alone refused holds it back,
+    PairRelation.held_back, unless the transfer is settled before history, else none:
+    engine._open's), or, on a manual counterpart, whose status is not the one engine._open
+    gives: awaiting, with no placeholder, when such a row holds the record back, else
+    inferred (one settled before history instead is checked by (d))."""
     tr, a = models.Transfer, models.Account
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
@@ -169,16 +169,17 @@ async def _pair_states(
             expected = "several_candidates"
         elif relation.candidates(present, exact=False):
             expected = "amount_differs"
-        elif row.status != "before_history" and relation.unlisted(present):
+        elif row.status != "before_history" and relation.held_back(present):
             # Whether it is settled before history instead is checked by (d) below.
             expected = "not_listed_in_full"
         # (e) an open transfer whose review reason disagrees with its record's candidates.
         if row.review_reason != expected:
             due.add(present)
-        # (e) one on a manual counterpart with a placeholder beside a row the gate alone
-        # refused, or with none and no such row (account type catalog design §8.3 item 3).
+        # (e) one on a manual counterpart with a placeholder while a row the gate alone
+        # refused holds it back, or with none and no such row (account type catalog design
+        # §8.3 item 3).
         elif row.manual_counterpart and row.status != "before_history":
-            if (row.status == "awaiting") != bool(relation.unlisted(present)):
+            if (row.status == "awaiting") != relation.held_back(present):
                 due.add(present)
     # (c) a unique pair not yet a matched transfer.
     for record_id in chain(relation.exact, relation.converts, relation.by_card):
@@ -299,8 +300,8 @@ async def records_to_heal(
             )
             # (d) a lone record whose manual counterpart's first snapshot (in its
             # instrument) now contains it, or no longer does (an earlier one was recorded):
-            # the same manual_predates engine._open decides by. One awaiting there (a row
-            # the gate alone refused it, with no placeholder) is settled the same way.
+            # the same manual_predates engine._open decides by. One awaiting there (held back
+            # by a row the gate alone refused, with no placeholder) is settled the same way.
             manual = aliased(models.Account, name="manual_counterpart")
             contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(

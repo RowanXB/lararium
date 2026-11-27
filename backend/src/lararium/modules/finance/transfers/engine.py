@@ -376,7 +376,7 @@ async def _open(
     review_reason: ReviewReason | None,
     previous: TransferRecord | None,
     *,
-    unlisted: bool,
+    held_back: bool,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart is already held by that account's history (a manual hybrid account's first
@@ -385,12 +385,13 @@ async def _open(
     with a placeholder when the counterpart is manual, or awaiting the counterpart's own
     record when it is connected.
 
-    `unlisted`: the coverage gate alone refused the record a candidate on the manual
-    counterpart (PairRelation.unlisted). Unless the account's history holds the
+    `held_back`: a row the coverage gate alone refused keeps the record from pairing
+    (PairRelation.held_back): one refused it on the manual counterpart, or one refused a
+    record whose candidate one of its own is. Unless the account's history holds the
     counterpart, the transfer then awaits review with no placeholder, which would count the
-    money twice if the candidate is the real row (account type catalog design §8.3 item
-    3): for its other review reason if it has one (several_candidates, amount_differs),
-    else not_listed_in_full.
+    money twice if a candidate is the real row (account type catalog design §8.3 item 3):
+    for its other review reason if it has one (several_candidates, amount_differs), else
+    not_listed_in_full.
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -405,7 +406,7 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
-        elif unlisted:
+        elif held_back:
             review_reason = review_reason or "not_listed_in_full"
         else:
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
@@ -619,7 +620,7 @@ async def _match_one(
         settings,
         review_reason,
         dissolved.get(record.id),
-        unlisted=bool(relation.unlisted(record.id)),
+        held_back=relation.held_back(record.id),
     )
     return others, set()
 

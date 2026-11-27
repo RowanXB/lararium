@@ -839,6 +839,18 @@ class PairRelation:
         placeholder beside a row that may be its counterpart."""
         return self.gated.get(record_id, frozenset())
 
+    def held_back(self, record_id: UUID) -> bool:
+        """Whether a row the coverage gate alone refused (`gated`) keeps the record from
+        pairing (partner): the record's own, or one refused a record whose candidate, or
+        twin, this one's are too. Its transfer then has no placeholder on a manual
+        counterpart, beside a row that may be its counterpart or another record's (account
+        type catalog design §8.3 item 3)."""
+        if record_id in self.gated:
+            return True
+        found = self.exact.get(record_id, frozenset())
+        twin = self.twins.get(record_id)
+        return any(c in self.gated for c in found) or (twin is not None and twin in self.gated)
+
     def candidates(self, record_id: UUID, *, exact: bool = True) -> list[UUID]:
         """The record's candidates, of the same amount or (exact False) of another."""
         found = (self.exact if exact else self.differing).get(record_id, frozenset())

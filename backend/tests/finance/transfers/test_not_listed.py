@@ -518,3 +518,64 @@ async def test_heal_takes_the_placeholder_away_when_a_gated_row_arrives(
     assert transfer.placeholder_transaction_id is not None
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_a_row_the_gate_refused_another_sender_holds_back_its_one_candidate(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """B's uploads list in full from DAY for two days (so they hold no window), with two
+    rows of 100 naming nobody, on DAY and four days later. S's payment of 100 on DAY names
+    B: its window starts the day before, so the gate refuses it both rows. A's of 100 three
+    days later names B too, and its gate takes the later row, its only candidate. That row
+    may be S's: A is paired with neither, and its transfer waits for review with no
+    placeholder beside the row, which it lists. When an upload lists from the day before
+    DAY, the gate takes both rows for S: nothing is paired around either (S has two
+    candidates, the later row two)."""
+    a, s = await connected_bank("A"), await connected_bank("S")
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    noon = datetime.combine(DAY, datetime.min.time(), UTC) + timedelta(hours=12)
+    listed = (DAY, DAY + timedelta(days=2))
+    await statement_row(b, "100", day=DAY, complete=listed)
+    later = await statement_row(b, "100", day=DAY + timedelta(days=4), complete=listed)
+    sent_s = (await connector_tx(s, "-100", occurred_at=noon, identifier_id=identifier)).id
+    sent_a = (
+        await connector_tx(
+            a, "-100", occurred_at=noon + timedelta(days=3), identifier_id=identifier
+        )
+    ).id
+    await heal()
+
+    transfer_s = await _transfer_of(session, sent_s)
+    assert (transfer_s.status, transfer_s.review_reason) == ("awaiting", "not_listed_in_full")
+    transfer_a = await _transfer_of(session, sent_a)
+    assert (transfer_a.status, transfer_a.review_reason) == ("awaiting", "several_candidates")
+    assert transfer_a.in_transaction_id is None
+    assert transfer_a.placeholder_transaction_id is None
+    assert await placeholders(session) == []
+    found = await candidates(session, transfer_a.id)
+    assert [(c.transaction_id, c.reason) for c in found] == [(later, "exact")]
+    balances = await balances_on(session, DAY + timedelta(days=10))
+    assert balances[b.id] == Decimal(200)  # the two rows, once each
+    assert balances[ids.in_transit] == Decimal(200)
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    # A later upload lists in full from the day before DAY.
+    before = DAY - timedelta(days=1)
+    await statement_row(b, "-5", day=before, complete=(before, DAY + timedelta(days=2)))
+    await heal()
+
+    for sent in (sent_s, sent_a):
+        transfer = await _transfer_of(session, sent)
+        assert transfer.in_transaction_id is None
+        assert transfer.review_reason == "several_candidates"
+    await assert_consistent(session)
+    assert await heal() == 0
