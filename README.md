@@ -611,11 +611,16 @@ until their `Action` is known.
   bank transfer to that payee pairs with the one deposit of the same amount in its window on
   any of the holder accounts that may be a bank transfer (one marked as such, or, on Trading
   212 Invest, Stocks ISA and Cash ISA, one naming nobody). Until it pairs, the payment stays on
-  Unassigned. When deposits on two of the holders fit, nothing is paired: pair the right one
-  by hand (`GET /api/v1/finance/transactions/{id}/pair-candidates`, then `POST
+  Unassigned. When it can't pair (deposits on two of the holders fit, or the only one is
+  refused by the coverage check), no transfer is opened and nothing prompts you: the payment
+  shows only on Unassigned, like an unpaired card payment, and a held payee is never settled
+  before history or given a placeholder. Find such a payment on Unassigned and pair the right
+  one by hand (`GET /api/v1/finance/transactions/{id}/pair-candidates`, then `POST
   /api/v1/finance/transactions/{id}/pair`, as for records that name no account, above). Card
   top-ups still pair by the card rule above, and card evidence comes first: a deposit that has
-  a card-payment candidate is not paired as a bank transfer by its account's funding.
+  a card-payment candidate is not paired as a bank transfer by its account's funding. A pair
+  made this way shows **Reject** on the Transfers page, not Unpair, like a card pair: neither
+  record is a transfer without the other.
 - **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and

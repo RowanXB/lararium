@@ -185,7 +185,8 @@ async def list_transfers(
 async def weak_transfers(
     session: AsyncSession, transfers: Collection[TransferRecord]
 ) -> frozenset[UUID]:
-    """The ids of those of the transfers that a sort code alone paired (pairs.WEAK): matched,
+    """The ids of those of the transfers that neither leg names an own account for (a sort code
+    alone, a card merchant's or a held payee's holders; pairs.WEAK): matched,
     neither own record naming another own account (eligible_records' holder), and no pair
     decision linking them. Read from their records, not from the pair relation, since the
     Transfers page asks on every load."""
