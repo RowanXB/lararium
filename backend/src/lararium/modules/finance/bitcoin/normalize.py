@@ -69,11 +69,11 @@ _DESCRIPTIONS = {
 }
 
 
-class BitcoinDataError(DisplayableError):
-    """Stored chain data that cannot be posted; names the transaction, never an address."""
+FEE_MISMATCH = "A Bitcoin transaction's fee differs from its inputs less its outputs."
 
-    def __init__(self, txid: str, problem: str) -> None:
-        super().__init__(f"Bitcoin transaction {txid}: {problem}")
+
+class BitcoinDataError(DisplayableError):
+    """Stored chain data that cannot be posted; names no transaction and no address."""
 
 
 @dataclass
@@ -114,8 +114,11 @@ class Movement:
     address: str | None = None
 
 
-def movements(txid: str, inputs: Collection[Input], outputs: Collection[Output]) -> list[Movement]:
-    """The ledger movements of a confirmed chain transaction (module docstring)."""
+def movements(
+    txid: str, inputs: Collection[Input], outputs: Collection[Output], fee: int | None
+) -> list[Movement]:
+    """The ledger movements of a confirmed chain transaction (module docstring); `fee` is the
+    server's, which a spend's inputs less its outputs must equal."""
     own_in = [i for i in inputs if i.own]
     if not own_in:
         return [
@@ -129,11 +132,11 @@ def movements(txid: str, inputs: Collection[Input], outputs: Collection[Output])
             for o in outputs
             if not o.own and o.value > 0
         ]
-        fee = sum(i.value for i in inputs) - sum(o.value for o in outputs)
-        if fee < 0:
-            raise BitcoinDataError(txid, "its outputs exceed its inputs")
-        if fee > 0:
-            found.append(Movement(f"{txid}:fee", "fee", -fee))
+        paid = sum(i.value for i in inputs) - sum(o.value for o in outputs)
+        if paid < 0 or (fee is not None and paid != fee):
+            raise BitcoinDataError(FEE_MISMATCH)
+        if paid > 0:
+            found.append(Movement(f"{txid}:fee", "fee", -paid))
         return found
     net = sum(o.value for o in outputs if o.own) - sum(i.value for i in own_in)
     return [Movement(f"{txid}:net", "net", net)] if net else []
@@ -149,6 +152,7 @@ class _Stored:
     confirmed: bool
     block_time: datetime | None
     normalized_confirmed: bool
+    fee: int | None
     inputs: list[Input]
     outputs: list[Output]
 
@@ -156,7 +160,7 @@ class _Stored:
 # Every query below reads the rows of `:t`, or of every stored transaction when it is null.
 _ONLY = " and (cast(:t as text[]) is null or txid = any(cast(:t as text[])))"
 _TRANSACTIONS = text(
-    "select txid, confirmed is true as confirmed, block_time, normalized_confirmed,"
+    "select txid, confirmed is true as confirmed, block_time, normalized_confirmed, fee,"
     " block_height from finance.bitcoin_transactions where connection_id = :c" + _ONLY
 )
 _INPUTS = text(
@@ -176,7 +180,9 @@ async def _stored(run: _Run, txids: Collection[str] | None) -> list[_Stored]:
     found: dict[str, _Stored] = {}
     for r in await run.session.execute(_TRANSACTIONS, params):
         heights[r.txid] = r.block_height
-        found[r.txid] = _Stored(r.txid, r.confirmed, r.block_time, r.normalized_confirmed, [], [])
+        found[r.txid] = _Stored(
+            r.txid, r.confirmed, r.block_time, r.normalized_confirmed, r.fee, [], []
+        )
     for r in await run.session.execute(_INPUTS, params):
         found[r.txid].inputs.append(Input(r.own, r.value))
     for r in await run.session.execute(_OUTPUTS, params):
@@ -237,7 +243,7 @@ class _Normalizer:
             case "net":
                 contra = await run.system_account("unassigned")
                 counterparty = CounterpartyFields(never_transfer=True)
-        unchanged = run.counts.unchanged
+        created = run.counts.created
         posted = await run.post(
             key,
             stored.block_time,
@@ -246,7 +252,7 @@ class _Normalizer:
             counterparty=counterparty,
             chain=ChainFields(CHAIN, stored.txid, movement.address),
         )
-        if movement.kind == "net" and run.counts.unchanged == unchanged:
+        if movement.kind == "net" and run.counts.created > created:
             run.flag(SHARED_FLAG)
         return posted
 
@@ -256,7 +262,11 @@ class _Normalizer:
         which stays pending: its movements cannot be dated."""
         if stored.confirmed and stored.block_time is None:
             return False
-        wanted = movements(stored.txid, stored.inputs, stored.outputs) if stored.confirmed else []
+        wanted = (
+            movements(stored.txid, stored.inputs, stored.outputs, stored.fee)
+            if stored.confirmed
+            else []
+        )
         posted = {m.key: await self._post(stored, m) for m in wanted}
         for key in sorted(await self._live_keys(stored.txid) - set(posted)):
             await self.run.void(key)
@@ -273,7 +283,16 @@ class _Normalizer:
         return True
 
     async def _link(self, stored: _Stored, wanted: list[Movement], posted: dict[str, UUID]) -> None:
-        """Each typed row names the ledger transaction it posts now, or none."""
+        """Each typed row names the ledger transaction it posts now, or none: not one the
+        owner voided, which the upsert leaves void."""
+        t = models.Transaction
+        live = set(
+            await self.run.session.scalars(
+                select(t.id).where(t.id.in_(list(posted.values())), t.status != "void")
+            )
+        )
+        posted = {key: id_ for key, id_ in posted.items() if id_ in live}
+        wanted = [m for m in wanted if m.key in posted]
         by_vout = {m.vout: posted[m.key] for m in wanted if m.vout is not None}
         ids = {"c": self.run.connection_id, "t": stored.txid}
         for out in stored.outputs:

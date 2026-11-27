@@ -2,6 +2,7 @@
 a shared transaction's net), confirmed only, voided when a transaction leaves the chain and
 posted again when it confirms, one Bitcoin instrument shared with Binance, and the replay."""
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,9 +29,11 @@ from lararium.modules.finance.bitcoin.derive import Branch, Source, Wallet, buil
 from lararium.modules.finance.bitcoin.fetch import FetchResult, fetch
 from lararium.modules.finance.bitcoin.instruments import SEVERAL_FLAG
 from lararium.modules.finance.bitcoin.normalize import (
+    FEE_MISMATCH,
     LEFT_CHAIN_FLAG,
     NORMALIZER_VERSION,
     SHARED_FLAG,
+    BitcoinDataError,
     NormalizeReport,
     normalize,
 )
@@ -40,6 +44,7 @@ from lararium.modules.finance.instruments import (
     create_instrument,
     get_instrument,
 )
+from lararium.modules.finance.ledger import void_transaction
 from lararium.modules.finance.system_accounts import system_account_ids
 
 from .fake_esplora import BASE, STRANGER, TIP, FakeEsplora, block_time, make_tx, output, txid
@@ -713,3 +718,121 @@ async def test_confirmed_without_block_time_stays_pending(session) -> None:
         t=t,
     )
     assert row.pending is True
+
+
+class TimelessStatus(FakeEsplora):
+    """A server whose `/tx/:txid/status` omits `block_time`, as Esplora documents it."""
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        response = super().handler(request)
+        if "/tx/" in request.url.path and response.status_code == 200:
+            body = json.loads(response.text)
+            body.pop("block_time", None)
+            return httpx.Response(200, text=json.dumps(body))
+        return response
+
+
+async def test_confirmed_by_a_timeless_status_is_dated_by_its_history(session) -> None:
+    chain = TimelessStatus()
+    waiting = chain.add(make_tx(1, [(receiving(0), 25_000)], height=None))
+    t = waiting["txid"]
+    wallet = await Synced.start(session, chain)
+    await wallet.sync()
+
+    chain.move(t, TIP - 1)
+    chain.requests.clear()
+    found, _ = await wallet.sync()
+
+    assert f"/address/{receiving(0)}/txs" in chain.asked_txs()
+    assert t in found.changed_txids
+    ledger = await wallet.live()
+    assert set(ledger) == {f"{t}:0"}
+    assert ledger[f"{t}:0"].occurred_at == at(TIP - 1)
+    row = await wallet.row(
+        "select block_time, pending from finance.bitcoin_transactions"
+        " where connection_id = :c and txid = :t",
+        t=t,
+    )
+    assert (row.block_time, row.pending) == (at(TIP - 1), False)
+
+
+async def test_shared_flag_only_when_first_posted(session) -> None:
+    chain = FakeEsplora()
+    shared = chain.add(
+        make_tx(
+            1,
+            [(receiving(1), 30_000), (OTHERS[0], 79_000)],
+            spends=[(receiving(0), 40_000), (STRANGER, 70_000)],
+            height=TIP - 1,
+            fee=1_000,
+        )
+    )
+    t = shared["txid"]
+    wallet = await Synced.start(session, chain)
+    _, first = await wallet.sync()
+    assert SHARED_FLAG in first.flagged
+
+    chain.move(t, None)
+    await wallet.sync()
+    chain.move(t, TIP, fork=2)
+    _, again = await wallet.sync()
+
+    assert again.updated == 1
+    assert (await wallet.live())[f"{t}:net"].occurred_at == at(TIP)
+    assert SHARED_FLAG not in again.flagged
+
+
+async def test_owner_voided_movement_is_not_linked(session, run) -> None:
+    chain = FakeEsplora()
+    spend = chain.add(
+        make_tx(
+            1,
+            [(OTHERS[0], 60_000), (change(0), 39_000)],
+            spends=[(receiving(0), 100_000)],
+            fee=1_000,
+        )
+    )
+    t = spend["txid"]
+    wallet = await Synced.start(session, chain)
+    await wallet.sync()
+    ledger = await wallet.ledger()
+    for key in (f"{t}:0", f"{t}:fee"):
+        await run(void_transaction, ledger[key].id)
+
+    await wallet.normalize({t})
+
+    assert {k: v.voided_by for k, v in (await wallet.ledger()).items()} == {
+        f"{t}:0": "user",
+        f"{t}:fee": "user",
+    }
+    links = await session.execute(
+        text("select vout, transaction_id from finance.bitcoin_outputs where txid = :t"),
+        {"t": t},
+    )
+    assert {r.vout: r.transaction_id for r in links} == {0: None, 1: None}
+    row = await wallet.row(
+        "select fee_transaction_id from finance.bitcoin_transactions"
+        " where connection_id = :c and txid = :t",
+        t=t,
+    )
+    assert row.fee_transaction_id is None
+
+
+async def test_fee_differing_from_inputs_less_outputs_fails(session) -> None:
+    chain = FakeEsplora()
+    # The inputs less the outputs are 1,000; the server says the fee is 900.
+    chain.add(
+        make_tx(
+            1,
+            [(OTHERS[0], 60_000), (change(0), 39_000)],
+            spends=[(receiving(0), 100_000)],
+            fee=900,
+        )
+    )
+    wallet = await Synced.start(session, chain)
+
+    with pytest.raises(BitcoinDataError) as raised:
+        await wallet.sync()
+
+    assert str(raised.value) == FEE_MISMATCH
+    assert txid(1) not in str(raised.value)

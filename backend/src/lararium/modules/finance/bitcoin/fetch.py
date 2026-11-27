@@ -14,7 +14,8 @@ count (chain + mempool) differs from the one its last complete history held
 so a history cut short is asked again in full. A transaction the recheck finds gone or back in
 the mempool clears that count on the wallet's addresses it touches, so the scan that follows
 asks their histories again and finds what replaced it (a fee bump, a double spend), though
-every count is unchanged.
+every count is unchanged; so does one it finds in a block whose time the status does not give,
+which the history's transaction then supplies.
 
 What still needs normalizing is kept in the database too: every write that inserts a
 transaction or changes its status or which of its inputs and outputs are the wallet's sets
@@ -660,8 +661,9 @@ class _Fetch:
 
     async def _recheck(self) -> None:
         """Ask again for every stored transaction that had fewer than 6 confirmations when
-        the server last reported it. One gone, or back in the mempool, makes the scan ask the
-        histories of the wallet's addresses it touches (module docstring)."""
+        the server last reported it. One gone, back in the mempool, or confirmed in a block
+        whose time is not known makes the scan ask the histories of the wallet's addresses it
+        touches (module docstring)."""
         async with self.ctx.session_factory() as session:
             rows = (
                 await session.execute(
@@ -729,7 +731,12 @@ class _Fetch:
                     }
                 params["changed"] = after != before
                 await cmd.session.execute(text(sql), ids | params)
-                if status is None or (row.confirmed is True and not status.confirmed):
+                gone = status is None or (row.confirmed is True and not status.confirmed)
+                # Confirmed in a block whose time the status does not give (Esplora documents
+                # none): the history's full transaction carries it, and a mempool-to-block move
+                # leaves the address's count as it was, so its history is asked again too.
+                undated = status is not None and status.confirmed and after[3] is None
+                if gone or undated:
                     await cmd.session.execute(_FORGET_HISTORIES, ids)
 
     async def _own(self) -> None:
