@@ -59,7 +59,7 @@ BLOCK_PERCENT = 85
 SPACING_MS = 100
 
 # Per minute. The futures, options and portfolio hosts publish theirs only in their own
-# `exchangeInfo`; until a task reads it, 600 is assumed.
+# `exchangeInfo` (`rateLimits`); until a sync has read it, 600 is assumed (`read_limits`).
 DEFAULT_CAPS: dict[str, int] = {
     "api": 6_000,
     "ip": 12_000,
@@ -74,6 +74,9 @@ USED_WEIGHT_HEADERS = {
     "uid": "X-SAPI-USED-UID-WEIGHT-1M",
 }
 DEFAULT_USED_WEIGHT_HEADER = "X-MBX-USED-WEIGHT-1M"
+# The `rateLimits` entry an `exchangeInfo` answer states a host's request weight per minute in.
+REQUEST_WEIGHT = "REQUEST_WEIGHT"
+_MINUTE = "MINUTE"
 
 
 class BinanceError(DisplayableError):
@@ -216,6 +219,24 @@ class Limiter:
             return
 
 
+def minute_weight_limit(body: ApiValue) -> int | None:
+    """The request weight per minute an `exchangeInfo` answer states: its `rateLimits` entry of
+    type `REQUEST_WEIGHT` over one `MINUTE`, a positive whole number; None when it states
+    none (another interval is not converted: the limiter counts by the minute)."""
+    listed = body.get("rateLimits") if isinstance(body, dict) else None
+    for entry in listed if isinstance(listed, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if (entry.get("rateLimitType"), entry.get("interval")) != (REQUEST_WEIGHT, _MINUTE):
+            continue
+        number, limit = entry.get("intervalNum"), entry.get("limit")
+        if number != 1 or isinstance(limit, bool) or not isinstance(limit, int | Decimal):
+            continue
+        if limit > 0 and limit == int(limit):
+            return int(limit)
+    return None
+
+
 def load_json(text: str) -> ApiValue:
     """A JSON answer with its numbers exact (`Decimal`); a non-finite number is a ValueError."""
 
@@ -269,6 +290,14 @@ class BinanceClient:
 
     def __repr__(self) -> str:
         return "BinanceClient()"
+
+    def read_limits(self, endpoint: Endpoint, body: ApiValue) -> None:
+        """Take a host's request weight per minute from its own `exchangeInfo` answer
+        (`minute_weight_limit`, plan Decision 4): the cap of the limit kind the endpoint's
+        host counts in. An answer that states none leaves the cap as it was."""
+        found = minute_weight_limit(body)
+        if found is not None:
+            self.caps[endpoint.limit] = found
 
     def now_ms(self) -> int:
         """Binance's clock: the local one plus the offset the last `sync_clock` measured."""

@@ -412,6 +412,65 @@ async def test_the_ip_weight_header_of_the_api_pool_is_read() -> None:
     assert env.sleeps == [60_000]
 
 
+async def test_a_futures_hosts_limit_is_read_from_its_exchange_information() -> None:
+    income = ENDPOINTS["um-income"]  # weight 30
+    env = Env(ok("[]"), repeat_last=True)
+    client = env.client()
+    assert client.caps["fapi"] == client.caps["dapi"] == 600
+    # 600 a minute until it is read: 16 asks of weight 30 fill 80% of it, the 17th waits for
+    # the minute to pass.
+    for _ in range(17):
+        await client.call(income)
+    assert max(env.sleeps) > 50_000
+    env.sleeps.clear()
+
+    stated = {
+        "rateLimits": [
+            {"rateLimitType": "ORDERS", "interval": "SECOND", "intervalNum": 10, "limit": 300},
+            {
+                "rateLimitType": "REQUEST_WEIGHT",
+                "interval": "MINUTE",
+                "intervalNum": 1,
+                "limit": 2400,
+            },
+        ]
+    }
+    client.read_limits(ENDPOINTS["um-exchange-info"], stated)
+
+    assert client.caps["fapi"] == 2400 and client.caps["dapi"] == 600
+    # Under 80% of 2400 with the asks of the last minute: only the spacing between requests.
+    for _ in range(40):
+        await client.call(income)
+    assert set(env.sleeps) == {100}
+    # A limit over another interval, or none, leaves the host's as it was.
+    for other in (
+        {
+            "rateLimits": [
+                {
+                    "rateLimitType": "REQUEST_WEIGHT",
+                    "interval": "SECOND",
+                    "intervalNum": 1,
+                    "limit": 50,
+                }
+            ]
+        },
+        {
+            "rateLimits": [
+                {
+                    "rateLimitType": "REQUEST_WEIGHT",
+                    "interval": "MINUTE",
+                    "intervalNum": 5,
+                    "limit": 50,
+                }
+            ]
+        },
+        {"rateLimits": []},
+        {},
+    ):
+        client.read_limits(ENDPOINTS["cm-exchange-info"], other)
+        assert client.caps["dapi"] == 600
+
+
 async def test_messages_never_contain_key_material() -> None:
     pem = (
         Ed25519PrivateKey.generate()

@@ -118,6 +118,19 @@ TABLE_LABELS: tuple[str, ...] = (
     "margin-small-liability",
     "margin-liquidation-loan",
     "margin-liquidation-loan-repays",
+    # Phase B: the futures wallets, USDⓈ-M and COIN-M, and each host's exchange information.
+    "um-exchange-info",
+    "um-balance",
+    "um-account",
+    "um-positions",
+    "um-income",
+    "um-trades",
+    "cm-exchange-info",
+    "cm-balance",
+    "cm-account",
+    "cm-positions",
+    "cm-income",
+    "cm-trades",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -146,6 +159,10 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     # The `type` a borrow or repay row was asked for (BORROW or REPAY): the row's own `type`
     # says only how (AUTO, MANUAL).
     "margin-borrow-repay": (("request_type", "text"),),
+    # The key of the movement an earlier listing posts that a futures income `TRANSFER` is
+    # (rule 2).
+    "um-income": (("movement_key", "text"),),
+    "cm-income": (("movement_key", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),

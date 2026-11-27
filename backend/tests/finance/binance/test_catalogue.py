@@ -136,11 +136,14 @@ def test_the_phase_a_labels_are_the_ones_the_plan_names() -> None:
     assert {e.label for e in ENDPOINTS.values() if e.phase == "A"} == PHASE_A
 
 
-def test_only_the_three_public_reads_are_unsigned() -> None:
+def test_only_the_public_reads_are_unsigned() -> None:
     assert {e.label for e in ENDPOINTS.values() if not e.signed} == {
         "time",
         "exchange-info",
         "klines",
+        # Each futures host's own, for its rate limits (plan Decision 4).
+        "um-exchange-info",
+        "cm-exchange-info",
     }
 
 
@@ -196,6 +199,12 @@ def test_time_params_are_the_documented_names() -> None:
         "c2c": ("startTimestamp", "endTimestamp"),
         # The documents give it paging only.
         "vip-loan-requests": None,
+        # The futures balances, positions and exchange information take no time range.
+        **{
+            f"{host}-{name}": None
+            for host in ("um", "cm")
+            for name in ("account", "balance", "positions", "exchange-info")
+        },
     }
 
 

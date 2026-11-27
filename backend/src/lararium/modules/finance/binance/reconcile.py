@@ -87,10 +87,11 @@ class Difference:
         return (self.account_id, self.instrument_id, self.from_at, self.to_at)
 
 
-# An account's reports: one definition, which the opening uses too.
-# Phase A: every wallet's reports are its snapshots. Phase B gives the futures wallets theirs
-# from `wallet_balance` (Decision 11: their snapshot also carries unrealised profit), as a
-# second source beside these, with those accounts left out of them.
+# An account's reports: one definition, which the opening uses too. Every wallet's reports are
+# its snapshots, but a futures wallet's quantities are its account's `wallet_balance` (Decision
+# 11): its snapshot also carries unrealised profit, which no record explains.
+# The futures wallets' typed account reports, by wallet key.
+FUTURES_REPORTS = {"um_futures": "binance_um_account", "cm_futures": "binance_cm_account"}
 
 
 async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
@@ -104,9 +105,19 @@ async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime
     return list(rows)
 
 
-async def reported_at(session: AsyncSession, account_id: UUID, at: datetime) -> dict[UUID, Decimal]:
+async def reported_at(
+    session: AsyncSession, account_id: UUID, at: datetime, wallet: str | None = None
+) -> dict[UUID, Decimal]:
     """Each instrument's quantity in the account's report at `at` (the latest recorded of a
-    time). A report is complete: an instrument it does not list is 0 there."""
+    time). A report is complete: an instrument it does not list is 0 there.
+
+    A futures wallet's (`wallet`, `FUTURES_REPORTS`) is its wallet balance instead
+    (`_wallet_balances`), when its account has a typed report then; a daily snapshot of the
+    first sync has none, and is a wallet balance itself."""
+    if wallet in FUTURES_REPORTS:
+        found = await _wallet_balances(session, account_id, FUTURES_REPORTS[wallet], at)
+        if found is not None:
+            return found
     s = models.BalanceSnapshot
     rows = await session.execute(
         select(s.instrument_id, s.quantity)
@@ -115,6 +126,39 @@ async def reported_at(session: AsyncSession, account_id: UUID, at: datetime) -> 
         .order_by(s.instrument_id, s.recorded_at.desc(), s.id.desc())
     )
     return {row.instrument_id: row.quantity for row in rows}
+
+
+async def _wallet_balances(
+    session: AsyncSession, account_id: UUID, table: str, at: datetime
+) -> dict[UUID, Decimal] | None:
+    """Each instrument's `wallet_balance` in the futures account's typed report at `at`: the
+    latest stored at or before it, since an answer is stored only when it changed
+    (`balances.store_reports`), so the one before is what the read at `at` said. None when
+    there is none: every read of the account comes after the first sync's daily snapshots."""
+    connection_id = await session.scalar(
+        select(models.Account.source_connection_id).where(models.Account.id == account_id)
+    )
+    read = await session.scalar(
+        text(
+            f"select max(snapshot_at) from finance.{table}"
+            " where connection_id = :c and snapshot_at <= :t"
+        ),
+        {"c": connection_id, "t": at},
+    )
+    if read is None:
+        return None
+    rows = await session.execute(
+        text(
+            "select i.instrument_id, sum(a.wallet_balance) as held"
+            f" from finance.{table}_assets a"
+            " join finance.instrument_identifiers i"
+            "  on i.scheme = 'binance_asset' and i.value = a.asset"
+            " where a.connection_id = :c and a.snapshot_at = :s"
+            " group by i.instrument_id"
+        ),
+        {"c": connection_id, "s": read},
+    )
+    return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
 
 
 async def _posted(
@@ -250,7 +294,8 @@ async def check(
     for account_id, low, high in _pending(config):
         spans[account_id].append((low, high))
     accounts = list(await session.scalars(_owned(connection_id).order_by(models.Account.id)))
-    earn = {a for a, key in (await wallets(session, connection_id)).items() if key == _EARN}
+    owned = await wallets(session, connection_id)
+    earn = {a for a, key in owned.items() if key == _EARN}
     decimals: dict[UUID, int] = {}
     found: list[Difference] = []
     with localcontext(prec=MAX_PREC):
@@ -261,8 +306,9 @@ async def check(
                 held = any(low <= to_at and from_at < high for low, high in spans[account_id])
                 if not fresh and not held:
                     continue
-                before = await reported_at(session, account_id, from_at)
-                after = await reported_at(session, account_id, to_at)
+                wallet = owned.get(account_id)
+                before = await reported_at(session, account_id, from_at, wallet)
+                after = await reported_at(session, account_id, to_at, wallet)
                 posted = await _posted(session, account_id, from_at, to_at)
                 for instrument_id in sorted({*before, *after, *posted}):
                     zero = Decimal(0)

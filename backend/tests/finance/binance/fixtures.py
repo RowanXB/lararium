@@ -43,8 +43,26 @@ type Rowdict = dict[str, ApiValue]
 # Text fields that hold an asset code.
 _ASSET_NAMES = {"currency", "token", "coin", "fiat", "feeAsset"}
 # Values the catalogue document records for a field Binance answers with no listed enum: the
-# daily snapshot's `type` is lower-case in the answer although the request asks `SPOT`.
-_RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {"snapshot": {"snapshotVos[].type": "spot"}}
+# daily snapshot's `type` is lower-case in the answer although the request asks `SPOT`. A
+# futures host's exchange information states its request weight per minute as Binance's example
+# does (2400).
+_RATE_LIMIT: dict[str, ApiValue] = {
+    "rateLimits[].rateLimitType": "REQUEST_WEIGHT",
+    "rateLimits[].interval": "MINUTE",
+    "rateLimits[].intervalNum": 1,
+    "rateLimits[].limit": 2400,
+}
+_RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {
+    "snapshot": {"snapshotVos[].type": "spot"},
+    "um-exchange-info": _RATE_LIMIT,
+    "cm-exchange-info": _RATE_LIMIT,
+}
+# The futures accounts answer as the probe's did: present, holding nothing (no asset, no
+# position) until a test stores rows or sets `positions` (`set_envelope`).
+_EMPTY_FUTURES: dict[str, dict[str, ApiValue]] = {
+    "um-account": {"positions": []},
+    "cm-account": {"positions": []},
+}
 # Text times written as "YYYY-MM-DD HH:MM:SS" (UTC); every other text time is epoch ms digits.
 _UTC_TEXT_LABELS = {"withdrawals", "travel-withdrawals"}
 
@@ -292,7 +310,8 @@ class FakeBinance:
 
     By default the account has no margin, as the probe's: the cross margin account answers
     `created: false` and the margin histories -3003. `margin=True` (or setting `margin`) opens
-    it: then they answer from what is stored, as every other label does.
+    it: then they answer from what is stored, as every other label does. The futures wallets
+    are there and empty, as the probe's were: a test that needs them stores their rows.
     """
 
     def __init__(
@@ -311,7 +330,9 @@ class FakeBinance:
         self._failures: list[_Failure] = []
         self._hooks: dict[str, Hook] = {}
         self._caps: dict[str, int] = {}
-        self._envelopes: dict[str, dict[str, ApiValue]] = {}
+        self._envelopes: dict[str, dict[str, ApiValue]] = {
+            label: dict(fields) for label, fields in _EMPTY_FUTURES.items()
+        }
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.

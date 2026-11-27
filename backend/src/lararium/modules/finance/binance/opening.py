@@ -4,8 +4,9 @@ history its records go back to.
 At each account's earliest report (the earliest time any of its instruments was reported, a
 daily snapshot included; `reconcile.report_times`), for every instrument the account has a
 snapshot or a posting of: its quantity in that report (0 when the report does not list it, as
-a report is complete; `reconcile.reported_at`) less the sum of the account's non-void postings
-of it up to that time, the opening itself left out. An asset first reported later is not an
+a report is complete; `reconcile.reported_at`: a futures wallet's is its wallet balance, which
+leaves its unrealised profit out) less the sum of the account's non-void postings of it up to
+that time, the opening itself left out. An asset first reported later is not an
 opening: its appearance is a reconciliation difference unless a record explains it.
 
 It is derived, not decided: set afresh after every normalising run once the first sync's
@@ -97,7 +98,7 @@ async def set_openings(run: Run) -> int:
                     await remove(run, f"{OPENING_PREFIX}{wallet}:{instrument_id}")
                 continue
             earliest = times[0]
-            reported = await reported_at(run.session, account_id, earliest)
+            reported = await reported_at(run.session, account_id, earliest, wallet)
             first = await _earliest_record(run, account_id)
             for instrument_id in sorted({*reported, *await _instruments(run, account_id)}):
                 key = f"{OPENING_PREFIX}{wallet}:{instrument_id}"

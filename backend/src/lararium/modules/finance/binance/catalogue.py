@@ -237,6 +237,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="assets",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
     ),
     "cm-balance": _ep(
@@ -248,7 +249,20 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
+    ),
+    "cm-exchange-info": _ep(
+        "cm-exchange-info",
+        "GET",
+        "/dapi/v1/exchangeInfo",
+        1,
+        "dapi",
+        signed=False,
+        rows="symbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "cm-income": _ep(
         "cm-income",
@@ -273,6 +287,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "positionSide"),
         time="updateTime",
+        params=None,
         kind="position",
     ),
     "cm-trades": _ep(
@@ -1206,6 +1221,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="assets",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
     ),
     "um-balance": _ep(
@@ -1217,7 +1233,20 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
+    ),
+    "um-exchange-info": _ep(
+        "um-exchange-info",
+        "GET",
+        "/fapi/v1/exchangeInfo",
+        1,
+        "fapi",
+        signed=False,
+        rows="symbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "um-income": _ep(
         "um-income",
@@ -1226,7 +1255,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         30,
         "fapi",
         rows=".",
-        ids=("incomeType", "tranId", "asset", "symbol"),
+        ids=("incomeType", "tranId"),
         time="time",
         lookback=90,
         paging="none",
@@ -1242,6 +1271,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "positionSide"),
         time="updateTime",
+        params=None,
         kind="position",
     ),
     "um-trades": _ep(
@@ -1659,6 +1689,42 @@ updateTime time_ms
 [].crossUnPnl decimal
 [].availableBalance decimal
 [].updateTime time_ms!
+""",
+    "cm-exchange-info": """
+timezone text
+serverTime time_ms
+exchangeFilters[] text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
+symbols[].symbol text!
+symbols[].pair text
+symbols[].contractType text
+symbols[].deliveryDate time_ms
+symbols[].onboardDate time_ms
+symbols[].contractStatus text
+symbols[].contractSize integer
+symbols[].baseAsset text
+symbols[].quoteAsset text
+symbols[].marginAsset text
+symbols[].pricePrecision integer
+symbols[].quantityPrecision integer
+symbols[].baseAssetPrecision integer
+symbols[].quotePrecision integer
+symbols[].equalQtyPrecision integer
+symbols[].triggerProtect decimal
+symbols[].maintMarginPercent decimal
+symbols[].requiredMarginPercent decimal
+symbols[].underlyingType text
+symbols[].underlyingSubType[] text
+symbols[].filters[] array~
+symbols[].filters[].filterType text
+symbols[].orderTypes[] text
+symbols[].timeInForce[] text
+symbols[].liquidationFee decimal
+symbols[].marketTakeBound decimal
 """,
     "cm-income": """
 [].symbol text
@@ -2807,6 +2873,44 @@ positions[].updateTime time_ms
 [].maxWithdrawAmount decimal
 [].marginAvailable boolean
 [].updateTime time_ms!
+""",
+    "um-exchange-info": """
+timezone text
+serverTime time_ms
+exchangeFilters[] text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
+assets[].asset text!
+assets[].marginAvailable boolean
+assets[].autoAssetExchange decimal
+symbols[].symbol text!
+symbols[].pair text
+symbols[].contractType text
+symbols[].deliveryDate time_ms
+symbols[].onboardDate time_ms
+symbols[].status text
+symbols[].maintMarginPercent decimal
+symbols[].requiredMarginPercent decimal
+symbols[].baseAsset text
+symbols[].quoteAsset text
+symbols[].marginAsset text
+symbols[].pricePrecision integer
+symbols[].quantityPrecision integer
+symbols[].baseAssetPrecision integer
+symbols[].quotePrecision integer
+symbols[].underlyingType text
+symbols[].underlyingSubType[] text
+symbols[].settlePlan integer
+symbols[].triggerProtect decimal
+symbols[].filters[] array~
+symbols[].filters[].filterType text
+symbols[].orderTypes[] text
+symbols[].timeInForce[] text
+symbols[].liquidationFee decimal
+symbols[].marketTakeBound decimal
 """,
     "um-income": """
 [].symbol text

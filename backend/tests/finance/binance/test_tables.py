@@ -351,6 +351,45 @@ def test_margin_tables_and_keys() -> None:
     assert layout.layout("margin-borrow-repay")[0].column("request_type").sql == "text"
 
 
+def test_futures_tables_and_keys() -> None:
+    family = (
+        "um-exchange-info",
+        "um-balance",
+        "um-account",
+        "um-positions",
+        "um-income",
+        "um-trades",
+        "cm-exchange-info",
+        "cm-balance",
+        "cm-account",
+        "cm-positions",
+        "cm-income",
+        "cm-trades",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Each account is one report per read; its assets and positions are child rows, and an
+    # asset's wallet balance is what reconciliation compares (Decision 11).
+    for host in ("um", "cm"):
+        account, assets, positions = layout.layout(f"{host}-account")
+        assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+        assert assets.name == f"binance_{host}_account_assets"
+        assert assets.column("wallet_balance").sql == "numeric"
+        assert not assets.column("wallet_balance").nullable
+        assert positions.name == f"binance_{host}_account_positions"
+        # Income is keyed by its type and id, as Binance says it is unique; a transfer row is
+        # linked to the movement an earlier listing posts (rule 2).
+        income = layout.layout(f"{host}-income")[0]
+        assert (income.key, income.record) == (("connection_id", "income_type", "tran_id"), True)
+        assert income.column("movement_key").sql == "text"
+        trades = layout.layout(f"{host}-trades")[0]
+        assert (trades.key, trades.record) == (("connection_id", "symbol", "id"), True)
+        positions_read = layout.layout(f"{host}-positions")[0]
+        assert positions_read.key == ("connection_id", "snapshot_at", "symbol", "position_side")
+        info = [t.name for t in layout.layout(f"{host}-exchange-info")]
+        assert f"binance_{host}_exchange_info_rate_limits" in info
+        assert f"binance_{host}_exchange_info_symbols" in info
+
+
 # The models are what the migration made.
 
 

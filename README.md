@@ -951,11 +951,19 @@ Built from Binance's documentation and not checked against a real account:
   posted once. Borrowing and repaying change no net quantity and are stored only, as are the
   capital flow, forced liquidations, small liability exchanges and the liquidation loan. An
   account Binance says it has not created is skipped, as a product the account does not have.
+- USD-M and COIN-M futures (`um-account`, `um-balance`, `um-positions`, `um-income`,
+  `um-trades`, `um-exchange-info`, `cm-account`, `cm-balance`, `cm-positions`, `cm-income`,
+  `cm-trades`, `cm-exchange-info`): "Binance USDⓈ-M Futures" and "Binance COIN-M Futures" hold
+  each asset's wallet balance plus its unrealised profit, and are reconciled on the wallet
+  balance alone. Every income row is posted against Unassigned (commissions, funding and
+  insurance clearance paid as fees) except a transfer, which is posted once with the
+  wallet-to-wallet history that also lists it. Trades (fetched for the symbols the income
+  history names) and positions are stored only; a contract is never an instrument. Each futures
+  host's request limit is read from its own exchange information.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- USD-M and COIN-M futures
 - Options
 - Fiat orders, card payments, P2P, Pay and rebates
 - Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no

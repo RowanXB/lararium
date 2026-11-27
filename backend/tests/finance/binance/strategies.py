@@ -12,10 +12,12 @@ subscriptions, redemptions to Spot and rewards, yield token subscriptions (swaps
 redemptions Binance pays out later (seen pending, then arrived, a fee at times), flexible
 crypto loans borrowed onto Spot (some failed) and repaid from it, margin transfers between Spot
 and Cross Margin (some also listed by the universal transfer history, some pending first), margin
-trades on Cross Margin (no `quoteQty`, a commission at times) and margin interest charged there.
-No wallet ever holds less than nothing, except Crypto Loans, whose holdings are debts: never
-more than nothing (a debt there before the history is a loan whose borrow is not listed, as a VIP
-loan's never is).
+trades on Cross Margin (no `quoteQty`, a commission at times) and margin interest charged there,
+transfers between Spot and USDⓈ-M Futures (listed by the universal transfer history and by the
+futures income history as a `TRANSFER` row, rule 2) and futures income (realised profit and
+funding either way, commissions paid). No wallet ever holds less than nothing, except Crypto
+Loans, whose holdings are debts: never more than nothing (a debt there before the history is a
+loan whose borrow is not listed, as a VIP loan's never is).
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -62,15 +64,17 @@ PAIRS = (
     ("AAABBB", "AAA", "BBB"),
     ("CCCSTB", "CCC", "STB"),
 )
-WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin")
+WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin", "um_futures")
 ACCOUNT_NAMES = {
     "spot": "Binance Spot",
     "funding": "Binance Funding",
     "earn": "Binance Earn",
     "loans": "Binance Crypto Loans",
     "cross_margin": "Binance Cross Margin",
+    "um_futures": "Binance USDⓈ-M Futures",
 }
 CROSS = "cross_margin"
+FUTURES = "um_futures"
 # The wallet whose holdings are debts (negative).
 DEBTS = "loans"
 _WALLET_TYPE = {"spot": 0, "funding": 1}
@@ -84,7 +88,16 @@ _REALTIME_DIGIT, _DIVIDEND_DIGIT, _PAYOUT_DIGIT = 3, 7, 5
 _LOCKED_DIGIT = 9
 # The kinds whose removal leaves one (account, instrument) changed.
 SINGLE_SIDED = frozenset(
-    {"deposit", "withdrawal", "dividend", "payout", "reward", "locked_reward", "margin_interest"}
+    {
+        "deposit",
+        "withdrawal",
+        "dividend",
+        "payout",
+        "reward",
+        "locked_reward",
+        "margin_interest",
+        "futures_income",
+    }
 )
 TWO_SIDED = frozenset(
     {
@@ -102,6 +115,7 @@ TWO_SIDED = frozenset(
         "repay",
         "margin_transfer",
         "margin_trade",
+        "futures_transfer",
     }
 )
 
@@ -945,6 +959,79 @@ def _margin_interest(b: _Builder) -> Record | None:
     return Record("margin_interest", (("margin-interest", ((b.now, row),)),), (effect,))
 
 
+def _futures_transfer(b: _Builder) -> Record | None:
+    """A transfer between Spot and USDⓈ-M Futures: the universal transfer history lists it, and
+    the futures income history as a `TRANSFER` row a few seconds apart (rule 2: posted once)."""
+    choices = b.holdings(("spot", FUTURES))
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    into = wallet == "spot"
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    universal = build_row(
+        "universal-transfer",
+        asset=asset,
+        amount=_plain(quantity),
+        type="MAIN_UMFUTURE" if into else "UMFUTURE_MAIN",
+        status="CONFIRMED",
+        tranId=b.id(),
+        timestamp=b.now,
+    )
+    listed_at = b.now + b.draw(st.integers(0, 30)) * SECOND_MS
+    income = build_row(
+        "um-income",
+        symbol="",
+        incomeType="TRANSFER",
+        income=_plain(quantity if into else -quantity),
+        asset=asset,
+        info="TRANSFER",
+        time=listed_at,
+        tranId=b.id(),
+        tradeId="",
+    )
+    rows = (
+        ("universal-transfer", ((b.now, universal),)),
+        ("um-income", ((listed_at, income),)),
+    )
+    other = FUTURES if into else "spot"
+    effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
+    return Record("futures_transfer", rows, effects)
+
+
+def _futures_income(b: _Builder) -> Record | None:
+    """An income row of USDⓈ-M Futures against nothing else: a realised profit or a funding fee
+    either way, or a commission paid; what is paid is within what the wallet holds."""
+    kind = b.draw(st.sampled_from(("REALIZED_PNL", "FUNDING_FEE", "COMMISSION")))
+    paid = kind == "COMMISSION" or b.draw(st.booleans())
+    if paid:
+        choices = b.holdings((FUTURES,))
+        if not choices:
+            return None
+        _, asset = b.draw(st.sampled_from(choices))
+        quantity = b.amount(at_most=b.held[(FUTURES, asset)])
+    else:
+        asset = b.draw(st.sampled_from(ASSETS))
+        quantity = b.amount()
+    if quantity == 0:
+        return None
+    delta = -quantity if paid else quantity
+    row = build_row(
+        "um-income",
+        symbol="AAASTB",
+        incomeType=kind,
+        income=_plain(delta),
+        asset=asset,
+        info="",
+        time=b.now,
+        tranId=b.id(),
+        tradeId=str(b.id()),
+    )
+    effect = Effect(b.now, FUTURES, asset, delta)
+    return Record("futures_income", (("um-income", ((b.now, row),)),), (effect,))
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -967,6 +1054,8 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "margin_transfer": _margin_transfer,
     "margin_trade": _margin_trade,
     "margin_interest": _margin_interest,
+    "futures_transfer": _futures_transfer,
+    "futures_income": _futures_income,
 }
 
 

@@ -50,6 +50,7 @@ from lararium.modules.finance.binance.records import (
     Run,
     capital,
     earn,
+    futures,
     loans,
     margin,
     post,
@@ -117,6 +118,8 @@ HANDLERS: dict[str, Handler] = {
     margin.BORROW_REPAY: margin.borrow_repay,
     margin.INTEREST: margin.interest,
     margin.CAPITAL_FLOW: margin.capital_flow,
+    futures.UM_INCOME: futures.income,
+    futures.CM_INCOME: futures.income,
 }
 # The report labels whose rows post (each row of each read, keyed by the row's id): the
 # products with no history endpoint.
@@ -128,10 +131,12 @@ POSITION_HANDLERS: dict[str, Handler] = {
 REWARD_HISTORIES: tuple[earn.Rewards, ...] = (*earn.REWARD_HISTORIES, *staking.REWARD_HISTORIES)
 # Rule 2: the endpoints that list wallet-to-wallet movements, the one that posts a movement first
 # (`transfers.link_movements`): the universal transfer history, then the margin transfer
-# history. Later tasks add the futures income TRANSFER rows and the options bill transfers.
+# history, then the futures income TRANSFER rows. A later task adds the options bill transfers.
 MOVEMENT_LISTINGS: tuple[transfers.Listing, ...] = (
     transfers.UNIVERSAL_LISTING,
     margin.MARGIN_LISTING,
+    futures.UM_LISTING,
+    futures.CM_LISTING,
 )
 # The history labels whose rows have typed tables, by raw record type.
 _LABEL_OF = {

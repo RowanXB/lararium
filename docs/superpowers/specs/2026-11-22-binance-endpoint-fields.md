@@ -15,7 +15,7 @@ Conventions:
 - Weight rule: `IP` = counted per IP (SAPI: 12,000/min per endpoint; `/api`: 6,000/min shared), `UID` = counted per account (SAPI: 180,000/min per endpoint).
 - "Doc" gives the anchor under `developers.binance.com/en/docs/catalog/`.
 
-Endpoint count: 108 endpoints with a field table (the probe's 85 + 22 added + `klines`, which the prices need), 19 more listed by one line. See "Index of labels" and "Totals" at the end.
+Endpoint count: 110 endpoints with a field table (the probe's 85 + 22 added + `klines`, which the prices need, + the two futures hosts' `exchangeInfo`, which their rate limits need), 19 more listed by one line. See "Index of labels" and "Totals" at the end.
 
 ---
 
@@ -1754,7 +1754,7 @@ Balances, accounts and positions (`um-balance`, `um-account`, `um-positions`, `c
 ### `um-income` — GET /fapi/v1/income
 Host fapi.binance.com · weight 30 (IP, fapi pool) · signed · doc `core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account#get-income-history`
 Request: all optional. `symbol`, `incomeType` (enum below; omitted = all kinds). `startTime`/`endTime` both inclusive; no per-query maximum documented; default "the recent 7-day data". "Income history only contains data for the last three months." `limit` default 100, max 1000; no page parameter (advance `startTime`).
-Id: `tranId`, "unique in the same incomeType for a user" → key = `incomeType` + `tranId` (add `asset` and `symbol` to be safe). Time: `time`. Seen: empty; a window older than 3 months answered HTTP 200 with no rows (no error).
+Id: `tranId`, "unique in the same incomeType for a user" → key = `incomeType` + `tranId`, as the documents say (not `symbol` as well: it is empty for transfers, and an empty key part is refused). Time: `time`. Seen: empty; a window older than 3 months answered HTTP 200 with no rows (no error).
 `incomeType` enum (23): TRANSFER, WELCOME_BONUS, REALIZED_PNL, FUNDING_FEE, COMMISSION, INSURANCE_CLEAR, REFERRAL_KICKBACK, COMMISSION_REBATE, API_REBATE, CONTEST_REWARD, CROSS_COLLATERAL_TRANSFER, OPTIONS_PREMIUM_FEE, OPTIONS_SETTLE_PROFIT, INTERNAL_TRANSFER, AUTO_EXCHANGE, DELIVERED_SETTELMENT (spelling as documented), COIN_SWAP_DEPOSIT, COIN_SWAP_WITHDRAW, POSITION_LIMIT_INCREASE_FEE, STRATEGY_UMFUTURES_TRANSFER, FEE_RETURN, BFUSD_REWARD, SPECIAL_FUNDING_FEE.
 
 | Field | Type | Meaning |
@@ -1834,6 +1834,79 @@ Id: `id` (per symbol; the schema's description says "positionId", it is the trad
 | [].positionSide | string | position side (example BOTH) |
 | [].buyer | boolean | account was the buyer |
 | [].maker | boolean | account was the maker |
+
+### `um-exchange-info` (not probed) — GET /fapi/v1/exchangeInfo
+Host fapi.binance.com · weight 1 (IP, fapi pool) · unsigned · doc `core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data#exchange-information` (read 2026-11-27)
+Request: none. Id: `symbols[].symbol`. Time: none (`serverTime`: "please ignore"). Seen: not probed.
+M7 reads it at the start of each sync for its `rateLimits` (the `REQUEST_WEIGHT` per minute that the fapi pool's limiter keeps under, plan Decision 4) and stores the symbol list; the rest is stored as reference data.
+
+| Field | Type | Meaning |
+|---|---|---|
+| timezone | string | "UTC" |
+| serverTime | integer | epoch ms; "please ignore", use `/fapi/v1/time` |
+| exchangeFilters[] | string | exchange filters (documented as strings; the example is empty) |
+| rateLimits[] | array | one object per limit |
+| rateLimits[].rateLimitType | string | example REQUEST_WEIGHT (enum not listed) |
+| rateLimits[].interval | string | example MINUTE (enum not listed) |
+| rateLimits[].intervalNum | integer | interval multiplier |
+| rateLimits[].limit | integer | limit value (example 2400) |
+| assets[].asset | string | asset |
+| assets[].marginAvailable | boolean | usable as margin in multi-assets mode |
+| assets[].autoAssetExchange | decimal string | auto-exchange threshold in multi-assets margin mode |
+| symbols[].symbol | string | contract symbol |
+| symbols[].pair | string | underlying pair |
+| symbols[].contractType | string | e.g. PERPETUAL |
+| symbols[].deliveryDate | integer | epoch ms |
+| symbols[].onboardDate | integer | epoch ms |
+| symbols[].status | string | e.g. TRADING |
+| symbols[].maintMarginPercent, requiredMarginPercent | decimal string | "ignore" |
+| symbols[].baseAsset, quoteAsset, marginAsset | string | assets |
+| symbols[].pricePrecision, quantityPrecision, baseAssetPrecision, quotePrecision | integer | precisions ("do not use as tickSize/stepSize") |
+| symbols[].underlyingType | string | e.g. COIN |
+| symbols[].underlyingSubType[] | string | e.g. STORAGE |
+| symbols[].settlePlan | integer | settlement plan |
+| symbols[].triggerProtect | decimal string | threshold for algo orders with "priceProtect" |
+| symbols[].filters[] | array | oneOf by `filterType` (PRICE_FILTER, LOT_SIZE, …); fields vary by kind |
+| symbols[].filters[].filterType | string | filter kind |
+| symbols[].orderTypes[] | string | order types |
+| symbols[].timeInForce[] | string | time in force values |
+| symbols[].liquidationFee | decimal string | liquidation fee rate |
+| symbols[].marketTakeBound | decimal string | the most a market order may move from the mark price |
+
+### `cm-exchange-info` (not probed) — GET /dapi/v1/exchangeInfo
+Host dapi.binance.com · weight 1 (IP, dapi pool) · unsigned · doc `core-trading-derivatives-trading-coin-m-futures/api/rest-api/market-data#exchange-information` (read 2026-11-27)
+Request: none. Id: `symbols[].symbol`. Time: none (`serverTime`: "Ignore please"). Seen: not probed.
+Read as `um-exchange-info` is, for the dapi pool's limit.
+
+| Field | Type | Meaning |
+|---|---|---|
+| timezone | string | "UTC" |
+| serverTime | integer | epoch ms; "Ignore please", use `/dapi/v1/time` |
+| exchangeFilters[] | string | exchange filters (documented as strings; the example shows empty arrays) |
+| rateLimits[] | array | one object per limit |
+| rateLimits[].rateLimitType | string | example REQUEST_WEIGHT (enum not listed) |
+| rateLimits[].interval | string | example MINUTE (enum not listed) |
+| rateLimits[].intervalNum | integer | interval multiplier |
+| rateLimits[].limit | integer | limit value |
+| symbols[].symbol | string | contract symbol, e.g. BTCUSD_200925 |
+| symbols[].pair | string | underlying pair |
+| symbols[].contractType | string | e.g. CURRENT_QUARTER, PERPETUAL |
+| symbols[].deliveryDate | integer | epoch ms |
+| symbols[].onboardDate | integer | epoch ms |
+| symbols[].contractStatus | string | e.g. TRADING |
+| symbols[].contractSize | integer | contract size |
+| symbols[].baseAsset, quoteAsset, marginAsset | string | assets |
+| symbols[].pricePrecision, quantityPrecision, baseAssetPrecision, quotePrecision, equalQtyPrecision | integer | precisions (`equalQtyPrecision` "ignore") |
+| symbols[].triggerProtect | decimal string | threshold for algo orders with "priceProtect" |
+| symbols[].maintMarginPercent, requiredMarginPercent | decimal string | "ignore" |
+| symbols[].underlyingType | string | e.g. COIN |
+| symbols[].underlyingSubType[] | string | documented as strings; the example shows empty arrays |
+| symbols[].filters[] | array | oneOf by `filterType`; fields vary by kind |
+| symbols[].filters[].filterType | string | filter kind |
+| symbols[].orderTypes[] | string | order types |
+| symbols[].timeInForce[] | string | time in force values |
+| symbols[].liquidationFee | decimal string | liquidation fee rate |
+| symbols[].marketTakeBound | decimal string | the most a market order may move from the mark price |
 
 Also present in the docs and left out: `/fapi/v1/forceOrders`, `/dapi/v1/forceOrders` (liquidation orders), `/fapi/v1/positionMargin/history`, `/dapi/v1/positionMargin/history`, order histories, and the async download endpoints (`/fapi/v1/income/asyn`, `/fapi/v1/trade/asyn`, and the `dapi` equivalents) that return a download link for older data.
 
@@ -2227,6 +2300,7 @@ One row per endpoint M7 reads, for the test that keeps the code's catalogue equa
 | `cloud-mining` | GET | api.binance.com | /sapi/v1/asset/ledger-transfer/cloud-mining/queryByPage | own heading |
 | `cm-account` | GET | dapi.binance.com | /dapi/v1/account | own heading |
 | `cm-balance` | GET | dapi.binance.com | /dapi/v1/balance | own heading |
+| `cm-exchange-info` | GET | dapi.binance.com | /dapi/v1/exchangeInfo | own heading |
 | `cm-income` | GET | dapi.binance.com | /dapi/v1/income | own heading |
 | `cm-positions` | GET | dapi.binance.com | /dapi/v1/positionRisk | own heading |
 | `cm-trades` | GET | dapi.binance.com | /dapi/v1/userTrades | own heading |
@@ -2306,6 +2380,7 @@ One row per endpoint M7 reads, for the test that keeps the code's catalogue equa
 | `travel-withdrawals` | GET | api.binance.com | /sapi/v1/localentity/withdraw/history | own heading |
 | `um-account` | GET | fapi.binance.com | /fapi/v3/account | own heading |
 | `um-balance` | GET | fapi.binance.com | /fapi/v3/balance | own heading |
+| `um-exchange-info` | GET | fapi.binance.com | /fapi/v1/exchangeInfo | own heading |
 | `um-income` | GET | fapi.binance.com | /fapi/v1/income | own heading |
 | `um-positions` | GET | fapi.binance.com | /fapi/v3/positionRisk | own heading |
 | `um-trades` | GET | fapi.binance.com | /fapi/v1/userTrades | own heading |
@@ -2326,6 +2401,6 @@ One row per endpoint M7 reads, for the test that keeps the code's catalogue equa
 
 ## Totals
 
-- Full field tables: **107 endpoints** = the probe's 85 (all found in the current docs at the method, path and weight the probe uses) + 22 added (`coin-config`, `asset-detail`, `earn-flexible-collateral`, `loan-flexible-ltv-adjustments`, `loan-flexible-liquidations`, 5 VIP-loan reads, `margin-trades`, `margin-liquidation-loan`, `margin-liquidation-loan-repays`, `um-trades`, `cm-trades`, 5 options reads, 2 portfolio-margin reads).
+- Full field tables: **109 endpoints** (110 with `klines`) = the probe's 85 (all found in the current docs at the method, path and weight the probe uses) + 22 added (`coin-config`, `asset-detail`, `earn-flexible-collateral`, `loan-flexible-ltv-adjustments`, `loan-flexible-liquidations`, 5 VIP-loan reads, `margin-trades`, `margin-liquidation-loan`, `margin-liquidation-loan-repays`, `um-trades`, `cm-trades`, 5 options reads, 2 portfolio-margin reads) + `um-exchange-info` and `cm-exchange-info` (2026-11-27, for the futures hosts' rate limits).
 - Listed by one line: 19 (5 further Portfolio Margin + 4 Portfolio Margin Pro account/balance reads, 3 gift-card reads, 4 mining reads, 2 travel-rule V2 histories, fiat order detail).
-- Hosts: `api.binance.com` (90 of the 107), `fapi.binance.com` (5), `dapi.binance.com` (5), `eapi.binance.com` (5), `papi.binance.com` (2; brief).
+- Hosts: `api.binance.com` (90 of the 109), `fapi.binance.com` (6), `dapi.binance.com` (6), `eapi.binance.com` (5), `papi.binance.com` (2; brief).

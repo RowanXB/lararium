@@ -536,6 +536,17 @@ def _margin_day(at_ms: int, *held: tuple[str, str]) -> dict[str, Any]:
     return {**row, "data": data}
 
 
+def _futures_day(at_ms: int, *held: tuple[str, str]) -> dict[str, Any]:
+    """A daily FUTURES snapshot: each asset's wallet balance in `assets`, no position."""
+    row = build_row("snapshot", type="futures", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["assets"] = [
+        {"asset": code, "marginBalance": wallet, "walletBalance": wallet} for code, wallet in held
+    ]
+    data["position"] = []
+    return {**row, "data": data}
+
+
 async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> None:
     connection = await binance_connection(run)
     day_one = NOW_MS - 2 * 24 * HOUR_MS - 1_000  # 23:59:59 UTC
@@ -544,8 +555,8 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
         _daily("spot", day_two, ("AAA", "3")),
         _daily("spot", day_one, ("AAA", "2"), ("BBB", "1"), ("LDAAA", "5")),
         _margin_day(day_two, ("CCC", "7")),
-        # FUTURES days are not written (yet).
-        _daily("futures", day_two, ("DDD", "9")),
+        # A FUTURES day is USDⓈ-M's wallet balance.
+        _futures_day(day_two, ("DDD", "9")),
     ]
 
     written = await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
@@ -557,8 +568,9 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
         ("Binance Cross Margin", "CCC", 7, _at(day_two)),
         ("Binance Spot", "AAA", 3, _at(day_two)),
         ("Binance Spot", "BBB", 0, _at(day_two)),
+        ("Binance USDⓈ-M Futures", "DDD", 9, _at(day_two)),
     ]
-    assert written == 5
+    assert written == 6
     # Once written, the same rows write nothing.
     assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 0
 

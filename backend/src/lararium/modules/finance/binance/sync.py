@@ -10,7 +10,8 @@ The connection's `config` keys, what each holds and who writes it:
 - `account_map`: wallet key to finance account id (`accounts.wallet_account`).
 - `cursors`: per history label (or `<label>:<variant>`, `:<isolated pair>`) `{fetched_to,
   backfilled_to, complete}`, per `my-trades:<symbol>` and `margin-trades:<symbol>` (an isolated
-  pair's `margin-trades:<symbol>:isolated`) the last trade id (`fetch.commit`).
+  pair's `margin-trades:<symbol>:isolated`) the last trade id, per `um-trades:<symbol>` and
+  `cm-trades:<symbol>` a window cursor as a history label's (`fetch.commit`).
 - `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
@@ -71,6 +72,7 @@ from lararium.modules.finance.binance.balances import (
     store_read,
     store_reports,
 )
+from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import (
     MAX_RETRIES,
     BinanceClient,
@@ -86,6 +88,8 @@ from lararium.modules.finance.binance.client import (
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
+    FUTURES_INFO,
+    FUTURES_TRADES,
     HISTORY_LABELS,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
@@ -101,6 +105,7 @@ from lararium.modules.finance.binance.fetch import (
     trade_cursor_key,
     trade_symbols,
     walk,
+    walk_futures_trades,
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import assets_seen as seen
@@ -283,7 +288,7 @@ async def opening(ctx: SyncContext) -> set[Point]:
 async def first_sync_line(session: AsyncSession, connection_id: UUID, openings: int) -> str:
     """The first sync's message: the records per label and the openings made, counts only."""
     counts: list[str] = []
-    for label in [*HISTORY_LABELS, *TRADE_LABELS]:
+    for label in [*HISTORY_LABELS, *TRADE_LABELS, *FUTURES_TRADES]:
         if label not in layout.TABLE_LABELS:
             continue
         table = layout.layout(label)[0].name
@@ -418,6 +423,8 @@ class BinanceConnector:
         uid = uid_of(account)
         if uid is None or uid != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
+        # Before any other request to a futures host: its own limits (plan Decision 4).
+        limits = await read_limits(client)
         reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
         # Before any asset is met: an instrument first needed can then be matched by its
         # CoinGecko id (design 5.5). A failure is logged and the sync goes on.
@@ -425,9 +432,13 @@ class BinanceConnector:
         for read in reads.values():
             await store_read(ctx, read)
         reference = await read_balances(client, [COIN_CONFIG_LABEL, ASSET_DETAIL_LABEL])
+        reference |= limits
 
         for label in HISTORY_LABELS:
             await walk(ctx, client, label)
+        # After the income histories: their rows name the symbols traded.
+        for label in FUTURES_TRADES:
+            await walk_futures_trades(ctx, client, label)
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
@@ -477,6 +488,21 @@ class BinanceConnector:
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
+
+
+async def read_limits(client: BinanceClient) -> dict[str, Read]:
+    """Each futures host's exchange information, and its request weight per minute taken from
+    it (`BinanceClient.read_limits`); the reads, stored with the reference reports. A host that
+    does not serve it (a "not present" answer) keeps the assumed limit."""
+    reads: dict[str, Read] = {}
+    for label in FUTURES_INFO:
+        try:
+            read = (await read_balances(client, [label]))[label]
+        except BinanceNotPresent:
+            continue
+        client.read_limits(ENDPOINTS[label], as_api(read.body))
+        reads[label] = read
+    return reads
 
 
 async def walk_symbols(

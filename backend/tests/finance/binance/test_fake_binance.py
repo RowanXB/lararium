@@ -79,6 +79,22 @@ async def test_the_default_account_has_no_margin() -> None:
     assert isinstance(opened, dict) and opened["created"] is True
 
 
+async def test_the_default_account_has_empty_futures_wallets() -> None:
+    # As the probe's account: both futures accounts answer, holding nothing.
+    fake = FakeBinance()
+    for label in ("um-account", "cm-account"):
+        body = await ask(fake, label)
+        assert isinstance(body, dict) and body["assets"] == [] and body["positions"] == []
+    for label in ("um-balance", "um-positions", "cm-balance", "cm-positions"):
+        assert await ask(fake, label) == []
+    # Each host states its request weight a minute as Binance's example does.
+    info = await ask(fake, "um-exchange-info")
+    assert isinstance(info, dict)
+    assert info["rateLimits"] == [
+        {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400}
+    ]
+
+
 async def test_stored_rows_come_back_oldest_first_in_the_labels_envelope() -> None:
     fake = FakeBinance()
     rows = [build_row("dividends", seq) for seq in (2, 0, 1)]

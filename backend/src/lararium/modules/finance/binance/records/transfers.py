@@ -7,10 +7,11 @@ the row does not name the pair, so the requested one is stored with it.
 
 A movement two endpoints both list is posted once (rule 2). The listings are taken in order
 (`Listing`; the universal transfer history first, then the margin transfer history and the
-futures income `TRANSFER` rows that later tasks add): a movement of a later listing with one of
-an earlier listing, posted, of the same asset and amount between the same two wallets within
-60 seconds is linked to it and not posted (`link_movements`). With none, it is posted by rule 1
-itself.
+futures income `TRANSFER` rows): a movement of a later listing with one of an earlier listing,
+posted, of the same asset and amount between the same two wallets within 60 seconds is linked
+to it and not posted (`link_movements`). With none, it is posted by rule 1 itself. A futures
+income row names only its own wallet: its other side matches any wallet, and posted by itself
+it is Unassigned.
 
 Cloud Mining has no wallet of its own on Binance: a payment leaves Spot and a refund comes back
 to it, against Unassigned.
@@ -86,12 +87,13 @@ _CLOUD_DONE = "S"
 @dataclass(frozen=True)
 class Movement:
     """One listing of a wallet-to-wallet movement: its record's ledger key, what moved, between
-    which wallets (from, to) and when; and the key of the movement it is linked to now."""
+    which wallets (from, to) and when; and the key of the movement it is linked to now. A side
+    the listing does not name (a futures income row's other wallet) is None."""
 
     key: str
     asset: str
     amount: Decimal
-    wallets: tuple[str, str]
+    wallets: tuple[str | None, str | None]
     at: datetime
     linked_to: str | None = None
 
@@ -115,10 +117,15 @@ class Listing:
 
 async def post_movement(run: Run, movement: Movement) -> UUID | None:
     """Rule 1: `-amount` on the first wallet's account and `+amount` on the second's, one
-    transaction keyed by the record; never a transfer leg."""
+    transaction keyed by the record; never a transfer leg. A side the listing does not name is
+    Unassigned."""
     instrument_id = await run.asset(movement.asset)
     if instrument_id is None:
         return None
+
+    async def account(wallet: str | None) -> UUID:
+        return run.unassigned if wallet is None else await run.account(wallet)
+
     source, destination = movement.wallets
     return await post(
         run,
@@ -126,10 +133,20 @@ async def post_movement(run: Run, movement: Movement) -> UUID | None:
         occurred_at=movement.at,
         description=f"Transfer {movement.asset}",
         postings=[
-            PostingInput(await run.account(source), instrument_id, -movement.amount),
-            PostingInput(await run.account(destination), instrument_id, movement.amount),
+            PostingInput(await account(source), instrument_id, -movement.amount),
+            PostingInput(await account(destination), instrument_id, movement.amount),
         ],
     )
+
+
+def same_wallets(one: tuple[str | None, str | None], other: tuple[str | None, str | None]) -> bool:
+    """Whether two listings can be of one movement: on each side the same wallet, or one of them
+    not naming it, and at least one side named by both (two rows that each name only another
+    side say nothing of one movement)."""
+    sides = list(zip(one, other, strict=True))
+    if any(a is not None and b is not None and a != b for a, b in sides):
+        return False
+    return any(a is not None and b is not None for a, b in sides)
 
 
 def _request_text(run: Run, name: str) -> str | None:
@@ -191,23 +208,23 @@ UNIVERSAL_LISTING = Listing(UNIVERSAL, _universal_movements)
 async def link_movements(run: Run, listings: Sequence[Listing]) -> None:
     """Rule 2 over every movement the listings hold, in the listings' order: a movement of a
     later listing is linked to the nearest posted movement of an earlier one with the same
-    asset, amount and wallets within 60 seconds, and its own posting removed; one no longer
-    linked is posted by rule 1 again.
+    asset, amount and wallets (`same_wallets`) within 60 seconds, and its own posting removed;
+    one no longer linked is posted by rule 1 again.
 
     The links are worked out afresh each run, so they do not depend on the order the records
     arrived in: pairs nearest first (ties by time and key), each movement of a listing linked
     at most once, each posted movement taken at most once by each later listing. Only a link
     that changes is written."""
-    posted: defaultdict[tuple[str, Decimal, tuple[str, str]], list[Movement]] = defaultdict(list)
+    posted: defaultdict[tuple[str, Decimal], list[Movement]] = defaultdict(list)
     for index, listing in enumerate(listings):
         movements = await listing.movements(run)
         wanted: dict[str, str] = {}
         if index > 0:
             pairs: list[tuple[timedelta, datetime, str, datetime, str]] = []
             for movement in movements:
-                for target in posted[(movement.asset, movement.amount, movement.wallets)]:
+                for target in posted[(movement.asset, movement.amount)]:
                     apart = abs(movement.at - target.at)
-                    if apart <= LINK_WINDOW:
+                    if apart <= LINK_WINDOW and same_wallets(movement.wallets, target.wallets):
                         pairs.append((apart, movement.at, movement.key, target.at, target.key))
             taken: set[str] = set()
             for _, _, key, _, target_key in sorted(pairs):
@@ -218,7 +235,7 @@ async def link_movements(run: Run, listings: Sequence[Listing]) -> None:
         for movement in movements:
             target = wanted.get(movement.key)
             if target is None:
-                posted[(movement.asset, movement.amount, movement.wallets)].append(movement)
+                posted[(movement.asset, movement.amount)].append(movement)
             if target == movement.linked_to:
                 continue
             assert listing.link is not None, f"{listing.label} cannot be linked"

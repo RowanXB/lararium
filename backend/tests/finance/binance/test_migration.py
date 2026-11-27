@@ -3,7 +3,8 @@ migration 0042 (`never_transfer`) likewise down to 0041, 0043 (the reconciliatio
 differences and the account report times) down to 0042, 0044 (the daily bars and the
 CoinGecko ids) down to 0043, 0047 (wallet-to-wallet transfers, dust, Cloud Mining and the
 travel-rule histories) down to 0046, 0048 (the other Earn products) down to 0047, 0049 (crypto
-loans) down to 0048, and 0050 (the margin wallets) down to 0049. Each table a migration creates
+loans) down to 0048, 0050 (the margin wallets) down to 0049, and 0051 (the futures wallets) down
+to 0050. Each table a migration creates
 is checked on its own, and each downgrade takes from a Binance connection's config what says
 what is in what it drops."""
 
@@ -62,6 +63,7 @@ _CONFIG: dict[str, object] = {
         "dci-positions": "digest",
         "loan-flexible-ongoing": "digest",
         "margin-account": "digest",
+        "um-account": "digest",
     },
     "swept": [["AAA", 1], ["BBB", 2, "cross_margin"]],
     "reconciled_through": 1,
@@ -74,6 +76,7 @@ _CONFIG: dict[str, object] = {
 }
 # What each downgrade removes, by the revision it goes down to.
 _REMOVED = {
+    "0050": {"normalized_through"},
     "0049": {"normalized_through"},
     "0048": {"normalized_through"},
     "0047": {"normalized_through"},
@@ -121,13 +124,14 @@ def _assert_config(engine: Engine, seeded: tuple[object, object, object], down_t
         }
     expected = {k: v for k, v in _CONFIG.items() if k not in _REMOVED[down_to]}
     if "report_digests" in expected:
-        # 0048, 0049 and 0050 drop their report tables, and with them the digests of what they
-        # stored.
+        # 0048 to 0051 drop their report tables, and with them the digests of what they stored.
         digests = {"coin-config": "digest"}
-        if down_to in ("0048", "0049"):
+        if down_to in ("0048", "0049", "0050"):
             digests["dci-positions"] = "digest"
-        if down_to == "0049":
+        if down_to in ("0049", "0050"):
             digests["loan-flexible-ongoing"] = "digest"
+        if down_to == "0050":
+            digests["margin-account"] = "digest"
         expected["report_digests"] = digests
     assert config[binance] == expected
     assert config[other] == _CONFIG
@@ -191,6 +195,19 @@ def test_each_migration_creates_its_own_tables() -> None:
         "binance_margin_liquidation_loan",
         "binance_margin_liquidation_loan_repays_responses",
     } <= set(margin)
+    futures = _created("0051")
+    assert len(futures) == len(set(futures)) == 23
+    assert {
+        "binance_um_account",
+        "binance_um_account_assets",
+        "binance_cm_account_assets",
+        "binance_um_income",
+        "binance_cm_income",
+        "binance_um_trades",
+        "binance_cm_trades",
+        "binance_um_exchange_info_rate_limits",
+        "binance_cm_exchange_info_symbols",
+    } <= set(futures)
 
 
 _CHECK = (
@@ -259,6 +276,7 @@ def test_migration_round_trip(owner_url: str, migrated: None) -> None:
         *_created("0048"),
         *_created("0049"),
         *_created("0050"),
+        *_created("0051"),
     ]
     engine = create_engine(owner_url)
     try:
@@ -471,6 +489,28 @@ def test_margin_migration_round_trip(owner_url: str, migrated: None) -> None:
         try:
             command.downgrade(config, "0049")
             _assert_config(engine, seeded, "0049")
+            with engine.begin() as connection:
+                assert _present(connection, tables) == _all(tables, False)
+                assert _present(connection, before) == _all(before, True)
+        finally:
+            command.upgrade(config, "head")
+            _unseed(engine, seeded)
+        with engine.begin() as connection:
+            assert _present(connection, tables) == _all(tables, True)
+    finally:
+        engine.dispose()
+
+
+def test_futures_migration_round_trip(owner_url: str, migrated: None) -> None:
+    config = _config(owner_url)
+    tables, before = _created("0051"), [*_created("0041"), *_created("0050")]
+    engine = create_engine(owner_url)
+    try:
+        with engine.begin() as connection:
+            seeded = _seed(connection)
+        try:
+            command.downgrade(config, "0050")
+            _assert_config(engine, seeded, "0050")
             with engine.begin() as connection:
                 assert _present(connection, tables) == _all(tables, False)
                 assert _present(connection, before) == _all(before, True)

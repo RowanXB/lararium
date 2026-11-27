@@ -779,10 +779,15 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
   记在它的钱包上；利息和强平手续费记为费用；钱包之间划转历史也列出的杠杆划转只入账一次。借款和
   还款不改变净数量，只保存；资金流水、强制平仓、小额负债兑换和强平借款也只保存。Binance 说尚未开通
   的账户会跳过，和账户没有的产品一样。
+- USD-M 和 COIN-M 合约（`um-account`、`um-balance`、`um-positions`、`um-income`、`um-trades`、
+  `um-exchange-info`、`cm-account`、`cm-balance`、`cm-positions`、`cm-income`、`cm-trades`、
+  `cm-exchange-info`）：“Binance USDⓈ-M Futures”和“Binance COIN-M Futures”持有每种资产的钱包余额
+  加未实现盈亏，对账只用钱包余额。除划转外，每条资金流水都对 Unassigned 入账（支付的手续费、资金费
+  和保险清算记为费用）；划转如果钱包之间划转历史也列出，只入账一次。成交（按资金流水提到的交易对
+  获取）和持仓只保存；合约永远不是一个 instrument。每个合约主机的请求限额从它自己的交易规则信息读取。
 
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- USD-M 和 COIN-M 合约
 - 期权
 - 法币订单、银行卡支付、P2P、Pay 和返佣
 - Portfolio Margin，以及 Trading Bots 和 Copy Trading 钱包（Binance 没有为它们提供记录）

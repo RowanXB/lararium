@@ -4,9 +4,9 @@
 The fake is the history at Binance's clock: every request first sets what it lists (the rows
 listed by then, in their state then: a deposit credited, a withdrawal failed) and what each
 wallet reports (the true balance then). The first sync walks back to the fetch floor and reads
-the daily Spot and Cross Margin snapshots; the later ones walk forwards from their cursors with
-the 7-day overlap. A record the test removes is the history's still (its effects are in every
-report) but the fake never lists it.
+the daily Spot, Cross Margin and USDⓈ-M snapshots; the later ones walk forwards from their
+cursors with the 7-day overlap. A record the test removes is the history's still (its effects
+are in every report) but the fake never lists it.
 
 - Windows and order: two schedules of the same history give the same transactions, postings
   and typed record rows; only an opening dated at its wallet's first report (no record, or
@@ -158,10 +158,11 @@ class World:
         )
         self.fake.set_rows("snapshot", self._daily("spot"), when={"type": "SPOT"})
         self.fake.add("snapshot", *self._daily("cross_margin"), when={"type": "MARGIN"})
+        self.fake.add("snapshot", *self._daily("um_futures"), when={"type": "FUTURES"})
 
     def _daily(self, wallet: str) -> list[dict[str, ApiValue]]:
-        """A Spot (or Cross Margin) snapshot at 23:59:59 of every day, from the day before the
-        history to three days after it; the fake lists only those up to the request's end."""
+        """A Spot (Cross Margin, USDⓈ-M) snapshot at 23:59:59 of every day, from the day before
+        the history to three days after it; the fake lists only those up to the request's end."""
         first = _at(self.history.start_ms).date() - timedelta(days=1)
         last = _at(self.history.end_ms).date() + timedelta(days=3)
         rows: list[dict[str, ApiValue]] = []
@@ -169,10 +170,20 @@ class World:
         while day <= last:
             at = _day_end_ms(day) - 999
             held = holdings_of(self.history.balance(at), wallet)
-            kind = "spot" if wallet == "spot" else "margin"
+            kind = {"spot": "spot", "cross_margin": "margin", "um_futures": "futures"}[wallet]
             row = build_row("snapshot", type=kind, updateTime=at)
             data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
-            if wallet == "spot":
+            if wallet == "um_futures":
+                data["assets"] = [
+                    {
+                        "asset": asset,
+                        "marginBalance": format(q, "f"),
+                        "walletBalance": format(q, "f"),
+                    }
+                    for asset, q in sorted(held.items())
+                ]
+                data["position"] = []
+            elif wallet == "spot":
                 data["balances"] = [
                     {"asset": asset, "free": format(q, "f"), "locked": "0"}
                     for asset, q in sorted(held.items())
@@ -210,7 +221,15 @@ class World:
             for row in rows:
                 self.fake.add(label, row, when=asked(row))
         held = self.history.balance(now_ms)
-        spot, funding, earn, loans, cross = (holdings_of(held, w) for w in WALLET_KEYS)
+        spot, funding, earn, loans, cross, futures = (holdings_of(held, w) for w in WALLET_KEYS)
+        # No position: the reported balance is the wallet balance.
+        self.fake.set_rows(
+            "um-account",
+            [
+                build_row("um-account", asset=a, walletBalance=format(q, "f"), unrealizedProfit="0")
+                for a, q in sorted(futures.items())
+            ],
+        )
         self.fake.set_rows(
             "margin-account",
             [

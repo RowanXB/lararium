@@ -152,6 +152,25 @@ MARGIN_PRODUCTS = (
     ISOLATED_MARGIN_LABEL,
     "margin-liquidation-loan",
 )
+# USDⓈ-M and COIN-M futures: the income histories, then each wallet's balance, account (its
+# report, `balances.FUTURES_SOURCES`) and positions. The trades are walked per symbol the income
+# rows name (`FUTURES_TRADES`), each host's exchange information read first (`FUTURES_INFO`).
+FUTURES_PRODUCTS = (
+    "um-income",
+    "cm-income",
+    "um-balance",
+    "um-account",
+    "um-positions",
+    "cm-balance",
+    "cm-account",
+    "cm-positions",
+)
+# Each futures trade label and the income history whose rows name its symbols (design 5.2): a
+# trade's commission is an income row of its symbol, so every symbol traded is named there.
+FUTURES_TRADES = {"um-trades": "um-income", "cm-trades": "cm-income"}
+# Each futures host's exchange information: its `rateLimits` give the host's request weight
+# per minute (plan Decision 4), read at the start of a sync before any other request to it.
+FUTURES_INFO = ("um-exchange-info", "cm-exchange-info")
 # The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
 # or walks them as it does Phase A's.
 PHASE_B_BUILT = (
@@ -166,6 +185,8 @@ PHASE_B_BUILT = (
     *LOAN_PRODUCTS,
     # The margin wallets (Task 18).
     *MARGIN_PRODUCTS,
+    # The futures wallets (Task 19).
+    *FUTURES_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 
@@ -884,3 +905,36 @@ async def _trades_between(
         *await _trades_between(client, endpoint, symbol, start, middle, isolated),
         *await _trades_between(client, endpoint, symbol, middle + 1, end, isolated),
     ]
+
+
+async def income_symbols(ctx: SyncContext, income_label: str) -> list[str]:
+    """The symbols the connection's stored rows of a futures income history name, sorted; a
+    row with no symbol (a transfer) names none."""
+    async with ctx.session_factory() as session:
+        found = await session.scalars(
+            text(
+                "select distinct content ->> 'symbol' from core.raw_records"
+                " where connection_id = :c and record_type = :t"
+            ),
+            {"c": ctx.connection.id, "t": record_type(income_label)},
+        )
+        return sorted({symbol.strip() for symbol in found if symbol and symbol.strip()})
+
+
+def futures_trade_key(label: str, symbol: str) -> str:
+    """The cursor of a symbol's futures trades: `<label>:<symbol>`, a window cursor."""
+    return f"{label}:{symbol}"
+
+
+async def walk_futures_trades(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
+    """Walk a futures trade label for every symbol its income history names (design 5.2); the
+    raw record ids stored. Binance takes a time range of at most 7 days and keeps 3 months
+    (the catalogue), so each symbol is walked by windows as a history label is, from its own
+    cursor (`futures_trade_key`): its first walk back 3 months, later ones from the last minus 7
+    days."""
+    endpoint = ENDPOINTS[label]
+    ids: list[UUID] = []
+    for symbol in await income_symbols(ctx, FUTURES_TRADES[label]):
+        key = futures_trade_key(label, symbol)
+        ids += await _walk_key(ctx, client, endpoint, key, {"symbol": symbol})
+    return ids

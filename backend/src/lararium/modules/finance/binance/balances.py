@@ -84,6 +84,11 @@ LOAN_READS = ("loan-flexible-ongoing", "vip-loan-ongoing")
 # The two margin accounts: Cross Margin holds each asset's `netAsset`, Isolated Margin the base
 # and quote `netAsset` of each of its pairs, summed per asset (design 5.6).
 CROSS_MARGIN_LABEL = "margin-account"
+# The futures wallets' reports: each account's `assets[]`, an asset's balance its wallet balance
+# plus its unrealised profit (design 5.6). Reconciliation compares the records with the change of
+# the wallet balance alone (`reconcile.reported_at`, plan Decision 11).
+FUTURES_SOURCES = {"um_futures": "um-account", "cm_futures": "cm-account"}
+_FUTURES_FIELDS = ("walletBalance", "unrealizedProfit")
 # The reads a snapshot comes from: only these are made again when a movement falls into them.
 SOURCE_LABELS = (
     "spot-account",
@@ -92,10 +97,17 @@ SOURCE_LABELS = (
     *LOAN_READS,
     CROSS_MARGIN_LABEL,
     ISOLATED_MARGIN_LABEL,
+    *FUTURES_SOURCES.values(),
 )
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
-REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
+REFERENCE_LABELS = (
+    "coin-config",
+    "asset-detail",
+    "exchange-info",
+    "um-exchange-info",
+    "cm-exchange-info",
+)
 # Request parameters a read sends.
 READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
     WALLET_LIST: {"needBalanceDetail": True},
@@ -106,7 +118,10 @@ READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
 # The digest of each report label's last stored answer: an unchanged answer is not stored again.
 DIGESTS_KEY = "report_digests"
 # Fields that change with every answer without the report changing.
-_VOLATILE = {"exchange-info": frozenset({"serverTime"})}
+_VOLATILE = {
+    label: frozenset({"serverTime"})
+    for label in ("exchange-info", "um-exchange-info", "cm-exchange-info")
+}
 # Wallets with a source of their own; every other wallet's balance comes from the wallet list
 # (design 5.6) until a later phase gives it one.
 OWN_SOURCES = {
@@ -115,6 +130,7 @@ OWN_SOURCES = {
     "loans": LOAN_READS[0],
     "cross_margin": CROSS_MARGIN_LABEL,
     "isolated_margin": ISOLATED_MARGIN_LABEL,
+    **FUTURES_SOURCES,
 }
 LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
@@ -137,10 +153,14 @@ class _DailyWallet:
 # The daily snapshot types written as reports, by the request's `type`. Binance answers the
 # daily snapshot's `type` in lower case (`spot`) although the request asks for `SPOT` (the
 # catalogue document): it is compared without case. Cross Margin's day holds each asset's
-# `netAsset`, as its account does; FUTURES is Task 19's to add.
+# `netAsset`, as its account does. A FUTURES day is USDⓈ-M's (Binance's example lists a USDT
+# asset and a BTCUSDT position; the page does not say which futures wallet): its `walletBalance`
+# alone, as it gives no unrealised profit to add (its `marginBalance` "can ignore", its
+# positions' profit is "at the time of opening"). That is the balance reconciliation compares.
 DAILY_WALLETS: dict[str, _DailyWallet] = {
     "SPOT": _DailyWallet("spot", "balances", _SPOT_FIELDS),
     "MARGIN": _DailyWallet("cross_margin", "userAssets", _NET_FIELDS),
+    "FUTURES": _DailyWallet("um_futures", "assets", ("walletBalance",)),
 }
 
 
@@ -570,6 +590,11 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     isolated = reads.get(ISOLATED_MARGIN_LABEL)
     if isolated is not None:
         wallets.append(_Wallet("isolated_margin", isolated, _isolated_held(isolated)))
+    for key, label in FUTURES_SOURCES.items():
+        futures = reads.get(label)
+        if futures is not None:
+            held = _per_asset(label, "assets[].", _source_rows(futures), _FUTURES_FIELDS)
+            wallets.append(_Wallet(key, futures, held))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
         for row in _source_rows(listed):
@@ -954,9 +979,9 @@ async def backfill_daily_snapshots(
     flag: Flag | None = None,
 ) -> int:
     """Each daily snapshot row of a type in `DAILY_WALLETS` (Spot: `free + locked`, `LD` mirrors
-    dropped; Cross Margin: `netAsset`) as `reported` snapshots of its wallet at its own
-    `updateTime`, an asset held then that the day does not list at 0 (`record_report`); how many
-    were written. A snapshot already written is not written again.
+    dropped; Cross Margin: `netAsset`; USDⓈ-M Futures: `walletBalance`) as `reported` snapshots
+    of its wallet at its own `updateTime`, an asset held then that the day does not list at 0
+    (`record_report`); how many were written. A snapshot already written is not written again.
 
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
