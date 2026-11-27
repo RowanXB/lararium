@@ -17,7 +17,11 @@ transfers between Spot and USDⓈ-M Futures (listed by the universal transfer hi
 futures income history as a `TRANSFER` row, rule 2) and futures income (realised profit and
 funding either way, commissions paid), transfers between Spot and Options (listed by the
 universal transfer history and by the options bill as a `TRANSFER` row, rule 2) and options
-bill rows (premiums and exercise profit either way, fees paid). No wallet ever holds less than
+bill rows (premiums and exercise profit either way, fees paid), fiat deposits (some pending first)
+and withdrawals by bank on Spot, card purchases (from a card, or from the cash balance) and sales
+on Spot, P2P buys and sells on Funding, and Pay payments and receipts on Funding or Spot. The fiat
+is EUR (`FIAT`), in cents; the other kinds never move it. Rebates are not drawn: Binance serves
+them from June 2020 only, and the histories start in July 2017. No wallet ever holds less than
 nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
 before the history is a loan whose borrow is not listed, as a VIP loan's never is).
 
@@ -59,6 +63,10 @@ START_MS = LAUNCH_MS + DAY_MS
 # BNB is what dust converts into.
 DUST_TARGET = "BNB"
 ASSETS = ("AAA", "BBB", "CCC", "STB", DUST_TARGET)
+# The currency of the fiat kinds: Binance marks it legal money (the World's coin-config), so it
+# is the ledger's EUR. Only they move it, in cents.
+FIAT = "EUR"
+_CENT = Decimal("0.01")
 # What `exchange-info` lists: (symbol, base, quote).
 PAIRS = (
     ("AAASTB", "AAA", "STB"),
@@ -102,6 +110,12 @@ SINGLE_SIDED = frozenset(
         "margin_interest",
         "futures_income",
         "options_bill",
+        "fiat_deposit",
+        "fiat_withdrawal",
+        "card_purchase",
+        "card_sale",
+        "p2p",
+        "pay",
     }
 )
 TWO_SIDED = frozenset(
@@ -122,6 +136,7 @@ TWO_SIDED = frozenset(
         "margin_trade",
         "futures_transfer",
         "options_transfer",
+        "cash_purchase",
     }
 )
 
@@ -145,6 +160,9 @@ class Record:
     rows: tuple[tuple[str, tuple[tuple[int, Rowdict], ...]], ...]
     effects: tuple[Effect, ...]
     failing: bool = False
+    # The request parameters its rows answer, when the row does not say them (a fiat order's
+    # `transactionType`).
+    asked: tuple[tuple[str, str], ...] = ()
 
     @property
     def listed_ms(self) -> int:
@@ -270,8 +288,16 @@ class _Builder:
                 self.pending.append(effect)
         self.records.append(record)
 
-    def holdings(self, wallets: Iterable[str]) -> list[Holding]:
-        return sorted(h for h, q in self.held.items() if q > 0 and h[0] in wallets)
+    def holdings(self, wallets: Iterable[str], *, fiat: bool = False) -> list[Holding]:
+        """What the wallets hold: the crypto assets, or with `fiat` the fiat only."""
+        return sorted(
+            h for h, q in self.held.items() if q > 0 and h[0] in wallets and (h[1] == FIAT) == fiat
+        )
+
+    def cents(self, *, at_most: Decimal | None = None) -> Decimal:
+        """A fiat amount: k cents, k ≥ 1 (≤ `at_most`)."""
+        top = 1_000_000 if at_most is None else int(at_most / _CENT)
+        return self.draw(st.integers(1, top)) * _CENT if top >= 1 else Decimal(0)
 
     def amount(self, *, at_most: Decimal | None = None, digit: int | None = None) -> Decimal:
         """k / 10^4 for k ≥ 1 (≤ `at_most`), its last digit `digit` when given."""
@@ -1107,6 +1133,205 @@ def _options_bill(b: _Builder) -> Record | None:
     return Record("options_bill", (("opt-bill", ((b.now, row),)),), (effect,))
 
 
+_FIAT_IN, _FIAT_OUT = "0", "1"
+
+
+def _fiat_order(b: _Builder, quantity: Decimal, fee: Decimal, **fields: ApiValue) -> Rowdict:
+    return build_row(
+        "fiat-orders",
+        orderNo=f"fo-{b.id()}",
+        fiatCurrency=FIAT,
+        indicatedAmount=_plain(quantity + fee),
+        amount=_plain(quantity),
+        totalFee=_plain(fee),
+        method="BankAccount",
+        **fields,
+    )
+
+
+def _fiat_deposit(b: _Builder) -> Record:
+    """A deposit by bank credited on Spot after its fee, some processing first."""
+    quantity = b.cents()
+    fee = b.cents(at_most=quantity) if b.draw(st.booleans()) else Decimal(0)
+    pending = b.draw(st.booleans())
+    credited_at = b.later(MINUTE_MS, 2 * DAY_MS) if pending else b.now
+    base = _fiat_order(
+        b, quantity, fee, status="Successful", createTime=b.now, updateTime=credited_at
+    )
+    versions: list[tuple[int, Rowdict]] = []
+    if pending:
+        versions.append((b.now, {**base, "status": "Processing", "updateTime": b.now}))
+    versions.append((credited_at, base))
+    return Record(
+        "fiat_deposit",
+        (("fiat-orders", tuple(versions)),),
+        (Effect(credited_at, "spot", FIAT, quantity),),
+        asked=(("transactionType", _FIAT_IN),),
+    )
+
+
+def _fiat_withdrawal(b: _Builder) -> Record | None:
+    """A withdrawal by bank from Spot: `amount` to the bank and the fee besides."""
+    if not b.holdings(("spot",), fiat=True):
+        return None
+    total = b.held[("spot", FIAT)]
+    quantity = b.cents(at_most=total)
+    fee = b.cents(at_most=total - quantity) if b.draw(st.booleans()) else Decimal(0)
+    if quantity == 0:
+        return None
+    row = _fiat_order(b, quantity, fee, status="Successful", createTime=b.now, updateTime=b.now)
+    return Record(
+        "fiat_withdrawal",
+        (("fiat-orders", ((b.now, row),)),),
+        (Effect(b.now, "spot", FIAT, -(quantity + fee)),),
+        asked=(("transactionType", _FIAT_OUT),),
+    )
+
+
+def _card_row(
+    b: _Builder, source: Decimal, crypto: str, obtained: Decimal, fee: Decimal, method: str | None
+) -> Rowdict:
+    return build_row(
+        "fiat-payments",
+        orderNo=f"fp-{b.id()}",
+        sourceAmount=_plain(source),
+        fiatCurrency=FIAT,
+        obtainAmount=_plain(obtained),
+        cryptoCurrency=crypto,
+        totalFee=_plain(fee),
+        price="1",
+        status="Completed",
+        paymentMethod=method,
+        createTime=b.now,
+        updateTime=b.now,
+    )
+
+
+def _card_purchase(b: _Builder) -> Record:
+    """Crypto bought on Spot with a card: the fiat arrives and is spent at once."""
+    crypto = b.draw(st.sampled_from(ASSETS))
+    source = b.cents() + _CENT
+    fee = b.cents(at_most=source - _CENT) if b.draw(st.booleans()) else Decimal(0)
+    obtained = b.amount()
+    row = _card_row(b, source, crypto, obtained, fee, "Credit Card")
+    return Record(
+        "card_purchase",
+        (("fiat-payments", ((b.now, row),)),),
+        (Effect(b.now, "spot", crypto, obtained),),
+        asked=(("transactionType", _FIAT_IN),),
+    )
+
+
+def _cash_purchase(b: _Builder) -> Record | None:
+    """Crypto bought on Spot from the cash balance: the fiat leaves Spot."""
+    if not b.holdings(("spot",), fiat=True):
+        return None
+    source = b.cents(at_most=b.held[("spot", FIAT)])
+    if source <= _CENT:
+        return None
+    fee = b.cents(at_most=source - _CENT) if b.draw(st.booleans()) else Decimal(0)
+    crypto = b.draw(st.sampled_from(ASSETS))
+    obtained = b.amount()
+    row = _card_row(b, source, crypto, obtained, fee, "Cash Balance")
+    effects = (Effect(b.now, "spot", FIAT, -source), Effect(b.now, "spot", crypto, obtained))
+    return Record(
+        "cash_purchase",
+        (("fiat-payments", ((b.now, row),)),),
+        effects,
+        asked=(("transactionType", _FIAT_IN),),
+    )
+
+
+def _card_sale(b: _Builder) -> Record | None:
+    """Crypto sold on Spot to a card: the fiat it buys leaves at once."""
+    choices = b.holdings(("spot",))
+    if not choices:
+        return None
+    _, crypto = b.draw(st.sampled_from(choices))
+    sold = b.amount(at_most=b.held[("spot", crypto)])
+    if sold == 0:
+        return None
+    source = b.cents()
+    fee = b.cents() if b.draw(st.booleans()) else Decimal(0)
+    row = _card_row(b, source, crypto, sold, fee, None)
+    return Record(
+        "card_sale",
+        (("fiat-payments", ((b.now, row),)),),
+        (Effect(b.now, "spot", crypto, -sold),),
+        asked=(("transactionType", _FIAT_OUT),),
+    )
+
+
+def _p2p(b: _Builder) -> Record | None:
+    """A P2P order on Funding paid by bank: a buy, or a sell of what Funding holds; the total is
+    the amount at a whole unit price exactly, the commission in the crypto."""
+    sell = b.draw(st.booleans())
+    if sell:
+        choices = b.holdings(("funding",))
+        if not choices:
+            return None
+        _, crypto = b.draw(st.sampled_from(choices))
+        held = b.held[("funding", crypto)]
+        quantity = b.cents(at_most=held)
+        commission = b.amount(at_most=held - quantity) if b.draw(st.booleans()) else Decimal(0)
+        if quantity == 0:
+            return None
+        delta = -(quantity + commission)
+    else:
+        crypto = b.draw(st.sampled_from(ASSETS))
+        quantity = b.cents()
+        commission = b.amount(at_most=quantity - _UNIT) if b.draw(st.booleans()) else Decimal(0)
+        delta = quantity - commission
+    price = Decimal(b.draw(st.integers(1, 100)))
+    row = build_row(
+        "c2c",
+        orderNumber=f"p2p-{b.id()}",
+        tradeType="SELL" if sell else "BUY",
+        asset=crypto,
+        fiat=FIAT,
+        amount=_plain(quantity),
+        totalPrice=_plain(quantity * price),
+        unitPrice=_plain(price),
+        orderStatus="COMPLETED",
+        commission=_plain(commission),
+        createTime=b.now,
+    )
+    return Record("p2p", (("c2c", ((b.now, row),)),), (Effect(b.now, "funding", crypto, delta),))
+
+
+def _pay(b: _Builder) -> Record | None:
+    """A Pay payment from Funding or Spot of what it holds, or a receipt there."""
+    wallet = b.draw(st.sampled_from(("funding", "spot")))
+    paid = b.draw(st.booleans())
+    if paid:
+        choices = b.holdings((wallet,))
+        if not choices:
+            return None
+        _, asset = b.draw(st.sampled_from(choices))
+        quantity = b.amount(at_most=b.held[(wallet, asset)])
+        if quantity == 0:
+            return None
+        details: list[ApiValue] = [
+            {"currency": asset, "amount": _plain(quantity), "walletAssetCost": {}}
+        ]
+    else:
+        asset = b.draw(st.sampled_from(ASSETS))
+        quantity = b.amount()
+        details = []
+    delta = -quantity if paid else quantity
+    row = build_row(
+        "pay",
+        transactionId=f"pay-{b.id()}",
+        orderType="PAY" if paid else "C2C",
+        transactionTime=b.now,
+        amount=_plain(delta),
+        currency=asset,
+        walletType=2 if wallet == "spot" else 1,
+        fundsDetail=details,
+    )
+    return Record("pay", (("pay", ((b.now, row),)),), (Effect(b.now, wallet, asset, delta),))
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -1133,6 +1358,13 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "futures_income": _futures_income,
     "options_transfer": _options_transfer,
     "options_bill": _options_bill,
+    "fiat_deposit": _fiat_deposit,
+    "fiat_withdrawal": _fiat_withdrawal,
+    "card_purchase": _card_purchase,
+    "cash_purchase": _cash_purchase,
+    "card_sale": _card_sale,
+    "p2p": _p2p,
+    "pay": _pay,
 }
 
 

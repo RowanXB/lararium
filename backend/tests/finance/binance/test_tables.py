@@ -886,3 +886,32 @@ async def test_a_table_without_its_own_non_finite_check_is_found(session) -> Non
         "binance_deposits": [d for d in checks["binance_deposits"] if "amount" not in d],
     }
     assert _missing_checks(mutated) == [("binance_deposits", "amount")]
+
+
+def test_fiat_tables_and_keys() -> None:
+    family = ("fiat-orders", "fiat-payments", "c2c", "pay", "rebate")
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # A fiat order and a card payment keep the transactionType they were asked for.
+    for label in ("fiat-orders", "fiat-payments"):
+        root = layout.layout(label)[0]
+        assert (root.key, root.record) == (("connection_id", "order_no"), True)
+        assert root.column("transaction_type").sql == "text"
+    c2c = layout.layout("c2c")[0]
+    assert (c2c.key, c2c.record) == (("connection_id", "order_number"), True)
+    # Pay's `transactionId` is not the ledger link `transaction_id`: it takes the label's name.
+    pay, detail, costs, _ = layout.layout("pay")
+    assert pay.key == ("connection_id", "pay_transaction_id")
+    assert pay.column("transaction_id").sql == "uuid"
+    assert layout.locate("pay", "data[].transactionId")[1].name == "pay_transaction_id"
+    assert detail.name == "binance_pay_funds_detail"
+    assert costs.key == (
+        "connection_id",
+        "pay_transaction_id",
+        "funds_detail_ordinal",
+        "wallet_type",
+    )
+    assert layout.locate("pay", "data[].walletTypes[]")[1].sql == "bigint[]"
+    # A rebate has no id: its content and occurrence key it, and it keeps its dividend.
+    rebate = layout.layout("rebate")[0]
+    assert rebate.key == ("connection_id", "content_hash", "occurrence")
+    assert rebate.column("dividend_id").sql == "text"

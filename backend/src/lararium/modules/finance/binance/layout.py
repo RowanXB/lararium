@@ -15,7 +15,8 @@ The rule, in short:
 - Below the root, every array of objects and every map is a child table `<parent>_<path>`,
   keyed by the parent's key and the element's position (or the map's key). An array of scalars
   is a `text[]`/`numeric[]` column; an array of arrays is a child table with a `value` array.
-- A column is the field's path in snake case; its type follows the field's type.
+- A column is the field's path in snake case; its type follows the field's type. A field named as
+  a column the table has of its own (`transaction_id`) takes the label's name as a prefix.
 - A history label is a table of records (nullable `transaction_id`, keyed by the record's id, or
   by a hash of its content and its occurrence); any other label is a report, keyed by
   `snapshot_at` and the row's id, with the `read_to` of the read.
@@ -138,6 +139,12 @@ TABLE_LABELS: tuple[str, ...] = (
     "opt-bill",
     "opt-trades",
     "opt-exercises",
+    # Phase B: fiat by bank, card purchases and sales, P2P, Pay and rebates.
+    "fiat-orders",
+    "fiat-payments",
+    "c2c",
+    "pay",
+    "rebate",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -173,6 +180,12 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     # The key of the movement an earlier listing posts that an options bill `TRANSFER` is
     # (rule 2).
     "opt-bill": (("movement_key", "text"),),
+    # The `transactionType` a fiat order (0 deposit, 1 withdraw) or a card payment (0 buy,
+    # 1 sell) was asked for: the row does not say which.
+    "fiat-orders": (("transaction_type", "text"),),
+    "fiat-payments": (("transaction_type", "text"),),
+    # The key of the dividend a rebate is linked to (rule 3).
+    "rebate": (("dividend_id", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),
@@ -480,18 +493,21 @@ def _root_table(
     if root and not root[-1].startswith("<") and record and not id_fields:
         head += [Column(CONTENT_HASH, "text", False), Column(OCCURRENCE, "integer", False)]
         key += [CONTENT_HASH, OCCURRENCE]
-    fields = _field_columns(mine, objects, frozenset(), "")
+    system = (
+        [Column("transaction_id", "uuid", True)]
+        if record
+        else [Column("read_to", "timestamptz", False)]
+    )
+    # A field named as one of the table's own columns (pay's `transactionId`) takes the
+    # label's name as a prefix (`pay_transaction_id`).
+    own = frozenset(c.name for c in (*head, *system))
+    fields = _field_columns(mine, objects, own, label.replace("-", "_"))
     for path in ids:
         found = next((c for c in fields if c.path == path and not c.twin), None)
         if found is None:
             raise ValueError(f"{label}: no field {path} to key the rows by")
         key.append(found.name)
     fields = [replace(c, nullable=False) if c.name in key else c for c in fields]
-    system = (
-        [Column("transaction_id", "uuid", True)]
-        if record
-        else [Column("read_to", "timestamptz", False)]
-    )
     extras = [Column(name, sql, True) for name, sql in EXTRA_COLUMNS.get(label, ())]
     return Table(
         name=table_name(label),

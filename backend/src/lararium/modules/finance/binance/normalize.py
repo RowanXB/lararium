@@ -50,6 +50,7 @@ from lararium.modules.finance.binance.records import (
     Run,
     capital,
     earn,
+    fiat,
     futures,
     loans,
     margin,
@@ -122,6 +123,11 @@ HANDLERS: dict[str, Handler] = {
     futures.UM_INCOME: futures.income,
     futures.CM_INCOME: futures.income,
     options.BILL: options.bill,
+    fiat.ORDERS: fiat.order,
+    fiat.PAYMENTS: fiat.payment,
+    fiat.C2C: fiat.c2c,
+    fiat.PAY: fiat.pay,
+    fiat.REBATES: fiat.rebate,
 }
 # The report labels whose rows post (each row of each read, keyed by the row's id): the
 # products with no history endpoint.
@@ -130,7 +136,11 @@ POSITION_HANDLERS: dict[str, Handler] = {
     structured.DISCOUNT_BUY: structured.discount_buy,
 }
 # Rule 3: every reward history whose rows a dividend can have paid.
-REWARD_HISTORIES: tuple[earn.Rewards, ...] = (*earn.REWARD_HISTORIES, *staking.REWARD_HISTORIES)
+REWARD_HISTORIES: tuple[earn.Rewards, ...] = (
+    *earn.REWARD_HISTORIES,
+    *staking.REWARD_HISTORIES,
+    *fiat.REWARD_HISTORIES,
+)
 # Rule 2: the endpoints that list wallet-to-wallet movements, the one that posts a movement first
 # (`transfers.link_movements`): the universal transfer history, then the margin transfer
 # history, then the futures income TRANSFER rows, then the options bill TRANSFER rows.
@@ -246,7 +256,8 @@ def _rewards_sql(columns: str, condition: str) -> str:
         where = condition.replace("{linkable}", f"({rewards.linkable})")
         parts.append(
             f"select :l{index} as label, content_hash, occurrence,"
-            f" {rewards.asset_sql} as asset, {rewards.amount_sql} as amount, time, dividend_id"
+            f" {rewards.asset_sql} as asset, {rewards.amount_sql} as amount,"
+            f" {rewards.time_sql} as time, dividend_id"
             f" from finance.{rewards.table} where connection_id = :c and {where}"
         )
     return f"select {columns} from (" + " union all ".join(parts) + ") r"

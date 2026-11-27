@@ -174,8 +174,8 @@ onchain_redemption = locked_redemption(
 @dataclass(frozen=True)
 class Rewards:
     """A reward history: its label, the wallet a reward that no dividend paid accrues on, the
-    row's fields of its asset (`coin`: the asset when the row names none) and amount, and which
-    of its rows can be a dividend's payout (`linkable`, SQL on the label's table)."""
+    row's fields of its asset (`coin`: the asset when the row names none), amount and time, and
+    which of its rows can be a dividend's payout (`linkable`, SQL on the label's table)."""
 
     label: str
     wallet: str
@@ -184,6 +184,7 @@ class Rewards:
     description: str
     coin: str | None = None
     linkable: str = "true"
+    time_field: str = "time"
 
     @property
     def table(self) -> str:
@@ -204,6 +205,10 @@ class Rewards:
     @property
     def amount_sql(self) -> str:
         return layout.snake(self.amount_field)
+
+    @property
+    def time_sql(self) -> str:
+        return layout.snake(self.time_field)
 
     def asset_of(self, run: Run, row: Row) -> str | None:
         if self.asset_field is None:
@@ -257,7 +262,7 @@ def reward(rewards: Rewards) -> Handler:
             return
         coin = rewards.asset_of(run, row)
         quantity = amount(rewards.label, row, rewards.amount_field)
-        occurred_at = when(rewards.label, row, "time")
+        occurred_at = when(rewards.label, row, rewards.time_field)
         if coin is None or quantity is None or occurred_at is None:
             return
         transaction_id = await post_reward(run, rewards, key, coin, quantity, occurred_at)

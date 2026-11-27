@@ -48,6 +48,9 @@ class Endpoint:
     # the documents give none.
     window_days: int | None
     lookback_days: int | None
+    # The earliest time Binance answers for, in epoch ms, when the documents give a date
+    # rather than a span; `None` when they give none.
+    earliest_ms: int | None
     # The names of a request's time range (start, end); None when the documents give the
     # endpoint none: it is asked without one.
     time_params: tuple[str, str] | None
@@ -69,6 +72,8 @@ _HOSTS = {
     "papi": "papi.binance.com",
 }
 _TIME_PARAMS = ("startTime", "endTime")
+# 2020-06-10 00:00 UTC: the rebate history's earliest supported start (the catalogue).
+_REBATE_EARLIEST_MS = 1_591_747_200_000
 
 
 def _ep(
@@ -84,6 +89,7 @@ def _ep(
     time: str | None = None,
     window: int | None = None,
     lookback: int | None = None,
+    earliest: int | None = None,
     params: tuple[str, str] | None = _TIME_PARAMS,
     paging: Literal["none", "offset", "page", "from_id"] = "none",
     page: int = 0,
@@ -104,6 +110,7 @@ def _ep(
         time_field=time,
         window_days=window,
         lookback_days=lookback,
+        earliest_ms=earliest,
         time_params=params,
         paging=paging,
         page_size=page,
@@ -1035,6 +1042,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="data.data",
         time="updateTime",
         window=29,
+        # "The earliest supported startTime is June 10, 2020" (00:00 UTC).
+        earliest=_REBATE_EARLIEST_MS,
         paging="page",
         page=200,
         kind="history",

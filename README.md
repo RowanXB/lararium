@@ -885,6 +885,17 @@ Accounts page and add the wallet's address as a **Chain address**, as in
 in transit, with the network fee posted separately. Each deposit and withdrawal also stores
 its transaction hash, network and addresses, so wallets can be paired by hash later.
 
+### Fiat deposits from your bank
+
+A fiat deposit or withdrawal by bank is a transfer between your bank account and "Binance Spot"
+once your bank's row names the account Binance's fiat channel pays into or from. Register that
+bank account, as your bank shows it, on the "Binance Spot" account (its **Identifiers**, as in
+[Registering identifiers](#registering-identifiers)), as you would for IBKR. A card purchase
+pairs with your card payment once Binance is registered as a **card merchant** of "Binance
+Spot". A P2P order's bank payment goes to someone else's account, so it never pairs by itself:
+pair the two by hand if you want them shown as one transfer. Unpaired, the bank's row and
+Binance's cancel out on Unassigned, so net worth is right either way.
+
 ### Prices
 
 Binance holdings are valued in EUR from a daily price for each asset:
@@ -972,11 +983,19 @@ Built from Binance's documentation and not checked against a real account:
   exercises and positions are stored only; a contract is never an instrument. An account without
   options is skipped, as a product the account does not have. The options host's request limit
   is read from its own exchange information.
+- Fiat by bank, card purchases and sales, P2P, Pay and rebates (`fiat-orders`,
+  `fiat-payments`, `c2c`, `pay`, `rebate`): a fiat deposit or withdrawal is a transfer between
+  your bank and "Binance Spot" (see [Fiat deposits from your bank](#fiat-deposits-from-your-bank));
+  a card purchase is the fiat arriving from the card and its swap for the crypto, with the fee
+  (one paid from the cash balance is the swap only); a P2P order is the same on "Binance
+  Funding", at its unit price. Only completed ones are posted. A Pay transaction moves what it
+  paid or received on Funding (or Spot) against Unassigned; a rebate is income on Spot, posted
+  once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
+  makes the first sync about 7 minutes longer.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Fiat orders, card payments, P2P, Pay and rebates
 - Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
   records
 

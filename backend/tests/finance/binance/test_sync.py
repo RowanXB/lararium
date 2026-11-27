@@ -86,7 +86,9 @@ def test_the_labels_built_so_far() -> None:
         if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
     ]
     assert {"spot-account", "api-restrictions", "funding-asset"} <= set(BALANCE_LABELS)
-    assert "rebate" not in HISTORY_LABELS
+    assert "rebate" in HISTORY_LABELS
+    # Portfolio Margin is not built yet.
+    assert "pm-balance" not in BALANCE_LABELS
 
 
 def test_gate_problem_at_any_depth() -> None:

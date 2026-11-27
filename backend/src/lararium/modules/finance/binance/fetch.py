@@ -181,6 +181,8 @@ OPTIONS_PRODUCTS = (
     "opt-account",
     "opt-positions",
 )
+# Fiat by bank, card purchases and sales, P2P orders, Pay and rebates.
+FIAT_PRODUCTS = ("fiat-orders", "fiat-payments", "c2c", "pay", "rebate")
 # Each trade label walked per symbol, and the history whose rows name its symbols (design 5.2):
 # a futures trade's commission is an income row of its symbol, an options trade's premium and
 # fee are bill rows of its symbol, so every symbol traded is named there.
@@ -206,6 +208,8 @@ PHASE_B_BUILT = (
     *FUTURES_PRODUCTS,
     # The Options wallet (Task 20).
     *OPTIONS_PRODUCTS,
+    # Fiat, cards, P2P, Pay and rebates (Task 21).
+    *FIAT_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 
@@ -253,6 +257,8 @@ def _int(value: JSONValue) -> int | None:
 
 def _floor(endpoint: Endpoint, now_ms: int) -> int:
     floor = LAUNCH_MS
+    if endpoint.earliest_ms is not None:
+        floor = max(floor, endpoint.earliest_ms)
     if endpoint.lookback_days is not None:
         floor = max(floor, now_ms - endpoint.lookback_days * DAY_MS + LOOKBACK_MARGIN_MS)
     return floor
@@ -264,8 +270,8 @@ def windows(
     """The (start, end) windows to ask, in epoch ms, both inclusive, in the order they are asked.
 
     While the backfill is not complete: newest first, from now (or from below `backfilled_to`)
-    back to July 2017 or the endpoint's lookback. Afterwards: oldest first, from `fetched_to`
-    minus 7 days to now. No window spans more than `window_days`.
+    back to July 2017, the endpoint's earliest date or its lookback. Afterwards: oldest first,
+    from `fetched_to` minus 7 days to now. No window spans more than `window_days`.
     """
     floor = _floor(endpoint, now_ms)
     span = endpoint.window_days * DAY_MS if endpoint.window_days is not None else None

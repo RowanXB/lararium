@@ -71,6 +71,7 @@ from .strategies import (
     ACCOUNT_NAMES,
     ASSETS,
     DEBTS,
+    FIAT,
     PAIRS,
     SINGLE_SIDED,
     TWO_SIDED,
@@ -136,6 +137,7 @@ async def connection(backend_url: str, migrated: None) -> AsyncIterator[AsyncCon
 _ASKED_FOR: dict[str, Callable[[dict[str, ApiValue]], dict[str, str]]] = {
     "universal-transfer": lambda row: {"type": str(row["type"])},
     "dust": lambda row: {"accountType": "SPOT"},
+    "c2c": lambda row: {"tradeType": str(row["tradeType"])},
 }
 
 
@@ -157,6 +159,8 @@ class World:
                 for symbol, base, quote in PAIRS
             ],
         )
+        # Binance marks the fiat kinds' currency legal money: it is the ledger's EUR.
+        self.fake.set_rows("coin-config", [build_row("coin-config", coin=FIAT, isLegalMoney=True)])
         self.fake.set_rows("snapshot", self._daily("spot"), when={"type": "SPOT"})
         self.fake.add("snapshot", *self._daily("cross_margin"), when={"type": "MARGIN"})
         self.fake.add("snapshot", *self._daily("um_futures"), when={"type": "FUTURES"})
@@ -206,21 +210,21 @@ class World:
         return rows
 
     def update(self, now_ms: int) -> None:
-        listed: dict[str, list[dict[str, ApiValue]]] = {label: [] for label in RECORD_LABELS}
+        listed: dict[str, list[tuple[dict[str, ApiValue], dict[str, str]]]] = {
+            label: [] for label in RECORD_LABELS
+        }
         for record in self.listed:
             for label, versions in record.rows:
                 shown = [row for at, row in versions if at <= now_ms]
                 if shown:
-                    listed[label].append(dict(shown[-1]))
+                    listed[label].append((dict(shown[-1]), dict(record.asked)))
         for label, rows in listed.items():
             asked = _ASKED_FOR.get(label)
-            if asked is None:
-                self.fake.set_rows(label, rows)
-                continue
-            # A row answers only the request for its own variant.
+            # A row answers only the request for its own variant: the one its record was
+            # asked for (the row does not say it), or the one the row names.
             self.fake.set_rows(label, [])
-            for row in rows:
-                self.fake.add(label, row, when=asked(row))
+            for row, when in rows:
+                self.fake.add(label, row, when=when or (asked(row) if asked else None))
         held = self.history.balance(now_ms)
         spot, funding, earn, loans, cross, futures, options = (
             holdings_of(held, w) for w in WALLET_KEYS
@@ -939,7 +943,7 @@ async def test_opening_plus_records_equal_the_first_report(
             if not times:
                 continue
             earliest = _ms(times[0])
-            for asset in ASSETS:
+            for asset in (*ASSETS, FIAT):
                 quantity = history.initial.get((wallet, asset), Decimal(0))
                 quantity += sum(
                     (
