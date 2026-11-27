@@ -325,7 +325,8 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
     which would count the money twice if the row is the real one. The account's balance is
     right; net worth counts the amount in the In transit account until the review is paired.
-    Upload a statement that lists those days and the two pair by themselves,
+    Upload a statement that lists those days and the two pair by themselves (unless another
+    transfer of the same amount competes for the row: then both are under *Several candidates*),
     or pair them yourself: the row is listed as a candidate, with **Pair**. It is never
     *Overdue*: it waits for an upload, not a connection.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
