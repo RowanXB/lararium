@@ -34,6 +34,7 @@ from lararium.modules.finance.transfers import (
 )
 
 from .conftest import (
+    A_IDENTIFIER,
     B_IDENTIFIER,
     DAY,
     WHEN,
@@ -386,5 +387,134 @@ async def test_a_transfer_the_account_s_statements_hold_is_settled_as_before(
     transfer = await _transfer_of(session, sent.id)
     assert (transfer.status, transfer.review_reason) == ("before_history", None)
     assert transfer.placeholder_transaction_id is None
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_gated_row_beside_one_the_gate_takes_leaves_both_for_review(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """A's payment of 100 at WHEN names B. B's upload lists in full from WHEN's day for two
+    days only (so it doesn't hold A's window), with two rows of 100 naming nobody: one
+    giving only its date, which the gate refuses (A's window starts the day before), and one
+    timed to the second 30 s after WHEN, which a timed receipt lets through (§8.3 item 4).
+    The refused row is as plausible a counterpart: the payment is paired with neither, its
+    review lists both, and no placeholder stands beside them."""
+    a = await connected_bank("A")
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    listed = (WHEN.date(), WHEN.date() + timedelta(days=2))
+    dated = await statement_row(b, "100", day=WHEN.date(), complete=listed)
+    timed = await statement_row(
+        b, "100", at=WHEN + timedelta(seconds=30), time_unit="second", complete=listed
+    )
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "several_candidates")
+    assert transfer.in_transaction_id is None
+    assert (transfer.placeholder_transaction_id, transfer.settlement_transaction_id) == (
+        None,
+        None,
+    )
+    assert await placeholders(session) == []
+    found = await candidates(session, transfer.id)
+    assert sorted((c.transaction_id, c.reason) for c in found) == sorted(
+        [(dated, "exact"), (timed, "exact")]
+    )
+    balances = await balances_on(session)
+    assert balances[b.id] == Decimal(200)  # the two rows, once each
+    assert balances[ids.in_transit] == Decimal(100)
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_gated_row_beside_one_of_another_amount_posts_no_placeholder(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    registered: Any,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """A's payment of 100 names B; B's row of 99.30 names A (another amount, mutually
+    identified) and its row of 100 names nobody on days no upload lists in full. The
+    transfer is for review as amount_differs, the gated row is among its candidates, and no
+    placeholder stands beside it."""
+    a, a_id = await registered("A", A_IDENTIFIER)
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    net = await statement_row(b, "99.30", day=WHEN.date(), identifier_id=a_id)
+    gated = await statement_row(b, "100", day=WHEN.date())
+    await _list_no_full_day(session, b)
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "amount_differs")
+    assert (transfer.placeholder_transaction_id, transfer.settlement_transaction_id) == (
+        None,
+        None,
+    )
+    assert await placeholders(session) == []
+    found = await candidates(session, transfer.id)
+    assert [(c.transaction_id, c.reason) for c in found] == [
+        (gated, "exact"),
+        (net, "amount_differs"),
+    ]
+    assert (await balances_on(session))[b.id] == Decimal("199.30")
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_heal_takes_the_placeholder_away_when_a_gated_row_arrives(
+    session: AsyncSession,
+    run: Run,
+    registered: Any,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """As above, with B's row of 100 arriving after the transfer opened for review as
+    amount_differs, with a placeholder: its review reason stays, but heal finds the
+    placeholder beside a row that may be the counterpart and takes it away. Voiding the row
+    brings the placeholder back."""
+    a, a_id = await registered("A", A_IDENTIFIER)
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    await statement_row(b, "99.30", day=WHEN.date(), identifier_id=a_id)
+    await _list_no_full_day(session, b)
+    await heal()
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("inferred", "amount_differs")
+
+    gated = await statement_row(b, "100", day=WHEN.date())
+    await _list_no_full_day(session, b)
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "amount_differs")
+    assert transfer.placeholder_transaction_id is None
+    await assert_consistent(session)
+    assert await heal() == 0
+
+    await run(void_transaction, gated)
+    await heal()
+
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("inferred", "amount_differs")
+    assert transfer.placeholder_transaction_id is not None
     await assert_consistent(session)
     assert await heal() == 0

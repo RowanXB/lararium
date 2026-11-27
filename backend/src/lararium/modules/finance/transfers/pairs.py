@@ -848,14 +848,25 @@ class PairRelation:
         """The record's unique partner: its only candidate, whose only candidate it is; or,
         among interchangeable candidates, the one a fixed order gives it (_twins). With no
         candidate of the same amount, the one it converts with across currencies
-        (`converts`), else the card payment or deposit it pairs with (`by_card`)."""
+        (`converts`), else the card payment or deposit it pairs with (`by_card`).
+
+        A record with candidates the coverage gate alone refused (`gated`) has none among
+        its candidates of the same amount, and is none's: a refused row is as plausible as
+        one the gate took (one a per-candidate rule, a timed receipt's or an opening date,
+        let through), so taking the other would pass it over (account type catalog design
+        §8.3 item 3)."""
         found = self.exact.get(record_id, frozenset())
         if not found:
             across = self.converts.get(record_id)
             return across if across is not None else self.by_card.get(record_id)
+        if record_id in self.gated:
+            return None
         if len(found) != 1:
-            return self.twins.get(record_id)
+            twin = self.twins.get(record_id)
+            return None if twin is None or twin in self.gated else twin
         [partner] = found
+        if partner in self.gated:
+            return None
         return partner if len(self.exact.get(partner, frozenset())) == 1 else None
 
     def several(self, record_id: UUID) -> bool:

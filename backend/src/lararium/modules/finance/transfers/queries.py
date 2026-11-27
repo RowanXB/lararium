@@ -685,7 +685,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
     make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
     (the owner paired it, so its side differs) is labelled amount_differs. A transfer
-    awaiting review as not_listed_in_full lists the rows the coverage gate refused it
+    awaiting review, for whatever reason, lists the rows the coverage gate refused it
     (PairRelation.unlisted) with those of the same amount, so the owner can pair one by hand
     (account type catalog design §8.3 item 3). Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
@@ -699,11 +699,7 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
         return []
     system = await system_account_ids(session)
     relation = await pair_relation(session, system, await load_transfer_settings(session))
-    unlisted = (
-        sorted(relation.unlisted(present_id))
-        if transfer.review_reason == "not_listed_in_full"
-        else []
-    )
+    unlisted = sorted(relation.unlisted(present_id)) if transfer.review_reason is not None else []
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
         ("exact", relation.candidates(present_id) + unlisted),
         ("amount_differs", relation.candidates(present_id, exact=False)),

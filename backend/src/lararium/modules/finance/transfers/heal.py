@@ -7,7 +7,7 @@ from decimal import Decimal
 from itertools import chain
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, or_, select, union
+from sqlalchemy import and_, case, exists, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -115,10 +115,16 @@ async def _pair_states(
     is not the one its own record's candidates give (several_candidates if it has several,
     PairRelation.several, else amount_differs if it has any of another amount, else
     not_listed_in_full if the coverage gate alone refused it one, PairRelation.unlisted,
-    unless the transfer is settled before history, else none: engine._open's)."""
-    tr = models.Transfer
+    unless the transfer is settled before history, else none: engine._open's), or, on a
+    manual counterpart, whose status is not the one engine._open gives: awaiting, with no
+    placeholder, when the gate alone refused the record a candidate, else inferred (one
+    settled before history instead is checked by (d))."""
+    tr, a = models.Transfer, models.Account
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
+    counterpart = case(
+        (tr.out_transaction_id.is_not(None), tr.to_account_id), else_=tr.from_account_id
+    )
     rows = list(
         await session.execute(
             select(
@@ -127,6 +133,9 @@ async def _pair_states(
                 tr.in_transaction_id,
                 tr.review_reason,
                 tr.settlement_transaction_id,
+                exists()
+                .where(a.id == counterpart, a.source_kind == "manual")
+                .label("manual_counterpart"),
             ).where(tr.status.in_(("matched", *OPEN_STATUSES)))
         )
     )
@@ -166,6 +175,11 @@ async def _pair_states(
         # (e) an open transfer whose review reason disagrees with its record's candidates.
         if row.review_reason != expected:
             due.add(present)
+        # (e) one on a manual counterpart with a placeholder beside a row the gate alone
+        # refused, or with none and no such row (account type catalog design §8.3 item 3).
+        elif row.manual_counterpart and row.status != "before_history":
+            if (row.status == "awaiting") != bool(relation.unlisted(present)):
+                due.add(present)
     # (c) a unique pair not yet a matched transfer.
     for record_id in chain(relation.exact, relation.converts, relation.by_card):
         partner = relation.partner(record_id)
@@ -285,8 +299,8 @@ async def records_to_heal(
             )
             # (d) a lone record whose manual counterpart's first snapshot (in its
             # instrument) now contains it, or no longer does (an earlier one was recorded):
-            # the same manual_predates engine._open decides by. One awaiting there is
-            # not_listed_in_full, with no placeholder, and is settled the same way.
+            # the same manual_predates engine._open decides by. One awaiting there (a row
+            # the gate alone refused it, with no placeholder) is settled the same way.
             manual = aliased(models.Account, name="manual_counterpart")
             contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(

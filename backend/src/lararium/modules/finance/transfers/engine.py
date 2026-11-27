@@ -386,10 +386,11 @@ async def _open(
     record when it is connected.
 
     `unlisted`: the coverage gate alone refused the record a candidate on the manual
-    counterpart (PairRelation.unlisted). With no other review reason, and unless the
-    account's history holds the counterpart, the transfer then awaits review
-    (not_listed_in_full) with no placeholder, which would count the money twice if the
-    candidate is the real row (account type catalog design §8.3 item 3).
+    counterpart (PairRelation.unlisted). Unless the account's history holds the
+    counterpart, the transfer then awaits review with no placeholder, which would count the
+    money twice if the candidate is the real row (account type catalog design §8.3 item
+    3): for its other review reason if it has one (several_candidates, amount_differs),
+    else not_listed_in_full.
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -404,8 +405,8 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
-        elif unlisted and review_reason is None:
-            review_reason = "not_listed_in_full"
+        elif unlisted:
+            review_reason = review_reason or "not_listed_in_full"
         else:
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
             status = "inferred"
