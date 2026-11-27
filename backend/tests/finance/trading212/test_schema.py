@@ -24,6 +24,8 @@ from lararium.modules.finance.trading212.fields import (
     KEYS,
     KINDS,
     MAP_ENTRIES,
+    NOTES_ACCOUNT_NUMBER,
+    NOTES_SORT_CODE,
     NOTES_TRANSACTION_ID,
     OWN_COLUMNS,
     PERSONAL,
@@ -160,7 +162,12 @@ async def test_every_column_is_a_field_or_its_own(session) -> None:
     for tables in COLUMNS.values():
         for table, paths in tables.items():
             fields.setdefault(table, set()).update(paths.values())
-    fields[EXPORT_TABLE] = {*EXPORT_COLUMNS.values(), NOTES_TRANSACTION_ID}
+    fields[EXPORT_TABLE] = {
+        *EXPORT_COLUMNS.values(),
+        NOTES_TRANSACTION_ID,
+        NOTES_SORT_CODE,
+        NOTES_ACCOUNT_NUMBER,
+    }
     stray = {
         table: sorted(set(columns) - fields.get(table, set()) - OWN_COLUMNS)
         for table, columns in found.items()

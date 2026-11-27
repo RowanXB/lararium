@@ -31,6 +31,7 @@ from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import list_transfers, register_holders_and_rematch
 from lararium.modules.finance.transfers.contra import eligible_records
 from lararium.modules.finance.transfers.pairs import (
+    DECIDED,
     MUTUAL,
     ONE_SIDED,
     Known,
@@ -38,6 +39,7 @@ from lararium.modules.finance.transfers.pairs import (
     PairRelation,
     Tier,
     _Decisions,
+    _near_split,
     _registry_edges,
     _several,
     _twins,
@@ -799,3 +801,19 @@ async def test_two_equal_moves_into_the_cash_isa_pair_by_time(
     )
     assert await heal() == 0
     await assert_consistent(session)
+
+
+def test_the_near_split_never_chooses_between_the_owner_s_pairs() -> None:
+    """Two pairs the owner made for one record stay for the owner, however close in time
+    one of them is (account family identifier design §5.10: the owner's decisions win)."""
+    sent = _pairable(MONZO, "-100", timed=True, source=("connection", "s"))
+    near = _pairable(INVEST, "100", timed=True, source=("connection", "n"))
+    far = _pairable(STOCKS, "100", timed=True, occurred_at=WHEN + timedelta(hours=1))
+    records = {x.id: x for x in (sent, near, far)}
+    tiers = {
+        sent.id: {near.id: DECIDED, far.id: DECIDED},
+        near.id: {sent.id: DECIDED},
+        far.id: {sent.id: DECIDED},
+    }
+    exact = {r: frozenset(found) for r, found in tiers.items()}
+    assert _near_split(records, tiers, exact, (), timedelta(minutes=2)) == exact

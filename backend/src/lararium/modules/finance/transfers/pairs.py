@@ -1142,7 +1142,10 @@ def _near_split(
     candidates still lists r or c among its own, so it pairs with neither
     (PairRelation.partner reads both ways); it was in no pair before either (it isn't in an
     interchangeable group, and r or c had several), and its candidates and review reason
-    are unchanged. Whatever is left with several goes to review as before."""
+    are unchanged. Whatever is left with several goes to review as before. The owner's
+    decisions win: a record with a pair the owner made (DECIDED) among its candidates, or
+    whose nearby candidate has one, is never split, so two of the owner's pair decisions
+    for one record stay for the owner however close in time one of them is."""
 
     def near(r: UUID) -> set[UUID]:
         """r's candidates time doesn't rule out: untimed ones, and timed ones within the
@@ -1156,9 +1159,12 @@ def _near_split(
             if not records[c].timed or abs(records[c].occurred_at - x.occurred_at) <= near_window
         }
 
+    def decided(r: UUID) -> bool:
+        return DECIDED in tiers.get(r, {}).values()
+
     split = dict(exact)
     for r, found in exact.items():
-        if len(found) < 2:
+        if len(found) < 2 or decided(r):
             continue
         nearby = near(r)
         if len(nearby) != 1:
@@ -1169,6 +1175,7 @@ def _near_split(
             and r not in whole
             and c not in whole
             and records[c].timed
+            and not decided(c)
             and near(c) == {r}
             and frozenset((r, c)) not in untakeable
         ):
