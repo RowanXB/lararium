@@ -13,8 +13,8 @@ Downgrading deletes the bank accounts' holder rows (the next heal unpairs what t
 restores the kind's CHECK and default, and recreates the references table as 0039 made it,
 empty.
 
-Revision ID: 0045
-Revises: 0044
+Revision ID: 0046
+Revises: 0045
 Create Date: 2026-11-27
 """
 
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0045"
-down_revision: str | None = "0044"
+revision: str = "0046"
+down_revision: str | None = "0045"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

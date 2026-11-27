@@ -271,6 +271,7 @@ class TransactionOut(_Out):
     status: TransactionStatus
     origin: TransactionOrigin
     postings: list[PostingOut]
+    cancels_transaction_id: UUID | None
 
 
 class PriceCreate(BaseModel):
