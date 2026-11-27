@@ -4,7 +4,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, text
 
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import set_excluded_from_reports
@@ -475,14 +475,29 @@ async def _reward(run, wallet, unassigned, coin, quantity: str, day: date, **det
 async def test_coin_reward_valued_on_its_day(
     session, run, make_account, unassigned, btc, eur, gbp
 ) -> None:
+    """At the latest price on or before its day, a manual one first among the day's."""
     wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
     day = date(2026, 11, 2)
-    await run(
-        record_price,
-        instrument_id=btc.id,
-        quote_instrument_id=eur.id,
-        price=Decimal("50000"),
-        as_of_date=day,
+    for value, on, source in (
+        ("40000", date(2026, 11, 1), "manual"),
+        ("50000", day, "manual"),
+        ("45000", day, "coingecko"),
+        ("60000", date(2026, 11, 3), "manual"),
+    ):
+        await run(
+            record_price,
+            instrument_id=btc.id,
+            quote_instrument_id=eur.id,
+            price=Decimal(value),
+            as_of_date=on,
+            source=source,
+        )
+    # Recorded later, so only the manual preference keeps it from winning.
+    await session.execute(
+        text(
+            "update finance.prices set recorded_at = now() + interval '1 hour'"
+            " where source = 'coingecko'"
+        )
     )
     await run(
         record_fx_rate,
@@ -529,6 +544,25 @@ async def test_coin_reward_without_price_is_missing(
     assert (flow.income, flow.missing_count) == (Decimal("100"), 1)
 
 
+async def test_coin_reward_without_fx_rate_is_missing(
+    session, run, make_account, unassigned, btc, eur
+) -> None:
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    day = date(2026, 11, 2)
+    await run(
+        record_price,
+        instrument_id=btc.id,
+        quote_instrument_id=eur.id,
+        price=Decimal("50000"),
+        as_of_date=day,
+    )  # but no EUR rate is recorded
+    await _reward(run, wallet, unassigned, btc, "0.0001", day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.missing_count) == (Decimal("0"), 1)
+
+
 async def test_coin_without_income_kind_is_not_a_flow(
     session, run, make_account, unassigned, usd
 ) -> None:
@@ -557,7 +591,9 @@ async def test_coin_without_income_kind_is_not_a_flow(
 async def test_periods_and_categories_add_up_to_the_totals(
     session, run, move, make_account, bank, unassigned, gbp, btc, eur
 ) -> None:
-    """Every flow is counted once in its period and shared out whole among categories."""
+    """Every flow is counted once in its period and shared out whole among categories.
+    Moves to or from a hidden account are left out of this data: they count in the totals
+    and periods but not in categories."""
     wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
     thirds = tuple(CategorySplit(name, Decimal("-1")) for name in ("a", "b", "c"))
     await move("-10", date(2026, 10, 3), category="groceries", category_splits=thirds)
@@ -589,6 +625,45 @@ async def test_periods_and_categories_add_up_to_the_totals(
 
     zero = Decimal(0)
     assert (flow.income, flow.spending) == (Decimal("2014.25"), Decimal("44.35"))
+    assert sum((p.income for p in flow.periods), zero) == flow.income
+    assert sum((p.spending for p in flow.periods), zero) == flow.spending
+    assert sum((c.income for c in flow.categories), zero) == flow.income
+    assert sum((c.spending for c in flow.categories), zero) == flow.spending
+
+
+async def test_amounts_at_an_inverse_rate_still_add_up(
+    session, run, move, make_account, unassigned, btc, eur, gbp
+) -> None:
+    """Only GBP to EUR is recorded, so EUR to GBP is its inverse, with as many digits as
+    Postgres gives a division; times a coin's eight places and a price it is past Decimal's
+    28. Each amount is rounded once, so periods and categories still add up exactly."""
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    for day in (date(2026, 10, 1), date(2026, 11, 1)):
+        await run(
+            record_fx_rate,
+            base_instrument_id=gbp.id,
+            quote_instrument_id=eur.id,
+            rate=Decimal("1.1734"),
+            as_of_date=day,
+        )
+        await run(
+            record_price,
+            instrument_id=btc.id,
+            quote_instrument_id=eur.id,
+            price=Decimal("50123.47"),
+            as_of_date=day,
+        )
+    thirds = tuple(CategorySplit(name, Decimal("-1")) for name in ("a", "b", "c"))
+    for day in (date(2026, 10, 3), date(2026, 11, 3)):
+        await move("-10.07", day, instrument=eur, category_splits=thirds)
+        await move("1234.56", day, instrument=eur, category="salary")
+        for quantity in ("0.96843464", "0.30703946", "0.79343271", "-0.00012347"):
+            await _reward(run, wallet, unassigned, btc, quantity, day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    zero = Decimal(0)
+    assert flow.missing_count == 0
     assert sum((p.income for p in flow.periods), zero) == flow.income
     assert sum((p.spending for p in flow.periods), zero) == flow.spending
     assert sum((c.income for c in flow.categories), zero) == flow.income

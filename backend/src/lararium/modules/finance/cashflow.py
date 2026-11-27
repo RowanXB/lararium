@@ -116,6 +116,15 @@ class CashFlow:
     hidden_accounts: list[HiddenAccountTotal]  # by name; their moves are in the totals too
 
 
+# Every amount, and every split's share of one, is rounded once to this many places. Postgres
+# gives a product all its digits: an inverse FX rate (1 / rate) has twenty, and times a coin's
+# eight places and a price the amount is past Decimal's 28 significant digits; so is a third
+# of an amount. Adding such amounts rounds, at different points when summing by period and by
+# category, so the two would not add up to the same total. With a fixed scale every sum is
+# exact while totals stay below 10**16.
+_PLACES = 12
+_SHARE_UNIT = Decimal(1).scaleb(-_PLACES)
+
 # Each flow valued on its booking day, once per instrument and day, not once per posting:
 # money at the day's FX rate, another asset as net worth values a holding (valuation.py), at
 # its latest price on or before the day converted at the day's rate. The owner's category is
@@ -187,7 +196,9 @@ _FLOWS = (
     )
     select base.transaction_id, base.day, own.id as account_id, own.name as account_name,
       base.instrument_id, i.symbol as instrument_code, base.quantity,
-      base.quantity * valuations.unit_value as amount,
+      round(base.quantity * valuations.unit_value, """
+    + str(_PLACES)
+    + """) as amount,
       coalesce(base.owner_category,
                case when base.quantity > 0 then base.income_kind end,
                base.source_category) as category,
@@ -259,7 +270,10 @@ _HIDDEN_MOVES = (
           as fx_rate
       from (select distinct moves.instrument_id, moves.day from moves) k
     )
-    select moves.day, moves.hidden_id, a.name, moves.quantity * rates.fx_rate as amount
+    select moves.day, moves.hidden_id, a.name,
+      round(moves.quantity * rates.fx_rate, """
+    + str(_PLACES)
+    + """) as amount
     from moves
     join finance.accounts a on a.id = moves.hidden_id
     join rates on rates.instrument_id = moves.instrument_id and rates.day = moves.day
@@ -314,12 +328,6 @@ async def _splits(
     return splits
 
 
-# A split's share is rounded to a fixed number of places. Unrounded, a third fills all 28 of
-# Decimal's digits, and adding it to a larger total rounds its last digit away, so the
-# categories would no longer add up to the total.
-_SHARE_PLACES = Decimal("1e-12")
-
-
 def _by_category(
     amount: Decimal, category: str | None, splits: list[tuple[str, Decimal]]
 ) -> list[tuple[str | None, Decimal]]:
@@ -331,7 +339,7 @@ def _by_category(
     shares: list[tuple[str | None, Decimal]] = []
     left = amount
     for name, quantity in splits[:-1]:
-        share = (amount * quantity / total).quantize(_SHARE_PLACES)
+        share = (amount * quantity / total).quantize(_SHARE_UNIT)
         shares.append((name, share))
         left -= share
     shares.append((splits[-1][0], left))
