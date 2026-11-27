@@ -1911,12 +1911,8 @@ def _period_from_filename(
 
 
 def _first_day_partial(config: ProfileConfigModel) -> bool:
-    """Its export's first day may be partial: the profile reads a second date for its rows
-    (Revolut's CSV: booked on the completed date, perhaps picked by the started date), or it
-    reads OFX, whose DTSTART may carry a time of day (an incremental download starting at
-    noon) that the parser drops, keeping only its date."""
-    if isinstance(config, OfxProfileConfig):
-        return True
+    """The profile reads a second date for its rows (Revolut's CSV: booked on the completed
+    date, perhaps picked by the started date), so its export's first day may be partial."""
     return isinstance(config, CsvProfileConfig) and config.columns.started_at is not None
 
 
@@ -1935,8 +1931,9 @@ def _covered(
     partial too when its rows carry a second date (first_day_partial): Revolut's CSV books a
     row on its completed date but may pick rows by their started date, so a payment started
     the day before and completed on the first day may be missing (account type catalog
-    design §8.3); an OFX's too, since its DTSTART may fall partway through its day. An
-    export whose include_only filter left rows out (a pending payment, say,
+    design §8.3). A period that starts partway through its first day (an OFX whose DTSTART
+    gives a time of day, period_starts_mid_day) is listed from the day after it. An export
+    whose include_only filter left rows out (a pending payment, say,
     that later appears completed) lists no day in full.
     """
     days = _importable_days(rows)
@@ -1953,6 +1950,9 @@ def _covered(
         return _Coverage((first, last), (first, end))
     filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
     start = first + timedelta(days=1) if first_day_partial else first
+    if statement.period_starts_mid_day and statement.period is not None:
+        # Nothing vouches for the days before it either, a row's on them included.
+        start = statement.period[0] + timedelta(days=1)
     end = last - timedelta(days=1)
     if filtered or start > end:
         return _Coverage((first, last), (None, None))

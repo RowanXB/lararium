@@ -7,7 +7,7 @@ import html
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from lararium.modules.finance.errors import FileFormatError
@@ -409,21 +409,23 @@ def _balance(
     return balance, as_of_date
 
 
-def _period(statement: _Aggregate) -> tuple[date, date] | None:
-    """BANKTRANLIST's DTSTART and DTEND by their written dates, when it states both."""
+def _period(statement: _Aggregate) -> tuple[tuple[date, date] | None, bool]:
+    """BANKTRANLIST's DTSTART and DTEND by their written dates, when it states both, and
+    whether DTSTART gives a time of day other than midnight in its own offset (an
+    incremental download starting partway through a day)."""
     transactions = statement.child("BANKTRANLIST")
     if transactions is None:
-        return None
+        return None, False
     start, end = transactions.leaf("DTSTART"), transactions.leaf("DTEND")
     if start is None or end is None:
-        return None
+        return None, False
     try:
-        period = _datetime(start, "DTSTART")[0], _datetime(end, "DTEND")[0]
+        (first, starts_at), (last, _) = _datetime(start, "DTSTART"), _datetime(end, "DTEND")
     except ValueError as error:
         raise FileFormatError(f"BANKTRANLIST: {error}") from None
-    if period[0] > period[1]:
+    if first > last:
         raise FileFormatError(f"BANKTRANLIST: DTSTART {start!r} is after DTEND {end!r}")
-    return period
+    return (first, last), starts_at is not None and starts_at.time() != time()
 
 
 def _check_status(tree: _Aggregate) -> None:
@@ -479,11 +481,13 @@ def parse_ofx(content: bytes, config: OfxProfileConfig) -> ParsedStatement:
             rows.append(RowError(position=position, message=str(error), raw=raw))
     closing_balance, closing_balance_date = _balance(statement, "LEDGERBAL", config)
     available_balance, available_balance_date = _balance(statement, "AVAILBAL", config)
+    period, starts_mid_day = _period(statement)
     return ParsedStatement(
         rows=rows,
         closing_balance=closing_balance,
         closing_balance_date=closing_balance_date,
-        period=_period(statement),
+        period=period,
+        period_starts_mid_day=starts_mid_day,
         available_balance=available_balance,
         available_balance_date=available_balance_date,
         account=_account(statement),

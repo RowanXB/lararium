@@ -883,8 +883,8 @@ transfer's placeholder instead of counting twice, and the Transfers page treats 
 other record. A row naming the other account is matched through the registry. A row naming no
 account, and not of a card type, is taken by amount and date unless the transfer's window starts
 before the first day the account's imports list in full (an export may cut its last day
-short, and one whose rows carry a `started_at`, as Revolut's CSV does, or an OFX file, whose
-`DTSTART` may fall partway through a day, its first day too):
+short, and one whose rows carry a `started_at`, as Revolut's CSV does, or an OFX file whose
+`DTSTART` gives a time of day other than midnight, its first day too):
 before it, the real row may be inside the account's opening, never to be imported, and an
 unrelated payment of the same amount must not stand in for it. An account's opening date (asked
 for when an upload creates the account) lets matching count the days before its first upload as
