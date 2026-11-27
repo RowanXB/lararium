@@ -145,6 +145,10 @@ class Transaction(Base):
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The other side's account number, when the source gives it without a sort code.
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
+    # The transaction this one cancels (a transaction is cancelled by at most one).
+    cancels_transaction_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("finance.transactions.id"), unique=True
+    )
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(
