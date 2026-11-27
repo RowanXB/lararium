@@ -319,8 +319,9 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
   - *Not listed in full*: a row on a manual account could be the other side, but it lies in
     the transfer's window before the first day that account's uploads list in full, so it isn't
     taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
-    which would count the money twice if the row is the real one; the amount waits in the In
-    transit account. Upload a statement that lists those days and the two pair by themselves,
+    which would count the money twice if the row is the real one. The account's balance is
+    right; net worth counts the amount in the In transit account until the review is paired.
+    Upload a statement that lists those days and the two pair by themselves,
     or pair them yourself: the row is listed as a candidate, with **Pair**. It is never
     *Overdue*: it waits for an upload, not a connection.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
@@ -604,8 +605,8 @@ until their `Action` is known.
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
   the transfer pairs by itself. With a Cash ISA added as well, transfers name no counterpart and
-  are paired by hand: both sides name nobody and neither is a bank transfer, so nothing pairs
-  them on its own. With only an Invest (or a Stocks ISA) and a Cash ISA, no counterpart is named
+  are paired by hand: both sides name nobody, so neither is identified and nothing pairs them
+  on its own. With only an Invest (or a Stocks ISA) and a Cash ISA, no counterpart is named
   either: a Cash ISA has no Trading 212 id to name, so such transfers are also paired by hand.
   Lararium counts only the accounts added to it: a Cash ISA you hold
   but haven't added leaves the two-account rule in force, so a move to it would be named as the
@@ -884,12 +885,16 @@ account, and not of a card type, is taken by amount and date unless the transfer
 before the first day the account's imports list in full (an export may cut its last day
 short, and one whose rows carry a `started_at`, as Revolut's CSV does, its first day too):
 before it, the real row may be inside the account's opening, never to be imported, and an
-unrelated payment of the same amount must not stand in for it. When the record naming the account
+unrelated payment of the same amount must not stand in for it. An account's opening date (asked
+for when an upload creates the account) lets matching count the days before its first upload as
+empty: an upload listing in full from on or before that date lists all time before it too. When
+the record naming the account
 is a payment, its window starts the day before it, since a statement giving only dates can date
 a payment after the money left. A row whose file gives its time to the second, received no
 earlier than two minutes before a payment that is a connected account's record, is checked
-from the payment's own day in your time zone instead: a receipt does not come before its
-payment. An imported payment never counts, even one timed to the second: its time may be when
+from the payment's own day instead, in the time zone the row's file is read in (its profile's,
+UTC for a Trading 212 Cash ISA; else yours), which the row is booked in: a receipt does not come
+before its payment. An imported payment never counts, even one timed to the second: its time may be when
 the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
 candidates, stay as they are.
 After the last day imported a row is taken: should it not be the real one, the next statement
