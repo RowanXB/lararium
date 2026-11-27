@@ -78,5 +78,5 @@ async def test_longest_overdue_loads_and_is_usable(session, run) -> None:
         notified_at=None,
         created_at=now,
     )
-    assert not is_overdue(transfer, now, settings)
+    assert not is_overdue(transfer, now, settings, manual=())
     assert await due_notifications(session, now) == []

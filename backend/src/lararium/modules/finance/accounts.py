@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -201,6 +202,12 @@ async def get_account(session: AsyncSession, account_id: UUID) -> AccountRecord:
 
 async def list_accounts(session: AsyncSession) -> list[AccountRecord]:
     return await _load(session)
+
+
+async def accounts_of_types(session: AsyncSession, keys: Collection[str]) -> list[UUID]:
+    """The ids of the accounts whose type is one of `keys`, whatever their status, sorted."""
+    a = models.Account
+    return sorted(await session.scalars(select(a.id).where(a.type_key.in_(sorted(keys)))))
 
 
 def require_owner_account(record: AccountRecord, action: str) -> None:

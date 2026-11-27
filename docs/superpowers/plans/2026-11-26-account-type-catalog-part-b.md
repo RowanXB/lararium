@@ -29,7 +29,7 @@
 Choices the spec leaves open, made here:
 
 1. **Storage.** A table of its own, `finance.account_identifier_references`, not a column on the card-merchant holders table (whose `kind` check and meaning are the card merchant's).
-2. **Registering references is API-only in this part.** The owner registers three rows once; a form can follow if it recurs. *(To confirm with the owner at hand-off.)*
+2. **Registering references is API-only in this part.** The owner registers three rows once; a form can follow if it recurs. *(Confirmed by the owner, 2026-11-27.)*
 3. **Replay timing.** The family rule's replay runs at each Trading 212 connection's next sync, triggered by a digest in its config (the Monzo `card_merchants` precedent). No account route runs a normalisation.
 4. **The funding arm reads the type at pairing time**, through a boolean column on `eligible_records`; the stored `bank_transfer` flag is untouched.
 

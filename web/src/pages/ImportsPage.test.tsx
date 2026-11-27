@@ -320,6 +320,70 @@ it("creates the account it is uploading to, once", async () => {
   );
 });
 
+it("sends the new account's opening date when given", async () => {
+  const user = userEvent.setup();
+  const form = await uploadForm();
+  await choose(form, "Account", "New account…");
+  await user.type(form.getByLabelText("New account name"), "Example savings");
+  await user.type(form.getByLabelText("Opened on"), "2026-11-03");
+  await choose(form, "Profile", "Example Bank CSV");
+  const file = new File(["Date,Description,Amount\n"], "example.csv", { type: "text/csv" });
+  await user.upload(form.getByLabelText("File"), file);
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  await waitFor(() => expect(stageImport).toHaveBeenCalled());
+  expect(createAccount).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: expect.objectContaining({ name: "Example savings", opened_on: "2026-11-03" }),
+    }),
+  );
+});
+
+it("sends no opening date for a new account of a type when left empty", async () => {
+  const savings = {
+    key: "example.savings",
+    institution: "Example Bank",
+    label: "Savings",
+    name: "Example Bank Savings",
+    shape: {
+      ledger_type: "asset",
+      subtype: "savings_pot",
+      tax_wrapper: "isa",
+      balance_mode: "transactions",
+    },
+    api: null,
+    files: [],
+    funding: [],
+    family: null,
+  };
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <UploadForm type={savings as never} />
+    </QueryClientProvider>,
+  );
+  const form = within(await screen.findByRole("form", { name: "Upload statement" }));
+  await waitFor(() => expect(form.getByLabelText("Opened on")).toHaveValue(""));
+  await waitFor(() =>
+    expect(form.getByRole("combobox", { name: "Currency" })).toHaveTextContent("GBP"),
+  );
+  await choose(form, "Profile", "Example Bank CSV");
+  const file = new File(["Date,Description,Amount\n"], "example.csv", { type: "text/csv" });
+  await user.upload(form.getByLabelText("File"), file);
+  await user.click(form.getByRole("button", { name: "Upload" }));
+
+  await waitFor(() => expect(stageImport).toHaveBeenCalled());
+  expect(createAccount).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: expect.objectContaining({
+        name: "Example Bank Savings",
+        type_key: "example.savings",
+        opened_on: null,
+      }),
+    }),
+  );
+});
+
 it("asks for a name before making a new account", async () => {
   const user = userEvent.setup();
   const form = await uploadForm();

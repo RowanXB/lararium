@@ -75,8 +75,8 @@ class LayoutResult:
     available_balance_date: date | None = None
     account_opened_on: date | None = None
     # Whether the statement lists every transaction of its whole period (Decision 16). False:
-    # like an export, only the days between its first and last (Tembo's is made on demand
-    # and may stop partway through its last day).
+    # like an export, every day but its last (Tembo's is made on demand and may stop partway
+    # through its last day).
     period_complete: bool = True
     # Rows the statement lists apart from its transactions and leaves out of its summary
     # (Revolut's pending payments), numbered after the rows.
