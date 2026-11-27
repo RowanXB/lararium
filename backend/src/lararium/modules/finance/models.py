@@ -155,6 +155,9 @@ class Transaction(Base):
     include_in_spending: Mapped[bool | None]
     payment_scheme: Mapped[str | None] = mapped_column(Text)
     place_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
+    # What the source says this income is (interest, dividend, share_lending, reward); only
+    # source code sets it, never the owner.
+    income_kind: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -472,6 +475,20 @@ class TransferDecision(Base):
         ForeignKey("finance.transfers.id", ondelete="CASCADE")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TransactionOwnerCategory(Base):
+    """The owner's category for a transaction, kept by its source reference (like a transfer
+    decision) so it survives a rebuild of the transaction from the same source."""
+
+    __tablename__ = "transaction_owner_categories"
+    __table_args__ = FINANCE_SCHEMA
+
+    source_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    category: Mapped[str] = mapped_column(Text)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_by: Mapped[str] = mapped_column(Text)
 
 
 class SourceReview(Base):
