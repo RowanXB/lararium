@@ -22,6 +22,12 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 ADD_COLUMN = "ALTER TABLE finance.transactions ADD COLUMN refund boolean NOT NULL DEFAULT false"
+# Monzo's own card fields, stored typed: the lifecycle id a card's authorisation and its
+# settlement share, and whether the source calls the transaction a reversal.
+ADD_CARD_COLUMNS = (
+    "ALTER TABLE finance.transactions"
+    " ADD COLUMN card_lifecycle_id text, ADD COLUMN card_reversal boolean"
+)
 
 # The catalog entries that have card payment types: how a stored config is recognised ({c} is
 # the config; its format, plus a PDF's layout, or the columns and date format that identify a
@@ -95,7 +101,7 @@ WHERE r.transaction_id = t.id
   )
 """
 
-UPGRADE = [ADD_COLUMN, *PROFILES, *STAGED_BATCHES, REFUNDS]
+UPGRADE = [ADD_COLUMN, ADD_CARD_COLUMNS, *PROFILES, *STAGED_BATCHES, REFUNDS]
 
 
 def upgrade() -> None:
@@ -104,4 +110,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE finance.transactions DROP COLUMN refund")
+    op.execute(
+        "ALTER TABLE finance.transactions"
+        " DROP COLUMN card_reversal, DROP COLUMN card_lifecycle_id, DROP COLUMN refund"
+    )

@@ -97,7 +97,7 @@ from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-5"
+NORMALIZER_VERSION = "monzo-norm-6"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
 # makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
@@ -334,6 +334,21 @@ def _mcc(metadata: _Reader) -> str | None:
         return value
     metadata.unreadable_field("mcc")
     return None
+
+
+def _card_reversal(metadata: _Reader) -> bool | None:
+    """Monzo's metadata.is_reversal, a string "true" or "false"."""
+    value = metadata.text("is_reversal")
+    if value in (None, "true", "false"):
+        return None if value is None else value == "true"
+    metadata.unreadable_field("is_reversal")
+    return None
+
+
+def _is_refund(tx: dict[str, Any]) -> bool:
+    """Money came back for a card payment: a positive card-scheme transaction."""
+    amount = _minor_units(tx.get("amount"))
+    return tx.get("scheme") == "mastercard" and amount is not None and amount > 0
 
 
 # A pot's fields by the account field each one fills, where the names differ.
@@ -1015,12 +1030,16 @@ class _Normalizer:
             # Always null so far: nothing shows its shape yet.
             self.unmapped.add("atm_fees_detailed")
         original_quantity, original_instrument_id = await self._original(read)
+        metadata = read.object("metadata")
         return TransactionDetails(
             original_quantity=original_quantity,
             original_instrument_id=original_instrument_id,
             category=read.text("category"),
             labels=self._labels(tx.get("labels")),
             include_in_spending=read.flag("include_in_spending"),
+            refund=_is_refund(tx),
+            card_lifecycle_id=metadata.text("mastercard_lifecycle_id"),
+            card_reversal=_card_reversal(metadata),
             payment_scheme=read.text("scheme"),
             place_entity_id=place,
             category_splits=self._category_splits(tx, read, currency.decimals),

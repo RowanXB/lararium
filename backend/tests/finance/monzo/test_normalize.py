@@ -155,7 +155,7 @@ async def _unassigned(run) -> uuid.UUID:
 
 
 def test_to_quantity_is_exact() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-5"
+    assert NORMALIZER_VERSION == "monzo-norm-6"
     assert to_quantity(-1234, 2) == Decimal("-12.34")
     assert to_quantity(5, 0) == Decimal(5)
     assert str(to_quantity(1, 2)) == "0.01"
@@ -935,6 +935,69 @@ async def _details(session, transaction_id: uuid.UUID) -> Any:
             {"id": transaction_id},
         )
     ).one()
+
+
+async def _card_fields(session, external_id: str) -> Any:
+    return (
+        await session.execute(
+            text(
+                "select refund, card_lifecycle_id, card_reversal"
+                " from finance.transactions where external_id = :e"
+            ),
+            {"e": external_id},
+        )
+    ).one()
+
+
+@pytest.mark.parametrize(
+    ("amount", "scheme", "refund"),
+    [
+        (1000, "mastercard", True),
+        (-1000, "mastercard", False),
+        (1000, "payport_faster_payments", False),
+    ],
+)
+async def test_a_positive_card_transaction_is_a_refund(
+    session, run, amount: int, scheme: str, refund: bool
+) -> None:
+    connection = await _connection(run)
+    tx = make_transaction(id="tx_TEST0001", amount=amount, local_amount=amount, scheme=scheme)
+    await _normalize(session, connection, transactions=[tx])
+
+    assert (await _card_fields(session, "tx_TEST0001")).refund is refund
+
+
+async def test_card_metadata_is_stored_typed(session, run) -> None:
+    connection = await _connection(run)
+    tx = make_transaction(
+        id="tx_TEST0001",
+        metadata={"mastercard_lifecycle_id": "mclifecycle_TEST1", "is_reversal": "true"},
+    )
+    await _normalize(session, connection, transactions=[tx])
+
+    row = await _card_fields(session, "tx_TEST0001")
+    assert (row.card_lifecycle_id, row.card_reversal) == ("mclifecycle_TEST1", True)
+    warnings = await _warnings(session, connection)
+    assert not [w for w in warnings if "lifecycle" in w or "is_reversal" in w]
+
+
+@pytest.mark.parametrize(
+    ("value", "stored", "noted"),
+    [("false", False, False), (None, None, False), ("maybe", None, True)],
+)
+async def test_card_reversal_reads_only_true_or_false(
+    session, run, value: str | None, stored: bool | None, noted: bool
+) -> None:
+    connection = await _connection(run)
+    metadata = {} if value is None else {"is_reversal": value}
+    await _normalize(
+        session, connection, transactions=[make_transaction(id="tx_TEST0001", metadata=metadata)]
+    )
+
+    assert (await _card_fields(session, "tx_TEST0001")).card_reversal is stored
+    assert (
+        UNMAPPED.format("metadata.is_reversal") in await _warnings(session, connection)
+    ) is noted
 
 
 async def _splits(session, transaction_id: uuid.UUID) -> list[tuple[str, Decimal]]:
@@ -2035,7 +2098,7 @@ async def test_replay_fills_history_outside_this_sync(session, run) -> None:
     ]
     assert (await _postings(session, by_id["tx_TEST0002"].id))[0][2] == "lunch"
     config = (await get_connection(session, connection.id)).config
-    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-5"
+    assert config[NORMALIZER_VERSION_KEY] == "monzo-norm-6"
 
 
 async def test_replay_uses_the_latest_by_updated(session, run) -> None:
