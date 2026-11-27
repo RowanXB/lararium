@@ -180,8 +180,9 @@ async def normalize(ctx: SyncContext, raw_record_ids: Sequence[UUID]) -> Normali
 
 async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeReport:
     connection = await get_connection(ctx.command.session, ctx.connection.id)
+    decided_on = await accounts.family(ctx.command.session)
     replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION or (
-        connection.config.get(FAMILY_KEY) != _digest(await accounts.family(ctx.command.session))
+        connection.config.get(FAMILY_KEY) != _digest(decided_on)
     )
     keyed, seen = await _records(ctx, raw_record_ids, replay)
     report = NormalizeReport(replayed=replay)
@@ -202,10 +203,13 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     latest = [r for r in seen if r.endpoint == "summary"]
     await accounts.account(run, (summary or latest[-1]).record if summary or latest else None)
     # The family with this account in it (accounts.account sets its type), stored so the
-    # next run does not replay for it. It differs from the one the replay was decided on only
-    # when this run creates the account or gives it its type: outside the family, it named no
-    # sibling, so there is no counterpart to strip (unidentified_transfers adds one).
-    family = _digest(await accounts.family(run.session))
+    # next run does not replay for it: outside the family, the account named no sibling, so
+    # there is no counterpart to strip (unidentified_transfers adds one). Only when that is
+    # the whole difference from the family the replay was decided on: another account
+    # created or typed meanwhile (read committed) keeps the decided-on digest, so the next
+    # run sees the change and replays.
+    now_in = await accounts.family(run.session)
+    family = _digest(now_in if set(now_in) == {*decided_on, run.account} else decided_on)
 
     unsupported = await reports.instruments(run, by_endpoint["instruments"], replay)
     await reports.exchanges(run, by_endpoint["exchanges"], replay)

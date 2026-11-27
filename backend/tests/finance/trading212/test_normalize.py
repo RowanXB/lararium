@@ -30,6 +30,7 @@ from lararium.modules.finance.instruments import InstrumentIdentifier, create_in
 from lararium.modules.finance.ledger import find_unbalanced_transactions
 from lararium.modules.finance.readonly_http import loads_decimal, record_json
 from lararium.modules.finance.report_sightings import record_sighting
+from lararium.modules.finance.trading212 import accounts as t212_accounts
 from lararium.modules.finance.trading212 import instruments as t212_instruments
 from lararium.modules.finance.trading212 import sync as t212_sync
 from lararium.modules.finance.trading212.client import Trading212Client
@@ -1401,3 +1402,44 @@ async def test_a_new_family_account_strips_the_counterpart_at_the_next_sync(sess
     assert not (await invest.normalize(now=_days(4))).replayed
     assert await _named(session) == {"transaction:t-out": None}
     assert await _contra(session, "transaction:t-out") == "Unassigned"
+
+
+async def test_a_family_account_added_during_a_sync_is_replayed_at_the_next(
+    session, run, monkeypatch
+) -> None:
+    invest = Ledger(session, await _connection(run, "invest"))
+    isa = Ledger(session, await _connection(run, "isa"))
+    await invest.normalize(SUMMARY)
+    await isa.normalize(("summary", summary_json(account_id=20000002, cash=NO_CASH)))
+    out = transaction_item(
+        reference="t-out", kind="TRANSFER", amount="-100.00", dateTime="2026-03-04T09:15:00Z"
+    )
+    await invest.normalize(SUMMARY, ("transactions", out), now=_days(1))
+    assert await _named(session) == {"transaction:t-out": "20000002"}
+
+    # A Cash ISA typed by another writer after the run decided not to replay, before it reads
+    # the family it stores.
+    original = t212_accounts.account
+
+    async def account_then_cash_isa(run_, summary) -> None:
+        await original(run_, summary)
+        await create_account(
+            CommandContext(session, Actor("user", "owner"), uuid.uuid4()),
+            name="Cash ISA",
+            ledger_type="asset",
+            subtype="savings_pot",
+            balance_mode="transactions",
+            tax_wrapper="isa",
+            type_key="trading212.cash_isa",
+        )
+
+    monkeypatch.setattr(t212_accounts, "account", account_then_cash_isa)
+    assert not (await invest.normalize(now=_days(2))).replayed
+    monkeypatch.setattr(t212_accounts, "account", original)
+    assert await _named(session) == {"transaction:t-out": "20000002"}
+
+    # The digest it stored is the family it decided on: the next sync sees the change.
+    assert (await invest.normalize(now=_days(3))).replayed
+    assert await _named(session) == {"transaction:t-out": None}
+    assert await _contra(session, "transaction:t-out") == "Unassigned"
+    assert not (await invest.normalize(now=_days(4))).replayed
