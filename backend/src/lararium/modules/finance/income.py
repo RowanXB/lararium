@@ -25,10 +25,7 @@ from lararium.modules.finance.cashflow import (
     period_start,
     periods_of,
 )
-from lararium.modules.finance.owner_categories import known_owner_categories
-
-# The `category` filter's value for entries with no effective category.
-UNCATEGORISED = "uncategorised"
+from lararium.modules.finance.owner_categories import UNCATEGORISED, known_owner_categories
 
 
 @dataclass(frozen=True)

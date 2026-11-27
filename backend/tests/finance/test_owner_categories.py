@@ -38,7 +38,7 @@ def test_normalise_category(text_in: str, expected: str) -> None:
     assert normalise_category(text_in) == expected
 
 
-@pytest.mark.parametrize("text_in", ["", "   ", "x" * 65])
+@pytest.mark.parametrize("text_in", ["", "   ", "x" * 65, "uncategorised", " Uncategorised "])
 def test_normalise_category_refuses(text_in: str) -> None:
     with pytest.raises(FinanceValidationError):
         normalise_category(text_in)

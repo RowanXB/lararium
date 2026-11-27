@@ -29,13 +29,22 @@ from lararium.modules.finance.transfers.contra import source_columns
 
 MAX_CATEGORY_LENGTH = 64
 
+# The Income report's `category` filter value for entries with no category, so no owner
+# category may be called this: the filter could not tell the two apart.
+UNCATEGORISED = "uncategorised"
+
 
 def normalise_category(text: str) -> str:
-    """Trim, collapse inner whitespace runs to `_`, lower-case; 1 to 64 characters."""
+    """Trim, collapse inner whitespace runs to `_`, lower-case; 1 to 64 characters, and not
+    UNCATEGORISED."""
     category = re.sub(r"\s+", "_", text.strip()).lower()
     if not 1 <= len(category) <= MAX_CATEGORY_LENGTH:
         raise FinanceValidationError(
             f"a category is 1 to {MAX_CATEGORY_LENGTH} characters after trimming"
+        )
+    if category == UNCATEGORISED:
+        raise FinanceValidationError(
+            f'"{UNCATEGORISED}" stands for no category, so it cannot be one; clear it instead'
         )
     return category
 
