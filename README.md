@@ -248,7 +248,8 @@ other's only candidate, and it never makes a transfer on its own.
 ### Manual accounts: hybrid, with an opening snapshot
 
 Bank A has no connection, so it can't report its side of a transfer. Lararium posts an
-*inferred* transaction on it instead, as soon as it sees Monzo's side. For that to move Bank A's
+*inferred* transaction on it instead, as soon as it sees Monzo's side, unless a row of the same
+amount on Bank A may be that side (see *Needs attention* below). For that to move Bank A's
 balance:
 
 1. On the Accounts page, create the account with **Balance mode: Hybrid** (ledger type Asset,
@@ -312,23 +313,27 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
     fixed order, as any pairing gives the same balances. Where one side's rows name no account,
     they are found by amount and date, like a single one: a payment from someone else of that
     amount on that day can be taken among them until your own arrives, and then they go here.
-    When one of them is a row on a manual account refused for this transfer or another (see
-    *Not listed in full*), it is listed too, and no inferred transaction is posted beside them.
+    A row on a manual account that isn't taken by itself (see *Not listed in full*) is a
+    candidate like any other, so identical ones with such a row among them wait here too. On a
+    manual account no inferred transaction is posted beside the candidates, which would count
+    the money twice if one is the real row: net worth counts the amount in the In transit
+    account until you pair.
   - *Amount differs*: the two records name each other's accounts but their amounts differ.
     The page has no **Pair** for them: when both are money records, pair them through the API
     (`POST /api/v1/finance/transfers/{id}/pair` with `{"transaction_id": "<other>"}`; see
     *Records that name no account* below), else Reject the transfer if it isn't one. A row of
-    the same amount on a manual account refused as under *Not listed in full* is listed too,
-    with **Pair**, and no inferred transaction is posted beside it.
-  - *Not listed in full*: a row on a manual account could be the other side, but it lies in
-    the transfer's window before the first day that account's uploads list in full, so it isn't
-    taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
+    the same amount on a manual account that isn't taken by itself, as under *Not listed in
+    full*, is listed too, with **Pair**, and no inferred transaction is posted beside it.
+  - *Not listed in full*: the transfer's one candidate is a row on a manual account that lies
+    in its window before the first day that account's uploads list in full, so it isn't taken
+    by itself (see *Imports and transfers* below). No inferred transaction is posted beside it,
     which would count the money twice if the row is the real one. The account's balance is
     right; net worth counts the amount in the In transit account until the review is paired.
-    Upload a statement that lists those days and the two pair by themselves (unless another
-    transfer of the same amount competes for the row: then both are under *Several candidates*),
-    or pair them yourself: the row is listed as a candidate, with **Pair**. It is never
-    *Overdue*: it waits for an upload, not a connection.
+    Upload a statement that lists those days and the two pair by themselves if each is the
+    other's only candidate (if another transfer of the same amount competes for the row, both
+    are under *Several candidates*), or pair them yourself: the row is listed as a candidate,
+    with **Pair**. A transfer settled before history is not under review for it. A transfer
+    waiting for a manual account is never *Overdue*: it waits for an upload, not a connection.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
     days.
 
@@ -904,8 +909,9 @@ before its payment. (An OFX row is booked on the date its own time is written in
 that zone; this check can then still start a day late after a payment made just after midnight in
 summer.) An imported payment never counts, even one timed to the second: its time may be when
 the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
-candidates, stay as they are. A row the check refuses still holds its transfer back, and any
-other whose candidate it is: neither pairs, and no inferred transaction is posted beside it.
+candidates, stay as they are. A row the check refuses is still a candidate, just not one taken
+by itself: its transfer needs attention (*Not listed in full*, or *Several candidates* when there
+are others), and so does any other whose candidate it is too.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on
