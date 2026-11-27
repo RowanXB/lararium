@@ -136,6 +136,19 @@ Where it is stored, typed:
 
 **Evidence arriving later.** A record that could not pair without Notes (an API-only move whose two sides are more than two minutes apart, say) pairs by itself once a later upload brings them: the upload's normalise re-posts the merged record with its evidence, and the upload's heal (`upload_trading212_export` and an import commit both heal) recomputes the pair relation. The owner's decisions (pairs, rejects, never-pair) are unchanged by it.
 
+### 5.10 Several candidates: the only one within the near window (owner, 2026-11-27)
+
+The owner moves the same amount into the Cash ISA every few days, so two same-amount moves on different days inside one date window are the normal case, and each would go to review as `several_candidates`. Time order (§5.7) only helps when one side is identical rows.
+
+Rule: where a record's same-amount candidates (at its best tier, `exact`) are several, it pairs with one of them when **both are timed** (`Pairable.timed`) and **each is the other's only same-amount candidate**, of any tier and takeable or not, **within `near_window`** of its instant, and the edge between them is takeable (the coverage gate). Whatever still can't be told apart goes to review as before. It is generic: it applies wherever both records are timed (a connector's record, or an imported row with `time_unit` "second"), so it splits family moves (one clock, Trading 212's) and external top-ups (a Monzo payment and its Trading 212 deposit, normally seconds apart; a delay past the window leaves it for review). Date-only records are unaffected. The owner's decisions still win.
+
+The window is `near_window` (2 minutes, `TransferSettings`, the card rule's). The owner asked about 5 minutes; 2 is kept because the owner often makes several movements within a few minutes (three within three minutes on 2026-11-26), and a wider window more often holds two candidates and splits less. A real delay only falls back to review. It is a setting: widen it if reviews show delays.
+
+Order of the rules, each applied to what the one before leaves:
+1. Whether two records may pair at all (§5.3; Notes first, §5.9; the two-minute family condition only without Notes).
+2. Several candidates split by the only one within the near window (this section).
+3. Time order inside a group whose one side is interchangeable (§5.7).
+
 ## 6. Tests
 
 Hypothesis properties in the style of the existing pairs tests (`Pairable` strategies, the relation built in memory), plus a few integration tests on the remote Docker host:
@@ -147,6 +160,7 @@ Hypothesis properties in the style of the existing pairs tests (`Pairable` strat
 - Family first (§5.3 item 3): a record naming nobody within the near window of a family move is no candidate of a shared-payee record or through its funding alone; further away, it is as #48 has it. The real shape: a Cash ISA internal-move row and a same-amount shared-payee payment in the day window, and the row pairs with its TRANSFER, the payment with its own deposit.
 - Interchangeable on one side (§5.7): for an n-by-n group whose one side is alike and whose other side is not, every assignment yields the same balances per account and instrument, and the relation chooses the fixed-order one; a group with neither side alike, with a record having a candidate outside the group, or with an untakeable pair, pairs none. The real shape as an integration test: two equal TRANSFERs out of Invest and Stocks ISA, two identical Cash ISA rows, all four pair. Links follow time order: each side sorted by instant (an untimed record by its booking date), then reference, linked in order; in every case the balances equal every other assignment's.
 - Notes (§5.9): a Cash ISA row with empty Notes names the family and pairs with a same-amount TRANSFER more than two minutes away; one with a transaction id within two minutes of a family move pairs with its shared-payee payment instead; Notes of another form are a row error, and in an export upload refuse the file. Evidence later: an unpaired API-only Invest↔Stocks ISA move (sides more than two minutes apart) pairs within the family after an export upload gives the receiving DEPOSIT empty Notes; a deposit later shown with a transaction id gets no family edge; an owner's never-pair decision between the two still holds.
+- Only candidate within the near window (§5.10): a property that a pair is taken by this rule only when both records are timed, each has exactly one same-amount candidate (any tier) within `near_window`, the other, and the edge is takeable; never when a second candidate lies within `near_window` of either, or either is untimed. The owner's case as an integration test: two Monzo payments of the same amount to the shared payee three days apart, each followed within a minute by a Cash ISA transaction-id deposit, all four in one date window, pair as two transfers.
 - Gate: with three accounts and the manual one unlisted for the window, an Invest↔Stocks ISA pair is a candidate but not takeable; listed, it is taken.
 - Membership change: a TRANSFER paired MUTUAL with two accounts becomes held when a third family account is created, and the heal leaves the ledger agreeing with the rule (contra, pair) with no replay.
 - Connector: `trading212-norm-4` re-posts TRANSFERs naming the family identifier; the identifier is created once per family; DEPOSIT/WITHDRAW unchanged.
