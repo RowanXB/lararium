@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,8 +19,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.connections import create_connection
+from lararium.core.documents import LocalDocumentStore
 from lararium.modules.finance.accounts import AccountRecord, create_account, set_type_key
 from lararium.modules.finance.identifiers import family_identifier, named_accounts
+from lararium.modules.finance.importing.catalog import CATALOG
+from lararium.modules.finance.importing.commit import commit_batch
+from lararium.modules.finance.importing.profiles import create_profile
+from lararium.modules.finance.importing.staging import list_batch_rows, stage_import
+from lararium.modules.finance.instruments import InstrumentRecord
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers import list_transfers, register_holders_and_rematch
 from lararium.modules.finance.transfers.contra import eligible_records
@@ -682,5 +689,113 @@ async def test_an_outside_deposit_near_a_family_move_pairs_with_its_payee_paymen
     # The one matched transfer: the TRANSFER is in none.
     matched = await list_transfers(session, statuses=["matched"])
     assert [(t.out_transaction_id, t.in_transaction_id) for t in matched] == [(paid.id, received)]
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+async def test_two_equal_moves_into_the_cash_isa_pair_by_time(
+    session: AsyncSession,
+    run: Run,
+    tmp_path: Path,
+    gbp: InstrumentRecord,
+    connected_bank: MakeConnected,
+    family_accounts: MakeFamily,
+    connector_tx: ConnectorTx,
+    heal: Heal,
+) -> None:
+    """The shape of 2026-11-26 (§6) end to end, the Cash ISA's rows through its History CSV
+    profile. Two TRANSFERs of 100, 18 s apart, out of Stocks ISA then Invest; two Cash ISA
+    deposits of 100 with empty Notes at the same times; and, within three minutes, a deposit
+    of 100 whose Notes give a transaction id, with a payment of 100 from Monzo to the payee
+    the three accounts hold a little before it. The TRANSFERs pair with the empty-Notes
+    deposits by time, the payment with the one whose Notes say it came from outside."""
+    m = await connected_bank("M")
+    invest, _ = await family_accounts(1)
+    connection = await run(
+        create_connection, connector="trading212", display_name="T212 ISA", config={}
+    )
+    stocks = Connected(
+        connection.id,
+        await run(
+            create_account,
+            name="Stocks ISA",
+            ledger_type="asset",
+            subtype="broker",
+            balance_mode="transactions",
+            source_connection_id=connection.id,
+            type_key="trading212.stocks_isa",
+        ),
+    )
+    cash = await run(
+        create_account,
+        name="Cash ISA",
+        ledger_type="asset",
+        subtype="savings_pot",
+        tax_wrapper="isa",
+        balance_mode="transactions",
+        type_key="trading212.cash_isa",
+    )
+    payee = (
+        await run(
+            register_holders_and_rematch,
+            "uk_bank_account",
+            PAYEE,
+            [invest.account.id, stocks.account.id, cash.id],
+        )
+    ).id
+    family_id = await run(family_identifier, "trading212")
+    out_stocks = await connector_tx(stocks, "-100", external_id="s", identifier_id=family_id)
+    out_invest = await connector_tx(
+        invest,
+        "-100",
+        external_id="i",
+        occurred_at=WHEN + timedelta(seconds=18),
+        identifier_id=family_id,
+    )
+    paid = await connector_tx(
+        m,
+        "-100",
+        external_id="p",
+        occurred_at=WHEN + timedelta(seconds=120),
+        identifier_id=payee,
+    )
+
+    content = (
+        "Action,Time (UTC),Notes,ID,Total,Currency (Total)\n"
+        "Deposit,2026-11-02 12:00:00+00:00,,01aaaaaa-0000-7000-8000-000000000001,100.00,GBP\n"
+        "Deposit,2026-11-02 12:00:18+00:00,,01aaaaaa-0000-7000-8000-000000000002,100.00,GBP\n"
+        "Deposit,2026-11-02 12:02:30+00:00,"
+        '"Transaction ID: 11111111-2222-3333-4444-555555555555",'
+        "01aaaaaa-0000-7000-8000-000000000003,100.00,GBP\n"
+    )
+    [entry] = [
+        e for e in CATALOG if (e.institution, e.label) == ("Trading 212 Cash ISA", "History CSV")
+    ]
+    profile = await run(create_profile, name="Cash ISA", config=entry.config)
+    batch = await run(
+        stage_import,
+        LocalDocumentStore(tmp_path),
+        account_id=cash.id,
+        profile_id=profile.id,
+        content=content.encode(),
+        filename="from_2026-10-01_to_2026-12-01.csv",
+        media_type="text/csv",
+        default_instrument_id=gbp.id,
+    )
+    await run(commit_batch, batch.id)
+    session.expunge_all()
+    await heal()
+    await heal()
+
+    deposits = {
+        row.position: row.transaction_id
+        for row in await list_batch_rows(session, batch.id)
+        if row.transaction_id is not None
+    }
+    first, second, outside = (deposits[n] for n in range(3))
+    matched = await list_transfers(session, statuses=["matched"])
+    assert sorted((t.out_transaction_id, t.in_transaction_id) for t in matched) == sorted(
+        [(out_stocks.id, first), (out_invest.id, second), (paid.id, outside)]
+    )
     assert await heal() == 0
     await assert_consistent(session)

@@ -313,7 +313,8 @@ async def list_accounts(session: SessionDep) -> list[AccountOut]:
 @router.post("/accounts", name="create_account", status_code=status.HTTP_201_CREATED)
 async def create_account(body: AccountCreate, session: SessionDep, actor: ActorDep) -> AccountOut:
     found = None if body.type_key is None else _require_type_shape(body, body.type_key)
-    async with command_context(session, actor, "create_account", _args(body)) as ctx:
+    command = healing_command if account_types.family_of(body.type_key) else command_context
+    async with command(session, actor, "create_account", _args(body)) as ctx:
         institution_id = None
         if found is not None:
             institution_id = await get_or_create_organization(ctx, found.institution)
@@ -345,9 +346,16 @@ async def rename_account(
     # The audit records what was sent, not the fields left out.
     args = _args(account_id=account_id) | body.model_dump(mode="json", exclude_unset=True)
     set_type = "type_key" in body.model_fields_set
-    async with command_context(session, actor, "rename_account", args) as ctx:
-        if set_type:
-            account = await accounts.get_account(session, account_id)
+    account = await accounts.get_account(session, account_id) if set_type else None
+    # An account joining or leaving a family changes which accounts the family's records
+    # name: heal at once, as a registered identifier does.
+    families = {
+        account_types.family_of(body.type_key),
+        account_types.family_of(account.type_key) if account else None,
+    }
+    command = healing_command if set_type and families - {None} else command_context
+    async with command(session, actor, "rename_account", args) as ctx:
+        if account is not None:
             staging.require_importable(account)
             if body.type_key is not None:
                 found, shape = _settable_type(body.type_key)
