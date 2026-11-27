@@ -367,16 +367,10 @@ class ConnectorRun:
         return record.id
 
     async def contra_for(
-        self,
-        key: str,
-        account_id: UUID,
-        other_postings: int,
-        identifier_id: UUID | None,
-        payment_reference: str | None = None,
+        self, key: str, account_id: UUID, other_postings: int, identifier_id: UUID | None
     ) -> UUID:
         """Unassigned or In transit for the account's record under the key, as
-        transfer_contra says (`payment_reference`, the record's, for a bank account that
-        names an own account by its reference)."""
+        transfer_contra says."""
         await self.system_account("unassigned")
         await self.system_account("in_transit")
         return await transfer_contra(
@@ -384,6 +378,5 @@ class ConnectorRun:
             source=("connection", f"{self.connection_id}:{key}"),
             own_account_id=account_id,
             counterparty_identifier_id=identifier_id,
-            payment_reference=payment_reference,
             other_postings=other_postings,
         )
