@@ -37,6 +37,7 @@ from sqlalchemy import (
     text,
     true,
     type_coerce,
+    union,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,6 +135,38 @@ def names_source(t: type[models.Transaction], source: SourceRef) -> ColumnElemen
     return false()
 
 
+def cancelled_pairs() -> Subquery:
+    """Every cancelled pair (cancelling, cancelled): a transaction with
+    cancels_transaction_id and the one it names, neither void. Both post their contra on In
+    transit, which the pair leaves level (cancelled-withdrawal design §4.4)."""
+    c = aliased(models.Transaction, name="cancelling_transaction")
+    d = aliased(models.Transaction, name="cancelled_transaction")
+    # The cancelled one's status looked up by its primary key, not joined: with wrong
+    # estimates (statistics taken while a bulk insert was uncommitted) the planner joined
+    # the two sides by scanning every transaction for each, which took 40 s on 10,000.
+    cancelled_status = select(d.status).where(d.id == c.cancels_transaction_id).scalar_subquery()
+    return (
+        select(c.id.label("cancelling"), c.cancels_transaction_id.label("cancelled"))
+        .where(
+            c.cancels_transaction_id.is_not(None),
+            c.status != "void",
+            cancelled_status != "void",
+        )
+        .subquery("cancelled_pairs")
+    )
+
+
+def in_cancelled_pair(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
+    """Whether the transaction is one of a cancelled pair (cancelled_pairs): it cancels
+    another, or another cancels it, and neither of the two is void."""
+    pairs = cancelled_pairs()
+    # Against the pairs' ids gathered once (a handful), not looked up per transaction: a
+    # lookup per row of a large statement turns slow when the planner's estimates are
+    # wrong (statistics taken while a bulk insert was uncommitted).
+    ids = union(select(pairs.c.cancelling), select(pairs.c.cancelled))
+    return type_coerce(transaction_id, Uuid()).in_(ids)
+
+
 # A transfer's leg is exactly two postings, its own posting and its contra: one with others
 # besides (a fee, say) is no leg, so its contra stays on Unassigned. eligible_records and
 # transfer_contra both read this.
@@ -143,8 +176,9 @@ LEG_POSTINGS = 2
 def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
     """Every transaction that can be a transfer's leg (an own record), with its own posting
     and its contra: not void, not derived, not one its source says was no transfer
-    (`never_transfer`), and exactly two postings, one on Unassigned or In transit and the
-    other on an account that is not a system account.
+    (`never_transfer`), not one of a cancelled pair (in_cancelled_pair), and exactly two
+    postings, one on Unassigned or In transit and the other on an account that is not a
+    system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
@@ -477,7 +511,12 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .join(family_accounts, true())
         .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
         .outerjoin(payees, payees.c.identifier_id == t.counterparty_identifier_id)
-        .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS), ~t.never_transfer)
+        .where(
+            t.status != "void",
+            t.origin.not_in(DERIVED_ORIGINS),
+            ~t.never_transfer,
+            ~in_cancelled_pair(t.id),
+        )
         .subquery(name)
     )
 

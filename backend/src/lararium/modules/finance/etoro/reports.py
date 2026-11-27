@@ -312,22 +312,24 @@ async def _rows(
     table: str,
     child: str,
     under: str,
+    identity: str,
     parent: dict[str, object],
     links: dict[int, dict[str, object]],
 ) -> None:
-    """A report's row for its day, and its array's items as child rows."""
+    """A report's row for its day, and its array's items as child rows (`identity`: the
+    column of an item's own id)."""
     endpoint = report.endpoint
     values = await run.typed(endpoint, table, flat(report.content))
     await run.upsert(table, parent, values | {"raw_record_id": report.record.id})
     items = objects_at(report.content, under.removesuffix("[]."))
-    for n, item in enumerate(items):
-        values = await run.typed(endpoint, child, flat(item), under)
+    rows = [await run.typed(endpoint, child, flat(item), under) for item in items]
+    await run.replace_moved(child, parent, identity, [row.get(identity) for row in rows])
+    for n, values in enumerate(rows):
         await run.upsert(
             child,
             parent | {"item_index": n},
             values | links.get(n, {}) | {"raw_record_id": report.record.id},
         )
-    await run.prune(child, parent, len(items))
 
 
 async def _instrument_link(run: Run, record: Record, item: Item, path: str) -> dict[str, object]:
@@ -364,6 +366,7 @@ async def _breakdown(run: Run, report: Report) -> None:
         "etoro_breakdowns",
         "etoro_breakdown_instruments",
         "instruments[].",
+        "instrument_id",
         parent,
         links,
     )
@@ -427,7 +430,8 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
         )
         parent = {"connection_id": run.connection_id, "snapshot_date": day}
         lines = objects_at(snapshot, "accountSnapshots")
-        for n, line in enumerate(lines):
+        rows: list[dict[str, object]] = []
+        for line in lines:
             values = await run.typed(
                 "balance_history",
                 "etoro_balance_account_snapshots",
@@ -442,17 +446,18 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
                 snapshot_id = await reported_snapshot(
                     run.command, account_id, currency.id, cash, end_of(day), day
                 )
-            await run.upsert(
-                "etoro_balance_account_snapshots",
-                parent | {"item_index": n},
+            rows.append(
                 values
                 | {
                     "finance_account_id": account_id,
                     "snapshot_id": snapshot_id,
                     "raw_record_id": record.id,
-                },
+                }
             )
-        await run.prune("etoro_balance_account_snapshots", parent, len(lines))
+        table = "etoro_balance_account_snapshots"
+        await run.replace_moved(table, parent, "account_id", [r.get("account_id") for r in rows])
+        for n, row in enumerate(rows):
+            await run.upsert(table, parent | {"item_index": n}, row)
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:
@@ -501,6 +506,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_balances",
                     "etoro_balance_accounts",
                     "balances[].",
+                    "account_id",
                     parent,
                     links,
                 )
@@ -517,6 +523,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_pnl",
                     "etoro_pnl_positions",
                     "clientPortfolio.positions[].",
+                    "position_id",
                     parent,
                     links,
                 )
@@ -532,6 +539,7 @@ async def apply(run: Run, reports: Sequence[Report]) -> None:
                     "etoro_aggregates",
                     "etoro_aggregate_instruments",
                     "instrumentAggregates[].",
+                    "instrument_id",
                     parent,
                     links,
                 )

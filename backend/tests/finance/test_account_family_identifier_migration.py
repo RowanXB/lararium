@@ -1,4 +1,4 @@
-"""Migration 0046: the account_family kind, which never has an account, and the typed Notes
+"""Migration 0047: the account_family kind, which never has an account, and the typed Notes
 evidence (account family identifier design §5.9): transactions.outside_family,
 import_rows.family_move and the Trading 212 export row's sent-to bank account."""
 
@@ -27,7 +27,7 @@ MIGRATION = (
     Path(__file__).parents[2]
     / "migrations"
     / "versions"
-    / "0046_finance_account_family_identifier.py"
+    / "0047_finance_account_family_identifier.py"
 )
 
 
@@ -71,7 +71,7 @@ def _columns(connection: Connection) -> dict[tuple[str, str], tuple[str, str, st
     return {(row[0], row[1]): (row[2], row[3], row[4]) for row in rows}
 
 
-def test_0046_and_its_downgrade(owner_url: str, migrated: None) -> None:
+def test_0047_and_its_downgrade(owner_url: str, migrated: None) -> None:
     engine = create_engine(owner_url)
     try:
         with engine.connect() as connection:
@@ -126,7 +126,7 @@ def test_0046_and_its_downgrade(owner_url: str, migrated: None) -> None:
         engine.dispose()
 
 
-async def test_downgrading_0046_first_clears_the_transactions_naming_a_family(
+async def test_downgrading_0047_first_clears_the_transactions_naming_a_family(
     session, run, make_account, gbp
 ) -> None:
     """Its downgrade clears the counterparty identifier of a transaction naming a family, then

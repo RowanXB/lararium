@@ -3,7 +3,7 @@
 An account family (`trading212`) is an identifier for "an account of this family", whichever
 it is. It never has an account or holder rows: whom a record naming it names is read from
 the accounts' `type_key` when it is resolved (identifiers.named_accounts). So an
-`account_family` row keeps `account_id` NULL, and the holders' kind CHECK (0045) is left
+`account_family` row keeps `account_id` NULL, and the holders' kind CHECK (0046) is left
 as it is: it can't hold one. That the value is a family of the catalog is checked in code,
 as the catalog is code.
 
@@ -18,8 +18,8 @@ account its Notes name as sent to: `trading212_export_rows.notes_sort_code` and
 Downgrading clears `counterparty_identifier_id` on the transactions naming such a row,
 deletes the rows, restores the kind CHECK as 0041 left it and drops the four columns.
 
-Revision ID: 0046
-Revises: 0045
+Revision ID: 0047
+Revises: 0046
 Create Date: 2026-11-27
 """
 
@@ -27,8 +27,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0046"
-down_revision: str | None = "0045"
+revision: str = "0047"
+down_revision: str | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
