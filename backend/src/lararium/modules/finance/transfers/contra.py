@@ -174,7 +174,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
     connector's record, or one whose statement import row gives its time to the second;
     only the coverage gate reads it, of a receipt: a payment counts as timed only as a
-    connector's record, pairs._gate_day), source_kind, source_ref.
+    connector's record, pairs._gate_day), occurred_tz (the time zone its time was read in,
+    which the gate reads a timed receipt's booking day in), source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -426,6 +427,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             t.bank_transfer,
             funded_by_transfer.label("funded_by_transfer"),
             timed.label("timed"),
+            t.occurred_tz,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
         )
@@ -461,6 +463,7 @@ _OWN_RECORDS = Table(
     Column("bank_transfer", Boolean, nullable=False),
     Column("funded_by_transfer", Boolean, nullable=False),
     Column("timed", Boolean, nullable=False),
+    Column("occurred_tz", String),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
     prefixes=["TEMPORARY"],

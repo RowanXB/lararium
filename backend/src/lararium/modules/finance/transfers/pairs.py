@@ -78,6 +78,10 @@ class Pairable:
     # it, of a receipt (_gate_day: a payment counts as timed only as a connector's record);
     # a row giving only its date is stamped 00:00.
     timed: bool = False
+    # The time zone its time was read in (Transaction.occurred_tz): an imported row's
+    # profile's, which a CSV row is booked on its time's date in. Only _gate_day reads it,
+    # of a timed receipt; None reads the owner's.
+    occurred_tz: str | None = None
 
     @property
     def sends(self) -> bool:
@@ -432,8 +436,8 @@ class Known:
     can stand in"): per account and instrument, the first day committed imports list in
     full (M2's complete_from). A connected account's history is known from its
     connection, so it isn't in `manual`. `zone`: the owner's time zone, which a timed
-    payment's day is taken in (_gate_day); None, as in a Known built by hand, relaxes
-    nothing."""
+    payment's day is taken in for a receipt read in no zone of its own (_gate_day); None,
+    as in a Known built by hand, relaxes nothing."""
 
     manual: frozenset[UUID]
     first_full_day: Mapping[tuple[UUID, UUID], date]
@@ -574,6 +578,7 @@ async def _load_records(
         e.c.holders,
         e.c.funded_by_transfer,
         e.c.timed,
+        e.c.occurred_tz,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -596,6 +601,7 @@ async def _load_records(
             holders=frozenset(row.holders or ()),
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
+            occurred_tz=row.occurred_tz,
             fiat=bool(row.fiat),
             fee=(
                 None
@@ -639,11 +645,19 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
     payment (account type catalog design §8.3 item 4): when record sends and is a
     connector's record (its time the instant the money left) and other is an imported row
     timed to the second, received no earlier than that instant less the near window, it is
-    that instant's day in the owner's time zone, if later. The window starts a day early
+    that instant's day in other's booking frame, if later. The window starts a day early
     only because a date-only statement can date a payment after the money left, which such
     a payment can't. An imported sender never counts, even timed to the second: its time
     may be a posting time (OFX's DTPOSTED), after the money left. This only ever lets the
-    gate take a pair: the window and tiers are unchanged, and nothing else reads `timed`."""
+    gate take a pair: the window and tiers are unchanged, and nothing else reads `timed`.
+
+    Other's booking frame is the zone its time was read in (occurred_tz, else the owner's):
+    a CSV row is booked on its time's date there, as a Cash ISA row on its UTC date. The
+    imports' listed days are its booking dates, so the instant's day is taken there: in the
+    owner's, a payment at 00:30 in London in summer would be asked from the day after the
+    UTC day its real receipt is booked on. An OFX row is booked on the date its DTPOSTED
+    writes, in that offset, which may not be occurred_tz's: where other's own booking date
+    shows its frame a day behind, the day is a day earlier (never later)."""
     earliest = counterpart_bounds(record, settings)[0]
     sent = record.occurred_at - settings.near_window
     if (
@@ -655,7 +669,9 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
         and other.source[0] != "connection"
         and other.occurred_at >= sent
     ):
-        return max(earliest, local_date(sent, known.zone))
+        frame = known.zone if other.occurred_tz is None else ZoneInfo(other.occurred_tz)
+        behind = min(other.booking_date - local_date(other.occurred_at, frame), timedelta(0))
+        return max(earliest, local_date(sent, frame) + behind)
     return earliest
 
 

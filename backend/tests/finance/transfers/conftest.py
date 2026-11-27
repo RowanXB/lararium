@@ -5,6 +5,7 @@ from decimal import Decimal
 from functools import partial
 from typing import Any, Literal
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, insert, select, text
@@ -15,6 +16,7 @@ from lararium.core.commands import command_context
 from lararium.core.connections import create_connection
 from lararium.core.documents import record_document
 from lararium.core.entities import get_self_entity_id
+from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord, create_account
 from lararium.modules.finance.identifiers import assign_identifier
@@ -445,7 +447,9 @@ def statement_row(
     account the posted transaction names, which a row naming one does; `reference`, its
     payment reference. `key`: the row's dedupe key (record_import_rows), its reference; by
     default one from the transaction. `at`: the row's time, which its file gives to
-    `time_unit`; by default `day`'s midnight, a date only."""
+    `time_unit`; by default `day`'s midnight, a date only. `zone`: the time zone its file
+    is read in (its import profile's), which it is booked on `at`'s date in; by default the
+    owner's, as posting gives."""
 
     async def _post(
         account: AccountRecord,
@@ -460,7 +464,9 @@ def statement_row(
         key: str | None = None,
         at: datetime | None = None,
         time_unit: str = "day",
+        zone: str | None = None,
     ) -> UUID:
+        occurred_at = datetime.combine(day, time(), UTC) if at is None else at
         contra = await transfer_contra(
             session,
             source=None,
@@ -473,7 +479,9 @@ def statement_row(
         row = await run(
             post_transaction,
             TransactionInput(
-                occurred_at=datetime.combine(day, time(), UTC) if at is None else at,
+                occurred_at=occurred_at,
+                booking_date=None if zone is None else local_date(occurred_at, ZoneInfo(zone)),
+                occurred_tz=zone,
                 description="Faster payment",
                 origin="manual",
                 postings=[

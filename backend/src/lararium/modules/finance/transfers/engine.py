@@ -834,6 +834,7 @@ async def preview_match(
     booking_date: date | None = None,
     complete: tuple[date, date] | None = None,
     timed: bool = False,
+    occurred_tz: str | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -852,6 +853,8 @@ async def preview_match(
     `timed`: the row's file gives its time to the second (its time_unit), as
     eligible_records' timed reads it once posted (pairs._gate_day); a caller previewing a
     row timed to the second passes True, else the preview may miss the pair posting forms.
+    `occurred_tz`: the time zone the row's time is read in, which posting stores and the
+    gate reads its booking day in (pairs._gate_day); None, the owner's.
 
     The row's evidence is its counterparty identifier only, with its payment reference
     (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
@@ -892,6 +895,7 @@ async def preview_match(
         # As eligible_records' funded_by_transfer: read from the account's type.
         funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
         timed=timed,
+        occurred_tz=occurred_tz,
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
