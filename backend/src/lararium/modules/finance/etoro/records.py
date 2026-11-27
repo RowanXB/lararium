@@ -32,6 +32,7 @@ giving its account number alone, which the transfer engine reads as an imported 
 Trading account when its counterparty's name says trading (as the owner's data shows), and goes to
 Unassigned when it names MoneyFarm or the ISA (design §5.12), or neither, or Trading while the
 balances list none (both flagged); a card payment or balance adjustment goes to Unassigned.
+A card credit whose subtype is `refund` is marked a refund; another subtype is flagged.
 
 **Opening balances** (design §5.5): eToro Money's earliest balance-history snapshot, less
 what its records post up to the end of that day, is one opening adjustment per currency,
@@ -83,7 +84,7 @@ from lararium.modules.finance.etoro.state import (
 )
 from lararium.modules.finance.identifiers import get_or_create_identifier, normalize_identifier
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
+from lararium.modules.finance.ledger import CounterpartyFields, PostingInput, TransactionDetails
 from lararium.modules.finance.money import to_plain_str, tolerance
 
 OPEN = "open:"
@@ -708,6 +709,12 @@ async def cash(run: Run, record: Record) -> None:
             description = _TYPES[kind]
             if kind == "card":
                 description = text_at(content, "cardTransactionDetails.merchantName") or description
+            refund = False
+            if kind == "card" and direction == "credit":
+                subtype = text_at(content, "transactionSubtype")
+                refund = subtype == "refund"
+                if not refund:
+                    run.flag_value("cash_transactions", "transactionSubtype", subtype)
             transaction_id = await run.post(
                 key,
                 moment_at(record, content, "postedAt"),
@@ -717,6 +724,7 @@ async def cash(run: Run, record: Record) -> None:
                     PostingInput(contra, currency.id, -amount),
                 ],
                 counterparty,
+                details=TransactionDetails(refund=refund),
             )
     if transaction_id is None:
         await run.void(key)

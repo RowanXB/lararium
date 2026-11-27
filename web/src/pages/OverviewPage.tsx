@@ -195,14 +195,17 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
     [flow.categories],
   );
   const format = useCallback((value: string) => formatMoney(value, currency), [currency]);
-  // Money moved to hidden accounts is spending too, but no category's.
-  const categorised = sumDecimalStrings(shares.map((share) => share.value));
+  // A category its refunds took below zero has no share of what was spent: shares are of
+  // the categories that spent. Money moved to hidden accounts is spending too, but no
+  // category's.
+  const spent = useMemo(() => shares.filter((share) => !share.value.startsWith("-")), [shares]);
+  const categorised = sumDecimalStrings(spent.map((share) => share.value));
   if (shares.length === 0) {
     return <p className="text-sm text-muted-foreground">No spending in these dates</p>;
   }
   return (
     <div className="flex flex-wrap items-start gap-6">
-      <ShareChart shares={shares} format={format} label="Spending by category" />
+      <ShareChart shares={spent} format={format} label="Spending by category" />
       <ul className="max-h-64 min-w-48 flex-1 space-y-2 overflow-y-auto pr-1">
         {shares.map((share) => (
           <li key={share.name} className="flex items-baseline justify-between gap-3 text-sm">
@@ -216,9 +219,11 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
             </span>
             <span className="shrink-0 tabular-nums">
               {format(share.value)}
-              <span className="ml-2 text-muted-foreground">
-                {Math.round(percent(share.value, categorised))}%
-              </span>
+              {!share.value.startsWith("-") && (
+                <span className="ml-2 text-muted-foreground">
+                  {Math.round(percent(share.value, categorised))}%
+                </span>
+              )}
             </span>
           </li>
         ))}

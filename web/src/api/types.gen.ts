@@ -832,6 +832,7 @@ export type CsvExtract = {
  */
 export type CsvProfileConfig = {
     amount_format?: AmountFormat;
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     columns: CsvColumns;
     /**
@@ -1820,6 +1821,7 @@ export type NetWorthPointOut = {
  * OfxProfileConfig
  */
 export type OfxProfileConfig = {
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     /**
      * Format
@@ -1879,6 +1881,7 @@ export type Pattern = string;
  * PdfProfileConfig
  */
 export type PdfProfileConfig = {
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     /**
      * Format
@@ -2022,6 +2025,7 @@ export type ProfileConfig = ({
  */
 export type QifProfileConfig = {
     amount_format?: AmountFormat;
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     date_format: DateFormat;
     encoding?: Encoding;
@@ -2301,6 +2305,14 @@ export type TransactionOut = {
      */
     cancels_transaction_id: string | null;
     /**
+     * Card Lifecycle Id
+     */
+    card_lifecycle_id: string | null;
+    /**
+     * Card Reversal
+     */
+    card_reversal: boolean | null;
+    /**
      * Description
      */
     description: string;
@@ -2320,6 +2332,10 @@ export type TransactionOut = {
      * Postings
      */
     postings: Array<PostingOut>;
+    /**
+     * Refund
+     */
+    refund: boolean;
     /**
      * Status
      */

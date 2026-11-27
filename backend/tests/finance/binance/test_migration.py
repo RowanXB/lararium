@@ -100,7 +100,8 @@ _REMOVED = {
 
 
 def _seed(connection: Connection) -> tuple[object, object, object]:
-    """A Binance connection and a Monzo one, each with every key; (owner, binance, other)."""
+    """A Binance connection and a Trading 212 one, which no downgrade from 0040 on touches,
+    each with every key; (owner, binance, other)."""
     owner = connection.execute(
         text("insert into core.entities (kind, name) values ('person', 'Config test') returning id")
     ).scalar_one()
@@ -113,7 +114,7 @@ def _seed(connection: Connection) -> tuple[object, object, object]:
             ),
             {"c": connector, "config": json.dumps(_CONFIG), "owner": owner},
         ).scalar_one()
-        for connector in ("binance", "monzo")
+        for connector in ("binance", "trading212")
     ]
     return owner, made[0], made[1]
 
