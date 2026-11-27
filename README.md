@@ -319,10 +319,10 @@ Each transfer is one row, such as "Monzo → Bank A · 100.00 GBP".
   - *Not listed in full*: a row on a manual account could be the other side, but it lies in
     the transfer's window before the first day that account's uploads list in full, so it isn't
     taken (see *Imports and transfers* below). No inferred transaction is posted beside it,
-    which would count the money twice if the row is the real one; the amount waits in In
-    transit. Upload a statement that lists those days and the two pair by themselves, or pair
-    them yourself through the API (`POST /api/v1/finance/transactions/{id}/pair`; see *Records
-    that name no account* below).
+    which would count the money twice if the row is the real one; the amount waits in the In
+    transit account. Upload a statement that lists those days and the two pair by themselves,
+    or pair them yourself: the row is listed as a candidate, with **Pair**. It is never
+    *Overdue*: it waits for an upload, not a connection.
   - *Overdue*: the other account has its own connection and hasn't reported its side within 7
     days.
 
@@ -887,9 +887,11 @@ before it, the real row may be inside the account's opening, never to be importe
 unrelated payment of the same amount must not stand in for it. When the record naming the account
 is a payment, its window starts the day before it, since a statement giving only dates can date
 a payment after the money left. A row whose file gives its time to the second, received no
-earlier than two minutes before a payment whose time is real too (a connected account's, or
-another such row), is checked from the payment's own day in your time zone instead: a receipt
-does not come before its payment. The window itself, and so the candidates, stay as they are.
+earlier than two minutes before a payment that is a connected account's record, is checked
+from the payment's own day in your time zone instead: a receipt does not come before its
+payment. An imported payment never counts, even one timed to the second: its time may be when
+the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
+candidates, stay as they are.
 After the last day imported a row is taken: should it not be the real one, the next statement
 brings the real row, and the transfer goes to Needs attention with both as candidates. On a
 Transactions account, a transfer whose window lies wholly on
