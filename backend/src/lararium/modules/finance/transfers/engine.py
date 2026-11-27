@@ -850,7 +850,8 @@ async def preview_match(
     (a counterpart found by amount and date is taken only from the first day imports list
     in full, design §5.8).
     `timed`: the row's file gives its time to the second (its time_unit), as
-    eligible_records' timed reads it once posted (pairs._gate_day).
+    eligible_records' timed reads it once posted (pairs._gate_day); a caller previewing a
+    row timed to the second passes True, else the preview may miss the pair posting forms.
 
     The row's evidence is its counterparty identifier only, with its payment reference
     (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not

@@ -75,7 +75,8 @@ class Pairable:
     funded_by_transfer: bool = False
     # Its occurred_at is a real instant (contra.eligible_records' timed): a connector's
     # record, or an imported row its file gives to the second. Only the coverage gate reads
-    # it (_gate_day); a row giving only its date is stamped 00:00.
+    # it, of a receipt (_gate_day: a payment counts as timed only as a connector's record);
+    # a row giving only its date is stamped 00:00.
     timed: bool = False
 
     @property
@@ -635,18 +636,20 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
     """The first day the coverage gate asks the ledger to hold `other`, the counterpart
     found by amount and date of `record` (the side that names the other's account): the
     start of record's window (counterpart_bounds). A receipt does not come before its
-    payment (account type catalog design §8.3 item 4): when record sends at a real instant
-    (timed) and other is an imported row timed to the second, received no earlier than that
-    instant less the near window, it is that instant's day in the owner's time zone, if
-    later. The window starts a day early only because a date-only statement can date a
-    payment after the money left, which such a row can't. This only ever lets the gate take
-    a pair: the window and tiers are unchanged, and nothing else reads `timed`."""
+    payment (account type catalog design §8.3 item 4): when record sends and is a
+    connector's record (its time the instant the money left) and other is an imported row
+    timed to the second, received no earlier than that instant less the near window, it is
+    that instant's day in the owner's time zone, if later. The window starts a day early
+    only because a date-only statement can date a payment after the money left, which such
+    a payment can't. An imported sender never counts, even timed to the second: its time
+    may be a posting time (OFX's DTPOSTED), after the money left. This only ever lets the
+    gate take a pair: the window and tiers are unchanged, and nothing else reads `timed`."""
     earliest = counterpart_bounds(record, settings)[0]
     sent = record.occurred_at - settings.near_window
     if (
         known.zone is not None
         and record.sends
-        and record.timed
+        and record.source[0] == "connection"
         # An imported row (or one previewed as it, preview_match), not a connector's record.
         and other.timed
         and other.source[0] != "connection"

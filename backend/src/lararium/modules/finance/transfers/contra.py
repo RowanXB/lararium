@@ -173,7 +173,8 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
     bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
     connector's record, or one whose statement import row gives its time to the second;
-    only the coverage gate reads it, pairs._gate_day), source_kind, source_ref.
+    only the coverage gate reads it, of a receipt: a payment counts as timed only as a
+    connector's record, pairs._gate_day), source_kind, source_ref.
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")

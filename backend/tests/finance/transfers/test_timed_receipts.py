@@ -3,10 +3,11 @@
 M4 §5.8's import-coverage gate takes a one-sided counterpart on a manual account only from
 the first day that account's imports list in full, asked from the start of the identified
 record's window: a day before a sending side's booking date, because a date-only statement
-can date a payment after the money left. When the identified record sends and its time is
-real (a connector's record, or an imported row timed to the second), and the candidate is an
-imported row timed to the second, no earlier than the sending instant minus the near window,
-the gate asks only from that instant's day in the owner's time zone (pairs._gate_day). It
+can date a payment after the money left. When the identified record sends and is a
+connector's record, and the candidate is an imported row timed to the second, no earlier
+than the sending instant minus the near window, the gate asks only from that instant's day
+in the owner's time zone (pairs._gate_day). An imported sender never relaxes it, even timed
+to the second: its time may be a posting time (OFX's DTPOSTED), after the money left. It
 only ever lets the gate accept a pair it used to refuse: windows and tiers are unchanged.
 
 E11 (the property): for generated records, turning their `timed` on only adds same-amount
@@ -28,12 +29,17 @@ from lararium.core.timeutil import local_date
 from lararium.modules.finance.accounts import AccountRecord
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.system_accounts import system_account_ids
-from lararium.modules.finance.transfers import list_transfers, load_transfer_settings
+from lararium.modules.finance.transfers import (
+    TransferRecord,
+    list_transfers,
+    load_transfer_settings,
+)
 from lararium.modules.finance.transfers.pairs import (
     ONE_SIDED,
     WEAK,
     Known,
     Pairable,
+    Tier,
     _Decisions,
     _registry_edges,
     counterpart_bounds,
@@ -62,7 +68,10 @@ def _at(day: date, hour: int, minute: int = 0, second: int = 0) -> datetime:
     return datetime.combine(day, time(hour, minute, second), LONDON)
 
 
-async def _relation_and_transfer(session: AsyncSession, sent: UUID) -> tuple[dict, object]:
+async def _relation_and_transfer(
+    session: AsyncSession, sent: UUID
+) -> tuple[dict[UUID, Tier], TransferRecord]:
+    """The sent record's candidates in the pair relation, with their tiers, and its transfer."""
     relation = await pair_relation(
         session, await system_account_ids(session), await load_transfer_settings(session)
     )
@@ -133,14 +142,16 @@ async def test_a_timed_receipt_is_taken_from_its_payment_s_day(
 
 
 @pytest.mark.parametrize(
-    ("sent_at", "sent_unit", "pairs"),
+    ("sent_at", "sent_unit"),
     [
-        (_at(DAY, 10), "second", True),  # an imported row timed to the second is timed
-        (_at(DAY, 10), "minute", False),  # one timed to the minute is not
-        (_at(DAY, 0), "day", False),  # nor one giving only its date
+        # Even timed to the second: an imported row's time may be a posting time (OFX's
+        # DTPOSTED), which can come after the money left.
+        (_at(DAY, 10), "second"),
+        (_at(DAY, 10), "minute"),
+        (_at(DAY, 0), "day"),
     ],
 )
-async def test_an_imported_sender_is_timed_only_to_the_second(
+async def test_an_imported_sender_never_relaxes_the_gate(
     session: AsyncSession,
     run: Run,
     imported_bank: ImportedBank,
@@ -148,10 +159,10 @@ async def test_an_imported_sender_is_timed_only_to_the_second(
     heal: Heal,
     sent_at: datetime,
     sent_unit: str,
-    pairs: bool,
 ) -> None:
     """A's imported row names B (identified); B's row, naming nobody, is timed to the
-    second 30 s after 10:00; B's upload lists in full from DAY only."""
+    second 30 s after 10:00; B's upload lists in full from DAY only. Only a connector's
+    record is a timed payment, so the gate asks from the window's start, as before."""
     a = await imported_bank("A")
     b: AccountRecord = await imported_bank("B", identifier=B_IDENTIFIER)
     identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
@@ -166,13 +177,9 @@ async def test_an_imported_sender_is_timed_only_to_the_second(
     await heal()
 
     tiers, transfer = await _relation_and_transfer(session, sent)
-    if pairs:
-        assert tiers[row] == ONE_SIDED
-        assert (transfer.status, transfer.out_transaction_id) == ("matched", sent)
-        assert transfer.in_transaction_id == row
-    else:
-        assert row not in tiers
-        assert transfer.in_transaction_id is None
+    assert row not in tiers
+    assert transfer.out_transaction_id == sent
+    assert transfer.in_transaction_id is None
     assert await heal() == 0
     await assert_consistent(session)
 
@@ -222,6 +229,9 @@ def test_only_an_imported_row_is_a_timed_receipt() -> None:
     assert not _pairs(sender, replace(receipt, timed=False), _listed())
     assert not _pairs(sender, replace(receipt, source=("connection", "c:1")), _listed())
     assert not _pairs(sender, receipt, _listed(zone=None))
+    # The payment must be a connector's record: an imported row's time, even to the second,
+    # may be a posting time, after the money left.
+    assert not _pairs(replace(sender, source=("import", "s")), receipt, _listed())
     # The identified side must send: a receipt it names isn't vouched for by a payment.
     assert not _pairs(
         _pairable(MANUAL, "-100", _at(DAY, 10, 0, 30), source=("import", "k")),
@@ -237,7 +247,7 @@ def test_a_weak_pair_is_relaxed_the_same_way() -> None:
     receipt = _pairable(MANUAL, "100", _at(DAY, 10, 0, 30), source=("import", "k"))
     assert _pairs(sender, receipt, _listed())
     assert not _pairs(sender, replace(receipt, occurred_at=_at(DAY, 9, 50)), _listed())
-    assert not _pairs(replace(sender, timed=False), receipt, _listed())
+    assert not _pairs(replace(sender, source=("import", "s")), receipt, _listed())
 
 
 _ACCOUNTS = (SENDER, MANUAL, UUID(int=12), UUID(int=13))  # the last two manual too
@@ -311,14 +321,15 @@ def _known(draw: st.DrawFn) -> Known:
 def _relaxed(sender: Pairable, other: Pairable, known: Known) -> bool:
     """Whether the rule lets the pair through the gate it would otherwise not pass: the
     gate's sender (`sender`: the identified side, or the one whose sort code names the
-    other's account) sends and is timed, the other is an imported row timed to the second
+    other's account) sends and is a connector's record, the other is an imported row timed
+    to the second
     no earlier than the sending instant less the near window, and its account is listed in
     full from that instant's day (in the owner's time zone) but not from the window's
     start."""
     sent = sender.occurred_at - DEFAULTS.near_window
     return (
         sender.sends
-        and sender.timed
+        and sender.source[0] == "connection"
         and other.timed
         and other.source[0] != "connection"
         and other.occurred_at >= sent
@@ -350,10 +361,12 @@ def test_turning_timed_on_only_adds_pairs_a_timed_receipt_lets_through(
     for (r, c), tier in added.items():
         x, y = by_id[r], by_id[c]
         assert tier in (ONE_SIDED, WEAK), (x, y, tier)
-        s, c = (x, y) if x.sends else (y, x)
+        payer, payee = (x, y) if x.sends else (y, x)
         if tier == ONE_SIDED:
             sender, other = (x, y) if x.identified else (y, x)
         else:  # the sending side, when its sort code names the other's account (_weak_known)
-            sender, other = (s, c) if s.weak_holder == c.account_id else (c, s)
+            sender, other = (
+                (payer, payee) if payer.weak_holder == payee.account_id else (payee, payer)
+            )
         assert _relaxed(sender, other, known), (sender, other)
     event("a timed receipt added a pair" if added else "no pair added")
