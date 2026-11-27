@@ -6,10 +6,11 @@ amount and date window as ever; uniqueness, the coverage gate and card precedenc
 unchanged. Until it pairs its contra is Unassigned, as a card merchant's payer's is."""
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -40,6 +41,7 @@ from lararium.modules.finance.transfers.pairs import (
 )
 
 from .conftest import (
+    A_IDENTIFIER,
     DAY,
     IMPORTED,
     WHEN,
@@ -58,6 +60,8 @@ from .conftest import (
 
 PAYEE = "121212:34343434"  # a platform's client money account, held by A and B
 INVEST = "trading212.invest"  # a type funded by bank transfer
+LONDON = ZoneInfo("Europe/London")  # the owner's time zone (core.timezone's default)
+SUMMER = date(2026, 7, 1)  # British Summer Time: 00:30 in London is 23:30 UTC the day before
 
 
 # The tier on its own.
@@ -251,6 +255,84 @@ async def test_every_manual_holder_is_held_to_the_coverage_gate(
         assert matched == []
         assert relation.review_reason(sent.id) == "not_listed_in_full"
         assert await contra_account(session, on_a, a.account.id) == ids.unassigned
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+@pytest.mark.parametrize("covered", [False, True])
+async def test_a_payer_s_holders_are_held_to_the_gate_when_its_receipt_is_identified(
+    session: AsyncSession,
+    run: Run,
+    registered: Any,
+    imported_bank: ImportedBank,
+    connector_tx: ConnectorTx,
+    statement_row: StatementRow,
+    heal: Heal,
+    covered: bool,
+) -> None:
+    """A receipt on the holder B naming the payer's account M is the identified side; the
+    payment names the payee B and C hold, so its real other side may be on C as well: the
+    pair is taken only once C's imports list in full from the payment's window."""
+    m, m_identifier = await registered("M", A_IDENTIFIER)
+    b, c = await imported_bank("B"), await imported_bank("C")
+    payee = await _register(run, b, c)
+    if covered:
+        await statement_row(c, "-7")
+    sent = await connector_tx(m, "-100", identifier_id=payee)
+    received = await statement_row(b, "100", identifier_id=m_identifier)
+    await heal()
+
+    relation = await _relation(session)
+    assert relation.candidates(sent.id) == [received]
+    assert relation.takeable(sent.id, received) is covered
+    matched = await list_transfers(session, statuses=["matched"])
+    assert [(t.out_transaction_id, t.in_transaction_id) for t in matched] == (
+        [(sent.id, received)] if covered else []
+    )
+    assert await heal() == 0
+    await assert_consistent(session)
+
+
+@pytest.mark.parametrize("c_from", [SUMMER, SUMMER - timedelta(days=1)])
+async def test_a_timed_receipt_relaxes_the_gate_only_on_its_own_account(
+    session: AsyncSession,
+    run: Run,
+    connected_bank: MakeConnected,
+    imported_bank: ImportedBank,
+    connector_tx: ConnectorTx,
+    statement_row: StatementRow,
+    heal: Heal,
+    c_from: date,
+) -> None:
+    """A payment at 00:30 in London in summer (23:30 UTC the day before) to the payee B and
+    C hold; a receipt on B timed to the second, booked in the owner's zone, with B listed
+    from the payment's London day. The receipt can't precede the payment, which moves B's
+    gate day to that day; C's real row may still be on the UTC day before, the window's
+    start: the pair is taken only once C lists from it."""
+    m = await connected_bank("M")
+    b, c = await imported_bank("B"), await imported_bank("C")
+    payee = await _register(run, b, c)
+    listed = timedelta(days=60)
+    await statement_row(c, "-7", day=SUMMER, complete=(c_from, c_from + listed))
+    sent_at = datetime.combine(SUMMER, time(0, 30), LONDON)
+    sent = await connector_tx(m, "-100", occurred_at=sent_at, identifier_id=payee)
+    received = await statement_row(
+        b,
+        "100",
+        at=sent_at + timedelta(seconds=30),
+        time_unit="second",
+        complete=(SUMMER, SUMMER + listed),
+    )
+    await heal()
+
+    relation = await _relation(session)
+    assert relation.candidates(sent.id) == [received]
+    pairs = c_from < SUMMER
+    assert relation.takeable(sent.id, received) is pairs
+    matched = await list_transfers(session, statuses=["matched"])
+    assert [(t.out_transaction_id, t.in_transaction_id) for t in matched] == (
+        [(sent.id, received)] if pairs else []
+    )
     assert await heal() == 0
     await assert_consistent(session)
 

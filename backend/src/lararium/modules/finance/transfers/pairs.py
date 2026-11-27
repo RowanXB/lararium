@@ -723,17 +723,27 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     timed receipt is asked only from its payment's day (_gate_day). A pair it refuses is
     still a candidate, one that can't be taken by itself (PairRelation.untakeable). The
     record naming a bank account the other's account holds (_names_held) is the identified
-    one here, and every holder of that bank account is held to the gate: the real row may
-    be on any of them, inside its opening."""
+    one here. Whichever side is identified, every holder of a bank account either side
+    names (payee_holders) is held to the gate from the start of that side's window: the
+    real row may be on any of them, inside its opening. Only the holder the other record is
+    on is asked from _gate_day's day instead: a timed receipt's evidence is about its own
+    account alone."""
     if s.identified or c.identified:
         identified, other = (s, c) if s.identified else (c, s)
     else:
         identified, other = (s, c) if _names_held(s, c) else (c, s)
-    earliest = _gate_day(identified, other, settings, known)
-    return known.holds_from(other, earliest) and all(
-        known.holds_account(holder, other.instrument_id, earliest)
-        for holder in identified.payee_holders
-    )
+    if not known.holds_from(other, _gate_day(identified, other, settings, known)):
+        return False
+    for x, y in ((s, c), (c, s)):
+        if x.payee_holders:
+            start = counterpart_bounds(x, settings)[0]
+            gate = _gate_day(x, y, settings, known)
+            if not all(
+                known.holds_account(h, y.instrument_id, gate if h == y.account_id else start)
+                for h in x.payee_holders
+            ):
+                return False
+    return True
 
 
 def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
