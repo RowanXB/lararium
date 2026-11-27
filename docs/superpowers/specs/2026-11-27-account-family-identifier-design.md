@@ -193,4 +193,5 @@ Only these run locally (remote Docker host); CI runs the rest.
 
 1. Each Trading 212 connection replays once at its next sync (`trading212-norm-4`); check both production TRANSFERs name `account_family:trading212` and how they pair (or why not).
 2. Check no shared-payee or card pair includes a TRANSFER.
+2a. Cash ISA batches committed before deploy were read without Notes (their rows carry no evidence, §5.9; they pair by the two-minute rule meanwhile). Roll each back and upload its file again from the account's **Upload file** tile, which makes a profile that reads Notes.
 3. Once the owner uploads the Cash ISA export covering 2026-11-26: check each incoming row is within two minutes of its TRANSFER (§5.3 item 2) and the four records pair (§5.7). If they are further apart, the owner pairs them by hand and the near window is revisited with the real gap.
