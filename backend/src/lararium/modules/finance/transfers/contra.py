@@ -144,6 +144,22 @@ def named_account_sql(
     return named_account_expression(i, t.payment_reference)
 
 
+def in_cancelled_pair(transaction_id: SQLColumnExpression[UUID] | UUID) -> ColumnElement[bool]:
+    """Whether the transaction is one of a cancelled pair: it cancels another
+    (cancels_transaction_id), or another cancels it, and neither of the two is void. Both
+    post their contra on In transit, which the pair leaves level (cancelled-withdrawal
+    design §4.4)."""
+    c = aliased(models.Transaction, name="cancelling")
+    d = aliased(models.Transaction, name="cancelled")
+    pair = and_(d.id == c.cancels_transaction_id, c.status != "void", d.status != "void")
+    # One lookup per side, each by its own index (the primary key; the UNIQUE
+    # cancels_transaction_id).
+    return or_(
+        exists().where(c.id == transaction_id, pair),
+        exists().where(c.cancels_transaction_id == transaction_id, pair),
+    )
+
+
 # A transfer's leg is exactly two postings, its own posting and its contra: one with others
 # besides (a fee, say) is no leg, so its contra stays on Unassigned. eligible_records and
 # transfer_contra both read this.
@@ -152,8 +168,9 @@ LEG_POSTINGS = 2
 
 def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
     """Every transaction that can be a transfer's leg (an own record), with its own posting
-    and its contra: not void, not derived, and exactly two postings, one on Unassigned or
-    In transit and the other on an account that is not a system account.
+    and its contra: not void, not derived, not one of a cancelled pair (in_cancelled_pair),
+    and exactly two postings, one on Unassigned or In transit and the other on an account
+    that is not a system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
@@ -436,7 +453,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .join(evidence, true())
         .join(own_account, true())
         .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
-        .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
+        .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS), ~in_cancelled_pair(t.id))
         .subquery(name)
     )
 
