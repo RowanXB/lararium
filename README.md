@@ -840,9 +840,10 @@ permissions at the start of every sync: any other permission that is on, known o
 makes the sync refuse the key, and a key without **Enable Reading** is refused too. An IP
 restriction is optional. Both key types are accepted: HMAC ("system generated") and Ed25519
 ("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only. If
-the futures or options host refuses an Ed25519 key, the connection is not rejected: that host's
-wallets are left out (and asked again a week later), and a warning names the host and asks for
-an HMAC key to include them.
+the futures or options host refuses an Ed25519 key, the connection is not rejected: that host
+is not read (it is asked again a week later, or at once when you update the key), its wallets'
+earlier balances keep counting until it is read again, and a warning names the host and asks
+for an HMAC key to include it.
 
 ### 2. Add the connection
 

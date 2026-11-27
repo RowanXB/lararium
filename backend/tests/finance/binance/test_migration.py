@@ -54,6 +54,7 @@ _CONFIG: dict[str, object] = {
     "account_map": {"spot": "00000000-0000-0000-0000-000000000001"},
     "cursors": {"deposits": {"fetched_to": 1, "backfilled_to": 1, "complete": True}},
     "not_present": {"dividends": 1},
+    "refused_hosts": {"eapi": 1},
     "first_sync_done": True,
     "normalized_through": "00000000-0000-0000-0000-000000000002",
     "normalizer_version": "binance-norm-2",

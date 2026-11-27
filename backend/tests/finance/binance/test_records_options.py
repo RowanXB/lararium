@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import text
 
 from lararium.core.commands import command_context
+from lararium.core.connections import store_credential, update_config
 from lararium.modules.finance.binance.balances import (
     OPTIONS_SOURCES,
     OWN_SOURCES,
@@ -28,6 +29,7 @@ from lararium.modules.finance.binance.fetch import (
     LIMITS_INFO,
     NOT_PRESENT_KEY,
     PHASE_B_BUILT,
+    REFUSED_HOSTS_KEY,
     SYMBOL_TRADES,
     TRADE_LABELS,
     to_json,
@@ -52,7 +54,9 @@ from .normalizing import (
     typed,
 )
 from .syncing import (
+    API_SECRET,
     CONNECTOR,
+    KEY,
     Clock,
     RecordingNotifier,
     binance_connection,
@@ -495,7 +499,32 @@ def _host_labels(limit: str) -> set[str]:
     return {label for label in built if ENDPOINTS[label].limit == limit}
 
 
-@pytest.mark.parametrize(("limit", "status", "code"), [("fapi", 401, None), ("eapi", 400, -1022)])
+_REFUSALS = [("fapi", 401, None), ("eapi", 400, -1022)]
+
+
+def _symbol_named(fake: FakeBinance, limit: str, at_ms: int) -> str:
+    """A history row of the host that names a symbol, so its trades are asked."""
+    if limit == "fapi":
+        fake.add("um-income", build_row("um-income", 0, symbol="AAASTB", time=at_ms))
+        return "um-trades"
+    fake.add(BILL, _bill(0, "CONTRACT", "-1", createDate=at_ms))
+    return "opt-trades"
+
+
+def _asked(fake: FakeBinance, limit: str) -> list[str]:
+    return [s.label for s in fake.requests if ENDPOINTS[s.label].limit == limit]
+
+
+async def _forget_flags(run, connection_id) -> None:
+    """As if no flag had been published yet: what a sync raises shows again."""
+
+    async def forget(ctx) -> None:
+        await update_config(ctx, connection_id, remove=["flags"])
+
+    await run(forget)
+
+
+@pytest.mark.parametrize(("limit", "status", "code"), _REFUSALS)
 async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
     session, run, connector, clock: Clock, limit: str, status: int, code: int | None
 ) -> None:
@@ -503,29 +532,36 @@ async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
     _refuse_host(fake, limit, status, code)
     host = f"{limit}.binance.com"
     connection = await binance_connection(run, config=later_config(), key_type="ed25519")
+    began = clock.ms
 
     after = await run_binance_sync(session, connection.id, fake.handler)
 
     assert after.status == "healthy", after.last_error
     assert [f for f in after.config["flags"] if host in f] == [key_type_flag(host)]
     assert not [f for f in after.config["flags"] if "could not be read" in f]
-    assert _host_labels(limit) <= set(after.config[NOT_PRESENT_KEY])
-    on_host = [s.label for s in fake.requests if ENDPOINTS[s.label].limit == limit]
+    [(refused_host, since)] = after.config[REFUSED_HOSTS_KEY].items()
+    assert refused_host == limit and began <= since <= clock.ms
+    # A refusal of the key's type is not the product's absence.
+    assert not _host_labels(limit) & set(after.config.get(NOT_PRESENT_KEY, {}))
+    on_host = _asked(fake, limit)
     # Its limits (unsigned), then the first signed request, refused; nothing more of it.
     assert len(on_host) == 2 and ENDPOINTS[on_host[1]].signed
     # The other derivatives hosts are asked as usual.
     for other in {"fapi", "dapi", "eapi"} - {limit}:
         assert other not in str(after.config["flags"])
-        assert [s for s in fake.requests if ENDPOINTS[s.label].limit == other]
+        assert _asked(fake, other)
 
-    # Not asked again for 7 days, as a product not present; then asked again.
+    # Still an Ed25519 key: not asked for 7 days; then asked again, refused again and told.
+    await _forget_flags(run, connection.id)
     for days, asked in ((1, 0), (7, 2)):
         fake.requests.clear()
         clock.ms += days * DAY_MS
+        began = clock.ms
         after = await run_binance_sync(session, connection.id, fake.handler)
         assert after.status == "healthy", after.last_error
-        assert len([s for s in fake.requests if ENDPOINTS[s.label].limit == limit]) == asked
+        assert len(_asked(fake, limit)) == asked
     assert after.config["flags"].count(key_type_flag(host)) == 1
+    assert began <= after.config[REFUSED_HOSTS_KEY][limit] <= clock.ms
 
     # An HMAC key the same host refuses is a rejected key.
     hmac = await binance_connection(run, config=later_config(), key_type="hmac")
@@ -533,8 +569,50 @@ async def test_ed25519_refused_on_another_host_is_a_flag_not_a_rejection(
     assert rejected.status == "needs_reauth"
 
 
+@pytest.mark.parametrize(("limit", "status", "code"), _REFUSALS)
+async def test_a_new_hmac_key_asks_a_refused_host_again_at_once(
+    session, run, connector, clock: Clock, limit: str, status: int, code: int | None
+) -> None:
+    fake = FakeBinance(now=clock, options=True)
+    _refuse_host(fake, limit, status, code)
+    trades = _symbol_named(fake, limit, clock.ms - DAY_MS)
+    host = f"{limit}.binance.com"
+    connection = await binance_connection(run, config=later_config(), key_type="ed25519")
+    refused = await run_binance_sync(session, connection.id, fake.handler)
+    assert set(refused.config[REFUSED_HOSTS_KEY]) == {limit}
+
+    # The owner switches to an HMAC key, as the flag says (the stored key only: the sync does
+    # not count a refusal of another key type, whatever the config still holds).
+    async def switch(ctx) -> None:
+        await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
+        await update_config(ctx, connection.id, {"key_type": "hmac"})
+
+    await run(switch)
+    await _forget_flags(run, connection.id)
+    fake.clear_failures()
+    fake.requests.clear()
+    clock.ms += HOUR_MS * 5
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    # The limits read, the balances, the histories and the trades, at once.
+    prefix = "um" if limit == "fapi" else "opt"
+    history = "um-income" if limit == "fapi" else BILL
+    wanted = {
+        f"{prefix}-exchange-info",
+        f"{prefix}-account",
+        f"{prefix}-positions",
+        history,
+        trades,
+    }
+    assert wanted <= set(_asked(fake, limit))
+    assert key_type_flag(host) not in after.config.get("flags", [])
+    assert after.config.get(REFUSED_HOSTS_KEY, {}) == {}
+
+
 @pytest.mark.parametrize("label", ["um-exchange-info", "opt-exchange-info"])
-async def test_ed25519_refused_on_a_limits_read_leaves_the_host_out(
+async def test_an_unsigned_limits_read_refused_says_nothing_of_the_key(
     session, run, connector, clock: Clock, label: str
 ) -> None:
     fake = FakeBinance(now=clock, options=True)
@@ -545,8 +623,9 @@ async def test_ed25519_refused_on_a_limits_read_leaves_the_host_out(
 
     after = await run_binance_sync(session, connection.id, fake.handler)
 
+    # The read carried no key: the generic limits flag, and the host is asked as usual.
     assert after.status == "healthy", after.last_error
-    assert key_type_flag(host) in after.config["flags"]
-    assert limits_unread_flag(label) not in after.config["flags"]
-    assert _host_labels(limit) <= set(after.config[NOT_PRESENT_KEY])
-    assert [s.label for s in fake.requests if ENDPOINTS[s.label].limit == limit] == [label]
+    assert limits_unread_flag(label) in after.config["flags"]
+    assert key_type_flag(host) not in after.config["flags"]
+    assert after.config.get(REFUSED_HOSTS_KEY, {}) == {}
+    assert len([s for s in _asked(fake, limit) if ENDPOINTS[s].signed]) > 1

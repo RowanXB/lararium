@@ -1916,7 +1916,7 @@ Also present in the docs and left out: `/fapi/v1/forceOrders`, `/dapi/v1/forceOr
 
 Docs: `core-trading-derivatives-trading-options/api/rest-api/…` (schema re-read 2026-11-27). All signed (USER_DATA) but `opt-exchange-info`. The account endpoint in the current docs is `/eapi/v1/marginAccount`; **`/eapi/v1/account` is not in the docs**.
 
-An account with no options account: the docs give no answer for it. The options error-code page lists `-5002` USER_NOT_ACCESS ("Option user not access"); M7 takes that code from `eapi` as "not present" (asked again after 7 days), as `-3003` is for margin. Unverified. Options signatures are documented as HMAC only ("Signing per host"): an Ed25519 key refused there (HTTP 401 or `-1022`) puts the host's labels in "not present" and is flagged, never a rejected key (design §5.1).
+An account with no options account: the docs give no answer for it. The options error-code page lists `-5002` USER_NOT_ACCESS ("Option user not access"); M7 takes that code from `eapi` as "not present" (asked again after 7 days), as `-3003` is for margin. Unverified. Options signatures are documented as HMAC only ("Signing per host"): an Ed25519 key refused on a signed request there (HTTP 401 or `-1022`) leaves the host unasked until the retry or a key update and is flagged, never a rejected key (design §5.1).
 
 ### `opt-account` — GET /eapi/v1/marginAccount
 Host eapi.binance.com · weight 3 (IP) · signed · doc `account#option-margin-account-information`
@@ -2447,4 +2447,4 @@ One row per endpoint M7 reads, for the test that keeps the code's catalogue equa
 
 - Full field tables: **110 endpoints** (111 with `klines`) = the probe's 85 (all found in the current docs at the method, path and weight the probe uses) + 22 added (`coin-config`, `asset-detail`, `earn-flexible-collateral`, `loan-flexible-ltv-adjustments`, `loan-flexible-liquidations`, 5 VIP-loan reads, `margin-trades`, `margin-liquidation-loan`, `margin-liquidation-loan-repays`, `um-trades`, `cm-trades`, 5 options reads, 2 portfolio-margin reads) + `um-exchange-info` and `cm-exchange-info` (2026-11-27, for the futures hosts' rate limits) + `opt-exchange-info` (2026-11-27, for the options host's).
 - Listed by one line: 19 (5 further Portfolio Margin + 4 Portfolio Margin Pro account/balance reads, 3 gift-card reads, 4 mining reads, 2 travel-rule V2 histories, fiat order detail).
-- Hosts: `api.binance.com` (90 of the 109), `fapi.binance.com` (6), `dapi.binance.com` (6), `eapi.binance.com` (6), `papi.binance.com` (2; brief).
+- Hosts: `api.binance.com` (90 of the 110), `fapi.binance.com` (6), `dapi.binance.com` (6), `eapi.binance.com` (6), `papi.binance.com` (2; brief).

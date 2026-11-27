@@ -13,8 +13,10 @@ The connection's `config` keys, what each holds and who writes it:
   pair's `margin-trades:<symbol>:isolated`) the last trade id, per `um-trades:<symbol>`,
   `cm-trades:<symbol>` and `opt-trades:<symbol>` a window cursor as a history label's
   (`fetch.commit`).
-- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads),
-  or every key of a host that refused the key's type (`refuse_host`).
+- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
+- `refused_hosts`: per derivatives host (`fapi`, `dapi`, `eapi`), when it refused the Ed25519
+  key's type (`refuse_host`); counted only while the key is an Ed25519 one, removed when the
+  host is asked again (`ask_refused_again`) and by a key update (the route).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
 - `normalizer_version`: the NORMALIZER_VERSION that applied them; another replays all
@@ -39,7 +41,7 @@ The connection's `config` keys, what each holds and who writes it:
   sync succeeds).
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -98,6 +100,7 @@ from lararium.modules.finance.binance.fetch import (
     LIMITS_INFO,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
+    REFUSED_HOSTS_KEY,
     SYMBOL_TRADES,
     TRADE_LABELS,
     TRADES_LABEL,
@@ -106,10 +109,9 @@ from lararium.modules.finance.binance.fetch import (
     absent,
     backfill_complete,
     commit,
+    due_refusals,
     fresh_config,
-    host_keys,
     isolated_symbols,
-    mark_absent,
     trade_cursor_key,
     trade_symbols,
     walk,
@@ -434,6 +436,7 @@ class BinanceConnector:
         # The wallet checks' flags and the limits reads', published with the records' (one line,
         # Decision 15).
         flags: list[str] = []
+        await ask_refused_again(ctx, client.now_ms())
         # Before any other request to a derivatives host: its own limits (plan Decision 4).
         limits = await read_limits(ctx, client, flag=flags.append)
         reads = {
@@ -497,7 +500,7 @@ class BinanceConnector:
                 continue
             except BinanceKeyTypeRefused as refused:
                 await refuse_host(ctx, client, refused, flag=flag)
-                # The host's other labels are not present now.
+                # The host's other labels are not asked now (`fetch.absent`).
                 config = await fresh_config(ctx)
                 continue
             if label == CROSS_MARGIN_LABEL and not margin_created(read):
@@ -521,13 +524,40 @@ async def refuse_host(
     *,
     flag: Callable[[str], None],
 ) -> None:
-    """A host that does not take the key's type (an Ed25519 key off `api`, design 5.1): every
-    key the sync asks of it goes to `not_present` (asked again after 7 days, as a refused
-    product is) and the owner is told by the host's name to use an HMAC key. The rest of the
-    sync goes on; the connection is not rejected."""
-    keys = host_keys(refused.limit, await isolated_symbols(ctx))
-    await mark_absent(ctx, keys, client.now_ms())
+    """A host that does not take the key's type (an Ed25519 key off `api`, design 5.1): it goes
+    to `refused_hosts`, so nothing more is asked of it while the key is an Ed25519 one, for 7
+    days (`ask_refused_again`), and the owner is told by the host's name to use an HMAC key. A
+    key update asks it again at once. The rest of the sync goes on; the connection is not
+    rejected."""
+    await _refusals(ctx, set_to={refused.limit: client.now_ms()})
     flag(str(refused))
+
+
+async def ask_refused_again(ctx: SyncContext, now_ms: int) -> None:
+    """At the start of a sync: the refused hosts to ask again (`fetch.due_refusals`: every one
+    once the key is no longer an Ed25519 one, else each refused 7 days ago) leave
+    `refused_hosts`."""
+    due = due_refusals(await fresh_config(ctx), now_ms)
+    if due:
+        await _refusals(ctx, remove=due)
+
+
+async def _refusals(
+    ctx: SyncContext, *, set_to: Mapping[str, int] | None = None, remove: Sequence[str] = ()
+) -> None:
+    """Change `refused_hosts` in a short transaction of its own, under the connection's lock."""
+    connection_id = ctx.connection.id
+    args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.refused_hosts", args) as cmd,
+    ):
+        current = (await lock_connection(cmd, connection_id)).config.get(REFUSED_HOSTS_KEY)
+        held: dict[str, JSONValue] = dict(current) if isinstance(current, dict) else {}
+        held.update(set_to or {})
+        for host in remove:
+            held.pop(host, None)
+        await update_config(cmd, connection_id, {REFUSED_HOSTS_KEY: held})
 
 
 async def on_host[T](
@@ -556,17 +586,14 @@ async def read_limits(
     be fetched (any Binance error but a ban or a rejected key, which stop every request) or
     typed (`BinanceDataError`: an answer whose shape the catalogue refuses) leaves that host at
     the assumed limit, is flagged by its label (never a value), and nothing of it is stored.
-    A host that refuses the key's type is left out (`refuse_host`), flagged by its name and not
-    by the label; one left out less than 7 days ago is not asked."""
+    It is unsigned, so it says nothing of the key's type. A host that refuses the key's type is
+    not asked (`fetch.absent`)."""
     reads: dict[str, Read] = {}
     for label in LIMITS_INFO:
         if absent(await fresh_config(ctx), label, client.now_ms()):
             continue
         try:
             read = (await read_balances(client, [label]))[label]
-        except BinanceKeyTypeRefused as refused:
-            await refuse_host(ctx, client, refused, flag=flag)
-            continue
         except (BinanceBanned, BinanceKeyRejected):
             raise
         except (BinanceError, BinanceDataError):

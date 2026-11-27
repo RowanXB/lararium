@@ -53,6 +53,9 @@ HOST_NOT_PRESENT: dict[str, frozenset[int]] = {"eapi": frozenset({-5002})}
 # is wrong (`BinanceKeyTypeRefused`).
 KEY_TYPE_HOSTS = frozenset({"fapi", "dapi", "eapi"})
 INVALID_SIGNATURE = -1022
+# The rejection codes that name what is wrong with the key itself (its format; its IP or
+# permissions), never its type.
+KEY_NAMED_CODES = frozenset({-2014, -2015})
 # Parameters the client sets itself; a caller may not.
 RESERVED = frozenset({"recvWindow", "timestamp", "signature"})
 
@@ -464,8 +467,11 @@ class BinanceClient:
                 self._api_accepted = True
             return body
         code = _error_code(response)
-        if status == 401 or code in KEY_REJECTED_CODES:
-            refused = status == 401 or code == INVALID_SIGNATURE
+        # Only a signed request carries the key: an unsigned one refused is no word on it.
+        if endpoint.signed and (status == 401 or code in KEY_REJECTED_CODES):
+            # An explicit -2014 or -2015 (the key's format, or its IP or permissions) outranks
+            # the status: that is the key itself, whatever its type.
+            refused = code not in KEY_NAMED_CODES and (status == 401 or code == INVALID_SIGNATURE)
             if (
                 refused
                 and self._signer.kind == "ed25519"

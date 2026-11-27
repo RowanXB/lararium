@@ -35,6 +35,8 @@ from lararium.modules.finance.binance.client import (
     key_type_flag,
 )
 
+from .syncing import ED25519_PEM
+
 API_KEY = "ak-5c1d9e7f3b2a4680"
 SECRET = "sk-0f9e8d7c6b5a4938"
 START_MS = 1_700_000_040_000  # a whole minute, so "the rest of the minute" is a round number
@@ -299,16 +301,7 @@ async def test_error_mapping(
 
 
 def _ed25519() -> Ed25519Signer:
-    pem = (
-        Ed25519PrivateKey.generate()
-        .private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-        .decode()
-    )
-    return Ed25519Signer(Secret(pem), None)
+    return Ed25519Signer(Secret(ED25519_PEM), None)
 
 
 @pytest.mark.parametrize("label", ["um-account", "cm-account", "opt-account"])
@@ -340,8 +333,10 @@ async def test_ed25519_refused_off_api_after_api_accepted_it_is_the_hosts_refusa
         ("ed25519", False, "opt-account", 401, None),
         # Refused on `api` itself.
         ("ed25519", True, "spot-account", 400, -1022),
-        # Another rejection code is about the key, not its type.
+        # Another rejection code is about the key, not its type, even with HTTP 401.
         ("ed25519", True, "um-account", 400, -2015),
+        ("ed25519", True, "um-account", 401, -2015),
+        ("ed25519", True, "opt-account", 401, -2014),
     ],
 )
 async def test_other_refusals_stay_a_rejected_key(
@@ -353,6 +348,18 @@ async def test_other_refusals_stay_a_rejected_key(
         await client.call(SPOT)
     with pytest.raises(BinanceKeyRejected):
         await client.call(ENDPOINTS[label])
+
+
+@pytest.mark.parametrize("signer", ["hmac", "ed25519"])
+@pytest.mark.parametrize("label", ["um-exchange-info", "opt-exchange-info", "time"])
+async def test_an_unsigned_request_refused_says_nothing_of_the_key(signer: str, label: str) -> None:
+    env = Env(ok(), error(401))
+    client = env.client(_ed25519() if signer == "ed25519" else None)
+    await client.call(SPOT)
+    with pytest.raises(BinanceError) as caught:
+        await client.call(ENDPOINTS[label])
+    assert type(caught.value) is BinanceError
+    assert caught.value.http_status == 401
 
 
 async def test_the_options_hosts_no_access_code_is_not_present_there_only() -> None:

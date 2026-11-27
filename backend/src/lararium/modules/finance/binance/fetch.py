@@ -55,6 +55,13 @@ from lararium.modules.finance.binance.tables import moment, store_response
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
 NOT_PRESENT_KEY = "not_present"
+# Per derivatives host (its limit kind: `fapi`, `dapi`, `eapi`), when it refused the Ed25519
+# key's type (`client.BinanceKeyTypeRefused`). Kept apart from `not_present`: it is about the
+# key, not the account, so it counts only while the key is an Ed25519 one; a key update clears
+# it, and the sync asks the host again once the retry is due (`due_refusals`).
+REFUSED_HOSTS_KEY = "refused_hosts"
+KEY_TYPE_KEY = "key_type"
+_ED25519 = "ed25519"
 
 DAY_MS = 86_400_000
 # 2017-07-01 00:00 UTC: Binance opened in July 2017; no history is older.
@@ -291,10 +298,39 @@ def _mapping(value: JSONValue) -> dict[str, JSONValue]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def refused_hosts(config: Mapping[str, JSONValue]) -> dict[str, int]:
+    """The hosts (limit kinds) that refused the connection's key type, and since when: none
+    unless the key is an Ed25519 one."""
+    if config.get(KEY_TYPE_KEY) != _ED25519:
+        return {}
+    held = _mapping(config.get(REFUSED_HOSTS_KEY))
+    return {host: since for host, value in held.items() if (since := _int(value)) is not None}
+
+
+def host_refused(config: Mapping[str, JSONValue], key: str) -> bool:
+    """Whether the key's host refused the connection's key type (`refused_hosts`): a cursor or
+    label key, `<label>[:<more>]`."""
+    endpoint = ENDPOINTS.get(key.split(":", 1)[0])
+    return endpoint is not None and endpoint.limit in refused_hosts(config)
+
+
+def due_refusals(config: Mapping[str, JSONValue], now_ms: int) -> list[str]:
+    """The hosts to ask again now: every one held when the key is not an Ed25519 one (the key
+    changed), else those refused 7 days ago or more."""
+    held = _mapping(config.get(REFUSED_HOSTS_KEY))
+    kept = refused_hosts(config)
+    return sorted(
+        host for host in held if host not in kept or now_ms - kept[host] >= NOT_PRESENT_RETRY_MS
+    )
+
+
 def absent(config: Mapping[str, JSONValue], key: str, now_ms: int) -> bool:
-    """Whether Binance said, less than 7 days ago, that it does not serve this key."""
+    """Whether Binance said, less than 7 days ago, that it does not serve this key, or the
+    key's host refuses the connection's key type."""
     since = _int(_mapping(config.get(NOT_PRESENT_KEY)).get(key))
-    return since is not None and now_ms - since < NOT_PRESENT_RETRY_MS
+    if since is not None and now_ms - since < NOT_PRESENT_RETRY_MS:
+        return True
+    return host_refused(config, key)
 
 
 @dataclass(frozen=True)
@@ -624,13 +660,15 @@ async def isolated_symbols(ctx: SyncContext) -> frozenset[str]:
 
 def backfill_complete(config: Mapping[str, JSONValue], isolated: Collection[str] = ()) -> bool:
     """Whether every history label's first walk has ended: each of its keys complete, or not
-    served by Binance (`not_present`). The keys of the isolated pairs in `isolated` (those
-    known when it is asked, ruling R17) count; a pair that appears after the first sync walks
-    its own history from then on."""
+    served by Binance (`not_present`), or of a host that refuses the key's type. The keys of
+    the isolated pairs in `isolated` (those known when it is asked, ruling R17) count; a pair
+    that appears after the first sync walks its own history from then on."""
     cursors = _mapping(config.get(CURSORS_KEY))
     missing = _mapping(config.get(NOT_PRESENT_KEY))
     return all(
-        key in missing or _mapping(cursors.get(key)).get("complete") is True
+        key in missing
+        or host_refused(config, key)
+        or _mapping(cursors.get(key)).get("complete") is True
         for label in HISTORY_LABELS
         for key, _ in walk_keys(label, isolated)
     )
@@ -951,7 +989,7 @@ async def walk_symbol_trades(ctx: SyncContext, client: BinanceClient, label: str
     (a futures request takes at most 7 days; an options one has no documented limit and is one
     window, split when full). Only a symbol named within those 3 months is asked: Binance serves
     no older trade, so a symbol traded long ago is not walked for ever. A label Binance said it
-    does not serve (`not_present`, a host that refused the key's type) is not asked."""
+    does not serve, or whose host refuses the key's type (`absent`), is not asked."""
     endpoint = ENDPOINTS[label]
     if absent(await fresh_config(ctx), label, client.now_ms()):
         return []
@@ -961,35 +999,3 @@ async def walk_symbol_trades(ctx: SyncContext, client: BinanceClient, label: str
         key = symbol_trade_key(label, symbol)
         ids += await _walk_key(ctx, client, endpoint, key, {"symbol": symbol})
     return ids
-
-
-def host_keys(limit: str, isolated: Collection[str] = ()) -> list[str]:
-    """Every key the sync asks of one host (a limit kind: `fapi`, `dapi`, `eapi`): each built
-    label of it, its history labels' cursor keys and its trade labels walked per symbol."""
-    labels = [
-        label
-        for label in [*(e.label for e in _built()), *SYMBOL_TRADES, *LIMITS_INFO]
-        if ENDPOINTS[label].limit == limit
-    ]
-    keys: list[str] = []
-    for label in labels:
-        keys.append(label)
-        if label in HISTORY_LABELS:
-            keys += [key for key, _ in walk_keys(label, isolated) if key != label]
-    return keys
-
-
-async def mark_absent(ctx: SyncContext, keys: Collection[str], since_ms: int) -> None:
-    """Put every key on `not_present` from `since_ms`, in one short transaction: each is asked
-    again after 7 days, as a refused product is."""
-    connection_id = ctx.connection.id
-    listed: list[JSONValue] = [*sorted(keys)]
-    args: dict[str, JSONValue] = {"connection_id": str(connection_id), "keys": listed}
-    async with (
-        ctx.session_factory() as session,
-        command_context(session, ctx.command.actor, "binance.fetch", args) as cmd,
-    ):
-        config = (await lock_connection(cmd, connection_id)).config
-        missing = _mapping(config.get(NOT_PRESENT_KEY))
-        missing.update(dict.fromkeys(keys, since_ms))
-        await update_config(cmd, connection_id, {NOT_PRESENT_KEY: missing})
