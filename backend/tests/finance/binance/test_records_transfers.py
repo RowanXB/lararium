@@ -171,8 +171,9 @@ async def test_no_isolated_symbol_is_known_yet(session, run) -> None:
 
 
 def test_the_family_is_walked() -> None:
-    assert set(PHASE_B_BUILT) >= {TRANSFERS, DUST, CLOUD, TRAVEL_DEPOSITS, TRAVEL_WITHDRAWALS}
-    assert set(PHASE_B_BUILT) <= set(HISTORY_LABELS)
+    family = {TRANSFERS, DUST, CLOUD, TRAVEL_DEPOSITS, TRAVEL_WITHDRAWALS}
+    assert set(PHASE_B_BUILT) >= family
+    assert family <= set(HISTORY_LABELS)
 
 
 # Wallet-to-wallet transfers (rule 1).

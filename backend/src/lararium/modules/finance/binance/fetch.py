@@ -68,6 +68,46 @@ TRADES_LABEL = "my-trades"
 # my-trades says it "can't be longer than 24 hours".
 TRADE_SPAN_MS = DAY_MS - 1
 
+# Locked Simple Earn, the flexible collateral record, BFUSD and RWUSD, ETH and SOL staking,
+# on-chain yields, soft staking, dual investment and discount buy.
+EARN_PRODUCTS = (
+    "earn-locked-subscriptions",
+    "earn-locked-redemptions",
+    "earn-locked-rewards",
+    "earn-flexible-collateral",
+    "bfusd-subscriptions",
+    "bfusd-redemptions",
+    "bfusd-rewards",
+    "rwusd-subscriptions",
+    "rwusd-redemptions",
+    "rwusd-rewards",
+    "eth-stakes",
+    "eth-redemptions",
+    "wbeth-rewards",
+    "wbeth-wraps",
+    "wbeth-unwraps",
+    "sol-stakes",
+    "sol-redemptions",
+    "bnsol-rewards",
+    "sol-boost-rewards",
+    "onchain-subscriptions",
+    "onchain-redemptions",
+    "onchain-rewards",
+    "soft-staking-rewards",
+    "earn-locked-position",
+    "bfusd-account",
+    "rwusd-account",
+    "eth-staking-account",
+    "sol-staking-account",
+    "sol-unclaimed-rewards",
+    "onchain-account",
+    "onchain-locked-position",
+    "soft-staking-list",
+    "dci-accounts",
+    "dci-positions",
+    "discount-accounts",
+    "discount-positions",
+)
 # The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
 # or walks them as it does Phase A's.
 PHASE_B_BUILT = (
@@ -76,6 +116,8 @@ PHASE_B_BUILT = (
     "cloud-mining",
     "travel-deposits",
     "travel-withdrawals",
+    # The other Earn products (Task 16): histories, then positions and accounts.
+    *EARN_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 

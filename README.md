@@ -891,12 +891,29 @@ Built from Binance's documentation and not checked against a real account:
 - Cloud Mining payments and refunds (`cloud-mining`), on Spot
 - The travel-rule deposit and withdrawal histories (`travel-deposits`, `travel-withdrawals`):
   stored and linked to the deposit or withdrawal they describe, never posted a second time
+- Locked Simple Earn and on-chain yields (`earn-locked-subscriptions`,
+  `earn-locked-redemptions`, `earn-locked-rewards`, `onchain-subscriptions`,
+  `onchain-redemptions`, `onchain-rewards`): moves between a wallet and Earn, as flexible ones
+  are; their positions (`earn-locked-position`, `onchain-locked-position`, `onchain-account`)
+  are stored. The flexible collateral record (`earn-flexible-collateral`) is stored only.
+- BFUSD and RWUSD (`bfusd-subscriptions`, `bfusd-redemptions`, `bfusd-rewards`,
+  `rwusd-subscriptions`, `rwusd-redemptions`, `rwusd-rewards`, `bfusd-account`,
+  `rwusd-account`), ETH and SOL staking (`eth-stakes`, `eth-redemptions`, `wbeth-wraps`,
+  `wbeth-unwraps`, `sol-stakes`, `sol-redemptions`, `sol-boost-rewards`, `eth-staking-account`,
+  `sol-staking-account`, `sol-unclaimed-rewards`): swaps on Spot between the asset and its
+  token. A redemption that Binance pays out later waits on a "Binance Pending redemptions"
+  account until it arrives. WBETH and BNSOL rewards (`wbeth-rewards`, `bnsol-rewards`) accrue
+  inside the token's rate and are stored only.
+- Soft Staking (`soft-staking-rewards`, `soft-staking-list`): rewards on Spot
+- Dual Investment and Discount Buy (`dci-positions`, `discount-positions`, `dci-accounts`,
+  `discount-accounts`): the invested asset moves to Earn and leaves it when the position
+  settles. Binance does not say what a position settles into, so what arrives on Spot shows as
+  a reconciliation difference.
+- Every reward Binance paid out as an asset dividend is posted once, as the dividend.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking, Dual
-  Investment, Discount Buy and Soft Staking
 - Crypto loans, as debt
 - Margin, cross and isolated
 - USD-M and COIN-M futures

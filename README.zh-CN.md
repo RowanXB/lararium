@@ -732,11 +732,26 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 - Cloud Mining 的付款和退款（`cloud-mining`），记在 Spot 上
 - travel rule 的充值和提现历史（`travel-deposits`、`travel-withdrawals`）：保存下来并关联到它们
   描述的那笔充值或提现，不会再入账一次
+- 定期 Simple Earn 和链上收益（`earn-locked-subscriptions`、`earn-locked-redemptions`、
+  `earn-locked-rewards`、`onchain-subscriptions`、`onchain-redemptions`、`onchain-rewards`）：
+  和活期一样，是某个钱包与 Earn 之间的移动；它们的持仓（`earn-locked-position`、
+  `onchain-locked-position`、`onchain-account`）会保存下来。活期质押记录
+  （`earn-flexible-collateral`）只保存。
+- BFUSD 和 RWUSD（`bfusd-subscriptions`、`bfusd-redemptions`、`bfusd-rewards`、
+  `rwusd-subscriptions`、`rwusd-redemptions`、`rwusd-rewards`、`bfusd-account`、`rwusd-account`），
+  ETH 和 SOL 质押（`eth-stakes`、`eth-redemptions`、`wbeth-wraps`、`wbeth-unwraps`、`sol-stakes`、
+  `sol-redemptions`、`sol-boost-rewards`、`eth-staking-account`、`sol-staking-account`、
+  `sol-unclaimed-rewards`）：在 Spot 上资产和它的代币之间的兑换。Binance 稍后才到账的赎回，在到账
+  之前记在“Binance Pending redemptions”账户上。WBETH 和 BNSOL 的奖励（`wbeth-rewards`、
+  `bnsol-rewards`）体现在代币的兑换比例里，只保存。
+- Soft Staking（`soft-staking-rewards`、`soft-staking-list`）：奖励记在 Spot 上
+- Dual Investment 和 Discount Buy（`dci-positions`、`discount-positions`、`dci-accounts`、
+  `discount-accounts`）：投入的资产转入 Earn，持仓结算时离开 Earn。Binance 没有说明持仓结算成什么，
+  所以 Spot 上收到的部分会显示为一处对账差异。
+- Binance 以资产分红方式发放的每一笔奖励只入账一次，记为那笔分红。
 
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- 其他 Earn 产品：定期、链上收益、BFUSD 和 RWUSD、ETH 和 SOL 质押、Dual Investment、Discount Buy
-  和 Soft Staking
 - 加密货币借贷，记为债务
 - 杠杆，全仓和逐仓
 - USD-M 和 COIN-M 合约

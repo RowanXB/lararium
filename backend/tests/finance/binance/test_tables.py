@@ -241,6 +241,44 @@ def test_transfer_family_tables_and_extras() -> None:
     assert dust[0].key == ("connection_id", "trans_id")
 
 
+_EARN_REWARDS = (
+    "earn-locked-rewards",
+    "onchain-rewards",
+    "bfusd-rewards",
+    "rwusd-rewards",
+    "soft-staking-rewards",
+    "sol-boost-rewards",
+)
+
+
+def test_earn_product_tables_and_extras() -> None:
+    family = (
+        *_EARN_REWARDS,
+        "earn-locked-position",
+        "earn-locked-subscriptions",
+        "earn-locked-redemptions",
+        "earn-flexible-collateral",
+        "bfusd-subscriptions",
+        "eth-redemptions",
+        "wbeth-rewards",
+        "onchain-locked-position",
+        "dci-positions",
+        "discount-positions",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Every reward rule 3 can link records the dividend it is linked to.
+    for label in _EARN_REWARDS:
+        assert layout.layout(label)[0].column("dividend_id").sql == "text", label
+    # A boost reward's row does not say which type it was asked for.
+    assert layout.layout("sol-boost-rewards")[0].column("type").sql == "text"
+    # A position is a report: keyed by the read and the position's id.
+    assert layout.layout("dci-positions")[0].key == ("connection_id", "snapshot_at", "id")
+    assert not layout.layout("dci-positions")[0].record
+    # On-chain yields give their times as epoch-millisecond text: each has its timestamptz twin.
+    onchain = layout.layout("onchain-locked-position")[0]
+    assert onchain.column("purchase_time_at").sql == "timestamptz"
+
+
 # The models are what the migration made.
 
 

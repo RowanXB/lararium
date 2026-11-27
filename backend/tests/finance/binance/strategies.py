@@ -6,9 +6,11 @@ over four assets: deposits (some pending first), withdrawals (some failing after
 applied), spot trades (some with a rounded `quoteQty`), converts, asset dividends, flexible
 Earn subscriptions, redemptions and `REALTIME` rewards (two identical ones at once, at
 times), `BONUS` payouts (a reward row and the dividend that paid it, within 26 hours),
-wallet-to-wallet transfers between Spot and Funding (some failed) and dust conversions on Spot
-(one or two small balances into BNB, with a service charge at times). No wallet ever holds
-less than nothing.
+wallet-to-wallet transfers between Spot and Funding (some failed), dust conversions on Spot
+(one or two small balances into BNB, with a service charge at times), locked Earn
+subscriptions, redemptions to Spot and rewards, yield token subscriptions (swaps on Spot) and
+redemptions Binance pays out later (seen pending, then arrived, a fee at times). No wallet
+ever holds less than nothing.
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -64,9 +66,24 @@ _EARN_SOURCE = {"spot": "SPOT", "funding": "FUNDING"}
 # BONUS payout's two rows can ever be linked.
 _UNIT = Decimal("0.0001")
 _REALTIME_DIGIT, _DIVIDEND_DIGIT, _PAYOUT_DIGIT = 3, 7, 5
+# A locked Earn reward can be any dividend's payout: its own digit keeps it from every one.
+_LOCKED_DIGIT = 9
 # The kinds whose removal leaves one (account, instrument) changed.
-SINGLE_SIDED = frozenset({"deposit", "withdrawal", "dividend", "payout", "reward"})
-TWO_SIDED = frozenset({"trade", "convert", "subscription", "redemption", "transfer", "dust"})
+SINGLE_SIDED = frozenset({"deposit", "withdrawal", "dividend", "payout", "reward", "locked_reward"})
+TWO_SIDED = frozenset(
+    {
+        "trade",
+        "convert",
+        "subscription",
+        "redemption",
+        "transfer",
+        "dust",
+        "locked_subscription",
+        "locked_redemption",
+        "token_swap",
+        "delayed_redemption",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -604,6 +621,137 @@ def _dust(b: _Builder) -> Record | None:
     return Record("dust", (("dust", ((b.now, row),)),), tuple(effects))
 
 
+def _locked_subscription(b: _Builder) -> Record | None:
+    choices = b.holdings(("spot", "funding"))
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    row = build_row(
+        "earn-locked-subscriptions",
+        purchaseId=str(b.id()),
+        asset=asset,
+        amount=_plain(quantity),
+        time=b.now,
+        type="NORMAL",
+        sourceAccount=_EARN_SOURCE[wallet],
+        amtFromSpot=_plain(quantity if wallet == "spot" else Decimal(0)),
+        amtFromFunding=_plain(quantity if wallet == "funding" else Decimal(0)),
+        status="SUCCESS",
+    )
+    effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, "earn", asset, quantity))
+    return Record("locked_subscription", (("earn-locked-subscriptions", ((b.now, row),)),), effects)
+
+
+def _locked_redemption(b: _Builder) -> Record | None:
+    """A locked position redeemed at maturity, to Spot."""
+    choices = b.holdings(("earn",))
+    if not choices:
+        return None
+    _, asset = b.draw(st.sampled_from(choices))
+    quantity = b.amount(at_most=b.held[("earn", asset)])
+    if quantity == 0:
+        return None
+    row = build_row(
+        "earn-locked-redemptions",
+        redeemId=b.id(),
+        asset=asset,
+        amount=_plain(quantity),
+        time=b.now,
+        type="MATURE",
+        status="PAID",
+    )
+    effects = (Effect(b.now, "earn", asset, -quantity), Effect(b.now, "spot", asset, quantity))
+    return Record("locked_redemption", (("earn-locked-redemptions", ((b.now, row),)),), effects)
+
+
+def _locked_reward(b: _Builder) -> Record:
+    """A locked Earn reward no dividend paid: income on Earn."""
+    asset = b.draw(st.sampled_from(ASSETS))
+    quantity = b.amount(at_most=Decimal(10), digit=_LOCKED_DIGIT)
+    if quantity == 0:
+        quantity = Decimal(_LOCKED_DIGIT) * _UNIT
+    row = build_row(
+        "earn-locked-rewards",
+        positionId=b.id(),
+        asset=asset,
+        amount=_plain(quantity),
+        type="Locked Rewards",
+        time=b.now,
+    )
+    return Record(
+        "locked_reward",
+        (("earn-locked-rewards", ((b.now, row),)),),
+        (Effect(b.now, "earn", asset, quantity),),
+    )
+
+
+def _token_swap(b: _Builder) -> Record | None:
+    """A yield token subscription: a swap on Spot."""
+    choices = b.holdings(("spot",))
+    if not choices:
+        return None
+    _, given = b.draw(st.sampled_from(choices))
+    received = b.draw(st.sampled_from([a for a in ASSETS if a != given]))
+    given_quantity = b.amount(at_most=b.held[("spot", given)])
+    if given_quantity == 0:
+        return None
+    received_quantity = b.amount()
+    row = build_row(
+        "bfusd-subscriptions",
+        time=b.now,
+        asset=given,
+        amount=_plain(given_quantity),
+        receiveAsset=received,
+        receiveAmount=_plain(received_quantity),
+        status="SUCCESS",
+    )
+    effects = (
+        Effect(b.now, "spot", given, -given_quantity),
+        Effect(b.now, "spot", received, received_quantity),
+    )
+    return Record("token_swap", (("bfusd-subscriptions", ((b.now, row),)),), effects)
+
+
+def _delayed_redemption(b: _Builder) -> Record | None:
+    """A yield token redemption Binance pays out hours later: listed pending at once, then
+    arrived; what it received is net of its fee."""
+    choices = b.holdings(("spot",))
+    if not choices:
+        return None
+    _, given = b.draw(st.sampled_from(choices))
+    received = b.draw(st.sampled_from([a for a in ASSETS if a != given]))
+    given_quantity = b.amount(at_most=b.held[("spot", given)])
+    if given_quantity == 0:
+        return None
+    net = b.amount()
+    fee = b.amount(at_most=Decimal(1)) if b.draw(st.booleans()) else Decimal(0)
+    arrives = b.later(HOUR_MS, 2 * DAY_MS)
+    pending = build_row(
+        "bfusd-redemptions",
+        time=b.now,
+        asset=given,
+        amount=_plain(given_quantity),
+        receiveAsset=received,
+        receiveAmount=_plain(net),
+        fee=_plain(fee),
+        arrivalTime=arrives,
+        status="PENDING",
+    )
+    arrived = {**pending, "status": "SUCCESS"}
+    effects = (
+        Effect(b.now, "spot", given, -given_quantity),
+        Effect(arrives, "spot", received, net),
+    )
+    return Record(
+        "delayed_redemption",
+        (("bfusd-redemptions", ((b.now, pending), (arrives, arrived))),),
+        effects,
+    )
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -616,6 +764,11 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "redemption": _redemption,
     "transfer": _transfer,
     "dust": _dust,
+    "locked_subscription": _locked_subscription,
+    "locked_redemption": _locked_redemption,
+    "locked_reward": _locked_reward,
+    "token_swap": _token_swap,
+    "delayed_redemption": _delayed_redemption,
 }
 
 

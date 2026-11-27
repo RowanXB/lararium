@@ -74,6 +74,25 @@ async def ingest(
         ]
 
 
+async def ingest_report(
+    session, connection_id: UUID, label: str, rows: Rows, *, at_ms: int = NOW_MS
+) -> UUID:
+    """Store one read of a report label listing the rows, made at `at_ms`, as a sync stores
+    it (`balances.store_read`): its bracket and its answer."""
+    bracket: dict[str, JSONValue] = {"read_from_ms": at_ms, "read_to_ms": at_ms}
+    body = to_json(build_response(label, rows))
+    async with command_context(session, CONNECTOR, "binance.read", {}) as ctx:
+        return await store_raw_record(
+            ctx,
+            connection_id=connection_id,
+            record_type=record_type(label),
+            request=bracket,
+            content={**bracket, "body": body},
+            connector_version=VERSION,
+            sync_id=uuid.uuid4(),
+        )
+
+
 async def run_normalize(session, connection_id: UUID, *, again: bool = False) -> NormalizeReport:
     async with httpx.AsyncClient(transport=httpx.MockTransport(_refuse)) as http:
         ctx = await context(session, connection_id, http)

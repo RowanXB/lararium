@@ -79,7 +79,8 @@ def test_the_labels_built_so_far() -> None:
     built = [label for label in HISTORY_LABELS + BALANCE_LABELS if ENDPOINTS[label].phase == "B"]
     assert sorted(built) == sorted(PHASE_B_BUILT)
     # Phase A's labels are walked first, in the catalogue's order.
-    assert HISTORY_LABELS[: -len(PHASE_B_BUILT)] == [
+    phase_b = [label for label in PHASE_B_BUILT if ENDPOINTS[label].kind == "history"]
+    assert HISTORY_LABELS[: -len(phase_b)] == [
         e.label
         for e in ENDPOINTS.values()
         if e.phase == "A" and e.kind == "history" and e.paging != "from_id"

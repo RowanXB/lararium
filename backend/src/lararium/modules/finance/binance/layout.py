@@ -58,6 +58,43 @@ TABLE_LABELS: tuple[str, ...] = (
     "cloud-mining",
     "travel-deposits",
     "travel-withdrawals",
+    # Phase B: the other Earn products.
+    "earn-locked-subscriptions",
+    "earn-locked-redemptions",
+    "earn-locked-rewards",
+    "earn-flexible-collateral",
+    "bfusd-subscriptions",
+    "bfusd-redemptions",
+    "bfusd-rewards",
+    "rwusd-subscriptions",
+    "rwusd-redemptions",
+    "rwusd-rewards",
+    "eth-stakes",
+    "eth-redemptions",
+    "wbeth-rewards",
+    "wbeth-wraps",
+    "wbeth-unwraps",
+    "sol-stakes",
+    "sol-redemptions",
+    "bnsol-rewards",
+    "sol-boost-rewards",
+    "onchain-subscriptions",
+    "onchain-redemptions",
+    "onchain-rewards",
+    "soft-staking-rewards",
+    "earn-locked-position",
+    "bfusd-account",
+    "rwusd-account",
+    "eth-staking-account",
+    "sol-staking-account",
+    "sol-unclaimed-rewards",
+    "onchain-account",
+    "onchain-locked-position",
+    "soft-staking-list",
+    "dci-accounts",
+    "dci-positions",
+    "discount-accounts",
+    "discount-positions",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -73,6 +110,14 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     # The id of the deposit or withdrawal a travel-rule row describes, once it is stored.
     "travel-deposits": (("deposit_id", "text"),),
     "travel-withdrawals": (("withdrawal_id", "text"),),
+    # The key of the dividend a reward is linked to (rule 3), for every product's rewards.
+    "earn-locked-rewards": (("dividend_id", "text"),),
+    "onchain-rewards": (("dividend_id", "text"),),
+    "bfusd-rewards": (("dividend_id", "text"),),
+    "rwusd-rewards": (("dividend_id", "text"),),
+    "soft-staking-rewards": (("dividend_id", "text"),),
+    # The `type` a boost reward was asked for (CLAIM or DISTRIBUTE): the row does not say it.
+    "sol-boost-rewards": (("type", "text"), ("dividend_id", "text")),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),
