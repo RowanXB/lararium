@@ -549,8 +549,10 @@ stays until the next sync checks again, even when the upload supplied the missin
 
 A Trading 212 Cash ISA has no API. Add it as an account of its own, then upload the CSV from the
 app's History page: on Accounts → Add account pick the **Trading 212 Cash ISA** tile and upload
-the History CSV there (the upload uses the ready profile itself). Each export must start on the
-account's first day or on a day an earlier upload covers. Keep the export's file name as Trading
+the History CSV there (the upload uses the ready profile itself). Give the account's opening
+date in the form's **Opened on** field: an export from that day then speaks for the days before
+it too, so a deposit on the day the account opened pairs with your bank's payment. Each export
+must start on the account's first day or on a day an earlier upload covers. Keep the export's file name as Trading
 212 gives it (`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`): it carries the period the export lists,
 every day of it in full but the last, which the export may have been taken partway through. A
 renamed export lists in full only the days between its first and last rows, and its upload warns

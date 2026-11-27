@@ -104,9 +104,15 @@ type UploadFormProps = {
 };
 
 // A new account of a catalog type takes the type's shape and key; the side is asked only
-// when the shape leaves it open. The type stands for the institution.
-function newAccountBody(name: string, side: Side, type: AccountTypeOut | undefined): AccountCreate {
-  const body = accountBody({ name, side, balance: "files" });
+// when the shape leaves it open. The type stands for the institution. The opening date,
+// when given, vouches for the days before the first upload (no row exists before it).
+function newAccountBody(
+  name: string,
+  side: Side,
+  openedOn: string,
+  type: AccountTypeOut | undefined,
+): AccountCreate {
+  const body = { ...accountBody({ name, side, balance: "files" }), opened_on: openedOn || null };
   if (!type?.shape) return body;
   const { ledger_type, subtype, tax_wrapper, balance_mode } = type.shape;
   return {
@@ -144,6 +150,7 @@ export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
   const [accountId, setAccountId] = useState<string>();
   const [newName, setNewName] = useState(type?.name ?? "");
   const [newSide, setNewSide] = useState<Side>("have");
+  const [newOpenedOn, setNewOpenedOn] = useState("");
   const [profileId, setProfileId] = useState<string>();
   // Which of the bank's formats the chosen file is; picked by hand only when it can't be told.
   const [detection, setDetection] = useState<Detection>();
@@ -199,7 +206,7 @@ export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
       if (account_id === undefined) {
         const created = (
           await createAccount({
-            body: newAccountBody(newName, newSide, type),
+            body: newAccountBody(newName, newSide, newOpenedOn, type),
             throwOnError: true,
           })
         ).data;
@@ -288,6 +295,14 @@ export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
               <div className="min-w-56">
                 <TextField label="New account name" value={newName} onChange={setNewName} />
               </div>
+              <div className="min-w-40">
+                <TextField
+                  label="Opened on"
+                  type="date"
+                  value={newOpenedOn}
+                  onChange={setNewOpenedOn}
+                />
+              </div>
               {askSide && (
                 <Segmented
                   label="What it holds"
@@ -298,7 +313,8 @@ export function UploadForm({ formats, type, account }: UploadFormProps = {}) {
               )}
               <p className="w-full text-sm text-muted-foreground">
                 {askSide && "A credit card or a loan is money you owe. "}The account is created
-                when you upload.
+                when you upload. The opening date is optional: with it, a file from the account's
+                first day speaks for the days before it too.
               </p>
             </div>
           )}

@@ -499,7 +499,8 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 
 Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再上传 app History 页面导出的 CSV：
 在 Accounts → Add account 里选 **Trading 212 Cash ISA** 并在那里上传 History CSV（上传会自己使用现成的
-profile）。每次导出必须从该账户的第一天开始，
+profile）。请在表单的 **Opened on** 栏填上账户的开户日期：这样从那天开始的导出也能代表之前的
+日子，开户当天的入金就能与银行那边的付款配对。每次导出必须从该账户的第一天开始，
 或从之前某次上传已覆盖的某一天开始。导出文件请保留 Trading 212 给的文件名
 （`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`）：它写明了这次导出的时段，时段内除最后一天外每天都
 完整列出（导出可能在最后一天中途生成）。改过名的导出只完整列出首行与末行之间的日子，上传时还会

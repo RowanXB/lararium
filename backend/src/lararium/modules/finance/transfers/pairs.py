@@ -454,12 +454,16 @@ async def _load_known(session: AsyncSession, listing: Collection[Listing]) -> Kn
     first_full_day: dict[tuple[UUID, UUID], date] = {}
     # A batch speaks only for the instruments it has live rows in (M2's Decision 16). One
     # that lists in full from its account's opening speaks for all time before it too:
-    # nothing exists before an account opens.
+    # nothing exists before an account opens. The opening is its statement's stated one, or
+    # the account's own opened_on (account type catalog design §8.3 item 2).
     s = models.ImportStatement
-    from_opening = func.bool_or(b.complete_from == s.account_opened_on)
+    from_opening = func.bool_or(
+        or_(b.complete_from == s.account_opened_on, b.complete_from <= a.opened_on)
+    )
     for account_id, instrument_id, first, opened in await session.execute(
         select(b.account_id, r.instrument_id, func.min(b.complete_from), from_opening)
         .join(r, r.batch_id == b.id)
+        .join(a, a.id == b.account_id)
         .outerjoin(s, s.batch_id == b.id)
         .where(
             b.status == "committed",
