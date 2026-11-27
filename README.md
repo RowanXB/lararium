@@ -886,7 +886,7 @@ Built from Binance's documentation and not checked against a real account:
 
 - Wallet-to-wallet transfers (`universal-transfer`): each is one transaction on the two
   wallets' accounts, never a transfer in transit. Transfers to and from isolated margin are
-  fetched once isolated margin is read.
+  asked once per isolated pair the account has.
 - Dust conversions into BNB (`dust`), with the service charge as a fee
 - Cloud Mining payments and refunds (`cloud-mining`), on Spot
 - The travel-rule deposit and withdrawal histories (`travel-deposits`, `travel-withdrawals`):
@@ -919,11 +919,20 @@ Built from Binance's documentation and not checked against a real account:
   interest for a flexible loan, so the growth of its debt between two reports that no record
   explains is posted as its interest. A liquidation sells the collateral from Earn. A loan's
   records never move its collateral: it stays in the wallet Binance reports it in.
+- Margin, cross and isolated (`margin-account`, `margin-isolated-account`, `margin-trades`,
+  `margin-transfers`, `margin-borrow-repay`, `margin-interest`, `margin-capital-flow`,
+  `margin-liquidations`, `margin-small-liability`, `margin-liquidation-loan`,
+  `margin-liquidation-loan-repays`): "Binance Cross Margin" and "Binance Isolated Margin" hold
+  each asset's net quantity, so a borrowed asset is a negative holding (Isolated Margin sums its
+  pairs per asset). A margin trade is posted as a spot trade on its wallet; interest and the
+  liquidation fee are fees; a margin transfer that the wallet-to-wallet history also lists is
+  posted once. Borrowing and repaying change no net quantity and are stored only, as are the
+  capital flow, forced liquidations, small liability exchanges and the liquidation loan. An
+  account Binance says it has not created is skipped, as a product the account does not have.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Margin, cross and isolated
 - USD-M and COIN-M futures
 - Options
 - Fiat orders, card payments, P2P, Pay and rebates

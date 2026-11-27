@@ -59,7 +59,7 @@ from lararium.db import create_engine
 from lararium.modules import finance
 from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance import sync as sync_module
-from lararium.modules.finance.binance.fetch import HISTORY_LABELS, TRADES_LABEL
+from lararium.modules.finance.binance.fetch import HISTORY_LABELS, TRADE_LABELS
 from lararium.modules.finance.binance.normalize import regenerate
 from lararium.modules.finance.binance.parse import ApiValue
 from lararium.modules.finance.binance.reconcile import report_times
@@ -100,7 +100,7 @@ VOLATILE = frozenset({"id", "created_at", "updated_at", "recorded_at", "fetched_
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _CHANGED = "changed by something no record explains"
 # The history labels with records of their own (the daily snapshots are a report).
-RECORD_LABELS = [label for label in [*HISTORY_LABELS, TRADES_LABEL] if label != "snapshot"]
+RECORD_LABELS = [label for label in [*HISTORY_LABELS, *TRADE_LABELS] if label != "snapshot"]
 _ACCRUING_MS = 48 * 3_600_000
 # The profile's examples (tests/finance/conftest.py): "ci" by default, "deep" with
 # HYPOTHESIS_PROFILE=deep (HYPOTHESIS_MAX_EXAMPLES of them, random).
@@ -194,7 +194,22 @@ class World:
             for row in rows:
                 self.fake.add(label, row, when=asked(row))
         held = self.history.balance(now_ms)
-        spot, funding, earn, loans = (holdings_of(held, w) for w in WALLET_KEYS)
+        spot, funding, earn, loans, cross = (holdings_of(held, w) for w in WALLET_KEYS)
+        self.fake.set_rows(
+            "margin-account",
+            [
+                build_row(
+                    "margin-account",
+                    asset=a,
+                    free=format(q, "f"),
+                    locked="0",
+                    borrowed="0",
+                    interest="0",
+                    netAsset=format(q, "f"),
+                )
+                for a, q in sorted(cross.items())
+            ],
+        )
         self.fake.set_rows(
             "loan-flexible-ongoing",
             [

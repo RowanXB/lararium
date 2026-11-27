@@ -10,9 +10,12 @@ wallet-to-wallet transfers between Spot and Funding (some failed), dust conversi
 (one or two small balances into BNB, with a service charge at times), locked Earn
 subscriptions, redemptions to Spot and rewards, yield token subscriptions (swaps on Spot) and
 redemptions Binance pays out later (seen pending, then arrived, a fee at times), flexible
-crypto loans borrowed onto Spot (some failed) and repaid from it. No wallet ever holds less than
-nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
-before the history is a loan whose borrow is not listed, as a VIP loan's never is).
+crypto loans borrowed onto Spot (some failed) and repaid from it, margin transfers between Spot
+and Cross Margin (some also listed by the universal transfer history, some pending first), margin
+trades on Cross Margin (no `quoteQty`, a commission at times) and margin interest charged there.
+No wallet ever holds less than nothing, except Crypto Loans, whose holdings are debts: never
+more than nothing (a debt there before the history is a loan whose borrow is not listed, as a VIP
+loan's never is).
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -59,13 +62,15 @@ PAIRS = (
     ("AAABBB", "AAA", "BBB"),
     ("CCCSTB", "CCC", "STB"),
 )
-WALLET_KEYS = ("spot", "funding", "earn", "loans")
+WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin")
 ACCOUNT_NAMES = {
     "spot": "Binance Spot",
     "funding": "Binance Funding",
     "earn": "Binance Earn",
     "loans": "Binance Crypto Loans",
+    "cross_margin": "Binance Cross Margin",
 }
+CROSS = "cross_margin"
 # The wallet whose holdings are debts (negative).
 DEBTS = "loans"
 _WALLET_TYPE = {"spot": 0, "funding": 1}
@@ -78,7 +83,9 @@ _REALTIME_DIGIT, _DIVIDEND_DIGIT, _PAYOUT_DIGIT = 3, 7, 5
 # A locked Earn reward can be any dividend's payout: its own digit keeps it from every one.
 _LOCKED_DIGIT = 9
 # The kinds whose removal leaves one (account, instrument) changed.
-SINGLE_SIDED = frozenset({"deposit", "withdrawal", "dividend", "payout", "reward", "locked_reward"})
+SINGLE_SIDED = frozenset(
+    {"deposit", "withdrawal", "dividend", "payout", "reward", "locked_reward", "margin_interest"}
+)
 TWO_SIDED = frozenset(
     {
         "trade",
@@ -93,6 +100,8 @@ TWO_SIDED = frozenset(
         "delayed_redemption",
         "borrow",
         "repay",
+        "margin_transfer",
+        "margin_trade",
     }
 )
 
@@ -818,6 +827,124 @@ def _repay(b: _Builder) -> Record | None:
     return Record("repay", (("loan-flexible-repays", ((b.now, row),)),), effects)
 
 
+def _margin_transfer(b: _Builder) -> Record | None:
+    """A margin transfer between Spot and Cross Margin; at times also listed by the universal
+    transfer history (rule 2: posted once), at times pending before it is confirmed."""
+    choices = b.holdings(("spot", CROSS))
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    into = wallet == "spot"
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    tx_id = b.id()
+    row = build_row(
+        "margin-transfers",
+        amount=_plain(quantity),
+        asset=asset,
+        status="CONFIRMED",
+        timestamp=b.now,
+        txId=tx_id,
+        type="ROLL_IN" if into else "ROLL_OUT",
+        transFrom="SPOT" if into else "CROSS_MARGIN",
+        transTo="CROSS_MARGIN" if into else "SPOT",
+        fromSymbol=None,
+        toSymbol=None,
+    )
+    versions: tuple[tuple[int, Rowdict], ...] = ((b.now, row),)
+    if b.draw(st.integers(0, 3)) == 0:
+        versions = ((b.now, {**row, "status": "PENDING"}), (b.now + SECOND_MS, row))
+    rows: list[tuple[str, tuple[tuple[int, Rowdict], ...]]] = [("margin-transfers", versions)]
+    if b.draw(st.booleans()):
+        universal = build_row(
+            "universal-transfer",
+            asset=asset,
+            amount=_plain(quantity),
+            type="MAIN_MARGIN" if into else "MARGIN_MAIN",
+            status="CONFIRMED",
+            tranId=tx_id,
+            timestamp=b.now,
+        )
+        rows.append(("universal-transfer", ((b.now, universal),)))
+    other = CROSS if into else "spot"
+    effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
+    return Record("margin_transfer", tuple(rows), effects)
+
+
+def _margin_trade(b: _Builder) -> Record | None:
+    """A trade on Cross Margin, within what it holds: Binance documents no `quoteQty` for it,
+    the quote side is `qty` times `price` exactly."""
+    symbol, base, quote = b.draw(st.sampled_from(PAIRS))
+    buyer = b.draw(st.booleans())
+    price = Decimal(b.draw(st.integers(1, 2_000_000))) * _UNIT
+    have = b.held[(CROSS, quote if buyer else base)]
+    if have <= 0:
+        return None
+    if buyer:
+        most = int(have / price / Decimal("0.01"))
+        if most < 1:
+            return None
+        quantity = Decimal(b.draw(st.integers(1, min(most, 100_000)))) * Decimal("0.01")
+    else:
+        quantity = b.amount(at_most=have)
+        if quantity == 0:
+            return None
+    quote_quantity = quantity * price
+    fee_asset = b.draw(st.sampled_from((base, quote)))
+    left = {
+        base: b.held[(CROSS, base)] + (quantity if buyer else -quantity),
+        quote: b.held[(CROSS, quote)] + (-quote_quantity if buyer else quote_quantity),
+    }
+    commission = Decimal(0)
+    if b.draw(st.booleans()) and left[fee_asset] > 0:
+        commission = Decimal(b.draw(st.integers(0, int(min(left[fee_asset], 1) * 10**6)))) / 10**6
+    row = build_row(
+        "margin-trades",
+        symbol=symbol,
+        id=b.id(),
+        orderId=b.id(),
+        price=f"{price:.4f}",
+        qty=_plain(quantity),
+        commission=_plain(commission),
+        commissionAsset=fee_asset,
+        time=b.now,
+        isBuyer=buyer,
+        isMaker=b.draw(st.booleans()),
+        isIsolated=False,
+    )
+    effects = [
+        Effect(b.now, CROSS, base, quantity if buyer else -quantity),
+        Effect(b.now, CROSS, quote, -quote_quantity if buyer else quote_quantity),
+    ]
+    if commission:
+        effects.append(Effect(b.now, CROSS, fee_asset, -commission))
+    return Record("margin_trade", (("margin-trades", ((b.now, row),)),), tuple(effects))
+
+
+def _margin_interest(b: _Builder) -> Record | None:
+    """Interest charged on Cross Margin: a fee taken from what it holds."""
+    choices = b.holdings((CROSS,))
+    if not choices:
+        return None
+    _, asset = b.draw(st.sampled_from(choices))
+    quantity = b.amount(at_most=b.held[(CROSS, asset)])
+    if quantity == 0:
+        return None
+    row = build_row(
+        "margin-interest",
+        txId=b.id(),
+        interestAccuredTime=b.now,
+        asset=asset,
+        rawAsset=asset,
+        interest=_plain(quantity),
+        type="PERIODIC",
+        isolatedSymbol=None,
+    )
+    effect = Effect(b.now, CROSS, asset, -quantity)
+    return Record("margin_interest", (("margin-interest", ((b.now, row),)),), (effect,))
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -837,6 +964,9 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "delayed_redemption": _delayed_redemption,
     "borrow": _borrow,
     "repay": _repay,
+    "margin_transfer": _margin_transfer,
+    "margin_trade": _margin_trade,
+    "margin_interest": _margin_interest,
 }
 
 

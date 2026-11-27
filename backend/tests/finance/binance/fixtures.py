@@ -226,7 +226,10 @@ _DEFAULT_SIZES = {"current": 10, "pageIndex": 10, "page": 100, "fromId": 500}
 # The catalogue's my-trades: "The time between startTime and endTime can't be longer than 24
 # hours"; a start (or an end) alone asks the 24 hours from (or to) it; a time and `fromId` are
 # not a supported combination.
-_TIME_SPANS = {"my-trades": DAY_MS}
+_TIME_SPANS = {"my-trades": DAY_MS, "margin-trades": DAY_MS}
+# A margin trade request asks cross margin's trades, or an isolated pair's with
+# `isIsolated=TRUE` (the default is FALSE): a row answers the one its `isIsolated` says.
+_ISOLATED_FLAG = "isIsolated"
 
 
 @dataclass(frozen=True)
@@ -282,6 +285,7 @@ class FakeBinance:
         self._failures: list[_Failure] = []
         self._hooks: dict[str, Hook] = {}
         self._caps: dict[str, int] = {}
+        self._envelopes: dict[str, dict[str, ApiValue]] = {}
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.
@@ -296,6 +300,11 @@ class FakeBinance:
     ) -> None:
         self._stored[label] = []
         self.add(label, *rows, when=when)
+
+    def set_envelope(self, label: str, **fields: ApiValue) -> None:
+        """Answer the label with these top-level fields beside its records (a margin account
+        that says `created: false`)."""
+        self._envelopes.setdefault(label, {}).update(fields)
 
     def rows(self, label: str) -> list[Rowdict]:
         return [stored.row for stored in self._stored.get(label, [])]
@@ -441,6 +450,7 @@ class FakeBinance:
         body = build_response(label, page)
         if isinstance(body, dict):
             self._patch_envelope(body, total, more)
+            body.update(self._envelopes.get(label, {}))
         return _json(body)
 
     @staticmethod
@@ -484,6 +494,9 @@ class FakeBinance:
         for name in _FILTERS:
             if name in own:
                 rows = [row for row in rows if name not in row or str(row[name]) == own[name]]
+        if endpoint.label == "margin-trades":
+            isolated = own.get(_ISOLATED_FLAG, "FALSE") == "TRUE"
+            rows = [row for row in rows if row.get(_ISOLATED_FLAG) in (None, isolated)]
         if endpoint.time_field is not None and endpoint.time_params is not None:
             low, high = endpoint.time_params
             field = endpoint.time_field

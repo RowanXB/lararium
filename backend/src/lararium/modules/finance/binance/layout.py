@@ -106,6 +106,18 @@ TABLE_LABELS: tuple[str, ...] = (
     "loan-flexible-ongoing",
     "vip-loan-ongoing",
     "vip-loan-collateral-account",
+    # Phase B: the margin wallets.
+    "margin-account",
+    "margin-isolated-account",
+    "margin-trades",
+    "margin-transfers",
+    "margin-borrow-repay",
+    "margin-interest",
+    "margin-capital-flow",
+    "margin-liquidations",
+    "margin-small-liability",
+    "margin-liquidation-loan",
+    "margin-liquidation-loan-repays",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -129,6 +141,11 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "soft-staking-rewards": (("dividend_id", "text"),),
     # The `type` a boost reward was asked for (CLAIM or DISTRIBUTE): the row does not say it.
     "sol-boost-rewards": (("type", "text"), ("dividend_id", "text")),
+    # The key of the movement an earlier listing posts that a margin transfer is (rule 2).
+    "margin-transfers": (("movement_key", "text"),),
+    # The `type` a borrow or repay row was asked for (BORROW or REPAY): the row's own `type`
+    # says only how (AUTO, MANUAL).
+    "margin-borrow-repay": (("request_type", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),

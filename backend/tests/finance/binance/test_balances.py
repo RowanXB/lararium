@@ -413,7 +413,10 @@ async def test_other_wallets_come_from_the_wallet_list_until_they_have_their_own
     listed = [
         _wallet("Spot", ("AAA", "9")),
         _wallet("Funding", ("AAA", "9")),
-        _wallet("Cross Margin", ("BBB", "2")),
+        _wallet("Trading Bots", ("BBB", "2")),
+        # Cross Margin has its own source (the margin account), which was not read: the list
+        # does not stand in for it.
+        _wallet("Cross Margin", ("BBB", "5")),
     ]
     reads: dict[str, Read | None] = {
         "spot-account": _read("spot-account", _spot(("AAA", "1", "0"))),
@@ -425,9 +428,9 @@ async def test_other_wallets_come_from_the_wallet_list_until_they_have_their_own
 
     found = sorted((w, s, q) for w, s, q, _ in await _snapshots(session, connection.id))
     assert found == [
-        ("Binance Cross Margin", "BBB", 2),
         ("Binance Funding", "AAA", 2),
         ("Binance Spot", "AAA", 1),
+        ("Binance Trading Bots", "BBB", 2),
     ]
 
 

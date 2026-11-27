@@ -3032,6 +3032,19 @@ ISOLATED_TRANSFER_TYPES: dict[str, tuple[str, ...]] = {
 }
 
 
+# The histories that list cross margin when asked without a pair, and an isolated pair's records
+# when asked with one, and the parameter the pair goes in (the catalogue document: `symbol` for
+# the capital flow, "mandatory for Isolated data"). Each is asked once more per isolated pair the
+# account has (`fetch.walk_keys`).
+ISOLATED_PARAMS: dict[str, str] = {
+    "margin-transfers": "isolatedSymbol",
+    "margin-borrow-repay": "isolatedSymbol",
+    "margin-interest": "isolatedSymbol",
+    "margin-capital-flow": "symbol",
+    "margin-liquidations": "isolatedSymbol",
+}
+
+
 def wallet_key(wallet_name: str) -> str:
     """The key of a wallet; one Binance adds later gets `other:<name>`."""
     return WALLETS.get(wallet_name, f"other:{wallet_name}")

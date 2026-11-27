@@ -44,8 +44,10 @@ from lararium.modules.finance.binance.catalogue import (
 from lararium.modules.finance.binance.client import BinanceClient
 from lararium.modules.finance.binance.fetch import (
     HISTORY_LABELS,
-    TRADES_LABEL,
+    ISOLATED_MARGIN_LABEL,
+    TRADE_LABELS,
     VERSION,
+    TradeWalk,
     record_type,
     to_json,
     typed,
@@ -75,8 +77,18 @@ ROUNDS = 3
 # report is cut at the first read's start and is clear only when nothing happened from then to
 # the end of the second (`loan_bracket`), so they are made again together.
 LOAN_READS = ("loan-flexible-ongoing", "vip-loan-ongoing")
+# The two margin accounts: Cross Margin holds each asset's `netAsset`, Isolated Margin the base
+# and quote `netAsset` of each of its pairs, summed per asset (design 5.6).
+CROSS_MARGIN_LABEL = "margin-account"
 # The reads a snapshot comes from: only these are made again when a movement falls into them.
-SOURCE_LABELS = ("spot-account", "funding-asset", "wallet-balance", *LOAN_READS)
+SOURCE_LABELS = (
+    "spot-account",
+    "funding-asset",
+    "wallet-balance",
+    *LOAN_READS,
+    CROSS_MARGIN_LABEL,
+    ISOLATED_MARGIN_LABEL,
+)
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
 REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
@@ -93,9 +105,17 @@ DIGESTS_KEY = "report_digests"
 _VOLATILE = {"exchange-info": frozenset({"serverTime"})}
 # Wallets with a source of their own; every other wallet's balance comes from the wallet list
 # (design 5.6) until a later phase gives it one.
-OWN_SOURCES = {"spot": "spot-account", "funding": "funding-asset", "loans": LOAN_READS[0]}
+OWN_SOURCES = {
+    "spot": "spot-account",
+    "funding": "funding-asset",
+    "loans": LOAN_READS[0],
+    "cross_margin": CROSS_MARGIN_LABEL,
+    "isolated_margin": ISOLATED_MARGIN_LABEL,
+}
 LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
+_NET_FIELDS = ("netAsset",)
+_LEGS = ("baseAsset", "quoteAsset")
 _HELD_FIELDS = ("free", "locked", "freeze", "withdrawing")
 _DAILY = "snapshot"
 # Binance answers the daily snapshot's `type` in lower case (`spot`) although the request asks
@@ -238,7 +258,7 @@ async def record_assets(ctx: SyncContext, after: UUID | None) -> set[str]:
     None) name: what the next normalising run will see."""
     found: set[str] = set()
     async with ctx.session_factory() as session:
-        for label in [*HISTORY_LABELS, TRADES_LABEL]:
+        for label in [*HISTORY_LABELS, *TRADE_LABELS]:
             paths = _asset_paths(label)
             if not paths:
                 continue
@@ -267,7 +287,7 @@ async def record_times(ctx: SyncContext) -> list[datetime]:
     only their time fields are read."""
     found: list[datetime] = []
     async with ctx.session_factory() as session:
-        for label in [*HISTORY_LABELS, TRADES_LABEL]:
+        for label in [*HISTORY_LABELS, *TRADE_LABELS]:
             paths = _time_paths(label)
             if not paths:
                 continue
@@ -299,10 +319,10 @@ async def settle_reads(
     client: BinanceClient,
     reads: dict[str, Read],
     *,
-    symbols: Sequence[str] = (),
+    trades: Sequence[TradeWalk] = (),
 ) -> dict[str, Read]:
     """Make the ambiguous reads again, then walk the history labels forwards again (and the
-    trades of `symbols`), at most 3 rounds; a read still ambiguous after them is the last one
+    trades of `trades`), at most 3 rounds; a read still ambiguous after them is the last one
     made, marked `unclear`.
 
     Only the reads a snapshot comes from are made again; every other read is kept as it is.
@@ -333,8 +353,9 @@ async def settle_reads(
         # After the reads: what happened while they were made is what the walks must find.
         for label in HISTORY_LABELS:
             await walk(ctx, client, label)
-        if symbols:
-            await walk_trades(ctx, client, TRADES_LABEL, symbols)
+        for trade in trades:
+            if trade.symbols:
+                await walk_trades(ctx, client, trade.label, trade.symbols, isolated=trade.isolated)
         settled.update(again)
         pending = await unsettled()
     for label in pending:
@@ -457,6 +478,33 @@ def _loan_rows(read: Read) -> list[Row]:
     return _source_rows(read)
 
 
+def margin_created(read: Read) -> bool:
+    """Whether a cross margin account read says the account exists: an answer `created: false`
+    is the account Binance has not opened, which is not present (design 6)."""
+    body = as_api(read.body)
+    return not (isinstance(body, dict) and body.get("created") is False)
+
+
+def _isolated_held(read: Read) -> dict[str, Decimal]:
+    """Each asset's net quantity over the isolated pairs created: the base and the quote leg's
+    `netAsset`, summed per asset; a pair not created holds nothing."""
+    label = read.label
+    held: dict[str, Decimal] = {}
+    for row in _source_rows(read):
+        if row.get("isolatedCreated") is False:
+            continue
+        for leg in _LEGS:
+            entry = row.get(leg)
+            if not isinstance(entry, dict):
+                raise BinanceDataError(label, f"assets[].{leg}")
+            code = entry.get("asset")
+            if not isinstance(code, str):
+                raise BinanceDataError(label, f"assets[].{leg}.asset")
+            net = _amount(label, f"assets[].{leg}.netAsset", entry.get("netAsset"))
+            held[code] = held.get(code, Decimal(0)) + net
+    return held
+
+
 def _debts(reads: Mapping[str, Read | None]) -> _Wallet | None:
     """The Crypto Loans wallet from its clear reads: minus the `totalDebt` of every ongoing
     order, per loan coin (design 5.6)."""
@@ -494,6 +542,13 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     if funding is not None:
         held = _per_asset(funding.label, "[].", _source_rows(funding), _HELD_FIELDS)
         wallets.append(_Wallet("funding", funding, held))
+    cross = reads.get(CROSS_MARGIN_LABEL)
+    if cross is not None and margin_created(cross):
+        held = _per_asset(cross.label, "userAssets[].", _source_rows(cross), _NET_FIELDS)
+        wallets.append(_Wallet("cross_margin", cross, held))
+    isolated = reads.get(ISOLATED_MARGIN_LABEL)
+    if isolated is not None:
+        wallets.append(_Wallet("isolated_margin", isolated, _isolated_held(isolated)))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
         for row in _source_rows(listed):

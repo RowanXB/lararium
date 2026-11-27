@@ -309,6 +309,48 @@ def test_loan_tables_and_keys() -> None:
     assert repays.column("loan_date_at").sql == "timestamptz"
 
 
+def test_margin_tables_and_keys() -> None:
+    family = (
+        "margin-account",
+        "margin-isolated-account",
+        "margin-trades",
+        "margin-transfers",
+        "margin-borrow-repay",
+        "margin-interest",
+        "margin-capital-flow",
+        "margin-liquidations",
+        "margin-small-liability",
+        "margin-liquidation-loan",
+        "margin-liquidation-loan-repays",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Each account is one report per read; its assets (and isolated pairs) are child rows.
+    cross, assets = layout.layout("margin-account")
+    assert (cross.key, cross.record) == (("connection_id", "snapshot_at"), False)
+    assert assets.name == "binance_margin_account_user_assets"
+    assert assets.column("net_asset").sql == "numeric"
+    isolated, pairs = layout.layout("margin-isolated-account")
+    assert not isolated.record
+    assert pairs.name == "binance_margin_isolated_account_assets"
+    assert {"base_asset_net_asset", "quote_asset_net_asset", "symbol"} <= {
+        c.name for c in pairs.columns
+    }
+    # A trade is keyed by its symbol and id, as a spot trade is.
+    trades = layout.layout("margin-trades")[0]
+    assert (trades.key, trades.record) == (("connection_id", "symbol", "id"), True)
+    interest = layout.layout("margin-interest")[0]
+    assert interest.key == ("connection_id", "tx_id", "interest_accured_time", "asset")
+    assert layout.layout("margin-small-liability")[0].key == (
+        "connection_id",
+        "content_hash",
+        "occurrence",
+    )
+    # The movement a margin transfer is linked to (rule 2), the type a borrow or repay was
+    # asked for.
+    assert layout.layout("margin-transfers")[0].column("movement_key").sql == "text"
+    assert layout.layout("margin-borrow-repay")[0].column("request_type").sql == "text"
+
+
 # The models are what the migration made.
 
 

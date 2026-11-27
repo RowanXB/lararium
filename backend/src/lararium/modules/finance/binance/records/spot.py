@@ -58,6 +58,16 @@ async def _pair(run: Run, symbol: str) -> tuple[str, str] | None:
 
 
 async def trade(run: Run, row: Row) -> None:
+    await post_trade(run, TRADES, row, "spot")
+
+
+async def post_trade(
+    run: Run, label: str, row: Row, wallet: str, *, quote_quantity: Decimal | None = None
+) -> None:
+    """A trade of the label's row as a swap on the wallet's account (Decision 10): the base
+    weighed by `price` in the quote, the quote side `quote_quantity` (the row's `quoteQty`
+    when None), the commission a fee, and what a rounded price leaves one "rounding" posting.
+    A margin trade is one, on its margin wallet (design 5.7)."""
     symbol = text(row, "symbol") or ""
     pair = await _pair(run, symbol)
     if pair is None:
@@ -65,13 +75,14 @@ async def trade(run: Run, row: Row) -> None:
         return
     buyer = row.get("isBuyer")
     if not isinstance(buyer, bool):
-        run.flag(f"{TRADES}.isBuyer missing")
+        run.flag(f"{label}.isBuyer missing")
         return
-    quantity = amount(TRADES, row, "qty")
-    price = amount(TRADES, row, "price")
-    quote_quantity = amount(TRADES, row, "quoteQty")
-    commission = amount(TRADES, row, "commission")
-    occurred_at = when(TRADES, row, "time")
+    quantity = amount(label, row, "qty")
+    price = amount(label, row, "price")
+    if quote_quantity is None:
+        quote_quantity = amount(label, row, "quoteQty")
+    commission = amount(label, row, "commission")
+    occurred_at = when(label, row, "time")
     if quantity is None or price is None or quote_quantity is None or commission is None:
         return
     if occurred_at is None:
@@ -84,7 +95,7 @@ async def trade(run: Run, row: Row) -> None:
     if base == quote:
         run.flag(f"symbol {code(symbol)} names one asset twice")
         return
-    account_id = await run.account("spot")
+    account_id = await run.account(wallet)
     if buyer:
         given = PostingInput(
             account_id, base, quantity, cost_per_unit=price, cost_instrument_id=quote

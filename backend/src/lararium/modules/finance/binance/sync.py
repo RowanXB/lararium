@@ -8,8 +8,9 @@ The connection's `config` keys, what each holds and who writes it:
 - `key_type`: `hmac` or `ed25519` (the routes, on create and key update).
 - `uid`: the Binance account the key answers for (the create route; checked on every sync).
 - `account_map`: wallet key to finance account id (`accounts.wallet_account`).
-- `cursors`: per history label (or `<label>:<variant>`) `{fetched_to, backfilled_to,
-  complete}`, per `my-trades:<symbol>` the last trade id (`fetch.commit`).
+- `cursors`: per history label (or `<label>:<variant>`, `:<isolated pair>`) `{fetched_to,
+  backfilled_to, complete}`, per `my-trades:<symbol>` and `margin-trades:<symbol>` (an isolated
+  pair's `margin-trades:<symbol>:isolated`) the last trade id (`fetch.commit`).
 - `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
@@ -18,7 +19,8 @@ The connection's `config` keys, what each holds and who writes it:
 - `flags`: every flag already published (`normalize.publish_flags`).
 - `report_digests`: per report label, the digest of its last stored answer
   (`balances.store_reports`).
-- `swept`: the (asset, interval start in ms) pairs whose trades were swept (`sweep`).
+- `swept`: the (asset, interval start in ms) pairs whose Spot trades were swept, and the
+  (asset, interval start, wallet key) of a margin wallet's (`sweep`).
 - `reconciled_through`: the newest report time the last reconciliation covered
   (`reconcile.reconcile`).
 - `touched_pending`: per `<account>:<instrument>`, the span of posting times committed runs
@@ -55,9 +57,11 @@ from lararium.core.json_types import JSONValue
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import layout, notices
 from lararium.modules.finance.binance.balances import (
+    CROSS_MARGIN_LABEL,
     Read,
     backfill_daily_snapshots,
     daily_rows,
+    margin_created,
     millis,
     read_assets,
     read_balances,
@@ -83,13 +87,18 @@ from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
     HISTORY_LABELS,
+    MARGIN_TRADES,
     NOT_PRESENT_KEY,
+    TRADE_LABELS,
     TRADES_LABEL,
     VERSION,
+    TradeWalk,
     absent,
     backfill_complete,
     commit,
     fresh_config,
+    isolated_symbols,
+    trade_cursor_key,
     trade_symbols,
     walk,
     walk_trades,
@@ -116,10 +125,17 @@ from lararium.modules.finance.binance.tables import moment
 HARMLESS_TRUE = frozenset({"enableReading", "ipRestrict"})
 DUE_AFTER = timedelta(hours=4)
 FIRST_SYNC_DONE_KEY = "first_sync_done"
-# (asset, interval start in ms) of every interval already swept for that asset's trades.
+# (asset, interval start in ms) of every interval already swept for that asset's Spot trades;
+# (asset, interval start, wallet key) for a margin wallet's.
 SWEPT_KEY = "swept"
-# The wallets that trade, whose unexplained change sends for the sweep.
-SWEPT_WALLETS = frozenset({"spot"})
+# The wallets that trade, whose unexplained change sends for the sweep: the trade label each
+# wallet's trades are in, and whether they are isolated margin pairs'.
+SWEPT_WALLETS: dict[str, tuple[str, bool]] = {
+    "spot": (TRADES_LABEL, False),
+    "cross_margin": (MARGIN_TRADES, False),
+    "isolated_margin": (MARGIN_TRADES, True),
+}
+_SPOT = "spot"
 
 GATE_LABEL = "api-restrictions"
 ACCOUNT_LABEL = "spot-account"
@@ -252,7 +268,7 @@ async def opening(ctx: SyncContext) -> set[Point]:
     ):
         connection = await get_connection(session, connection_id)
         done = connection.config.get(FIRST_SYNC_DONE_KEY) is True
-        if not done and not backfill_complete(connection.config):
+        if not done and not backfill_complete(connection.config, await isolated_symbols(ctx)):
             return set()
         run = await Run.start(ctx, cmd, connection)
         made = await set_openings(run)
@@ -267,7 +283,7 @@ async def opening(ctx: SyncContext) -> set[Point]:
 async def first_sync_line(session: AsyncSession, connection_id: UUID, openings: int) -> str:
     """The first sync's message: the records per label and the openings made, counts only."""
     counts: list[str] = []
-    for label in [*HISTORY_LABELS, TRADES_LABEL]:
+    for label in [*HISTORY_LABELS, *TRADE_LABELS]:
         if label not in layout.TABLE_LABELS:
             continue
         table = layout.layout(label)[0].name
@@ -290,42 +306,63 @@ async def differences(ctx: SyncContext, touched: Touched) -> list[Difference]:
         return await check(session, ctx.connection.id, touched)
 
 
+def _swept_mark(item: JSONValue) -> tuple[str, JSONValue, str] | None:
+    """A `config["swept"]` entry as (asset, interval start, wallet key): a Spot sweep's entry
+    names no wallet."""
+    if isinstance(item, list) and len(item) == 2:
+        return (str(item[0]), item[1], _SPOT)
+    if isinstance(item, list) and len(item) == 3:
+        return (str(item[0]), item[1], str(item[2]))
+    return None
+
+
+def _swept_entry(code: str, from_ms: int, wallet: str) -> list[JSONValue]:
+    return [code, from_ms] if wallet == _SPOT else [code, from_ms, wallet]
+
+
 async def sweep(
     ctx: SyncContext, client: BinanceClient, info: ApiValue, found: list[Difference]
 ) -> bool:
-    """For each difference on a wallet that trades (`SWEPT_WALLETS`) whose asset was not swept
-    for that interval yet: every trade, in the interval, of every symbol with the asset on
-    either side, so a round trip through an asset never seen is found (design 5.2). Each
-    (asset, interval start) is swept once (`config["swept"]`); whether any was."""
+    """For each difference on a wallet that trades (`SWEPT_WALLETS`: Spot and the margin
+    wallets) whose asset was not swept for that interval yet: every trade of the wallet, in the
+    interval, of every symbol with the asset on either side (for Isolated Margin, every
+    isolated pair with it), so a round trip through an asset never seen is found (design 5.2).
+    Each (asset, interval start, wallet) is swept once (`config["swept"]`); whether any was."""
     config = await fresh_config(ctx)
     held = config.get(SWEPT_KEY)
     swept: list[JSONValue] = list(held) if isinstance(held, list) else []
-    done = {(str(item[0]), item[1]) for item in swept if isinstance(item, list) and len(item) == 2}
-    wanted: list[tuple[str, Difference]] = []
+    done = {mark for item in swept if (mark := _swept_mark(item)) is not None}
+    wanted: list[tuple[str, str, Difference]] = []
     async with ctx.session_factory() as session:
         owned = await wallets(session, ctx.connection.id)
-        trading = {a for a, key in owned.items() if key in SWEPT_WALLETS}
         for difference in found:
-            if difference.account_id not in trading:
+            wallet = owned.get(difference.account_id)
+            if wallet not in SWEPT_WALLETS:
                 continue
             code = await asset_code(session, difference.instrument_id)
-            mark = (code, millis(difference.from_at))
+            mark = (code, millis(difference.from_at), wallet)
             if mark not in done:
                 done.add(mark)
-                wanted.append((code, difference))
+                wanted.append((code, wallet, difference))
     if not wanted:
         return False
     seen_now = await assets_seen(ctx)
-    for code, difference in wanted:
+    pairs = await isolated_symbols(ctx)
+    for code, wallet, difference in wanted:
+        label, isolated = SWEPT_WALLETS[wallet]
+        symbols = trade_symbols(info, seen_now, either_side_of=code)
+        if isolated:
+            symbols = [symbol for symbol in symbols if symbol in pairs]
         await walk_trades(
             ctx,
             client,
-            TRADES_LABEL,
-            trade_symbols(info, seen_now, either_side_of=code),
+            label,
+            symbols,
             since_ms=millis(difference.from_at),
             until_ms=millis(difference.to_at),
+            isolated=isolated,
         )
-        swept.append([code, millis(difference.from_at)])
+        swept.append(_swept_entry(code, millis(difference.from_at), wallet))
     args: dict[str, JSONValue] = {"connection_id": str(ctx.connection.id)}
     async with (
         ctx.session_factory() as session,
@@ -393,9 +430,16 @@ class BinanceConnector:
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
-        symbols = await walk_symbols(ctx, client, info, reads, everything=first)
+        trades = [
+            TradeWalk(
+                TRADES_LABEL,
+                tuple(await walk_symbols(ctx, client, info, reads, everything=first)),
+            ),
+            *await walk_margin_trades(ctx, client, info, reads, everything=first),
+        ]
 
-        settled = await settle_reads(ctx, client, reads, symbols=await _traded(ctx, symbols, first))
+        traded = [await _traded(ctx, trade, first) for trade in trades]
+        settled = await settle_reads(ctx, client, reads, trades=traded)
         # The wallet checks' flags, published with the records' (one line, Decision 15).
         flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
@@ -420,10 +464,15 @@ class BinanceConnector:
             if label in (GATE_LABEL, ACCOUNT_LABEL) or absent(config, label, client.now_ms()):
                 continue
             try:
-                reads |= await read_balances(client, [label])
+                read = (await read_balances(client, [label]))[label]
             except BinanceNotPresent:
                 await commit(ctx, label, absent_since=client.now_ms())
                 continue
+            if label == CROSS_MARGIN_LABEL and not margin_created(read):
+                # The account Binance has not opened: not present, as a refused product is.
+                await commit(ctx, label, absent_since=client.now_ms())
+                continue
+            reads[label] = read
             if label in missing:
                 await commit(ctx, label, present=True)
         return reads
@@ -436,6 +485,7 @@ async def walk_symbols(
     reads: Mapping[str, Read],
     *,
     everything: bool,
+    label: str = TRADES_LABEL,
 ) -> list[str]:
     """Walk the trades of this sync's symbols; the symbols walked. With `everything` (the
     first sync) every listed symbol; otherwise those both of whose assets the account has shown
@@ -451,19 +501,49 @@ async def walk_symbols(
         more = [s for s in trade_symbols(info, shown, everything=everything) if s not in walked]
         if not more:
             return walked
-        await walk_trades(ctx, client, TRADES_LABEL, more)
+        await walk_trades(ctx, client, label, more)
         walked += more
 
 
-async def _traded(ctx: SyncContext, symbols: list[str], first: bool) -> list[str]:
+async def walk_margin_trades(
+    ctx: SyncContext,
+    client: BinanceClient,
+    info: ApiValue,
+    reads: Mapping[str, Read],
+    *,
+    everything: bool,
+) -> list[TradeWalk]:
+    """Walk the margin trades of this sync's symbols; the walks made. Cross margin's only when
+    this sync read the cross margin account (an account not created is not read), by the
+    symbol rules of Spot's (`walk_symbols`); every isolated pair the account has, as isolated
+    trades."""
+    walked: list[TradeWalk] = []
+    if CROSS_MARGIN_LABEL in reads:
+        symbols = await walk_symbols(
+            ctx, client, info, reads, everything=everything, label=MARGIN_TRADES
+        )
+        walked.append(TradeWalk(MARGIN_TRADES, tuple(symbols)))
+    pairs = sorted(await isolated_symbols(ctx))
+    if pairs:
+        await walk_trades(ctx, client, MARGIN_TRADES, pairs, isolated=True)
+        walked.append(TradeWalk(MARGIN_TRADES, tuple(pairs), isolated=True))
+    return walked
+
+
+async def _traded(ctx: SyncContext, trade: TradeWalk, first: bool) -> TradeWalk:
     """The symbols whose trades a read made again is checked against: those of a later sync;
     on the first sync (every listed symbol) only those with a trade, or each round would ask
     them all again."""
     if not first:
-        return symbols
+        return trade
     cursors = (await fresh_config(ctx)).get(CURSORS_KEY)
     known = cursors if isinstance(cursors, dict) else {}
-    return [symbol for symbol in symbols if f"{TRADES_LABEL}:{symbol}" in known]
+    kept = tuple(
+        symbol
+        for symbol in trade.symbols
+        if trade_cursor_key(trade.label, symbol, isolated=trade.isolated) in known
+    )
+    return TradeWalk(trade.label, kept, trade.isolated)
 
 
 async def _report(

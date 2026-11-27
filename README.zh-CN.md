@@ -727,7 +727,7 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 已依据 Binance 的文档实现，尚未用真实账户核对：
 
 - 钱包之间的划转（`universal-transfer`）：每笔是两个钱包账户上的一笔交易，从不作为在途转账。
-  与逐仓杠杆之间的划转要等读取逐仓杠杆之后才会拉取。
+  与逐仓杠杆之间的划转按账户的每个逐仓交易对分别拉取。
 - 小额资产兑换成 BNB（`dust`），手续费单独记为费用
 - Cloud Mining 的付款和退款（`cloud-mining`），记在 Spot 上
 - travel rule 的充值和提现历史（`travel-deposits`、`travel-withdrawals`）：保存下来并关联到它们
@@ -756,10 +756,17 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
   按进行中的借款订单报告。借款把币转入 Spot，记为对应的负债；还款再转回；VIP 还款中的利息记为
   费用。Binance 不列出活期借款的利息，所以两次报告之间没有任何记录能解释的负债增长记为它的利息。
   强制平仓从 Earn 卖出抵押物。借款自身的记录从不移动抵押物：抵押物留在 Binance 报告它所在的钱包里。
+- 杠杆，全仓和逐仓（`margin-account`、`margin-isolated-account`、`margin-trades`、
+  `margin-transfers`、`margin-borrow-repay`、`margin-interest`、`margin-capital-flow`、
+  `margin-liquidations`、`margin-small-liability`、`margin-liquidation-loan`、
+  `margin-liquidation-loan-repays`）：“Binance Cross Margin”和“Binance Isolated Margin”持有每种资产的
+  净数量，所以借入的资产是负持仓（Isolated Margin 按资产汇总它的各个交易对）。杠杆成交按现货成交
+  记在它的钱包上；利息和强平手续费记为费用；钱包之间划转历史也列出的杠杆划转只入账一次。借款和
+  还款不改变净数量，只保存；资金流水、强制平仓、小额负债兑换和强平借款也只保存。Binance 说尚未开通
+  的账户会跳过，和账户没有的产品一样。
 
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- 杠杆，全仓和逐仓
 - USD-M 和 COIN-M 合约
 - 期权
 - 法币订单、银行卡支付、P2P、Pay 和返佣
