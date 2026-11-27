@@ -418,12 +418,14 @@ async def test_identifier_with_references_refuses_an_account(
 ) -> None:
     invest, isa = await _payee_accounts(make_account)
     record = await run(register_references, PAYEE, [(invest.id, "REF-A")])
-    command = assign_identifier if register == "assign_identifier" else ensure_identifier
-
-    with pytest.raises(FinanceValidationError, match="references") as refused:
-        await run(command, isa.id, "uk_bank_account", PAYEE)
-
-    assert "87654321" not in str(refused.value)
+    if register == "assign_identifier":
+        # The owner registering it is refused.
+        with pytest.raises(FinanceValidationError, match="references") as refused:
+            await run(assign_identifier, isa.id, "uk_bank_account", PAYEE)
+        assert "87654321" not in str(refused.value)
+    else:
+        # A connector's sync leaves it, as it leaves one on another account.
+        assert await run(ensure_identifier, isa.id, "uk_bank_account", PAYEE) is False
     [row] = await list_identifiers(session)
     assert (row.id, row.account_id, row.references) == (record.id, None, ((invest.id, "REF-A"),))
     assert await _count_events(session, "finance.account_identifier.assigned") == 0

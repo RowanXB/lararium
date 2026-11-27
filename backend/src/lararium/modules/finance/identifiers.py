@@ -363,8 +363,8 @@ def _carries_references(identifier_id: UUID) -> ColumnElement[bool]:
 
 
 async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) -> bool:
-    """Assign an unassigned (or dismissed) row; False when it is assigned already, and
-    refused when it carries references."""
+    """Assign an unassigned (or dismissed) row; False when it didn't: it is assigned
+    already, or it carries references."""
     i = models.AccountIdentifier
     # Locked first, as register_references locks it: the update below then reads, in a
     # snapshot of its own, the references a registration that held the row committed. (A
@@ -378,8 +378,6 @@ async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) ->
         .returning(i.id)
     )
     if assigned is None:
-        if await ctx.session.scalar(select(_carries_references(identifier_id))):
-            raise FinanceValidationError(_CARRIES_REFERENCES)
         return False
     _publish(ctx, "finance.account_identifier.assigned", await _get(ctx.session, identifier_id))
     return True
@@ -394,6 +392,8 @@ async def assign_identifier(
     await _require_can_carry_identifiers(ctx.session, account_id)
     identifier_id = await _get_or_create(ctx, kind, normalized)
     if not await _assign(ctx, identifier_id, account_id):
+        if await ctx.session.scalar(select(_carries_references(identifier_id))):
+            raise FinanceValidationError(_CARRIES_REFERENCES)
         holder = await identifier_account(ctx.session, identifier_id)
         if holder != account_id:
             assert holder is not None  # rows are never deleted, and _assign saw it assigned
@@ -408,7 +408,8 @@ async def ensure_identifier(
 
     For a connector registering its own accounts on every sync. An identifier on another
     account stays there (the owner's registration wins); a dismissed one is assigned, as a
-    connector's own account is a fact.
+    connector's own account is a fact. One carrying references (a shared payee's) is left
+    as it is too.
     """
     _require_single_holder(kind)
     normalized = normalize_identifier(kind, value)
@@ -426,7 +427,15 @@ async def ensure_identifier(
             holder,
         )
         return False
-    return await _assign(ctx, identifier_id, account_id)
+    if await _assign(ctx, identifier_id, account_id):
+        return True
+    if await ctx.session.scalar(select(_carries_references(identifier_id))):
+        logger.warning(
+            "identifier %s of account %s carries references; left there",
+            identifier_id,
+            account_id,
+        )
+    return False
 
 
 async def unassign_identifier(ctx: CommandContext, identifier_id: UUID) -> IdentifierRecord:
