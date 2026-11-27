@@ -210,7 +210,7 @@ Format `csv`, `recommended`, with this profile (staged for the owner's review, a
 - `Notes` is stored whole in `memo`. Its `Transaction ID` is not split out: the import has no field for it and nothing matches on it. *(Carried over from the other session as its call. If the owner wants it as its own field, that is an `extract` pattern plus a new extract field.)*
 - This profile is on the Cash ISA type only. An Invest or Stocks ISA export has the same header and is read by the Trading 212 connector's upload, as today; each goes to the right place because the upload starts from the account.
 - The time is to the second, but per the owner's rule it is display only. Matching is by booking date, as the registry tiers do.
-- Each export must start on the account's first day or on a day an earlier upload covers (imports already gate matching on the days they list in full). The README's Trading 212 section says so.
+- Each export must start on the account's first day or on a day an earlier upload covers (imports already gate matching on the days they list in full). The README's Trading 212 section says so. The days an export lists in full are read from its file name (§8.3).
 
 ## 8. Bank top-ups to a payee account shared by several own accounts
 
@@ -243,6 +243,16 @@ Nothing else about the tier changes: equal amounts, opposite signs, the date win
 A deposit that was a card payment is not caught by this. Its Monzo side names a card merchant, not a bank account, so it is identified by no reference and only `card_tier` can pair it, as today.
 
 Effect on today's data: an identified bank transfer to a Trading 212 Invest or Stocks ISA account now pairs with that account's same-amount deposit in the window. No other account type lists a funding method, so no other pairing changes. *(My call: the transaction's stored `bank_transfer` flag is left as the source gave it; the type is read at pairing time, so a type's configuration can be corrected without rewriting records.)*
+
+### 8.3 Which days a Cash ISA upload covers (added 2026-11-27, after review)
+
+A review of PR #46 found the Cash ISA's first deposit counted twice. A History CSV states no period, so an export lists in full only the days strictly between its first and last rows (M2 Decision 16). A one-row file lists none. The Monzo transfer that §8.1 identifies is then refused its one-sided pair by the import-coverage gate (M4 §5.8): its window starts the day before the deposit, which no upload lists. So the transfer opens `inferred`, with a placeholder on the Cash ISA beside the imported row.
+
+Three changes, decided by the owner 2026-11-27:
+
+1. **The period from the file name.** Trading 212 names an export `from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_…csv`, with the range the owner chose. A CSV profile may state a pattern for its file name (named groups `start` and `end`, ISO dates); the Cash ISA profile does. When the name matches, the upload's period is that range. It lists every day in full except its last: a file never starts partway through a day (owner, 2026-11-21), and an export may be taken partway through its last day (owner, 2026-11-27). An export's first day without a stated period stays listed in part, as today: that caution is about Revolut's CSV and is unproven either way. A name that does not match, a range whose start is after its end, or rows outside the range: no period, and a warning on the batch saying the file name gives none. The upload is read as today.
+2. **An account's own opening date.** A batch that lists in full from its account's opening already speaks for all time before it, but only a statement's `account_opened_on` says when that is. The account's `opened_on` now says so too: a batch whose first full day is on or before its account's `opened_on` speaks for all time before. The Add account upload form asks for an optional opening date when it creates an account. With it, a deposit on the day the account opened pairs.
+3. **No placeholder beside a row that may be the counterpart.** When the coverage gate is all that keeps an identified record from a counterpart candidate on a manual account, the transfer opens with no placeholder and a review reason, `not_listed_in_full`. A placeholder there would count the money twice if the candidate is the real row. When a later upload lists the days, the pair forms by itself. The owner can confirm the pair by hand before that. This applies to every manual account: it replaces M4 §5.8's documented cost (the account off by the amount until the next statement) with a review item.
 
 ## 9. Moves between the owner's Trading 212 accounts
 
