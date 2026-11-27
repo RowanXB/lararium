@@ -370,7 +370,13 @@ async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) ->
     # Locked first, as register_references locks it: the update below then reads, in a
     # snapshot of its own, the references a registration that held the row committed. (A
     # condition alone would be read in the snapshot taken before it waited on the row.)
-    await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
+    # FOR NO KEY UPDATE (key_share), as each registration locks it: it serialises them
+    # still, but not a transaction inserted naming the row (its foreign key check takes a
+    # KEY SHARE lock), which FOR UPDATE would block, or deadlock with as a registration
+    # rematches transfers.
+    await ctx.session.execute(
+        select(i.id).where(i.id == identifier_id).with_for_update(key_share=True)
+    )
     # Conditional update, so a concurrent assignment elsewhere can't be overwritten.
     assigned = await ctx.session.scalar(
         update(i)
@@ -515,7 +521,9 @@ async def register_card_merchant(
     identifier_id = await _get_or_create(ctx, "card_merchant", normalized)
     i, h = models.AccountIdentifier, models.AccountIdentifierHolder
     # Serialised on the row, so two registrations can't interleave their holder sets.
-    await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
+    await ctx.session.execute(
+        select(i.id).where(i.id == identifier_id).with_for_update(key_share=True)
+    )
     before = await _get(ctx.session, identifier_id)
     added = [account_id for account_id in wanted if account_id not in before.holders]
     for account_id in added:
@@ -597,7 +605,9 @@ async def register_references(
     i, r = models.AccountIdentifier, models.AccountIdentifierReference
     # Serialised on the row, so two registrations can't interleave their reference sets,
     # and an assignment (_assign, which locks it too) can't slip in between.
-    await ctx.session.execute(select(i.id).where(i.id == identifier_id).with_for_update())
+    await ctx.session.execute(
+        select(i.id).where(i.id == identifier_id).with_for_update(key_share=True)
+    )
     before = await _get(ctx.session, identifier_id)
     if before.account_id is not None:
         raise FinanceValidationError(

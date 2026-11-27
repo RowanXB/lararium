@@ -29,6 +29,7 @@ from lararium.modules.finance.identifiers import (
     named_account,
     normalize_identifier,
     normalize_reference,
+    register_card_merchant,
     register_references,
     unassign_identifier,
 )
@@ -558,6 +559,71 @@ async def test_concurrent_references_and_account_one_wins(
             )
             await conn.execute(
                 text("delete from finance.account_identifiers where value = :v"), {"v": value}
+            )
+            await conn.execute(
+                text("delete from finance.accounts where id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(
+                text("delete from core.audit_log where command = :c"), {"c": command}
+            )
+        await engine.dispose()
+        await owner.dispose()
+
+
+@pytest.mark.parametrize("registration", ["assign", "references", "card_merchant"])
+async def test_a_registration_s_row_lock_lets_a_transaction_name_the_identifier(
+    backend_url: str, owner_url: str, migrated: None, registration: str
+) -> None:
+    """A registration locks its identifier's row FOR NO KEY UPDATE, not FOR UPDATE: a
+    transaction inserted meanwhile naming the identifier (its foreign key check takes a KEY
+    SHARE lock on the row) is not blocked, so a sync posting it doesn't wait on, or
+    deadlock with, a registration that rematches transfers. Checked with the lock the
+    foreign key check takes, under a lock timeout, while the registration is uncommitted."""
+    kind, value = (
+        ("card_merchant", "merch_LOCKTEST1")
+        if registration == "card_merchant"
+        else ("uk_bank_account", "998877:55667788")
+    )
+    command = "test.registration_lock"
+    engine, owner = create_engine(backend_url), create_engine(owner_url)
+    sessions = make_sessionmaker(engine)
+    actor = Actor("user", "test")
+    ids: list[uuid.UUID] = []
+    try:
+        async with sessions() as s, command_context(s, actor, command, {}) as ctx:
+            account = await create_account(
+                ctx, name="Lock Test", ledger_type="asset", subtype="bank", balance_mode="hybrid"
+            )
+            identifier_id = await get_or_create_identifier(ctx, kind, value)
+        ids += [account.id, identifier_id]
+
+        async with sessions() as s, command_context(s, actor, command, {}) as ctx:
+            if registration == "assign":
+                await assign_identifier(ctx, account.id, kind, value)
+            elif registration == "references":
+                await register_references(ctx, value, [(account.id, "REF-A")])
+            else:
+                await register_card_merchant(ctx, value, [account.id])
+            # The registration holds the row, uncommitted, while a sync names it.
+            async with engine.connect() as sync:
+                await sync.execute(text("set local lock_timeout = '2s'"))
+                await sync.execute(
+                    text("select id from finance.account_identifiers where id = :id for key share"),
+                    {"id": identifier_id},
+                )
+                await sync.rollback()
+    finally:
+        async with owner.begin() as conn:
+            for table in ("account_identifier_references", "account_identifier_holders"):
+                await conn.execute(
+                    text(f"delete from finance.{table} where identifier_id = any(:ids)"),
+                    {"ids": ids},
+                )
+            await conn.execute(
+                text("delete from core.events where subject_id = any(:ids)"), {"ids": ids}
+            )
+            await conn.execute(
+                text("delete from finance.account_identifiers where id = any(:ids)"), {"ids": ids}
             )
             await conn.execute(
                 text("delete from finance.accounts where id = any(:ids)"), {"ids": ids}
