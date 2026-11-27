@@ -30,9 +30,12 @@ Each cash event is one connector transaction, `activity:<row key>`:
 - any other Type is flagged by name and posts nothing.
 A cancelled pair (rows taken by time, then row id; one whose cash is no number is in none)
 posts both rows as above but against In transit, which it leaves level, the cancelled one
-first and the other naming it (`cancels_transaction_id`); a run that brings either row
-re-posts the other from its stored row. When the owner has voided either, each posts as in no
-pair (cancelled-withdrawal design §4.1, §4.3).
+first and the other naming it (`cancels_transaction_id`). The pairs are found over every
+stored row, so a statement can make or end a pair of rows another brought: a run also
+re-posts each stored row whose transaction disagrees with its pairing (links that go or move
+cleared first), so the ledger does not depend on the order statements are uploaded in. When
+the owner has voided either side, each posts as in no pair (cancelled-withdrawal design §4.1,
+§4.3).
 The Types the owner's statements have not shown (all but transfers, conversion fees,
 withdrawals, withdrawal fees, opens and closes) are provisional: Account Summary's names.
 
@@ -63,7 +66,6 @@ from sqlalchemy import select, text
 from lararium.core import models as core_models
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
-from lararium.modules.finance import models
 from lararium.modules.finance.connector_items import SHOWN_NAME
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro import accounts
@@ -113,6 +115,8 @@ WITHDRAW_FEE_CANCELLED = "Withdraw Fee Cancelled"
 # How far from its refund a "Withdraw Fee Cancelled" row may be: eToro may write one operation
 # across a second's boundary.
 _REFUND_MARGIN = timedelta(seconds=1)
+# The Types a cancelled pair's rows are of.
+_PAIRED = (WITHDRAW_REQUEST, WITHDRAW_REQUEST_CANCELLED, WITHDRAW_FEE)
 DIVIDEND = "dividend"
 UNATTACHED_FEE = "a conversion fee row names no transfer"
 NO_MONEY_ACCOUNT = "a statement transfer names no single eToro Money account"
@@ -766,18 +770,39 @@ async def _unassigned(
     return await run.post(key, _when(row), kind.description, postings)
 
 
-async def _kept_void(run: Run, key: str) -> bool:
-    """Whether the connection's transaction under the key is one the owner voided: posting
-    leaves it void (upsert_connector_transaction)."""
-    t = models.Transaction
-    found = (
-        await run.session.execute(
-            select(t.voided_by).where(
-                t.connection_id == run.connection_id, t.external_id == key, t.status == "void"
-            )
+@dataclass(frozen=True)
+class _Posted:
+    """What the connection's transaction under a row's key is now."""
+
+    live: bool
+    kept_void: bool  # void, and posting leaves it so: the owner voided it
+    cancels: str | None  # the external id of the transaction it cancels
+    in_transit: bool  # it posts on In transit
+
+
+async def _posted(run: Run, keys: Sequence[str]) -> dict[str, _Posted]:
+    """The connection's transactions under the keys, by key."""
+    in_transit = await run.system_account("in_transit")
+    rows = await run.session.execute(
+        text(
+            "select t.external_id, t.status, t.voided_by, c.external_id as cancels,"
+            " exists(select 1 from finance.postings p where p.transaction_id = t.id"
+            " and p.account_id = :i) as in_transit"
+            " from finance.transactions t"
+            " left join finance.transactions c on c.id = t.cancels_transaction_id"
+            " where t.connection_id = :c and t.external_id = any(:k)"
+        ),
+        {"c": run.connection_id, "k": list(keys), "i": in_transit},
+    )
+    return {
+        row.external_id: _Posted(
+            row.status != "void",
+            row.status == "void" and row.voided_by != "connector",
+            row.cancels,
+            row.in_transit,
         )
-    ).one_or_none()
-    return found is not None and found.voided_by != "connector"
+        for row in rows
+    }
 
 
 async def _alone(run: Run, statement: Statement, row: Row, currency: str) -> UUID | None:
@@ -813,15 +838,61 @@ async def _pair(
     run: Run, statement: Statement, cancelled: Row, cancelling: Row, currency: str
 ) -> dict[str, UUID | None]:
     """Post a cancelled pair (module doc), by row key: the cancelled row first, the
-    cancelling one naming its transaction; each as in no pair when either is not live (the
-    owner voided it, before or meanwhile), so a void side ends the pair."""
+    cancelling one naming its transaction; each as in no pair when either is not live after
+    (the owner voided it meanwhile: one voided before is in no pair, _pairs)."""
     keys = [f"{ACTIVITY}{cancelled.key}", f"{ACTIVITY}{cancelling.key}"]
-    if not [key for key in keys if await _kept_void(run, key)]:
-        first = await _in_transit(run, cancelled, keys[0], currency, None)
-        second = await _in_transit(run, cancelling, keys[1], currency, first)
-        if None not in [await run.live(key) for key in keys]:
-            return {cancelled.key: first, cancelling.key: second}
+    first = await _in_transit(run, cancelled, keys[0], currency, None)
+    second = await _in_transit(run, cancelling, keys[1], currency, first)
+    if None not in [await run.live(key) for key in keys]:
+        return {cancelled.key: first, cancelling.key: second}
     return {row.key: await _alone(run, statement, row, currency) for row in (cancelled, cancelling)}
+
+
+async def _pairs(
+    run: Run, statement: Statement, currency: str
+) -> tuple[dict[str, tuple[str, str]], list[Row]]:
+    """Each row of a cancelled pair → (the cancelled row's key, the cancelling row's), a pair
+    with a side the owner voided left out; and the stored rows of the pairs' Types whose
+    transaction says otherwise (in a pair or not, or naming another): a run re-posts those
+    too, so the ledger is the same whatever order the statements came in. Before it returns,
+    each of those whose link goes or moves is posted as in no pair, so no transaction
+    names a target another is about to."""
+    rows = [r for r in statement.stored if r.sheet == ACCOUNT_ACTIVITY and r.type in _PAIRED]
+    posted = await _posted(run, [f"{ACTIVITY}{r.key}" for r in rows])
+    pairs: dict[str, tuple[str, str]] = {}
+    for cancelling, cancelled in _cancellations(statement.stored).items():
+        sides = [posted.get(f"{ACTIVITY}{key}") for key in (cancelled, cancelling)]
+        if not any(side is not None and side.kept_void for side in sides):
+            pairs[cancelling] = pairs[cancelled] = (cancelled, cancelling)
+    in_transit = await run.system_account("in_transit")
+    stale: list[Row] = []
+    for row in sorted(rows, key=lambda r: (_when(r), r.id)):
+        key = f"{ACTIVITY}{row.key}"
+        found = posted.get(key)
+        if found is not None and found.kept_void:
+            continue
+        pair = pairs.get(row.key)
+        if pair is not None:
+            wanted = f"{ACTIVITY}{pair[0]}" if pair[1] == row.key else None
+            if found is None or not found.live or not found.in_transit or found.cancels != wanted:
+                stale.append(row)
+        elif found is not None and found.live:
+            # Alone, a bank transfer is on In transit only as a transfer's leg (transfer_contra).
+            wanted = None
+            if found.cancels is not None or (
+                found.in_transit
+                and (
+                    row.type not in _BANK or await run.contra(key, run.trading, None) != in_transit
+                )
+            ):
+                stale.append(row)
+        else:
+            continue
+        if found is not None and found.cancels is not None and found.cancels != wanted:
+            transaction_id = await _alone(run, statement, row, currency)
+            if pair is None:
+                statement.links[row.key] = transaction_id
+    return pairs, stale
 
 
 async def cash_events(run: Run, statement: Statement) -> None:
@@ -834,10 +905,7 @@ async def cash_events(run: Run, statement: Statement) -> None:
     currency = run.account_currency
     links, unattached = _fee_links(statement.stored, currency)
     by_key = {row.key: row for row in statement.stored}
-    # Each row of a cancelled pair → (the cancelled row's key, the cancelling row's).
-    pairs: dict[str, tuple[str, str]] = {}
-    for cancelling, cancelled in _cancellations(statement.stored).items():
-        pairs[cancelling] = pairs[cancelled] = (cancelled, cancelling)
+    pairs, stale = await _pairs(run, statement, currency)
     for row in sorted(statement.of(ACCOUNT_ACTIVITY), key=lambda r: (_when(r), r.id)):
         if row.type in (OPEN_POSITION, POSITION_CLOSED):
             continue  # a trade: records.position
@@ -866,6 +934,15 @@ async def cash_events(run: Run, statement: Statement) -> None:
         if transaction_id is None:
             await run.void(key)
         statement.links[row.key] = transaction_id
+    # Stored rows the run did not bring whose transaction disagrees with their pairing.
+    for row in stale:
+        if row.key in statement.links:
+            continue
+        if (pair := pairs.get(row.key)) is not None:
+            cancelled, cancelling = (by_key[key] for key in pair)
+            statement.links |= await _pair(run, statement, cancelled, cancelling, currency)
+        else:
+            statement.links[row.key] = await _alone(run, statement, row, currency)
     await _leg_fees(run, statement, links, currency)
 
 

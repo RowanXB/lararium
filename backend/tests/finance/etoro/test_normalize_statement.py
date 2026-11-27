@@ -811,6 +811,53 @@ async def test_a_side_the_owner_voided_ends_the_pair(session, run, ledger) -> No
     assert (report.created, report.updated) == (0, 0)
 
 
+async def _in_two_statements(
+    session, ledger, first: list[dict[str, str]], second: list[dict[str, str]]
+) -> dict[str, tuple]:
+    """The ledger after uploading the two statements in turn, which is the one a single
+    statement of all their rows gives: replaying them together (as one run) changes nothing,
+    and regenerating the ledger from them in one run gives it again. The transfer invariant
+    holds without heal."""
+    await ledger.normalize(*BASE)
+    await ledger.upload(build_statement(summary(username=USERNAME), [transfer_in(), *first]))
+    await ledger.upload(build_statement(summary(username=USERNAME), second))
+    found = await _ledger(session, ledger)
+    assert await _violations(session) == []
+    replayed = await ledger.replay()
+    assert await _ledger(session, ledger) == found
+    assert replayed.updated == 0
+    await _delete_derived(session, ledger.connection)
+    await ledger.replay()
+    assert await _ledger(session, ledger) == found
+    return found
+
+
+def _activity_key(cells: dict[str, str]) -> str:
+    """The transaction key of one row, as the statement holding only it gives it."""
+    body = build_statement(summary(username=USERNAME), [cells])
+    return f"activity:{_key(body, cells['Type'])}"
+
+
+async def test_a_middle_statement_uploaded_last_moves_the_pair(session, ledger) -> None:
+    earlier, later = _withdrawal("05/10/2026 09:00:00"), _withdrawal("05/10/2026 10:00:00")
+    cancellation = _cancellation("05/10/2026 11:00:00")
+    found = await _in_two_statements(session, ledger, [earlier, cancellation], [later])
+    r1, r2, cancel = (_activity_key(cells) for cells in (earlier, later, cancellation))
+    assert (_against(found[r1]), found[r1][6]) == ("Unassigned", None)
+    assert (_against(found[r2]), found[r2][6]) == ("In transit", None)
+    assert (_against(found[cancel]), found[cancel][6]) == ("In transit", r2)
+
+
+async def test_an_earlier_cancellation_uploaded_last(session, ledger) -> None:
+    request = _withdrawal("05/10/2026 09:00:00")
+    earlier, later = _cancellation("05/10/2026 10:00:00"), _cancellation("05/10/2026 12:00:00")
+    found = await _in_two_statements(session, ledger, [request, later], [earlier])
+    r, c0, c = (_activity_key(cells) for cells in (request, earlier, later))
+    assert (_against(found[r]), found[r][6]) == ("In transit", None)
+    assert (_against(found[c0]), found[c0][6]) == ("In transit", r)
+    assert (_against(found[c]), found[c][6]) == ("Unassigned", None)
+
+
 async def test_dividend_with_withholding_tax(session, ledger) -> None:
     await ledger.normalize(*BASE, *TRADES)
     body = build_statement(
