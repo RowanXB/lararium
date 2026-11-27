@@ -610,9 +610,12 @@ until their `Action` is known.
   it is no suggestion and can't be dismissed. Lararium then goes through the whole history: a
   bank transfer to that payee pairs with the one deposit of the same amount in its window on
   any of the holder accounts that may be a bank transfer (one marked as such, or, on Trading
-  212 Invest, Stocks ISA and Cash ISA, one naming nobody). Until it pairs, the payment stays on
+  212 Invest, Stocks ISA and Cash ISA, one naming nobody; a Trading 212 dividend, fee,
+  interest payment or order fill is never one). It never pairs with a record on an account outside the
+  holders, even one naming your bank account. Until it pairs, the payment stays on
   Unassigned. When it can't pair (deposits on two of the holders fit, or the only one is
-  refused by the coverage check), no transfer is opened and nothing prompts you: the payment
+  refused by the coverage check, which asks it of every manual or imported holder: the real
+  deposit may be on any of them, hidden in its opening), no transfer is opened and nothing prompts you: the payment
   shows only on Unassigned, like an unpaired card payment, and a held payee is never settled
   before history or given a placeholder. Find such a payment on Unassigned and pair the right
   one by hand (`GET /api/v1/finance/transactions/{id}/pair-candidates`, then `POST
