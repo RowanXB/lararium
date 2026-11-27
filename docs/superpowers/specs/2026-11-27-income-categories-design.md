@@ -65,7 +65,7 @@ For the self-produced kinds, two ways were considered: writing `interest` into `
 
 `finance.transaction_owner_categories`: `source_kind` text, `source_ref` text (primary key together), `category` text not null, `decided_at` timestamptz, `decided_by` text. One row per event; clearing deletes the row.
 
-An owner category is free text, stored normalised so the same word typed twice is one category: trimmed, inner whitespace collapsed to `_`, lower-cased, 1 to 64 characters. This matches the source's style (`eating_out`), which `web/src/lib/category.ts` already turns into words.
+An owner category is free text, stored normalised so the same word typed twice is one category: trimmed, inner whitespace collapsed to `_`, lower-cased, 1 to 64 characters, and not `uncategorised`, which the Income report's filter uses for no category (§4.5). This matches the source's style (`eating_out`), which `web/src/lib/category.ts` already turns into words.
 
 Limits of the source reference, accepted as they are for transfer decisions (my call): an import's reference is its dedupe key, stable for the same file but not for the same event imported from another format after a rollback; and a transaction the ledger derives itself (a transfer's settlement) is referenced by its id and is re-created, so a mark on one can be orphaned. Such entries can be marked and are not protected.
 
@@ -90,7 +90,7 @@ Only what each source's data states; nothing is guessed from free text.
 | Trading 212 | `INTEREST_ON_FREE_CASH` → `interest`; `LENDING_INTEREST` → `share_lending`; a dividend record → `dividend` |
 | eToro | Account Activity types `interest`, `interest payment` → `interest`; `dividend` → `dividend`; `stocks lending` → `share_lending` |
 | IBKR | cash transactions by their `type`. The builder reads the Flex Query reference for the full list of types and maps the dividend and interest-received types; a type whose meaning the reference leaves unclear is left unmarked |
-| Binance | a Simple Earn reward posted on Earn (`earn-flexible-rewards`) → `reward`; an asset dividend (`assetDividend`) → `reward`. In the owner's data every asset dividend is the payout of a flexible Earn reward (`enInfo` "flexible", 398 of 398); Binance uses the same endpoint for airdrops and other distributions, which are free coins too, so they get the same kind and the source's `enInfo` stays on its typed row. The Binance products of the draft PR #49 that post rewards (locked Earn, staking, on-chain yields) set `reward` when that work lands |
+| Binance | a Simple Earn reward posted on Earn (`earn-flexible-rewards`) → `reward`; an asset dividend (`assetDividend`) → `reward`. In the owner's data every asset dividend is the payout of a flexible Earn reward (`enInfo` "flexible", every one); Binance uses the same endpoint for airdrops and other distributions, which are free coins too, so they get the same kind and the source's `enInfo` stays on its typed row. The Binance products of the draft PR #49 that post rewards (locked Earn, staking, on-chain yields) set `reward` when that work lands |
 | Monzo | none (Monzo states no such type) |
 
 The kind is set whatever the amount's sign (a dividend's reversal is still a dividend record); whether a flow is income stays the report's rule (a positive flow). Taxes withheld and fees are not income kinds.
