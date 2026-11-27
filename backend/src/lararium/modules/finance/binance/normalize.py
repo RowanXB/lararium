@@ -147,12 +147,16 @@ async def _apply_report(run: Run, record: RawRecord) -> None:
     started = content["read_from_ms"]
     assert isinstance(started, int)
     name = structured.RECORDS[label]
+    read: dict[str, object] = {
+        "connection_id": run.connection.id,
+        "snapshot_at": tables.moment(started),
+    }
+    root = layout.layout(label)[0]
     for row in parse(label, content["body"]).rows:
         ids = [tables.key_part(label, row, field) for field in ENDPOINTS[label].id_fields]
-        typed_key: dict[str, object] = {
-            "connection_id": run.connection.id,
-            "snapshot_at": tables.moment(started),
-        }
+        # The row's own key in its report table: the read and the row's id fields.
+        values = tables.columns_for(label, row)
+        typed_key = {column: read.get(column, values.get(column)) for column in root.key}
         run.current = Current(label, record, ":".join([name, *ids]), typed_key)
         await POSITION_HANDLERS[label](run, row)
     run.current = None

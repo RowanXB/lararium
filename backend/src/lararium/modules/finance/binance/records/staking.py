@@ -204,7 +204,9 @@ async def _arrive(
     at: datetime,
     description: str,
 ) -> None:
-    """What a redemption bought leaves Pending redemptions for Spot when it arrives."""
+    """What a redemption bought leaves Pending redemptions for Spot when it arrives: a move
+    between two of the connection's accounts, with no cost of its own, as Phase A's moves
+    between wallets; the received side's cost sits on its Pending redemptions posting."""
     await post(
         run,
         key,

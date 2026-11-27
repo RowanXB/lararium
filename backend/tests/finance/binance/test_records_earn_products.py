@@ -11,12 +11,19 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from lararium.modules.finance.binance import normalize as normalize_module
+from lararium.modules.finance.binance.balances import Read, store_reports
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
-from lararium.modules.finance.binance.fetch import BALANCE_LABELS, HISTORY_LABELS, PHASE_B_BUILT
-from lararium.modules.finance.binance.records import unit_cost
+from lararium.modules.finance.binance.fetch import (
+    BALANCE_LABELS,
+    HISTORY_LABELS,
+    PHASE_B_BUILT,
+    to_json,
+)
+from lararium.modules.finance.binance.records import Run, unit_cost
 from lararium.modules.finance.transfers import find_transfer_violations
 
-from .fixtures import BASE_TIME_MS, DAY_MS, HOUR_MS, FakeBinance, build_row
+from .fixtures import BASE_TIME_MS, DAY_MS, HOUR_MS, FakeBinance, build_response, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
@@ -311,6 +318,27 @@ async def test_reward_without_a_dividend_accrues_on_its_product(session, run, la
     await assert_balanced_and_quiet(session, connection.id)
 
 
+@pytest.mark.parametrize("label", ["earn-locked-rewards", "soft-staking-rewards"])
+async def test_dividend_before_its_reward_gives_the_same_ledger(session, run, label: str) -> None:
+    coin, _ = REWARDS[label]
+    reward = _reward_row(label, coin, "0.7", T)
+    dividend = build_row("dividends", asset=coin, amount="0.7", direction=1, divTime=T - HOUR_MS)
+    reward_first = await binance_connection(run)
+    await _ingest_reward(session, reward_first.id, label, reward)
+    await run_normalize(session, reward_first.id)
+    await normalize_rows(session, reward_first.id, ("dividends", [dividend]))
+    dividend_first = await binance_connection(run)
+    await normalize_rows(session, dividend_first.id, ("dividends", [dividend]))
+    await _ingest_reward(session, dividend_first.id, label, reward)
+    await run_normalize(session, dividend_first.id)
+
+    assert await keys(session, dividend_first.id) == [f"dividend:{dividend['id']}"]
+    assert await ledger(session, dividend_first.id) == await ledger(session, reward_first.id)
+    [row] = await typed(session, _table(label), dividend_first.id)
+    assert (row.dividend_id, row.transaction_id) == (str(dividend["id"]), None)
+    await assert_balanced_and_quiet(session, dividend_first.id)
+
+
 async def test_boost_distribution_is_typed_only(session, run) -> None:
     # A DISTRIBUTE row is a reward handed out to be claimed; only its claim (CLAIM) posts.
     connection = await binance_connection(run)
@@ -356,6 +384,7 @@ async def test_flexible_collateral_is_typed_only(session, run) -> None:
 
     assert await keys(session, connection.id) == []
     assert len(await typed(session, "binance_earn_flexible_collateral", connection.id)) == 1
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 # Yield tokens and staking: swaps on Spot.
@@ -461,6 +490,7 @@ async def test_unfinished_swap_is_not_posted(session, run, label: str, status: s
 
     assert await keys(session, connection.id) == []
     assert len(await typed(session, _table(label), connection.id)) == 1
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 async def test_redemption_fee_is_taken_from_what_it_received(session, run) -> None:
@@ -538,6 +568,7 @@ async def test_redemption_that_arrived_at_once_is_one_swap(session, run) -> None
 
     assert await keys(session, connection.id) == [_swap_key("eth-redemptions", "WBETH", "1.9")]
     assert PENDING not in {name for name, _ in await holdings(session, connection.id)}
+    await assert_balanced_and_quiet(session, connection.id)
 
 
 # Dual investment and discount buy: from the position rows of each report.
@@ -556,7 +587,7 @@ def _dci(seq: int = 0, **fields: Any) -> dict:
     return build_row("dci-positions", seq, **(values | fields))
 
 
-async def _settlement_time(session, key: str):
+async def _occurred_at(session, key: str):
     return await session.scalar(
         text("select occurred_at from finance.transactions where external_id = :e"), {"e": key}
     )
@@ -583,7 +614,7 @@ async def test_dual_investment_settlement_leaves_earn(session, run) -> None:
         ("Binance Spot", "STB", Decimal(-100)),
         ("Binance Earn", "STB", Decimal(100)),
     ]
-    assert await _settlement_time(session, subscription) == at(T)
+    assert await _occurred_at(session, subscription) == at(T)
 
     # Read again in a later report: nothing is written.
     await ingest_report(session, connection.id, "dci-positions", [position], at_ms=T + 2 * HOUR_MS)
@@ -606,7 +637,7 @@ async def test_dual_investment_settlement_leaves_earn(session, run) -> None:
         ("Binance Earn", "STB", Decimal(-100)),
         ("Unassigned", "STB", Decimal(100)),
     ]
-    assert await _settlement_time(session, f"{subscription}:settlement") == at(T + 3 * DAY_MS)
+    assert await _occurred_at(session, f"{subscription}:settlement") == at(T + 3 * DAY_MS)
     back = f"dci_position:{refunded['id']}"
     assert plain(await postings(session, f"{back}:settlement")) == [
         ("Binance Earn", "STB", Decimal(-100)),
@@ -639,7 +670,7 @@ async def test_settlement_seen_before_its_date_is_dated_when_seen(session, run) 
     await run_normalize(session, connection.id)
 
     key = f"dci_position:{early['id']}:settlement"
-    assert await _settlement_time(session, key) == at(T + DAY_MS)
+    assert await _occurred_at(session, key) == at(T + DAY_MS)
 
 
 def _discount(seq: int = 0, **fields: Any) -> dict:
@@ -666,7 +697,7 @@ async def test_discount_buy_subscribes_its_duration_before_settling(session, run
         ("Binance Earn", "STB", Decimal(50)),
     ]
     # No subscription time is documented: the settlement date less the duration in days.
-    assert await _settlement_time(session, key) == at(T)
+    assert await _occurred_at(session, key) == at(T)
 
     settled = {**position, "purchaseStatus": "SETTLED"}
     await ingest_report(
@@ -677,7 +708,7 @@ async def test_discount_buy_subscribes_its_duration_before_settling(session, run
         ("Binance Earn", "STB", Decimal(-50)),
         ("Unassigned", "STB", Decimal(50)),
     ]
-    assert await _settlement_time(session, f"{key}:settlement") == at(T + 7 * DAY_MS)
+    assert await _occurred_at(session, f"{key}:settlement") == at(T + 7 * DAY_MS)
     await assert_balanced_and_quiet(session, connection.id)
 
 
@@ -817,3 +848,29 @@ async def test_spot_and_earn_reconcile_with_the_earn_products(
     assert any(k.startswith("dci_position:") for k in live)
     assert not [k for k in live if k.startswith("opening:redeeming")]
     assert await find_transfer_violations(session) == []
+
+
+async def test_a_report_row_is_its_own_typed_row(session, run, monkeypatch) -> None:
+    # A position handler's `run.typed` reaches only the row it is applying, not the read's
+    # other rows.
+    connection = await binance_connection(run)
+    first, second = _dci(0), _dci(1)
+    moment = at(T + HOUR_MS)
+    body = to_json(build_response("dci-positions", [first, second]))
+    read = Read("dci-positions", body, moment, moment)
+    await run(store_reports, connection, {"dci-positions": read})
+    await ingest_report(session, connection.id, "dci-positions", [first, second], at_ms=T + HOUR_MS)
+
+    async def mark(run_: Run, row: dict) -> None:
+        assert run_.record.typed_key["id"] == row["id"]
+        if row["id"] == first["id"]:
+            await run_.typed(apr=Decimal(9))
+
+    monkeypatch.setitem(normalize_module.POSITION_HANDLERS, "dci-positions", mark)
+    await run_normalize(session, connection.id)
+
+    rows = await typed(session, "binance_dci_positions", connection.id)
+    assert {(r.id, r.apr) for r in rows} == {
+        (first["id"], Decimal(9)),
+        (second["id"], Decimal(second["apr"])),
+    }
