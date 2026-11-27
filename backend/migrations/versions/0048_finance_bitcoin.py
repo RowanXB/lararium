@@ -6,8 +6,8 @@ scheme (Bitcoin wallet design).
 `chain` / `tx_hash` / `chain_address` let the transfer engine pair an on-chain movement with an
 exchange's withdrawal or deposit without reading a connector's tables; Binance fills them too.
 
-Revision ID: 0047
-Revises: 0046
+Revision ID: 0048
+Revises: 0047
 Create Date: 2026-11-27
 """
 
@@ -15,12 +15,12 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0047"
-down_revision: str | None = "0046"
+revision: str = "0048"
+down_revision: str | None = "0047"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# The list as 0046 leaves it (0041 added `binance_asset`); the downgrade restores exactly this.
+# The list as 0047 leaves it (0041 added `binance_asset`); the downgrade restores exactly this.
 _SCHEMES = """'iso4217', 'isin', 'figi', 'ticker_mic', 'ibkr_conid', 'etoro_id',
           'chain_contract', 'coingecko', 'trading212_ticker', 'binance_asset'"""
 
@@ -130,6 +130,16 @@ UPGRADE = [
       WHERE pending
     """,
     """
+    CREATE INDEX bitcoin_transactions_fee_transaction_idx
+      ON finance.bitcoin_transactions (fee_transaction_id)
+      WHERE fee_transaction_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX bitcoin_transactions_net_transaction_idx
+      ON finance.bitcoin_transactions (net_transaction_id)
+      WHERE net_transaction_id IS NOT NULL
+    """,
+    """
     CREATE TABLE finance.bitcoin_inputs (
       connection_id uuid NOT NULL REFERENCES core.connections (id) ON DELETE CASCADE,
       txid text NOT NULL,
@@ -167,9 +177,17 @@ UPGRADE = [
       PRIMARY KEY (connection_id, txid, vout)
     )
     """,
+    """
+    CREATE INDEX bitcoin_outputs_transaction_idx
+      ON finance.bitcoin_outputs (transaction_id)
+      WHERE transaction_id IS NOT NULL
+    """,
 ]
 
 DOWNGRADE = [
+    "DROP INDEX finance.bitcoin_outputs_transaction_idx",
+    "DROP INDEX finance.bitcoin_transactions_net_transaction_idx",
+    "DROP INDEX finance.bitcoin_transactions_fee_transaction_idx",
     "DROP TABLE finance.bitcoin_outputs",
     "DROP TABLE finance.bitcoin_inputs",
     "DROP TABLE finance.bitcoin_transactions",

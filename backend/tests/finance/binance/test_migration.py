@@ -172,7 +172,7 @@ def _assert_lists(connection: Connection, *, binance: bool) -> None:
         _check(connection, "instrument_identifiers", "instrument_identifiers_scheme_check")
     )
     assert kinds == (_M6_KINDS | {"chain_address"} if binance else _M6_KINDS)
-    # 0046 (Bitcoin) adds `chain_native` on top of what 0041 adds.
+    # 0048 (Bitcoin) adds `chain_native` on top of what 0041 adds.
     assert schemes == (_M6_SCHEMES | {"binance_asset", "chain_native"} if binance else _M6_SCHEMES)
     # M6's own value checks are left as they are.
     for name in (

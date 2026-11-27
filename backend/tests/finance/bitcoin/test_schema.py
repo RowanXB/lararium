@@ -1,5 +1,5 @@
-"""Migration 0047 (the Bitcoin wallet tables, the chain columns on transactions and the
-`chain_native` instrument scheme) goes down to 0046 and up again, and the CHECKs hold."""
+"""Migration 0048 (the Bitcoin wallet tables, the chain columns on transactions and the
+`chain_native` instrument scheme) goes down to 0047 and up again, and the CHECKs hold."""
 
 import re
 from pathlib import Path
@@ -54,8 +54,29 @@ def _schemes(connection: Connection) -> set[str]:
 
 
 def test_migration_creates_its_own_tables() -> None:
-    [path] = VERSIONS.glob("0047_*.py")
+    [path] = VERSIONS.glob("0048_*.py")
     assert re.findall(r"CREATE TABLE finance\.(\w+)", path.read_text()) == TABLES
+
+
+# The links to finance.transactions, each indexed where set, as Binance's are (0041): a
+# transaction's delete sets them NULL, and its lookup by link must not scan the table.
+LINK_INDEXES = {
+    "bitcoin_outputs_transaction_idx",
+    "bitcoin_transactions_fee_transaction_idx",
+    "bitcoin_transactions_net_transaction_idx",
+}
+
+
+def _link_indexes(connection: Connection) -> set[str]:
+    return set(
+        connection.execute(
+            text(
+                "select indexname from pg_indexes where schemaname = 'finance'"
+                " and indexname = any(:names)"
+            ),
+            {"names": list(LINK_INDEXES)},
+        ).scalars()
+    )
 
 
 def test_migration_round_trips(owner_url: str, migrated: None) -> None:
@@ -67,19 +88,22 @@ def test_migration_round_trips(owner_url: str, migrated: None) -> None:
             assert set(_present(connection).values()) == {True}
             assert _chain_columns(connection) == {"chain", "tx_hash", "chain_address"}
             assert "chain_native" in _schemes(connection)
+            assert _link_indexes(connection) == LINK_INDEXES
         try:
-            command.downgrade(config, "0046")
+            command.downgrade(config, "0047")
             with engine.begin() as connection:
                 assert set(_present(connection).values()) == {False}
                 assert _chain_columns(connection) == set()
                 assert {"binance_asset", "coingecko"} <= _schemes(connection)
                 assert "chain_native" not in _schemes(connection)
+                assert _link_indexes(connection) == set()
         finally:
             command.upgrade(config, "head")
         with engine.begin() as connection:
             assert set(_present(connection).values()) == {True}
             assert _chain_columns(connection) == {"chain", "tx_hash", "chain_address"}
             assert "chain_native" in _schemes(connection)
+            assert _link_indexes(connection) == LINK_INDEXES
     finally:
         engine.dispose()
 
