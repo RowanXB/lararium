@@ -1,31 +1,39 @@
 """Generated Binance account histories for the property tests (test_properties.py).
 
-`histories()` draws a consistent account history: what the Spot, Funding and Earn wallets
-held before it (the opening the records no longer explain) and a time-ordered list of records
-over four assets: deposits (some pending first), withdrawals (some failing after they were
-applied), spot trades (some with a rounded `quoteQty`), converts, asset dividends, flexible
-Earn subscriptions, redemptions and `REALTIME` rewards (two identical ones at once, at
-times), `BONUS` payouts (a reward row and the dividend that paid it, within 26 hours),
-wallet-to-wallet transfers between Spot and Funding (some failed), dust conversions on Spot
-(one or two small balances into BNB, with a service charge at times), locked Earn
-subscriptions, redemptions to Spot and rewards, yield token subscriptions (swaps on Spot) and
-redemptions Binance pays out later (seen pending, then arrived, a fee at times), flexible
-crypto loans borrowed onto Spot (some failed) and repaid from it, margin transfers between Spot
-and Cross Margin (some also listed by the universal transfer history, some pending first), margin
-trades on Cross Margin (no `quoteQty`, a commission at times) and margin interest charged there,
-transfers between Spot and USDⓈ-M Futures (listed by the universal transfer history and by the
-futures income history as a `TRANSFER` row, rule 2) and futures income (realised profit and
-funding either way, commissions paid), transfers between Spot and Options (listed by the
-universal transfer history and by the options bill as a `TRANSFER` row, rule 2) and options
-bill rows (premiums and exercise profit either way, fees paid), fiat deposits (some pending first)
-and withdrawals by bank on Spot, card purchases (from a card, or from the cash balance) and sales
-on Spot, P2P buys and sells on Funding, and Pay payments and receipts on Funding or Spot (a
-payment at times drawn from both). Trading Bots, which Binance lists no record of, holds only
-what it held before the history: its report is its opening, and it never changes. The fiat
-is EUR (`FIAT`), in cents; the other kinds never move it. Rebates are not drawn: Binance serves
-them from June 2020 only, and the histories start in July 2017. No wallet ever holds less than
-nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
-before the history is a loan whose borrow is not listed, as a VIP loan's never is).
+`histories()` draws a consistent account history: what every wallet held before it (the
+opening the records no longer explain) and a time-ordered list of records over four assets:
+deposits (some pending first), withdrawals (some failing after they were applied), spot trades
+(some with a rounded `quoteQty`), converts, asset dividends, flexible Earn subscriptions,
+redemptions and `REALTIME` rewards (two identical ones at once, at times), `BONUS` payouts (a
+reward row and the dividend that paid it, within 26 hours), wallet-to-wallet transfers between
+Spot and Funding (some failed), dust conversions on Spot (one or two small balances into BNB,
+with a service charge at times), locked Earn subscriptions, redemptions to Spot and rewards,
+yield token subscriptions (swaps on Spot) and redemptions Binance pays out later (seen
+pending, then arrived, a fee at times), flexible crypto loans borrowed onto Spot (some failed)
+and repaid from it, margin transfers between Spot and Cross Margin (some also listed by the
+universal transfer history, some pending first) and between Spot and the isolated pair
+`ISOLATED_PAIR` (listed only when the history is asked for the pair), margin trades on Cross
+Margin or the isolated pair (no `quoteQty`, a commission at times) and margin interest charged
+there, transfers between Spot and USDⓈ-M or COIN-M Futures (listed by the universal transfer
+history and by the wallet's income history as a `TRANSFER` row, rule 2) and futures income
+(realised profit and funding either way, commissions paid), transfers between Spot and Options
+(listed by the universal transfer history and by the options bill as a `TRANSFER` row, rule 2)
+and options bill rows (premiums and exercise profit either way, fees paid), fiat deposits (some
+pending first) and withdrawals by bank on Spot, card purchases (from a card, or from the cash
+balance) and sales on Spot, P2P buys and sells on Funding, and Pay payments and receipts on
+Funding or Spot (a payment at times drawn from both). Trading Bots and Copy Trading, which
+Binance lists no record of, hold only what they held before the history: their report is their
+opening, and it never changes. The fiat is EUR (`FIAT`), in cents; the other kinds never move
+it. Isolated Margin holds only its pair's two assets.
+
+Not drawn, each for a stated reason: rebates (Binance serves them from June 2020 only, and the
+histories start in July 2017); Portfolio Margin (it needs `account-info` on, which takes out
+the Cross Margin and futures wallets the histories trade on: a second world rather than an
+addition; its switch is pinned by `test_records_unhandled.py`); dual investment and discount buy
+(the world would have to serve their position reads; unit tests cover them). No wallet ever
+holds less than nothing, except Crypto Loans, whose holdings are debts: never more than nothing
+(a debt there before the history is a loan whose borrow is not listed, as a VIP loan's never
+is).
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -82,9 +90,12 @@ WALLET_KEYS = (
     "earn",
     "loans",
     "cross_margin",
+    "isolated_margin",
     "um_futures",
+    "cm_futures",
     "options",
     "trading_bots",
+    "copy_trading",
 )
 ACCOUNT_NAMES = {
     "spot": "Binance Spot",
@@ -92,13 +103,31 @@ ACCOUNT_NAMES = {
     "earn": "Binance Earn",
     "loans": "Binance Crypto Loans",
     "cross_margin": "Binance Cross Margin",
+    "isolated_margin": "Binance Isolated Margin",
     "um_futures": "Binance USDⓈ-M Futures",
+    "cm_futures": "Binance COIN-M Futures",
     "options": "Binance Options",
     "trading_bots": "Binance Trading Bots",
+    "copy_trading": "Binance Copy Trading",
 }
 CROSS = "cross_margin"
+ISOLATED = "isolated_margin"
+# The one isolated margin pair the histories trade on: Isolated Margin holds only its two legs.
+ISOLATED_PAIR = PAIRS[0]
+# The request parameter that asks a margin history for an isolated pair's records (the catalogue's
+# ISOLATED_PARAMS): without it, the history lists Cross Margin's.
+ISOLATED_PARAM = "isolatedSymbol"
 FUTURES = "um_futures"
+COIN_FUTURES = "cm_futures"
 OPTIONS = "options"
+# Each futures wallet's universal transfer types (from Spot, to Spot), its income history and
+# the symbol its income rows name.
+_FUTURES_KINDS = {
+    FUTURES: (("MAIN_UMFUTURE", "UMFUTURE_MAIN"), "um-income", "AAASTB"),
+    COIN_FUTURES: (("MAIN_CMFUTURE", "CMFUTURE_MAIN"), "cm-income", "AAAUSD_PERP"),
+}
+# The wallets Binance lists no record of: what they hold is what they held before the history.
+RECORD_LESS = ("trading_bots", "copy_trading")
 # The wallet whose holdings are debts (negative).
 DEBTS = "loans"
 _WALLET_TYPE = {"spot": 0, "funding": 1}
@@ -145,6 +174,7 @@ TWO_SIDED = frozenset(
         "borrow",
         "repay",
         "margin_transfer",
+        "isolated_transfer",
         "margin_trade",
         "futures_transfer",
         "options_transfer",
@@ -931,13 +961,52 @@ def _margin_transfer(b: _Builder) -> Record | None:
     return Record("margin_transfer", tuple(rows), effects)
 
 
+def _isolated_transfer(b: _Builder) -> Record | None:
+    """A margin transfer between Spot and the isolated pair (one of its two legs), listed only
+    when the margin transfer history is asked for that pair; at times pending first."""
+    symbol, base, quote = ISOLATED_PAIR
+    choices = [h for h in b.holdings(("spot", ISOLATED)) if h[1] in (base, quote)]
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    into = wallet == "spot"
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    row = build_row(
+        "margin-transfers",
+        amount=_plain(quantity),
+        asset=asset,
+        status="CONFIRMED",
+        timestamp=b.now,
+        txId=b.id(),
+        type="ROLL_IN" if into else "ROLL_OUT",
+        transFrom="SPOT" if into else "ISOLATED_MARGIN",
+        transTo="ISOLATED_MARGIN" if into else "SPOT",
+        fromSymbol=None if into else symbol,
+        toSymbol=symbol if into else None,
+    )
+    versions: tuple[tuple[int, Rowdict], ...] = ((b.now, row),)
+    if b.draw(st.integers(0, 3)) == 0:
+        versions = ((b.now, {**row, "status": "PENDING"}), (b.now + SECOND_MS, row))
+    other = ISOLATED if into else "spot"
+    effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
+    return Record(
+        "isolated_transfer",
+        (("margin-transfers", versions),),
+        effects,
+        asked=((ISOLATED_PARAM, symbol),),
+    )
+
+
 def _margin_trade(b: _Builder) -> Record | None:
-    """A trade on Cross Margin, within what it holds: Binance documents no `quoteQty` for it,
-    the quote side is `qty` times `price` exactly."""
-    symbol, base, quote = b.draw(st.sampled_from(PAIRS))
+    """A trade on Cross Margin or on the isolated pair, within what the wallet holds: Binance
+    documents no `quoteQty` for it, the quote side is `qty` times `price` exactly."""
+    wallet = b.draw(st.sampled_from((CROSS, ISOLATED)))
+    symbol, base, quote = ISOLATED_PAIR if wallet == ISOLATED else b.draw(st.sampled_from(PAIRS))
     buyer = b.draw(st.booleans())
     price = Decimal(b.draw(st.integers(1, 2_000_000))) * _UNIT
-    have = b.held[(CROSS, quote if buyer else base)]
+    have = b.held[(wallet, quote if buyer else base)]
     if have <= 0:
         return None
     if buyer:
@@ -952,8 +1021,8 @@ def _margin_trade(b: _Builder) -> Record | None:
     quote_quantity = quantity * price
     fee_asset = b.draw(st.sampled_from((base, quote)))
     left = {
-        base: b.held[(CROSS, base)] + (quantity if buyer else -quantity),
-        quote: b.held[(CROSS, quote)] + (-quote_quantity if buyer else quote_quantity),
+        base: b.held[(wallet, base)] + (quantity if buyer else -quantity),
+        quote: b.held[(wallet, quote)] + (-quote_quantity if buyer else quote_quantity),
     }
     commission = Decimal(0)
     if b.draw(st.booleans()) and left[fee_asset] > 0:
@@ -970,26 +1039,28 @@ def _margin_trade(b: _Builder) -> Record | None:
         time=b.now,
         isBuyer=buyer,
         isMaker=b.draw(st.booleans()),
-        isIsolated=False,
+        isIsolated=wallet == ISOLATED,
     )
     effects = [
-        Effect(b.now, CROSS, base, quantity if buyer else -quantity),
-        Effect(b.now, CROSS, quote, -quote_quantity if buyer else quote_quantity),
+        Effect(b.now, wallet, base, quantity if buyer else -quantity),
+        Effect(b.now, wallet, quote, -quote_quantity if buyer else quote_quantity),
     ]
     if commission:
-        effects.append(Effect(b.now, CROSS, fee_asset, -commission))
+        effects.append(Effect(b.now, wallet, fee_asset, -commission))
     return Record("margin_trade", (("margin-trades", ((b.now, row),)),), tuple(effects))
 
 
 def _margin_interest(b: _Builder) -> Record | None:
-    """Interest charged on Cross Margin: a fee taken from what it holds."""
-    choices = b.holdings((CROSS,))
+    """Interest charged on Cross Margin or the isolated pair: a fee taken from what it holds. An
+    isolated pair's is listed only when the history is asked for that pair."""
+    choices = b.holdings((CROSS, ISOLATED))
     if not choices:
         return None
-    _, asset = b.draw(st.sampled_from(choices))
-    quantity = b.amount(at_most=b.held[(CROSS, asset)])
+    wallet, asset = b.draw(st.sampled_from(choices))
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
     if quantity == 0:
         return None
+    pair = ISOLATED_PAIR[0] if wallet == ISOLATED else None
     row = build_row(
         "margin-interest",
         txId=b.id(),
@@ -998,16 +1069,31 @@ def _margin_interest(b: _Builder) -> Record | None:
         rawAsset=asset,
         interest=_plain(quantity),
         type="PERIODIC",
-        isolatedSymbol=None,
+        isolatedSymbol=pair,
     )
-    effect = Effect(b.now, CROSS, asset, -quantity)
-    return Record("margin_interest", (("margin-interest", ((b.now, row),)),), (effect,))
+    effect = Effect(b.now, wallet, asset, -quantity)
+    return Record(
+        "margin_interest",
+        (("margin-interest", ((b.now, row),)),),
+        (effect,),
+        asked=((ISOLATED_PARAM, pair),) if pair else (),
+    )
+
+
+def _tran_id(b: _Builder, label: str) -> ApiValue:
+    """A new income row id, typed as the label's catalogue has it (USDⓈ-M: a number, COIN-M:
+    text)."""
+    tran_id = b.id()
+    return str(tran_id) if isinstance(build_row(label)["tranId"], str) else tran_id
 
 
 def _futures_transfer(b: _Builder) -> Record | None:
-    """A transfer between Spot and USDⓈ-M Futures: the universal transfer history lists it, and
-    the futures income history as a `TRANSFER` row a few seconds apart (rule 2: posted once)."""
-    choices = b.holdings(("spot", FUTURES))
+    """A transfer between Spot and a futures wallet (USDⓈ-M or COIN-M): the universal transfer
+    history lists it, and the wallet's income history as a `TRANSFER` row a few seconds apart
+    (rule 2: posted once)."""
+    futures = b.draw(st.sampled_from(sorted(_FUTURES_KINDS)))
+    (to_futures, to_spot), label, _ = _FUTURES_KINDS[futures]
+    choices = b.holdings(("spot", futures))
     if not choices:
         return None
     wallet, asset = b.draw(st.sampled_from(choices))
@@ -1019,43 +1105,46 @@ def _futures_transfer(b: _Builder) -> Record | None:
         "universal-transfer",
         asset=asset,
         amount=_plain(quantity),
-        type="MAIN_UMFUTURE" if into else "UMFUTURE_MAIN",
+        type=to_futures if into else to_spot,
         status="CONFIRMED",
         tranId=b.id(),
         timestamp=b.now,
     )
     listed_at = b.now + b.draw(st.integers(0, 30)) * SECOND_MS
     income = build_row(
-        "um-income",
+        label,
         symbol="",
         incomeType="TRANSFER",
         income=_plain(quantity if into else -quantity),
         asset=asset,
         info="TRANSFER",
         time=listed_at,
-        tranId=b.id(),
+        tranId=_tran_id(b, label),
         tradeId="",
     )
     rows = (
         ("universal-transfer", ((b.now, universal),)),
-        ("um-income", ((listed_at, income),)),
+        (label, ((listed_at, income),)),
     )
-    other = FUTURES if into else "spot"
+    other = futures if into else "spot"
     effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
     return Record("futures_transfer", rows, effects)
 
 
 def _futures_income(b: _Builder) -> Record | None:
-    """An income row of USDⓈ-M Futures against nothing else: a realised profit or a funding fee
-    either way, or a commission paid; what is paid is within what the wallet holds."""
+    """An income row of a futures wallet (USDⓈ-M or COIN-M) against nothing else: a realised
+    profit or a funding fee either way, or a commission paid; what is paid is within what the
+    wallet holds."""
+    futures = b.draw(st.sampled_from(sorted(_FUTURES_KINDS)))
+    _, label, symbol = _FUTURES_KINDS[futures]
     kind = b.draw(st.sampled_from(("REALIZED_PNL", "FUNDING_FEE", "COMMISSION")))
     paid = kind == "COMMISSION" or b.draw(st.booleans())
     if paid:
-        choices = b.holdings((FUTURES,))
+        choices = b.holdings((futures,))
         if not choices:
             return None
         _, asset = b.draw(st.sampled_from(choices))
-        quantity = b.amount(at_most=b.held[(FUTURES, asset)])
+        quantity = b.amount(at_most=b.held[(futures, asset)])
     else:
         asset = b.draw(st.sampled_from(ASSETS))
         quantity = b.amount()
@@ -1063,18 +1152,18 @@ def _futures_income(b: _Builder) -> Record | None:
         return None
     delta = -quantity if paid else quantity
     row = build_row(
-        "um-income",
-        symbol="AAASTB",
+        label,
+        symbol=symbol,
         incomeType=kind,
         income=_plain(delta),
         asset=asset,
         info="",
         time=b.now,
-        tranId=b.id(),
+        tranId=_tran_id(b, label),
         tradeId=str(b.id()),
     )
-    effect = Effect(b.now, FUTURES, asset, delta)
-    return Record("futures_income", (("um-income", ((b.now, row),)),), (effect,))
+    effect = Effect(b.now, futures, asset, delta)
+    return Record("futures_income", ((label, ((b.now, row),)),), (effect,))
 
 
 def _options_transfer(b: _Builder) -> Record | None:
@@ -1405,6 +1494,7 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "borrow": _borrow,
     "repay": _repay,
     "margin_transfer": _margin_transfer,
+    "isolated_transfer": _isolated_transfer,
     "margin_trade": _margin_trade,
     "margin_interest": _margin_interest,
     "futures_transfer": _futures_transfer,
@@ -1427,7 +1517,7 @@ def histories(draw: st.DrawFn, *, min_records: int = 1, max_records: int = 10) -
     start = START_MS + draw(st.integers(0, 86_399)) * 1000
     initial: dict[Holding, Decimal] = {}
     for wallet in WALLET_KEYS:
-        for asset in ASSETS:
+        for asset in ISOLATED_PAIR[1:] if wallet == ISOLATED else ASSETS:
             if draw(st.integers(0, 5)) == 0:
                 quantity = Decimal(draw(st.integers(1, 1_000_000))) * _UNIT
                 initial[(wallet, asset)] = -quantity if wallet == DEBTS else quantity

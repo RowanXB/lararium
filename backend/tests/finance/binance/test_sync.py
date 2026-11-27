@@ -33,6 +33,7 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
+from lararium.modules.finance.binance.client import ALLOWED
 from lararium.modules.finance.binance.fetch import (
     CURSORS_KEY,
     PHASE_B_BUILT,
@@ -730,14 +731,18 @@ async def test_an_unknown_field_in_any_answer_is_flagged_once(
     assert all(sum(flag in m for m in told) == 1 for flag in expected)
 
 
-# Every Phase A label is fetched by a sync.
+# Every request a sync sends is in the allowlist, and every catalogue label is asked.
 
 
-async def test_a_first_sync_asks_every_phase_a_label(
-    session, run, fake: FakeBinance, connector
-) -> None:
+async def test_allowlist_is_exactly_the_catalogue(session, run, clock: Clock, connector) -> None:
+    """Two syncs of one connection against a fake with every product: the first, with margin and
+    options open, asks every label but Portfolio Margin's; the second, with Portfolio Margin on
+    (which replaces the classic margin and futures wallets), asks its two. Every request is in
+    `ALLOWED` and, as `ALLOWED` is the catalogue's, every catalogue label is asked."""
+    fake = FakeBinance(now=clock, secret=API_SECRET, margin=True, options=True)
     # Enough for every step to ask: an asset held since a daily snapshot two days ago, with a
-    # EUR market (bars) and a symbol of its own (trades).
+    # EUR market (bars) and a symbol of its own (trades); an income or bill row naming a futures
+    # or options symbol (that symbol's trades).
     day = NOW_MS - 2 * DAY_MS - 1_000
     snapshot = build_row("snapshot", type="spot", updateTime=day)
     data = dict(snapshot["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
@@ -748,14 +753,27 @@ async def test_a_first_sync_asks_every_phase_a_label(
         "exchange-info",
         build_row("exchange-info", symbol="AAAEUR", baseAsset="AAA", quoteAsset="EUR"),
     )
+    recent = NOW_MS - 2 * HOUR_MS
+    for label, symbol in (("um-income", "AAASTB"), ("cm-income", "AAAUSD_PERP")):
+        fake.add(label, build_row(label, symbol=symbol, incomeType="COMMISSION", time=recent))
+    fake.add("opt-bill", build_row("opt-bill", symbol="AAA-261231-100-C", createDate=recent))
+    routes: set[tuple[str, str, str]] = set()
+
+    def handler(request: httpx.Request) -> Any:
+        routes.add((request.method, request.url.host, request.url.path))
+        return fake.handler(request)
+
     connection = await binance_connection(run)
-
-    after = await run_binance_sync(session, connection.id, fake.handler)
-
+    after = await run_binance_sync(session, connection.id, handler)
     assert after.status == "healthy", after.last_error
-    phase_a = {label for label, endpoint in ENDPOINTS.items() if endpoint.phase == "A"}
+    fake.set_rows("account-info", [build_row("account-info", isPortfolioMarginRetailEnabled=True)])
+    clock.ms += 5 * HOUR_MS
+    after = await run_binance_sync(session, connection.id, handler)
+    assert after.status == "healthy", after.last_error
+
+    assert sorted(routes - ALLOWED) == []
     asked = {seen.label for seen in fake.requests}
-    assert sorted(phase_a - asked) == []
+    assert sorted(set(ENDPOINTS) - asked) == []
     assert await session.scalar(
         text("select count(*) from finance.binance_asset_detail where connection_id = :c"),
         {"c": connection.id},

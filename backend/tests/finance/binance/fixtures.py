@@ -300,7 +300,8 @@ class _Failure:
 @dataclass(frozen=True)
 class _Stored:
     row: Rowdict
-    when: Mapping[str, str]
+    # None: the request does not carry the parameter.
+    when: Mapping[str, str | None]
 
 
 # What `FakeBinance.when_asked` runs: told how many earlier asks there were.
@@ -351,13 +352,14 @@ class FakeBinance:
 
     # What it holds.
 
-    def add(self, label: str, *rows: Rowdict, when: Mapping[str, str] | None = None) -> None:
-        """Store rows; with `when`, they answer only requests with those parameters."""
+    def add(self, label: str, *rows: Rowdict, when: Mapping[str, str | None] | None = None) -> None:
+        """Store rows; with `when`, they answer only requests with those parameters (a
+        parameter given as None: only requests without it)."""
         assert label in ENDPOINTS, label
         self._stored.setdefault(label, []).extend(_Stored(dict(r), when or {}) for r in rows)
 
     def set_rows(
-        self, label: str, rows: Iterable[Rowdict], when: Mapping[str, str] | None = None
+        self, label: str, rows: Iterable[Rowdict], when: Mapping[str, str | None] | None = None
     ) -> None:
         self._stored[label] = []
         self.add(label, *rows, when=when)
