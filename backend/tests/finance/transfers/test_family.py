@@ -31,8 +31,8 @@ from lararium.modules.finance.transfers.pairs import (
     PairRelation,
     Tier,
     _Decisions,
-    _near_split,
     _registry_edges,
+    _several,
     _twins,
     card_tier,
     registry_tier,
@@ -302,7 +302,7 @@ def _relation(records: list[Pairable], untakeable: Iterable[frozenset[UUID]] = (
     by_id = {x.id: x for x in records}
     tiers, exact, refused = _exact(records)
     untaken = refused | frozenset(untakeable)
-    exact = _near_split(by_id, tiers, exact, untaken, NEAR)
+    exact, twins = _several(by_id, tiers, exact, untaken, NEAR)
     return PairRelation(
         records=by_id,
         rejected=frozenset(),
@@ -310,7 +310,7 @@ def _relation(records: list[Pairable], untakeable: Iterable[frozenset[UUID]] = (
         exact=exact,
         untakeable=untaken,
         differing={},
-        twins=_twins(by_id, exact, untaken),
+        twins=twins,
         across={},
         alone_across=frozenset(),
         converts={},
@@ -438,6 +438,27 @@ def test_one_side_alike_pairs_in_time_order() -> None:
     records = {x.id: x for x in (stocks, invest, *rows, third)}
     _, exact, untakeable = _exact(list(records.values()))
     assert _twins(records, exact, untakeable) == {}
+
+
+def test_an_interchangeable_group_stays_whole_before_the_split() -> None:
+    """Two payments from Monzo naming the Cash ISA, at T0 and four hours later, and two
+    Cash ISA rows naming nobody, 30 s after the first and eight hours after it: both sides
+    alike, each record has both of the other side. The first payment and the first row are
+    each the other's only one within the near window, but the group pairs as
+    interchangeable, in time order, and all four pair: the split is for records that
+    would otherwise go to review (§5.10)."""
+    named: dict[str, Any] = {"bank_transfer": True, "names_account": True, "holder": CASH}
+    paid = [_pairable(MONZO, "-100", occurred_at=T0 + timedelta(hours=h), **named) for h in (0, 4)]
+    rows = [
+        _pairable(CASH, "100", bank_transfer=True, occurred_at=at, source=("import", str(at)))
+        for at in (T0 + timedelta(seconds=30), T0 + timedelta(hours=8))
+    ]
+    relation = _relation([*paid, *rows])
+    assert relation.exact[paid[0].id] == {x.id for x in rows}
+    assert _partners(relation) == {
+        frozenset((paid[0].id, rows[0].id)),
+        frozenset((paid[1].id, rows[1].id)),
+    }
 
 
 PAYEE = "121212:34343434"  # the payee all three Trading 212 accounts hold

@@ -16,12 +16,14 @@ apart. No other tier pairs it, so it is never an external top-up or withdrawal. 
 naming nobody that is such a move's counterpart is that move's first: no shared payee's
 record and no funding alone gives it another edge (_registry_edges).
 
-Where a record has several candidates of the same amount, two more rules apply, in this
-order, each to what the one before leaves (account family identifier design §5.10 and §5.7,
-owner's decisions 2026-11-27): a record pairs with the one of them that is, both timed, its
-only candidate of any tier within the near window, when it is that one's only one too and
-the pair is takeable (_near_split); and a group of interchangeable records, one side of
-which is alike, pairs in time order (_twins)."""
+Where a record has several candidates of the same amount, two more rules apply
+(account family identifier design §5.10 and §5.7, owner's decisions 2026-11-27;
+_several): a group of interchangeable records, one side of which is alike, pairs in time
+order (_twins), and stays whole; every other record pairs with the one of its candidates
+that is, both timed, its only candidate of any tier time doesn't rule out (an untimed one
+is never ruled out: its real time is unknown), within the near window, when it is that
+one's only one too and the pair is takeable (_near_split). A group alike on one side only
+after that split pairs in time order too."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -971,8 +973,9 @@ class PairRelation:
     tiers: Mapping[UUID, Mapping[UUID, Tier]]
     # A record's candidates of the same amount, or the owner's: those in the strongest tier
     # it has any in, for which that is also their own strongest (Ruling 7); a record with
-    # several, only the one the near window gives it (_near_split). A record dropped so
-    # still lists the one that dropped it (`partner` reads both ways).
+    # several, outside an interchangeable group, only the one the near window gives it
+    # (_several, _near_split). A record dropped so still lists the one that dropped it
+    # (`partner` reads both ways).
     exact: Mapping[UUID, frozenset[UUID]]
     # The pairs of the same amount that can't be taken by themselves: the coverage gate
     # refused them (_one_sided_known, _weak_known). They are candidates all the same
@@ -1076,9 +1079,11 @@ def _near_split(
     exact: Mapping[UUID, frozenset[UUID]],
     untakeable: Collection[frozenset[UUID]],
     near_window: timedelta,
+    whole: Collection[UUID] = (),
 ) -> dict[UUID, frozenset[UUID]]:
     """`exact` with several candidates split by the near window (account family identifier
-    design §5.10, owner's decision 2026-11-27): a record r with two or more keeps only c,
+    design §5.10, owner's decision 2026-11-27): a record r with two or more, neither it nor
+    c in `whole` (the members of interchangeable groups, _several), keeps only c,
     one of them, and c only r, when both are timed (a connector's record, or an imported
     row timed to the second), c is within `near_window` of r's instant, every other record
     in r's `tiers` (of any tier, `untakeable` included) is timed and further than
@@ -1088,11 +1093,13 @@ def _near_split(
     a lower tier, or one the coverage gate refuses, still might be, and then nothing is
     split. So might an untimed candidate (a row giving only its date, stamped 00:00): its
     real time is unknown, so it can't be shown to lie outside the window, and only timed
-    candidates are ruled out by time (owner's ruling, 2026-11-27). It only narrows: no
-    record gains a candidate, and a record dropped from r's or c's candidates still lists r
-    or c among its own, so its candidates and review reason are as before
-    (PairRelation.partner reads both ways). Whatever is left with several goes to review as
-    before."""
+    candidates are ruled out by time (owner's ruling, 2026-11-27). The split is for records
+    that would otherwise go to review: a group that pairs as interchangeable is left whole.
+    It only narrows: no record gains a candidate. A record dropped from r's or c's
+    candidates still lists r or c among its own, so it pairs with neither
+    (PairRelation.partner reads both ways); it was in no pair before either (it isn't in an
+    interchangeable group, and r or c had several), and its candidates and review reason
+    are unchanged. Whatever is left with several goes to review as before."""
 
     def near(r: UUID) -> set[UUID]:
         """r's candidates time doesn't rule out: untimed ones, and timed ones within the
@@ -1116,6 +1123,8 @@ def _near_split(
         [c] = nearby
         if (
             c in found
+            and r not in whole
+            and c not in whole
             and records[c].timed
             and near(c) == {r}
             and frozenset((r, c)) not in untakeable
@@ -1183,6 +1192,25 @@ def _twins(
     return twins
 
 
+def _several(
+    records: Mapping[UUID, Pairable],
+    tiers: Mapping[UUID, Mapping[UUID, Tier]],
+    exact: Mapping[UUID, frozenset[UUID]],
+    untakeable: Collection[frozenset[UUID]],
+    near_window: timedelta,
+) -> tuple[dict[UUID, frozenset[UUID]], dict[UUID, UUID]]:
+    """(exact, twins) once the rules for several candidates have applied (account family
+    identifier design §5.10 and §5.7, owner's decisions 2026-11-27), in this order: the
+    groups interchangeable on the candidates as found (_twins) are kept whole, to pair in
+    time order; every other record is split by the near window (_near_split); and the
+    groups interchangeable on what that leaves pair in time order (_twins again: the first
+    ones, untouched, and any the split makes, if it can). The split is for records that
+    would otherwise go to review, and such a group doesn't."""
+    whole = _twins(records, exact, untakeable).keys()
+    split = _near_split(records, tiers, exact, untakeable, near_window, whole)
+    return split, _twins(records, split, untakeable)
+
+
 async def pair_relation(
     session: AsyncSession,
     system: Mapping[SystemAccountKey, UUID],
@@ -1220,13 +1248,15 @@ async def pair_relation(
     amount the coverage gate refuses (design §5.8) is a candidate like any other, one that
     can't be taken by itself (`untakeable`).
 
-    Where a record has several candidates of the same amount, two rules follow, in this
-    order (account family identifier design §5.10 then §5.7, owner's decisions
-    2026-11-27), after the one above of whether two records may pair at all: it pairs with
-    the one that is, both timed, each the other's only candidate of any tier within the
-    near window, when that pair is takeable (_near_split); then a group of interchangeable
-    records, one side of which (or both) is alike, pairs in time order (_twins). Whatever
-    is left with several is for review.
+    Where a record has several candidates of the same amount, two rules follow (account
+    family identifier design §5.10 and §5.7, owner's decisions 2026-11-27; _several),
+    after the one above of whether two records may pair at all. A group of interchangeable
+    records, one side of which (or both) is alike, pairs in time order and stays whole
+    (_twins). Every other record pairs with the one candidate that is, both timed, each
+    the other's only candidate of any tier time doesn't rule out, within the near window,
+    when that pair is takeable (_near_split); an untimed candidate is never ruled out, its
+    real time being unknown. A group alike on one side only after that split pairs in time
+    order too. Whatever is left with several is for review.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
@@ -1246,7 +1276,7 @@ async def pair_relation(
     }
     exact = {r: found for r, found in exact.items() if found}
     by_id = {x.id: x for x in records}
-    exact = _near_split(by_id, same.tiers, exact, untakeable, settings.near_window)
+    exact, twins = _several(by_id, same.tiers, exact, untakeable, settings.near_window)
     across = {
         r: frozenset(found)
         for r, found in _cross_currency_edges(records, settings, decisions).tiers.items()
@@ -1285,7 +1315,7 @@ async def pair_relation(
         exact=exact,
         untakeable=untakeable,
         differing={r: frozenset(found) for r, found in differing.tiers.items()},
-        twins=_twins(by_id, exact, untakeable),
+        twins=twins,
         across=across,
         alone_across=frozenset(alone),
         converts=converts,

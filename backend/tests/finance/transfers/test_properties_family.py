@@ -30,13 +30,14 @@ from lararium.modules.finance.transfers.pairs import (
     ONE_SIDED,
     Known,
     Pairable,
+    PairRelation,
     _Decisions,
     _Edges,
     _family_pair,
     _funded_only,
     _names_nobody,
-    _near_split,
     _registry_edges,
+    _several,
     _twins,
     counterpart_bounds,
 )
@@ -343,12 +344,18 @@ def _crowd(draw: st.DrawFn) -> tuple[list[Pairable], frozenset[frozenset[UUID]]]
     """Payments of 100 from Monzo naming the shared payee the three Trading 212 accounts
     hold (or one of them), deposits of 100 on those accounts naming nobody, and up to two
     records of 100 either way of any kind (_record), within five minutes of BASE (the near
-    window's edge often), timed or not: most are each other's candidates, many several,
-    and some within the window of two. Some of their pairs untakeable."""
+    window's edge often) or else six hours, timed or not: most are each other's
+    candidates, many several, some within the window of two, some interchangeable groups.
+    Some of their pairs untakeable."""
+
+    # Within five minutes of BASE in two crowds of three, else within six hours (the same
+    # day), where interchangeable groups are each other's only ones within the window.
+    spread = draw(st.sampled_from((False, False, True)))
 
     def at() -> datetime:
         seconds = draw(st.sampled_from((-121, -120, -60, 0, 40, 119, 120, 121)))
-        return BASE + timedelta(seconds=draw(st.just(seconds) | st.integers(-300, 300)))
+        apart = st.integers(-6 * 3600, 6 * 3600) if spread else st.integers(-300, 300)
+        return BASE + timedelta(seconds=draw(st.just(seconds) | apart))
 
     records = []
     for _ in range(draw(st.integers(min_value=1, max_value=3))):
@@ -386,64 +393,105 @@ def _crowd(draw: st.DrawFn) -> tuple[list[Pairable], frozenset[frozenset[UUID]]]
     return records, frozenset(untakeable)
 
 
-@settings(max_examples=300, deadline=None)
-@given(crowd=_crowd())
-def test_near_split_never_takes_a_pair_with_a_second_candidate_within_the_window(
-    crowd: tuple[list[Pairable], frozenset[frozenset[UUID]]],
-) -> None:
-    """_near_split, exactly: it narrows a record r with two or more candidates to c, and c
-    to r, iff both are timed, each is the other's only record of any tier (untakeable
-    included) time doesn't rule out (an untimed one, or a timed one within the near
-    window), c is among r's candidates, and the pair is takeable. Nothing else changes, and
-    no record gains a candidate."""
-    records, untakeable = crowd
+def _relation(
+    records: list[Pairable], untakeable: frozenset[frozenset[UUID]], *, split: bool
+) -> PairRelation:
+    """The relation pair_relation builds over `records` (no card or cross-currency pair),
+    with `untakeable` pairs besides those the coverage gate refuses: with the rules for
+    several candidates (_several), or (split False) with time order alone, as before them."""
     by_id = {x.id: x for x in records}
     same, _, refused = _registry_edges(records, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
-    untakeable |= refused
-    tiers = same.tiers
+    untaken = untakeable | refused
+    tiers = {r: dict(found) for r, found in same.tiers.items()}
     best = {r: min(found.values()) for r, found in tiers.items()}
     exact = {
         r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])
         for r, found in tiers.items()
     }
     exact = {r: found for r, found in exact.items() if found}
-    split = _near_split(by_id, tiers, exact, untakeable, NEAR)
-
-    def near(r: UUID) -> set[UUID]:
-        """r's candidates time doesn't rule out: untimed, or timed within the window."""
-        x = by_id[r]
-        return {
-            c
-            for c in tiers.get(r, {})
-            if x.timed and (not by_id[c].timed or abs(by_id[c].occurred_at - x.occurred_at) <= NEAR)
-        }
-
-    taken = {
-        frozenset((r, c))
-        for r, found in exact.items()
-        for c in found
-        if (len(found) >= 2 or len(exact[c]) >= 2)
-        and by_id[c].timed
-        and near(r) == {c}
-        and near(c) == {r}
-        and frozenset((r, c)) not in untakeable
-    }
-    assert split.keys() == exact.keys()
-    for r in exact:
-        assert split[r] <= exact[r]
-        [pair] = [p for p in taken if r in p] or [None]
-        if pair is None:
-            assert split[r] == exact[r]
-        else:
-            [c] = pair - {r}
-            assert split[r] == {c}
-            assert by_id[r].timed and by_id[c].timed
-    event("split" if taken else "none split")
-    event(
-        "a second candidate within the window"
-        if any(len(near(r)) >= 2 for r in exact)
-        else "at most one within the window"
+    if split:
+        exact, twins = _several(by_id, tiers, exact, untaken, NEAR)
+    else:
+        twins = _twins(by_id, exact, untaken)
+    return PairRelation(
+        records=by_id,
+        rejected=frozenset(),
+        tiers=tiers,
+        exact=exact,
+        untakeable=untaken,
+        differing={},
+        twins=twins,
+        across={},
+        alone_across=frozenset(),
+        converts={},
+        cards={},
+        by_card={},
     )
+
+
+def _paired(relation: PairRelation) -> dict[UUID, UUID]:
+    """Each record's partner, where it is its partner's too."""
+    return {
+        r: p
+        for r in relation.records
+        if (p := relation.partner(r)) is not None and relation.partner(p) == r
+    }
+
+
+_TO_CASH: dict[str, Any] = {"bank_transfer": True, "names_account": True, "holder": CASH}
+
+
+# An interchangeable group, both sides alike, whose first payment and row are each the
+# other's only one within the near window: it stays whole, and all four pair.
+@example(
+    crowd=(
+        [
+            _p(MONZO, "-100", 0, **_TO_CASH),
+            _p(MONZO, "-100", 4 * 3600, **_TO_CASH),
+            _p(CASH, "100", 30, bank_transfer=True, source=("import", "a")),
+            _p(CASH, "100", 8 * 3600, bank_transfer=True, source=("import", "b")),
+        ],
+        frozenset(),
+    )
+)
+@settings(max_examples=300, deadline=None)
+@given(crowd=_crowd())
+def test_near_split_never_takes_a_pair_with_a_second_candidate_within_the_window(
+    crowd: tuple[list[Pairable], frozenset[frozenset[UUID]]],
+) -> None:
+    """Against the relation without the split (time order alone): every record paired
+    there keeps its partner (an interchangeable group stays whole), and every pair the
+    split adds is of two records, both timed, each the other's candidate of the same amount
+    with several between them, each with no other same-amount candidate of any tier
+    (untakeable included) within the near window, an untimed one counting as within, and a
+    takeable edge. A record with a second candidate within the window of it, or untimed,
+    never pairs by it."""
+    records, untakeable = crowd
+    by_id = {x.id: x for x in records}
+    before = _relation(records, untakeable, split=False)
+    after = _relation(records, untakeable, split=True)
+    paired, added = _paired(before), _paired(after)
+    for r, p in paired.items():
+        assert added.get(r) == p, (by_id[r], by_id[p])
+    new = {r: p for r, p in added.items() if r not in paired}
+    for r, p in new.items():
+        assert by_id[r].timed and by_id[p].timed
+        assert p in before.exact[r]
+        assert len(before.exact[r]) >= 2 or len(before.exact[p]) >= 2
+        assert after.takeable(r, p)
+        for x, y in ((r, p), (p, r)):
+            assert abs(by_id[x].occurred_at - by_id[y].occurred_at) <= NEAR
+            for other in after.tiers[x]:
+                if other == y:
+                    continue
+                o = by_id[other]
+                assert o.timed and abs(o.occurred_at - by_id[x].occurred_at) > NEAR, (x, o)
+    # No other record changes its partner, unpaired ones included.
+    for r in by_id:
+        if r not in new:
+            assert after.partner(r) == before.partner(r), by_id[r]
+    event("split" if new else "none split")
+    event("an interchangeable group" if before.twins else "no interchangeable group")
 
 
 # Interchangeable on one side, in time order (§5.7).
