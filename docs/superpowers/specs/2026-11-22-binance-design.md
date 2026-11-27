@@ -255,7 +255,7 @@ Every record is one connector transaction on the wallet's account. Fees are sepa
 | Fiat deposit or withdrawal (`fiat/orders`) | ± `amount` of the fiat on Spot, contra from `transfer_contra` with `bank_transfer = true`; `totalFee` typed | no |
 | Card purchase or sale (`fiat/payments`) | two transactions: the fiat arriving (or leaving), and the swap of fiat for crypto with `totalFee` as a fee; paid from the cash balance, only the swap | no |
 | P2P order, completed | as a card purchase, on Funding: the fiat leg and the swap at `unitPrice` | no |
-| Pay transaction | ± each `fundsDetail` amount on the wallet it names, against Unassigned | no |
+| Pay transaction | ± each `fundsDetail` amount on the wallet it names, against Unassigned; a `PAY_REFUND` is marked a refund (`2026-11-27-card-refunds-design.md` §4.1) when Phase B builds `pay/transactions` | no |
 | Rebate | + `amount` on Spot against Unassigned, unless rule 3 links it to a dividend | no |
 
 - **A pending record** is stored typed and posted when Binance counts it in the balance (a credited deposit; a withdrawal from the moment it is applied).

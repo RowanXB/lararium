@@ -26,6 +26,7 @@ from lararium.core.json_types import JSONValue
 from lararium.core.notify import NullNotifier
 from lararium.db import create_engine, make_sessionmaker
 from lararium.modules.finance.monzo import sync as monzo_sync
+from lararium.modules.finance.monzo.normalize import oldest_pending
 from lararium.modules.finance.monzo.sync import (
     FETCH_ATTEMPTS,
     BalanceKeptChangingError,
@@ -33,7 +34,14 @@ from lararium.modules.finance.monzo.sync import (
 )
 from lararium.modules.finance.valuation import balances_asof
 
-from .fixtures import ACCOUNT_ID, make_account, make_balance, make_pot, make_transaction
+from .fixtures import (
+    ACCOUNT_ID,
+    make_account,
+    make_balance,
+    make_card_transaction,
+    make_pot,
+    make_transaction,
+)
 
 KEY = bytes(range(32))
 # What Monzo lists for /transactions without `since`.
@@ -553,6 +561,20 @@ async def test_an_old_pending_transaction_is_fetched_until_it_settles(session, r
         )
     ).one()
     assert (row.status, str(row.quantity)) == ("booked", "-150.00")
+
+
+async def test_a_reversed_authorisation_is_no_longer_fetched(session, run) -> None:
+    authorisation = make_card_transaction("tx_TEST_AUTH", -1000, _iso(_noon(30)))
+    reversal = make_card_transaction(
+        "tx_TEST_REV", 1000, _iso(_noon(29)), reversal=True, settled=_iso(_noon(29))
+    )
+    connection = await _connection(run)
+    fake = FakeMonzo([authorisation, reversal], make_account(created=_iso(_noon(31))))
+
+    await _sync(session, run, connection, fake, full_backfill=True)
+
+    config = (await get_connection(session, connection.id)).config
+    assert await oldest_pending(session, connection.id, config, ACCOUNT_ID) is None
 
 
 async def test_a_quiet_account_synced_recently_has_no_gap_warning(session, run) -> None:

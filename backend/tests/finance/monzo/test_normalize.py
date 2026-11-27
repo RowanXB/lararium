@@ -2,7 +2,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import MAX_PREC, Decimal, localcontext
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -25,11 +25,13 @@ from lararium.core.raw_records import _content_hash, store_raw_record
 from lararium.core.settings_store import get_timezone
 from lararium.core.timeutil import local_date
 from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.cashflow import cash_flow
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     post_transaction,
+    upsert_connector_transaction,
     void_transaction,
 )
 from lararium.modules.finance.monzo.normalize import (
@@ -49,6 +51,7 @@ from .fixtures import (
     ACCOUNT_ID,
     make_account,
     make_balance,
+    make_card_transaction,
     make_merchant,
     make_pot,
     make_transaction,
@@ -998,6 +1001,183 @@ async def test_card_reversal_reads_only_true_or_false(
     assert (
         UNMAPPED.format("metadata.is_reversal") in await _warnings(session, connection)
     ) is noted
+
+
+# A card authorisation and its reversal (card refunds design §4.3).
+
+AUTHORISATION = make_card_transaction("tx_TEST_AUTH", -1000, "2026-03-01T12:00:00.000Z")
+# A reversal settles as it is made; its authorisation never does.
+REVERSAL = make_card_transaction(
+    "tx_TEST_REV",
+    1000,
+    "2026-03-01T15:00:00.000Z",
+    reversal=True,
+    settled="2026-03-02T06:00:00.000Z",
+)
+UNMATCHED = "Monzo transaction {}: a reversal that matches no authorisation; counted as a refund"
+
+
+async def _card_ledger(session) -> dict[str, tuple[Any, ...]]:
+    """Each transaction by external id: its status, value date, contra account (position
+    1), refund mark and the external id of the transaction it cancels."""
+    rows = await session.execute(
+        text(
+            "select t.external_id, t.status, t.value_date, p.account_id as contra, t.refund,"
+            " c.external_id as cancels from finance.transactions t"
+            " join finance.postings p on p.transaction_id = t.id and p.position = 1"
+            " left join finance.transactions c on c.id = t.cancels_transaction_id"
+        )
+    )
+    return {r.external_id: (r.status, r.value_date, r.contra, r.refund, r.cancels) for r in rows}
+
+
+async def _in_transit_balance(session, in_transit: uuid.UUID) -> Decimal:
+    total = await session.scalar(
+        text(
+            "select sum(p.quantity) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where p.account_id = :a and t.status <> 'void'"
+        ),
+        {"a": in_transit},
+    )
+    return total if total is not None else Decimal(0)
+
+
+async def _assert_cancelled_pair(session, run) -> None:
+    """The authorisation and its reversal as a cancelled pair: both on In transit, the
+    authorisation booked with no value date, the reversal naming it, neither a refund, and
+    neither income nor spending."""
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    ledger = await _card_ledger(session)
+    assert ledger["tx_TEST_AUTH"] == ("booked", None, in_transit, False, None)
+    assert ledger["tx_TEST_REV"] == ("booked", date(2026, 3, 2), in_transit, False, "tx_TEST_AUTH")
+    assert await _in_transit_balance(session, in_transit) == 0
+    flow = await cash_flow(session, date(2026, 3, 1), date(2026, 3, 1), "day")
+    assert (flow.income, flow.spending) == (0, 0)
+
+
+async def test_a_reversed_authorisation_and_its_reversal_post_on_in_transit(session, run) -> None:
+    connection = await _connection(run)
+
+    await _normalize(session, connection, transactions=[AUTHORISATION, REVERSAL])
+
+    await _assert_cancelled_pair(session, run)
+    assert not [w for w in await _warnings(session, connection) if "reversal" in w]
+
+
+async def test_a_reversal_in_a_later_sync(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[AUTHORISATION])
+    unassigned = await _unassigned(run)
+    assert (await _card_ledger(session))["tx_TEST_AUTH"] == (
+        "pending",
+        None,
+        unassigned,
+        False,
+        None,
+    )
+
+    # The later sync's pages hold the reversal alone.
+    await _normalize(session, connection, transactions=[REVERSAL])
+
+    await _assert_cancelled_pair(session, run)
+
+
+async def _post_as_before(ctx: CommandContext, connection: ConnectionRecord) -> None:
+    """Post the authorisation and its reversal as monzo-norm-5 did: against Unassigned, the
+    authorisation pending, no link."""
+    account = uuid.UUID(str(cast(dict[str, Any], connection.config)["account_map"][ACCOUNT_ID]))
+    gbp = await get_currency(ctx.session, "GBP")
+    unassigned = await get_or_create_system_account(ctx, "unassigned")
+    for tx, status in ((AUTHORISATION, "pending"), (REVERSAL, "booked")):
+        amount = to_quantity(tx["amount"], 2)
+        await upsert_connector_transaction(
+            ctx,
+            TransactionInput(
+                occurred_at=datetime.fromisoformat(tx["created"]),
+                description="TEST SHOP LONDON",
+                status=status,
+                origin="connector",
+                connection_id=connection.id,
+                external_id=tx["id"],
+                postings=[
+                    PostingInput(account, gbp.id, amount),
+                    PostingInput(unassigned, gbp.id, -amount),
+                ],
+            ),
+        )
+
+
+async def test_a_replay_repairs_the_old_posting(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection)  # maps the account
+    await _store_page(run, connection, [AUTHORISATION, REVERSAL])
+    await run(_post_as_before, await get_connection(session, connection.id))
+    await run(update_config, connection.id, {NORMALIZER_VERSION_KEY: "monzo-norm-5"})
+
+    await _normalize(session, connection)
+
+    await _assert_cancelled_pair(session, run)
+    await run(update_config, connection.id, {NORMALIZER_VERSION_KEY: "monzo-norm-5"})
+    again = await _normalize(session, connection)
+    assert (again.created, again.updated, again.unchanged) == (0, 0, 2)
+
+
+async def test_a_voided_reversal_dissolves_the_pair(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[AUTHORISATION, REVERSAL])
+    declined = REVERSAL | {
+        "decline_reason": "INSUFFICIENT_FUNDS",
+        "updated": "2026-03-01T16:00:00.000Z",
+    }
+
+    await _normalize(session, connection, transactions=[declined])
+
+    unassigned = await _unassigned(run)
+    ledger = await _card_ledger(session)
+    assert ledger["tx_TEST_REV"][0] == "void"
+    assert ledger["tx_TEST_AUTH"] == ("pending", None, unassigned, False, None)
+    report = await _normalize(session, connection, transactions=[declined])
+    assert (report.created, report.updated) == (0, 0)
+    assert await _card_ledger(session) == ledger
+
+
+async def test_the_owner_voiding_the_authorisation_leaves_the_reversal_a_refund(
+    session, run
+) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[AUTHORISATION, REVERSAL])
+    (authorisation,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST_AUTH"]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, authorisation.id)
+
+    await _normalize(session, connection)
+
+    unassigned = await _unassigned(run)
+    ledger = await _card_ledger(session)
+    assert ledger["tx_TEST_AUTH"][0] == "void"
+    assert ledger["tx_TEST_REV"] == ("booked", date(2026, 3, 2), unassigned, True, None)
+    assert not [w for w in await _warnings(session, connection) if "reversal" in w]
+    report = await _normalize(session, connection)
+    assert (report.created, report.updated, report.voided) == (0, 0, 0)
+    assert await _card_ledger(session) == ledger
+
+
+async def test_an_unmatched_reversal_is_a_refund_and_warns(session, run) -> None:
+    connection = await _connection(run)
+    partial = REVERSAL | {"amount": 700, "local_amount": 700}
+
+    await _normalize(session, connection, transactions=[AUTHORISATION, partial])
+
+    unassigned = await _unassigned(run)
+    ledger = await _card_ledger(session)
+    assert ledger["tx_TEST_REV"] == ("booked", date(2026, 3, 2), unassigned, True, None)
+    assert ledger["tx_TEST_AUTH"] == ("pending", None, unassigned, False, None)
+    warnings = await _warnings(session, connection)
+    assert warnings.count(UNMATCHED.format("tx_TEST_REV")) == 1
+    # Once, as an unmapped field warns.
+    await _normalize(session, connection, transactions=[AUTHORISATION, partial])
+    assert (await _warnings(session, connection)).count(UNMATCHED.format("tx_TEST_REV")) == 1
 
 
 async def _splits(session, transaction_id: uuid.UUID) -> list[tuple[str, Decimal]]:
