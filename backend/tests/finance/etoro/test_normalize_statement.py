@@ -866,6 +866,29 @@ async def test_an_earlier_cancellation_uploaded_last(session, ledger) -> None:
     assert (_against(found[c]), found[c][6]) == ("Unassigned", None)
 
 
+async def test_an_earlier_cancellation_after_the_owner_voided_one(session, run, ledger) -> None:
+    # The owner voids a pair's cancellation; a later upload brings an earlier one of the same
+    # amount, which cancels the request. The void one is left as the owner voided it.
+    await ledger.normalize(*BASE)
+    request = _withdrawal("05/10/2026 09:00:00")
+    earlier, later = _cancellation("05/10/2026 10:00:00"), _cancellation("05/10/2026 12:00:00")
+    first = [transfer_in(), request, later]
+    await ledger.upload(build_statement(summary(username=USERNAME), first))
+    r, c0, c = (_activity_key(cells) for cells in (request, earlier, later))
+    voided = await _transaction_id(session, c)
+    await run(void_transaction, voided)
+    await ledger.upload(build_statement(summary(username=USERNAME), [earlier]))
+    found = await _ledger(session, ledger)
+    assert c not in found
+    assert (_against(found[r]), found[r][6]) == ("In transit", None)
+    assert (_against(found[c0]), found[c0][6]) == ("In transit", r)
+    assert await _violations(session) == []
+    status = await session.scalar(
+        text("select status from finance.transactions where id = :i"), {"i": voided}
+    )
+    assert status == "void"
+
+
 async def test_dividend_with_withholding_tax(session, ledger) -> None:
     await ledger.normalize(*BASE, *TRADES)
     body = build_statement(

@@ -153,9 +153,10 @@ class Transaction(Base):
     bank_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The other side's account number, when the source gives it without a sort code.
     counterparty_account_number: Mapped[str | None] = mapped_column(Text)
-    # The transaction this one cancels (a transaction is cancelled by at most one).
+    # The transaction this one cancels. A transaction is cancelled by at most one that is not
+    # void (the partial unique index transactions_cancels_once, migration 0045).
     cancels_transaction_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("finance.transactions.id"), unique=True
+        ForeignKey("finance.transactions.id")
     )
     # The source says this movement was not a transfer (a withdrawal that failed after it
     # left the balance), so it is never a transfer's leg.

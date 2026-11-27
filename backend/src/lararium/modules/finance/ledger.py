@@ -402,13 +402,16 @@ async def _validate_cancels(
     session: AsyncSession, cancels_id: UUID, replacing_id: UUID | None
 ) -> None:
     """The transaction a transaction cancels exists, is another one, and is cancelled by no
-    other. replacing_id is the transaction being replaced in place, which may keep its link."""
+    other that is not void: a void one keeps its link but holds nothing. replacing_id is the
+    transaction being replaced in place, which may keep its link."""
     if cancels_id == replacing_id:
         raise FinanceValidationError("a transaction can't cancel itself")
     t = models.Transaction
     if await session.scalar(select(t.id).where(t.id == cancels_id)) is None:
         raise FinanceValidationError(f"cancels_transaction_id {cancels_id} is not a transaction")
-    cancelled_by = await session.scalar(select(t.id).where(t.cancels_transaction_id == cancels_id))
+    cancelled_by = await session.scalar(
+        select(t.id).where(t.cancels_transaction_id == cancels_id, t.status != "void")
+    )
     if cancelled_by is not None and cancelled_by != replacing_id:
         raise FinanceValidationError(f"transaction {cancels_id} is already cancelled")
 

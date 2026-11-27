@@ -527,6 +527,26 @@ async def test_a_transaction_cannot_cancel_one_that_is_not_there(run, make_accou
         )
 
 
+async def test_a_void_cancellation_holds_nothing(session, run, make_account, gbp) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    first, _ = await run(upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00"))
+    voided, _ = await run(
+        upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_2", first.id)
+    )
+    await run(void_transaction, voided.id)
+    other, _ = await run(
+        upsert_connector_transaction, _cancelling(conn.id, b, a, gbp, "tx_3", first.id)
+    )
+    assert other.cancels_transaction_id == first.id
+    # The void one keeps its link as it was voided.
+    kept = await session.scalar(
+        text("select cancels_transaction_id from finance.transactions where id = :i"),
+        {"i": voided.id},
+    )
+    assert kept == first.id
+
+
 async def test_a_transaction_is_cancelled_by_at_most_one(run, make_account, gbp) -> None:
     conn = await _connection(run)
     a, b = await make_account(name="A"), await make_account(name="B")

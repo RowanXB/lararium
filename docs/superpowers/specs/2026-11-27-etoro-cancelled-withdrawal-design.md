@@ -76,7 +76,7 @@ With two requests of one amount and one cancellation, the later request is the c
 
 A new nullable column on `finance.transactions`, `cancels_transaction_id`: the transaction this one cancels.
 
-- A foreign key to `finance.transactions (id)`, unique (a transaction is cancelled by at most one), and never the transaction's own id.
+- A foreign key to `finance.transactions (id)`, never the transaction's own id, and unique among transactions that are not void (a transaction is cancelled by at most one live transaction). A void transaction keeps its link as it was voided, since the owner's void is never rewritten, but holds nothing: an earlier cancellation a later upload brings can take the request.
 - Written through `TransactionInput` and `upsert_connector_transaction`, which updates it in place when it changes, as it does the transaction's other fields.
 - Returned on the transaction record and in the API schema.
 

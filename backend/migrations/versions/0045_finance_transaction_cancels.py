@@ -21,12 +21,19 @@ depends_on: str | Sequence[str] | None = None
 UPGRADE = [
     """
     ALTER TABLE finance.transactions
-      ADD COLUMN cancels_transaction_id uuid UNIQUE REFERENCES finance.transactions (id),
+      ADD COLUMN cancels_transaction_id uuid REFERENCES finance.transactions (id),
       ADD CONSTRAINT transactions_cancels_another CHECK (cancels_transaction_id <> id)
+    """,
+    # Cancelled by at most one live transaction: a void one keeps its link as it was voided
+    # (the owner's void is never rewritten) without holding the transaction it named.
+    """
+    CREATE UNIQUE INDEX transactions_cancels_once ON finance.transactions
+      (cancels_transaction_id) WHERE status <> 'void'
     """,
 ]
 
 DOWNGRADE = [
+    "DROP INDEX finance.transactions_cancels_once",
     """
     ALTER TABLE finance.transactions
       DROP CONSTRAINT transactions_cancels_another,
