@@ -107,17 +107,17 @@
 - [ ] **Step 5: Run to pass**, plus the existing `tests/finance/transfers/test_payee_holders.py` and `test_funding.py` (they call `registry_tier` directly; they must pass unchanged). Lint/pyright.
 - [ ] **Step 6: Commit** `feat: pair a family move only within its family, by the near window for unnamed sides`.
 
-### Task 4: Interchangeable on one side, and links by time (§5.7)
+### Task 4: Interchangeable on one side, linked in time order (§5.7)
 
 **Files:**
 - Modify: `backend/src/lararium/modules/finance/transfers/pairs.py` (`_twins`, its call in `pair_relation`)
 - Test: `backend/tests/finance/transfers/test_properties_family.py` (properties), `backend/tests/finance/transfers/test_family.py` (unit)
 
 **Interfaces:**
-- Produces: `_twins(records, exact, untakeable, near_window: timedelta) -> dict[UUID, UUID]`. A group qualifies when today's conditions hold except that `alike(found) and alike(others)` becomes `alike(found) or alike(others)`. Links: when every record of the group is `timed` and each has exactly one record of the other side within `near_window` of its `occurred_at`, those; else `zip(order(others), order(found))` as today. Docstring states the owner's decision (2026-11-27) and why any assignment gives the same ledger.
+- Produces: `_twins(records, exact, untakeable) -> dict[UUID, UUID]` (signature unchanged). A group qualifies when today's conditions hold except that `alike(found) and alike(others)` becomes `alike(found) or alike(others)`. Links: one rule, time order — each side sorted by `(occurred_at, source)` (an untimed record is stamped 00:00 on its booking date, so it sorts by that date), linked k-th to k-th; this is today's `order()` and `zip`, kept as is. No near-window clause (the owner dropped it, 2026-11-27). Docstring states the owner's decision (2026-11-27), why any assignment gives the same ledger, and that time order is the least-total-time-difference matching.
 
-- [ ] **Step 1: Write the failing unit test** `test_one_side_alike_pairs_in_order`: senders I −100 at T0 and S −100 at T0+17s (both family, set {other, C}), receivers C +100 rows at T0 and T0+17s (bank transfers, timed, identical account/instrument/amount/booking date): `pair_relation`-free call of `_twins` on the `exact` map `_registry_edges` + the tier filter give → I↔first row, S↔second; with the rows untimed → the fixed order (by time then reference on each side); with a third C +100 row in the window → no twins.
-- [ ] **Step 2: Write the failing property** `test_one_side_alike_any_assignment_gives_the_same_balances`: draw n in 2..3, n receivers alike on one account, n senders on distinct accounts, all mutually candidates; for every permutation the per-(account, instrument) sums of linked quantities are equal; `_twins` returns a bijection between the two sides equal to the time-order zip; adding one record with a candidate outside the group, or marking one pair untakeable, yields no twins.
+- [ ] **Step 1: Write the failing unit test** `test_one_side_alike_pairs_in_time_order`: senders S −100 at T0 and I −100 at T0+17s (both family, set {other, C}), receivers C +100 rows at T0 and T0+18s (bank transfers, timed, identical account/instrument/amount/booking date): `_twins` on the `exact` map `_registry_edges` + the tier filter give → S↔first row, I↔second; swapping the senders' times swaps the links; with a third C +100 row in the window → no twins.
+- [ ] **Step 2: Write the failing property** `test_one_side_alike_any_assignment_gives_the_same_balances`: draw n in 2..3, n receivers alike on one account, n senders on distinct accounts, all mutually candidates; for every permutation the per-(account, instrument) sums of linked quantities are equal; `_twins` returns a bijection between the two sides equal to the time-order zip (each side sorted by `(occurred_at, source)`); adding one record with a candidate outside the group, or marking one pair untakeable, yields no twins.
 - [ ] **Step 3: Run to fail.** **Step 4: Implement.** **Step 5: Run to pass**, plus the existing twin tests by name: `tests/finance/transfers/test_connected.py` (the test whose docstring cites `pairs._twins`, line ~1222) and `test_not_listed.py` (the one at ~709). Lint/pyright.
 - [ ] **Step 6: Commit** `feat: pair interchangeable records when one side is alike, linking by time`.
 
