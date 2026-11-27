@@ -228,11 +228,11 @@ def has_known_notes(notes: str) -> bool:
 
 
 def evidence(record: ExportRecord) -> Evidence:
-    """The evidence of the row's Notes. A row of another action, or with Notes of another form
-    (an upload refuses those, export.py), says nothing."""
-    if record.action not in ACTIONS:
+    """The evidence of the row's Notes. A row of another action, with Notes of another form
+    (an upload refuses those, export.py), or of a file without a Notes column says nothing."""
+    if record.action not in ACTIONS or "Notes" not in record.cells:
         return NO_EVIDENCE
-    notes = record.cells.get("Notes", "")
+    notes = record.cells["Notes"]
     if not notes.strip():
         return Evidence(True, False, None, None)
     if notes_transaction_id(notes) is not None:

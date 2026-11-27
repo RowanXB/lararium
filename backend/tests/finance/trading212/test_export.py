@@ -739,3 +739,21 @@ async def test_a_transfer_names_the_family_whatever_an_export_row_says(session, 
         "trading212",
         False,
     )
+
+
+async def test_an_export_without_a_notes_column_says_nothing(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(SUMMARY, ("transactions", transaction_item(reference="d-bare")))
+    header = tuple(h for h in HEADER if h != "Notes")
+    await _ingest(ledger, export_csv(row(reference="d-bare"), header=header))
+    assert tuple(await _posted(session, "transaction:d-bare")) == (None, None, False)
+    assert (
+        merge.evidence(
+            merge.ExportRecord(
+                uuid.uuid4(),
+                {k: v for k, v in row().items() if k != "Notes"},
+                datetime(2026, 3, 1, tzinfo=UTC),
+            )
+        )
+        == merge.NO_EVIDENCE
+    )

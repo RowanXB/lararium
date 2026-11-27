@@ -301,14 +301,6 @@ async def isolated(
         await outer.rollback()
 
 
-async def _follow(
-    conn: AsyncConnection, api: FakeTrading212, history: History, schedule: Schedule
-) -> list[tuple[Any, ...]]:
-    async with isolated(conn, api, history) as account:
-        await account.follow(schedule)
-        return await account.ledger()
-
-
 async def _follow_marked(
     conn: AsyncConnection, api: FakeTrading212, history: History, schedule: Schedule
 ) -> list[tuple[Any, ...]]:
@@ -339,7 +331,6 @@ async def _follow_marked(
         # A deposit's Notes are a transaction ID (outside the family); a withdrawal's, empty.
         if e.kind == "deposit":
             expected_outside.add(f"transaction:{e.reference}")
-    named = {f"transaction:{e.reference}" for e in history.events if e.n in covered}
     withdrawals = {
         f"transaction:{e.reference}"
         for e in history.events
@@ -347,7 +338,6 @@ async def _follow_marked(
     }
     for t in ledger:
         assert t[6] == ("trading212" if t[0] in withdrawals else None), t[0]
-        assert t[0] in named or t[0] not in outside
     assert outside == expected_outside
     return [(*t[:6], None, *t[7:]) for t in ledger]
 

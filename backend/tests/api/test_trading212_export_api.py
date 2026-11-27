@@ -23,6 +23,7 @@ from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.trading212.normalize import Trading212DataError
 from lararium.modules.finance.transfers import heal_transfers, list_transfers, unpair
+from lararium.modules.finance.transfers.decisions import pair_records
 from lararium.worker.app import procrastinate_app
 
 from ..finance.trading212.fixtures import summary_json, transaction_item
@@ -458,7 +459,17 @@ async def test_a_later_transaction_id_takes_no_family_edge(api, session, run) ->
 async def test_an_owner_s_never_pair_decision_holds_after_an_empty_notes_upload(
     api, session, run
 ) -> None:
-    isa = await _invest_and_isa(api, session, run, minutes=2)
+    # Ten minutes apart: no pair is possible until the owner pairs them, then says never.
+    isa = await _invest_and_isa(api, session, run, minutes=10)
+    ids = {
+        key: await session.scalar(
+            text("select id from finance.transactions where external_id = :k"),
+            {"k": f"transaction:{key}"},
+        )
+        for key in ("out", DEPOSIT_REF)
+    }
+    async with command_context(session, Actor("user", "me"), "finance.pair", {}) as ctx:
+        await pair_records(ctx, ids["out"], ids[DEPOSIT_REF])
     [transfer] = await _matched(session)
     async with command_context(session, Actor("user", "me"), "finance.unpair", {}) as ctx:
         await unpair(ctx, transfer.id)

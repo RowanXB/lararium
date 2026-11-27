@@ -168,7 +168,11 @@ def parse_export(body: bytes) -> tuple[tuple[ExportRow, ...], frozenset[str]]:
                     cells[name] = value
                     flagged.add(name)
             _check_row(cells)
-            if cells["Action"].strip() in ACTIONS and not has_known_notes(cells.get("Notes", "")):
+            if (
+                cells["Action"].strip() in ACTIONS
+                and "Notes" in cells
+                and not has_known_notes(cells["Notes"])
+            ):
                 raise ExportError(
                     f"line {reader.line_num} of the export: the Notes of a Deposit or Withdrawal"
                     " must be a transaction ID, a bank account sent to, or empty"
