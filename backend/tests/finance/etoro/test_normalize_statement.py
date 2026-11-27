@@ -30,8 +30,9 @@ from lararium.modules.finance.instruments import (
     create_instrument,
     get_currency,
 )
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.ledger import find_unbalanced_transactions, void_transaction
 from lararium.modules.finance.source_reviews import list_reviews, resolve_review
+from lararium.modules.finance.transfers import find_transfer_violations
 
 from .fixtures import (
     CASH_ACCOUNT,
@@ -218,13 +219,16 @@ async def ledger(session, run, tmp_path, monkeypatch) -> StatementLedger:
 
 async def _ledger(session, ledger: Ledger) -> dict[str, tuple]:
     """The connection's live transactions by external id: (occurred_at, booking date,
-    description, counterparty identifier, postings), postings as (account, symbol, quantity,
-    cost, price, is_fee) with exact numbers, no UUIDs."""
+    description, counterparty identifier, bank transfer, postings, the external id of the
+    transaction it cancels), postings as (account, symbol, quantity, cost, price, is_fee) with
+    exact numbers, no UUIDs."""
     rows = await _rows(
         session,
         "select t.id, t.external_id, t.occurred_at, t.booking_date, t.description,"
-        " ci.value as counterparty, t.bank_transfer from finance.transactions t"
+        " ci.value as counterparty, t.bank_transfer, ct.external_id as cancels"
+        " from finance.transactions t"
         " left join finance.account_identifiers ci on ci.id = t.counterparty_identifier_id"
+        " left join finance.transactions ct on ct.id = t.cancels_transaction_id"
         " where t.connection_id = :c and t.status <> 'void'",
         c=ledger.connection.id,
     )
@@ -245,6 +249,7 @@ async def _ledger(session, ledger: Ledger) -> dict[str, tuple]:
             row.counterparty,
             row.bank_transfer,
             [tuple(p) for p in postings],
+            row.cancels,
         )
     return found
 
@@ -256,6 +261,14 @@ def _key(body: bytes, type_: str) -> str:
         r.key for r in statement.rows if r.sheet == ACCOUNT_ACTIVITY and r.cells["Type"] == type_
     ]
     return key
+
+
+def _keys(body: bytes, type_: str) -> list[str]:
+    """The keys of the statement's Account Activity rows of the Type, in the sheet's order."""
+    statement = parse_statement(body, etoro_sync.STATEMENT_ZONE)
+    return [
+        r.key for r in statement.rows if r.sheet == ACCOUNT_ACTIVITY and r.cells["Type"] == type_
+    ]
 
 
 def _expected_trade_ledger(body: bytes) -> dict[str, tuple]:
@@ -271,6 +284,7 @@ def _expected_trade_ledger(body: bytes) -> dict[str, tuple]:
                 (TRADING, "USD", Decimal("1260.00"), None, None, False),
                 ("In transit", "USD", Decimal("-1260.00"), None, None, False),
             ],
+            None,
         ),
         f"open:{POSITION}": (
             datetime(2026, 10, 2, 14, 30, 5, 120000, tzinfo=UTC),
@@ -282,6 +296,7 @@ def _expected_trade_ledger(body: bytes) -> dict[str, tuple]:
                 (TRADING, SYMBOL, Decimal(4), Decimal(125), None, False),
                 (TRADING, "USD", Decimal(-500), None, None, False),
             ],
+            None,
         ),
         f"close:{POSITION}": (
             datetime(2026, 10, 20, 15, 1, 44, 500000, tzinfo=UTC),
@@ -293,6 +308,7 @@ def _expected_trade_ledger(body: bytes) -> dict[str, tuple]:
                 (TRADING, SYMBOL, Decimal(-4), None, Decimal(130), False),
                 (TRADING, "USD", Decimal(520), None, None, False),
             ],
+            None,
         ),
     }
 
@@ -395,6 +411,7 @@ async def test_transfer_rows_are_legs(session, ledger) -> None:
             (TRADING, "USD", Decimal("1260.00"), None, None, False),
             ("In transit", "USD", Decimal("-1260.00"), None, None, False),
         ],
+        None,
     )
     assert found[f"activity:{_key(body, 'Transfer: USD > GBP')}"][2:] == (
         "Transfer to eToro Money",
@@ -404,6 +421,7 @@ async def test_transfer_rows_are_legs(session, ledger) -> None:
             (TRADING, "USD", Decimal("-1000.00"), None, None, False),
             ("In transit", "USD", Decimal("1000.00"), None, None, False),
         ],
+        None,
     )
     # Typed, each linked to its transaction.
     rows = await _rows(
@@ -480,6 +498,32 @@ async def test_conversion_fee_row_no_postings_and_leg_fee(session, ledger) -> No
     ]
 
 
+def _withdrawal(at: str) -> dict[str, str]:
+    return activity_row(at, "Withdraw Request", "-100.00")
+
+
+def _cancellation(at: str, amount: str = "100.00", **cells: str) -> dict[str, str]:
+    return activity_row(at, "Withdraw Request Cancelled", amount, **cells)
+
+
+async def _violations(session) -> list[str]:
+    """The external ids of the transfer invariant's violations, but the transfer in from eToro
+    Money, whose transfer the engine (not run here) records."""
+    found = await find_transfer_violations(session)
+    rows = await _rows(
+        session,
+        "select external_id from finance.transactions where id = any(:ids)"
+        " and description <> 'Transfer from eToro Money' order by 1",
+        ids=found,
+    )
+    return [row.external_id for row in rows]
+
+
+def _against(entry: tuple) -> str:
+    """The account a cash event's contra (its second posting) is on."""
+    return entry[5][1][0]
+
+
 async def test_withdraw_request_and_cancel_net_zero(session, ledger) -> None:
     await ledger.normalize(*BASE)
     body = build_statement(
@@ -494,28 +538,33 @@ async def test_withdraw_request_and_cancel_net_zero(session, ledger) -> None:
     )
     await ledger.upload(body)
     found = await _ledger(session, ledger)
-    request = found[f"activity:{_key(body, 'Withdraw Request')}"]
+    request_key = f"activity:{_key(body, 'Withdraw Request')}"
+    request = found[request_key]
     cancel = found[f"activity:{_key(body, 'Withdraw Request Cancelled')}"]
-    # Bank transfers naming no account: Unassigned until the transfer engine pairs them.
+    # A cancelled pair: both against In transit, which they leave level, the cancellation
+    # naming its request; neither is spending or income.
     assert request[3:] == (
         None,
         True,
         [
             (TRADING, "USD", Decimal("-100.00"), None, None, False),
-            ("Unassigned", "USD", Decimal("100.00"), None, None, False),
+            ("In transit", "USD", Decimal("100.00"), None, None, False),
         ],
+        None,
     )
     assert cancel[3:] == (
         None,
         True,
         [
             (TRADING, "USD", Decimal("100.00"), None, None, False),
-            ("Unassigned", "USD", Decimal("-100.00"), None, None, False),
+            ("In transit", "USD", Decimal("-100.00"), None, None, False),
         ],
+        request_key,
     )
     account = await _account(session, TRADING)
     usd = (await get_currency(session, "USD")).id
     assert (await holdings(session, account, NOW))[usd] == Decimal("1260.00")
+    assert await _violations(session) == []
 
 
 async def test_withdraw_fee_and_cancel(session, ledger) -> None:
@@ -534,21 +583,232 @@ async def test_withdraw_fee_and_cancel(session, ledger) -> None:
     )
     await ledger.upload(body)
     found = await _ledger(session, ledger)
-    fees = sorted(v[5] for k, v in found.items() if v[2] == "Withdrawal fee")
-    assert fees == [
-        [
-            (TRADING, "USD", Decimal("-5.00"), None, None, True),
-            ("Unassigned", "USD", Decimal("5.00"), None, None, False),
-        ],
-        [
-            (TRADING, "USD", Decimal("5.00"), None, None, True),
-            ("Unassigned", "USD", Decimal("-5.00"), None, None, False),
-        ],
-    ]
+    fee, refund = (f"activity:{key}" for key in _keys(body, "Withdraw Fee"))
+    assert (found[fee][2], found[fee][5:]) == (
+        "Withdrawal fee",
+        (
+            [
+                (TRADING, "USD", Decimal("-5.00"), None, None, True),
+                ("In transit", "USD", Decimal("5.00"), None, None, False),
+            ],
+            None,
+        ),
+    )
+    assert (found[refund][2], found[refund][5:]) == (
+        "Withdrawal fee",
+        (
+            [
+                (TRADING, "USD", Decimal("5.00"), None, None, True),
+                ("In transit", "USD", Decimal("-5.00"), None, None, False),
+            ],
+            fee,
+        ),
+    )
     assert f"activity:{_key(body, 'Withdraw Fee Cancelled')}" not in found
     account = await _account(session, TRADING)
     usd = (await get_currency(session, "USD")).id
     assert (await holdings(session, account, NOW))[usd] == Decimal("1260.00")
+    assert await _violations(session) == []
+
+
+async def test_a_refund_needs_its_cancelled_row(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            activity_row("05/10/2026 09:00:00", "Withdraw Fee", "-5.00"),
+            activity_row("06/10/2026 11:00:00", "Withdraw Fee", "5.00"),
+        ],
+    )
+    await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    for key in _keys(body, "Withdraw Fee"):
+        assert (_against(found[f"activity:{key}"]), found[f"activity:{key}"][6]) == (
+            "Unassigned",
+            None,
+        )
+
+
+@pytest.mark.parametrize(("refunded_at", "paired"), [("11:00:01", True), ("11:00:02", False)])
+async def test_a_refund_one_second_from_its_cancelled_row(
+    session, ledger, refunded_at, paired
+) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            activity_row("05/10/2026 09:00:00", "Withdraw Fee", "-5.00"),
+            activity_row("06/10/2026 11:00:00", "Withdraw Fee Cancelled", "5.00"),
+            activity_row(f"06/10/2026 {refunded_at}", "Withdraw Fee", "5.00"),
+        ],
+    )
+    await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    fee, refund = (f"activity:{key}" for key in _keys(body, "Withdraw Fee"))
+    if paired:
+        assert (_against(found[fee]), found[fee][6]) == ("In transit", None)
+        assert (_against(found[refund]), found[refund][6]) == ("In transit", fee)
+    else:
+        assert (_against(found[fee]), found[fee][6]) == ("Unassigned", None)
+        assert (_against(found[refund]), found[refund][6]) == ("Unassigned", None)
+
+
+async def _split_pair(session, ledger, *, request_first: bool) -> None:
+    """A request and its cancellation in two statements: the pair once both are uploaded,
+    the request keeping its transaction."""
+    await ledger.normalize(*BASE)
+    with_request = build_statement(
+        summary(username=USERNAME), [transfer_in(), _withdrawal("05/10/2026 09:00:00")]
+    )
+    with_cancellation = build_statement(
+        summary(username=USERNAME), [_cancellation("06/10/2026 11:00:00")]
+    )
+    request = f"activity:{_key(with_request, 'Withdraw Request')}"
+    cancel = f"activity:{_key(with_cancellation, 'Withdraw Request Cancelled')}"
+    first, alone = (request, with_request) if request_first else (cancel, with_cancellation)
+    await ledger.upload(alone)
+    found = await _ledger(session, ledger)
+    # Alone, it posts as any bank transfer with no counterpart yet.
+    assert (_against(found[first]), found[first][4], found[first][6]) == (
+        "Unassigned",
+        True,
+        None,
+    )
+    posted = await _transaction_id(session, first)
+    await ledger.upload(with_cancellation if request_first else with_request)
+    found = await _ledger(session, ledger)
+    assert (_against(found[request]), found[request][6]) == ("In transit", None)
+    assert (_against(found[cancel]), found[cancel][6]) == ("In transit", request)
+    assert await _transaction_id(session, first) == posted
+    assert await _violations(session) == []
+
+
+async def test_a_cancellation_in_a_later_statement(session, ledger) -> None:
+    await _split_pair(session, ledger, request_first=True)
+
+
+async def test_a_request_uploaded_after_its_cancellation(session, ledger) -> None:
+    await _split_pair(session, ledger, request_first=False)
+
+
+async def test_a_cancellation_with_no_request(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME), [transfer_in(), _cancellation("06/10/2026 11:00:00")]
+    )
+    await ledger.upload(body)
+    cancel = (await _ledger(session, ledger))[
+        f"activity:{_key(body, 'Withdraw Request Cancelled')}"
+    ]
+    assert (_against(cancel), cancel[6]) == ("Unassigned", None)
+
+
+async def test_the_later_of_two_requests_is_the_cancelled_one(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            _withdrawal("05/10/2026 09:00:00"),
+            _withdrawal("05/10/2026 10:00:00"),
+            _cancellation("05/10/2026 11:00:00"),
+        ],
+    )
+    await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    earlier, later = (f"activity:{key}" for key in _keys(body, "Withdraw Request"))
+    cancel = f"activity:{_key(body, 'Withdraw Request Cancelled')}"
+    assert (_against(found[earlier]), found[earlier][6]) == ("Unassigned", None)
+    assert (_against(found[later]), found[later][6]) == ("In transit", None)
+    assert (_against(found[cancel]), found[cancel][6]) == ("In transit", later)
+
+
+async def test_a_second_cancellation_cancels_nothing(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            _withdrawal("05/10/2026 09:00:00"),
+            _cancellation("05/10/2026 11:00:00"),
+            _cancellation("05/10/2026 12:00:00"),
+        ],
+    )
+    await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    request = f"activity:{_key(body, 'Withdraw Request')}"
+    first, second = (f"activity:{key}" for key in _keys(body, "Withdraw Request Cancelled"))
+    assert (_against(found[first]), found[first][6]) == ("In transit", request)
+    assert (_against(found[second]), found[second][6]) == ("Unassigned", None)
+
+
+async def test_a_request_after_the_cancellation_is_a_withdrawal(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            _withdrawal("05/10/2026 09:00:00"),
+            _cancellation("05/10/2026 11:00:00"),
+            _withdrawal("05/10/2026 12:00:00"),
+        ],
+    )
+    await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    cancelled, withdrawn = (f"activity:{key}" for key in _keys(body, "Withdraw Request"))
+    assert _against(found[cancelled]) == "In transit"
+    assert (_against(found[withdrawn]), found[withdrawn][4], found[withdrawn][6]) == (
+        "Unassigned",
+        True,
+        None,
+    )
+
+
+async def test_a_cancellation_without_a_number_cancels_nothing(session, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            _withdrawal("05/10/2026 09:00:00"),
+            _cancellation("05/10/2026 11:00:00", change="-"),
+        ],
+    )
+    report = await ledger.upload(body)
+    found = await _ledger(session, ledger)
+    request = found[f"activity:{_key(body, 'Withdraw Request')}"]
+    assert (_against(request), request[6]) == ("Unassigned", None)
+    assert f"activity:{_key(body, 'Withdraw Request Cancelled')}" not in found
+    assert report.flagged == {f"{ACCOUNT_ACTIVITY}.Realized Equity Change has no number"}
+
+
+async def test_a_side_the_owner_voided_ends_the_pair(session, run, ledger) -> None:
+    await ledger.normalize(*BASE)
+    body = build_statement(
+        summary(username=USERNAME),
+        [
+            transfer_in(),
+            _withdrawal("05/10/2026 09:00:00"),
+            _cancellation("06/10/2026 11:00:00"),
+        ],
+    )
+    await ledger.upload(body)
+    request = f"activity:{_key(body, 'Withdraw Request')}"
+    cancel = f"activity:{_key(body, 'Withdraw Request Cancelled')}"
+    assert _against((await _ledger(session, ledger))[request]) == "In transit"
+    await run(void_transaction, await _transaction_id(session, cancel))
+    for _ in range(2):
+        report = await ledger.replay()
+        found = await _ledger(session, ledger)
+        assert cancel not in found
+        assert (_against(found[request]), found[request][4], found[request][6]) == (
+            "Unassigned",
+            True,
+            None,
+        )
+    assert (report.created, report.updated) == (0, 0)
 
 
 async def test_dividend_with_withholding_tax(session, ledger) -> None:

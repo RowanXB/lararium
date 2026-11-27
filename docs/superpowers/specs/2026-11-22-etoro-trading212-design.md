@@ -293,8 +293,8 @@ Every record is one connector transaction. Fees and taxes are separate postings 
 - **Cash events, statement only** (key per §5.3):
   - "Transfer GBP → USD" / "Transfer USD → GBP": ± `Amount` USD, a transfer leg identified as eToro Money (§5.12);
   - "Deposit Conversion Fee", "Withdrawal Conversion Fee": no postings (the fee is netted in the transfer; `Realized Equity Change` is 0); typed, and used as the conversion's fee (§5.12);
-  - "Withdraw Request" (− USD) and "Withdraw Request Cancelled" (+ USD): through `transfer_contra`, `bank_transfer` true (§5.12);
-  - "Withdraw Fee" and "Withdraw Fee Cancelled": fee postings, against Unassigned;
+  - "Withdraw Request" (− USD) and "Withdraw Request Cancelled" (+ USD): through `transfer_contra`, `bank_transfer` true (§5.12), unless they are a cancelled pair: then both post against In transit, the cancellation linked to its request (`cancels_transaction_id`), and neither is spending or income (cancelled-withdrawal design, `2026-11-27-etoro-cancelled-withdrawal-design.md`, §4.1, §4.3);
+  - "Withdraw Fee" and "Withdraw Fee Cancelled": fee postings, against Unassigned; a fee and its refund (a positive "Withdraw Fee" beside a "Withdraw Fee Cancelled", which moves nothing) are a cancelled pair as a request and its cancellation are, against In transit, the refund linked to its fee (same design);
   - dividends (with withholding tax from the Dividends sheet as a separate fee posting), overnight fees, SDRT, interest, refunds, credits, adjustments, stocks lending: against Unassigned;
   - any other Type is flagged and not posted.
 - **The ledger's cash equals the statement's balance.** The cash a row moves is its `Realized Equity Change`, except open and close rows, whose cash is the `Amount` (− for an open, + for a close), and "Withdraw Fee Cancelled", which moves nothing (its fee was already refunded by a positive "Withdraw Fee" row; in the owner's data both `Balance` and `Realized Equity` stay unchanged on it while its `Realized Equity Change` is positive). Rows sharing one second are not listed in balance order, so the check is per second: the balance after the second's rows equals the balance before plus their cash. (Task 0, 2026-11-23: this holds on every second of the owner's statement.)
@@ -408,7 +408,7 @@ Audit arguments never include keys.
 | eToro Money → Trading, statement not yet uploaded | GBP in In transit; "upload a statement" warning (§5.11, §5.12). |
 | A GBP → USD transfer with no conversion-fee row | Fee 0 (seen in the owner's data). |
 | Two transfers between eToro Money and Trading within the window | Each must be the only candidate; otherwise `several_candidates` for the owner. |
-| Withdraw Request then Withdraw Request Cancelled | Both post; they net to zero on the account. |
+| Withdraw Request then Withdraw Request Cancelled | Both post against In transit, the cancellation linked to its request; they net to zero on the account, and neither is spending or income (cancelled-withdrawal design §4). |
 | Two Monzo card deposits of the same amount minutes apart | Paired by time within N minutes when unique; else the owner pairs. |
 | A Trading 212 key without `pies:read` or `orders:read` | That part skipped, flagged once. |
 | Trading 212 pies endpoints removed | Their 404 skips pies, flagged once; positions already carry `quantityInPies`. |

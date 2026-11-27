@@ -17,11 +17,22 @@ Each cash event is one connector transaction, `activity:<row key>`:
   account's currency), the transfer being the one of its direction at the same second, else
   the row right before it; one with no such transfer is flagged;
 - "Withdraw Request" and "Withdraw Request Cancelled" go through transfer_contra as bank
-  transfers naming no account;
+  transfers naming no account, unless they are a cancelled pair: a "Withdraw Request
+  Cancelled" cancels the latest earlier "Withdraw Request" of the opposite cash that nothing
+  cancels yet;
 - fees and income go against Unassigned, fees (`is_fee`) as such: "Withdraw Fee", overnight
   fees, SDRT; dividends (their withholding tax, from the Dividends sheet, a fee posting of its
-  own), interest, refunds, credits, adjustments, stocks lending;
+  own), interest, refunds, credits, adjustments, stocks lending. A positive "Withdraw Fee" is
+  a refund when a "Withdraw Fee Cancelled" row of its |Amount| is at most a second from it
+  (each such row vouches for the nearest refund no other does, the earlier on a tie); a
+  refund cancels the latest earlier "Withdraw Fee" of the opposite cash that nothing cancels
+  yet, a cancelled pair as a request and its cancellation are;
 - any other Type is flagged by name and posts nothing.
+A cancelled pair (rows taken by time, then row id; one whose cash is no number is in none)
+posts both rows as above but against In transit, which it leaves level, the cancelled one
+first and the other naming it (`cancels_transaction_id`); a run that brings either row
+re-posts the other from its stored row. When the owner has voided either, each posts as in no
+pair (cancelled-withdrawal design §4.1, §4.3).
 The Types the owner's statements have not shown (all but transfers, conversion fees,
 withdrawals, withdrawal fees, opens and closes) are provisional: Account Summary's names.
 
@@ -42,7 +53,7 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 from uuid import UUID
@@ -52,6 +63,7 @@ from sqlalchemy import select, text
 from lararium.core import models as core_models
 from lararium.core.raw_records import RawRecord, get_raw_records
 from lararium.core.timeutil import local_date
+from lararium.modules.finance import models
 from lararium.modules.finance.connector_items import SHOWN_NAME
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.etoro import accounts
@@ -94,7 +106,13 @@ from lararium.modules.finance.typed_tables import Value, typed_values, upsert_ty
 ACTIVITY = "activity:"
 OPEN_POSITION = "Open Position"
 POSITION_CLOSED = "Position closed"
+WITHDRAW_REQUEST = "Withdraw Request"
+WITHDRAW_REQUEST_CANCELLED = "Withdraw Request Cancelled"
+WITHDRAW_FEE = "Withdraw Fee"
 WITHDRAW_FEE_CANCELLED = "Withdraw Fee Cancelled"
+# How far from its refund a "Withdraw Fee Cancelled" row may be: eToro may write one operation
+# across a second's boundary.
+_REFUND_MARGIN = timedelta(seconds=1)
 DIVIDEND = "dividend"
 UNATTACHED_FEE = "a conversion fee row names no transfer"
 NO_MONEY_ACCOUNT = "a statement transfer names no single eToro Money account"
@@ -107,7 +125,7 @@ _CONVERSION_FEES: Mapping[str, Literal["in", "out"]] = {
     "Deposit Conversion Fee": "in",
     "Withdrawal Conversion Fee": "out",
 }
-_BANK = {"Withdraw Request": "Withdrawal", "Withdraw Request Cancelled": "Withdrawal cancelled"}
+_BANK = {WITHDRAW_REQUEST: "Withdrawal", WITHDRAW_REQUEST_CANCELLED: "Withdrawal cancelled"}
 
 
 @dataclass(frozen=True)
@@ -610,6 +628,54 @@ def _is_leg(row: Row, direction: Literal["in", "out"], currency: str) -> bool:
     return found is not None and found[0] == direction
 
 
+def _cancellations(rows: Sequence[Row]) -> dict[str, str]:
+    """Each cancelling row's key to the key of the row it cancels (module doc): a "Withdraw
+    Request Cancelled" its request's, a refund its fee's."""
+    ordered = sorted(
+        (r for r in rows if r.sheet == ACCOUNT_ACTIVITY), key=lambda r: (_when(r), r.id)
+    )
+    refunds = _refunds(ordered)
+    # By Type: the (cash, key) of the rows nothing cancels yet, the earliest first.
+    waiting: defaultdict[str, list[tuple[Decimal, str]]] = defaultdict(list)
+    found: dict[str, str] = {}
+    for row in ordered:
+        amount = cash(row)
+        if amount is None:
+            continue
+        if (row.type == WITHDRAW_REQUEST_CANCELLED and amount > 0) or row.key in refunds:
+            cancelled = waiting[WITHDRAW_REQUEST if row.type in _BANK else WITHDRAW_FEE]
+            for n in range(len(cancelled) - 1, -1, -1):
+                if cancelled[n][0] == -amount:
+                    found[row.key] = cancelled.pop(n)[1]
+                    break
+        elif row.type in (WITHDRAW_REQUEST, WITHDRAW_FEE) and amount < 0:
+            waiting[row.type].append((amount, row.key))
+    return found
+
+
+def _refunds(ordered: Sequence[Row]) -> set[str]:
+    """The keys of the positive "Withdraw Fee" rows a "Withdraw Fee Cancelled" row vouches
+    for (module doc), of rows in order."""
+    positive = [
+        (r, a) for r in ordered if r.type == WITHDRAW_FEE and (a := cash(r)) is not None and a > 0
+    ]
+    vouched: set[str] = set()
+    for row in ordered:
+        if row.type != WITHDRAW_FEE_CANCELLED or (amount := number(row, "Amount")) is None:
+            continue
+        at = _when(row)
+        near = [
+            (abs(_when(r) - at), _when(r), r.id, r.key)
+            for r, refunded in positive
+            if r.key not in vouched
+            and refunded == amount.copy_abs()
+            and abs(_when(r) - at) <= _REFUND_MARGIN
+        ]
+        if near:
+            vouched.add(min(near)[3])
+    return vouched
+
+
 def _dividend(statement: Statement, row: Row) -> Row | None:
     """The Dividends row of an activity's dividend: the same position and day, and the same
     net amount when the day has several."""
@@ -700,6 +766,64 @@ async def _unassigned(
     return await run.post(key, _when(row), kind.description, postings)
 
 
+async def _kept_void(run: Run, key: str) -> bool:
+    """Whether the connection's transaction under the key is one the owner voided: posting
+    leaves it void (upsert_connector_transaction)."""
+    t = models.Transaction
+    found = (
+        await run.session.execute(
+            select(t.voided_by).where(
+                t.connection_id == run.connection_id, t.external_id == key, t.status == "void"
+            )
+        )
+    ).one_or_none()
+    return found is not None and found.voided_by != "connector"
+
+
+async def _alone(run: Run, statement: Statement, row: Row, currency: str) -> UUID | None:
+    """A row of a cancelled pair posted as one in no pair (cash_events)."""
+    key = f"{ACTIVITY}{row.key}"
+    if row.type in _BANK:
+        return await _bank(run, row, key, currency)
+    return await _unassigned(run, statement, row, key, currency, _UNASSIGNED[row.type.casefold()])
+
+
+async def _in_transit(run: Run, row: Row, key: str, currency: str, cancels: UUID | None) -> UUID:
+    """One row of a cancelled pair: posted as in no pair (_bank, _unassigned), but against In
+    transit, naming the transaction it cancels."""
+    amount = cash(row)
+    assert amount is not None  # a row without a number is in no pair (_cancellations)
+    usd = await run.currency(currency)
+    in_transit = await run.system_account("in_transit")
+    kind = None if row.type in _BANK else _UNASSIGNED[row.type.casefold()]
+    return await run.post(
+        key,
+        _when(row),
+        _BANK[row.type] if kind is None else kind.description,
+        [
+            PostingInput(run.trading, usd.id, amount, is_fee=kind is not None and kind.fee),
+            PostingInput(in_transit, usd.id, -amount),
+        ],
+        CounterpartyFields(bank_transfer=True) if kind is None else None,
+        cancels=cancels,
+    )
+
+
+async def _pair(
+    run: Run, statement: Statement, cancelled: Row, cancelling: Row, currency: str
+) -> dict[str, UUID | None]:
+    """Post a cancelled pair (module doc), by row key: the cancelled row first, the
+    cancelling one naming its transaction; each as in no pair when either is not live (the
+    owner voided it, before or meanwhile), so a void side ends the pair."""
+    keys = [f"{ACTIVITY}{cancelled.key}", f"{ACTIVITY}{cancelling.key}"]
+    if not [key for key in keys if await _kept_void(run, key)]:
+        first = await _in_transit(run, cancelled, keys[0], currency, None)
+        second = await _in_transit(run, cancelling, keys[1], currency, first)
+        if None not in [await run.live(key) for key in keys]:
+            return {cancelled.key: first, cancelling.key: second}
+    return {row.key: await _alone(run, statement, row, currency) for row in (cancelled, cancelling)}
+
+
 async def cash_events(run: Run, statement: Statement) -> None:
     """Post the cash events of the run's Account Activity rows (module doc), and the leg fees
     of their transfers."""
@@ -709,6 +833,11 @@ async def cash_events(run: Run, statement: Statement) -> None:
         raise EtoroDataError("eToro has not given the Trading account's currency")
     currency = run.account_currency
     links, unattached = _fee_links(statement.stored, currency)
+    by_key = {row.key: row for row in statement.stored}
+    # Each row of a cancelled pair → (the cancelled row's key, the cancelling row's).
+    pairs: dict[str, tuple[str, str]] = {}
+    for cancelling, cancelled in _cancellations(statement.stored).items():
+        pairs[cancelling] = pairs[cancelled] = (cancelled, cancelling)
     for row in sorted(statement.of(ACCOUNT_ACTIVITY), key=lambda r: (_when(r), r.id)):
         if row.type in (OPEN_POSITION, POSITION_CLOSED):
             continue  # a trade: records.position
@@ -721,6 +850,11 @@ async def cash_events(run: Run, statement: Statement) -> None:
                 run.flag(f"{row.sheet}.Amount has no number")
         elif row.type == WITHDRAW_FEE_CANCELLED:
             pass  # moves nothing: its refund is a "Withdraw Fee" row of its own
+        elif row.key in pairs:
+            if row.key not in statement.links:  # not yet posted with the other row
+                cancelled, cancelling = (by_key[key] for key in pairs[row.key])
+                statement.links |= await _pair(run, statement, cancelled, cancelling, currency)
+            transaction_id = statement.links[row.key]
         elif _TRANSFER.fullmatch(row.type):
             transaction_id = await _transfer(run, row, key, currency)
         elif row.type in _BANK:
