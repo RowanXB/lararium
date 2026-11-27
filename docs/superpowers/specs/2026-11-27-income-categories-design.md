@@ -157,11 +157,11 @@ By category                    By month (stacked by category)
 2 selected:  Category [ Salary v ]  [Apply]  [Clear]
 ```
 
-(Amounts invented.) The Source column shows what the source says (its income kind, else its category) and never changes. The Category column is the owner's, empty until set. The picker offers the known categories and takes a new one typed in; with none yet, it suggests `salary` and `family`. Clicking a category in the summary filters the list to it. The page reuses `RangePicker`, `ShareChart`, the existing table and checkbox components, and `categoryLabel`.
+(Amounts invented.) The Source column shows what the source says (its income kind, else its category) and never changes. The Category column is the owner's, empty until set. The picker offers the known categories and takes a new one typed in; with none yet, it suggests `salary` and `family`. Clicking a category in the summary filters the list to it. The account filter lists the owner's accounts still in reports (not system accounts, not those left out of reports, which have no entries here). The page reuses `RangePicker`, `ShareChart`, the existing table and checkbox components, and `categoryLabel`.
 
 ### 4.7 The Overview
 
-The owner asked (2026-11-27) for the Overview's "Where your money is" card, beside "Where it went" (spending by payee), to become an income card. It becomes **Where it came from**: income by effective category over the Overview's range, largest first, as bars, read from the cash-flow report's categories (their `income`), with a link to the Income page. Money moved in from hidden accounts stays in its own block, as today. Each account's value is still in the Holdings table below. Income by category rather than by payer is my call: the category is what the owner sets.
+The owner asked (2026-11-27) for the Overview's "Where your money is" card, beside "Where it went" (spending by payee), to become an income card. It becomes **Where it came from**: income by effective category over the Overview's range, largest first, as bars, read from the cash-flow report's categories (their `income`), with a link to the Income page that opens it on the same dates (the range rides in the link's search params). Money moved in from hidden accounts stays in its own block, as today. Each account's value is still in the Holdings table below. Income by category rather than by payer is my call: the category is what the owner sets.
 
 ## 5. Constraints
 
