@@ -200,3 +200,37 @@ async def test_a_profile_without_the_pattern_ignores_the_file_name(
     )
     assert batch.statement is not None and batch.statement.period_from is None
     assert batch.warnings == []
+
+
+NOTES_CSV = (
+    HEADER + "Deposit,2026-01-05 09:10:11+00:00,"
+    '"Transaction ID: 11111111-2222-3333-4444-555555555555",'
+    '01aaaaaa-bbbb-7ccc-8ddd-000000000001,25.00,"GBP"\n'
+    'Deposit,2026-01-06 10:00:00+00:00,,01aaaaaa-bbbb-7ccc-8ddd-000000000002,1.00,"GBP"\n'
+    'Withdrawal,2026-01-06 10:05:00+00:00,"Sent to Bank Account 12-34-56 / 87654321",'
+    '01aaaaaa-bbbb-7ccc-8ddd-000000000003,-1.00,"GBP"\n'
+)
+
+
+def test_a_withdrawal_names_the_bank_account_it_was_sent_to() -> None:
+    deposit, internal, withdrawal = _parse(NOTES_CSV).rows
+    assert isinstance(deposit, ParsedRow) and isinstance(internal, ParsedRow)
+    assert isinstance(withdrawal, ParsedRow)
+    assert withdrawal.counterparty is not None
+    assert (withdrawal.counterparty.sort_code, withdrawal.counterparty.account_number) == (
+        "123456",
+        "87654321",
+    )
+    assert withdrawal.memo == "Sent to Bank Account 12-34-56 / 87654321"
+    # A deposit's transaction id and an internal move's empty Notes name no bank account.
+    for row in (deposit, internal):
+        assert row.counterparty is None or row.counterparty.sort_code is None
+
+
+def test_notes_of_another_form_make_the_row_an_error() -> None:
+    content = (
+        HEADER + 'Deposit,2026-01-05 09:10:11+00:00,"Something new",'
+        '01aaaaaa-bbbb-7ccc-8ddd-000000000004,5.00,"GBP"\n'
+    )
+    [row] = _parse(content).rows
+    assert isinstance(row, RowError)

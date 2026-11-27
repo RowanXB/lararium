@@ -575,7 +575,10 @@ must start on the account's first day or on a day an earlier upload covers. Keep
 every day of it in full but the last, which the export may have been taken partway through. A
 renamed export lists in full every day from its first row's to the day before its last row's,
 and its upload warns that the file name gives no period. Interest rows import as ordinary rows
-until their `Action` is known.
+until their `Action` is known. A withdrawal's Notes give the bank account it was sent to (sort
+code and account number), so it names your own account there and pairs with that account's
+receipt; a deposit's Notes give Trading 212's transaction id, and a move from another Trading 212
+account leaves Notes empty. Notes of any other form make the row an error, so a new form is seen.
 
 ### Transfers
 
