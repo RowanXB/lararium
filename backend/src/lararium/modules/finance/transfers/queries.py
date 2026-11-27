@@ -761,10 +761,13 @@ class SuggestionRecord:
 
 async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
     """Unregistered, undismissed bank accounts that own records name, most named first,
-    then the most recently named."""
+    then the most recently named. One held by several own accounts (a shared payee's,
+    account type catalog design §8.1) is registered already: it is offered again once its
+    holders are removed."""
     system = await system_account_ids(session)
     e = eligible_records(system)
     i, t = models.AccountIdentifier, models.Transaction
+    h = models.AccountIdentifierHolder
     outgoing = func.count().filter(e.c.quantity < 0)
     incoming = func.count().filter(e.c.quantity > 0)
     latest = func.max(e.c.booking_date)
@@ -779,7 +782,12 @@ async def suggestions(session: AsyncSession) -> list[SuggestionRecord]:
         )
         .join(e, e.c.counterparty_identifier_id == i.id)
         .join(t, t.id == e.c.transaction_id)
-        .where(i.kind == "uk_bank_account", i.account_id.is_(None), i.dismissed_at.is_(None))
+        .where(
+            i.kind == "uk_bank_account",
+            i.account_id.is_(None),
+            i.dismissed_at.is_(None),
+            ~exists().where(h.identifier_id == i.id),
+        )
         .group_by(i.id, i.value)
         .order_by((outgoing + incoming).desc(), latest.desc(), i.id)
     )

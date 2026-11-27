@@ -29,7 +29,7 @@ from lararium.modules.finance.accounts import (
     TaxWrapper,
 )
 from lararium.modules.finance.cashflow import Bucket
-from lararium.modules.finance.identifiers import IdentifierKind
+from lararium.modules.finance.identifiers import HeldKind, IdentifierKind
 from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
@@ -526,7 +526,8 @@ class IdentifierOut(BaseModel):
     sort_code: str | None  # a UK bank account's only
     account_number: str | None
     account_id: UUID | None
-    # A card merchant's own accounts (it has no account_id); empty for every other kind.
+    # The own accounts holding it (it then has no account_id): a card merchant's, or a payee
+    # bank account's several share; empty for every other row.
     holder_account_ids: list[UUID]
     dismissed_at: AwareDatetime | None
     created_by: str
@@ -537,6 +538,17 @@ class CardMerchantRegister(BaseModel):
     """The own accounts card payments to a Monzo merchant go into; none removes it."""
 
     merchant_id: str  # Monzo's merchant id, merch_…
+    account_ids: list[UUID]
+
+
+class IdentifierHoldersRegister(BaseModel):
+    """The own accounts payments to an identifier go into: a card merchant (`value` its
+    Monzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts
+    are paid through (`value` its sort code and account number, e.g. "11-22-33 12345678");
+    none removes them."""
+
+    kind: HeldKind
+    value: str
     account_ids: list[UUID]
 
 

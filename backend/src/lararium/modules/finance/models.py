@@ -84,8 +84,10 @@ class AccountIdentifier(Base):
 
 
 class AccountIdentifierHolder(Base):
-    """An own account a card merchant pays into: a card_merchant identifier names its holders
-    here (it may have several), every other kind its one account in account_id."""
+    """An own account a card merchant, or a payee bank account several own accounts share,
+    pays into: a card_merchant identifier names its holders here (it may have several), and
+    so may a uk_bank_account one registered to no account (account type catalog design §8.1);
+    every other row its one account in account_id."""
 
     __tablename__ = "account_identifier_holders"
     __table_args__ = FINANCE_SCHEMA
@@ -93,9 +95,9 @@ class AccountIdentifierHolder(Base):
     identifier_id: Mapped[UUID] = mapped_column(
         ForeignKey("finance.account_identifiers.id"), primary_key=True
     )
-    # Its identifier's kind, always card_merchant: with the identifier id, a foreign key to
-    # (id, kind), so no other kind's row can have holders.
-    kind: Mapped[str] = mapped_column(Text, server_default=text("'card_merchant'"))
+    # Its identifier's kind, card_merchant or uk_bank_account: with the identifier id, a
+    # foreign key to (id, kind), so no other kind's row can have holders.
+    kind: Mapped[str] = mapped_column(Text)
     account_id: Mapped[UUID] = mapped_column(ForeignKey("finance.accounts.id"), primary_key=True)
 
 

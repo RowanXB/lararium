@@ -1939,6 +1939,38 @@
         "title": "IdentifierCreate",
         "type": "object"
       },
+      "IdentifierHoldersRegister": {
+        "description": "The own accounts payments to an identifier go into: a card merchant (`value` its\nMonzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts\nare paid through (`value` its sort code and account number, e.g. \"11-22-33 12345678\");\nnone removes them.",
+        "properties": {
+          "account_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Account Ids",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "card_merchant",
+              "uk_bank_account"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value",
+          "account_ids"
+        ],
+        "title": "IdentifierHoldersRegister",
+        "type": "object"
+      },
       "IdentifierOut": {
         "properties": {
           "account_id": {
@@ -5709,6 +5741,48 @@
           }
         },
         "summary": "Register Card Merchant",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/accounts/identifiers/holders": {
+      "post": {
+        "description": "Register the own accounts an identifier pays into, replacing the ones it had; none\nremoves them. A UK bank account several of your accounts are paid through (a platform's\nclient money account) must be registered to no account. Every record naming it is\nmatched again.",
+        "operationId": "register_identifier_holders",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierHoldersRegister"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Identifier Holders",
         "tags": [
           "finance"
         ]

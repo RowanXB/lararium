@@ -11,6 +11,12 @@ A card merchant (a Monzo merchant id) is the exception: it may pay into several 
 accounts (Trading 212's Invest and ISA share one), so it keeps `account_id` NULL and names
 its holders in finance.account_identifier_holders (M6 design §5.12). Such evidence never
 identifies a record on its own: it pairs only records that are both there.
+
+A payee bank account several own accounts are paid through (a platform's client money
+account, shared by every one of the owner's accounts there) is held the same way: a
+uk_bank_account row may keep `account_id` NULL and name its holders there too (account type
+catalog design §8.1). A record naming it is identified to that set, never to one account. An
+identifier has an account or holders, never both.
 """
 
 import logging
@@ -21,7 +27,7 @@ from datetime import datetime
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, delete, exists, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
@@ -40,6 +46,8 @@ logger = logging.getLogger(__name__)
 IdentifierKind = Literal[
     "uk_bank_account", "ibkr_account", "trading212_account", "etoro_account", "card_merchant"
 ]
+# The kinds that may be held by several own accounts (finance.account_identifier_holders).
+HeldKind = Literal["card_merchant", "uk_bank_account"]
 
 _UK_BANK_ACCOUNT = re.compile(r"([0-9]{6})[:/]?([0-9]{8})")
 _IBKR_ACCOUNT = re.compile(r"[A-Z]{1,3}[0-9]{3,12}")
@@ -63,7 +71,8 @@ class IdentifierRecord:
     dismissed_at: datetime | None
     created_by: str
     created_at: datetime
-    # A card merchant's own accounts, sorted; empty for every other kind.
+    # The own accounts holding it, sorted: a card merchant's, or a payee bank account's held
+    # by several (then account_id is None); empty for every other row.
     holders: tuple[UUID, ...] = ()
 
 
@@ -123,12 +132,13 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             .order_by(i.kind, i.value)
         )
     )
-    merchants = [row.id for row in rows if row.kind == "card_merchant"]
     holders: dict[UUID, list[UUID]] = {}
-    if merchants:
+    if rows:
+        # By the same conditions, not by the ids: the registry holds every bank account a
+        # source has named.
         for identifier_id, account_id in await session.execute(
             select(h.identifier_id, h.account_id)
-            .where(h.identifier_id.in_(merchants))
+            .where(h.identifier_id.in_(select(i.id).where(*conditions)))
             .order_by(h.identifier_id, h.account_id)
         ):
             holders.setdefault(identifier_id, []).append(account_id)
@@ -187,8 +197,8 @@ def _publish(ctx: CommandContext, event_type: str, record: IdentifierRecord) -> 
 async def list_identifiers(
     session: AsyncSession, *, account_id: UUID | None = None
 ) -> list[IdentifierRecord]:
-    """The registry, or the identifiers of one own account: those assigned to it, and the
-    card merchants it is a holder of."""
+    """The registry, or the identifiers of one own account: those assigned to it, and those
+    it is one of the holders of."""
     if account_id is None:
         return await _load(session)
     i, h = models.AccountIdentifier, models.AccountIdentifierHolder
@@ -266,13 +276,35 @@ async def _require_can_carry_identifiers(session: AsyncSession, account_id: UUID
         raise FinanceValidationError(_SNAPSHOTS_ONLY)
 
 
+_HELD = (
+    "the bank account is held by several of your accounts, so it can't be registered to one;"
+    " remove its holders first"
+)
+
+
+def _held(identifier_id: UUID) -> ColumnElement[bool]:
+    h = models.AccountIdentifierHolder
+    return exists().where(h.identifier_id == identifier_id)
+
+
 async def _assign(ctx: CommandContext, identifier_id: UUID, account_id: UUID) -> bool:
-    """Assign an unassigned (or dismissed) row; False when it is assigned already."""
+    """Assign an unassigned (or dismissed) row; False when it didn't: it is assigned
+    already, or held by several accounts (_held)."""
     i = models.AccountIdentifier
+    # Locked first, as register_holders locks it: the update below then reads, in a
+    # snapshot of its own, the holders a registration that held the row committed. (A
+    # condition alone would be read in the snapshot taken before it waited on the row.)
+    # FOR NO KEY UPDATE (key_share), as each registration locks it: it serialises them
+    # still, but not a transaction inserted naming the row (its foreign key check takes a
+    # KEY SHARE lock), which FOR UPDATE would block, or deadlock with as a registration
+    # rematches transfers.
+    await ctx.session.execute(
+        select(i.id).where(i.id == identifier_id).with_for_update(key_share=True)
+    )
     # Conditional update, so a concurrent assignment elsewhere can't be overwritten.
     assigned = await ctx.session.scalar(
         update(i)
-        .where(i.id == identifier_id, i.account_id.is_(None))
+        .where(i.id == identifier_id, i.account_id.is_(None), ~_held(identifier_id))
         .values(account_id=account_id, dismissed_at=None)
         .returning(i.id)
     )
@@ -291,6 +323,8 @@ async def assign_identifier(
     await _require_can_carry_identifiers(ctx.session, account_id)
     identifier_id = await _get_or_create(ctx, kind, normalized)
     if not await _assign(ctx, identifier_id, account_id):
+        if await ctx.session.scalar(select(_held(identifier_id))):
+            raise FinanceValidationError(_HELD)
         holder = await identifier_account(ctx.session, identifier_id)
         if holder != account_id:
             assert holder is not None  # rows are never deleted, and _assign saw it assigned
@@ -305,7 +339,8 @@ async def ensure_identifier(
 
     For a connector registering its own accounts on every sync. An identifier on another
     account stays there (the owner's registration wins); a dismissed one is assigned, as a
-    connector's own account is a fact.
+    connector's own account is a fact. One held by several accounts (a shared payee's) is
+    left as it is too.
     """
     _require_single_holder(kind)
     normalized = normalize_identifier(kind, value)
@@ -323,7 +358,15 @@ async def ensure_identifier(
             holder,
         )
         return False
-    return await _assign(ctx, identifier_id, account_id)
+    if await _assign(ctx, identifier_id, account_id):
+        return True
+    if await ctx.session.scalar(select(_held(identifier_id))):
+        logger.warning(
+            "identifier %s of account %s is held by several accounts; left there",
+            identifier_id,
+            account_id,
+        )
+    return False
 
 
 async def unassign_identifier(ctx: CommandContext, identifier_id: UUID) -> IdentifierRecord:
@@ -349,7 +392,7 @@ async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> Identi
         return current
     if current.holders:
         raise FinanceValidationError(
-            "only a card merchant not registered to any account can be dismissed"
+            "an identifier your accounts hold can't be dismissed; remove its holders first"
         )
     i = models.AccountIdentifier
     dismissed = await ctx.session.scalar(
@@ -367,9 +410,12 @@ async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> Identi
     return record
 
 
-async def _require_can_hold_card_merchant(session: AsyncSession, account_id: UUID) -> None:
-    """The refusals of the other kinds (_require_can_carry_identifiers), narrowed: a card
-    merchant pays only into an open asset account. Asked only of an account a registration
+_HOLDS = {"card_merchant": "a card merchant", "uk_bank_account": "a shared bank account"}
+
+
+async def _require_can_hold(session: AsyncSession, kind: HeldKind, account_id: UUID) -> None:
+    """The refusals of the other kinds (_require_can_carry_identifiers), narrowed: a held
+    identifier pays only into an open asset account. Asked only of an account a registration
     adds: a holder that has closed since stays (close_account keeps it). An unknown account
     is refused like the others (a 422 on the request's body), not as a missing resource."""
     try:
@@ -379,31 +425,40 @@ async def _require_can_hold_card_merchant(session: AsyncSession, account_id: UUI
     if account.system:
         raise FinanceValidationError("a system account can't have identifiers")
     if account.ledger_type != "asset":
-        raise FinanceValidationError("a card merchant pays only into an asset account")
+        raise FinanceValidationError(f"{_HOLDS[kind]} pays only into an asset account")
     if account.balance_mode == "snapshots":
         raise FinanceValidationError(_SNAPSHOTS_ONLY)
     if account.status != "open":
-        raise FinanceValidationError("a card merchant can't pay into a closed account")
+        raise FinanceValidationError(f"{_HOLDS[kind]} can't pay into a closed account")
 
 
-async def register_card_merchant(
-    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID]
+async def register_holders(
+    ctx: CommandContext, kind: HeldKind, value: str, account_ids: Sequence[UUID]
 ) -> IdentifierRecord:
-    """The owner saying card payments to this merchant go into these own accounts: replaces
-    the merchant's holders with `account_ids` (an empty list removes the registration; the
-    row stays, as transactions reference it). Registering takes it back from dismissed."""
-    normalized = normalize_identifier("card_merchant", merchant_id)
+    """The owner saying payments to this identifier go into these own accounts: replaces
+    its holders with `account_ids` (an empty list removes the registration; the row stays,
+    as transactions reference it). `kind` is a card merchant (a Monzo merchant id) or a UK
+    bank account several own accounts are paid through (account type catalog design §8.1);
+    a bank account registered to one account is refused, as it names that account.
+    Registering takes it back from dismissed."""
+    normalized = normalize_identifier(kind, value)
     wanted = sorted(set(account_ids))
-    identifier_id = await _get_or_create(ctx, "card_merchant", normalized)
+    identifier_id = await _get_or_create(ctx, kind, normalized)
     i, h = models.AccountIdentifier, models.AccountIdentifierHolder
-    # Serialised on the row, so two registrations can't interleave their holder sets.
+    # Serialised on the row, so two registrations can't interleave their holder sets, and
+    # an assignment (_assign, which locks it too) can't slip in between.
     await ctx.session.execute(
         select(i.id).where(i.id == identifier_id).with_for_update(key_share=True)
     )
     before = await _get(ctx.session, identifier_id)
+    if before.account_id is not None:
+        raise FinanceValidationError(
+            "the bank account is registered to one of your accounts, so it can't have"
+            " holders; remove it from that account first"
+        )
     added = [account_id for account_id in wanted if account_id not in before.holders]
     for account_id in added:
-        await _require_can_hold_card_merchant(ctx.session, account_id)
+        await _require_can_hold(ctx.session, kind, account_id)
     if list(before.holders) == wanted and not (wanted and before.dismissed_at is not None):
         return before
     await ctx.session.execute(
@@ -411,7 +466,9 @@ async def register_card_merchant(
     )
     if added:
         await ctx.session.execute(
-            insert(h).values([{"identifier_id": identifier_id, "account_id": a} for a in added])
+            insert(h).values(
+                [{"identifier_id": identifier_id, "kind": kind, "account_id": a} for a in added]
+            )
         )
     if wanted and before.dismissed_at is not None:
         await ctx.session.execute(update(i).where(i.id == identifier_id).values(dismissed_at=None))
@@ -423,6 +480,14 @@ async def register_card_merchant(
     )
     ctx.record_change(f"account_identifier:{record.id}", _change_data(record))
     return record
+
+
+async def register_card_merchant(
+    ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID]
+) -> IdentifierRecord:
+    """register_holders for a card merchant: card payments to it go into these own
+    accounts."""
+    return await register_holders(ctx, "card_merchant", merchant_id, account_ids)
 
 
 async def dismiss_card_merchant(ctx: CommandContext, merchant_id: str) -> IdentifierRecord:

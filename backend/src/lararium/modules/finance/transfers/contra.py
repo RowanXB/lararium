@@ -156,7 +156,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     bank account, or its import rows print part of one; a card merchant is none), holders
     (the own accounts the card merchant it names pays into, NULL for any other record: such
     evidence never identifies it, so holder stays NULL and it pairs only with a record that
-    is there, pairs.card_tier),
+    is there, pairs.card_tier), payee_holders (the own accounts holding the bank account it
+    names, when several share it, account type catalog design §8.1; NULL for any other
+    record: it is identified to that set, not to one account, so holder stays NULL and it
+    pairs, pairs.registry_tier, with a record on one of them that may be a transfer),
     bank_transfer, funded_by_transfer (its account's type lists bank transfer among the ways
     it is funded, account_types.keys_funded_by: read here, at pairing time, so the stored
     bank_transfer stays as the source gave it), timed (its occurred_at is a real instant: a
@@ -379,6 +382,17 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .group_by(m.id)
         .subquery("card_merchants")
     )
+    # The payee bank accounts several own accounts hold, each with its holders: as few.
+    ph = aliased(models.AccountIdentifierHolder, name="payee_holder")
+    payees = (
+        select(
+            ph.identifier_id,
+            type_coerce(func.array_agg(ph.account_id), ARRAY(Uuid())).label("holders"),
+        )
+        .where(ph.kind == "uk_bank_account")
+        .group_by(ph.identifier_id)
+        .subquery("payees")
+    )
     source_kind, source_ref_ = source_columns(t)
     timed_row = aliased(models.ImportRow, name="timed_row")
     timed = or_(
@@ -410,6 +424,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
             merchants.c.holders,
+            payees.c.holders.label("payee_holders"),
             t.bank_transfer,
             funded_by_transfer.label("funded_by_transfer"),
             timed.label("timed"),
@@ -422,6 +437,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .join(evidence, true())
         .join(own_account, true())
         .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
+        .outerjoin(payees, payees.c.identifier_id == t.counterparty_identifier_id)
         .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS))
         .subquery(name)
     )
@@ -446,6 +462,7 @@ _OWN_RECORDS = Table(
     Column("weak_holder", Uuid),
     Column("names_account", Boolean, nullable=False),
     Column("holders", ARRAY(Uuid)),
+    Column("payee_holders", ARRAY(Uuid)),
     Column("bank_transfer", Boolean, nullable=False),
     Column("funded_by_transfer", Boolean, nullable=False),
     Column("timed", Boolean, nullable=False),
@@ -689,8 +706,10 @@ async def transfer_contra(
     transit; a counterparty bank account registered to another own account makes it In
     transit. A card merchant (registered with holders, not to one account) never does: its
     record stays on Unassigned until it is paired (eToro design §5.12, as amended in Task
-    15). `source` is None for a transaction not yet posted, which has neither. Both
-    system accounts must exist already (get_or_create_system_account).
+    15). Nor does a bank account held by several own accounts (account type catalog design
+    §8.1), registered to none of them: its record stays on Unassigned until it is paired
+    too. `source` is None for a transaction not yet posted, which has neither. Both system
+    accounts must exist already (get_or_create_system_account).
     """
     system = await system_account_ids(session)
     missing = [key for key in ("unassigned", "in_transit") if key not in system]

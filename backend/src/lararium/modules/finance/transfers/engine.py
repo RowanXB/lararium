@@ -29,9 +29,10 @@ from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
+    HeldKind,
     IdentifierRecord,
     get_identifier,
-    register_card_merchant,
+    register_holders,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -853,8 +854,11 @@ async def preview_match(
     )
     # As eligible_records reads it: a card merchant names no bank account and identifies no
     # account (no holder), only its holders. (The importers that preview give bank accounts
-    # only; this keeps the two definitions one should a card merchant reach it.)
+    # only; this keeps the two definitions one should a card merchant reach it.) A bank
+    # account held by several accounts identifies no account either, only its holders
+    # (payee_holders).
     merchant = named is not None and named.kind == "card_merchant"
+    payee = named is not None and named.kind == "uk_bank_account"
     a = models.Account
     type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
@@ -870,6 +874,7 @@ async def preview_match(
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
         holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
+        payee_holders=frozenset(named.holders) if payee and named is not None else frozenset(),
         # As eligible_records' funded_by_transfer: read from the account's type.
         funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
         timed=timed,
@@ -913,13 +918,27 @@ async def unassign_identifier_and_rematch(
     return record
 
 
+async def register_holders_and_rematch(
+    ctx: CommandContext,
+    kind: HeldKind,
+    value: str,
+    account_ids: Sequence[UUID],
+    *,
+    heal: bool = True,
+) -> IdentifierRecord:
+    """register_holders, then match again every record naming the identifier, so the new
+    holders take effect at once (healing unless `heal` is False, as in rematch_identifiers).
+    Records that don't name a card merchant yet (posted before it was registered) are named
+    by their connector's next normalize (Monzo's replays them)."""
+    record = await register_holders(ctx, kind, value, account_ids)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
+    return record
+
+
 async def register_card_merchant_and_rematch(
     ctx: CommandContext, merchant_id: str, account_ids: Sequence[UUID], *, heal: bool = True
 ) -> IdentifierRecord:
-    """register_card_merchant, then match again every record naming the merchant, so the
-    new holders take effect at once (healing unless `heal` is False, as in
-    rematch_identifiers). Records that don't name it yet (posted before it was registered)
-    are named by their connector's next normalize (Monzo's replays them)."""
-    record = await register_card_merchant(ctx, merchant_id, account_ids)
-    await rematch_identifiers(ctx, [record.id], heal=heal)
-    return record
+    """register_holders_and_rematch for a card merchant."""
+    return await register_holders_and_rematch(
+        ctx, "card_merchant", merchant_id, account_ids, heal=heal
+    )

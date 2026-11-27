@@ -485,16 +485,19 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
   日期配对（见[登记标识](#登记标识)）。有两个候选都符合时（比如两个账户在相近的时间收到同样金额），
   这笔转账会出现在 Transfers 页面的 Needs attention 里：对正确的那个点 **Pair**。
 - **多个账户共用的收款银行账户。** 如果你的银行用同一个银行账户（同一组 sort code 和账号）向
-  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款只能靠付款参考（reference）说明付给
-  哪一个。把参考登记一次，目前只能通过 API 操作：`POST /api/v1/finance/accounts/identifiers/references`
-  和 `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
-  "reference": "<payment reference>"}]}`（占位符；填你的银行 app 显示的内容，sort code 写成 11-22-33 或
-  112233 都行）。一次调用会替换该标识的全部参考，`references` 为空列表则
-  移除它们。参考的匹配忽略大小写和首尾空格。一个银行账户要么登记到一个账户上（做法见
-  [登记标识](#登记标识)），要么带参考，不能两者兼有。Lararium 随后会检查全部历史：付给该收款账户、
-  参考相符的银行转账会指明对应账户，银行付到 Trading 212 Invest、Stocks ISA 和 Cash ISA 的充值
-  会自动配对。卡充值仍按上面的卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的
-  入金方式当作银行转账来配对。
+  Trading 212 Invest、Stocks ISA 和 Cash ISA 付款，这笔付款不会说明付给了哪一个：它的付款参考
+  （reference）不固定，无法区分这几个账户。把这个银行账户登记一次，标明由它们共同持有，目前只能通过
+  API 操作：`POST /api/v1/finance/accounts/identifiers/holders` 和 `{"kind": "uk_bank_account",
+  "value": "<sort code> <account number>", "account_ids": ["<account id>", ...]}`（占位符；填你的
+  银行 app 显示的内容，sort code 写成 11-22-33 或 112233 都行）。一次调用会替换它的全部持有账户，
+  `account_ids` 为空列表则移除它们。一个银行账户要么登记到一个账户上（做法见[登记标识](#登记标识)），
+  要么由多个账户共同持有，不能两者兼有；有持有账户时，它不会出现在建议里，也不能被忽略。Lararium
+  随后会检查全部历史：付给该收款账户的银行转账，会与任一持有账户上、窗口内唯一一笔同金额、可能是
+  银行转账的入金配对（标为银行转账的入金，或在 Trading 212 Invest、Stocks ISA 和 Cash ISA 上不指明
+  任何人的入金）。配对之前，这笔付款留在 Unassigned。两个持有账户上都有符合的入金时，不会配对：
+  手动配对正确的那一笔（先 `GET /api/v1/finance/transactions/{id}/pair-candidates`，再
+  `POST /api/v1/finance/transactions/{id}/pair`，见上文“没有写明对方账户的记录”）。卡充值仍按上面的
+  卡规则配对，且卡证据优先：已有刷卡付款候选的入金，不会按其账户的入金方式当作银行转账来配对。
 - **你的 Trading 212 账户之间。** 只有当你在 Lararium 里恰好有两个 Trading 212 系列的账户（不论
   状态；两个 Invest 账户也算两个）时，Trading 212 的 TRANSFER 才会指明另一个账户。有一个 Invest 和
   一个 Stocks ISA 时，两者互为对方的对手账户，转账自动配对。再添加了 Cash ISA 之后，转账不指明
