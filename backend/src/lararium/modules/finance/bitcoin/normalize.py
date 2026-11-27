@@ -27,8 +27,9 @@ longer applies (an output found to be the wallet's own) is voided.
 
 Every transaction normalized is marked (`fetch.mark_normalized`) in the sync's own
 transaction, except a confirmed one whose block time is not known, which cannot be dated, and
-a spend whose inputs less outputs are not its fee, which posts nothing and is flagged: both
-stay pending, so every later sync tries them again without stopping on them. When the
+a spend whose inputs less outputs are not its fee, which is flagged and keeps whatever it
+posted before: both change nothing and stay pending, so every later sync tries them again
+without stopping on them. When the
 connection's `normalizer_version` is not this one, every stored transaction is normalized again
 (the replay), and the version is recorded.
 """
@@ -264,19 +265,19 @@ class _Normalizer:
     async def apply(self, stored: _Stored) -> bool:
         """Bring the transaction's movements in line with its row; whether it is done (else
         it stays pending). A confirmed one whose block time is not known (a status read that
-        gave none) changes nothing: its movements cannot be dated. A spend whose fee does not
-        add up posts nothing (what it posted is voided) and is flagged; the balance check
-        shows the gap."""
+        gave none) changes nothing: its movements cannot be dated. Nor does a spend whose fee
+        does not add up, which is flagged: what it posted from consistent data stays, links
+        included, rather than one inconsistent read taking money off the balance, and one not
+        yet posted posts nothing (the balance check shows the gap)."""
         if stored.confirmed and stored.block_time is None:
             return False
-        done = True
         wanted: list[Movement] = []
         if stored.confirmed:
             try:
                 wanted = movements(stored.txid, stored.inputs, stored.outputs, stored.fee)
             except FeeMismatch:
                 self.run.flag(FEE_FLAG)
-                done = False
+                return False
         posted = {m.key: await self._post(stored, m) for m in wanted}
         for key in sorted(await self._live_keys(stored.txid) - set(posted)):
             await self.run.void(key)
@@ -290,7 +291,7 @@ class _Normalizer:
                 {"at": datetime.now(UTC), "c": self.run.connection_id, "t": stored.txid},
             )
             self.run.flag(LEFT_CHAIN_FLAG)
-        return done
+        return True
 
     async def _link(self, stored: _Stored, wanted: list[Movement], posted: dict[str, UUID]) -> None:
         """Each typed row names the ledger transaction it posts now, or none: not one the

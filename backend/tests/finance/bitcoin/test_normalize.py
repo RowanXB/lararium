@@ -852,13 +852,33 @@ async def test_fee_that_does_not_add_up_is_flagged_and_waits(session) -> None:
     assert set(await wallet.live()) == {f"{good['txid']}:0"}
     assert await pending(bad["txid"]) is True
 
-    # A transaction already posted whose stored fee stops adding up: its movements go.
+    # A transaction already posted whose stored fee stops adding up: what it posted from
+    # consistent data stays as it is, links included, until the data agree again.
     spend = chain.add(
         make_tx(3, [(OTHERS[1], 5_000)], spends=[(receiving(0), 6_000)], height=TIP - 50, fee=1_000)
     )
     s = spend["txid"]
     await wallet.sync()
+    posted = await wallet.ledger()
     assert {f"{s}:0", f"{s}:fee"} <= set(await wallet.live())
+
+    async def links() -> tuple[Any, ...]:
+        outputs = await session.execute(
+            text(
+                "select vout, transaction_id from finance.bitcoin_outputs"
+                " where connection_id = :c and txid = :t order by vout"
+            ),
+            {"c": wallet.connection.id, "t": s},
+        )
+        row = await wallet.row(
+            "select fee_transaction_id, net_transaction_id from finance.bitcoin_transactions"
+            " where connection_id = :c and txid = :t",
+            t=s,
+        )
+        return (*outputs.all(), tuple(row))
+
+    linked = await links()
+    assert linked[0][1] == posted[f"{s}:0"].id
     # As the fetch stores a changed row: pending.
     await session.execute(
         text("update finance.bitcoin_transactions set fee = 1, pending = true where txid = :t"),
@@ -868,13 +888,7 @@ async def test_fee_that_does_not_add_up_is_flagged_and_waits(session) -> None:
     later = await wallet.normalize({s})
 
     assert FEE_FLAG in later.flagged
-    ledger = await wallet.ledger()
-    for key in (f"{s}:0", f"{s}:fee"):
-        assert (ledger[key].status, ledger[key].voided_by) == ("void", "connector")
+    assert (later.created, later.updated, later.unchanged) == (0, 0, 0)
+    assert await wallet.ledger() == posted
+    assert await links() == linked
     assert await pending(s) is True
-    fee_link = await wallet.row(
-        "select fee_transaction_id from finance.bitcoin_transactions"
-        " where connection_id = :c and txid = :t",
-        t=s,
-    )
-    assert fee_link.fee_transaction_id is None
