@@ -9,8 +9,10 @@ times), `BONUS` payouts (a reward row and the dividend that paid it, within 26 h
 wallet-to-wallet transfers between Spot and Funding (some failed), dust conversions on Spot
 (one or two small balances into BNB, with a service charge at times), locked Earn
 subscriptions, redemptions to Spot and rewards, yield token subscriptions (swaps on Spot) and
-redemptions Binance pays out later (seen pending, then arrived, a fee at times). No wallet
-ever holds less than nothing.
+redemptions Binance pays out later (seen pending, then arrived, a fee at times), flexible
+crypto loans borrowed onto Spot (some failed) and repaid from it. No wallet ever holds less than
+nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
+before the history is a loan whose borrow is not listed, as a VIP loan's never is).
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -57,8 +59,15 @@ PAIRS = (
     ("AAABBB", "AAA", "BBB"),
     ("CCCSTB", "CCC", "STB"),
 )
-WALLET_KEYS = ("spot", "funding", "earn")
-ACCOUNT_NAMES = {"spot": "Binance Spot", "funding": "Binance Funding", "earn": "Binance Earn"}
+WALLET_KEYS = ("spot", "funding", "earn", "loans")
+ACCOUNT_NAMES = {
+    "spot": "Binance Spot",
+    "funding": "Binance Funding",
+    "earn": "Binance Earn",
+    "loans": "Binance Crypto Loans",
+}
+# The wallet whose holdings are debts (negative).
+DEBTS = "loans"
 _WALLET_TYPE = {"spot": 0, "funding": 1}
 _EARN_SOURCE = {"spot": "SPOT", "funding": "FUNDING"}
 # Amounts are k / 10^4. Rule 3 links a BONUS reward to a dividend of the same asset and
@@ -82,6 +91,8 @@ TWO_SIDED = frozenset(
         "locked_redemption",
         "token_swap",
         "delayed_redemption",
+        "borrow",
+        "repay",
     }
 )
 
@@ -223,7 +234,8 @@ class _Builder:
         for effect in record.effects:
             if effect.at_ms <= self.now:
                 self.held[(effect.wallet, effect.asset)] += effect.delta
-                assert self.held[(effect.wallet, effect.asset)] >= 0, record.describe()
+                held = self.held[(effect.wallet, effect.asset)]
+                assert held <= 0 if effect.wallet == DEBTS else held >= 0, record.describe()
             else:
                 assert effect.delta > 0, record.describe()
                 self.pending.append(effect)
@@ -752,6 +764,60 @@ def _delayed_redemption(b: _Builder) -> Record | None:
     )
 
 
+def collateral_of(coin: str) -> str:
+    """The collateral a generated loan of the coin is pledged with: never the coin itself."""
+    return "CCC" if coin != "CCC" else "AAA"
+
+
+def _borrow(b: _Builder) -> Record:
+    """A flexible loan borrowed onto Spot; a failed one moves nothing."""
+    coin = b.draw(st.sampled_from(ASSETS))
+    quantity = b.amount()
+    failed = b.draw(st.integers(0, 5)) == 0
+    row = build_row(
+        "loan-flexible-borrows",
+        loanCoin=coin,
+        initialLoanAmount=_plain(quantity),
+        collateralCoin=collateral_of(coin),
+        initialCollateralAmount="1",
+        borrowTime=b.now,
+        status="FAILED" if failed else "SUCCESS",
+    )
+    effects = (
+        ()
+        if failed
+        else (Effect(b.now, "spot", coin, quantity), Effect(b.now, DEBTS, coin, -quantity))
+    )
+    return Record("borrow", (("loan-flexible-borrows", ((b.now, row),)),), effects)
+
+
+def _repay(b: _Builder) -> Record | None:
+    """Part or all of a debt repaid from Spot."""
+    held = dict(b.held)
+    choices = sorted(
+        (wallet, coin)
+        for (wallet, coin), q in held.items()
+        if wallet == DEBTS and q < 0 and held.get(("spot", coin), Decimal(0)) > 0
+    )
+    if not choices:
+        return None
+    _, coin = b.draw(st.sampled_from(choices))
+    quantity = b.amount(at_most=min(-b.held[(DEBTS, coin)], b.held[("spot", coin)]))
+    if quantity == 0:
+        return None
+    row = build_row(
+        "loan-flexible-repays",
+        loanCoin=coin,
+        repayAmount=_plain(quantity),
+        collateralCoin=collateral_of(coin),
+        collateralReturn="0",
+        repayStatus="REPAID",
+        repayTime=b.now,
+    )
+    effects = (Effect(b.now, "spot", coin, -quantity), Effect(b.now, DEBTS, coin, quantity))
+    return Record("repay", (("loan-flexible-repays", ((b.now, row),)),), effects)
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -769,6 +835,8 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "locked_reward": _locked_reward,
     "token_swap": _token_swap,
     "delayed_redemption": _delayed_redemption,
+    "borrow": _borrow,
+    "repay": _repay,
 }
 
 
@@ -779,7 +847,8 @@ def histories(draw: st.DrawFn, *, min_records: int = 1, max_records: int = 10) -
     for wallet in WALLET_KEYS:
         for asset in ASSETS:
             if draw(st.integers(0, 5)) == 0:
-                initial[(wallet, asset)] = Decimal(draw(st.integers(1, 1_000_000))) * _UNIT
+                quantity = Decimal(draw(st.integers(1, 1_000_000))) * _UNIT
+                initial[(wallet, asset)] = -quantity if wallet == DEBTS else quantity
     b = _Builder(draw, start)
     b.held.update(initial)
     count = draw(st.integers(min_records, max_records))

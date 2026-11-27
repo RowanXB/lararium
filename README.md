@@ -787,7 +787,7 @@ What is built so far (phase A):
   list, per asset, without records of its own in phase A, so its changes show as
   reconciliation differences; a wallet Lararium doesn't know is flagged by name and still gets
   an account, and one whose balance is not zero but which lists no asset is flagged by name.
-  Crypto-loan debt is not read until phase B.
+  Crypto-loan debt is read in phase B (below).
 - **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
   Lararium already has. If Lararium has no currency with that ISO 4217 code and no instrument
   for the code exists yet, the asset is not counted: the connection is flagged with the code,
@@ -910,11 +910,19 @@ Built from Binance's documentation and not checked against a real account:
   settles. Binance does not say what a position settles into, so what arrives on Spot shows as
   a reconciliation difference.
 - Every reward Binance paid out as an asset dividend is posted once, as the dividend.
+- Crypto loans, flexible and VIP (`loan-flexible-borrows`, `loan-flexible-repays`,
+  `loan-flexible-ltv-adjustments`, `loan-flexible-liquidations`, `loan-flexible-ongoing`,
+  `vip-loan-ongoing`, `vip-loan-repays`, `vip-loan-interest`, `vip-loan-requests`,
+  `vip-loan-collateral-account`): the debt is a negative holding on a "Binance Crypto Loans"
+  account (a liability), reported from the ongoing orders. A borrow moves the coin to Spot
+  against the debt and a repay moves it back; a VIP repay's interest is a fee. Binance lists no
+  interest for a flexible loan, so the growth of its debt between two reports that no record
+  explains is posted as its interest. A liquidation sells the collateral from Earn. A loan's
+  records never move its collateral: it stays in the wallet Binance reports it in.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Crypto loans, as debt
 - Margin, cross and isolated
 - USD-M and COIN-M futures
 - Options

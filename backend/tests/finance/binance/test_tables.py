@@ -279,6 +279,36 @@ def test_earn_product_tables_and_extras() -> None:
     assert onchain.column("purchase_time_at").sql == "timestamptz"
 
 
+def test_loan_tables_and_keys() -> None:
+    family = (
+        "loan-flexible-borrows",
+        "loan-flexible-repays",
+        "loan-flexible-ltv-adjustments",
+        "loan-flexible-liquidations",
+        "vip-loan-repays",
+        "vip-loan-interest",
+        "vip-loan-requests",
+        "loan-flexible-ongoing",
+        "vip-loan-ongoing",
+        "vip-loan-collateral-account",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # The histories with no id are keyed by the row's hash and occurrence.
+    borrows = layout.layout("loan-flexible-borrows")[0]
+    assert borrows.key == ("connection_id", "content_hash", "occurrence")
+    assert borrows.record
+    assert layout.layout("vip-loan-requests")[0].key == ("connection_id", "request_id")
+    # A flexible order has no id: its loan coin and collateral coin identify it in a read.
+    ongoing = layout.layout("loan-flexible-ongoing")[0]
+    assert ongoing.key == ("connection_id", "snapshot_at", "loan_coin", "collateral_coin")
+    assert not ongoing.record
+    assert layout.layout("vip-loan-ongoing")[0].key == ("connection_id", "snapshot_at", "order_id")
+    # VIP loans give their times as epoch-millisecond text: each has its timestamptz twin.
+    repays = layout.layout("vip-loan-repays")[0]
+    assert repays.column("repay_time_at").sql == "timestamptz"
+    assert repays.column("loan_date_at").sql == "timestamptz"
+
+
 # The models are what the migration made.
 
 

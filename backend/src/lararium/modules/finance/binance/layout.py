@@ -95,6 +95,17 @@ TABLE_LABELS: tuple[str, ...] = (
     "dci-positions",
     "discount-accounts",
     "discount-positions",
+    # Phase B: crypto loans, flexible and VIP.
+    "loan-flexible-borrows",
+    "loan-flexible-repays",
+    "loan-flexible-ltv-adjustments",
+    "loan-flexible-liquidations",
+    "vip-loan-repays",
+    "vip-loan-interest",
+    "vip-loan-requests",
+    "loan-flexible-ongoing",
+    "vip-loan-ongoing",
+    "vip-loan-collateral-account",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).

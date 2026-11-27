@@ -70,8 +70,13 @@ type Flag = Callable[[str], None]
 # Times Binance gives to the second may be up to a second early (plan Decision 9).
 MARGIN = timedelta(seconds=2)
 ROUNDS = 3
+# The two reads of the Crypto Loans wallet, flexible first, made one after the other: its debt
+# per loan coin is minus the `totalDebt` of every ongoing order of both (design 5.6). Their one
+# report is cut at the first read's start and is clear only when nothing happened from then to
+# the end of the second (`loan_bracket`), so they are made again together.
+LOAN_READS = ("loan-flexible-ongoing", "vip-loan-ongoing")
 # The reads a snapshot comes from: only these are made again when a movement falls into them.
-SOURCE_LABELS = ("spot-account", "funding-asset", "wallet-balance")
+SOURCE_LABELS = ("spot-account", "funding-asset", "wallet-balance", *LOAN_READS)
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
 REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
@@ -88,7 +93,8 @@ DIGESTS_KEY = "report_digests"
 _VOLATILE = {"exchange-info": frozenset({"serverTime"})}
 # Wallets with a source of their own; every other wallet's balance comes from the wallet list
 # (design 5.6) until a later phase gives it one.
-OWN_SOURCES = {"spot": "spot-account", "funding": "funding-asset"}
+OWN_SOURCES = {"spot": "spot-account", "funding": "funding-asset", "loans": LOAN_READS[0]}
+LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
 _HELD_FIELDS = ("free", "locked", "freeze", "withdrawing")
 _DAILY = "snapshot"
@@ -308,10 +314,13 @@ async def settle_reads(
 
     async def unsettled() -> list[str]:
         times = await record_times(ctx)
+        loans = loan_bracket(settled)
+        unclear_loans = loans is not None and ambiguous(loans, times)
         return [
             label
             for label in SOURCE_LABELS
-            if label in settled and ambiguous(settled[label], times)
+            if label in settled
+            and (unclear_loans if label in LOAN_READS else ambiguous(settled[label], times))
         ]
 
     pending = await unsettled()
@@ -420,6 +429,54 @@ class _Wallet:
     held: dict[str, Decimal]
 
 
+def loan_bracket(reads: Mapping[str, Read | None]) -> Read | None:
+    """The Crypto Loans wallet's one read: from the start of the first of its reads the sync
+    made to the end of the last (`LOAN_READS`; a product Binance does not serve is not read and
+    holds no debt). None when it made neither; `unclear` when one of them is, or is None."""
+    made = [reads[label] for label in LOAN_READS if label in reads]
+    if not made:
+        return None
+    present = [read for read in made if read is not None]
+    if not present:
+        return None
+    unclear = len(present) < len(made) or any(read.unclear for read in present)
+    return replace(
+        present[0],
+        read_from=min(read.read_from for read in present),
+        read_to=max(read.read_to for read in present),
+        unclear=unclear,
+    )
+
+
+def _loan_rows(read: Read) -> list[Row]:
+    """An ongoing-orders read's rows. An answer that leaves its list out is empty only when its
+    `total` says it has no records; otherwise it does not state the debt (`_stated`)."""
+    body = as_api(read.body)
+    if isinstance(body, dict) and "rows" not in body and body.get("total") in (0, "0"):
+        return []
+    return _source_rows(read)
+
+
+def _debts(reads: Mapping[str, Read | None]) -> _Wallet | None:
+    """The Crypto Loans wallet from its clear reads: minus the `totalDebt` of every ongoing
+    order, per loan coin (design 5.6)."""
+    bracket = loan_bracket(reads)
+    if bracket is None or bracket.unclear:
+        return None
+    held: dict[str, Decimal] = {}
+    for label in LOAN_READS:
+        read = reads.get(label)
+        if read is None:
+            continue
+        for row in _loan_rows(read):
+            code = row.get("loanCoin")
+            if not isinstance(code, str):
+                raise BinanceDataError(label, "rows[].loanCoin")
+            debt = _amount(label, "rows[].totalDebt", row.get("totalDebt"))
+            held[code] = held.get(code, Decimal(0)) - debt
+    return _Wallet(LOANS, bracket, held)
+
+
 def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     """Each wallet whose source read is clear (not None, not `unclear`) and states what it
     holds, with its quantity per asset (design 5.6). A source whose list is not stated fails
@@ -427,6 +484,7 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     quantity, is left out (and flagged, `wallet_flags`): it gets no snapshot and no report time
     from this read, and its earlier balance stands."""
     wallets: list[_Wallet] = []
+    loans = _debts(reads)
     reads = {label: read for label, read in reads.items() if read is not None and not read.unclear}
     spot = reads.get("spot-account")
     if spot is not None:
@@ -449,6 +507,8 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
             held = _per_asset(WALLET_LIST, "[].assetBalances[].", entries, _HELD_FIELDS)
             if _list_states_holdings(row, held):
                 wallets.append(_Wallet(key, listed, held))
+    if loans is not None:
+        wallets.append(loans)
     return wallets
 
 

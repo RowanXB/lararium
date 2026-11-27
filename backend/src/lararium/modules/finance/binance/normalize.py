@@ -6,7 +6,8 @@ or value it does not list becomes a flag), its typed row upserted, and its label
 run. A row that changed (a withdrawal that failed) is a new raw record, so it is applied again
 and updates its typed row and transactions in place. Then a movement two endpoints list is
 posted once (rule 2), rewards are linked to the dividends that paid them (rule 3), travel-rule
-rows to the deposits and withdrawals they describe, and the new flags published.
+rows to the deposits and withdrawals they describe, a flexible loan's interest derived from the
+reports (`loans.set_interest`), and the new flags published.
 
 The run writes in a transaction of its own: making a wallet's account and setting the
 connection's config lock its row, which a later step of the sync that walks (in short
@@ -49,6 +50,7 @@ from lararium.modules.finance.binance.records import (
     Run,
     capital,
     earn,
+    loans,
     post,
     remove,
     spot,
@@ -105,6 +107,10 @@ HANDLERS: dict[str, Handler] = {
     staking.RWUSD_REWARDS.label: staking.rwusd_reward,
     staking.SOFT_STAKING_REWARDS.label: staking.soft_staking_reward,
     staking.BOOST_REWARDS: staking.boost_reward,
+    loans.BORROWS: loans.borrow,
+    loans.REPAYS: loans.repay,
+    loans.LIQUIDATIONS: loans.liquidation,
+    loans.VIP_REPAYS: loans.vip_repay,
 }
 # The report labels whose rows post (each row of each read, keyed by the row's id): the
 # products with no history endpoint.
@@ -366,6 +372,9 @@ async def _normalize(
             await capital.link_travel_rule(run)
             if reads is not None:
                 await record_reads(cmd, connection, reads, daily=daily, flag=run.flag)
+            # After the reports: a flexible loan's interest is what they show the records do
+            # not explain.
+            await loans.set_interest(run)
             run.report.new_flags = await publish_flags(run)
             run.report.touched = run.touched
             await queue_touched(cmd, connection.id, run.touched)

@@ -17,7 +17,8 @@ but the fake never lists it.
 - Reconciliation: a consistent history leaves no difference open and no difference warning.
 - A removed record: a difference in each interval of two reports of the record's account in
   which it changed an instrument, of what it changed there (none where the Earn allowance
-  covers it; none before the account's first report, where the opening holds it): exactly one
+  covers it; none where a debt grew, which is a flexible loan's interest; none before the
+  account's first report, where the opening holds it): exactly one
   for a record that moves one instrument of one wallet, one per (account, instrument) it moved
   for a record that moves two.
 - Regeneration: with the connection's transactions and typed record rows deleted, normalising
@@ -69,6 +70,7 @@ from .fixtures import FakeBinance, build_row
 from .strategies import (
     ACCOUNT_NAMES,
     ASSETS,
+    DEBTS,
     PAIRS,
     SINGLE_SIDED,
     TWO_SIDED,
@@ -76,6 +78,7 @@ from .strategies import (
     History,
     Record,
     Schedule,
+    collateral_of,
     histories,
     holdings_of,
     schedule,
@@ -191,7 +194,20 @@ class World:
             for row in rows:
                 self.fake.add(label, row, when=asked(row))
         held = self.history.balance(now_ms)
-        spot, funding, earn = (holdings_of(held, w) for w in WALLET_KEYS)
+        spot, funding, earn, loans = (holdings_of(held, w) for w in WALLET_KEYS)
+        self.fake.set_rows(
+            "loan-flexible-ongoing",
+            [
+                build_row(
+                    "loan-flexible-ongoing",
+                    loanCoin=a,
+                    totalDebt=format(-q, "f"),
+                    collateralCoin=collateral_of(a),
+                    collateralAmount="1",
+                )
+                for a, q in sorted(loans.items())
+            ],
+        )
         self.fake.set_rows(
             "spot-account",
             [
@@ -682,7 +698,8 @@ async def test_consistent_history_has_no_difference(
 
 async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ...]]:
     """A difference in each interval of two consecutive reports of each account the removed
-    record changed, of what it changed there; none where Earn's allowance covers it."""
+    record changed, of what it changed there; none where Earn's allowance covers it, nor where
+    the debt on Crypto Loans grew (a flexible loan's interest absorbs it)."""
     history = env.history
     reports = await env.reports()
     expected: list[tuple[Any, ...]] = []
@@ -701,6 +718,9 @@ async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ..
             if delta == 0:
                 continue
             if wallet == "earn" and abs(delta) <= _accruing(history, removed, asset, high):
+                continue
+            if wallet == DEBTS and delta < 0:
+                # A debt that grew with no record is a flexible loan's interest (design 5.7).
                 continue
             zero = Decimal(0)
             change = history.balance(high).get((wallet, asset), zero) - history.balance(low).get(
@@ -801,7 +821,9 @@ async def test_removing_a_two_sided_record_gives_one_difference_per_leg(
     if reported:
         got = {(d[0], d[1]): d[4] - d[5] for d in found}
         wanted = {
-            (ACCOUNT_NAMES[w], a): q for (w, a), q in legs.items() if not (w == "earn" and 0 < q)
+            (ACCOUNT_NAMES[w], a): q
+            for (w, a), q in legs.items()
+            if not (w == "earn" and 0 < q) and not (w == DEBTS and q < 0)
         }
         for holding, quantity in wanted.items():
             assert got.get(holding) == quantity, holding

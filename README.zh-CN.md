@@ -649,7 +649,7 @@ Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，�
 - **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中其他每个有余额的钱包（Cross Margin、
   Futures、Trading Bots、未知的钱包等）都按该列表逐个资产计入；在阶段 A 它们没有自己的记录，
   所以它们的变化会显示为对账差异。Lararium 不认识的钱包会按名称标记，并且仍会得到一个账户；
-  余额不为零却没有列出任何资产的钱包也会按名称标记。加密货币借贷的负债要到阶段 B 才会读取。
+  余额不为零却没有列出任何资产的钱包也会按名称标记。加密货币借贷的负债在阶段 B 读取（见下文）。
 - **Binance 上的法币**（Binance 标记为法定货币的资产，例如 EUR）就是 Lararium 已有的那个币种。
   如果 Lararium 没有该 ISO 4217 代码的币种，且该代码还没有任何 instrument，该资产不计入：连接会被
   标记并写出该代码，其余额不计入，其记录保留但不入账。已有 instrument 的代码（在 Binance 标记它为法定
@@ -749,10 +749,16 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
   `discount-accounts`）：投入的资产转入 Earn，持仓结算时离开 Earn。Binance 没有说明持仓结算成什么，
   所以 Spot 上收到的部分会显示为一处对账差异。
 - Binance 以资产分红方式发放的每一笔奖励只入账一次，记为那笔分红。
+- 加密货币借贷，活期和 VIP（`loan-flexible-borrows`、`loan-flexible-repays`、
+  `loan-flexible-ltv-adjustments`、`loan-flexible-liquidations`、`loan-flexible-ongoing`、
+  `vip-loan-ongoing`、`vip-loan-repays`、`vip-loan-interest`、`vip-loan-requests`、
+  `vip-loan-collateral-account`）：负债是“Binance Crypto Loans”账户（负债类账户）上的负持仓，
+  按进行中的借款订单报告。借款把币转入 Spot，记为对应的负债；还款再转回；VIP 还款中的利息记为
+  费用。Binance 不列出活期借款的利息，所以两次报告之间没有任何记录能解释的负债增长记为它的利息。
+  强制平仓从 Earn 卖出抵押物。借款自身的记录从不移动抵押物：抵押物留在 Binance 报告它所在的钱包里。
 
 尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
 
-- 加密货币借贷，记为债务
 - 杠杆，全仓和逐仓
 - USD-M 和 COIN-M 合约
 - 期权

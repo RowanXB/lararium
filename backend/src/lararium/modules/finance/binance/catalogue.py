@@ -674,6 +674,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         300,
         "ip",
         rows="rows",
+        # No id: the catalogue says a loan coin and its collateral coin identify a row.
+        ids=("loanCoin", "collateralCoin"),
         paging="page",
         page=100,
         kind="position",

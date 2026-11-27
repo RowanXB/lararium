@@ -108,6 +108,21 @@ EARN_PRODUCTS = (
     "discount-accounts",
     "discount-positions",
 )
+# Flexible and VIP crypto loans: the histories, then the ongoing orders (read one after the
+# other: together they are the Crypto Loans wallet's report, `balances.LOAN_READS`) and the VIP
+# collateral accounts.
+LOAN_PRODUCTS = (
+    "loan-flexible-borrows",
+    "loan-flexible-repays",
+    "loan-flexible-ltv-adjustments",
+    "loan-flexible-liquidations",
+    "vip-loan-repays",
+    "vip-loan-interest",
+    "vip-loan-requests",
+    "loan-flexible-ongoing",
+    "vip-loan-ongoing",
+    "vip-loan-collateral-account",
+)
 # The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
 # or walks them as it does Phase A's.
 PHASE_B_BUILT = (
@@ -118,6 +133,8 @@ PHASE_B_BUILT = (
     "travel-withdrawals",
     # The other Earn products (Task 16): histories, then positions and accounts.
     *EARN_PRODUCTS,
+    # Crypto loans (Task 17).
+    *LOAN_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 
