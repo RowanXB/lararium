@@ -3,7 +3,7 @@ recheck of shallow transactions, raw records, typed rows and the wallet's identi
 
 import json
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 import httpx
@@ -20,11 +20,12 @@ from lararium.modules.finance.bitcoin import fetch as fetch_module
 from lararium.modules.finance.bitcoin.accounts import ACCOUNT_KEY, wallet_account
 from lararium.modules.finance.bitcoin.derive import Wallet, build_wallet
 from lararium.modules.finance.bitcoin.fetch import (
-    MAX_TIP_JUMP,
+    TIP_AT_KEY,
     TIP_KEY,
     VERSION,
     FetchResult,
     TooManyAddresses,
+    allowed_jump,
     fetch,
     mark_normalized,
 )
@@ -660,26 +661,72 @@ async def test_history_longer_than_its_count_is_refused(session, run, chain: Fak
     assert stored == []
 
 
-async def test_tip_below_a_stored_block_is_refused(session, run, chain: FakeEsplora) -> None:
-    chain.add(_receive(1, receiving(0), height=TIP))
+async def test_tip_below_a_deep_stored_block_is_refused(session, run, chain: FakeEsplora) -> None:
+    chain.add(_receive(1, receiving(0), height=TIP - 10))  # deep
+    chain.add(_receive(2, receiving(1), height=TIP))  # 1 confirmation: may be wrong
     connection = await _connection(run)
     await _fetch(session, connection, chain, build_wallet(SPEC))
 
+    # Below the shallow row only: the recheck that follows can correct it.
     chain.tip = TIP - 1
+    assert (await _fetch(session, connection, chain, build_wallet(SPEC))).tip == TIP - 1
+
+    chain.tip = TIP - 11
     with pytest.raises(MalformedResponse):
         await _fetch(session, connection, chain, build_wallet(SPEC))
 
 
-async def test_tip_too_far_on_is_refused(session, run, chain: FakeEsplora) -> None:
+async def _tip_read(session: AsyncSession, connection: ConnectionRecord, ago: timedelta) -> None:
+    """Date the last accepted tip `ago`."""
+    await session.execute(
+        text(
+            "update core.connections"
+            " set config = config || jsonb_build_object('tip_at', cast(:at as text))"
+            " where id = :id"
+        ),
+        {"at": (datetime.now(UTC) - ago).isoformat(), "id": connection.id},
+    )
+
+
+async def test_tip_jump_is_bounded_by_the_time_since(session, run, chain: FakeEsplora) -> None:
     chain.add(_receive(1, receiving(0)))
     connection = await _connection(run)
     await _fetch(session, connection, chain, build_wallet(SPEC))
-    assert (await get_connection(session, connection.id)).config[TIP_KEY] == TIP
+    config = (await get_connection(session, connection.id)).config
+    assert config[TIP_KEY] == TIP and isinstance(config[TIP_AT_KEY], str)
 
-    chain.tip = TIP + MAX_TIP_JUMP + 1
+    # An hour on, the tip may have grown 100 + 60 // 5 = 112 blocks, no more.
+    await _tip_read(session, connection, timedelta(hours=1))
+    chain.tip = TIP + allowed_jump(timedelta(hours=1)) + 1
     with pytest.raises(MalformedResponse):
         await _fetch(session, connection, chain, build_wallet(SPEC))
     assert (await get_connection(session, connection.id)).config[TIP_KEY] == TIP
 
-    chain.tip = TIP + MAX_TIP_JUMP
+    chain.tip = TIP + 112
+    assert (await _fetch(session, connection, chain, build_wallet(SPEC))).tip == TIP + 112
+
+    # A connection last synced 30 days ago: an honest tip 4,320 blocks on passes.
+    await _tip_read(session, connection, timedelta(days=30))
+    chain.tip = TIP + 112 + 4_320
     assert (await _fetch(session, connection, chain, build_wallet(SPEC))).tip == chain.tip
+
+
+async def test_a_block_above_the_tip_is_refused(session, run, chain: FakeEsplora) -> None:
+    chain.add(_receive(1, receiving(0), height=TIP + 3))
+    connection = await _connection(run)
+    with pytest.raises(MalformedResponse):
+        await _fetch(session, connection, chain, build_wallet(SPEC))
+    stored = await _rows(
+        session,
+        "select txid from finance.bitcoin_transactions where connection_id = :c",
+        c=connection.id,
+    )
+    assert stored == []
+
+    # Two blocks ahead is a server behind the same name a little ahead: accepted.
+    chain.move(txid(1), TIP + 2, fork=0)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    # A status naming a block three above the tip is refused too.
+    chain.move(txid(1), TIP + 3)
+    with pytest.raises(MalformedResponse):
+        await _fetch(session, connection, chain, build_wallet(SPEC))

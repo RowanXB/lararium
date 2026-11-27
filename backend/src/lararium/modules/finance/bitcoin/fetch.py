@@ -33,7 +33,7 @@ the endpoint template and the address's place in the wallet.
 from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -73,11 +73,15 @@ VERSION = "bitcoin-sync-1"
 SAFE_CONFIRMATIONS = 6
 # Confirmed transactions per history page (Esplora's `/txs` and `/txs/chain/:txid`).
 CHAIN_PAGE = 25
-# Bounds on what a misbehaving server can make a sync do: the addresses scanned per branch,
-# and how far the tip may move on from the last sync's (about a week of blocks).
+# Bounds on what a misbehaving server can make a sync do: the addresses scanned per branch;
+# how far the tip may move on from the last sync's (`allowed_jump`); and how far a block a
+# response names may be above the tip (a load-balanced server's backends can differ by a
+# block or two).
 MAX_INDEX = 100_000
-MAX_TIP_JUMP = 1_000
+MAX_AHEAD = 2
+# The last accepted tip and the wall time it was read (ISO, UTC), in the connection's config.
 TIP_KEY = "tip_height"
+TIP_AT_KEY = "tip_at"
 
 TIP = "/blocks/tip/height"
 STATS = "/address/:address"
@@ -286,6 +290,24 @@ _FORGET_HISTORIES = text(
 )
 
 
+def allowed_jump(elapsed: timedelta) -> int:
+    """How many blocks the tip may grow in `elapsed`: blocks average 10 minutes but bunch up,
+    so twice that rate, plus 100."""
+    minutes = max(int(elapsed.total_seconds() // 60), 0)
+    return 100 + minutes // 5
+
+
+def _previous_tip(config: Mapping[str, JSONValue]) -> tuple[int, datetime] | None:
+    height, at = config.get(TIP_KEY), config.get(TIP_AT_KEY)
+    if not isinstance(height, int) or isinstance(height, bool) or not isinstance(at, str):
+        return None  # the first sync (or a config without both): nothing to compare with
+    try:
+        when = datetime.fromisoformat(at)
+    except ValueError:
+        return None
+    return height, when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
 def _depth(tip: int, height: int) -> int:
     """Confirmations of a block at `height` when the tip is `tip`; never negative."""
     return max(tip - height + 1, 0)
@@ -403,29 +425,40 @@ class _Fetch:
         )
 
     async def _tip(self) -> None:
-        """The chain tip, refused when it is below a block a stored transaction is in, or
-        further on from the last sync's than the chain could have grown."""
+        """The chain tip, refused when it is below a block a deep stored transaction is in,
+        or further on from the last sync's than the chain could have grown since.
+
+        Only rows 6 blocks deep when last reported floor it: a shallower one may be a block a
+        server got wrong, which the recheck that follows corrects."""
         tip = await self.client.tip_height()
+        read_at = _now()
         connection_id = self.ctx.connection.id
         async with self.ctx.session_factory() as session:
             highest: int | None = await session.scalar(
                 text(
                     "select max(block_height) from finance.bitcoin_transactions"
                     " where connection_id = :c and confirmed is true"
+                    " and seen_at_height is not null"
+                    " and greatest(seen_at_height - block_height + 1, 0) >= :n"
                 ),
-                {"c": connection_id},
+                {"c": connection_id, "n": SAFE_CONFIRMATIONS},
             )
-            previous = (await get_connection(session, connection_id)).config.get(TIP_KEY)
+            previous = _previous_tip((await get_connection(session, connection_id)).config)
         if highest is not None and tip < highest:
             raise MalformedResponse("tip height", "the body")
-        if isinstance(previous, int) and not isinstance(previous, bool):
-            if tip > previous + MAX_TIP_JUMP:
-                raise MalformedResponse("tip height", "the body")
+        if previous is not None and tip > previous[0] + allowed_jump(read_at - previous[1]):
+            raise MalformedResponse("tip height", "the body")
         self.tip = tip
         async with self._command("tip") as cmd:
             # The body is the bare number, so this is the record of it exactly.
             await self._raw(cmd, "tip", {"endpoint": TIP}, record_json(Decimal(tip)))
-            await update_config(cmd, connection_id, {TIP_KEY: tip})
+            await update_config(cmd, connection_id, {TIP_KEY: tip, TIP_AT_KEY: read_at.isoformat()})
+
+    def _check_height(self, status: Status, endpoint: str, field: str) -> None:
+        """A block above the tip (beyond what servers behind one name differ by) is refused:
+        stored, it would floor every later tip."""
+        if status.block_height is not None and status.block_height > self.tip + MAX_AHEAD:
+            raise MalformedResponse(endpoint, field)
 
     async def _load(self) -> None:
         params = {"c": self.ctx.connection.id}
@@ -530,6 +563,8 @@ class _Fetch:
         at most), so the next sync asks again."""
         total = stats.chain.tx_count + stats.mempool.tx_count
         txs, body = await self.client.txs(address)
+        for tx in txs:
+            self._check_height(tx.status, "txs", "status.block_height")
         pages = [_Page(position.request(TXS), body, txs)]
         seen = {tx.txid for tx in txs}
         if len(seen) > total:
@@ -543,6 +578,8 @@ class _Fetch:
                 break
             after = confirmed[-1].txid
             txs, body = await self.client.txs(address, after)
+            for tx in txs:
+                self._check_height(tx.status, "txs", "status.block_height")
             if any(tx.txid in seen or not tx.status.confirmed for tx in txs):
                 # A page repeating or out of order would walk forever or miss transactions.
                 raise MalformedResponse("txs", "the body")
@@ -641,6 +678,8 @@ class _Fetch:
             ).all()
         for row in rows:
             status, body = await self.client.status(row.txid)
+            if status is not None:
+                self._check_height(status, "status", "block_height")
             seen_at = _now()
             if body is not None:
                 self.unknown |= unknown_fields(body)
