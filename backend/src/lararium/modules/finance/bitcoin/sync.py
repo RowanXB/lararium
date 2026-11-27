@@ -2,10 +2,10 @@
 
 A sync runs at most every `SYNC_EVERY`, unless the owner asked for it: transactions post only
 once confirmed, blocks come about every ten minutes, and the server is a public one. Each sync
-builds the wallet from its credential and the config's gap limits, fetches (which commits as
-it goes, so it must run before the connection's row is locked here), then, holding that lock,
-posts what changed, checks the balance against the addresses' reported sums and publishes
-the flags.
+builds the wallet from its credential and the config's gap limits, fetches, prices BTC (both
+commit as they go, so they must run before the connection's row is locked here), then,
+holding that lock, posts what changed, checks the balance against the addresses' reported
+sums and publishes the flags.
 
 The credential (purpose `descriptor`) is the owner's input as JSON (`input_json`): a master
 public key reveals every address the wallet will ever use, so it is kept encrypted. The config
@@ -19,6 +19,8 @@ The flags are connection warnings `Bitcoin flagged: <reason>`, the owner told of
   (most likely the wrong wallet type, so it stands until an address is used); decided by
   every sync's scan.
 - `fee`: a spend whose fee does not add up; it stays pending, so every sync sees it again.
+- `prices`: what the price step flags (`no price for BTC` while a day held has no price,
+  design 5.7); decided by every sync whose price step ran, kept when Binance failed.
 - `fields`: the response fields the documented format does not list, as each response that
   carries one is fetched (a history only when its address changed), so they accumulate.
 - `events`: what the normalizer saw happen once (a shared transaction, a confirmed one that
@@ -30,13 +32,14 @@ No flag, error or log line names an address, a key or a transaction.
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import text
 
-from lararium.core.connections import load_credential, lock_connection
+from lararium.core.connections import get_connection, load_credential, lock_connection
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
@@ -57,8 +60,15 @@ from lararium.modules.finance.bitcoin.normalize import (
     SHARED_FLAG,
     normalize,
 )
+from lararium.modules.finance.bitcoin.prices import (
+    PRICE_FAILURES,
+    failure_shown,
+    update_btc_prices,
+)
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.readonly_http import Clock, Sleep, monotonic
+
+logger = logging.getLogger(__name__)
 
 DESCRIPTOR_PURPOSE = "descriptor"
 SYNC_EVERY = timedelta(hours=6)
@@ -74,8 +84,10 @@ ADDRESSES = "addresses"
 FEE = "fee"
 FIELDS = "fields"
 EVENTS = "events"
-# The parts every sync decides in full; the others keep what earlier syncs found.
-CHECKED = frozenset({ADDRESSES, FEE})
+PRICES = "prices"
+# The parts every sync decides in full; the others keep what earlier syncs found. A sync whose
+# price step failed leaves `prices` as the last one decided it.
+CHECKED = frozenset({ADDRESSES, FEE, PRICES})
 # The normalizer's flags by part; one it raises that is not here is an event.
 _NORMALIZER_PARTS = {
     FEE_FLAG: FEE,
@@ -88,6 +100,10 @@ _INPUT_FIELDS = ("form", "electrum_type", "keys", "threshold", "descriptors", "a
 _UNREADABLE = "The Bitcoin wallet's stored keys or addresses could not be read"
 _GAPS_UNREADABLE = "The Bitcoin wallet's gap limits could not be read"
 _BRANCHES: dict[str, Branch] = {"0": 0, "1": 1}
+
+
+# The price step (design 5.7): the wallet's account in, the prices' flags out.
+type PriceStep = Callable[[SyncContext, UUID], Awaitable[list[str]]]
 
 
 class BitcoinSyncError(DisplayableError):
@@ -170,8 +186,10 @@ def _due(cursor: JSONValue, now: datetime) -> bool:
     return last.tzinfo is None or now - last >= SYNC_EVERY
 
 
-def _found(result: FetchResult, normalizer_flags: Iterable[str]) -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
+def _found(
+    result: FetchResult, normalizer_flags: Iterable[str], price_flags: Iterable[str]
+) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = {(PRICES, flag) for flag in price_flags}
     if result.conflicts:
         found.add((ADDRESSES, CONFLICT_FLAG))
     if not any(s.chain.tx_count or s.mempool.tx_count for s in result.scanned.values()):
@@ -206,10 +224,12 @@ class BitcoinConnector:
         now: Callable[[], datetime] | None = None,
         sleep: Sleep = asyncio.sleep,
         clock: Clock = monotonic,
+        prices: PriceStep = update_btc_prices,
     ) -> None:
         self._now = now or (lambda: datetime.now(UTC))
         self._sleep = sleep
         self._clock = clock
+        self._prices = prices
 
     async def check_access(self, ctx: SyncContext) -> bool:
         # The chain is public: there is no secret for a provider to accept.
@@ -228,6 +248,15 @@ class BitcoinConnector:
             # FinanceValidationError's message may describe the input: never repeated.
             raise CredentialRejectedError(_UNREADABLE) from None
 
+    async def _update_prices(self, ctx: SyncContext, account_id: UUID) -> list[str] | None:
+        """BTC's prices (design 5.7) and their flags; None when Binance failed, which is logged
+        (its status at most) and leaves the sync going."""
+        try:
+            return await self._prices(ctx, account_id)
+        except PRICE_FAILURES as error:
+            logger.warning("BTC prices failed: %s", failure_shown(error))
+            return None
+
     async def sync(self, ctx: SyncContext) -> JSONValue:
         connection = ctx.connection
         now = self._now()
@@ -237,6 +266,15 @@ class BitcoinConnector:
         wallet = build_wallet(spec, _gaps(connection.config))
         client = EsploraClient(ctx.http, ctx.esplora_url, sleep=self._sleep, clock=self._clock)
         result = await fetch(ctx, client, wallet)
+        # Like the fetch, the price step commits as it goes (its record of the days asked under
+        # the connection's row lock), so it runs before that lock is taken here. It prices
+        # what earlier syncs posted: BTC first posted now is priced from the next sync on.
+        recorded = (await get_connection(ctx.command.session, connection.id)).config.get(
+            ACCOUNT_KEY
+        )
+        assert isinstance(recorded, str), "the fetch made the wallet's account"
+        account_id = UUID(recorded)
+        priced = await self._update_prices(ctx, account_id)
 
         # Locked from here until the sync commits. Nothing below writes the connection's row
         # through `ctx.session_factory`: that would wait on this lock.
@@ -244,19 +282,15 @@ class BitcoinConnector:
         replay = locked.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
         report = await normalize(ctx, None if replay else result.changed_txids | result.left_chain)
 
-        recorded = locked.config.get(ACCOUNT_KEY)
-        assert isinstance(recorded, str), "the fetch made the wallet's account"
-        account_id = UUID(recorded)
         account = await get_account(ctx.command.session, account_id)
         at = await _checked_at(ctx, now)
         mismatches = await reconcile.check(ctx, account_id, account.name, result.scanned, at)
         reconciled = await reconcile.publish(ctx, mismatches)
 
-        # BTC prices (design 5.7) are updated here, their flags published with these.
         flags = await connector_flags.publish_flags(
             ctx,
-            _found(result, report.flagged),
-            CHECKED,
+            _found(result, report.flagged, priced or ()),
+            CHECKED if priced is not None else CHECKED - {PRICES},
             cursor=None,
             prefix=FLAGGED_PREFIX,
             label="a Bitcoin wallet",

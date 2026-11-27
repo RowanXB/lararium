@@ -2,6 +2,7 @@
 and the balance check, the flags it publishes, and its registration."""
 
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -32,6 +33,7 @@ from lararium.modules.finance.bitcoin.sync import (
     NO_USED_FLAG,
     SYNC_EVERY,
     BitcoinConnector,
+    PriceStep,
     input_json,
     load_input,
 )
@@ -52,6 +54,10 @@ class Notifier:
         self.messages.append(text)
 
 
+async def _no_prices(ctx: SyncContext, account_id: uuid.UUID) -> list[str]:
+    return []
+
+
 class Wallet(Synced):
     """A Bitcoin connection with its credential stored, synced by the connector itself, its
     cursor recorded as the worker records it."""
@@ -60,6 +66,9 @@ class Wallet(Synced):
         super().__init__(started.session, started.connection, started.chain)
         self.notifier = Notifier()
         self.now = NOW
+        # Prices are test_prices.py's: here no Binance is asked.
+        self.prices: PriceStep = _no_prices
+        self.handler: Callable[[httpx.Request], Any] = started.chain.handler
 
     @classmethod
     async def create(
@@ -80,11 +89,11 @@ class Wallet(Synced):
 
     def connector(self) -> BitcoinConnector:
         return BitcoinConnector(
-            now=lambda: self.now, sleep=self.chain.sleep, clock=self.chain.clock
+            now=lambda: self.now, sleep=self.chain.sleep, clock=self.chain.clock, prices=self.prices
         )
 
     async def run(self, *, requested: bool = False) -> JSONValue:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(self.chain.handler)) as http:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(self.handler)) as http:
             ctx = SyncContext(
                 esplora_url=BASE,
                 command=CommandContext(self.session, CONNECTOR, uuid.uuid4()),
