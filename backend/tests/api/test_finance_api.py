@@ -615,3 +615,35 @@ async def test_a_type_key_no_longer_in_the_catalog_reads_as_none(client, run) ->
     )
     listed = {a["id"]: a for a in (await client.get(f"{API}/accounts")).json()}
     assert listed[str(record.id)]["type_key"] is None
+
+
+async def test_set_transaction_categories(client, session, run) -> None:
+    gbp = await get_currency(session, "GBP")
+    a, b = [
+        await run(
+            create_account, name=name, ledger_type="asset", subtype="bank", balance_mode="hybrid"
+        )
+        for name in ("A", "B")
+    ]
+    record = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 10, 12, tzinfo=UTC),
+            description="Gift",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("10")),
+                PostingInput(b.id, gbp.id, Decimal("-10")),
+            ],
+        ),
+    )
+    url = "/api/v1/finance/transaction-categories"
+    body = {"transaction_ids": [str(record.id)], "category": " Family  money "}
+    assert (await client.put(url, json=body)).status_code == 204
+    assert (await client.put(url, json=body | {"category": None})).status_code == 204
+
+    too_many = {"transaction_ids": [str(record.id)] * 501, "category": "x"}
+    assert (await client.put(url, json=too_many)).status_code == 422
+    empty = {"transaction_ids": [str(record.id)], "category": "  "}
+    assert (await client.put(url, json=empty)).status_code == 422
+    unknown = {"transaction_ids": ["00000000-0000-0000-0000-000000000001"], "category": "x"}
+    assert (await client.put(url, json=unknown)).status_code == 404

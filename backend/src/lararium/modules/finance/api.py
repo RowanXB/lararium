@@ -34,6 +34,7 @@ from lararium.modules.finance import (
     errors,
     instruments,
     ledger,
+    owner_categories,
     pricing,
     snapshots,
     valuation,
@@ -68,6 +69,7 @@ from lararium.modules.finance.schemas import (
     PriceCreate,
     SnapshotCreate,
     SnapshotOut,
+    TransactionCategoriesUpdate,
     TransactionCreate,
     TransactionOut,
 )
@@ -452,6 +454,19 @@ async def void_transaction(
         await staging.require_not_imported(ctx.session, transaction_id)
         record = await ledger.void_transaction(ctx, transaction_id)
     return TransactionOut.model_validate(record)
+
+
+@router.put(
+    "/transaction-categories",
+    name="set_transaction_categories",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def set_transaction_categories(
+    body: TransactionCategoriesUpdate, session: SessionDep, actor: ActorDep
+) -> None:
+    """Set the owner's category on the transactions, or clear it with null. All or nothing."""
+    async with command_context(session, actor, "set_transaction_categories", _args(body)) as ctx:
+        await owner_categories.set_owner_category(ctx, body.transaction_ids, body.category)
 
 
 # Prices and FX rates

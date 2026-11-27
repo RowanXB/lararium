@@ -242,6 +242,13 @@ class PostingCreate(BaseModel):
         return self
 
 
+class TransactionCategoriesUpdate(BaseModel):
+    """Set the owner's category on transactions, or clear it with null."""
+
+    transaction_ids: list[UUID] = Field(min_length=1, max_length=500)
+    category: str | None
+
+
 class TransactionCreate(BaseModel):
     occurred_at: AwareDatetime
     description: str
