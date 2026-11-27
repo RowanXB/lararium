@@ -14,6 +14,7 @@ import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { ImportBatchPage } from "./pages/ImportBatchPage";
 import { ImportProfilesPage } from "./pages/ImportProfilesPage";
 import { ImportsPage } from "./pages/ImportsPage";
+import { IncomePage } from "./pages/IncomePage";
 import { InstrumentsPage } from "./pages/InstrumentsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PricesPage } from "./pages/PricesPage";
@@ -21,7 +22,14 @@ import { TransfersPage } from "./pages/TransfersPage";
 
 // Four places, by what the owner comes to do; the pages inside one are its tabs.
 const SECTIONS = [
-  { label: "Overview", icon: LayoutDashboard, pages: [{ to: "/", label: "Overview" }] },
+  {
+    label: "Overview",
+    icon: LayoutDashboard,
+    pages: [
+      { to: "/", label: "Overview" },
+      { to: "/income", label: "Income" },
+    ],
+  },
   {
     label: "Accounts",
     icon: Wallet,
@@ -113,6 +121,7 @@ const importBatchRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: OverviewPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/income", component: IncomePage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts/new", component: AddAccountPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/transfers", component: TransfersPage }),

@@ -6,3 +6,9 @@ export function categoryLabel(category: string | null): string {
   const words = category.replace(/[_-]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
+
+// What the source says an income is: "share_lending" reads as "Share lending".
+export function incomeKindLabel(kind: string): string {
+  const words = kind.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
