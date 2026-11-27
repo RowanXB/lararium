@@ -314,3 +314,19 @@ it("reads the cash flow again after a write", async () => {
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ["cash-flow"] })),
   );
 });
+
+it("sends the same category again after a failed write", async () => {
+  const user = userEvent.setup();
+  vi.mocked(setTransactionCategories).mockRejectedValueOnce(new Error("offline"));
+  renderPage();
+  await screen.findByText("ACME LTD");
+
+  const field = rowOf("ACME LTD").getByLabelText(/^Category for/);
+  await user.type(field, "salary{Enter}");
+  await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText(/offline/)).toBeInTheDocument();
+
+  await user.clear(field);
+  await user.type(field, "salary{Enter}");
+  await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(2));
+});

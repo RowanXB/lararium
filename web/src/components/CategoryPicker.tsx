@@ -8,7 +8,9 @@ const SUGGESTIONS = ["salary", "family"];
 type Props = {
   value: string | null;
   known: readonly string[];
-  onChange: (category: string) => void;
+  // A write's promise, when there is one: the picker sends the same value again after it
+  // fails, and only once while it is in flight or after it succeeded.
+  onChange: (category: string) => void | Promise<unknown>;
   label?: string;
 };
 
@@ -18,7 +20,8 @@ type Props = {
 export function CategoryPicker({ value, known, onChange, label = "Category" }: Props) {
   const listId = useId();
   const [draft, setDraft] = useState(value ?? "");
-  // What was last sent, so Enter followed by a blur before the refetch lands sends once.
+  // What was last sent, so Enter followed by a blur before the refetch lands sends once. A
+  // failed write forgets it, so the owner can try the same category again.
   const sent = useRef<string | null>(null);
   useEffect(() => {
     setDraft(value ?? "");
@@ -34,7 +37,9 @@ export function CategoryPicker({ value, known, onChange, label = "Category" }: P
       return;
     }
     sent.current = next;
-    onChange(next);
+    onChange(next)?.catch(() => {
+      if (sent.current === next) sent.current = null;
+    });
   }
 
   return (

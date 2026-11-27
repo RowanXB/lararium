@@ -147,7 +147,8 @@ type TableProps = {
   known: string[];
   selected: Set<string>;
   onToggle: (ids: string[], on: boolean) => void;
-  onCategory: (ids: string[], category: string | null) => void;
+  // Settles when the write does; its error is shown by the page.
+  onCategory: (ids: string[], category: string | null) => Promise<unknown>;
 };
 
 function EntriesTable({ entries, currency, known, selected, onToggle, onCategory }: TableProps) {
@@ -210,7 +211,7 @@ function EntriesTable({ entries, currency, known, selected, onToggle, onCategory
                       size="icon-sm"
                       variant="ghost"
                       aria-label={`Clear category for ${entry.description}`}
-                      onClick={() => onCategory([id], null)}
+                      onClick={() => void onCategory([id], null).catch(() => undefined)}
                     >
                       <X aria-hidden />
                     </Button>
@@ -407,7 +408,7 @@ export function IncomePage() {
                   known={data.known_categories}
                   selected={new Set(chosen)}
                   onToggle={toggle}
-                  onCategory={(ids, next) => write.mutate({ ids, category: next })}
+                  onCategory={(ids, next) => write.mutateAsync({ ids, category: next })}
                 />
               )}
             </CardContent>
