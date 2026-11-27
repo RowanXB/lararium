@@ -5,7 +5,7 @@ income, expense or equity account, which is also where a connector puts the unkn
 what it reads (Unassigned). A posting there is the mirror of what happened to the owner's
 money, so its negation is the flow: positive is income, negative is spending, except
 that a positive flow the source marks as a refund (money back for an earlier payment) is
-negative spending, counted in the month it arrives. A transfer
+negative spending, counted in the period it is booked. A transfer
 between own accounts posts to In transit, an asset, and a trade moves value inside one
 account, so neither is a flow. Opening balances are where an account's history starts, not
 income. Only money counts: a security arriving from nowhere (a corporate action, a transfer

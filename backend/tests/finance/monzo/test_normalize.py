@@ -1180,6 +1180,73 @@ async def test_an_unmatched_reversal_is_a_refund_and_warns(session, run) -> None
     assert (await _warnings(session, connection)).count(UNMATCHED.format("tx_TEST_REV")) == 1
 
 
+async def test_a_pair_that_holds_is_not_posted_again(session, run) -> None:
+    connection = await _connection(run)
+    # A field it cannot store yet, so posting this copy again would note it again.
+    foreign = AUTHORISATION | {"local_currency": "XTS", "local_amount": -99000}
+    await _normalize(session, connection, transactions=[foreign, REVERSAL])
+    await _assert_cancelled_pair(session, run)
+    assert await _warnings(session, connection) == [UNMAPPED.format("local_currency")]
+    async with command_context(session, Actor("user", "owner"), "set_warnings", {}) as ctx:
+        await set_warnings(ctx, connection.id, [])
+
+    report = await _normalize(session, connection)
+
+    assert (report.created, report.updated, report.unchanged, report.voided) == (0, 0, 0, 0)
+    assert await _warnings(session, connection) == []
+    await _assert_cancelled_pair(session, run)
+
+
+async def test_the_owner_voiding_the_reversal_returns_the_authorisation_to_pending(
+    session, run
+) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[AUTHORISATION, REVERSAL])
+    (reversal,) = [r for r in await _transactions(session) if r.external_id == "tx_TEST_REV"]
+    async with command_context(session, Actor("user", "owner"), "void_transaction", {}) as ctx:
+        await void_transaction(ctx, reversal.id)
+
+    report = await _normalize(session, connection)
+
+    unassigned = await _unassigned(run)
+    ledger = await _card_ledger(session)
+    # The owner's void keeps its link; the authorisation leaves In transit all the same.
+    assert ledger["tx_TEST_REV"][0] == "void"
+    assert ledger["tx_TEST_REV"][4] == "tx_TEST_AUTH"
+    assert ledger["tx_TEST_AUTH"] == ("pending", None, unassigned, False, None)
+    assert report.updated == 1
+    again = await _normalize(session, connection)
+    assert (again.created, again.updated, again.unchanged, again.voided) == (0, 0, 0, 0)
+    assert await _card_ledger(session) == ledger
+
+
+async def test_a_reversal_that_pairs_later_no_longer_warns(session, run) -> None:
+    connection = await _connection(run)
+    await _normalize(session, connection, transactions=[REVERSAL])
+    assert UNMATCHED.format("tx_TEST_REV") in await _warnings(session, connection)
+
+    await _normalize(session, connection, transactions=[AUTHORISATION])
+
+    await _assert_cancelled_pair(session, run)
+    assert UNMATCHED.format("tx_TEST_REV") not in await _warnings(session, connection)
+
+
+async def test_an_unmatched_reversal_declined_later_no_longer_warns(session, run) -> None:
+    connection = await _connection(run)
+    partial = REVERSAL | {"amount": 700, "local_amount": 700}
+    await _normalize(session, connection, transactions=[partial])
+    assert UNMATCHED.format("tx_TEST_REV") in await _warnings(session, connection)
+    declined = partial | {
+        "decline_reason": "INSUFFICIENT_FUNDS",
+        "updated": "2026-03-01T16:00:00.000Z",
+    }
+
+    await _normalize(session, connection, transactions=[declined])
+
+    assert (await _card_ledger(session))["tx_TEST_REV"][0] == "void"
+    assert UNMATCHED.format("tx_TEST_REV") not in await _warnings(session, connection)
+
+
 async def _splits(session, transaction_id: uuid.UUID) -> list[tuple[str, Decimal]]:
     rows = await session.execute(
         text(

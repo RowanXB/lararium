@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from lararium.core.actors import Actor
 from lararium.core.commands import command_context
-from lararium.core.connections import update_config
+from lararium.core.connections import ConnectionRecord, get_connection, update_config
 from lararium.db import create_engine
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.ledger import find_unbalanced_transactions, void_transaction
 from lararium.modules.finance.monzo.normalize import NORMALIZER_VERSION_KEY
 from lararium.modules.finance.monzo.reversals import reversal_pairs
 from lararium.modules.finance.system_accounts import system_account_ids
@@ -97,7 +97,9 @@ def test_a_declined_reversal_pairs_nothing() -> None:
 # A generated history: card authorisations on a few lifecycles, of two amounts, most of
 # them reversed later, exactly or in part (a partial reversal), so that a reversal meets
 # authorisations of its amount and of another, and two authorisations of one amount meet one
-# reversal; with settled card payments and refunds on the same lifecycles.
+# reversal; some reversals come back declined later (a later copy of the same id); with
+# settled card payments and refunds on the same lifecycles. No two reversals compete for one
+# authorisation.
 _START = datetime(2026, 3, 1, 9, tzinfo=UTC)
 _LIFECYCLES = st.integers(1, 2)
 _AMOUNTS = st.sampled_from([1000, 500])
@@ -122,13 +124,37 @@ def _history_item(n: int, kind: str, lifecycle: int, amount: int) -> dict[str, A
     )
 
 
+def _declined(tx: dict[str, Any]) -> dict[str, Any]:
+    """A later copy of the transaction, declined: Monzo voiding a reversal."""
+    updated = datetime.fromisoformat(tx["created"]) + timedelta(hours=2)
+    return tx | {"decline_reason": "INSUFFICIENT_FUNDS", "updated": _iso(updated)}
+
+
+def _latest(copies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The latest copy of each transaction (a declined copy is the later one), in the order
+    each was first given: what Monzo returns once all of them happened."""
+    latest: dict[str, dict[str, Any]] = {}
+    for tx in copies:
+        if tx["id"] not in latest or "updated" in tx:
+            latest[tx["id"]] = tx
+    return list(latest.values())
+
+
 @st.composite
 def _histories(draw: st.DrawFn) -> list[dict[str, Any]]:
+    """Every copy of a generated history: each transaction, then a declined copy of some
+    reversals."""
     events: list[tuple[str, int, int]] = []
     later: list[tuple[int, int]] = []  # each reversal's index in events, and its authorisation's
-    for lifecycle, amount, reversed_by in draw(
+    declined: set[int] = set()  # the reversals, by index in events, that come back declined
+    for lifecycle, amount, reversed_by, declines in draw(
         st.lists(
-            st.tuples(_LIFECYCLES, _AMOUNTS, st.sampled_from([None, "exact", "exact", "part"])),
+            st.tuples(
+                _LIFECYCLES,
+                _AMOUNTS,
+                st.sampled_from([None, "exact", "exact", "part"]),
+                st.sampled_from([False, False, True]),
+            ),
             min_size=1,
             max_size=4,
         )
@@ -137,6 +163,8 @@ def _histories(draw: st.DrawFn) -> list[dict[str, Any]]:
         if reversed_by is not None:
             events.append(("reversal", lifecycle, amount if reversed_by == "exact" else 300))
             later.append((len(events) - 1, len(events) - 2))
+            if declines:
+                declined.add(len(events) - 1)
     others = st.tuples(st.sampled_from(["payment", "refund"]), _LIFECYCLES, _AMOUNTS)
     events += draw(st.lists(others, max_size=3))
     positions = draw(st.permutations(range(len(events))))
@@ -148,7 +176,8 @@ def _histories(draw: st.DrawFn) -> list[dict[str, Any]]:
                 positions[reversal],
             )
     by_position = sorted(range(len(events)), key=lambda i: positions[i])
-    return [_history_item(n, *events[i]) for n, i in enumerate(by_position)]
+    history = [(i, _history_item(n, *events[i])) for n, i in enumerate(by_position)]
+    return [tx for _, tx in history] + [_declined(tx) for i, tx in history if i in declined]
 
 
 @pytest.fixture
@@ -179,8 +208,9 @@ async def _isolated(conn: AsyncConnection) -> AsyncGenerator[tuple[AsyncSession,
 
 
 async def _ledger(session: AsyncSession) -> set[tuple[Any, ...]]:
-    """Every transaction: (external id, status, contra account, refund, cancels external id),
-    the contra named by its system account key."""
+    """Every transaction but those the connector voided (a reversal posted and then declined
+    in one run, never posted in the other): (external id, status, contra account, refund,
+    cancels external id), the contra named by its system account key."""
     names = {account_id: key for key, account_id in (await system_account_ids(session)).items()}
     rows = await session.execute(
         text(
@@ -188,15 +218,26 @@ async def _ledger(session: AsyncSession) -> set[tuple[Any, ...]]:
             " from finance.transactions t"
             " join finance.postings p on p.transaction_id = t.id and p.position = 1"
             " left join finance.transactions c on c.id = t.cancels_transaction_id"
+            " where t.voided_by is distinct from 'connector'"
         )
     )
     return {(r.external_id, r.status, names.get(r.account_id), r.refund, r.cancels) for r in rows}
 
 
 async def _check(session: AsyncSession) -> None:
-    """Every transaction balances, and every cancelled pair sums to zero on In transit."""
+    """Every transaction balances, every cancelled pair sums to zero on In transit, and so
+    does In transit (no history here has a transfer, so only a pair may post there)."""
     assert await find_unbalanced_transactions(session) == []
     in_transit = (await system_account_ids(session)).get("in_transit")
+    left = await session.scalar(
+        text(
+            "select coalesce(sum(p.quantity), 0) from finance.postings p"
+            " join finance.transactions t on t.id = p.transaction_id"
+            " where t.status <> 'void' and p.account_id = :i"
+        ),
+        {"i": in_transit},
+    )
+    assert left == 0
     unbalanced = await session.execute(
         text(
             "select c.external_id, sum(p.quantity) from finance.transactions c"
@@ -210,16 +251,42 @@ async def _check(session: AsyncSession) -> None:
     assert unbalanced.all() == []
 
 
-async def _sync_by_sync(conn: AsyncConnection, syncs: list[list[dict[str, Any]]]) -> set[Any]:
+async def _void_then_settle(
+    session: AsyncSession, connection: ConnectionRecord, voided: str | None
+) -> set[Any]:
+    """After the last sync: the owner voids `voided` (if any) and a sync with no pages
+    follows; then one more sync with no pages changes nothing, warnings included."""
+    if voided is not None:
+        transaction_id = await session.scalar(
+            text("select id from finance.transactions where external_id = :e"), {"e": voided}
+        )
+        async with command_context(session, Actor("user", "owner"), "void", {}) as ctx:
+            await void_transaction(ctx, transaction_id)
+        await _normalize(session, connection)
+        await _check(session)
+    warnings = (await get_connection(session, connection.id)).warnings
+    ledger = await _ledger(session)
+    report = await _normalize(session, connection)
+    assert (report.created, report.updated, report.voided, report.unchanged) == (0, 0, 0, 0)
+    assert (await get_connection(session, connection.id)).warnings == warnings
+    assert await _ledger(session) == ledger
+    return ledger
+
+
+async def _sync_by_sync(
+    conn: AsyncConnection, syncs: list[list[dict[str, Any]]], voided: str | None
+) -> set[Any]:
     async with _isolated(conn) as (session, run):
         connection = await _connection(run)
         for pages in syncs:
             await _normalize(session, connection, transactions=pages)
             await _check(session)
-        return await _ledger(session)
+        return await _void_then_settle(session, connection, voided)
 
 
-async def _at_once_then_replayed(conn: AsyncConnection, history: list[dict[str, Any]]) -> set[Any]:
+async def _at_once_then_replayed(
+    conn: AsyncConnection, history: list[dict[str, Any]], voided: str | None
+) -> set[Any]:
     async with _isolated(conn) as (session, run):
         connection = await _connection(run)
         await _normalize(session, connection, transactions=history)
@@ -230,7 +297,7 @@ async def _at_once_then_replayed(conn: AsyncConnection, history: list[dict[str, 
         await _check(session)
         replayed = await _ledger(session)
         assert replayed == once
-        return replayed
+        return await _void_then_settle(session, connection, voided)
 
 
 @given(history=_histories(), data=st.data())
@@ -241,16 +308,31 @@ async def test_any_arrival_order_gives_one_ledger(
     groups = data.draw(
         st.lists(st.integers(0, 3), min_size=len(order), max_size=len(order)), label="syncs"
     )
-    syncs = [[tx for tx, g in zip(order, groups, strict=True) if g == n] for n in range(4)]
-    pairs = _pairs(*history)
+    # A declined copy comes in the sync of the copy it replaces or a later one; in the same
+    # sync, Monzo returns only the declined one.
+    sync_of = {tx["id"]: g for tx, g in zip(order, groups, strict=True) if "updated" not in tx}
+    groups = [
+        max(g, sync_of[tx["id"]]) if "updated" in tx else g
+        for tx, g in zip(order, groups, strict=True)
+    ]
+    syncs = [_latest([tx for tx, g in zip(order, groups, strict=True) if g == n]) for n in range(4)]
+    final = _latest(history)
+    pairs = _pairs(*final)
+    live = sorted(tx["id"] for tx in final if "decline_reason" not in tx)
+    sides = sorted({*pairs, *pairs.values()})
+    voided = data.draw(
+        st.one_of(st.none(), st.sampled_from(live), *([st.sampled_from(sides)] if sides else [])),
+        label="the owner voids",
+    )
     note(f"pairs: {pairs}")
     event(f"pairs: {min(len(pairs), 2)}")
-    sync_of = {tx["id"]: g for tx, g in zip(order, groups, strict=True)}
-    early = any(sync_of[r] < sync_of[a] for r, a in pairs.items())
+    early = any(sync_of[r] < sync_of[a] for r, a in _pairs(*history).items())
     event(f"a reversal in a sync before its authorisation's: {early}")
     event(f"a pair split across syncs: {any(sync_of[r] != sync_of[a] for r, a in pairs.items())}")
+    event(f"a reversal declined later: {len(final) < len(history)}")
+    event(f"the owner voids a side of a pair: {voided in {*pairs, *pairs.values()}}")
 
-    by_sync = await _sync_by_sync(connection, syncs)
-    at_once = await _at_once_then_replayed(connection, history)
+    by_sync = await _sync_by_sync(connection, syncs, voided)
+    at_once = await _at_once_then_replayed(connection, final, voided)
 
     assert by_sync == at_once

@@ -425,6 +425,7 @@ class _Linked:
     status: TransactionStatus
     voided_by: str | None
     cancels: str | None  # the external id of the transaction it cancels
+    contra: UUID  # the account of its contra posting (position 1)
 
 
 async def _linked(
@@ -432,12 +433,19 @@ async def _linked(
 ) -> dict[str, _Linked]:
     """By external id, the connection's transactions under `external_ids`, those that cancel
     another and those another cancels."""
-    t, c = models.Transaction, aliased(models.Transaction)
+    t, c, p = models.Transaction, aliased(models.Transaction), models.Posting
     named = select(t.cancels_transaction_id).where(
         t.connection_id == connection_id, t.cancels_transaction_id.is_not(None)
     )
     rows = await session.execute(
-        select(t.external_id, t.status, t.voided_by, c.external_id.label("cancels"))
+        select(
+            t.external_id,
+            t.status,
+            t.voided_by,
+            c.external_id.label("cancels"),
+            p.account_id.label("contra"),
+        )
+        .join(p, and_(p.transaction_id == t.id, p.position == 1))
         .outerjoin(c, c.id == t.cancels_transaction_id)
         .where(
             t.connection_id == connection_id,
@@ -449,7 +457,9 @@ async def _linked(
         )
     )
     return {
-        row.external_id: _Linked(cast(TransactionStatus, row.status), row.voided_by, row.cancels)
+        row.external_id: _Linked(
+            cast(TransactionStatus, row.status), row.voided_by, row.cancels, row.contra
+        )
         for row in rows
     }
 
@@ -670,14 +680,17 @@ class _Normalizer:
         # Card reversals (prepare_pairs): the latest copy of every transaction, with its
         # Monzo account; every reversal reversal_pairs matches; the pairs to post (reversal
         # → authorisation, and back); the transactions a pairing or a link touches, which
-        # are posted once a run (`settled`), the run's own pages or not; the live ones whose
-        # link goes away or moves, posted alone first; and the reversals that match nothing.
+        # are posted once a run (`settled`); of those, the ones the ledger holds otherwise
+        # than the pairing now calls for, posted even when the run's pages don't bring them
+        # (`unsettled`); the live ones whose link goes away or moves, posted alone first; and
+        # the reversals that match nothing.
         self.copies: dict[str, tuple[dict[str, Any], str]] = {}
         self.matched: set[str] = set()
         self.pairs: dict[str, str] = {}
         self.cancelled: dict[str, str] = {}
         self.involved: set[str] = set()
         self.settled: set[str] = set()
+        self.unsettled: set[str] = set()
         self.relinked: list[str] = []
         self.unmatched: set[str] = set()
 
@@ -1000,6 +1013,29 @@ class _Normalizer:
             and self.pairs.get(external_id) != found.cancels
             and external_id in self.copies
         )
+        if linked:
+            in_transit = await self.system_account("in_transit")
+            self.unsettled = {
+                external_id
+                for external_id in self.involved
+                if (found := linked.get(external_id)) is not None
+                and not self._holds(external_id, found, in_transit)
+            }
+
+    def _holds(self, external_id: str, found: _Linked, in_transit: UUID) -> bool:
+        """Whether the ledger holds the transaction as the pairing calls for: a paired
+        reversal naming its authorisation, a paired authorisation booked, both on In transit;
+        anything else naming none, and booked only when its record is settled. A void stays:
+        an owner's is never rewritten, and a connector's posted its latest copy already."""
+        if found.status == "void":
+            return external_id not in self.pairs and external_id not in self.cancelled
+        if external_id in self.pairs:
+            return found.cancels == self.pairs[external_id] and found.contra == in_transit
+        if external_id in self.cancelled:
+            return found.cancels is None and found.contra == in_transit and found.status == "booked"
+        # Its contra is left to transfer_contra, which may put it on In transit as a transfer.
+        tx = self.copies[external_id][0]
+        return found.cancels is None and (found.status != "booked" or bool(tx.get("settled")))
 
     async def relink(self) -> None:
         """Post alone, first, each live transaction whose link goes away or moves, so none
@@ -1008,10 +1044,11 @@ class _Normalizer:
             await self._apply(*self.copies[external_id], backfill=True)
 
     async def settle_pairs(self) -> None:
-        """Post what a pairing or a link touches that this run has not posted yet, from its
-        latest copy: an authorisation whose reversal came in an earlier sync, or one whose
-        pair dissolved, say."""
-        for external_id in sorted(self.involved - self.settled):
+        """Post what the ledger holds otherwise than the pairing calls for that this run has
+        not posted yet, from its latest copy: an authorisation whose reversal came in an
+        earlier sync, or one whose pair dissolved, say. One that holds is not posted again, so
+        an unchanged sync writes nothing and what an old copy notes is not noted again."""
+        for external_id in sorted(self.unsettled - self.settled):
             await self.transaction(*self.copies[external_id], backfill=True)
 
     async def transaction(
@@ -1645,6 +1682,14 @@ async def _normalize(
     for name in sorted(n.unmapped):
         if (warning := _unmapped_warning(name)) not in warnings:
             warnings.append(warning)
+    # A reversal that now matches, or that is no longer one (declined or zero), warns no
+    # more; one that still matches nothing warns once, until the owner clears it.
+    settled_reversals = {
+        _unmatched_warning(monzo_id)
+        for monzo_id, (tx, _) in n.copies.items()
+        if monzo_id in n.matched or _is_stated(tx.get("decline_reason")) or tx["amount"] == 0
+    }
+    warnings = [w for w in warnings if w not in settled_reversals]
     for monzo_id in sorted(n.unmatched):
         if (warning := _unmatched_warning(monzo_id)) not in warnings:
             warnings.append(warning)
