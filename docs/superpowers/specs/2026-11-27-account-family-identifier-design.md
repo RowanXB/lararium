@@ -181,6 +181,7 @@ Only these run locally (remote Docker host); CI runs the rest.
 - A move naming several accounts that can't pair (several candidates, none, or refused by the gate) opens no transfer and no review item: it shows on Unassigned, as a shared-payee payment does.
 - If a source's two sides of an internal move are more than two minutes apart and neither side has Notes (§5.9), they don't pair by themselves until an upload brings Notes; until then the owner may pair them by hand.
 - A record with no Notes (API-only) and a same-amount real top-up within two minutes of a family move on another family account would be taken as that move's side (§5.3 item 2); an upload's Notes correct it at its heal.
+- Every connector's record counts as timed, but an IBKR Flex `dateTime` may give a date alone, which is stamped 00:00 New York (one real withdrawal is). Such a record is read as timed at midnight, so it doesn't block the near split (§5.10) as an untimed candidate would; a wrong pair needs another same-amount candidate within two minutes of the same record, and the owner can undo it. Not fixed here (owner, 2026-11-27): it would need a typed date-only field and an IBKR replay. Fix it when an IBKR change is due anyway, or when such a pair is seen.
 - Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider were a TRANSFER, it would name the family wrongly; it then pairs with nothing (or, with one other account, awaits a record there and goes overdue), and the owner rejects it. Not seen.
 
 ## 9. Open, for the owner
