@@ -1933,7 +1933,6 @@ def _covered(
     the day before and completed on the first day may be missing (account type catalog
     design §8.3). A period that starts partway through its first day (an OFX whose DTSTART
     gives a time of day, period_starts_mid_day) is listed from the day after it. An export
-    that states a period lists in full only days inside it, whatever its rows' days. An export
     whose include_only filter left rows out (a pending payment, say,
     that later appears completed) lists no day in full.
     """
@@ -1951,13 +1950,10 @@ def _covered(
         return _Coverage((first, last), (first, end))
     filtered = any(row.status == "skipped" and row.parsed is None for row in rows)
     start = first + timedelta(days=1) if first_day_partial else first
+    if statement.period_starts_mid_day and statement.period is not None:
+        # Nothing vouches for the days before it either, a row's on them included.
+        start = statement.period[0] + timedelta(days=1)
     end = last - timedelta(days=1)
-    if statement.period is not None:
-        # A file vouches only for its stated range, not for a row's day outside it.
-        period_start, period_end = statement.period
-        if statement.period_starts_mid_day or first_day_partial:
-            period_start += timedelta(days=1)
-        start, end = max(start, period_start), min(end, period_end - timedelta(days=1))
     if filtered or start > end:
         return _Coverage((first, last), (None, None))
     return _Coverage((first, last), (start, end))

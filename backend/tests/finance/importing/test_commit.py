@@ -1036,8 +1036,7 @@ async def test_row_before_dtstart_still_checks_its_days(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit, account: AccountRecord
 ) -> None:
     """Final review test 2: an OFX whose DTSTART (25 Nov) comes after one of its rows
-    (20 Nov) covers that row's day too, so it can't skip the CSV's 22 Nov row unnoticed. It
-    lists in full only its period, so its balance, not a missing row, refuses it."""
+    (20 Nov) covers that row's day too, so it can't skip the CSV's 22 Nov row unnoticed."""
     csv = BALANCE_HEADER + (
         "10/11/2026,Pay,100.00,100.00\n20/11/2026,Cafe,-5.00,95.00\n"
         "22/11/2026,Taxi,-10.00,85.00\n28/11/2026,Shop,-8.00,77.00\n"
@@ -1051,7 +1050,7 @@ async def test_row_before_dtstart_still_checks_its_days(
         extra="<LEDGERBAL>\n<BALAMT>70.00\n<DTASOF>20261205\n</LEDGERBAL>",
     )
 
-    with pytest.raises(ImportNotAllowedError, match=r"90\.00 before 2026-11-20.*nov\.csv"):
+    with pytest.raises(ImportNotAllowedError, match=r"nov\.csv has -10\.00 on 2026-11-22"):
         await stage(ofx, content, filename="export.ofx")
     assert await _balance_after(session, account.id, date(2026, 11, 30)) == Decimal("77.00")
 
