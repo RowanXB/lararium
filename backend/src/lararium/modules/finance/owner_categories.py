@@ -16,7 +16,7 @@ import re
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, func, select
+from sqlalchemy import delete, func, literal_column, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,19 +41,20 @@ def normalise_category(text: str) -> str:
 
 
 def _owner_category_sql() -> str:
-    t = aliased(models.Transaction, name="t")
-    kind, ref = source_columns(t)
-
-    def sql(expression: ColumnElement[str]) -> str:
-        return str(
-            expression.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
-        )
-
-    table = f"finance.{models.TransactionOwnerCategory.__tablename__}"
-    return (
-        f"select owner_category.category from {table} owner_category"
-        f" where owner_category.source_kind = {sql(kind)}"
-        f" and owner_category.source_ref = {sql(ref)}"
+    # The reference is read off an alias of its own, tied to the outer `t` by id, inside a
+    # real select. Compiled on its own, `source_columns(t)` has subqueries (a statement
+    # import's row) that would bring their own `finance.transactions AS t` into their FROM,
+    # so `t` there would name any transaction, not the outer one.
+    src = aliased(models.Transaction, name="owner_src")
+    o = aliased(models.TransactionOwnerCategory, name="owner_category")
+    kind, ref = source_columns(src)
+    statement = (
+        select(o.category)
+        .select_from(src)
+        .where(src.id == literal_column("t.id"), o.source_kind == kind, o.source_ref == ref)
+    )
+    return str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     )
 
 

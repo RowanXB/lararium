@@ -1,5 +1,6 @@
 """The owner's categories: normalised free text kept by source reference."""
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -45,6 +46,13 @@ def test_normalise_category_refuses(text_in: str) -> None:
 
 async def test_normalise_category_accepts_the_longest() -> None:
     assert normalise_category("x" * 64) == "x" * 64
+
+
+def test_sql_reads_t_only_as_the_outer_row() -> None:
+    # The import lookups are subqueries. Compiled on their own, each took a
+    # `finance.transactions AS t` of its own, so `t` there named any row, not the outer one.
+    assert re.search(r"transactions\s+(AS\s+)?t\b", OWNER_CATEGORY_SQL, re.IGNORECASE) is None
+    assert "t.id" in OWNER_CATEGORY_SQL
 
 
 async def _accounts(run: Run) -> tuple[AccountRecord, AccountRecord]:
