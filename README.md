@@ -894,7 +894,9 @@ a payment after the money left. A row whose file gives its time to the second, r
 earlier than two minutes before a payment that is a connected account's record, is checked
 from the payment's own day instead, in the time zone the row's file is read in (its profile's,
 UTC for a Trading 212 Cash ISA; else yours), which the row is booked in: a receipt does not come
-before its payment. An imported payment never counts, even one timed to the second: its time may be when
+before its payment. (An OFX row is booked on the date its own time is written in, which may not be
+that zone; this check can then still start a day late after a payment made just after midnight in
+summer.) An imported payment never counts, even one timed to the second: its time may be when
 the bank posted it (as an OFX file's is), after the money left. The window itself, and so the
 candidates, stay as they are.
 After the last day imported a row is taken: should it not be the real one, the next statement
