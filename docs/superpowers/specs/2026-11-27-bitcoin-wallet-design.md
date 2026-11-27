@@ -1,7 +1,7 @@
 # M8 design: Bitcoin wallets
 
 - Date: 2026-11-27 (brainstormed with the owner 2026-11-27)
-- Status: draft, awaiting the owner's review
+- Status: approved by the owner 2026-11-27; plan `docs/superpowers/plans/2026-11-27-bitcoin-wallet.md`
 - Builds on: `main` at `5dae7be` (M0–M7 Phase A merged; migrations up to `0045`). Migrations are numbered after whatever is on `main` when implementation starts.
 - Parent spec: `docs/superpowers/specs/2026-11-11-financial-gate-phase1-design.md` (§6.3, §7.7, §8, §9, §13 M8, §14)
 - Related:
