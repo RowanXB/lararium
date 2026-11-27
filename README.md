@@ -839,7 +839,10 @@ On Binance, create an API key with only **Enable Reading** ticked. Lararium chec
 permissions at the start of every sync: any other permission that is on, known or unknown,
 makes the sync refuse the key, and a key without **Enable Reading** is refused too. An IP
 restriction is optional. Both key types are accepted: HMAC ("system generated") and Ed25519
-("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only.
+("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only. If
+the futures or options host refuses an Ed25519 key, the connection is not rejected: that host's
+wallets are left out (and asked again a week later), and a warning names the host and asks for
+an HMAC key to include them.
 
 ### 2. Add the connection
 
@@ -960,11 +963,18 @@ Built from Binance's documentation and not checked against a real account:
   wallet-to-wallet history that also lists it. Trades (fetched for the symbols the income
   history names) and positions are stored only; a contract is never an instrument. Each futures
   host's request limit is read from its own exchange information.
+- Options (`opt-account`, `opt-positions`, `opt-bill`, `opt-trades`, `opt-exercises`,
+  `opt-exchange-info`): "Binance Options" holds each asset's equity in the options margin
+  account, and is reconciled on the margin balance alone. Every bill row is posted against
+  Unassigned (fees paid as fees) except a transfer, which is posted once with the
+  wallet-to-wallet history that also lists it. Trades (fetched for the symbols the bill names),
+  exercises and positions are stored only; a contract is never an instrument. An account without
+  options is skipped, as a product the account does not have. The options host's request limit
+  is read from its own exchange information.
 
 Not built yet. When built, these will follow Binance's documentation and will not have been
 checked against a real account:
 
-- Options
 - Fiat orders, card payments, P2P, Pay and rebates
 - Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
   records

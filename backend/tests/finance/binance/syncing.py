@@ -8,6 +8,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +44,16 @@ SETTINGS = Settings(
     master_key=SecretStr(base64.b64encode(KEY).decode()),
 )
 MINUTE_MS = 60_000
+# An Ed25519 key of the test's own, made once: `binance_connection(key_type="ed25519")`.
+ED25519_PEM = (
+    Ed25519PrivateKey.generate()
+    .private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    .decode()
+)
 # The account the fake's spot-account answers for.
 _uid = build_response("spot-account", [])
 assert isinstance(_uid, dict)
@@ -84,16 +96,22 @@ async def binance_connection(
     config: Mapping[str, JSONValue] | None = None,
     cursor: JSONValue = None,
     status: str = "healthy",
+    key_type: str = "hmac",
 ) -> ConnectionRecord:
+    """A connection with an HMAC key (`API_SECRET`), or an Ed25519 one (`ED25519_PEM`)."""
+
     async def setup(ctx: CommandContext) -> ConnectionRecord:
         connection = await create_connection(
             ctx,
             connector="binance",
             display_name="Binance",
-            config={"key_type": "hmac", "uid": UID, **(config or {})},
+            config={"key_type": key_type, "uid": UID, **(config or {})},
         )
         await store_credential(ctx, KEY, connection.id, "api_key", API_KEY, None)
-        await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
+        if key_type == "ed25519":
+            await store_credential(ctx, KEY, connection.id, "private_key", ED25519_PEM, None)
+        else:
+            await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
         await ctx.session.execute(
             text(
                 "update core.connections set status = :s, cursor = cast(:c as jsonb) where id = :id"

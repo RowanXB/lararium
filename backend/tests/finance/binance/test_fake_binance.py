@@ -56,7 +56,7 @@ async def ask(
 
 @pytest.mark.parametrize("label", sorted(ENDPOINTS))
 async def test_every_label_answers_in_its_catalogue_shape(label: str) -> None:
-    fake = FakeBinance(margin=True)
+    fake = FakeBinance(margin=True, options=True)
     # The parameters the catalogue always sends: Binance refuses the query without them.
     always = {name: values[0] for name, values in ENDPOINTS[label].variants}
     body = await ask(fake, label, always)
@@ -93,6 +93,26 @@ async def test_the_default_account_has_empty_futures_wallets() -> None:
     assert info["rateLimits"] == [
         {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400}
     ]
+
+
+async def test_the_default_account_has_no_options() -> None:
+    # Binance documents no answer for it: its options error page's -5002 "Option user not
+    # access" on every signed options request. Opened, the account is empty.
+    fake = FakeBinance()
+    for label in ("opt-account", "opt-positions", "opt-bill", "opt-exercises"):
+        always = {name: values[0] for name, values in ENDPOINTS[label].variants}
+        with pytest.raises(BinanceNotPresent) as caught:
+            await ask(fake, label, always)
+        assert caught.value.code == -5002
+    info = await ask(fake, "opt-exchange-info")
+    assert isinstance(info, dict)
+    assert info["rateLimits"] == [
+        {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 2400}
+    ]
+    fake.options = True
+    body = await ask(fake, "opt-account")
+    assert isinstance(body, dict) and body["asset"] == [] and body["greek"] == []
+    assert await ask(fake, "opt-positions") == []
 
 
 async def test_stored_rows_come_back_oldest_first_in_the_labels_envelope() -> None:

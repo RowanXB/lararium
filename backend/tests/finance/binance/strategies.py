@@ -15,9 +15,11 @@ and Cross Margin (some also listed by the universal transfer history, some pendi
 trades on Cross Margin (no `quoteQty`, a commission at times) and margin interest charged there,
 transfers between Spot and USDⓈ-M Futures (listed by the universal transfer history and by the
 futures income history as a `TRANSFER` row, rule 2) and futures income (realised profit and
-funding either way, commissions paid). No wallet ever holds less than nothing, except Crypto
-Loans, whose holdings are debts: never more than nothing (a debt there before the history is a
-loan whose borrow is not listed, as a VIP loan's never is).
+funding either way, commissions paid), transfers between Spot and Options (listed by the
+universal transfer history and by the options bill as a `TRANSFER` row, rule 2) and options
+bill rows (premiums and exercise profit either way, fees paid). No wallet ever holds less than
+nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
+before the history is a loan whose borrow is not listed, as a VIP loan's never is).
 
 Each `Record` is what Binance lists (one or more rows, each changing as time passes: a deposit
 is credited, a withdrawal completes or fails) and what it does to the balances (`Effect`s,
@@ -64,7 +66,7 @@ PAIRS = (
     ("AAABBB", "AAA", "BBB"),
     ("CCCSTB", "CCC", "STB"),
 )
-WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin", "um_futures")
+WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin", "um_futures", "options")
 ACCOUNT_NAMES = {
     "spot": "Binance Spot",
     "funding": "Binance Funding",
@@ -72,9 +74,11 @@ ACCOUNT_NAMES = {
     "loans": "Binance Crypto Loans",
     "cross_margin": "Binance Cross Margin",
     "um_futures": "Binance USDⓈ-M Futures",
+    "options": "Binance Options",
 }
 CROSS = "cross_margin"
 FUTURES = "um_futures"
+OPTIONS = "options"
 # The wallet whose holdings are debts (negative).
 DEBTS = "loans"
 _WALLET_TYPE = {"spot": 0, "funding": 1}
@@ -97,6 +101,7 @@ SINGLE_SIDED = frozenset(
         "locked_reward",
         "margin_interest",
         "futures_income",
+        "options_bill",
     }
 )
 TWO_SIDED = frozenset(
@@ -116,6 +121,7 @@ TWO_SIDED = frozenset(
         "margin_transfer",
         "margin_trade",
         "futures_transfer",
+        "options_transfer",
     }
 )
 
@@ -1032,6 +1038,75 @@ def _futures_income(b: _Builder) -> Record | None:
     return Record("futures_income", (("um-income", ((b.now, row),)),), (effect,))
 
 
+def _options_transfer(b: _Builder) -> Record | None:
+    """A transfer between Spot and Options: the universal transfer history lists it, and the
+    options bill as a `TRANSFER` row (no symbol) a few seconds apart (rule 2: posted once)."""
+    choices = b.holdings(("spot", OPTIONS))
+    if not choices:
+        return None
+    wallet, asset = b.draw(st.sampled_from(choices))
+    into = wallet == "spot"
+    quantity = b.amount(at_most=b.held[(wallet, asset)])
+    if quantity == 0:
+        return None
+    universal = build_row(
+        "universal-transfer",
+        asset=asset,
+        amount=_plain(quantity),
+        type="MAIN_OPTION" if into else "OPTION_MAIN",
+        status="CONFIRMED",
+        tranId=b.id(),
+        timestamp=b.now,
+    )
+    listed_at = b.now + b.draw(st.integers(0, 30)) * SECOND_MS
+    bill = build_row(
+        "opt-bill",
+        id=b.id(),
+        asset=asset,
+        amount=_plain(quantity if into else -quantity),
+        type="TRANSFER",
+        createDate=listed_at,
+    )
+    del bill["symbol"]
+    rows = (
+        ("universal-transfer", ((b.now, universal),)),
+        ("opt-bill", ((listed_at, bill),)),
+    )
+    other = OPTIONS if into else "spot"
+    effects = (Effect(b.now, wallet, asset, -quantity), Effect(b.now, other, asset, quantity))
+    return Record("options_transfer", rows, effects)
+
+
+def _options_bill(b: _Builder) -> Record | None:
+    """A bill row of Options against nothing else: a premium or an exercise's profit either
+    way, or a fee paid; what is paid is within what the wallet holds."""
+    kind = b.draw(st.sampled_from(("CONTRACT", "EXERCISE_PNL", "FEE", "EXERCISE_FEE")))
+    paid = kind in ("FEE", "EXERCISE_FEE") or b.draw(st.booleans())
+    if paid:
+        choices = b.holdings((OPTIONS,))
+        if not choices:
+            return None
+        _, asset = b.draw(st.sampled_from(choices))
+        quantity = b.amount(at_most=b.held[(OPTIONS, asset)])
+    else:
+        asset = b.draw(st.sampled_from(ASSETS))
+        quantity = b.amount()
+    if quantity == 0:
+        return None
+    delta = -quantity if paid else quantity
+    row = build_row(
+        "opt-bill",
+        id=b.id(),
+        asset=asset,
+        amount=_plain(delta),
+        symbol="AAA-261231-100-C",
+        type=kind,
+        createDate=b.now,
+    )
+    effect = Effect(b.now, OPTIONS, asset, delta)
+    return Record("options_bill", (("opt-bill", ((b.now, row),)),), (effect,))
+
+
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "deposit": _deposit,
     "withdrawal": _withdrawal,
@@ -1056,6 +1131,8 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "margin_interest": _margin_interest,
     "futures_transfer": _futures_transfer,
     "futures_income": _futures_income,
+    "options_transfer": _options_transfer,
+    "options_bill": _options_bill,
 }
 
 

@@ -89,6 +89,20 @@ CROSS_MARGIN_LABEL = "margin-account"
 # the wallet balance alone (`reconcile.reported_at`, plan Decision 11).
 FUTURES_SOURCES = {"um_futures": "um-account", "cm_futures": "cm-account"}
 _FUTURES_FIELDS = ("walletBalance", "unrealizedProfit")
+# The Options wallet's report: its margin account's `asset[]`, an asset's balance its `equity`
+# (design 5.6), which Binance's example gives as the margin balance plus the unrealised profit.
+# Reconciliation compares the records with the change of the margin balance alone
+# (`reconcile.reported_at`), as a futures wallet's with its wallet balance.
+OPTIONS_SOURCES = {"options": "opt-account"}
+# Each derivatives account's quantity per asset: the sum of these fields of its rows.
+_ACCOUNT_FIELDS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(FUTURES_SOURCES.values(), _FUTURES_FIELDS),
+    "opt-account": ("equity",),
+}
+# Fields a derivatives account must state for each asset beside those summed: what reconciliation
+# compares with the records (`reconcile.ACCOUNT_REPORTS`). A futures account sums its wallet
+# balance already.
+_ACCOUNT_STATED: dict[str, tuple[str, ...]] = {"opt-account": ("marginBalance",)}
 # The reads a snapshot comes from: only these are made again when a movement falls into them.
 SOURCE_LABELS = (
     "spot-account",
@@ -98,6 +112,7 @@ SOURCE_LABELS = (
     CROSS_MARGIN_LABEL,
     ISOLATED_MARGIN_LABEL,
     *FUTURES_SOURCES.values(),
+    *OPTIONS_SOURCES.values(),
 )
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
@@ -107,6 +122,7 @@ REFERENCE_LABELS = (
     "exchange-info",
     "um-exchange-info",
     "cm-exchange-info",
+    "opt-exchange-info",
 )
 # Request parameters a read sends.
 READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
@@ -120,7 +136,7 @@ DIGESTS_KEY = "report_digests"
 # Fields that change with every answer without the report changing.
 _VOLATILE = {
     label: frozenset({"serverTime"})
-    for label in ("exchange-info", "um-exchange-info", "cm-exchange-info")
+    for label in ("exchange-info", "um-exchange-info", "cm-exchange-info", "opt-exchange-info")
 }
 # Wallets with a source of their own; every other wallet's balance comes from the wallet list
 # (design 5.6) until a later phase gives it one.
@@ -131,6 +147,7 @@ OWN_SOURCES = {
     "cross_margin": CROSS_MARGIN_LABEL,
     "isolated_margin": ISOLATED_MARGIN_LABEL,
     **FUTURES_SOURCES,
+    **OPTIONS_SOURCES,
 }
 LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
@@ -590,11 +607,15 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     isolated = reads.get(ISOLATED_MARGIN_LABEL)
     if isolated is not None:
         wallets.append(_Wallet("isolated_margin", isolated, _isolated_held(isolated)))
-    for key, label in FUTURES_SOURCES.items():
-        futures = reads.get(label)
-        if futures is not None:
-            held = _per_asset(label, "assets[].", _source_rows(futures), _FUTURES_FIELDS)
-            wallets.append(_Wallet(key, futures, held))
+    for key, label in {**FUTURES_SOURCES, **OPTIONS_SOURCES}.items():
+        account = reads.get(label)
+        if account is not None:
+            prefix = f"{ENDPOINTS[label].rows}[]."
+            rows = _source_rows(account)
+            held = _per_asset(label, prefix, rows, _ACCOUNT_FIELDS[label])
+            # Never read as 0 where it is left out.
+            _per_asset(label, prefix, rows, _ACCOUNT_STATED.get(label, ()))
+            wallets.append(_Wallet(key, account, held))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
         for row in _source_rows(listed):

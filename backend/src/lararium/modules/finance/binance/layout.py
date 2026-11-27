@@ -131,6 +131,13 @@ TABLE_LABELS: tuple[str, ...] = (
     "cm-positions",
     "cm-income",
     "cm-trades",
+    # Phase B: the Options wallet, and its host's exchange information.
+    "opt-exchange-info",
+    "opt-account",
+    "opt-positions",
+    "opt-bill",
+    "opt-trades",
+    "opt-exercises",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -163,6 +170,9 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     # (rule 2).
     "um-income": (("movement_key", "text"),),
     "cm-income": (("movement_key", "text"),),
+    # The key of the movement an earlier listing posts that an options bill `TRANSFER` is
+    # (rule 2).
+    "opt-bill": (("movement_key", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),

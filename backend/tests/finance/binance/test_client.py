@@ -25,12 +25,14 @@ from lararium.modules.finance.binance.client import (
     BinanceClient,
     BinanceError,
     BinanceKeyRejected,
+    BinanceKeyTypeRefused,
     BinanceNotPresent,
     Ed25519Signer,
     HmacSigner,
     Limiter,
     RequestRefused,
     Signer,
+    key_type_flag,
 )
 
 API_KEY = "ak-5c1d9e7f3b2a4680"
@@ -294,6 +296,74 @@ async def test_error_mapping(
     if message is not None:
         assert str(caught.value) == message
     assert env.sleeps == []
+
+
+def _ed25519() -> Ed25519Signer:
+    pem = (
+        Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    return Ed25519Signer(Secret(pem), None)
+
+
+@pytest.mark.parametrize("label", ["um-account", "cm-account", "opt-account"])
+@pytest.mark.parametrize(("status", "code"), [(401, None), (400, -1022), (401, -1022)])
+async def test_ed25519_refused_off_api_after_api_accepted_it_is_the_hosts_refusal(
+    label: str, status: int, code: int | None
+) -> None:
+    endpoint = ENDPOINTS[label]
+    env = Env(ok(), error(status, code))
+    client = env.client(_ed25519())
+    await client.call(SPOT)
+    with pytest.raises(BinanceKeyTypeRefused) as caught:
+        await client.call(endpoint)
+    assert not isinstance(caught.value, CredentialRejectedError)
+    assert (caught.value.host, caught.value.limit) == (endpoint.host, endpoint.limit)
+    assert str(caught.value) == key_type_flag(endpoint.host)
+    assert str(caught.value) == (
+        f"{endpoint.host} does not accept this key type; use an HMAC key to include it"
+    )
+
+
+@pytest.mark.parametrize(
+    ("signer", "accepted", "label", "status", "code"),
+    [
+        # An HMAC key refused anywhere is a rejected key.
+        ("hmac", True, "opt-account", 401, None),
+        ("hmac", True, "um-account", 400, -1022),
+        # Before `api` accepted the Ed25519 key, the key itself is in question.
+        ("ed25519", False, "opt-account", 401, None),
+        # Refused on `api` itself.
+        ("ed25519", True, "spot-account", 400, -1022),
+        # Another rejection code is about the key, not its type.
+        ("ed25519", True, "um-account", 400, -2015),
+    ],
+)
+async def test_other_refusals_stay_a_rejected_key(
+    signer: str, accepted: bool, label: str, status: int, code: int | None
+) -> None:
+    env = Env(*([ok()] if accepted else []), error(status, code))
+    client = env.client(_ed25519() if signer == "ed25519" else None)
+    if accepted:
+        await client.call(SPOT)
+    with pytest.raises(BinanceKeyRejected):
+        await client.call(ENDPOINTS[label])
+
+
+async def test_the_options_hosts_no_access_code_is_not_present_there_only() -> None:
+    env = Env(error(400, -5002), error(400, -5002))
+    client = env.client()
+    with pytest.raises(BinanceNotPresent) as caught:
+        await client.call(ENDPOINTS["opt-account"])
+    assert caught.value.code == -5002
+    with pytest.raises(BinanceError) as other:
+        await client.call(SPOT)
+    assert type(other.value) is BinanceError
 
 
 async def test_a_transport_failure_is_a_binance_error_without_the_url() -> None:

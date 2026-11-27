@@ -44,6 +44,15 @@ CLOCK_SLOW_MS = 500
 CLOCK_SAMPLES = 3
 KEY_REJECTED_CODES = frozenset({-2014, -2015, -1022})
 NOT_PRESENT = frozenset({-3003, -30105, -6021, -5026, -4047, 403004})
+# What the options host answers an account it does not serve (its error-code page: -5002
+# USER_NOT_ACCESS, "Option user not access"); on `eapi` only, as the code means another thing on
+# the other hosts. Binance does not say an account without options gets it: unverified (design 6).
+HOST_NOT_PRESENT: dict[str, frozenset[int]] = {"eapi": frozenset({-5002})}
+# The hosts Binance documents no Ed25519 key for (design 3.1): an Ed25519 signature refused there
+# (HTTP 401 or -1022) while `api` accepted it says the host takes no such key, not that the key
+# is wrong (`BinanceKeyTypeRefused`).
+KEY_TYPE_HOSTS = frozenset({"fapi", "dapi", "eapi"})
+INVALID_SIGNATURE = -1022
 # Parameters the client sets itself; a caller may not.
 RESERVED = frozenset({"recvWindow", "timestamp", "signature"})
 
@@ -102,6 +111,24 @@ class BinanceKeyRejected(BinanceError, CredentialRejectedError):
         BinanceError.__init__(self, http_status, code)
         shown = code if code is not None else http_status
         self.args = (f"Binance rejected the key (code {shown})",)
+
+
+class BinanceKeyTypeRefused(BinanceError):
+    """A host other than `api` refused an Ed25519 key's signature that `api` accepted: the key
+    is good, the host does not take its type. Not a rejected key; the host's labels are left
+    out (`sync.refuse_host`)."""
+
+    def __init__(self, endpoint: Endpoint, http_status: int, code: int | None) -> None:
+        BinanceError.__init__(self, http_status, code)
+        self.host = endpoint.host
+        # The limit kind that names the host (`fapi`, `dapi`, `eapi`).
+        self.limit: str = endpoint.limit
+        self.args = (key_type_flag(endpoint.host),)
+
+
+def key_type_flag(host: str) -> str:
+    """What the owner is told of a host that refuses the key's type (design 5.1)."""
+    return f"{host} does not accept this key type; use an HMAC key to include it"
 
 
 class BinanceBanned(BinanceError):
@@ -285,6 +312,9 @@ class BinanceClient:
         self._limiter = limiter or Limiter(clock, sleep)
         self._retries = retries
         self._offset = 0
+        # Whether `api.binance.com` has answered a signed request: only then can another host's
+        # refusal of an Ed25519 signature be about the host and not the key.
+        self._api_accepted = False
         # Per limit kind; a task that reads a host's own limits replaces its entry.
         self.caps = dict(DEFAULT_CAPS)
 
@@ -421,21 +451,31 @@ class BinanceClient:
                 retries += 1
                 await self._sleep(retry_after(response) * 1000)
                 continue
-            return self._result(response), sent, received
+            return self._result(endpoint, response), sent, received
 
-    @staticmethod
-    def _result(response: httpx.Response) -> ApiValue:
+    def _result(self, endpoint: Endpoint, response: httpx.Response) -> ApiValue:
         status = response.status_code
         if 200 <= status < 300:
             try:
-                return load_json(response.text)
+                body = load_json(response.text)
             except ValueError:
                 raise BinanceError(status) from None
+            if endpoint.signed and endpoint.limit in ("api", "ip", "uid"):
+                self._api_accepted = True
+            return body
         code = _error_code(response)
         if status == 401 or code in KEY_REJECTED_CODES:
+            refused = status == 401 or code == INVALID_SIGNATURE
+            if (
+                refused
+                and self._signer.kind == "ed25519"
+                and endpoint.limit in KEY_TYPE_HOSTS
+                and self._api_accepted
+            ):
+                raise BinanceKeyTypeRefused(endpoint, status, code)
             raise BinanceKeyRejected(status, code)
         if status == 418:
             raise BinanceBanned(status, code)
-        if status == 404 or code in NOT_PRESENT:
+        if status == 404 or code in NOT_PRESENT or code in HOST_NOT_PRESENT.get(endpoint.limit, ()):
             raise BinanceNotPresent(status, code)
         raise BinanceError(status, code)

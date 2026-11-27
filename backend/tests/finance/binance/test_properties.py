@@ -148,7 +148,8 @@ class World:
         hidden_ids = {id(record) for record in hidden}
         self.listed = [r for r in history.records if id(r) not in hidden_ids]
         # The histories trade and transfer on Cross Margin: the account has it.
-        self.fake = FakeBinance(now=clock, secret=API_SECRET, margin=True)
+        # And on Options.
+        self.fake = FakeBinance(now=clock, secret=API_SECRET, margin=True, options=True)
         self.fake.set_rows(
             "exchange-info",
             [
@@ -221,7 +222,19 @@ class World:
             for row in rows:
                 self.fake.add(label, row, when=asked(row))
         held = self.history.balance(now_ms)
-        spot, funding, earn, loans, cross, futures = (holdings_of(held, w) for w in WALLET_KEYS)
+        spot, funding, earn, loans, cross, futures, options = (
+            holdings_of(held, w) for w in WALLET_KEYS
+        )
+        # No position: the equity is the margin balance.
+        self.fake.set_rows(
+            "opt-account",
+            [
+                build_row(
+                    "opt-account", asset=a, marginBalance=format(q, "f"), equity=format(q, "f")
+                )
+                for a, q in sorted(options.items())
+            ],
+        )
         # No position: the reported balance is the wallet balance.
         self.fake.set_rows(
             "um-account",

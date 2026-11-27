@@ -56,12 +56,15 @@ _RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {
     "snapshot": {"snapshotVos[].type": "spot"},
     "um-exchange-info": _RATE_LIMIT,
     "cm-exchange-info": _RATE_LIMIT,
+    "opt-exchange-info": _RATE_LIMIT,
 }
 # The futures accounts answer as the probe's did: present, holding nothing (no asset, no
 # position) until a test stores rows or sets `positions` (`set_envelope`).
 _EMPTY_FUTURES: dict[str, dict[str, ApiValue]] = {
     "um-account": {"positions": []},
     "cm-account": {"positions": []},
+    # An options account, once a test opens one (`options`), holds nothing and has no greeks.
+    "opt-account": {"greek": []},
 }
 # Text times written as "YYYY-MM-DD HH:MM:SS" (UTC); every other text time is epoch ms digits.
 _UTC_TEXT_LABELS = {"withdrawals", "travel-withdrawals"}
@@ -264,6 +267,10 @@ _NO_MARGIN = frozenset(
     }
 )
 _NO_MARGIN_CODE = -3003
+# What an account without options answers on the options host's signed endpoints: the docs give
+# no answer for it; their error-code page's -5002 USER_NOT_ACCESS ("Option user not access") is
+# what the connector takes as not present there.
+_NO_OPTIONS_CODE = -5002
 
 
 @dataclass(frozen=True)
@@ -311,7 +318,9 @@ class FakeBinance:
     By default the account has no margin, as the probe's: the cross margin account answers
     `created: false` and the margin histories -3003. `margin=True` (or setting `margin`) opens
     it: then they answer from what is stored, as every other label does. The futures wallets
-    are there and empty, as the probe's were: a test that needs them stores their rows.
+    are there and empty, as the probe's were: a test that needs them stores their rows. The
+    account has no options: every signed options request answers -5002 (`_NO_OPTIONS_CODE`);
+    `options=True` (or setting `options`) opens it, empty.
     """
 
     def __init__(
@@ -320,9 +329,11 @@ class FakeBinance:
         now: Callable[[], int] = lambda: NOW_MS,
         secret: str | None = None,
         margin: bool = False,
+        options: bool = False,
     ) -> None:
         self.now = now
         self.margin = margin
+        self.options = options
         self.permissions: dict[str, ApiValue] = dict(PERMISSIONS)
         self.requests: list[Seen] = []
         self._secret = secret
@@ -442,6 +453,8 @@ class FakeBinance:
             return failure
         if not self.margin and endpoint.label in _NO_MARGIN:
             return _error(400, _NO_MARGIN_CODE)
+        if not self.options and endpoint.limit == "eapi" and endpoint.signed:
+            return _error(400, _NO_OPTIONS_CODE)
         return self._answer(endpoint, own)
 
     def _check_signature(

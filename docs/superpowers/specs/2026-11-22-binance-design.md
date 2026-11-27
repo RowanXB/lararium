@@ -134,7 +134,7 @@ The probe sent only queries, with a key that had only "Enable Reading", and prin
 - **Queries only.** The HTTP client holds a fixed list of (method, host, path) it may call, GET except the two POST queries of §3.1; anything else raises before a request is made. Redirects are off, so the key never follows one.
 - **A rejected key** (HTTP 401, or codes `-2014`, `-2015`, `-1022`) raises `CredentialRejectedError`: `needs_reauth`, and the owner is told with Binance's code. Updating the key returns the connection to `healthy` and queues a sync.
 - **No expiry reminder.** Binance does not report one for a reading-only key.
-- **Ed25519 off `api.binance.com` is unverified** (§10): Binance documents it for that host only. If a futures or options host refuses the signature, the sync says so by name, recommends an HMAC key, and the rest proceeds.
+- **Ed25519 off `api.binance.com` is unverified** (§10): Binance documents it for that host only. If a futures or options host refuses the signature, the sync says so by name, recommends an HMAC key, and the rest proceeds: with an Ed25519 key, HTTP 401 or `-1022` from `fapi`, `dapi` or `eapi` after `api` accepted the key is not a rejected key; every label of that host goes to "not present" (asked again after 7 days) and the flag "`<host>` does not accept this key type; use an HMAC key to include it" is raised once. The same refusal of an HMAC key, or before `api` answered, is a rejected key.
 
 ### 5.2 Fetching and pacing
 
@@ -155,7 +155,7 @@ The probe sent only queries, with a key that had only "Enable Reading", and prin
 - **First sync:** every symbol in `exchangeInfo`, halted ones included (about 3,750 requests, roughly 15 minutes at the `/api` limit).
 - **Later syncs:** every symbol both of whose assets the account has ever shown (in a balance or a record), from each symbol's last trade id.
 - **On an unexplained change** (§5.11) of an asset in Spot or a margin wallet: every symbol with that asset on either side is asked once for the interval, then the check runs again. A round trip through an asset never seen before is found this way.
-- The same applies to margin trades (`/sapi/v1/margin/myTrades`) when a margin account exists, and to futures trades for the symbols the income history names: Binance takes those by time range only (at most 7 days a request, 3 months back), so each symbol is walked in windows from a cursor of its own, as a history is.
+- The same applies to margin trades (`/sapi/v1/margin/myTrades`) when a margin account exists, and to futures trades for the symbols the income history names: Binance takes those by time range only (at most 7 days a request, 3 months back), so each symbol is walked in windows from a cursor of its own, as a history is. Options trades likewise, for the symbols the options bill names (3 months back, no documented window limit: one window, split while an answer is full).
 
 **Pacing.** The client tracks weight per limit (IP per host, UID per endpoint), stays under 80% of each, and reads the used-weight headers. On 429 it waits `Retry-After` and retries; on 418 the sync stops and fails. Three failed syncs in a row notify the owner (M3's rule).
 
@@ -208,7 +208,7 @@ Each sync writes one `reported` snapshot per account and asset.
 | Cross Margin | `/sapi/v1/margin/account`: `netAsset`; an answer `created: false` is no account (not present) | no |
 | Isolated Margin | `/sapi/v1/margin/isolated/account`: base and quote `netAsset` of each pair created, summed per asset | no |
 | USDⓈ-M, COIN-M Futures | the account's `assets[]`: wallet balance + unrealised profit | shape only (zero) |
-| Options | the options margin account (`/eapi/v1/marginAccount`): equity per asset | no |
+| Options | the options margin account (`/eapi/v1/marginAccount`): `equity` per asset (the margin balance plus unrealised profit, by Binance's example); an account without options (`-5002`) is not present | no |
 | Trading Bots, Copy Trading | wallet-balance detail | no |
 | Crypto Loans | − `totalDebt` per loan coin, summed over the ongoing flexible and VIP orders (`loan-flexible-ongoing`, `vip-loan-ongoing`: read one after the other, one report cut at the first read's start and made again together when a record falls anywhere between the first read's start and the second's end) | no |
 
@@ -259,7 +259,7 @@ Every record is one connector transaction on the wallet's account. Fees are sepa
 | Futures income (every `incomeType` but `TRANSFER`) | ± `income` of `asset` on the futures account against Unassigned; commissions, funding and insurance clearance paid (negative `COMMISSION`, `FUNDING_FEE`, `INSURANCE_CLEAR`) are `is_fee`; a type the catalogue does not list is flagged and not posted | no |
 | Futures income `TRANSFER` | rule 1 through rule 2: linked to the universal or margin transfer of the same asset and amount into (`income` positive) or out of that futures wallet within 60 seconds; listed by no other history, its other side (the row does not name it) is Unassigned | no |
 | Futures and options trades, positions | typed only: income and bill rows carry the money | no |
-| Options bill | ± amount on Options against Unassigned; transfers by rule 2 | no |
+| Options bill | ± `amount` of `asset` on Options against Unassigned; a fee paid (negative `FEE`, `EXERCISE_FEE`) is `is_fee`; `TRANSFER` by rule 1 through rule 2 as a futures income `TRANSFER` (its other side Unassigned when no other history lists it); a type the catalogue does not list is flagged and not posted | no |
 | Fiat deposit or withdrawal (`fiat/orders`) | ± `amount` of the fiat on Spot, contra from `transfer_contra` with `bank_transfer = true`; `totalFee` typed | no |
 | Card purchase or sale (`fiat/payments`) | two transactions: the fiat arriving (or leaving), and the swap of fiat for crypto with `totalFee` as a fee; paid from the cash balance, only the swap | no |
 | P2P order, completed | as a card purchase, on Funding: the fiat leg and the swap at `unitPrice` | no |
@@ -299,7 +299,7 @@ Every record is one connector transaction on the wallet's account. Fees are sepa
 ### 5.11 Reconciliation
 
 - **The check.** For each account and asset, between two consecutive reported snapshots: the reported change against the sum of the account's non-void postings with `occurred_at` in between.
-- **Futures.** The postings are compared with the change in wallet balance (a typed field), since the reported balance also carries unrealised profit. The opening of a futures wallet is likewise its earliest wallet balance less the records before it: the unrealised profit is in the reports and in no opening.
+- **Futures and Options.** The postings are compared with the change in wallet balance (a typed field), since the reported balance also carries unrealised profit; for Options, with the change in the margin account's `marginBalance`, which its `equity` exceeds by the unrealised profit (§6). The opening of a futures or options wallet is likewise its earliest wallet (margin) balance less the records before it: the unrealised profit is in the reports and in no opening.
 - **Earn's accruing reward.** A flexible position grows all day with its real-time reward, while the record of a day's reward is dated at the day's end. Between two reports the position is therefore ahead of its records by the reward still accruing at the later report, or behind them by what had already accrued at the earlier one (seen on the first real sync, 2026-11-24). A difference in either direction no larger than the asset's largest `REALTIME` reward of the last two days is not a difference.
 - **A difference** is stored (`finance.binance_reconciliation_differences`: account, asset, the two snapshot times, the reported change, the posted sum), named in the connection's warnings, and notified once. It is never corrected automatically.
 - **Every interval a sync touched is checked again**: the newest one, and any earlier one in which the sync added, changed or removed a posting. So a difference closes when the record that explains it arrives, and a change to an old record that no longer fits its interval opens one.
@@ -414,6 +414,11 @@ Holdings and net worth need no new page.
 | A futures host's request limit | Each sync first reads the host's own `exchangeInfo` and takes its `REQUEST_WEIGHT` limit over one `MINUTE`; a limit over another interval is not converted, and a host that states none keeps 600 a minute. The read is used for nothing else, so it never stops a sync: one Binance refuses or fails (anything but a ban or a rejected key) or whose answer the catalogue cannot type (COIN-M's page gives `exchangeFilters` and `underlyingSubType` as strings in its schema and as arrays of empty arrays in its example) keeps 600, is flagged by its label, and stores nothing. |
 | COIN-M income history | No lookback is documented (the probe's windows back to 2017 all answered), so its first walk goes back to July 2017 in 364-day windows, as Decision 7 says. |
 | The futures positions | Typed with every read in which they changed: COIN-M lists every trading symbol, zero amounts included, with a mark price that moves, so its positions are stored at nearly every sync. Known cost. |
+| The Options wallet's balance and what reconciles it | The report is each asset's `equity`; reconciliation and the opening use its `marginBalance`, the bills' side: Binance's example gives `equity` = `marginBalance` + `unrealizedPNL` exactly, and does not define either further. If `equity` leaves a long position's value out (its `adjustedEquity` is described as the margin balance plus long positions' value), Options' net worth is low by that value while the position is open. Both fields are required for every asset. Unverified. |
+| An account without options | Binance documents no answer for it. Its options error page's `-5002` ("Option user not access") is taken as "not present" on `eapi` only (asked again after 7 days); another refusal fails the sync until it is added. Unverified. |
+| The options bill's types | Binance names FEE, CONTRACT, EXERCISE_PNL, EXERCISE_FEE and TRANSFER and gives no complete list: they are the catalogue's enum, so another one is flagged and not posted, and shows as an Options difference. A positive fee is income. Unverified. |
+| How the options histories are walked | The bill and each symbol's trades by time windows over the last 90 days (Binance's limit; `-6073` outside it), split in two while an answer is full, never by `recordId` or `fromId` (their combination with a time range is not documented); the exercises back to July 2017 likewise (no lookback documented). Trades are asked for the symbols the bill rows of the last 90 days name. Unverified. |
+| An Ed25519 key a futures or options host refuses | That host's labels are not present for 7 days and then asked again; meanwhile its wallets get no report (their earlier snapshots stand, and the wallet list's line for them is not counted instead). Known limit. |
 | A borrowed margin asset | A negative quantity; valued negative. |
 | Unrealised futures profit | In the futures account's reported balance; reconciliation uses the wallet balance. |
 | A stablecoin loses its peg | Its price comes from its market, so its value follows. |

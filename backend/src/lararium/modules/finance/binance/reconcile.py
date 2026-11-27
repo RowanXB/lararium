@@ -89,9 +89,15 @@ class Difference:
 
 # An account's reports: one definition, which the opening uses too. Every wallet's reports are
 # its snapshots, but a futures wallet's quantities are its account's `wallet_balance` (Decision
-# 11): its snapshot also carries unrealised profit, which no record explains.
-# The futures wallets' typed account reports, by wallet key.
-FUTURES_REPORTS = {"um_futures": "binance_um_account", "cm_futures": "binance_cm_account"}
+# 11), and the Options wallet's its margin account's `margin_balance`: their snapshots also carry
+# unrealised profit, which no record explains.
+# The derivatives wallets' typed account reports, by wallet key: the report table, its table of
+# assets, and the column that holds what the records change.
+ACCOUNT_REPORTS: dict[str, tuple[str, str, str]] = {
+    "um_futures": ("binance_um_account", "binance_um_account_assets", "wallet_balance"),
+    "cm_futures": ("binance_cm_account", "binance_cm_account_assets", "wallet_balance"),
+    "options": ("binance_opt_account", "binance_opt_account_asset", "margin_balance"),
+}
 
 
 async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
@@ -111,11 +117,11 @@ async def reported_at(
     """Each instrument's quantity in the account's report at `at` (the latest recorded of a
     time). A report is complete: an instrument it does not list is 0 there.
 
-    A futures wallet's (`wallet`, `FUTURES_REPORTS`) is its wallet balance instead
-    (`_wallet_balances`), when its account has a typed report then; a daily snapshot of the
-    first sync has none, and is a wallet balance itself."""
-    if wallet in FUTURES_REPORTS:
-        found = await _wallet_balances(session, account_id, FUTURES_REPORTS[wallet], at)
+    A futures wallet's (`wallet`, `ACCOUNT_REPORTS`) is its wallet balance instead, the Options
+    wallet's its margin balance (`_wallet_balances`), when its account has a typed report then;
+    a daily snapshot of the first sync has none, and is a wallet balance itself."""
+    if wallet in ACCOUNT_REPORTS:
+        found = await _wallet_balances(session, account_id, ACCOUNT_REPORTS[wallet], at)
         if found is not None:
             return found
     s = models.BalanceSnapshot
@@ -129,12 +135,15 @@ async def reported_at(
 
 
 async def _wallet_balances(
-    session: AsyncSession, account_id: UUID, table: str, at: datetime
+    session: AsyncSession, account_id: UUID, report: tuple[str, str, str], at: datetime
 ) -> dict[UUID, Decimal] | None:
-    """Each instrument's `wallet_balance` in the futures account's typed report at `at`: the
-    latest stored at or before it, since an answer is stored only when it changed
-    (`balances.store_reports`), so the one before is what the read at `at` said. None when
-    there is none: every read of the account comes after the first sync's daily snapshots."""
+    """Each instrument's balance without unrealised profit (`report`'s column: a futures
+    account's `wallet_balance`, the options account's `margin_balance`) in the account's typed
+    report at `at`: the latest stored at or before it, since an answer is stored only when it
+    changed (`balances.store_reports`), so the one before is what the read at `at` said. None
+    when there is none: every read of the account comes after the first sync's daily snapshots.
+    A report states the column for every asset (`balances` refuses one that does not)."""
+    table, assets, column = report
     connection_id = await session.scalar(
         select(models.Account.source_connection_id).where(models.Account.id == account_id)
     )
@@ -149,8 +158,8 @@ async def _wallet_balances(
         return None
     rows = await session.execute(
         text(
-            "select i.instrument_id, sum(a.wallet_balance) as held"
-            f" from finance.{table}_assets a"
+            f"select i.instrument_id, sum(a.{column}) as held"
+            f" from finance.{assets} a"
             " join finance.instrument_identifiers i"
             "  on i.scheme = 'binance_asset' and i.value = a.asset"
             " where a.connection_id = :c and a.snapshot_at = :s"

@@ -10,9 +10,11 @@ The connection's `config` keys, what each holds and who writes it:
 - `account_map`: wallet key to finance account id (`accounts.wallet_account`).
 - `cursors`: per history label (or `<label>:<variant>`, `:<isolated pair>`) `{fetched_to,
   backfilled_to, complete}`, per `my-trades:<symbol>` and `margin-trades:<symbol>` (an isolated
-  pair's `margin-trades:<symbol>:isolated`) the last trade id, per `um-trades:<symbol>` and
-  `cm-trades:<symbol>` a window cursor as a history label's (`fetch.commit`).
-- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
+  pair's `margin-trades:<symbol>:isolated`) the last trade id, per `um-trades:<symbol>`,
+  `cm-trades:<symbol>` and `opt-trades:<symbol>` a window cursor as a history label's
+  (`fetch.commit`).
+- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads),
+  or every key of a host that refused the key's type (`refuse_host`).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
 - `normalizer_version`: the NORMALIZER_VERSION that applied them; another replays all
@@ -37,7 +39,7 @@ The connection's `config` keys, what each holds and who writes it:
   sync succeeds).
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -79,6 +81,7 @@ from lararium.modules.finance.binance.client import (
     BinanceClient,
     BinanceError,
     BinanceKeyRejected,
+    BinanceKeyTypeRefused,
     BinanceNotPresent,
     Clock,
     Ed25519Signer,
@@ -91,11 +94,11 @@ from lararium.modules.finance.binance.client import (
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
-    FUTURES_INFO,
-    FUTURES_TRADES,
     HISTORY_LABELS,
+    LIMITS_INFO,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
+    SYMBOL_TRADES,
     TRADE_LABELS,
     TRADES_LABEL,
     VERSION,
@@ -104,11 +107,13 @@ from lararium.modules.finance.binance.fetch import (
     backfill_complete,
     commit,
     fresh_config,
+    host_keys,
     isolated_symbols,
+    mark_absent,
     trade_cursor_key,
     trade_symbols,
     walk,
-    walk_futures_trades,
+    walk_symbol_trades,
     walk_trades,
 )
 from lararium.modules.finance.binance.instruments import assets_seen as seen
@@ -291,7 +296,7 @@ async def opening(ctx: SyncContext) -> set[Point]:
 async def first_sync_line(session: AsyncSession, connection_id: UUID, openings: int) -> str:
     """The first sync's message: the records per label and the openings made, counts only."""
     counts: list[str] = []
-    for label in [*HISTORY_LABELS, *TRADE_LABELS, *FUTURES_TRADES]:
+    for label in [*HISTORY_LABELS, *TRADE_LABELS, *SYMBOL_TRADES]:
         if label not in layout.TABLE_LABELS:
             continue
         table = layout.layout(label)[0].name
@@ -429,9 +434,13 @@ class BinanceConnector:
         # The wallet checks' flags and the limits reads', published with the records' (one line,
         # Decision 15).
         flags: list[str] = []
-        # Before any other request to a futures host: its own limits (plan Decision 4).
-        limits = await read_limits(client, flag=flags.append)
-        reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
+        # Before any other request to a derivatives host: its own limits (plan Decision 4).
+        limits = await read_limits(ctx, client, flag=flags.append)
+        reads = {
+            GATE_LABEL: gate,
+            ACCOUNT_LABEL: account,
+            **await self._read_balances(ctx, client, flag=flags.append),
+        }
         # Before any asset is met: an instrument first needed can then be matched by its
         # CoinGecko id (design 5.5). A failure is logged and the sync goes on.
         await refresh_ids_quietly(ctx, clock=client.now_ms, sleep=self._sleep)
@@ -441,10 +450,10 @@ class BinanceConnector:
         reference |= limits
 
         for label in HISTORY_LABELS:
-            await walk(ctx, client, label)
-        # After the income histories: their rows name the symbols traded.
-        for label in FUTURES_TRADES:
-            await walk_futures_trades(ctx, client, label)
+            await on_host(ctx, client, walk(ctx, client, label), flag=flags.append)
+        # After the income and bill histories: their rows name the symbols traded.
+        for label in SYMBOL_TRADES:
+            await on_host(ctx, client, walk_symbol_trades(ctx, client, label), flag=flags.append)
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
@@ -471,7 +480,9 @@ class BinanceConnector:
         await tell(ctx)
         return {"fetched_at": now_ms}
 
-    async def _read_balances(self, ctx: SyncContext, client: BinanceClient) -> dict[str, Read]:
+    async def _read_balances(
+        self, ctx: SyncContext, client: BinanceClient, *, flag: Callable[[str], None]
+    ) -> dict[str, Read]:
         config: Mapping[str, JSONValue] = await fresh_config(ctx)
         missing = config.get(NOT_PRESENT_KEY)
         missing = missing if isinstance(missing, dict) else {}
@@ -483,6 +494,11 @@ class BinanceConnector:
                 read = (await read_balances(client, [label]))[label]
             except BinanceNotPresent:
                 await commit(ctx, label, absent_since=client.now_ms())
+                continue
+            except BinanceKeyTypeRefused as refused:
+                await refuse_host(ctx, client, refused, flag=flag)
+                # The host's other labels are not present now.
+                config = await fresh_config(ctx)
                 continue
             if label == CROSS_MARGIN_LABEL and not margin_created(read):
                 # The account Binance has not opened: not present, as a refused product is.
@@ -498,18 +514,59 @@ def limits_unread_flag(label: str) -> str:
     return f"{label} could not be read: its host's request limit stays at the assumed 600 a minute"
 
 
-async def read_limits(client: BinanceClient, *, flag: Callable[[str], None]) -> dict[str, Read]:
-    """Each futures host's exchange information, and its request weight per minute taken from
-    it (`BinanceClient.read_limits`); the reads, stored with the reference reports.
+async def refuse_host(
+    ctx: SyncContext,
+    client: BinanceClient,
+    refused: BinanceKeyTypeRefused,
+    *,
+    flag: Callable[[str], None],
+) -> None:
+    """A host that does not take the key's type (an Ed25519 key off `api`, design 5.1): every
+    key the sync asks of it goes to `not_present` (asked again after 7 days, as a refused
+    product is) and the owner is told by the host's name to use an HMAC key. The rest of the
+    sync goes on; the connection is not rejected."""
+    keys = host_keys(refused.limit, await isolated_symbols(ctx))
+    await mark_absent(ctx, keys, client.now_ms())
+    flag(str(refused))
+
+
+async def on_host[T](
+    ctx: SyncContext,
+    client: BinanceClient,
+    step: Awaitable[T],
+    *,
+    flag: Callable[[str], None],
+) -> T | None:
+    """Run one walk; a host that refuses the key's type there is left out (`refuse_host`) and
+    the sync goes on."""
+    try:
+        return await step
+    except BinanceKeyTypeRefused as refused:
+        await refuse_host(ctx, client, refused, flag=flag)
+        return None
+
+
+async def read_limits(
+    ctx: SyncContext, client: BinanceClient, *, flag: Callable[[str], None]
+) -> dict[str, Read]:
+    """Each derivatives host's exchange information, and its request weight per minute taken
+    from it (`BinanceClient.read_limits`); the reads, stored with the reference reports.
 
     A read used only for a limit that has a safe default never stops the sync: one that cannot
     be fetched (any Binance error but a ban or a rejected key, which stop every request) or
     typed (`BinanceDataError`: an answer whose shape the catalogue refuses) leaves that host at
-    the assumed limit, is flagged by its label (never a value), and nothing of it is stored."""
+    the assumed limit, is flagged by its label (never a value), and nothing of it is stored.
+    A host that refuses the key's type is left out (`refuse_host`), flagged by its name and not
+    by the label; one left out less than 7 days ago is not asked."""
     reads: dict[str, Read] = {}
-    for label in FUTURES_INFO:
+    for label in LIMITS_INFO:
+        if absent(await fresh_config(ctx), label, client.now_ms()):
+            continue
         try:
             read = (await read_balances(client, [label]))[label]
+        except BinanceKeyTypeRefused as refused:
+            await refuse_host(ctx, client, refused, flag=flag)
+            continue
         except (BinanceBanned, BinanceKeyRejected):
             raise
         except (BinanceError, BinanceDataError):

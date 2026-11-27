@@ -168,8 +168,9 @@ async def test_uid_mismatch_fails(session, run, fake, connector) -> None:
 
 
 async def test_balances_are_read_with_their_bracket(session, run, fake, connector) -> None:
-    # With a margin account: every balance label answers.
+    # With a margin and an options account: every balance label answers.
     fake.margin = True
+    fake.options = True
     connection = await binance_connection(run, config=later_config())
 
     after = await run_binance_sync(session, connection.id, fake.handler)

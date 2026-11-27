@@ -144,6 +144,8 @@ def test_only_the_public_reads_are_unsigned() -> None:
         # Each futures host's own, for its rate limits (plan Decision 4).
         "um-exchange-info",
         "cm-exchange-info",
+        # The options host's, likewise.
+        "opt-exchange-info",
     }
 
 
@@ -205,6 +207,8 @@ def test_time_params_are_the_documented_names() -> None:
             for host in ("um", "cm")
             for name in ("account", "balance", "positions", "exchange-info")
         },
+        # The options account, positions and exchange information likewise.
+        **{f"opt-{name}": None for name in ("account", "positions", "exchange-info")},
     }
 
 

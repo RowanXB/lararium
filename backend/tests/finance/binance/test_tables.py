@@ -390,6 +390,44 @@ def test_futures_tables_and_keys() -> None:
         assert f"binance_{host}_exchange_info_symbols" in info
 
 
+def test_options_tables_and_keys() -> None:
+    family = (
+        "opt-exchange-info",
+        "opt-account",
+        "opt-positions",
+        "opt-bill",
+        "opt-trades",
+        "opt-exercises",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # The account is one report per read; its assets (whose margin balance reconciliation
+    # compares) and greeks are child rows.
+    account, assets, greeks = layout.layout("opt-account")
+    assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+    assert assets.name == "binance_opt_account_asset"
+    assert {assets.column(n).sql for n in ("margin_balance", "equity")} == {"numeric"}
+    assert greeks.name == "binance_opt_account_greek"
+    # The bill is keyed by its id; a transfer row is linked to the movement an earlier listing
+    # posts (rule 2).
+    bill = layout.layout("opt-bill")[0]
+    assert (bill.key, bill.record) == (("connection_id", "id"), True)
+    assert bill.column("movement_key").sql == "text"
+    for label in ("opt-trades", "opt-exercises"):
+        table = layout.layout(label)[0]
+        assert (table.key, table.record) == (("connection_id", "id"), True)
+    positions = layout.layout("opt-positions")[0]
+    assert positions.key == ("connection_id", "snapshot_at", "symbol", "side")
+    info = [t.name for t in layout.layout("opt-exchange-info")]
+    assert info == [
+        "binance_opt_exchange_info",
+        "binance_opt_exchange_info_option_assets",
+        "binance_opt_exchange_info_option_contracts",
+        "binance_opt_exchange_info_option_symbols",
+        "binance_opt_exchange_info_rate_limits",
+        "binance_opt_exchange_info_option_symbols_filters",
+    ]
+
+
 # The models are what the migration made.
 
 

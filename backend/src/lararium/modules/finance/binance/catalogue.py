@@ -930,6 +930,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         "eapi",
         rows="asset",
         ids=("asset",),
+        params=None,
         kind="balance",
     ),
     "opt-bill": _ep(
@@ -946,6 +947,18 @@ ENDPOINTS: dict[str, Endpoint] = {
         page=1000,
         variants=(("currency", ("USDT",)),),
         kind="history",
+    ),
+    "opt-exchange-info": _ep(
+        "opt-exchange-info",
+        "GET",
+        "/eapi/v1/exchangeInfo",
+        1,
+        "eapi",
+        signed=False,
+        rows="optionSymbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "opt-exercises": _ep(
         "opt-exercises",
@@ -969,6 +982,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "side"),
         time="time",
+        params=None,
         kind="position",
     ),
     "opt-trades": _ep(
@@ -2519,8 +2533,49 @@ tradeGroupId id
 [].asset text!
 [].amount decimal!
 [].symbol text
-[].type text
+[].type text = FEE|CONTRACT|EXERCISE_PNL|EXERCISE_FEE|TRANSFER
 [].createDate time_ms!
+""",
+    "opt-exchange-info": """
+timezone text
+serverTime time_ms
+optionContracts[].baseAsset text
+optionContracts[].quoteAsset text
+optionContracts[].underlying text
+optionContracts[].settleAsset text
+optionAssets[].name text
+optionSymbols[].expiryDate time_ms
+optionSymbols[].filters[].filterType text
+optionSymbols[].filters[].minPrice decimal
+optionSymbols[].filters[].maxPrice decimal
+optionSymbols[].filters[].tickSize decimal
+optionSymbols[].filters[].minQty decimal
+optionSymbols[].filters[].maxQty decimal
+optionSymbols[].filters[].stepSize decimal
+optionSymbols[].symbol text!
+optionSymbols[].side text
+optionSymbols[].strikePrice decimal
+optionSymbols[].underlying text
+optionSymbols[].unit integer
+optionSymbols[].liquidationFeeRate decimal
+optionSymbols[].minQty decimal
+optionSymbols[].maxQty decimal
+optionSymbols[].initialMargin decimal
+optionSymbols[].maintenanceMargin decimal
+optionSymbols[].minInitialMargin decimal
+optionSymbols[].minMaintenanceMargin decimal
+optionSymbols[].priceScale integer
+optionSymbols[].quantityScale integer
+optionSymbols[].quoteAsset text
+optionSymbols[].contractType text
+optionSymbols[].underlyingType text
+optionSymbols[].nakedSell boolean
+optionSymbols[].status text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
 """,
     "opt-exercises": """
 [].id text!

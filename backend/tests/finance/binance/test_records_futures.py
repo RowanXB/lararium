@@ -23,10 +23,10 @@ from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
-    FUTURES_INFO,
-    FUTURES_TRADES,
     HISTORY_LABELS,
+    LIMITS_INFO,
     PHASE_B_BUILT,
+    SYMBOL_TRADES,
     TRADE_LABELS,
     to_json,
 )
@@ -147,14 +147,14 @@ def test_the_family_is_walked_and_read() -> None:
     assert histories <= set(HISTORY_LABELS)
     assert reports <= set(BALANCE_LABELS)
     # Trades are walked per symbol the income rows name; the exchange information is read first.
-    assert FUTURES_TRADES == {"um-trades": UM, "cm-trades": CM}
-    for label in [*FUTURES_TRADES, *FUTURES_INFO]:
+    assert {"um-trades": UM, "cm-trades": CM}.items() <= SYMBOL_TRADES.items()
+    for label in [*SYMBOL_TRADES, *LIMITS_INFO]:
         assert label not in HISTORY_LABELS and label not in BALANCE_LABELS
         assert label not in TRADE_LABELS
     assert FUTURES_SOURCES == {"um_futures": UM_ACCOUNT, "cm_futures": CM_ACCOUNT}
     assert set(FUTURES_SOURCES.items()) <= set(OWN_SOURCES.items())
     assert HANDLERS[UM] is HANDLERS[CM]
-    assert [listing.label for listing in MOVEMENT_LISTINGS][-2:] == [UM, CM]
+    assert [listing.label for listing in MOVEMENT_LISTINGS][2:4] == [UM, CM]
 
 
 # The reported balances.
@@ -538,7 +538,7 @@ async def test_futures_trades_are_walked_for_the_symbols_the_income_names(
     assert {s.params["symbol"] for s in fake.calls("um-trades")} == {"AAASTB"}
     assert "um-trades:OLDSTB" not in after.config[CURSORS_KEY]
     assert {s.params["symbol"] for s in fake.calls("cm-trades")} == {"BBBUSD_PERP"}
-    for label in FUTURES_TRADES:
+    for label in ("um-trades", "cm-trades"):
         for seen in fake.calls(label):
             start, end = int(seen.params["startTime"]), int(seen.params["endTime"])
             # At most 7 days a request, and no further back than 3 months.
@@ -590,14 +590,14 @@ async def test_a_futures_limits_read_that_fails_never_stops_the_sync(
     assert after.status == "healthy", after.last_error
     assert [f for f in after.config["flags"] if label in f] == [limits_unread_flag(label)]
     assert await typed(session, f"binance_{label.replace('-', '_')}", after.id) == []
-    other = next(info for info in FUTURES_INFO if info != label)
+    other = next(info for info in ("um-exchange-info", "cm-exchange-info") if info != label)
     assert len(await typed(session, f"binance_{other.replace('-', '_')}", after.id)) == 1
     # The host keeps the assumed limit; the other takes its own.
     flags: list[str] = []
     async with fake.http() as http:
         client = client_for(clock, http)
         await client.sync_clock()
-        await read_limits(client, flag=flags.append)
+        await read_limits(await context(session, after.id, http), client, flag=flags.append)
     assert flags == [limits_unread_flag(label)]
     other_host = "dapi" if host == "fapi" else "fapi"
     assert (client.caps[host], client.caps[other_host]) == (600, 2400)

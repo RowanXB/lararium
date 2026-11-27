@@ -154,7 +154,7 @@ MARGIN_PRODUCTS = (
 )
 # USDⓈ-M and COIN-M futures: the income histories, then each wallet's balance, account (its
 # report, `balances.FUTURES_SOURCES`) and positions. The trades are walked per symbol the income
-# rows name (`FUTURES_TRADES`), each host's exchange information read first (`FUTURES_INFO`).
+# rows name (`SYMBOL_TRADES`), each host's exchange information read first (`LIMITS_INFO`).
 FUTURES_PRODUCTS = (
     "um-income",
     "cm-income",
@@ -165,12 +165,22 @@ FUTURES_PRODUCTS = (
     "cm-account",
     "cm-positions",
 )
-# Each futures trade label and the income history whose rows name its symbols (design 5.2): a
-# trade's commission is an income row of its symbol, so every symbol traded is named there.
-FUTURES_TRADES = {"um-trades": "um-income", "cm-trades": "cm-income"}
-# Each futures host's exchange information: its `rateLimits` give the host's request weight
+# The Options wallet: the bill and exercise histories, then its margin account (the wallet's
+# report, `balances.OPTIONS_SOURCES`) and positions. Its trades are walked per symbol the bill
+# rows name (`SYMBOL_TRADES`), its host's exchange information read first (`LIMITS_INFO`).
+OPTIONS_PRODUCTS = (
+    "opt-bill",
+    "opt-exercises",
+    "opt-account",
+    "opt-positions",
+)
+# Each trade label walked per symbol, and the history whose rows name its symbols (design 5.2):
+# a futures trade's commission is an income row of its symbol, an options trade's premium and
+# fee are bill rows of its symbol, so every symbol traded is named there.
+SYMBOL_TRADES = {"um-trades": "um-income", "cm-trades": "cm-income", "opt-trades": "opt-bill"}
+# Each derivatives host's exchange information: its `rateLimits` give the host's request weight
 # per minute (plan Decision 4), read at the start of a sync before any other request to it.
-FUTURES_INFO = ("um-exchange-info", "cm-exchange-info")
+LIMITS_INFO = ("um-exchange-info", "cm-exchange-info", "opt-exchange-info")
 # The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
 # or walks them as it does Phase A's.
 PHASE_B_BUILT = (
@@ -187,6 +197,8 @@ PHASE_B_BUILT = (
     *MARGIN_PRODUCTS,
     # The futures wallets (Task 19).
     *FUTURES_PRODUCTS,
+    # The Options wallet (Task 20).
+    *OPTIONS_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 
@@ -907,37 +919,77 @@ async def _trades_between(
     ]
 
 
-async def income_symbols(ctx: SyncContext, income_label: str, since_ms: int) -> list[str]:
-    """The symbols the connection's stored rows of a futures income history dated `since_ms`
-    or later name, sorted; a row with no symbol (a transfer) names none."""
+async def named_symbols(ctx: SyncContext, history: str, since_ms: int) -> list[str]:
+    """The symbols the connection's stored rows of a history (a futures income history, the
+    options bill) dated `since_ms` or later name, sorted; a row with no symbol (a transfer)
+    names none."""
+    time_field = ENDPOINTS[history].time_field
+    assert time_field is not None and "." not in time_field, history
     async with ctx.session_factory() as session:
         found = await session.scalars(
             text(
                 "select distinct content ->> 'symbol' from core.raw_records"
                 " where connection_id = :c and record_type = :t"
-                " and (content ->> 'time')::bigint >= :since"
+                " and (content ->> :f)::bigint >= :since"
             ),
-            {"c": ctx.connection.id, "t": record_type(income_label), "since": since_ms},
+            {"c": ctx.connection.id, "t": record_type(history), "f": time_field, "since": since_ms},
         )
         return sorted({symbol.strip() for symbol in found if symbol and symbol.strip()})
 
 
-def futures_trade_key(label: str, symbol: str) -> str:
-    """The cursor of a symbol's futures trades: `<label>:<symbol>`, a window cursor."""
+def symbol_trade_key(label: str, symbol: str) -> str:
+    """The cursor of a symbol's futures or options trades: `<label>:<symbol>`, a window
+    cursor."""
     return f"{label}:{symbol}"
 
 
-async def walk_futures_trades(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
-    """Walk a futures trade label for every symbol its income history names (design 5.2); the
-    raw record ids stored. Binance takes a time range of at most 7 days and keeps 3 months
-    (the catalogue), so each symbol is walked by windows as a history label is, from its own
-    cursor (`futures_trade_key`): its first walk back 3 months, later ones from the last minus 7
-    days. Only a symbol named by income within those 3 months is asked: Binance serves no older
-    trade, so a symbol traded long ago is not walked for ever."""
+async def walk_symbol_trades(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
+    """Walk a futures or options trade label for every symbol its history names (design 5.2,
+    `SYMBOL_TRADES`); the raw record ids stored. Binance keeps 3 months of them (the catalogue),
+    so each symbol is walked by windows as a history label is, from its own cursor
+    (`symbol_trade_key`): its first walk back 3 months, later ones from the last minus 7 days
+    (a futures request takes at most 7 days; an options one has no documented limit and is one
+    window, split when full). Only a symbol named within those 3 months is asked: Binance serves
+    no older trade, so a symbol traded long ago is not walked for ever. A label Binance said it
+    does not serve (`not_present`, a host that refused the key's type) is not asked."""
     endpoint = ENDPOINTS[label]
+    if absent(await fresh_config(ctx), label, client.now_ms()):
+        return []
     since = _floor(endpoint, client.now_ms())
     ids: list[UUID] = []
-    for symbol in await income_symbols(ctx, FUTURES_TRADES[label], since):
-        key = futures_trade_key(label, symbol)
+    for symbol in await named_symbols(ctx, SYMBOL_TRADES[label], since):
+        key = symbol_trade_key(label, symbol)
         ids += await _walk_key(ctx, client, endpoint, key, {"symbol": symbol})
     return ids
+
+
+def host_keys(limit: str, isolated: Collection[str] = ()) -> list[str]:
+    """Every key the sync asks of one host (a limit kind: `fapi`, `dapi`, `eapi`): each built
+    label of it, its history labels' cursor keys and its trade labels walked per symbol."""
+    labels = [
+        label
+        for label in [*(e.label for e in _built()), *SYMBOL_TRADES, *LIMITS_INFO]
+        if ENDPOINTS[label].limit == limit
+    ]
+    keys: list[str] = []
+    for label in labels:
+        keys.append(label)
+        if label in HISTORY_LABELS:
+            keys += [key for key, _ in walk_keys(label, isolated) if key != label]
+    return keys
+
+
+async def mark_absent(ctx: SyncContext, keys: Collection[str], since_ms: int) -> None:
+    """Put every key on `not_present` from `since_ms`, in one short transaction: each is asked
+    again after 7 days, as a refused product is."""
+    connection_id = ctx.connection.id
+    listed: list[JSONValue] = [*sorted(keys)]
+    args: dict[str, JSONValue] = {"connection_id": str(connection_id), "keys": listed}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.fetch", args) as cmd,
+    ):
+        config = (await lock_connection(cmd, connection_id)).config
+        missing = _mapping(config.get(NOT_PRESENT_KEY))
+        missing.update(dict.fromkeys(keys, since_ms))
+        await update_config(cmd, connection_id, {NOT_PRESENT_KEY: missing})
