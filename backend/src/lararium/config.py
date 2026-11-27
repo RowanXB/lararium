@@ -72,7 +72,11 @@ class Settings(BaseSettings):
     # Where uploaded documents are stored, by content hash (see lararium.core.documents).
     document_dir: Path = Path("/var/lib/lararium/documents")
 
-    @field_validator("webhook_base_url", "webhook_secret", mode="before")
+    # Optional: a CoinGecko Demo key lets the Binance connector price an asset Binance has no
+    # market for. Sent only in a request header, never logged or shown.
+    coingecko_api_key: SecretStr | None = None
+
+    @field_validator("webhook_base_url", "webhook_secret", "coingecko_api_key", mode="before")
     @classmethod
     def _empty_is_unset(cls, value: object) -> object:
         return None if value == "" else value

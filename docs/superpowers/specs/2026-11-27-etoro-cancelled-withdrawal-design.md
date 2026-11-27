@@ -112,7 +112,7 @@ No change to the code. The cash-flow report reads income, expense and equity acc
 ### 4.6 Version and deployment
 
 - `NORMALIZER_VERSION` goes from `etoro-norm-3` to `etoro-norm-4`, so the next sync replays the stored statements.
-- Migration `0041` adds the column. If another open pull request merges a migration `0041` first, this one is renumbered.
+- Migration `0045` adds the column (renumbered from `0041` after the Binance connector's `0041`–`0044` reached `main`).
 - After deployment, in production: the four transactions of 2026-11-19 post against In transit, the cancellation and the refund each carry the link, In transit's balance is unchanged, and November's spending and income are each lower by the pair's and the fee's value.
 
 ## 5. Tests

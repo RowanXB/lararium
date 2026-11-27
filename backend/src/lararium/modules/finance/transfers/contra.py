@@ -185,9 +185,10 @@ LEG_POSTINGS = 2
 
 def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligible") -> Subquery:
     """Every transaction that can be a transfer's leg (an own record), with its own posting
-    and its contra: not void, not derived, not one of a cancelled pair (in_cancelled_pair),
-    and exactly two postings, one on Unassigned or In transit and the other on an account
-    that is not a system account.
+    and its contra: not void, not derived, not one its source says was no transfer
+    (`never_transfer`), not one of a cancelled pair (in_cancelled_pair), and exactly two
+    postings, one on Unassigned or In transit and the other on an account that is not a
+    system account.
 
     Columns: transaction_id, occurred_at, booking_date, account_id, instrument_id, quantity,
     contra_account_id, counterparty_identifier_id, holder (the own account the record names:
@@ -470,7 +471,12 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .join(evidence, true())
         .join(own_account, true())
         .outerjoin(merchants, merchants.c.identifier_id == t.counterparty_identifier_id)
-        .where(t.status != "void", t.origin.not_in(DERIVED_ORIGINS), ~in_cancelled_pair(t.id))
+        .where(
+            t.status != "void",
+            t.origin.not_in(DERIVED_ORIGINS),
+            ~t.never_transfer,
+            ~in_cancelled_pair(t.id),
+        )
         .subquery(name)
     )
 
@@ -727,12 +733,15 @@ async def transfer_contra(
     own_account_id: UUID,
     counterparty_identifier_id: UUID | None,
     other_postings: int,
+    never_transfer: bool = False,
     payment_reference: str | None = None,
 ) -> UUID:
     """The system account a record's contra belongs on: In transit for a transfer between
     own accounts, Unassigned otherwise (design §5.6).
 
-    In order: the owner's reject decision for `source` wins (Unassigned); a transaction
+    In order: a transaction its source says was no transfer (`never_transfer`) is
+    Unassigned, whatever was decided about it; the owner's reject decision for `source` wins
+    (Unassigned); a transaction
     with `other_postings` (postings besides its own and the contra, a fee say) can't be a
     leg (LEG_POSTINGS), so Unassigned; a leg of a transfer that is not rejected stays In
     transit; a counterparty bank account naming another own account makes it In transit:
@@ -747,6 +756,8 @@ async def transfer_contra(
     missing = [key for key in ("unassigned", "in_transit") if key not in system]
     if missing:
         raise LookupError(f"the system accounts {', '.join(missing)} have not been created yet")
+    if never_transfer:  # the source says it was no transfer: no decision applies
+        return system["unassigned"]
     if source is not None and await is_rejected(session, source):
         return system["unassigned"]
     if 2 + other_postings != LEG_POSTINGS:  # its own posting and the contra, and the others

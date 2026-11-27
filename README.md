@@ -772,6 +772,131 @@ itself.
 - Between Monzo's sync and Trading 212's, a card deposit shows as spending on Unassigned and
   net worth dips by it, until both sides are in.
 
+## Connecting Binance
+
+Binance is a connector: the `worker` syncs it through Binance's REST API with a key that can
+only read. It never trades, transfers, subscribes or withdraws: the client only sends queries.
+Each Binance wallet with a balance becomes an account in Lararium whose balance is what
+Binance reports, and the records Binance lists (deposits, withdrawals, trades and so on)
+explain how it got there.
+
+What is built so far (phase A):
+
+- **Wallets**: Spot, Funding and Earn. Every other wallet with a balance in Binance's wallet
+  list (Cross Margin, Futures, Trading Bots, an unknown one and so on) is counted from that
+  list, per asset, without records of its own in phase A, so its changes show as
+  reconciliation differences; a wallet Lararium doesn't know is flagged by name and still gets
+  an account, and one whose balance is not zero but which lists no asset is flagged by name.
+  Crypto-loan debt is not read until phase B.
+- **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
+  Lararium already has. If Lararium has no currency with that ISO 4217 code and no instrument
+  for the code exists yet, the asset is not counted: the connection is flagged with the code,
+  its balance is left out and its records are kept but not posted. A code that already has an
+  instrument (it counted as crypto before Binance marked it legal money, or through another
+  connection) keeps being counted on it. The other side of a trade in it is not posted either: after the
+  account's earliest report it shows as a reconciliation difference, and before that it is
+  inside that asset's opening adjustment. To count the currency, add it on the Instruments page
+  (kind Fiat, the ISO code as its symbol): later syncs count its balance and the records they
+  fetch. Its balance first shows as a reconciliation difference, because the earlier reports
+  counted it as nothing; the records kept before are posted only when Lararium next replays
+  its records (a new normaliser version) or when Binance changes them. If a crypto instrument
+  for that code already exists when you add the currency, the asset is the currency from then
+  on: at the next report the crypto instrument reads 0 and the currency the amount, two equal
+  and opposite reconciliation differences that stay open, and the earlier postings stay on the
+  crypto instrument until Lararium replays its records.
+- **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
+  (subscriptions, redemptions and rewards).
+
+Spot, flexible Earn, deposits, withdrawals, trades, convert and dividends were checked
+against a real account. Funding and the rest of phase A's response shapes follow Binance's
+documentation and have not been checked against a real account.
+
+### 1. Create a reading-only API key
+
+On Binance, create an API key with only **Enable Reading** ticked. Lararium checks the key's
+permissions at the start of every sync: any other permission that is on, known or unknown,
+makes the sync refuse the key, and a key without **Enable Reading** is refused too. An IP
+restriction is optional. Both key types are accepted: HMAC ("system generated") and Ed25519
+("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only.
+
+### 2. Add the connection
+
+In Accounts → Add account choose **Binance** and enter a display name, the key type, the API
+key and its secret (for an Ed25519 key, the private key in PEM format and, if it has one, its
+passphrase). The key is stored encrypted and is never shown again; **Update key** replaces it.
+A Binance account can be connected once. Binance reports no expiry for a reading-only key, so
+there is no expiry reminder; a rejected key shows as needing a new one and notifies you.
+
+### What the first sync does
+
+The first sync walks every history endpoint back as far as Binance serves it, then asks for
+the trades of every symbol Binance lists, since the trades endpoint needs a symbol. That is
+about 3,750 requests, roughly 15 minutes at Binance's `/api` rate limit; Lararium paces
+itself under the limit. The first sync is resumable: if it is interrupted, the next one
+continues where it stopped. Later syncs run every 4 hours, and **Sync now** always runs.
+They ask from 7 days before the last one, so a deposit that confirms later is picked up.
+
+Binance does not list everything that moved a balance (a P2P purchase made long ago, for
+example). Per asset, the difference between the earliest balance Binance reported and what
+the records add up to is posted once as an **Opening balance adjustment**, dated the day
+before the account's earliest record. It is derived afresh on every sync, so a late record
+from before that balance moves it.
+
+### Reconciliation differences
+
+Every sync compares, for each account and asset, the change between two balance reports with
+the sum of the records between them. If they disagree, the connection lists a **reconciliation
+difference** and sends one notification. The balance stays what Binance reports; the
+difference stays listed until a record explains it, and nothing is corrected automatically.
+Notifications never carry values, addresses or hashes.
+
+### Withdrawals to your own wallet
+
+An on-chain withdrawal to an address Lararium doesn't know goes to Unassigned, and the address
+appears in Suggestions. To make it a transfer, open an account's **Identifiers** on the
+Accounts page and add the wallet's address as a **Chain address**, as in
+[Registering identifiers](#registering-identifiers). Withdrawals to it then show as transfers
+in transit, with the network fee posted separately. Each deposit and withdrawal also stores
+its transaction hash, network and addresses, so wallets can be paired by hash later.
+
+### Prices
+
+Binance holdings are valued in EUR from a daily price for each asset:
+
+- **Binance's daily bars**, converted to EUR through Binance's own EUR market (the asset's EUR
+  pair, or its USDT pair divided by `EURUSDT`). Stablecoins are priced the same way, never
+  assumed to be worth one.
+- **CoinGecko**, optional. Set `LARARIUM_COINGECKO_API_KEY` in `infra/.env` (a Demo-plan key
+  works) and run `make up`. For any asset Binance does not price up to yesterday (one with no
+  market on Binance, or whose pair stopped trading), it fills the days of the last 365 that
+  have no Binance price; it is never used on a day Binance has a price. With the key,
+  CoinGecko's listing of Binance's markets also gives each Binance asset its CoinGecko id,
+  which decides which existing instrument the asset is (the same coin held elsewhere).
+  Without the key an asset Binance cannot price shows as missing a price.
+  CoinGecko's terms require attribution: Price data provided by
+  [CoinGecko](https://www.coingecko.com).
+- **ECB reference rates**, fetched daily through Frankfurter (`api.frankfurter.dev`, no key)
+  on every installation, with or without a Binance connection, so EUR prices can be shown in
+  your reporting currency. They only fill days for which no other source has a rate between
+  those two currencies.
+
+### What phase B adds
+
+Not built yet. When built, these will follow Binance's documentation and will not have been
+checked against a real account:
+
+- Wallet-to-wallet transfers, dust conversion and Cloud Mining, and the travel-rule deposit and
+  withdrawal histories
+- The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking, Dual
+  Investment, Discount Buy and Soft Staking
+- Crypto loans, as debt
+- Margin, cross and isolated
+- USD-M and COIN-M futures
+- Options
+- Fiat orders, card payments, P2P, Pay and rebates
+- Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
+  records
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo

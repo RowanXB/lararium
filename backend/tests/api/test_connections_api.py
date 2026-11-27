@@ -269,6 +269,7 @@ async def test_create_connection_hides_secret(api, session) -> None:
         "warnings",
         "redirect_uri",
         "webhook_enabled",
+        "binance",
     }
 
 
@@ -494,6 +495,25 @@ async def test_sync_now_and_disable(api, session, queue) -> None:
     assert (disabled.status_code, disabled.json()["status"]) == (200, "disabled")
     assert missing.status_code == 404
     assert missing.json()["detail"]["error"] == "connection_not_found"
+
+
+async def test_sync_now_tells_the_sync_the_owner_asked(api, session, queue) -> None:
+    created = await _create(api)
+
+    synced = await api.post(f"/api/v1/connections/{created['id']}/sync", headers=OWNER)
+
+    assert synced.status_code == 202
+    connection = await get_connection(session, uuid.UUID(created["id"]))
+    assert connection.config.get("sync_requested") is not None
+    audited = (
+        await session.execute(
+            text(
+                "select actor_type, args from core.audit_log"
+                " where command = 'sync_connection_now' order by id desc limit 1"
+            )
+        )
+    ).one()
+    assert (audited.actor_type, audited.args) == ("user", {"connection_id": created["id"]})
 
 
 async def _authorising(api: httpx.AsyncClient) -> str:
@@ -852,6 +872,8 @@ def test_connection_operation_ids() -> None:
         ("get", "/api/v1/connections/oauth/monzo/callback"): "monzo_oauth_callback",
         ("post", "/api/v1/connections/{connection_id}/sync"): "sync_connection_now",
         ("post", "/api/v1/connections/{connection_id}/disable"): "disable_connection",
+        ("post", "/api/v1/connections/binance"): "create_binance_connection",
+        ("put", "/api/v1/connections/{connection_id}/binance"): "update_binance_connection",
         ("post", "/api/v1/connections/ibkr"): "create_ibkr_connection",
         ("put", "/api/v1/connections/{connection_id}/ibkr"): "update_ibkr_connection",
         ("post", "/api/v1/connections/trading212"): "create_trading212_connection",

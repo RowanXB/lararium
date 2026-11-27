@@ -348,6 +348,34 @@ it("adds and removes an identifier", async () => {
   );
 });
 
+it("adds a chain address as a single value", async () => {
+  const { user, region } = await identifiersOf("Ledger account");
+  await user.click(await region.findByRole("combobox", { name: "Kind" }));
+  await user.click(await screen.findByRole("option", { name: "Chain address" }));
+  expect(region.queryByLabelText("Sort code")).toBeNull();
+  expect(region.queryByLabelText("Account number")).toBeNull();
+  await user.type(region.getByLabelText("Chain address"), `0x${"A".repeat(40)}`);
+  await user.click(region.getByRole("button", { name: "Add" }));
+  expect(addAccountIdentifier).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { account_id: "0190a0b0-0000-7000-8000-000000000002" },
+      body: { kind: "chain_address", value: `0x${"A".repeat(40)}` },
+    }),
+  );
+});
+
+it("shows the API's message when a chain address is refused", async () => {
+  vi.mocked(addAccountIdentifier).mockRejectedValueOnce({
+    detail: { error: "invalid", message: "not a valid chain address" },
+  });
+  const { user, region } = await identifiersOf("Ledger account");
+  await user.click(await region.findByRole("combobox", { name: "Kind" }));
+  await user.click(await screen.findByRole("option", { name: "Chain address" }));
+  await user.type(region.getByLabelText("Chain address"), "nope");
+  await user.click(region.getByRole("button", { name: "Add" }));
+  expect(await region.findByText("not a valid chain address")).toBeInTheDocument();
+});
+
 it("offers the hybrid switch for a snapshots account", async () => {
   const { user, region } = await identifiersOf("Credit card");
   expect(

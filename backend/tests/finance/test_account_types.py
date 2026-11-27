@@ -60,6 +60,7 @@ def test_the_entries():
         ("monzo", "Monzo"),
         ("ibkr", "Interactive Brokers"),
         ("etoro", "eToro"),
+        ("binance", "Binance"),
         ("trading212.invest", "Trading 212 Invest"),
         ("trading212.stocks_isa", "Trading 212 Stocks ISA"),
         ("trading212.cash_isa", "Trading 212 Cash ISA"),

@@ -7,9 +7,9 @@ the OAuth code and state never reach a response, the audit log or the logs.
 import hashlib
 import logging
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 import httpx
@@ -24,7 +24,9 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,10 +40,13 @@ from lararium.core.connections import (
     ConnectionStatus,
     consume_oauth_state,
     create_connection,
+    delete_credential,
     get_connection,
     list_connections,
     load_credential,
     lock_connection,
+    request_sync,
+    reset_failures,
     set_credential_expiry,
     set_cursor,
     set_status,
@@ -57,6 +62,7 @@ from lararium.core.errors import (
     CredentialRejectedError,
 )
 from lararium.core.json_types import JSONValue
+from lararium.core.models import Connection
 from lararium.core.notify import notifier_from_settings
 from lararium.core.secrets import Secret
 from lararium.deps import (
@@ -69,6 +75,18 @@ from lararium.deps import (
 )
 from lararium.modules.finance import models, transfers
 from lararium.modules.finance.api import read_upload
+from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_name
+from lararium.modules.finance.binance.balances import read_balances
+from lararium.modules.finance.binance.client import BinanceError
+from lararium.modules.finance.binance.normalize import FLAGS_KEY
+from lararium.modules.finance.binance.reconcile import open_differences
+from lararium.modules.finance.binance.sync import (
+    ACCOUNT_LABEL,
+    FIRST_SYNC_DONE_KEY,
+    make_client,
+    pass_gate,
+    uid_of,
+)
 from lararium.modules.finance.errors import ReviewNotFoundError
 from lararium.modules.finance.etoro.client import GATE_MESSAGE, EtoroClient, ReadOnlyGateError
 from lararium.modules.finance.etoro.normalize import EtoroDataError
@@ -104,6 +122,7 @@ from lararium.modules.finance.ibkr.sync import (
     TOKEN_PURPOSE,
     ingest_statement,
 )
+from lararium.modules.finance.models import Instrument
 from lararium.modules.finance.monzo.auth import authorize_url, exchange_code, store_tokens
 from lararium.modules.finance.monzo.client import MonzoApiError
 from lararium.modules.finance.readonly_http import HttpAuthError, HttpError
@@ -160,9 +179,36 @@ XML_TYPES = ("application/xml", "text/xml")
 GENERIC_TYPE = "application/octet-stream"
 QUERY_ID_PATTERN = r"^[0-9]{1,12}$"
 
-router = APIRouter(prefix=PREFIX, tags=["connections"], dependencies=[Depends(get_actor)])
+
+class BodylessErrorRoute(APIRoute):
+    """A route whose request-validation errors never repeat the request. FastAPI puts the
+    offending input in each error, and for a missing field that is the whole body: the
+    client secret, the Flex token, a Binance key. Everything else about the error stays."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handle = super().get_route_handler()
+
+        async def guarded(request: Request) -> Response:
+            try:
+                return await handle(request)
+            except RequestValidationError as exc:
+                bare = [
+                    {key: value for key, value in error.items() if key not in ("input", "ctx")}
+                    for error in exc.errors()
+                ]
+                raise RequestValidationError(bare) from None
+
+        return guarded
+
+
+router = APIRouter(
+    prefix=PREFIX,
+    tags=["connections"],
+    dependencies=[Depends(get_actor)],
+    route_class=BodylessErrorRoute,
+)
 # The callback alone may be a cross-site navigation (from auth.monzo.com).
-callback_router = APIRouter(prefix=PREFIX, tags=["connections"])
+callback_router = APIRouter(prefix=PREFIX, tags=["connections"], route_class=BodylessErrorRoute)
 
 
 class ConnectionOut(BaseModel):
@@ -179,6 +225,25 @@ class ConnectionOut(BaseModel):
     # public URL (LARARIUM_PUBLIC_BASE_URL).
     redirect_uri: str | None
     webhook_enabled: bool
+    # A Binance connection's own state; None for every other connector.
+    binance: "BinanceConnectionState | None" = None
+
+
+class BinanceDifferenceOut(BaseModel):
+    """A reconciliation difference that still holds: where and when, never an amount."""
+
+    account_id: UUID
+    symbol: str
+    from_at: datetime
+    to_at: datetime
+
+
+class BinanceConnectionState(BaseModel):
+    # The display names of the wallets found so far.
+    wallets: list[str]
+    first_sync_done: bool
+    differences: list[BinanceDifferenceOut]
+    flags: list[str]
 
 
 class MonzoConnectionCreate(BaseModel):
@@ -230,6 +295,26 @@ class EtoroUploadOut(BaseModel):
 class Trading212UploadOut(BaseModel):
     # The export rows the upload stored, once each.
     raw_records: int
+
+
+class _BinanceKey(BaseModel):
+    """The key material. Checked in the routes, not by validators or field limits: a pydantic
+    error would repeat the input, secrets included, in its response."""
+
+    key_type: Literal["hmac", "ed25519"]
+    api_key: SecretStr
+    # hmac: the secret. ed25519: the private key (PEM) and its passphrase, if it has one.
+    api_secret: SecretStr | None = None
+    private_key: SecretStr | None = None
+    private_key_passphrase: SecretStr | None = None
+
+
+class BinanceConnectionCreate(_BinanceKey):
+    display_name: str = Field(min_length=1, max_length=200)
+
+
+class BinanceConnectionUpdate(_BinanceKey):
+    pass
 
 
 class IbkrUploadOut(BaseModel):
@@ -319,10 +404,54 @@ def _out(record: ConnectionRecord, settings: Settings) -> ConnectionOut:
     )
 
 
+async def _binance_state(session: AsyncSession, record: ConnectionRecord) -> BinanceConnectionState:
+    mapped = record.config.get(ACCOUNT_MAP_KEY)
+    names: list[str] = []
+    for key in mapped if isinstance(mapped, dict) else {}:
+        try:
+            names.append(wallet_name(key))
+        except ValueError:
+            continue
+    held = await open_differences(session, record.id)
+    shown = await session.execute(
+        select(Instrument.id, Instrument.symbol).where(
+            Instrument.id.in_({d.instrument_id for d in held})
+        )
+    )
+    symbols = {row.id: row.symbol for row in shown}
+    flags = record.config.get(FLAGS_KEY)
+    return BinanceConnectionState(
+        wallets=sorted(names),
+        first_sync_done=record.config.get(FIRST_SYNC_DONE_KEY) is True,
+        differences=[
+            BinanceDifferenceOut(
+                account_id=d.account_id,
+                symbol=symbols[d.instrument_id],
+                from_at=d.from_at,
+                to_at=d.to_at,
+            )
+            for d in held
+        ],
+        flags=[f for f in flags if isinstance(f, str)] if isinstance(flags, list) else [],
+    )
+
+
+async def _out_with_state(
+    session: AsyncSession, record: ConnectionRecord, settings: Settings
+) -> ConnectionOut:
+    out = _out(record, settings)
+    if record.connector == "binance":
+        out.binance = await _binance_state(session, record)
+    return out
+
+
 @router.get("", name="list_connections")
 async def list_connections_route(request: Request, session: SessionDep) -> list[ConnectionOut]:
     settings = _settings(request)
-    return [_out(record, settings) for record in await list_connections(session)]
+    return [
+        await _out_with_state(session, record, settings)
+        for record in await list_connections(session)
+    ]
 
 
 @router.post("", name="create_monzo_connection", status_code=status.HTTP_201_CREATED)
@@ -450,8 +579,14 @@ def _done(error: str | None = None) -> RedirectResponse:
 @router.post(
     "/{connection_id}/sync", name="sync_connection_now", status_code=status.HTTP_202_ACCEPTED
 )
-async def sync_connection_now(connection_id: UUID, session: SessionDep) -> SyncQueuedOut:
-    await get_connection(session, connection_id)
+async def sync_connection_now(
+    connection_id: UUID, session: SessionDep, actor: ActorDep
+) -> SyncQueuedOut:
+    # The request is recorded before the job is queued, so whichever sync job runs next,
+    # this one or one already queued, sees it.
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "sync_connection_now", args) as ctx:
+        await request_sync(ctx, connection_id)
     return SyncQueuedOut(queued=await defer_sync(connection_id))
 
 
@@ -462,7 +597,7 @@ async def disable_connection(
     args = {"connection_id": str(connection_id)}
     async with command_context(session, actor, "disable_connection", args) as ctx:
         record = await set_status(ctx, connection_id, "disabled")
-    return _out(record, _settings(request))
+    return await _out_with_state(session, record, _settings(request))
 
 
 def _expires_at(token_expires_on: date) -> datetime:
@@ -1140,3 +1275,201 @@ async def resolve_source_review(
             # What is stored cannot be posted; the message names no value.
             raise _unprocessable("not_postable", str(error)) from None
         await transfers.heal_transfers(ctx)
+
+
+# Binance (design 5.1 and 5.15)
+
+MAX_KEY_CHARS = 10_000
+# Serialises creates, so two that name one account can't both pass the check for it.
+BINANCE_CREATE_LOCK = 7_104_001
+
+
+def _material(body: _BinanceKey) -> dict[str, Secret]:
+    """The credentials to store, by purpose, once the key type's rules hold."""
+    given = {
+        "api_key": body.api_key,
+        "api_secret": body.api_secret,
+        "private_key": body.private_key,
+        "private_key_passphrase": body.private_key_passphrase,
+    }
+    material: dict[str, Secret] = {}
+    for purpose, value in given.items():
+        if value is None or (purpose == "private_key_passphrase" and not value.get_secret_value()):
+            continue
+        revealed = value.get_secret_value()
+        if not revealed or len(revealed) > MAX_KEY_CHARS:
+            raise _unprocessable(
+                "key_invalid", f"{purpose} must be 1 to {MAX_KEY_CHARS} characters"
+            )
+        material[purpose] = Secret(revealed)
+    if "api_key" not in material:
+        raise _unprocessable("key_invalid", "api_key is required")
+    if body.key_type == "hmac":
+        if (
+            "api_secret" not in material
+            or "private_key" in material
+            or "private_key_passphrase" in material
+        ):
+            raise _unprocessable(
+                "key_invalid",
+                "an HMAC key needs api_secret, and takes no private_key or passphrase",
+            )
+    elif "private_key" not in material or "api_secret" in material:
+        raise _unprocessable(
+            "key_invalid",
+            "an Ed25519 key needs private_key (and its passphrase, if it has one),"
+            " and takes no api_secret",
+        )
+    return material
+
+
+def _unreachable(message: str) -> HTTPException:
+    return HTTPException(
+        status.HTTP_502_BAD_GATEWAY, {"error": "binance_unavailable", "message": message}
+    )
+
+
+async def _checked_uid(
+    http: httpx.AsyncClient, body: _BinanceKey, material: dict[str, Secret]
+) -> str:
+    """Ask Binance, with nothing stored: the gate first (nothing else is sent with a key it
+    refuses), then the account the key belongs to."""
+    try:
+        client = make_client(
+            http,
+            material["api_key"],
+            body.key_type,
+            api_secret=material.get("api_secret"),
+            private_key=material.get("private_key"),
+            passphrase=material.get("private_key_passphrase"),
+            # Someone is waiting: a 429 is an answer, not a wait of up to a minute.
+            retries=0,
+        )
+        await pass_gate(client)
+        uid = uid_of((await read_balances(client, [ACCOUNT_LABEL]))[ACCOUNT_LABEL])
+    except CredentialRejectedError as exc:
+        # Written to be shown: a permission's name or a code, never the key.
+        raise _unprocessable("key_rejected", str(exc)) from None
+    except BinanceError as exc:
+        raise _unreachable(f"{exc}; nothing was saved") from None
+    except httpx.HTTPError as exc:
+        logger.warning("Binance key check failed: %s", type(exc).__name__)
+        raise _unreachable("Binance can't be reached; nothing was saved") from None
+    if uid is None:
+        raise _unprocessable(
+            "key_rejected", "Binance did not say which account this key belongs to"
+        )
+    return uid
+
+
+async def _store_key(
+    ctx: CommandContext, master_key: bytes, connection_id: UUID, material: dict[str, Secret]
+) -> None:
+    """Store the key's parts and drop the others (a switch of key type leaves none behind)."""
+    for purpose in ("api_key", "api_secret", "private_key", "private_key_passphrase"):
+        if purpose in material:
+            await store_credential(
+                ctx, master_key, connection_id, purpose, material[purpose].reveal(), None
+            )
+        else:
+            await delete_credential(ctx, connection_id, purpose)
+
+
+@router.post("/binance", name="create_binance_connection", status_code=status.HTTP_201_CREATED)
+async def create_binance_connection(
+    body: BinanceConnectionCreate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+) -> ConnectionOut:
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    material = _material(body)
+    uid = await _checked_uid(http, body, material)
+    args = body.model_dump(mode="json", include={"display_name", "key_type"})
+    async with command_context(session, actor, "create_binance_connection", args) as ctx:
+        await session.execute(select(func.pg_advisory_xact_lock(BINANCE_CREATE_LOCK)))
+        taken = await session.scalar(
+            select(Connection.id).where(
+                Connection.connector == "binance", Connection.config["uid"].as_string() == uid
+            )
+        )
+        if taken is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "error": "already_connected",
+                    "message": "this Binance account is already connected",
+                },
+            )
+        created = await create_connection(
+            ctx,
+            connector="binance",
+            display_name=body.display_name,
+            config={"key_type": body.key_type, "uid": uid},
+        )
+        await _store_key(ctx, master_key, created.id, material)
+        # There is no approval step: a key that passed the gate works at once.
+        record = await set_status(ctx, created.id, "healthy")
+    # After the commit, so the job finds the connection.
+    await defer_sync(record.id)
+    return await _out_with_state(session, record, settings)
+
+
+def _require_binance(connection: ConnectionRecord) -> None:
+    if connection.connector != "binance":
+        raise _unprocessable("not_binance", "this is not a Binance connection")
+
+
+@router.put("/{connection_id}/binance", name="update_binance_connection")
+async def update_binance_connection(
+    connection_id: UUID,
+    body: BinanceConnectionUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+    http: HttpDep,
+) -> ConnectionOut:
+    """Replace the key (a new one after the old was rejected). It must belong to the account
+    already connected. It is also how a disabled connection is brought back (adding the account
+    again is refused as a duplicate): the ledger, cursors and config are kept. Only a
+    connection disabled when the update began is brought back: a disable made while the key
+    was checked stands."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    material = _material(body)
+    began = await get_connection(session, connection_id)
+    _require_binance(began)
+    uid = await _checked_uid(http, body, material)
+    args = body.model_dump(mode="json", include={"key_type"}) | {
+        "connection_id": str(connection_id)
+    }
+    async with command_context(session, actor, "update_binance_connection", args) as ctx:
+        connection = await lock_connection(ctx, connection_id)
+        _require_binance(connection)
+        if connection.status == "disabled" and began.status != "disabled":
+            raise _unprocessable(
+                "not_updatable", "the connection was disabled meanwhile: it is not updated"
+            )
+        if uid != connection.config.get("uid"):
+            raise _unprocessable(
+                "another_account",
+                "this key belongs to another Binance account than this connection",
+            )
+        await _store_key(ctx, master_key, connection_id, material)
+        await update_config(ctx, connection_id, {"key_type": body.key_type})
+        moved = await transition_status(
+            ctx,
+            connection_id,
+            "healthy",
+            only_from=("needs_reauth", "failing", "disabled"),
+            clear_error=True,
+        )
+        if moved is not None:
+            await reset_failures(ctx, connection_id)
+        # As "Sync now" does: the queued sync runs although the last one is recent.
+        await request_sync(ctx, connection_id)
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
+    return await _out_with_state(session, record, settings)

@@ -9,6 +9,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from lararium.core.json_types import JSONValue
 from lararium.core.models import UUIDV7, Base
 
+# The Binance tables are built from the catalogue (binance/layout.py); importing them here puts
+# them in the metadata with the rest of the finance schema.
+from lararium.modules.finance.binance.models import AccountReport as AccountReport
+from lararium.modules.finance.binance.models import AssetsSeen as AssetsSeen
+from lararium.modules.finance.binance.models import (
+    ReconciliationDifference as ReconciliationDifference,
+)
+
 FINANCE_SCHEMA = {"schema": "finance"}
 
 
@@ -149,6 +157,9 @@ class Transaction(Base):
     cancels_transaction_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("finance.transactions.id"), unique=True
     )
+    # The source says this movement was not a transfer (a withdrawal that failed after it
+    # left the balance), so it is never a transfer's leg.
+    never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(
