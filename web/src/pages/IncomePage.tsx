@@ -298,7 +298,8 @@ export function IncomePage() {
   // A refetch can drop rows: only the ones still shown count and are sent.
   const shownIds = useMemo(() => new Set((data?.entries ?? []).map((e) => e.transaction_id)), [data]);
   const chosen = useMemo(() => [...selected].filter((id) => shownIds.has(id)), [selected, shownIds]);
-  const own = (accounts.data ?? []).filter((a) => !a.system);
+  // An account left out of reports has no entries here, so it is no filter either.
+  const own = (accounts.data ?? []).filter((a) => !a.system && !a.excluded_from_reports);
   const accountOptions = [
     { value: ALL_ACCOUNTS, label: "All accounts" },
     ...own.map((a) => ({ value: a.id, label: a.name })),

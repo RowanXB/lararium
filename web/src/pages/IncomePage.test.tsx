@@ -62,9 +62,10 @@ beforeEach(() => {
   vi.mocked(getIncome).mockResolvedValue({ data: INCOME } as never);
   vi.mocked(listAccounts).mockResolvedValue({
     data: [
-      { id: "a1", name: "Current", system: false },
-      { id: "a2", name: "Savings", system: false },
-      { id: "sys", name: "In transit", system: true },
+      { id: "a1", name: "Current", system: false, excluded_from_reports: false },
+      { id: "a2", name: "Savings", system: false, excluded_from_reports: false },
+      { id: "a3", name: "Pension", system: false, excluded_from_reports: true },
+      { id: "sys", name: "In transit", system: true, excluded_from_reports: false },
     ],
   } as never);
   vi.mocked(setTransactionCategories).mockResolvedValue({ data: undefined } as never);
@@ -104,6 +105,8 @@ it("filters by account and by category", async () => {
   const select = await screen.findByRole("combobox", { name: "Account" });
   await user.click(select);
   expect(screen.queryByRole("option", { name: "In transit" })).toBeNull();
+  // An account left out of reports has no entries here to filter to.
+  expect(screen.queryByRole("option", { name: "Pension" })).toBeNull();
   await user.click(await screen.findByRole("option", { name: "Savings" }));
   await waitFor(() =>
     expect(getIncome).toHaveBeenLastCalledWith(
