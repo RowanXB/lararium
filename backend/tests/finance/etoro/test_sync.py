@@ -726,7 +726,38 @@ async def test_daily_parts_once_a_day(session, run, api) -> None:
     assert DAILY <= set(api.paths())
     # Candles go on from the last day fetched, less a week.
     [request] = [r for r in api.requests if r.url.path == CANDLES]
-    assert request.url.params["from"] == f"{(today() - timedelta(days=7)).isoformat()}T00:00:00Z"
+    assert request.url.params["from"] == f"{(today() - timedelta(days=8)).isoformat()}T12:00:00Z"
+
+
+async def test_candles_asked_from_the_first_open_day(session, run, api) -> None:
+    connection = await _connection(run)
+    cursor = await _sync(session, connection, api)
+    # The position opened 20 days ago: that day's candle, stamped the evening before, is asked.
+    [request] = [r for r in api.requests if r.url.path == CANDLES]
+    opened = today() - timedelta(days=20)
+    assert request.url.params["from"] == f"{(opened - timedelta(days=1)).isoformat()}T12:00:00Z"
+    assert cursor["candles_to"] == {str(INSTRUMENT): today().isoformat()}
+    assert cursor["candles_rule"] == etoro_sync.CANDLES_RULE
+
+
+async def test_candles_fetched_under_an_older_rule_are_asked_again_from_the_first_open(
+    session, run, api
+) -> None:
+    connection = await _connection(run)
+    cursor = await _sync(session, connection, api)
+    # A cursor from before the rule: its first open day's candle was never asked for.
+    del cursor["candles_rule"]
+    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    await _set_cursor(session, connection, {**cursor, "daily_at": stale})
+    api.requests.clear()
+    after = await _sync(session, connection, api)
+    [request] = [r for r in api.requests if r.url.path == CANDLES]
+    opened = today() - timedelta(days=20)
+    assert request.url.params["from"] == f"{(opened - timedelta(days=1)).isoformat()}T12:00:00Z"
+    assert after["candles_rule"] == etoro_sync.CANDLES_RULE
+    # Between daily parts, the rule the cursor holds is kept.
+    api.requests.clear()
+    assert (await _sync(session, connection, api))["candles_rule"] == etoro_sync.CANDLES_RULE
 
 
 async def test_normalize_is_called_with_the_records(session, run, api, monkeypatch) -> None:
@@ -741,7 +772,7 @@ async def test_normalize_is_called_with_the_records(session, run, api, monkeypat
     notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, notifier)
     assert called == [len(await _records(session, connection))]
-    assert NORMALIZER_VERSION == "etoro-norm-1"
+    assert NORMALIZER_VERSION == "etoro-norm-3"
     assert after.warnings == ["eToro flagged: pnl.someNewField"]
     assert notifier.messages == ["eToro: eToro flagged: pnl.someNewField"]
     await _run_sync(session, connection, api, notifier)

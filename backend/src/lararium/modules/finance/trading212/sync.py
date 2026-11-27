@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from lararium.core.connections import load_credential, lock_connection
+from lararium.core.connections import load_credential, lock_connection, merge_cursor
 from lararium.core.connectors import Capability, SyncContext
 from lararium.core.errors import CredentialRejectedError, DisplayableError
 from lararium.core.json_types import JSONValue
@@ -45,7 +45,7 @@ from lararium.modules.finance.trading212.client import (
     endpoint_path,
 )
 from lararium.modules.finance.trading212.fields import ENDPOINTS
-from lararium.modules.finance.trading212.normalize import normalize
+from lararium.modules.finance.trading212.normalize import NormalizeReport, normalize
 
 VERSION = "trading212-sync-1"
 KEY_PURPOSE = "api_key"
@@ -175,6 +175,19 @@ async def publish_flags(
         label="a Trading 212",
         own=_own,
     )
+
+
+async def publish_replayed(ctx: SyncContext, report: NormalizeReport) -> None:
+    """Publish the flags of a run outside a sync and an upload (a review decision) when it
+    replayed. The replay took the new normalizer version, so no later run replays: its flags
+    are all there is to flag, and the ones from before would stay for good. The caller holds
+    the connection's lock."""
+    if not report.replayed:
+        return
+    found = {(FIELDS, flag) for flag in report.flagged}
+    found |= {(INSTRUMENT_TYPES, flag) for flag in report.instrument_flags}
+    flags = await publish_flags(ctx, found, {FIELDS, INSTRUMENT_TYPES})
+    await merge_cursor(ctx.command, ctx.connection.id, flags)
 
 
 class _Run:

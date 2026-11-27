@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -10,8 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.core.entities import get_self_entity_id
+from lararium.core.errors import SettingNotFoundError
 from lararium.core.json_types import JSONValue
 from lararium.core.models import Setting
+from lararium.core.settings_store import get_setting, set_setting
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import (
     AccountAlreadyClosedError,
@@ -31,6 +34,8 @@ AccountStatus = Literal["open", "closed"]
 # The settings remembering the ledger's own accounts (system_accounts): an account is one
 # when a setting under this prefix holds its id.
 SYSTEM_ACCOUNT_SETTING_PREFIX = "finance.system_account."
+# The ids of the accounts the owner left out of reports, as a list of strings.
+EXCLUDED_ACCOUNTS_KEY = "finance.report_excluded_accounts"
 
 
 @dataclass(frozen=True)
@@ -52,12 +57,16 @@ class AccountRecord:
     # One the ledger keeps for itself (Unassigned, Opening balances, In transit): the owner
     # can't close, rename or snapshot it.
     system: bool
+    # Left out of the reports (net worth, holdings, cash flow) by the owner; its records stay.
+    excluded_from_reports: bool
     product_type: str | None
     owner_type: str | None
     goal_amount: Decimal | None
     locked: bool | None
     round_up: bool | None
     round_up_multiplier: Decimal | None
+    # A key of the account type catalog; stored here as text, not read for posting.
+    type_key: str | None
 
 
 @dataclass(frozen=True)
@@ -102,12 +111,19 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
                 Setting.value == func.to_jsonb(sql_cast(a.id, Text)),
             )
             .label("system"),
+            exists()
+            .where(
+                Setting.key == EXCLUDED_ACCOUNTS_KEY,
+                Setting.value.contains(func.to_jsonb(sql_cast(a.id, Text))),
+            )
+            .label("excluded_from_reports"),
             a.product_type,
             a.owner_type,
             a.goal_amount,
             a.locked,
             a.round_up,
             a.round_up_multiplier,
+            a.type_key,
         )
         .where(*conditions)
         .order_by(a.name, a.id)
@@ -129,12 +145,14 @@ async def _load(session: AsyncSession, *conditions: ColumnElement[bool]) -> list
             opened_on=row.opened_on,
             closed_on=row.closed_on,
             system=row.system,
+            excluded_from_reports=row.excluded_from_reports,
             product_type=row.product_type,
             owner_type=row.owner_type,
             goal_amount=row.goal_amount,
             locked=row.locked,
             round_up=row.round_up,
             round_up_multiplier=row.round_up_multiplier,
+            type_key=row.type_key,
         )
         for row in rows
     ]
@@ -166,6 +184,7 @@ def _change_data(record: AccountRecord) -> dict[str, JSONValue]:
         "locked": record.locked,
         "round_up": record.round_up,
         "round_up_multiplier": _optional_str(record.round_up_multiplier),
+        "type_key": record.type_key,
     }
 
 
@@ -183,6 +202,12 @@ async def get_account(session: AsyncSession, account_id: UUID) -> AccountRecord:
 
 async def list_accounts(session: AsyncSession) -> list[AccountRecord]:
     return await _load(session)
+
+
+async def accounts_of_types(session: AsyncSession, keys: Collection[str]) -> list[UUID]:
+    """The ids of the accounts whose type is one of `keys`, whatever their status, sorted."""
+    a = models.Account
+    return sorted(await session.scalars(select(a.id).where(a.type_key.in_(sorted(keys)))))
 
 
 def require_owner_account(record: AccountRecord, action: str) -> None:
@@ -238,6 +263,7 @@ async def create_account(
     parent_account_id: UUID | None = None,
     opened_on: date | None = None,
     source_connection_id: UUID | None = None,
+    type_key: str | None = None,
 ) -> AccountRecord:
     """A manual account's parent_account_id is its main account (set_main_account's rules);
     a connected account's is its connector's to give (a Monzo pot's main account)."""
@@ -264,6 +290,7 @@ async def create_account(
                 source_kind="manual" if source_connection_id is None else "connection",
                 source_connection_id=source_connection_id,
                 opened_on=opened_on,
+                type_key=type_key,
             )
             .returning(models.Account.id)
         )
@@ -351,6 +378,22 @@ async def set_source_details(ctx: CommandContext, account_id: UUID, details: Sou
     return True
 
 
+async def set_type_key(ctx: CommandContext, account_id: UUID, type_key: str | None) -> bool:
+    """Set the account's type key (None clears it); False (and no event) if it is the same."""
+    a = models.Account
+    written = await ctx.session.scalar(
+        update(a)
+        .where(a.id == account_id, a.type_key.is_distinct_from(type_key))
+        .values(type_key=type_key)
+        .returning(a.id)
+    )
+    if written is None:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    _publish(ctx, "finance.account.updated", await get_account(ctx.session, account_id))
+    return True
+
+
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
     """Close the account. It stays a holder of the card merchants it held, so its
     card-deposit history stands, as a bank identifier stays assigned after a close; it
@@ -398,4 +441,41 @@ async def set_balance_mode(
     record = await get_account(ctx.session, account_id)
     if switched is not None:
         _publish(ctx, "finance.account.updated", record)
+    return record
+
+
+async def excluded_account_ids(session: AsyncSession) -> frozenset[UUID]:
+    """The accounts the owner left out of reports."""
+    try:
+        value = await get_setting(session, EXCLUDED_ACCOUNTS_KEY)
+    except SettingNotFoundError:
+        return frozenset()
+    if not isinstance(value, list):
+        raise ValueError(f"{EXCLUDED_ACCOUNTS_KEY} must be a list of account ids, got {value!r}")
+    return frozenset(UUID(str(item)) for item in value)
+
+
+async def set_excluded_from_reports(
+    ctx: CommandContext, account_id: UUID, excluded: bool
+) -> AccountRecord:
+    """Leave an account out of the reports, or put it back. Nothing in the ledger changes.
+
+    Only an asset or liability account of the owner's: the others are in no report's totals,
+    and without In transit a transfer would dip net worth while it is on its way.
+    """
+    session = ctx.session
+    record = await get_account(session, account_id)
+    require_owner_account(record, "left out of reports")
+    if record.ledger_type not in ("asset", "liability"):
+        raise FinanceValidationError(f"{record.name} isn't an asset or liability account")
+    # Read and write the list under one lock, so two concurrent changes both land.
+    await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(EXCLUDED_ACCOUNTS_KEY))))
+    current = await excluded_account_ids(session)
+    wanted = current | {account_id} if excluded else current - {account_id}
+    if wanted == current:
+        return record
+    value: list[JSONValue] = [*sorted(str(item) for item in wanted)]
+    await set_setting(ctx, EXCLUDED_ACCOUNTS_KEY, value)
+    record = await get_account(session, account_id)
+    ctx.emit("finance.account.updated", record.id, {"account_id": str(record.id)})
     return record

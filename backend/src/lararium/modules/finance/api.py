@@ -28,7 +28,9 @@ from lararium.core.json_types import JSONValue
 from lararium.core.settings_store import get_setting, get_timezone, set_setting
 from lararium.deps import ActorDep, DocumentStoreDep, SessionDep, get_actor
 from lararium.modules.finance import (
+    account_types,
     accounts,
+    cashflow,
     errors,
     instruments,
     ledger,
@@ -43,6 +45,12 @@ from lararium.modules.finance.schemas import (
     AccountCreate,
     AccountOut,
     AccountRename,
+    AccountReportingUpdate,
+    AccountShapeOut,
+    AccountTypeApiOut,
+    AccountTypeFileOut,
+    AccountTypeOut,
+    CashFlowOut,
     FinanceSettingsOut,
     FinanceSettingsUpdate,
     FxRateCreate,
@@ -213,6 +221,90 @@ async def update_instrument(
 # Accounts
 
 
+def _type_out(found: account_types.AccountType) -> AccountTypeOut:
+    return AccountTypeOut(
+        key=found.key,
+        institution=found.institution,
+        label=found.label,
+        name=found.name,
+        shape=None if found.shape is None else AccountShapeOut.model_validate(found.shape),
+        api=None
+        if found.api is None
+        else AccountTypeApiOut(connector=found.api.connector, config=dict(found.api.config)),
+        files=[
+            AccountTypeFileOut(
+                label=f.label, format=f.format, recommended=f.recommended, config=f.profile
+            )
+            for f in found.files
+        ],
+        funding=sorted(found.funding),
+        family=found.family,
+    )
+
+
+@router.get("/account-types", name="list_account_types")
+async def list_account_types() -> list[AccountTypeOut]:
+    """The account types the owner can pick: where an account's data comes from and how it
+    posts. Only a type with no API creates an account here; one with an API is connected."""
+    return [_type_out(found) for found in account_types.ACCOUNT_TYPES]
+
+
+def _type_error(code: str, message: str) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {"error": code, "message": message})
+
+
+def _settable_type(key: str) -> tuple[account_types.AccountType, account_types.AccountShape]:
+    """The type a type_key names, with its shape; only one with no API can be set by hand."""
+    found = account_types.account_type(key)
+    if found is None:
+        raise _type_error("unknown_type", "type_key names no account type")
+    if found.api is not None:
+        raise _type_error(
+            "type_not_creatable",
+            f"{found.name} syncs through its API, so type_key can't name it; connect it instead",
+        )
+    assert found.shape is not None  # check_catalog: a type with no API has a shape
+    return found, found.shape
+
+
+def _require_shape_agrees(
+    found: account_types.AccountType,
+    shape: account_types.AccountShape,
+    account: AccountCreate | accounts.AccountRecord,
+) -> None:
+    """The account (a create body or a stored account) must agree with the type wherever the
+    type states its shape; the side is the account's when the type leaves it open, and then
+    one a statement can import into."""
+    if shape.ledger_type is None and account.ledger_type not in ("asset", "liability"):
+        raise _type_error(
+            "type_mismatch",
+            f"ledger_type must be asset or liability for the {found.name} account type",
+        )
+    stated: dict[str, str | None] = {
+        "ledger_type": shape.ledger_type,
+        "subtype": shape.subtype,
+        "tax_wrapper": shape.tax_wrapper,
+        "balance_mode": shape.balance_mode,
+    }
+    for field, value in stated.items():
+        if value is not None and getattr(account, field) != value:
+            raise _type_error(
+                "type_mismatch", f"{field} disagrees with the {found.name} account type"
+            )
+
+
+def _require_type_shape(body: AccountCreate, key: str) -> account_types.AccountType:
+    """The body must agree with the type's shape, and the institution is always the type's."""
+    found, shape = _settable_type(key)
+    _require_shape_agrees(found, shape, body)
+    if body.institution_name is not None:
+        raise _type_error(
+            "type_mismatch",
+            f"institution_name is the {found.name} account type's own; leave it out",
+        )
+    return found
+
+
 @router.get("/accounts", name="list_accounts")
 async def list_accounts(session: SessionDep) -> list[AccountOut]:
     return [AccountOut.model_validate(record) for record in await accounts.list_accounts(session)]
@@ -220,9 +312,12 @@ async def list_accounts(session: SessionDep) -> list[AccountOut]:
 
 @router.post("/accounts", name="create_account", status_code=status.HTTP_201_CREATED)
 async def create_account(body: AccountCreate, session: SessionDep, actor: ActorDep) -> AccountOut:
+    found = None if body.type_key is None else _require_type_shape(body, body.type_key)
     async with command_context(session, actor, "create_account", _args(body)) as ctx:
         institution_id = None
-        if body.institution_name is not None:
+        if found is not None:
+            institution_id = await get_or_create_organization(ctx, found.institution)
+        elif body.institution_name is not None:
             institution_id = await get_or_create_organization(ctx, body.institution_name)
         record = await accounts.create_account(
             ctx,
@@ -234,6 +329,7 @@ async def create_account(body: AccountCreate, session: SessionDep, actor: ActorD
             tax_wrapper=body.tax_wrapper,
             parent_account_id=body.parent_account_id,
             opened_on=body.opened_on,
+            type_key=body.type_key,
         )
     return AccountOut.model_validate(record)
 
@@ -242,9 +338,25 @@ async def create_account(body: AccountCreate, session: SessionDep, actor: ActorD
 async def rename_account(
     account_id: UUID, body: AccountRename, session: SessionDep, actor: ActorDep
 ) -> AccountOut:
-    args = _args(body, account_id=account_id)
+    """Rename the account, set its type, or both, in one command: if either is refused,
+    neither happens. Setting or clearing the type needs an account that can take imports (a
+    connector owns a connected account's); a type must have no API and agree with the
+    account's shape. type_key null clears it."""
+    # The audit records what was sent, not the fields left out.
+    args = _args(account_id=account_id) | body.model_dump(mode="json", exclude_unset=True)
+    set_type = "type_key" in body.model_fields_set
     async with command_context(session, actor, "rename_account", args) as ctx:
-        record = await accounts.rename_account(ctx, account_id, body.name)
+        if set_type:
+            account = await accounts.get_account(session, account_id)
+            staging.require_importable(account)
+            if body.type_key is not None:
+                found, shape = _settable_type(body.type_key)
+                _require_shape_agrees(found, shape, account)
+        if body.name is not None:
+            await accounts.rename_account(ctx, account_id, body.name)
+        if set_type:
+            await accounts.set_type_key(ctx, account_id, body.type_key)
+        record = await accounts.get_account(session, account_id)
     return AccountOut.model_validate(record)
 
 
@@ -256,6 +368,17 @@ async def close_account(
     args = _args(body, account_id=account_id)
     async with command_context(session, actor, "close_account", args) as ctx:
         record = await accounts.close_account(ctx, account_id, body.closed_on)
+    return AccountOut.model_validate(record)
+
+
+@router.post("/accounts/{account_id}/reporting", name="set_account_reporting")
+async def set_account_reporting(
+    account_id: UUID, body: AccountReportingUpdate, session: SessionDep, actor: ActorDep
+) -> AccountOut:
+    """Leave the account out of net worth, holdings and cash flow, or put it back."""
+    args = _args(body, account_id=account_id)
+    async with command_context(session, actor, "set_account_reporting", args) as ctx:
+        record = await accounts.set_excluded_from_reports(ctx, account_id, body.excluded)
     return AccountOut.model_validate(record)
 
 
@@ -366,24 +489,56 @@ async def record_fx_rate(body: FxRateCreate, session: SessionDep, actor: ActorDe
 
 @router.get("/holdings", name="get_holdings")
 async def get_holdings(
-    session: SessionDep, day: Annotated[date | None, Query(alias="date")] = None
+    session: SessionDep,
+    day: Annotated[date | None, Query(alias="date")] = None,
+    all_accounts: bool = False,
 ) -> list[HoldingOut]:
-    """Holdings valued in the reporting currency; the date defaults to today."""
-    rows = await valuation.holdings_asof(session, day or await _today(session))
+    """Holdings valued in the reporting currency, without the accounts left out of reports
+    unless `all_accounts`; the date defaults to today."""
+    excluded: frozenset[UUID] = (
+        frozenset() if all_accounts else await accounts.excluded_account_ids(session)
+    )
+    rows = await valuation.holdings_asof(session, day or await _today(session), excluded)
     return [HoldingOut.model_validate(row) for row in rows]
+
+
+async def _year_to(
+    session: AsyncSession, start: date | None, end: date | None
+) -> tuple[date, date]:
+    """The range asked for; by default the 365 days up to and including today."""
+    end = end or await _today(session)
+    if start is None:
+        # Clamped, because a year before the first representable day would overflow.
+        start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
+    return start, end
 
 
 @router.get("/net-worth", name="get_net_worth")
 async def get_net_worth(
     session: SessionDep, start: date | None = None, end: date | None = None
 ) -> list[NetWorthPointOut]:
-    """Daily net worth; defaults to the 365 days up to and including today."""
-    end = end or await _today(session)
-    if start is None:
-        # Clamped, because a year before the first representable day would overflow.
-        start = end - timedelta(days=364) if end.toordinal() > 364 else date.min
-    points = await valuation.net_worth_series(session, start, end)
+    """Daily net worth, without the accounts left out of reports; defaults to the 365 days up
+    to and including today."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    points = await valuation.net_worth_series(session, start, end, excluded)
     return [NetWorthPointOut.model_validate(point) for point in points]
+
+
+@router.get("/cash-flow", name="get_cash_flow")
+async def get_cash_flow(
+    session: SessionDep,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: cashflow.Bucket = "month",
+) -> CashFlowOut:
+    """Income and spending by period, category and payee, without the accounts left out of
+    reports; defaults to the 365 days up to and including today."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    return CashFlowOut.model_validate(
+        await cashflow.cash_flow(session, start, end, bucket, excluded)
+    )
 
 
 # Imports

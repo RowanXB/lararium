@@ -6,25 +6,33 @@ One account per connection (one key pair is one account), created on first sight
 and registered under its Trading 212 account id (`trading212_account`). The account map in
 the connection's config remembers it.
 
-A TRANSFER names no other account. When the owner has exactly two Trading 212 connections,
-one Invest and one ISA, the other is the only account it can be with: it is the sibling, and
-a TRANSFER names its registry row, so the pair is mutually identified.
+A TRANSFER names no other account. When the owner has exactly two accounts of the Trading
+212 family (account_types: Invest, Stocks ISA, Cash ISA; open or closed), the other is the only
+account it can be with: it is the sibling, and a TRANSFER names its Trading 212 id's registry
+row, so the pair is mutually identified. A third account of the family, or none registered
+under a Trading 212 id (a manual Cash ISA), names nothing.
 """
 
 from collections.abc import Mapping
 from uuid import UUID
 
-from lararium.core.connections import list_connections
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from lararium.core.entities import get_or_create_organization
 from lararium.core.json_types import JSONValue
+from lararium.modules.finance import models
+from lararium.modules.finance.account_types import family_keys
 from lararium.modules.finance.accounts import (
     SourceDetails,
     TaxWrapper,
+    accounts_of_types,
     create_account,
     get_account,
     set_source_details,
+    set_type_key,
 )
-from lararium.modules.finance.errors import AccountNotFoundError, FinanceValidationError
+from lararium.modules.finance.errors import AccountNotFoundError
 from lararium.modules.finance.identifiers import (
     ensure_identifier,
     get_or_create_identifier,
@@ -34,12 +42,15 @@ from lararium.modules.finance.trading212.state import Record, Run, Trading212Dat
 
 ACCOUNT_MAP_KEY = "account_map"
 INSTITUTION = "Trading 212"
-CONNECTOR = "trading212"
+# The family (account_types) of the accounts a TRANSFER can be with.
+FAMILY = "trading212"
 # The connection's account kind: the account's name and tax wrapper.
 KINDS: Mapping[str, tuple[str, TaxWrapper]] = {
     "invest": ("Trading 212 Invest", "gia"),
     "isa": ("Trading 212 ISA", "isa"),
 }
+# The account type (finance/account_types.py) of each account kind.
+TYPE_KEYS: Mapping[str, str] = {"invest": "trading212.invest", "isa": "trading212.stocks_isa"}
 
 
 def mapped_id(config: Mapping[str, JSONValue]) -> str | None:
@@ -89,11 +100,13 @@ async def account(run: Run, summary: Record | None) -> None:
             institution_entity_id=institution,
             tax_wrapper=wrapper,
             source_connection_id=run.connection_id,
+            type_key=TYPE_KEYS[kind],
         )
         account_id = created.id
         run.account_map[trading212_id] = str(account_id)
     run.account_id = account_id
     changed = await set_source_details(run.command, account_id, SourceDetails(tax_wrapper=wrapper))
+    changed |= await set_type_key(run.command, account_id, TYPE_KEYS[kind])
     # The row exists before ensure_identifier runs, so it takes no lock in this transaction.
     await run.shared(
         ("identifier", "trading212_account", trading212_id),
@@ -108,25 +121,28 @@ async def account(run: Run, summary: Record | None) -> None:
         run.report.accounts_unchanged += 1
 
 
+async def family(session: AsyncSession) -> list[UUID]:
+    """The owner's accounts of a Trading 212 type (account_types), whatever their status."""
+    return await accounts_of_types(session, family_keys(FAMILY))
+
+
 async def sibling(run: Run) -> UUID | None:
-    """The registry row of the sibling account, when there is exactly one (module doc) and
-    its connection has found its account id; else None."""
+    """The registry row of the sibling account (module doc): when the family has exactly two
+    accounts and this one is one of them, the other's Trading 212 id; else None."""
     if run.sibling is not None:
         return run.sibling
-    connections = [c for c in await list_connections(run.session) if c.connector == CONNECTOR]
-    kinds = sorted(str(c.config.get("account_kind")) for c in connections)
-    if kinds != ["invest", "isa"]:
+    ids = await family(run.session)
+    if len(ids) != 2 or run.account not in ids:
         return None
-    [other] = [c for c in connections if c.id != run.connection_id]
-    trading212_id = mapped_id(other.config)
-    if trading212_id is None:
-        return None
-    try:
-        normalized = normalize_identifier("trading212_account", trading212_id)
-    except FinanceValidationError:
-        return None
-    run.sibling = await run.shared(
-        ("identifier", "trading212_account", normalized),
-        lambda cmd: get_or_create_identifier(cmd, "trading212_account", normalized),
+    [other] = [i for i in ids if i != run.account]
+    i = models.AccountIdentifier
+    registered = list(
+        await run.session.scalars(
+            select(i.id).where(i.account_id == other, i.kind == "trading212_account")
+        )
     )
+    # One account, one Trading 212 id: none (a manual account's) or more names no one.
+    if len(registered) != 1:
+        return None
+    run.sibling = registered[0]
     return run.sibling

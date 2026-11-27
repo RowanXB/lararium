@@ -666,6 +666,174 @@ async def test_prices_from_candles_and_current_rate(session, ledger) -> None:
     assert await session.scalar(text("select count(*) from finance.fx_rates")) == 0
 
 
+def _stamped(day: date, close: str) -> dict[str, Any]:
+    """A daily candle of `day` as eToro stamps it: midnight in Israel (UTC+2), 22:00 UTC the
+    evening before."""
+    evening = day - timedelta(days=1)
+    return {**candle_item(day, close), "time": f"{evening.isoformat()}T22:00:00Z"}
+
+
+async def _price_days(session) -> list[tuple[date, Decimal]]:
+    rows = await _rows(
+        session,
+        "select as_of_date, price from finance.prices where source = 'etoro' order by as_of_date",
+    )
+    return [(r.as_of_date, r.price) for r in rows]
+
+
+async def test_a_candle_stamped_the_evening_before_prices_its_day(session, ledger) -> None:
+    day = NOW.date()
+    monday = day - timedelta(days=1)
+    await ledger.normalize(
+        *_ledger_entries(),
+        ("candles", _stamped(monday, "124.10")),
+        # Today's candle wins over today's current rate, though stamped yesterday in UTC.
+        ("candles", _stamped(day, "125.00")),
+    )
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.00"))]
+    # Summer time (UTC+3) stamps it at 21:00 UTC: the same day.
+    summer = {**candle_item(day, "125.50"), "time": f"{monday.isoformat()}T21:00:00Z"}
+    await ledger.normalize(("candles", summer), now=NOW + timedelta(hours=1))
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.50"))]
+    # A later current rate does not replace the stored candle's day.
+    await ledger.normalize(*_ledger_entries(), now=NOW + timedelta(hours=2))
+    assert await _price_days(session) == [(monday, Decimal("124.10")), (day, Decimal("125.50"))]
+
+
+async def test_a_candle_without_a_close_leaves_the_day_its_current_rate(session, ledger) -> None:
+    """eToro's candle fields are nullable: one without a close prices nothing, so the day's
+    current rate stands."""
+    day = NOW.date()
+    await ledger.normalize(*_ledger_entries(), ("candles", {**_stamped(day, "1"), "close": None}))
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+    await ledger.replay()
+    assert await _price_days(session) == [(day, Decimal("126.5"))]
+
+
+async def test_a_replay_leaves_no_misdated_candle_price(session, ledger) -> None:
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    # What the previous version wrote: Monday's candle priced on its UTC date, a Sunday.
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.10, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Another source's price of that day is not the connector's to remove.
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.00, :d, 'manual')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Nor is a price in a currency the replay does not price (it cannot tell those apart).
+    gbp = await session.scalar(
+        text("select id from finance.instruments where symbol = 'GBP' and kind = 'fiat'")
+    )
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 98.00, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": gbp, "d": sunday},
+    )
+    await ledger.replay()
+    assert await _price_days(session) == [
+        (sunday, Decimal("98.00")),
+        (monday, Decimal("124.10")),
+        (NOW.date(), Decimal("126.5")),
+    ]
+    assert (
+        await session.scalar(text("select count(*) from finance.prices where source = 'manual'"))
+        == 1
+    )
+
+
+async def test_a_replay_leaves_no_misdated_price_of_a_candle_revised_since(session, ledger) -> None:
+    """Today's candle keeps its open time while its close moves: the misdated price an
+    earlier version filed from an earlier close of it is removed too."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 124.10, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # The upgrade's first sync fetches the same candle with a later close.
+    await update_config(
+        CommandContext(session, CONNECTOR, uuid.uuid4()),
+        ledger.connection.id,
+        {"normalizer_version": "etoro-norm-0"},
+    )
+    await ledger.normalize(("candles", _stamped(monday, "125.00")), now=NOW + timedelta(hours=1))
+    days = await _price_days(session)
+    assert sunday not in [d for d, _ in days]
+    assert (monday, Decimal("125.00")) in days
+
+
+async def test_a_replay_keeps_a_day_another_etoro_connection_gives(session, run, ledger) -> None:
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 123.90, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    # Another eToro connection holds the instrument's candle of that Sunday: prices name no
+    # connection, so the replay cannot tell the price is not that one's.
+    other = Ledger(session, await _connection(run))
+    await other.normalize(("candles", _stamped(sunday, "123.90")))
+    await ledger.replay()
+    assert (sunday, Decimal("123.90")) in await _price_days(session)
+
+
+async def test_a_replay_keeps_a_misdated_day_rewritten_since(session, run, ledger) -> None:
+    """Only the value the previous version filed there is removed: a price written on that
+    day since (another eToro connection's, whose rows are pruned now) is kept."""
+    monday = NOW.date() - timedelta(days=1)
+    sunday = monday - timedelta(days=1)
+    await ledger.normalize(*_ledger_entries(), ("candles", _stamped(monday, "124.10")))
+    instrument, quote = (
+        await session.execute(
+            text("select instrument_id, quote_instrument_id from finance.prices limit 1")
+        )
+    ).one()
+    await session.execute(
+        text(
+            "insert into finance.prices (instrument_id, quote_instrument_id, price, as_of_date,"
+            " source) values (:i, :q, 123.70, :d, 'etoro')"
+        ),
+        {"i": instrument, "q": quote, "d": sunday},
+    )
+    await ledger.replay()
+    assert (sunday, Decimal("123.70")) in await _price_days(session)
+
+
 # eToro Money (design §5.7, §5.12) -------------------------------------------------------------
 
 
@@ -880,6 +1048,106 @@ async def test_an_unknown_field_is_named_only_by_plain_names(ledger) -> None:
     report = await ledger.normalize(BALANCES, ("pnl", pnl), META)
     shown = {flag for flag in report.flagged if flag.startswith("pnl.clientPortfolio.")}
     assert shown == {"pnl.clientPortfolio.positions[].{}"}
+
+
+# `externalOperation.data` of an order lookup: JSON text of an object, inside a string.
+_OPERATION_COLUMNS = (
+    "external_operation_type, external_operation_reference_id, external_operation_data,"
+    " external_operation_data_creditor_type_id, external_operation_data_debitor_type_id,"
+    " external_operation_data_id, external_operation_data_status_id"
+)
+_OPERATION_MEMBERS = {"CreditorTypeId": 3, "DebitorTypeId": 7, "Id": 4100200300, "StatusID": 2}
+_OPERATION_REFERENCE = "0f9e8d7c-1111-4222-8333-944455556666"
+
+
+def _operation(data: Any) -> dict[str, Any]:
+    return {"type": "SyntheticOp", "referenceId": _OPERATION_REFERENCE, "data": data}
+
+
+async def _order(session, ledger: Ledger, columns: str = _OPERATION_COLUMNS) -> tuple[Any, ...]:
+    [row] = await _rows(
+        session,
+        f"select {columns} from finance.etoro_orders where connection_id = :c",
+        c=ledger.connection.id,
+    )
+    return tuple(row)
+
+
+async def test_an_order_lookups_external_operation_is_typed(session, ledger) -> None:
+    data = json.dumps(_OPERATION_MEMBERS)
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    assert not any(flag.startswith("order_lookup.") for flag in report.flagged)
+    typed = ("SyntheticOp", _OPERATION_REFERENCE, data, Decimal(3), Decimal(7))
+    assert await _order(session, ledger) == (*typed, Decimal(4100200300), Decimal(2))
+    # Normalizing again writes nothing: the row is the one first written.
+    written = await _order(session, ledger, "ctid::text")
+    again = await ledger.again()
+    assert (again.created, again.updated) == (0, 0)
+    assert await _order(session, ledger, "ctid::text") == written
+    # A replay fills the columns of a lookup stored before they were.
+    await session.execute(
+        text(
+            "update finance.etoro_orders set external_operation_type = null,"
+            " external_operation_data = null, external_operation_data_id = null"
+        )
+    )
+    await ledger.replay()
+    assert await _order(session, ledger) == (*typed, Decimal(4100200300), Decimal(2))
+
+
+async def test_an_order_lookup_without_an_external_operation(session, ledger) -> None:
+    report = await ledger.normalize(
+        *_ledger_entries(), ("order_lookup", lookup_body(ORDER, POSITION))
+    )
+    assert not any(flag.startswith("order_lookup.") for flag in report.flagged)
+    assert await _order(session, ledger) == (None,) * 7
+
+
+@pytest.mark.parametrize(
+    ("data", "flags", "members"),
+    [
+        # Not JSON, and JSON that is not an object: the text is kept, no member read.
+        ("Id=4100200300", {"data"}, (None, None, None, None)),
+        ("[4100200300]", {"data"}, (None, None, None, None)),
+        ('{"Id": NaN}', {"data"}, (None, None, None, None)),
+        # A member the fields do not list, named only when its name is a plain one.
+        (
+            '{"Id": 41, "StatusID": 2, "BrandNew": 5, "see https://x.test/": 6}',
+            {"data.BrandNew", "data.{}"},
+            (None, None, Decimal(41), Decimal(2)),
+        ),
+        # A listed member that is not a number: the others are still typed.
+        (
+            '{"CreditorTypeId": "3", "DebitorTypeId": true, "Id": {"a": 1}, "StatusID": 2}',
+            {"data.CreditorTypeId", "data.DebitorTypeId", "data.Id"},
+            (None, None, None, Decimal(2)),
+        ),
+        ('{"Id": null, "StatusID": 2.0}', set(), (None, None, None, Decimal(2))),
+    ],
+)
+async def test_external_operation_data_that_is_not_as_known_is_flagged_by_path(
+    session, ledger, data: str, flags: set[str], members: tuple[Decimal | None, ...]
+) -> None:
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    found = {flag for flag in report.flagged if flag.startswith("order_lookup.")}
+    assert found == {f"order_lookup.externalOperation.{flag}" for flag in flags}
+    assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, data, *members)
+    # The open still posts.
+    assert len(await _postings(session, f"open:{POSITION}")) == 2
+
+
+@pytest.mark.parametrize("data", [True, {"Id": 41}, {"Id": "forty-one"}])
+async def test_external_operation_data_that_is_not_text_is_flagged_and_left_out(
+    session, ledger, data: Any
+) -> None:
+    lookup = lookup_body(ORDER, POSITION) | {"externalOperation": _operation(data)}
+    report = await ledger.normalize(*_ledger_entries(), ("order_lookup", lookup))
+    found = {flag for flag in report.flagged if flag.startswith("order_lookup.")}
+    assert found == {"order_lookup.externalOperation.data"}
+    assert await _order(session, ledger) == ("SyntheticOp", _OPERATION_REFERENCE, *(None,) * 5)
+    assert len(await _postings(session, f"open:{POSITION}")) == 2
 
 
 # Merging instruments (design §5.6) ----------------------------------------------------------

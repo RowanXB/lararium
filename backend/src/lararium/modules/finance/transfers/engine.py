@@ -25,12 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.accounts import AccountRecord, get_account
 from lararium.modules.finance.errors import TransactionNotFoundError
 from lararium.modules.finance.identifiers import (
     IdentifierRecord,
     get_identifier,
+    named_account,
     register_card_merchant,
+    register_references,
     unassign_identifier,
 )
 from lararium.modules.finance.ledger import (
@@ -71,7 +74,6 @@ from lararium.modules.finance.transfers.pairs import (
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
-    ReviewReason,
     TransferRecord,
     TransferStatus,
     before_history,
@@ -370,15 +372,18 @@ async def _open(
     counterpart: AccountRecord,
     system: _System,
     settings: TransferSettings,
-    review_reason: ReviewReason | None,
+    relation: PairRelation,
     previous: TransferRecord | None,
 ) -> None:
     """Open the record's own transfer: before_history with a settlement when the
     counterpart is already held by that account's history (a manual hybrid account's first
     snapshot, or the days a manual transactions account's imports list or open with,
-    manual_predates; a connected account's first record, before_history); else inferred
-    with a placeholder when the counterpart is manual, or awaiting the counterpart's own
-    record when it is connected.
+    manual_predates; a connected account's first record, before_history); else, when the
+    counterpart is manual, inferred with a placeholder, or awaiting with none while the
+    record has a candidate of the same amount there (PairRelation.candidate_on: a
+    placeholder beside it would count the money twice if it is the real row, account type
+    catalog design §8.3 item 3); else awaiting the counterpart's own record when it is
+    connected. Its review reason is the one `relation` gives (PairRelation.review_reason).
 
     `previous`: the record's transfer this matching dissolved, if any. When the owner was
     told about it and the new one is the same situation (the same accounts and amount, and
@@ -393,7 +398,7 @@ async def _open(
         ):
             settlement_id = await _post_settlement(ctx, record, counterpart, system)
             status = "before_history"
-        else:
+        elif not relation.candidate_on(record.id, counterpart.id):
             placeholder_id = await _post_placeholder(ctx, record, counterpart, system)
             status = "inferred"
     elif await session.scalar(
@@ -410,6 +415,7 @@ async def _open(
     ):
         settlement_id = await _post_settlement(ctx, record, counterpart, system)
         status = "before_history"
+    review_reason = relation.review_reason(record.id, settled=status == "before_history")
     from_id, to_id = _accounts(record, counterpart.id)
     notified_at = None
     if previous is not None and (
@@ -591,13 +597,16 @@ async def _match_one(
     # 3. Identified, with no unique partner: its own transfer, for review if it has any.
     if not await _set_contra(ctx, record, system.in_transit):
         return others, set()
-    review_reason: ReviewReason | None = None
-    if relation.several(record.id):
-        review_reason = "several_candidates"
-    elif relation.candidates(record.id, exact=False):
-        review_reason = "amount_differs"
     counterpart = await get_account(session, counterpart_id)
-    await _open(ctx, record, counterpart, system, settings, review_reason, dissolved.get(record.id))
+    await _open(
+        ctx,
+        record,
+        counterpart,
+        system,
+        settings,
+        relation,
+        dissolved.get(record.id),
+    )
     return others, set()
 
 
@@ -811,6 +820,8 @@ async def preview_match(
     source: SourceRef | None = None,
     booking_date: date | None = None,
     complete: tuple[date, date] | None = None,
+    timed: bool = False,
+    occurred_tz: str | None = None,
 ) -> UUID | None:
     """The own record a row not yet posted would be linked with if it were posted now
     (Decision 6 steps 2-4, without writing): its unique partner in the pair relation
@@ -826,9 +837,15 @@ async def preview_match(
     `complete`: the days the row's import lists in full, which committing it would add
     (a counterpart found by amount and date is taken only from the first day imports list
     in full, design §5.8).
+    `timed`: the row's file gives its time to the second (its time_unit), as
+    eligible_records' timed reads it once posted (pairs._gate_day); a caller previewing a
+    row timed to the second passes True, else the preview may miss the pair posting forms.
+    `occurred_tz`: the time zone the row's time is read in, which posting stores and the
+    gate reads its booking day in (pairs._gate_day); None, the owner's.
 
-    The row's evidence is its counterparty identifier only: `counterparty.account_number`
-    is not read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
+    The row's evidence is its counterparty identifier only, with its payment reference
+    (`counterparty.reference`) for a shared payee's: `counterparty.account_number` is not
+    read. Only connectors give one (transfer-evidence design §5.1, item 2), and they
     post without previewing."""
     system = await system_account_ids(session)
     settings = await load_transfer_settings(session)
@@ -841,6 +858,8 @@ async def preview_match(
     # account (no holder), only its holders. (The importers that preview give bank accounts
     # only; this keeps the two definitions one should a card merchant reach it.)
     merchant = named is not None and named.kind == "card_merchant"
+    a = models.Account
+    type_key = await session.scalar(select(a.type_key).where(a.id == account_id))
     row = Pairable(
         id=_UNPOSTED,
         source=("unposted", "") if source is None else source,
@@ -849,11 +868,21 @@ async def preview_match(
         quantity=quantity,
         occurred_at=occurred_at,
         booking_date=await resolve_booking_date(session, occurred_at, booking_date),
-        holder=None if named is None else named.account_id,
+        # As eligible_records' holder (contra.named_account_sql): its account, or by the
+        # reference.
+        holder=(
+            None
+            if named is None
+            else await named_account(session, named.id, counterparty.reference)
+        ),
         bank_transfer=counterparty.bank_transfer,
         # A row naming a bank account, someone else's too, is never a weak counterpart.
         names_account=named is not None and not merchant,
         holders=frozenset(named.holders) if merchant and named is not None else frozenset(),
+        # As eligible_records' funded_by_transfer: read from the account's type.
+        funded_by_transfer=type_key in keys_funded_by("bank_transfer"),
+        timed=timed,
+        occurred_tz=occurred_tz,
     )
     listing = [] if complete is None else [(account_id, instrument_id, complete[0])]
     relation = await pair_relation(session, system, settings, adding=[row], listing=listing)
@@ -901,5 +930,20 @@ async def register_card_merchant_and_rematch(
     rematch_identifiers). Records that don't name it yet (posted before it was registered)
     are named by their connector's next normalize (Monzo's replays them)."""
     record = await register_card_merchant(ctx, merchant_id, account_ids)
+    await rematch_identifiers(ctx, [record.id], heal=heal)
+    return record
+
+
+async def register_references_and_rematch(
+    ctx: CommandContext,
+    value: str,
+    references: Sequence[tuple[UUID, str]],
+    *,
+    heal: bool = True,
+) -> IdentifierRecord:
+    """register_references, then match again every record naming the bank account, so the
+    changed references take effect at once (healing unless `heal` is False, as in
+    rematch_identifiers)."""
+    record = await register_references(ctx, value, references)
     await rematch_identifiers(ctx, [record.id], heal=heal)
     return record

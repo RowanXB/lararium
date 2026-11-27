@@ -17,7 +17,29 @@ import {
   uploadIbkrStatement,
   uploadTrading212Export,
 } from "../api";
-import { ConnectionsPage } from "./ConnectionsPage";
+import { ConnectForm, ConnectionsPage } from "./ConnectionsPage";
+
+function apiType(key: string, institution: string, connector: string, config = {}) {
+  return {
+    key,
+    institution,
+    label: "",
+    name: institution,
+    shape: null,
+    api: { connector, config },
+    files: [],
+    funding: [],
+    family: null,
+  };
+}
+
+// One API type per connector; the Stocks ISA stands for Trading 212.
+const API_TYPES = [
+  apiType("monzo", "Monzo", "monzo"),
+  apiType("ibkr", "Interactive Brokers", "ibkr"),
+  apiType("trading212.stocks_isa", "Trading 212", "trading212", { account_kind: "isa" }),
+  apiType("etoro", "eToro", "etoro"),
+];
 
 const CONNECTION = {
   id: "0190a0b0-0000-7000-8000-0000000000d1",
@@ -65,6 +87,10 @@ function renderPage(client = new QueryClient()) {
   render(
     <QueryClientProvider client={client}>
       <ConnectionsPage />
+      {/* The add forms live on the add-account page; they're tested here beside the list. */}
+      {API_TYPES.map((type) => (
+        <ConnectForm key={type.key} type={type} />
+      ))}
     </QueryClientProvider>,
   );
 }
@@ -306,13 +332,13 @@ it("shows why a statement upload failed", async () => {
 it("highlights a token expiring within 14 days", async () => {
   vi.mocked(listConnections).mockResolvedValue({ data: [ibkrExpiringIn(5)] } as never);
   renderPage();
-  expect(await screen.findByText(/Token expires on/)).toHaveClass("text-amber-600");
+  expect(await screen.findByText(/Token expires on/)).toHaveClass("text-warning");
 });
 
 it("does not highlight a token expiring later", async () => {
   vi.mocked(listConnections).mockResolvedValue({ data: [ibkrExpiringIn(40)] } as never);
   renderPage();
-  expect(await screen.findByText(/Token expires on/)).not.toHaveClass("text-amber-600");
+  expect(await screen.findByText(/Token expires on/)).not.toHaveClass("text-warning");
 });
 
 it("does not offer Authorise for IBKR and asks to update a rejected token", async () => {
@@ -365,7 +391,7 @@ it("adds a Trading 212 connection and clears the keys", async () => {
     ),
   ).toBeInTheDocument();
   await user.type(within(form).getByLabelText("Display name"), "Trading 212 ISA");
-  await user.selectOptions(within(form).getByLabelText("Account type"), "isa");
+  expect(within(form).queryByLabelText("Account type")).toBeNull();
   const key = within(form).getByLabelText("API key");
   const secret = within(form).getByLabelText("API secret");
   expect(key).toHaveAttribute("type", "password");

@@ -15,7 +15,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -51,6 +51,11 @@ DATA_PAGE = 500
 BALANCE_HISTORY_DAYS = 365
 INSTRUMENTS_PER_REQUEST = 50
 CANDLE_LIMIT = 2000
+# A daily candle's day is the UTC date of its `time` plus this. eToro stamps each day's candle
+# at midnight in Israel: 22:00 UTC the evening before (UTC+2), 21:00 in summer (UTC+3). Half a
+# day later is that day whatever the offset, with no time zone to know; a candle stamped at
+# midnight UTC stays on its own date.
+CANDLE_DAY_SHIFT = timedelta(hours=12)
 # A walk that has not ended after this many pages is a pagination fault, not a history.
 MAX_PAGES = 300
 
@@ -385,14 +390,15 @@ class EtoroClient:
         return await self._list("exchanges", "exchangeInfo")
 
     async def candles(self, instrument_id: int | Decimal, start: date, end: date) -> list[Item]:
-        """Daily candles from `start` to `end`, both included, following `nextCursor`."""
+        """The daily candles of the days `start` to `end`, both included (by candle_day: from
+        noon UTC the day before `start`, to noon UTC on `end`, exclusive), following
+        `nextCursor`."""
         if end < start:
             raise ValueError("a candle range ends on or after its start")
         query = {
             "interval": "1d",
-            "from": f"{start.isoformat()}T00:00:00Z",
-            # `to` is exclusive: the day after `end`.
-            "to": f"{(end + timedelta(days=1)).isoformat()}T00:00:00Z",
+            "from": _utc(_day_start(start)),
+            "to": _utc(_day_start(end + timedelta(days=1))),
             "limit": str(CANDLE_LIMIT),
         }
         return await self._follow(
@@ -402,3 +408,17 @@ class EtoroClient:
             query=query,
             token=("nextCursor", "cursor"),
         )
+
+
+def candle_day(moment: datetime) -> date:
+    """The day a daily candle stamped at `moment` is the candle of (CANDLE_DAY_SHIFT)."""
+    return (moment.astimezone(UTC) + CANDLE_DAY_SHIFT).date()
+
+
+def _day_start(day: date) -> datetime:
+    """The earliest moment a candle of `day` can be stamped at."""
+    return datetime.combine(day, time(), UTC) - CANDLE_DAY_SHIFT
+
+
+def _utc(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")

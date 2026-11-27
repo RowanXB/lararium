@@ -726,6 +726,7 @@ class _Normalizer:
             source=("connection", f"{self.connection_id}:{external_id}"),
             own_account_id=own_account_id,
             counterparty_identifier_id=fields.identifier_id,
+            payment_reference=fields.reference,
             other_postings=other_postings,
         )
 

@@ -8,6 +8,9 @@
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
+    --color-income: var(--income);
+    --color-spending: var(--spending);
+    --color-warning: var(--warning);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -83,38 +86,44 @@
     --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* The app has one theme, set by class="dark" on <html>. Chart colours repeat in
+   src/lib/theme.ts, because a canvas can't read these. */
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    color-scheme: dark;
+    --background: #0a0f1e;
+    --foreground: #e8ecf7;
+    --card: #111830;
+    --card-foreground: #e8ecf7;
+    --popover: #151d38;
+    --popover-foreground: #e8ecf7;
+    --primary: #7aa2ff;
+    --primary-foreground: #0a0f1e;
+    --secondary: #1b2443;
+    --secondary-foreground: #e8ecf7;
+    --muted: #1b2443;
+    --muted-foreground: #8c96b3;
+    --accent: #1b2443;
+    --accent-foreground: #e8ecf7;
+    --destructive: #ff6b7a;
+    --border: #232c4a;
+    --input: #2b3558;
+    --ring: #7aa2ff;
+    --income: #3dd6a3;
+    --spending: #ff9466;
+    --warning: #f5c05b;
+    --chart-1: #7aa2ff;
+    --chart-2: #3dd6a3;
+    --chart-3: #ff9466;
+    --chart-4: #b48cff;
+    --chart-5: #f5c05b;
+    --sidebar: #111830;
+    --sidebar-foreground: #e8ecf7;
+    --sidebar-primary: #7aa2ff;
+    --sidebar-primary-foreground: #0a0f1e;
+    --sidebar-accent: #1b2443;
+    --sidebar-accent-foreground: #e8ecf7;
+    --sidebar-border: #232c4a;
+    --sidebar-ring: #7aa2ff;
 }
 
 @layer base {
@@ -123,6 +132,9 @@
     }
   body {
     @apply bg-background text-foreground;
+    /* One soft light behind the top of the page; everything else stays flat. */
+    background-image: radial-gradient(60rem 28rem at 50% -12rem, rgb(122 162 255 / 0.14), transparent 70%);
+    background-repeat: no-repeat;
     }
   html {
     @apply font-sans;

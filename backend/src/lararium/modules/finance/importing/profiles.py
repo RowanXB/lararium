@@ -228,6 +228,22 @@ def _check_pattern(pattern: str) -> str:
 type Pattern = Annotated[str, Field(min_length=1, max_length=500), AfterValidator(_check_pattern)]
 
 
+def _check_period_pattern(pattern: str) -> str:
+    try:
+        compiled = re.compile(pattern)
+    except re.error as error:
+        raise ValueError(f"not a regular expression: {error}") from None
+    missing = [name for name in ("start", "end") if name not in compiled.groupindex]
+    if missing:
+        raise ValueError(f"the file name pattern lacks the named groups: {', '.join(missing)}")
+    return pattern
+
+
+type PeriodPattern = Annotated[
+    str, Field(min_length=1, max_length=500), AfterValidator(_check_period_pattern)
+]
+
+
 class CsvExtract(BaseModel):
     """Typed fields read out of one column: the first pattern that matches a non-empty cell
     in full fills the fields its named groups name (those that match); a cell no pattern
@@ -271,6 +287,11 @@ class CsvProfileConfig(BaseModel):
     # The currency of every row, for a file that states it once, not per row (LemFi's
     # column labels, "Money in (GBP)"): rather than the one picked at upload.
     currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")] | None = None
+    # Searched in the uploaded file's name, for a bank that names its export by the period
+    # chosen (Trading 212): named groups start and end, ISO dates (YYYY-MM-DD). A match is the
+    # file's period, listed in full but for its last day, which the export may have been
+    # taken partway through.
+    period_from_filename: PeriodPattern | None = None
 
     def read_columns(self) -> list[str]:
         """Every column the profile reads: mapped, filtered on or extracted from."""

@@ -101,6 +101,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -134,6 +145,10 @@
               }
             ],
             "title": "Closed On"
+          },
+          "excluded_from_reports": {
+            "title": "Excluded From Reports",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -252,6 +267,17 @@
             ],
             "title": "Tax Wrapper",
             "type": "string"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
           }
         },
         "required": [
@@ -269,22 +295,250 @@
           "status",
           "opened_on",
           "closed_on",
-          "system"
+          "system",
+          "excluded_from_reports",
+          "type_key"
         ],
         "title": "AccountOut",
         "type": "object"
       },
       "AccountRename": {
+        "description": "Rename the account, set its type (one with no API), or both; type_key null clears it.",
         "properties": {
           "name": {
-            "title": "Name",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "type_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Key"
+          }
+        },
+        "title": "AccountRename",
+        "type": "object"
+      },
+      "AccountReportingUpdate": {
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "title": "AccountReportingUpdate",
+        "type": "object"
+      },
+      "AccountShapeOut": {
+        "properties": {
+          "balance_mode": {
+            "enum": [
+              "transactions",
+              "snapshots",
+              "hybrid"
+            ],
+            "title": "Balance Mode",
+            "type": "string"
+          },
+          "ledger_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asset",
+                  "liability",
+                  "income",
+                  "expense",
+                  "equity"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger Type"
+          },
+          "subtype": {
+            "enum": [
+              "bank",
+              "savings_pot",
+              "broker",
+              "exchange",
+              "wallet",
+              "in_transit",
+              "manual_asset",
+              "other"
+            ],
+            "title": "Subtype",
+            "type": "string"
+          },
+          "tax_wrapper": {
+            "enum": [
+              "none",
+              "isa",
+              "sipp",
+              "lisa",
+              "gia"
+            ],
+            "title": "Tax Wrapper",
             "type": "string"
           }
         },
         "required": [
-          "name"
+          "ledger_type",
+          "subtype",
+          "tax_wrapper",
+          "balance_mode"
         ],
-        "title": "AccountRename",
+        "title": "AccountShapeOut",
+        "type": "object"
+      },
+      "AccountTypeApiOut": {
+        "properties": {
+          "config": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "title": "Config",
+            "type": "object"
+          },
+          "connector": {
+            "title": "Connector",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector",
+          "config"
+        ],
+        "title": "AccountTypeApiOut",
+        "type": "object"
+      },
+      "AccountTypeFileOut": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "recommended": {
+            "title": "Recommended",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "label",
+          "format",
+          "recommended",
+          "config"
+        ],
+        "title": "AccountTypeFileOut",
+        "type": "object"
+      },
+      "AccountTypeOut": {
+        "properties": {
+          "api": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountTypeApiOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/AccountTypeFileOut"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "funding": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Funding",
+            "type": "array"
+          },
+          "institution": {
+            "title": "Institution",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "shape": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountShapeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "institution",
+          "label",
+          "name",
+          "shape",
+          "api",
+          "files",
+          "funding",
+          "family"
+        ],
+        "title": "AccountTypeOut",
         "type": "object"
       },
       "AmountFormat": {
@@ -589,6 +843,201 @@
         },
         "maxItems": 50,
         "type": "array"
+      },
+      "CashFlowCategoryOut": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowCategoryOut",
+        "type": "object"
+      },
+      "CashFlowHiddenAccountOut": {
+        "description": "Money moved between an account left out of reports and those still in them.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "moved_in": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved In",
+            "type": "string"
+          },
+          "moved_out": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Moved Out",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "name",
+          "moved_in",
+          "moved_out"
+        ],
+        "title": "CashFlowHiddenAccountOut",
+        "type": "object"
+      },
+      "CashFlowOut": {
+        "description": "Income and spending in the reporting currency; spending is positive.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowCategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "hidden_accounts": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowHiddenAccountOut"
+            },
+            "title": "Hidden Accounts",
+            "type": "array"
+          },
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "net": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Net",
+            "type": "string"
+          },
+          "payees": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPayeeOut"
+            },
+            "title": "Payees",
+            "type": "array"
+          },
+          "periods": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowPeriodOut"
+            },
+            "title": "Periods",
+            "type": "array"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "bucket",
+          "income",
+          "spending",
+          "net",
+          "missing_count",
+          "periods",
+          "categories",
+          "payees",
+          "hidden_accounts"
+        ],
+        "title": "CashFlowOut",
+        "type": "object"
+      },
+      "CashFlowPayeeOut": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "spending"
+        ],
+        "title": "CashFlowPayeeOut",
+        "type": "object"
+      },
+      "CashFlowPeriodOut": {
+        "properties": {
+          "income": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Income",
+            "type": "string"
+          },
+          "spending": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Spending",
+            "type": "string"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "income",
+          "spending"
+        ],
+        "title": "CashFlowPeriodOut",
+        "type": "object"
       },
       "ConnectionOut": {
         "properties": {
@@ -1053,6 +1502,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/FooterLabel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "period_from_filename": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeriodPattern"
               },
               {
                 "type": "null"
@@ -1550,6 +2009,13 @@
             "title": "Kind",
             "type": "string"
           },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/IdentifierReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
           "sort_code": {
             "anyOf": [
               {
@@ -1574,11 +2040,54 @@
           "account_number",
           "account_id",
           "holder_account_ids",
+          "references",
           "dismissed_at",
           "created_by",
           "created_at"
         ],
         "title": "IdentifierOut",
+        "type": "object"
+      },
+      "IdentifierReference": {
+        "description": "One own account behind a shared payee bank account, told apart by the payment\nreference it is paid with (stored trimmed and upper-cased).",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "reference"
+        ],
+        "title": "IdentifierReference",
+        "type": "object"
+      },
+      "IdentifierReferencesRegister": {
+        "description": "The own accounts payments to a shared payee bank account go into, by reference; none\nremoves them.",
+        "properties": {
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/IdentifierReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "references"
+        ],
+        "title": "IdentifierReferencesRegister",
         "type": "object"
       },
       "ImportBatchDetailOut": {
@@ -3062,6 +3571,34 @@
         "title": "InstrumentUpdate",
         "type": "object"
       },
+      "JSONValue": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JSONValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "MainAccountUpdate": {
         "properties": {
           "main_account_id": {
@@ -3286,6 +3823,11 @@
         ],
         "title": "PdfProfileConfig",
         "type": "object"
+      },
+      "PeriodPattern": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
       },
       "PostingCreate": {
         "properties": {
@@ -4163,7 +4705,8 @@
               {
                 "enum": [
                   "several_candidates",
-                  "amount_differs"
+                  "amount_differs",
+                  "not_listed_in_full"
                 ],
                 "type": "string"
               },
@@ -5089,6 +5632,32 @@
         ]
       }
     },
+    "/api/v1/finance/account-types": {
+      "get": {
+        "description": "The account types the owner can pick: where an account's data comes from and how it\nposts. Only a type with no API creates an account here; one with an API is connected.",
+        "operationId": "list_account_types",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountTypeOut"
+                  },
+                  "title": "Response List Account Types",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Account Types",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts": {
       "get": {
         "operationId": "list_accounts",
@@ -5195,8 +5764,51 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/identifiers/references": {
+      "post": {
+        "description": "Register the own accounts a shared payee bank account pays into, each by the payment\nreference it is paid with, replacing the ones it had; none removes them. The bank account\nmust be registered to no account. Every record naming it is matched again.",
+        "operationId": "register_identifier_references",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifierReferencesRegister"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifierOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Identifier References",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}": {
       "patch": {
+        "description": "Rename the account, set its type, or both, in one command: if either is refused,\nneither happens. Setting or clearing the type needs an account that can take imports (a\nconnector owns a connected account's); a type must have no API and agree with the\naccount's shape. type_key null clears it.",
         "operationId": "rename_account",
         "parameters": [
           {
@@ -5556,6 +6168,60 @@
         ]
       }
     },
+    "/api/v1/finance/accounts/{account_id}/reporting": {
+      "post": {
+        "description": "Leave the account out of net worth, holdings and cash flow, or put it back.",
+        "operationId": "set_account_reporting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountReportingUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Account Reporting",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/accounts/{account_id}/snapshots": {
       "post": {
         "operationId": "record_snapshot",
@@ -5609,6 +6275,89 @@
         ]
       }
     },
+    "/api/v1/finance/cash-flow": {
+      "get": {
+        "description": "Income and spending by period, category and payee, without the accounts left out of\nreports; defaults to the 365 days up to and including today.",
+        "operationId": "get_cash_flow",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashFlowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Cash Flow",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/fx-rates": {
       "post": {
         "operationId": "record_fx_rate",
@@ -5645,7 +6394,7 @@
     },
     "/api/v1/finance/holdings": {
       "get": {
-        "description": "Holdings valued in the reporting currency; the date defaults to today.",
+        "description": "Holdings valued in the reporting currency, without the accounts left out of reports\nunless `all_accounts`; the date defaults to today.",
         "operationId": "get_holdings",
         "parameters": [
           {
@@ -5663,6 +6412,16 @@
                 }
               ],
               "title": "Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_accounts",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Accounts",
+              "type": "boolean"
             }
           }
         ],
@@ -6219,7 +6978,7 @@
     },
     "/api/v1/finance/net-worth": {
       "get": {
-        "description": "Daily net worth; defaults to the 365 days up to and including today.",
+        "description": "Daily net worth, without the accounts left out of reports; defaults to the 365 days up\nto and including today.",
         "operationId": "get_net_worth",
         "parameters": [
           {

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useId, useState } from "react";
 
 import {
+  type AccountTypeOut,
   authorizeConnection,
   type ConnectionOut,
   createEtoroConnection,
@@ -432,12 +433,12 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
           <p className="text-sm text-destructive">Last error: {connection.last_error}</p>
         )}
         {connection.warnings.map((warning) => (
-          <p key={warning} className="text-sm text-amber-600">
+          <p key={warning} className="text-sm text-warning">
             {warning}
           </p>
         ))}
         {expiry && (
-          <p className={expiry.soon ? "text-sm font-medium text-amber-600" : "text-sm"}>
+          <p className={expiry.soon ? "text-sm font-medium text-warning" : "text-sm"}>
             Token expires on {expiry.date}
           </p>
         )}
@@ -486,7 +487,13 @@ function ConnectionCard({ connection }: { connection: ConnectionOut }) {
   );
 }
 
-function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
+function AddMonzoForm({
+  redirectUri,
+  onAdded,
+}: {
+  redirectUri: string | undefined;
+  onAdded?: () => void;
+}) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const [clientId, setClientId] = useState("");
@@ -506,6 +513,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
       setDisplayName("");
       setClientId("");
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     onError: (failure) => setError(errorMessage(failure)),
   });
@@ -564,7 +572,7 @@ function AddMonzoForm({ redirectUri }: { redirectUri: string | undefined }) {
   );
 }
 
-function AddIbkrForm() {
+function AddIbkrForm({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const form = useIbkrCredentialsForm(
@@ -580,6 +588,7 @@ function AddIbkrForm() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     { doneMessage: "Interactive Brokers connected" },
   );
@@ -613,11 +622,15 @@ function AddIbkrForm() {
   );
 }
 
-function AddTrading212Form() {
+function AddTrading212Form({
+  kind,
+  onAdded,
+}: {
+  kind: "invest" | "isa";
+  onAdded?: () => void;
+}) {
   const queryClient = useQueryClient();
-  const kindId = useId();
   const [displayName, setDisplayName] = useState("");
-  const [kind, setKind] = useState<"invest" | "isa">("invest");
   const form = useKeysForm(
     TRADING212_KEYS,
     async (keys) =>
@@ -628,6 +641,7 @@ function AddTrading212Form() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     "Trading 212 connected",
   );
@@ -643,18 +657,6 @@ function AddTrading212Form() {
           className="grid gap-4 sm:grid-cols-2"
         >
           <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
-          <div className="grid gap-1.5">
-            <Label htmlFor={kindId}>Account type</Label>
-            <select
-              id={kindId}
-              value={kind}
-              onChange={(event) => setKind(event.target.value === "isa" ? "isa" : "invest")}
-              className="h-9 rounded-md border bg-transparent px-3 text-sm"
-            >
-              <option value="invest">Invest</option>
-              <option value="isa">Stocks ISA</option>
-            </select>
-          </div>
           {form.fields}
           <p className="text-sm text-muted-foreground sm:col-span-2">
             Create an API key in the Trading 212 app under Settings → API (Beta), for this account
@@ -673,7 +675,7 @@ function AddTrading212Form() {
   );
 }
 
-function AddEtoroForm() {
+function AddEtoroForm({ onAdded }: { onAdded?: () => void }) {
   const queryClient = useQueryClient();
   const [displayName, setDisplayName] = useState("");
   const form = useKeysForm(
@@ -686,6 +688,7 @@ function AddEtoroForm() {
     () => {
       setDisplayName("");
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
     },
     "eToro connected",
   );
@@ -715,6 +718,41 @@ function AddEtoroForm() {
   );
 }
 
+// The form that connects an account type's API; onAdded runs once the connection exists.
+export function ConnectForm({ type, onAdded }: { type: AccountTypeOut; onAdded?: () => void }) {
+  const connector = type.api?.connector;
+  const connections = useQuery({
+    queryKey: ["connections"],
+    queryFn: async () => (await listConnections({ throwOnError: true })).data,
+    enabled: connector === "monzo",
+  });
+  switch (connector) {
+    case "monzo":
+      return (
+        <AddMonzoForm
+          redirectUri={
+            connections.data?.find((connection) => connection.redirect_uri)?.redirect_uri ??
+            undefined
+          }
+          onAdded={onAdded}
+        />
+      );
+    case "ibkr":
+      return <AddIbkrForm onAdded={onAdded} />;
+    case "trading212":
+      return (
+        <AddTrading212Form
+          kind={type.api?.config.account_kind === "isa" ? "isa" : "invest"}
+          onAdded={onAdded}
+        />
+      );
+    case "etoro":
+      return <AddEtoroForm onAdded={onAdded} />;
+    default:
+      return null;
+  }
+}
+
 export function ConnectionsPage() {
   const connections = useQuery({
     queryKey: ["connections"],
@@ -741,12 +779,11 @@ export function ConnectionsPage() {
       {list.map((connection) => (
         <ConnectionCard key={connection.id} connection={connection} />
       ))}
-      <AddMonzoForm
-        redirectUri={list.find((connection) => connection.redirect_uri)?.redirect_uri ?? undefined}
-      />
-      <AddIbkrForm />
-      <AddTrading212Form />
-      <AddEtoroForm />
+      {connections.isSuccess && list.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No connections yet. Connect a bank or broker from Accounts → Add account.
+        </p>
+      )}
     </div>
   );
 }

@@ -20,8 +20,11 @@ Per sync (design §5.2), in order:
    first sync takes 365 days.
 7. Once a day (`daily_at`): closed-events, stockback, the market data of the instruments held
    or traded, and daily candles of those held, from each one's first open (then from the last
-   day fetched, `candles_to`, less 7 days). Between those, a sync fetches the market data of
-   an instrument held or traded that the connection has none of yet.
+   day fetched, `candles_to`, less 7 days). A cursor whose `candles_rule` is not CANDLES_RULE
+   was fetched before the first open day's candle was asked for (stamped the evening before,
+   client.candle_day): its candles are asked again from each held instrument's first open
+   once. Between those, a sync fetches the market data of an instrument held or traded that
+   the connection has none of yet.
 
 Every item is stored as eToro sent it, its numbers as exact text; a report (`/me`, balances,
 PnL, aggregate, breakdown, balance history) is also sighted (report_sightings), so it is dated
@@ -77,7 +80,7 @@ from lararium.modules.finance.etoro.fields import (
     ENDPOINTS,
     STATEMENT_SHEETS,
 )
-from lararium.modules.finance.etoro.normalize import normalize
+from lararium.modules.finance.etoro.normalize import NormalizeReport, normalize
 from lararium.modules.finance.etoro.statement import (
     STATEMENT_ZONE,
     EtoroStatement,
@@ -107,6 +110,9 @@ DAILY_EVERY = timedelta(hours=24)
 # Trade history, balance history and candles are asked again from this far before the latest
 # day stored, for rows eToro adds late.
 OVERLAP = timedelta(days=7)
+# The candle range rule `candles_to` was fetched under (client.candles): from the day of a
+# candle stamped the evening before.
+CANDLES_RULE = "candle-day-1"
 # A first walk back that has not ended after this many windows (40 years) is a fault.
 MAX_WINDOWS = 40
 # The orders a sync looks up at most (`orders:lookup`), all in its one transaction.
@@ -240,6 +246,19 @@ async def publish_flags(
     return await connector_flags.publish_flags(
         ctx, found, checked, cursor=None, prefix=FLAGGED_PREFIX, label="an eToro"
     )
+
+
+async def publish_replayed(ctx: SyncContext, report: NormalizeReport) -> None:
+    """Publish the flags of a run outside a sync and an upload (a review decision) when it
+    replayed. The replay took the new normalizer version, so no later run replays: its flags
+    are all there is to flag, and the ones from before would stay for good. The caller holds
+    the connection's lock."""
+    if not report.replayed:
+        return
+    found = {(FIELDS, flag) for flag in report.flagged}
+    found |= {(IN_FULL, flag) for flag in report.flags_in_full}
+    flags = await publish_flags(ctx, found, {FIELDS, IN_FULL})
+    await merge_cursor(ctx.command, ctx.connection.id, flags)
 
 
 class _Seen:
@@ -480,6 +499,8 @@ class _Run:
             await self.store("exchanges", item)
 
         fetched = _cursor_texts(self.cursor, "candles_to")
+        if self.cursor.get("candles_rule") != CANDLES_RULE:
+            fetched = {}  # from each first open again (module doc)
         candles_to: dict[str, JSONValue] = dict(fetched)
         for instrument in sorted(held, key=int):
             last = _iso_date(fetched.get(instrument))
@@ -542,6 +563,7 @@ class _Run:
             "looked_up": looked_up,
             "to_look_up": to_look_up,
             "candles_to": candles_to if isinstance(candles_to, dict) else {},
+            "candles_rule": CANDLES_RULE if daily else self.cursor.get("candles_rule"),
         }
 
 

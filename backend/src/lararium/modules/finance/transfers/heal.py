@@ -7,7 +7,7 @@ from decimal import Decimal
 from itertools import chain
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, or_, select, union
+from sqlalchemy import and_, case, exists, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -27,7 +27,6 @@ from lararium.modules.finance.transfers.pairs import (
 )
 from lararium.modules.finance.transfers.queries import (
     OPEN_STATUSES,
-    ReviewReason,
     before_history,
     history_starts,
     manual_predates,
@@ -112,12 +111,17 @@ async def _pair_states(
     a unique pair (each the other's only candidate) not yet matched; a matched pair that
     is no longer unique, or whose conversion (its settlement, for two currencies) is not
     the one its records and their fees give now; and an open transfer whose review reason
-    is not the one its own record's candidates give (several_candidates if it has several,
-    PairRelation.several, else amount_differs if it has any of another amount, else
-    none)."""
-    tr = models.Transfer
+    is not the one its own record's candidates give (PairRelation.review_reason, as
+    engine._open's), or, on a manual counterpart, whose status is not the one engine._open
+    gives: awaiting, with no placeholder, while its record has a candidate of the same
+    amount there (PairRelation.candidate_on), else inferred (one settled before history
+    instead is checked by (d))."""
+    tr, a = models.Transfer, models.Account
     due: set[UUID] = set()
     matched: set[tuple[UUID, UUID]] = set()
+    counterpart = case(
+        (tr.out_transaction_id.is_not(None), tr.to_account_id), else_=tr.from_account_id
+    )
     rows = list(
         await session.execute(
             select(
@@ -126,15 +130,19 @@ async def _pair_states(
                 tr.in_transaction_id,
                 tr.review_reason,
                 tr.settlement_transaction_id,
+                counterpart.label("counterpart_id"),
+                exists()
+                .where(a.id == counterpart, a.source_kind == "manual")
+                .label("manual_counterpart"),
             ).where(tr.status.in_(("matched", *OPEN_STATUSES)))
         )
     )
-    settled = [
+    settlement_ids = [
         row.settlement_transaction_id
         for row in rows
         if row.status == "matched" and row.settlement_transaction_id is not None
     ]
-    conversions = await _conversions(session, settled) if settled else {}
+    conversions = await _conversions(session, settlement_ids) if settlement_ids else {}
     for row in rows:
         if row.status == "matched":
             matched.add((row.out_transaction_id, row.in_transaction_id))
@@ -154,14 +162,16 @@ async def _pair_states(
         present = row.out_transaction_id or row.in_transaction_id
         if present is None or (row.out_transaction_id and row.in_transaction_id):
             continue
-        expected: ReviewReason | None = None
-        if relation.several(present):
-            expected = "several_candidates"
-        elif relation.candidates(present, exact=False):
-            expected = "amount_differs"
         # (e) an open transfer whose review reason disagrees with its record's candidates.
-        if row.review_reason != expected:
+        settled = row.status == "before_history"
+        if row.review_reason != relation.review_reason(present, settled=settled):
             due.add(present)
+        # (e) one on a manual counterpart with a placeholder beside a candidate of the same
+        # amount there, or with none and no such candidate (account type catalog design §8.3
+        # item 3). Whether it is settled before history instead is checked by (d).
+        elif row.manual_counterpart and not settled:
+            if (row.status == "awaiting") != relation.candidate_on(present, row.counterpart_id):
+                due.add(present)
     # (c) a unique pair not yet a matched transfer.
     for record_id in chain(relation.exact, relation.converts, relation.by_card):
         partner = relation.partner(record_id)
@@ -281,7 +291,8 @@ async def records_to_heal(
             )
             # (d) a lone record whose manual counterpart's first snapshot (in its
             # instrument) now contains it, or no longer does (an earlier one was recorded):
-            # the same manual_predates engine._open decides by.
+            # the same manual_predates engine._open decides by. One awaiting there (beside a
+            # candidate, with no placeholder) is settled the same way.
             manual = aliased(models.Account, name="manual_counterpart")
             contained = manual_predates(record_columns(own), counterpart, settings)
             queries.append(
@@ -293,7 +304,7 @@ async def records_to_heal(
                     other_leg.is_(None),
                     or_(
                         and_(tr.status == "before_history", ~contained),
-                        and_(tr.status == "inferred", contained),
+                        and_(tr.status.in_(("inferred", "awaiting")), contained),
                     ),
                 )
             )
