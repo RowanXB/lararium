@@ -19,7 +19,8 @@ funding either way, commissions paid), transfers between Spot and Options (liste
 universal transfer history and by the options bill as a `TRANSFER` row, rule 2) and options
 bill rows (premiums and exercise profit either way, fees paid), fiat deposits (some pending first)
 and withdrawals by bank on Spot, card purchases (from a card, or from the cash balance) and sales
-on Spot, P2P buys and sells on Funding, and Pay payments and receipts on Funding or Spot. The fiat
+on Spot, P2P buys and sells on Funding, and Pay payments and receipts on Funding or Spot (a
+payment at times drawn from both). The fiat
 is EUR (`FIAT`), in cents; the other kinds never move it. Rebates are not drawn: Binance serves
 them from June 2020 only, and the histories start in July 2017. No wallet ever holds less than
 nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
@@ -137,6 +138,7 @@ TWO_SIDED = frozenset(
         "futures_transfer",
         "options_transfer",
         "cash_purchase",
+        "split_pay",
     }
 )
 
@@ -1311,8 +1313,11 @@ def _pay(b: _Builder) -> Record | None:
         quantity = b.amount(at_most=b.held[(wallet, asset)])
         if quantity == 0:
             return None
+        cost = {"2" if wallet == "spot" else "1": _plain(quantity)}
+        # Its costs name its wallet, or are left out (the row's `walletType` says it).
+        costs: ApiValue = cost if b.draw(st.booleans()) else {}
         details: list[ApiValue] = [
-            {"currency": asset, "amount": _plain(quantity), "walletAssetCost": {}}
+            {"currency": asset, "amount": _plain(quantity), "walletAssetCost": costs}
         ]
     else:
         asset = b.draw(st.sampled_from(ASSETS))
@@ -1330,6 +1335,43 @@ def _pay(b: _Builder) -> Record | None:
         fundsDetail=details,
     )
     return Record("pay", (("pay", ((b.now, row),)),), (Effect(b.now, wallet, asset, delta),))
+
+
+def _split_pay(b: _Builder) -> Record | None:
+    """A combined Pay payment of one asset, part from Funding and part from Spot
+    (`walletAssetCost` by wallet type: 1 Funding, 2 Spot)."""
+    on_funding = {asset for _, asset in b.holdings(("funding",))}
+    choices = sorted(asset for _, asset in b.holdings(("spot",)) if asset in on_funding)
+    if not choices:
+        return None
+    asset = b.draw(st.sampled_from(choices))
+    from_funding = b.amount(at_most=b.held[("funding", asset)])
+    from_spot = b.amount(at_most=b.held[("spot", asset)])
+    if from_funding == 0 or from_spot == 0:
+        return None
+    total = from_funding + from_spot
+    row = build_row(
+        "pay",
+        transactionId=f"pay-{b.id()}",
+        orderType="PAY",
+        transactionTime=b.now,
+        amount=_plain(-total),
+        currency=asset,
+        walletType=1,
+        walletTypes=[1, 2],
+        fundsDetail=[
+            {
+                "currency": asset,
+                "amount": _plain(total),
+                "walletAssetCost": {"1": _plain(from_funding), "2": _plain(from_spot)},
+            }
+        ],
+    )
+    effects = (
+        Effect(b.now, "funding", asset, -from_funding),
+        Effect(b.now, "spot", asset, -from_spot),
+    )
+    return Record("split_pay", (("pay", ((b.now, row),)),), effects)
 
 
 _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
@@ -1365,6 +1407,7 @@ _KINDS: dict[str, Callable[[_Builder], Record | None]] = {
     "card_sale": _card_sale,
     "p2p": _p2p,
     "pay": _pay,
+    "split_pay": _split_pay,
 }
 
 

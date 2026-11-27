@@ -38,6 +38,7 @@ from .fixtures import BASE_TIME_MS, HOUR_MS, FakeBinance, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
+    differences,
     holdings,
     ingest,
     keys,
@@ -53,8 +54,10 @@ from .syncing import (
     RecordingNotifier,
     binance_connection,
     context,
+    funding_rows,
     later_config,
     run_binance_sync,
+    spot_rows,
 )
 
 TRANSFERS = "universal-transfer"
@@ -508,35 +511,11 @@ async def test_travel_rule_row_without_its_movement_is_unlinked(session, run) ->
 # Reconciliation: Spot and Funding with a consistent history of the family's records.
 
 
-def _spot(*balances: tuple[str, str]) -> list[dict]:
-    return [build_row("spot-account", asset=code, free=free, locked="0") for code, free in balances]
-
-
-def _funding(*balances: tuple[str, str]) -> list[dict]:
-    return [
-        build_row("funding-asset", asset=code, free=free, locked="0", freeze="0", withdrawing="0")
-        for code, free in balances
-    ]
-
-
-async def _differences(session, connection_id) -> list:
-    rows = await session.execute(
-        text(
-            "select a.name, i.symbol from finance.binance_reconciliation_differences d"
-            " join finance.accounts a on a.id = d.account_id"
-            " join finance.instruments i on i.id = d.instrument_id"
-            " where a.source_connection_id = :c"
-        ),
-        {"c": connection_id},
-    )
-    return list(rows)
-
-
 async def test_spot_and_funding_reconcile_with_transfers_dust_and_mining(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    fake.set_rows("spot-account", _spot(("AAA", "10"), ("BBB", "1")))
-    fake.set_rows("funding-asset", _funding(("AAA", "2")))
+    fake.set_rows("spot-account", spot_rows(("AAA", "10"), ("BBB", "1")))
+    fake.set_rows("funding-asset", funding_rows(("AAA", "2")))
     connection = await binance_connection(run, config=later_config())
     first = await run_binance_sync(session, connection.id, fake.handler)
     assert first.status == "healthy", first.last_error
@@ -555,8 +534,8 @@ async def test_spot_and_funding_reconcile_with_transfers_dust_and_mining(
     dust = _dust(0, _detail("BBB", "1", "0.01", "0.0002", dust_at), at_ms=dust_at)
     fake.add(DUST, dust, when={"accountType": "SPOT"})
     fake.add(CLOUD, build_row(CLOUD, 0, type=248, amount="0.5", createTime=start + 4 * HOUR_MS))
-    fake.set_rows("spot-account", _spot(("AAA", "6.5"), ("BNB", "0.01")))
-    fake.set_rows("funding-asset", _funding(("AAA", "5")))
+    fake.set_rows("spot-account", spot_rows(("AAA", "6.5"), ("BNB", "0.01")))
+    fake.set_rows("funding-asset", funding_rows(("AAA", "5")))
     notifier = RecordingNotifier()
 
     clock.ms += 6 * HOUR_MS
@@ -564,7 +543,7 @@ async def test_spot_and_funding_reconcile_with_transfers_dust_and_mining(
 
     assert after.status == "healthy", after.last_error
     assert len(await keys(session, connection.id)) >= 4
-    assert await _differences(session, connection.id) == []
+    assert await differences(session, connection.id) == []
     assert not [w for w in after.warnings if _CHANGED in w]
     assert not [m for m in notifier.messages if _CHANGED in m]
     # The isolated types are not asked until an isolated symbol is known.

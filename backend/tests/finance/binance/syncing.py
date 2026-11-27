@@ -32,7 +32,7 @@ from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys
 from lararium.modules.finance.binance.sync import HISTORY_LABELS
 from lararium.worker import jobs
 
-from .fixtures import NOW_MS, build_response
+from .fixtures import NOW_MS, build_response, build_row
 
 KEY = bytes(range(32))
 API_KEY = "ak-TEST-do-not-log-0123"
@@ -174,3 +174,16 @@ async def run_binance_sync(
             session_factory=session_factory or async_sessionmaker(bind=session.bind),
         )
     return await get_connection(session, connection_id)
+
+
+def spot_rows(*balances: tuple[str, str]) -> list[dict[str, Any]]:
+    """A Spot account report holding each (asset, free)."""
+    return [build_row("spot-account", asset=code, free=free, locked="0") for code, free in balances]
+
+
+def funding_rows(*balances: tuple[str, str]) -> list[dict[str, Any]]:
+    """A Funding report holding each (asset, free)."""
+    return [
+        build_row("funding-asset", asset=code, free=free, locked="0", freeze="0", withdrawing="0")
+        for code, free in balances
+    ]

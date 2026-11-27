@@ -7,15 +7,11 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import exc, text
 
-from lararium.core.actors import Actor
-from lararium.core.commands import command_context
-from lararium.core.connections import create_connection
 from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.identifiers import (
     assign_identifier,
     get_or_create_identifier,
     list_identifiers,
-    register_card_merchant,
 )
 from lararium.modules.finance.instruments import get_currency
 from lararium.modules.finance.ledger import (
@@ -23,14 +19,11 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionInput,
     post_transaction,
-    upsert_connector_transaction,
 )
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.transfers import (
     find_transfer_violations,
-    heal_transfers,
     suggestions,
-    transfer_contra,
 )
 from lararium.modules.finance.transfers.queries import list_transfers
 from lararium.modules.finance.valuation import balances_asof
@@ -39,6 +32,8 @@ from .fixtures import BASE_TIME_MS, HOUR_MS, NOW_MS, FakeBinance, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
+    card_payment,
+    heal,
     keys,
     normalize_rows,
     plain,
@@ -51,13 +46,6 @@ from .test_records_capital import _deposit, _text_time, _withdrawal
 
 WALLET_ADDRESS = "0x" + "a" * 40
 OTHER_ADDRESS = "0x" + "b" * 40
-
-
-async def _heal(session) -> int:
-    async with command_context(
-        session, Actor("system", "transfers"), "finance.heal_transfers", {}
-    ) as ctx:
-        return await heal_transfers(ctx)
 
 
 async def _wallet(run, address: str | None = WALLET_ADDRESS):
@@ -92,7 +80,7 @@ async def test_withdrawal_to_a_registered_address_is_a_transfer(session, run) ->
     row = _withdrawal(6, address=WALLET_ADDRESS)
 
     await normalize_rows(session, connection.id, ("withdrawals", [row]))
-    await _heal(session)
+    await heal(session)
 
     key = f"withdrawal:{row['id']}"
     assert plain(await postings(session, key)) == [
@@ -117,7 +105,7 @@ async def test_withdrawal_to_an_unknown_address_appears_in_suggestions(session, 
     row = _withdrawal(6, address=OTHER_ADDRESS)
 
     await normalize_rows(session, connection.id, ("withdrawals", [row]))
-    await _heal(session)
+    await heal(session)
 
     assert plain(await postings(session, f"withdrawal:{row['id']}"))[1][0] == "Unassigned"
     [suggestion] = await suggestions(session)
@@ -154,11 +142,11 @@ async def test_registering_later_re_evaluates_past_withdrawals(session, run) -> 
     connection = await binance_connection(run)
     row = _withdrawal(6, address=WALLET_ADDRESS)
     await normalize_rows(session, connection.id, ("withdrawals", [row]))
-    await _heal(session)
+    await heal(session)
     assert await list_transfers(session) == []
 
     await _wallet(run)
-    await _heal(session)
+    await heal(session)
 
     [transfer] = await list_transfers(session)
     assert transfer.status == "inferred"
@@ -173,7 +161,7 @@ async def test_deposit_from_a_registered_address(session, run) -> None:
     row = _deposit(1, sourceAddress=WALLET_ADDRESS)
 
     await normalize_rows(session, connection.id, ("deposits", [row]))
-    await _heal(session)
+    await heal(session)
 
     assert plain(await postings(session, f"deposit:{row['id']}")) == [
         ("Binance Spot", "AAA", Decimal(5)),
@@ -201,7 +189,7 @@ async def test_a_synced_deposit_from_a_registered_address_is_a_transfer(
     connection = await binance_connection(run, config=later_config())
 
     after = await run_binance_sync(session, connection.id, fake.handler)
-    await _heal(session)
+    await heal(session)
 
     assert after.status == "healthy", after.last_error
     assert plain(await postings(session, f"deposit:{row['id']}"))[1][0] == "In transit"
@@ -222,7 +210,7 @@ async def test_internal_binance_transfer_is_unidentified(session, run) -> None:
     )
 
     await normalize_rows(session, connection.id, ("deposits", [row]), ("withdrawals", [out]))
-    await _heal(session)
+    await heal(session)
 
     assert [r.kind for r in await list_identifiers(session)] == ["chain_address"]  # the wallet's
     assert await list_transfers(session) == []
@@ -238,7 +226,7 @@ async def test_evm_addresses_match_whatever_their_case(session, run, spelling) -
     row = _withdrawal(6, address=spelling)
 
     await normalize_rows(session, connection.id, ("withdrawals", [row]))
-    await _heal(session)
+    await heal(session)
 
     [transfer] = await list_transfers(session)
     assert transfer.status == "inferred"
@@ -297,13 +285,13 @@ async def test_failed_withdrawal_to_a_registered_address_stops_being_a_transfer(
     await _wallet(run)
     processing = _withdrawal(4, address=WALLET_ADDRESS, completeTime=None)
     await normalize_rows(session, connection.id, ("withdrawals", [processing]))
-    await _heal(session)
+    await heal(session)
     assert len(await list_transfers(session)) == 1
 
     refunded_ms = BASE_TIME_MS + 2 * HOUR_MS
     failed = _withdrawal(5, address=WALLET_ADDRESS, completeTime=_text_time(refunded_ms))
     await normalize_rows(session, connection.id, ("withdrawals", [failed]))
-    await _heal(session)
+    await heal(session)
 
     key = f"withdrawal:{failed['id']}"
     assert await list_transfers(session) == []
@@ -322,7 +310,7 @@ async def test_failed_withdrawal_to_a_registered_address_stops_being_a_transfer(
     assert (await transaction(session, f"{key}:refund")).status == "booked"
     assert await _holdings(session, _day()) == {}
     assert await find_transfer_violations(session) == []
-    assert await _heal(session) == 0
+    assert await heal(session) == 0
     await assert_balanced_and_quiet(session, connection.id)
 
 
@@ -357,7 +345,6 @@ async def test_counterparty_name_is_the_network_only(session, run) -> None:
 # card payment of the same amount, to a merchant registered on the wallet, pairs with a leg
 # only.
 
-MERCHANT = "merch_TESTBIN"
 _REWARD = build_row(
     "earn-flexible-rewards", asset="AAA", rewards="0.25", type="REALTIME", time=BASE_TIME_MS
 )
@@ -401,42 +388,6 @@ async def _own_posting(session, connection_id, key: str):
     ).one()
 
 
-async def _card_payment(session, run, account_id, instrument_id, quantity, occurred_at):
-    """A card connection's payment naming the merchant, the wallet's opposite amount."""
-    card = await run(create_connection, connector="monzo", display_name="Card", config={})
-    bank = await run(
-        create_account,
-        name="Card",
-        ledger_type="asset",
-        subtype="bank",
-        balance_mode="transactions",
-        source_connection_id=card.id,
-    )
-    merchant = await run(register_card_merchant, MERCHANT, [account_id])
-    contra = await transfer_contra(
-        session,
-        source=("connection", f"{card.id}:card_1"),
-        own_account_id=bank.id,
-        counterparty_identifier_id=merchant.id,
-        other_postings=0,
-    )
-    await run(
-        upsert_connector_transaction,
-        TransactionInput(
-            occurred_at=occurred_at,
-            description="Binance",
-            origin="connector",
-            connection_id=card.id,
-            external_id="card_1",
-            postings=[
-                PostingInput(bank.id, instrument_id, -quantity),
-                PostingInput(contra, instrument_id, quantity),
-            ],
-            counterparty=CounterpartyFields(identifier_id=merchant.id, bank_transfer=False),
-        ),
-    )
-
-
 @pytest.mark.parametrize("case", list(_CASES))
 async def test_only_a_deposit_or_withdrawal_pairs_with_a_card_payment(
     session, run, case: str
@@ -453,9 +404,9 @@ async def test_only_a_deposit_or_withdrawal_pairs_with_a_card_payment(
     account_id, instrument_id, quantity, occurred_at = await _own_posting(
         session, connection.id, key
     )
-    await _card_payment(session, run, account_id, instrument_id, quantity, occurred_at)
+    await card_payment(session, run, account_id, instrument_id, quantity, occurred_at)
 
-    await _heal(session)
+    await heal(session)
 
     assert len(await list_transfers(session)) == (1 if leg else 0)
     never = await session.scalar(

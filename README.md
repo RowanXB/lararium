@@ -989,7 +989,8 @@ Built from Binance's documentation and not checked against a real account:
   a card purchase is the fiat arriving from the card and its swap for the crypto, with the fee
   (one paid from the cash balance is the swap only); a P2P order is the same on "Binance
   Funding", at its unit price. Only completed ones are posted. A Pay transaction moves what it
-  paid or received on Funding (or Spot) against Unassigned; a rebate is income on Spot, posted
+  paid or received on each wallet it drew on (a combined payment on several) against
+  Unassigned; a rebate is income on Spot, posted
   once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
   makes the first sync about 7 minutes longer.
 

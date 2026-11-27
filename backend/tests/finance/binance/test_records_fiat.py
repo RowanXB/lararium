@@ -39,6 +39,9 @@ from .fixtures import BASE_TIME_MS, DAY_MS, HOUR_MS, NOW_MS, FakeBinance, build_
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
+    card_payment,
+    differences,
+    heal,
     holdings,
     ingest,
     keys,
@@ -48,9 +51,15 @@ from .normalizing import (
     transaction,
     typed,
 )
-from .syncing import Clock, RecordingNotifier, binance_connection, later_config, run_binance_sync
-from .test_records_transfers import _differences, _funding, _spot
-from .test_transfers import _card_payment, _heal
+from .syncing import (
+    Clock,
+    RecordingNotifier,
+    binance_connection,
+    funding_rows,
+    later_config,
+    run_binance_sync,
+    spot_rows,
+)
 
 ORDERS = "fiat-orders"
 PAYMENTS = "fiat-payments"
@@ -113,6 +122,8 @@ def _p2p(seq: int = 0, **fields) -> dict:
 
 
 def _pay(seq: int = 0, *details: tuple[str, str], **fields) -> dict:
+    """A Pay row; each (currency, amount) element drawn whole from the row's `walletType`."""
+    wallet = str(fields.get("walletType", 1))
     values = {
         "transactionId": f"pay-{seq}",
         "orderType": "PAY",
@@ -121,7 +132,7 @@ def _pay(seq: int = 0, *details: tuple[str, str], **fields) -> dict:
         "currency": "AAA",
         "walletType": 1,
         "fundsDetail": [
-            {"currency": currency, "amount": quantity, "walletAssetCost": {"1": quantity}}
+            {"currency": currency, "amount": quantity, "walletAssetCost": {wallet: quantity}}
             for currency, quantity in (details or (("AAA", "3"),))
         ],
     }
@@ -319,7 +330,7 @@ async def test_fiat_deposit_pairs_with_an_identified_bank_row(session, run) -> N
     identifier = await run(assign_identifier, spot, "uk_bank_account", B_IDENTIFIER)
     sent = await _bank_row(session, run, "-100", at(BASE_TIME_MS), identifier_id=identifier.id)
 
-    await _heal(session)
+    await heal(session)
 
     key = f"fiat_order:{deposit['orderNo']}"
     [transfer] = await list_transfers(session)
@@ -330,7 +341,7 @@ async def test_fiat_deposit_pairs_with_an_identified_bank_row(session, run) -> N
     )
     assert plain(await postings(session, key))[1][0] == "In transit"
     assert await find_transfer_violations(session) == []
-    assert await _heal(session) == 0
+    assert await heal(session) == 0
     await assert_balanced_and_quiet(session, connection.id)
 
 
@@ -442,8 +453,8 @@ async def test_card_purchase_pairs_with_a_card_payment_to_binances_merchant(sess
     eur = (await get_currency(session, "EUR")).id
     leg = f"fiat_payment:{bought['orderNo']}:funding"
 
-    await _card_payment(session, run, spot, eur, Decimal(20), at(BASE_TIME_MS))
-    await _heal(session)
+    await card_payment(session, run, spot, eur, Decimal(20), at(BASE_TIME_MS))
+    await heal(session)
 
     [transfer] = await list_transfers(session)
     assert transfer.in_transaction_id == await _id(session, leg)
@@ -550,7 +561,7 @@ async def test_p2p_buy_nets_to_zero_on_unassigned(session, run) -> None:
     await _normalize(session, connection.id, C2C, [order])
     await _bank_row(session, run, "-50", at(BASE_TIME_MS - HOUR_MS))
 
-    await _heal(session)
+    await heal(session)
 
     assert await list_transfers(session) == []
     unassigned = await session.scalar(
@@ -572,12 +583,12 @@ async def test_owner_can_pair_a_p2p_order_with_a_bank_row(session, run) -> None:
     await _normalize(session, connection.id, C2C, [order])
     sent = await _bank_row(session, run, "-50", at(BASE_TIME_MS - HOUR_MS))
     leg = f"c2c:{order['orderNumber']}:funding"
-    await _heal(session)
+    await heal(session)
 
     await run(pair_records, sent, await _id(session, leg))
     # A later run (a regenerate replays every record) and heal keep the owner's pair.
     await run_normalize(session, connection.id, again=True)
-    await _heal(session)
+    await heal(session)
 
     [transfer] = await list_transfers(session)
     assert transfer.status == "matched"
@@ -588,7 +599,7 @@ async def test_owner_can_pair_a_p2p_order_with_a_bank_row(session, run) -> None:
     assert plain(await postings(session, leg))[1][0] == "In transit"
     assert await _never_transfer(session, leg) is False
     assert await find_transfer_violations(session) == []
-    assert await _heal(session) == 0
+    assert await heal(session) == 0
 
 
 # Pay.
@@ -637,6 +648,63 @@ async def test_pay_takes_each_funds_detail_from_its_wallet(session, run) -> None
     await assert_balanced_and_quiet(session, connection.id)
 
 
+async def test_a_combined_pay_payment_is_taken_from_each_wallet_it_drew_on(session, run) -> None:
+    # `walletAssetCost`: "cost from that wallet", by wallet type (1 Funding, 2 Spot, 5 Earn).
+    connection = await _connection(run)
+    split = _pay(
+        0,
+        amount="-4",
+        walletType=1,
+        walletTypes=[1, 2, 5],
+        fundsDetail=[
+            {"currency": "AAA", "amount": "3", "walletAssetCost": {"1": "1", "2": "2"}},
+            {"currency": "BBB", "amount": "1", "walletAssetCost": {"5": "1"}},
+        ],
+    )
+    # No costs: the row's own wallet; type 3 (fiat) is held on Spot.
+    fiat = _pay(
+        1,
+        amount="-5",
+        currency="EUR",
+        walletType=3,
+        fundsDetail=[{"currency": "EUR", "amount": "5", "walletAssetCost": {}}],
+    )
+
+    await _normalize(session, connection.id, PAY, [split, fiat])
+
+    assert plain(await postings(session, f"pay:{split['transactionId']}")) == [
+        ("Binance Funding", "AAA", Decimal(-1)),
+        ("Binance Spot", "AAA", Decimal(-2)),
+        ("Binance Earn", "BBB", Decimal(-1)),
+        ("Unassigned", "AAA", Decimal(3)),
+        ("Unassigned", "BBB", Decimal(1)),
+    ]
+    assert plain(await postings(session, f"pay:{fiat['transactionId']}")) == [
+        ("Binance Spot", "EUR", Decimal(-5)),
+        ("Unassigned", "EUR", Decimal(5)),
+    ]
+    await assert_balanced_and_quiet(session, connection.id)
+
+
+@pytest.mark.parametrize(
+    ("costs", "flag"),
+    [
+        ({"1": "1", "2": "1"}, "pay.fundsDetail.walletAssetCost does not make the amount"),
+        ({"7": "3"}, "pay.fundsDetail.walletAssetCost names a wallet type not known"),
+    ],
+)
+async def test_pay_costs_that_do_not_say_where_it_came_from_are_flagged(
+    session, run, costs, flag
+) -> None:
+    connection = await _connection(run)
+    row = _pay(0, fundsDetail=[{"currency": "AAA", "amount": "3", "walletAssetCost": costs}])
+
+    report = await _normalize(session, connection.id, PAY, [row])
+
+    assert flag in report.new_flags
+    assert await keys(session, connection.id) == []
+
+
 # Rebates.
 
 
@@ -674,8 +742,8 @@ async def test_spot_and_funding_reconcile_with_fiat_cards_p2p_pay_and_rebates(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
     fake.add("coin-config", build_row("coin-config", coin="EUR", isLegalMoney=True))
-    fake.set_rows("spot-account", _spot(("AAA", "10"), ("EUR", "50")))
-    fake.set_rows("funding-asset", _funding(("BBB", "1")))
+    fake.set_rows("spot-account", spot_rows(("AAA", "10"), ("EUR", "50")))
+    fake.set_rows("funding-asset", funding_rows(("BBB", "1")))
     connection = await binance_connection(run, config=later_config())
     first = await run_binance_sync(session, connection.id, fake.handler)
     assert first.status == "healthy", first.last_error
@@ -706,8 +774,8 @@ async def test_spot_and_funding_reconcile_with_fiat_cards_p2p_pay_and_rebates(
     fake.add(C2C, _p2p(0, commission="0.01", **moment(4)), when={"tradeType": "BUY"})
     fake.add(PAY, _pay(0, ("BBB", "0.5"), amount="-0.5", transactionTime=start + 5 * HOUR_MS))
     fake.add(REBATES, _rebate(0, updateTime=start + 5 * HOUR_MS))
-    fake.set_rows("spot-account", _spot(("AAA", "15.712"), ("EUR", "109")))
-    fake.set_rows("funding-asset", _funding(("BBB", "2.49")))
+    fake.set_rows("spot-account", spot_rows(("AAA", "15.712"), ("EUR", "109")))
+    fake.set_rows("funding-asset", funding_rows(("BBB", "2.49")))
     notifier = RecordingNotifier()
 
     clock.ms += 6 * HOUR_MS
@@ -716,11 +784,23 @@ async def test_spot_and_funding_reconcile_with_fiat_cards_p2p_pay_and_rebates(
     assert after.status == "healthy", after.last_error
     records_posted = [k for k in await keys(session, connection.id) if not k.startswith("opening:")]
     assert len(records_posted) == 10
-    assert await _differences(session, connection.id) == []
+    assert await differences(session, connection.id) == []
     assert not [w for w in after.warnings if _CHANGED in w]
     assert not [m for m in notifier.messages if _CHANGED in m]
     asked = {(s.label, s.params.get("transactionType")) for s in fake.requests}
     assert {(ORDERS, "0"), (ORDERS, "1"), (PAYMENTS, "0"), (PAYMENTS, "1")} <= asked
     # Every documented time parameter, and no other.
-    assert all("beginTime" in s.params for s in fake.calls(ORDERS))
-    assert all("startTimestamp" in s.params for s in fake.calls(C2C))
+    time_params = {
+        ORDERS: ("beginTime", "endTime"),
+        PAYMENTS: ("beginTime", "endTime"),
+        C2C: ("startTimestamp", "endTimestamp"),
+        PAY: ("startTime", "endTime"),
+        REBATES: ("startTime", "endTime"),
+    }
+    names = {"beginTime", "endTime", "startTimestamp", "endTimestamp", "startTime"}
+    for label, wanted in time_params.items():
+        calls = fake.calls(label)
+        assert calls, label
+        for seen in calls:
+            assert set(wanted) <= set(seen.params), label
+            assert names & set(seen.params) == set(wanted), label

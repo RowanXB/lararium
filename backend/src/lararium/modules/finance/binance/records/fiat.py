@@ -13,14 +13,16 @@ owner pairs the two by hand. Everything else (the swaps, fees, Pay, rebates) is 
 
 Only a record in its documented final success status posts; in any other status what it posted
 before is removed, so the ledger follows the row's latest version. A Pay transaction is what it
-took from (or gave to) the wallet it names, against Unassigned. A rebate is income on Spot that a
+took from (or gave to) each wallet it drew on, against Unassigned. A rebate is income on Spot that a
 dividend can have paid (rule 3, `normalize.link_payouts`).
 """
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+from lararium.modules.finance.binance import tables
 from lararium.modules.finance.binance.parse import ApiValue, Row
 from lararium.modules.finance.binance.records import (
     Run,
@@ -53,10 +55,14 @@ _CASH_BALANCE = "Cash Balance"
 _TYPES = ("0", "1")
 _IN = "0"
 _BUY, _SELL = "BUY", "SELL"
-# Pay's `walletType` 2 is Spot; every other (1 funding, 3 fiat, 4 or 6 card, 5 earn) is taken as
-# Funding (design 6).
-_PAY_SPOT = 2
+# Pay's wallet types (`walletType`, and the keys of `walletAssetCost`): 1 funding, 2 spot,
+# 3 fiat (held on Spot, as a fiat order's), 4 or 6 card payment (taken as Funding, which the card
+# spends from), 5 earn (design 6).
+_PAY_WALLETS = {1: "funding", 2: "spot", 3: "spot", 4: "funding", 5: "earn", 6: "funding"}
+_PAY_DEFAULT = "funding"
 _FUNDS = "fundsDetail"
+_COSTS = "walletAssetCost"
+_COST_PATH = "data[].fundsDetail[].walletAssetCost.<walletType>"
 
 
 async def _asked(run: Run, label: str) -> str | None:
@@ -312,37 +318,63 @@ def _funds(row: Row) -> list[dict[str, ApiValue]]:
     return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
 
 
+def _costs(detail: Mapping[str, ApiValue]) -> list[tuple[str, ApiValue]]:
+    found = detail.get(_COSTS)
+    return sorted(found.items()) if isinstance(found, dict) else []
+
+
 async def pay(run: Run, row: Row) -> None:
-    """A Pay transaction: each `fundsDetail` element's `amount` of its `currency` on the wallet
-    the row names (Funding, or Spot), signed by the row's `amount`, against Unassigned. A row
-    with no `fundsDetail` moves its own `amount` of its `currency`."""
+    """A Pay transaction: each `fundsDetail` element's `amount` of its `currency`, taken from (or
+    given to) each wallet its `walletAssetCost` names, that wallet's cost of it ("cost from that
+    wallet"), signed by the row's `amount`, against Unassigned (one counterpart per instrument).
+    An element with no costs is on the wallet the row's `walletType` names; a row with no
+    `fundsDetail` moves its own `amount` of its `currency` there. Costs that do not make the
+    element's amount, or name a wallet type the catalogue does not list, are flagged and the row
+    is not posted."""
     signed = amount(PAY, row, "amount")
     occurred_at = when(PAY, row, "transactionTime")
     if signed is None or occurred_at is None:
         return
     sign = Decimal(-1) if signed < 0 else Decimal(1)
-    pieces: list[tuple[str, Decimal]] = []
+    kind = integer(row, "walletType")
+    own = _PAY_WALLETS.get(kind, _PAY_DEFAULT) if kind is not None else _PAY_DEFAULT
+    # (wallet, currency, quantity), quantities unsigned.
+    pieces: list[tuple[str, str, Decimal]] = []
     for detail in _funds(row):
         currency = text(detail, "currency")
         quantity = amount(PAY, detail, "amount")
         if currency is None or quantity is None:
             run.flag(f"{PAY}.{_FUNDS} element without its currency or amount")
             return
-        pieces.append((currency, quantity.copy_abs()))
+        costs = _costs(detail)
+        if not costs:
+            pieces.append((own, currency, quantity.copy_abs()))
+            continue
+        drawn: list[tuple[str, str, Decimal]] = []
+        for name, value in costs:
+            wallet = _PAY_WALLETS.get(int(name)) if name.isdecimal() else None
+            cost = tables.decimal_value(PAY, _COST_PATH, value)
+            if wallet is None:
+                run.flag(f"{PAY}.{_FUNDS}.{_COSTS} names a wallet type not known")
+                return
+            drawn.append((wallet, currency, cost.copy_abs()))
+        if sum((q for _, _, q in drawn), Decimal(0)) != quantity.copy_abs():
+            run.flag(f"{PAY}.{_FUNDS}.{_COSTS} does not make the amount")
+            return
+        pieces += drawn
     if not pieces:
         currency = text(row, "currency")
         if currency is None:
             run.flag(f"{PAY}.currency missing")
             return
-        pieces.append((currency, signed.copy_abs()))
-    wallet = "spot" if integer(row, "walletType") == _PAY_SPOT else "funding"
-    account_id = await run.account(wallet)
+        pieces.append((own, currency, signed.copy_abs()))
     postings: list[PostingInput] = []
     totals: dict[UUID, Decimal] = {}
-    for currency, quantity in pieces:
+    for wallet, currency, quantity in pieces:
         instrument_id = await run.asset(currency)
         if instrument_id is None:
             return  # never one-sided: a record naming an uncounted asset is not posted
+        account_id = await run.account(wallet)
         postings.append(PostingInput(account_id, instrument_id, sign * quantity))
         totals[instrument_id] = totals.get(instrument_id, Decimal(0)) + sign * quantity
     postings += [PostingInput(run.unassigned, i, -q) for i, q in totals.items() if q != 0]
