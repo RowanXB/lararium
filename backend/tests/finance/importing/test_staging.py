@@ -1258,8 +1258,8 @@ async def test_covered_range_includes_rows_outside_the_period(
     session: AsyncSession, run: Run, stage: Stage
 ) -> None:
     """A file covers its stated period and every day it has a row on (OFX's DTSTART/DTEND
-    don't bound its rows the way a PDF's period does). An export may be taken partway
-    through a day, so it lists in full every day but its last."""
+    don't bound its rows the way a PDF's period does). It lists in full only the days of its
+    period, and an export may be taken partway through a day, so not its period's last."""
     profile = await _profile(run, format="ofx")
     content = _ofx(
         [("20261120", "-3.50", "A"), ("20261127", "-1.00", "B"), ("20261203", "-2.00", "C")],
@@ -1279,8 +1279,8 @@ async def test_covered_range_includes_rows_outside_the_period(
     assert tuple(covered) == (
         date(2026, 11, 20),
         date(2026, 12, 3),
-        date(2026, 11, 20),
-        date(2026, 12, 2),
+        date(2026, 11, 25),
+        date(2026, 11, 29),
     )
 
 
@@ -1443,6 +1443,73 @@ def test_a_period_starting_mid_day_lists_from_the_day_after_its_start() -> None:
     coverage = staging._covered(statement, rows)  # pyright: ignore[reportPrivateUsage]
     assert coverage.covered == (date(2026, 10, 30), date(2026, 11, 10))
     assert coverage.complete == (date(2026, 11, 2), date(2026, 11, 9))
+
+
+def _dated_row(day: date) -> staging._Row:  # pyright: ignore[reportPrivateUsage]
+    parsed = ParsedRow(
+        position=0,
+        booking_date=day,
+        occurred_at=None,
+        description="Example Payee",
+        quantity=Decimal("-2.00"),
+        fee=Decimal(0),
+        currency=None,
+        balance=None,
+        external_id=None,
+        bank_type=None,
+        raw={},
+    )
+    return staging._Row(0, "new", {}, parsed, instrument_id=UUID(int=1))  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("period", "mid_day", "day", "covered", "complete"),
+    [
+        # A late-posted row the day before DTSTART: covered, but nothing vouches for its day.
+        (
+            (date(2026, 11, 1), date(2026, 11, 10)),
+            False,
+            date(2026, 10, 31),
+            (date(2026, 10, 31), date(2026, 11, 10)),
+            (date(2026, 11, 1), date(2026, 11, 9)),
+        ),
+        # A row after DTEND: DTEND's day is still its last, perhaps partial.
+        (
+            (date(2026, 11, 1), date(2026, 11, 10)),
+            False,
+            date(2026, 11, 11),
+            (date(2026, 11, 1), date(2026, 11, 11)),
+            (date(2026, 11, 1), date(2026, 11, 9)),
+        ),
+        (
+            (date(2026, 11, 1), date(2026, 11, 10)),
+            True,
+            date(2026, 10, 31),
+            (date(2026, 10, 31), date(2026, 11, 10)),
+            (date(2026, 11, 2), date(2026, 11, 9)),
+        ),
+        # No stated period: its rows' days are all it gives.
+        (
+            None,
+            False,
+            date(2026, 10, 31),
+            (date(2026, 10, 31), date(2026, 11, 11)),
+            (date(2026, 10, 31), date(2026, 11, 10)),
+        ),
+    ],
+)
+def test_a_statement_lists_in_full_only_days_inside_its_stated_period(
+    period: tuple[date, date] | None,
+    mid_day: bool,
+    day: date,
+    covered: tuple[date, date],
+    complete: tuple[date, date],
+) -> None:
+    statement = ParsedStatement(rows=[], period=period, period_starts_mid_day=mid_day)
+    rows = [_dated_row(day)] if period is not None else [_dated_row(day), _dated_row(covered[1])]
+    coverage = staging._covered(statement, rows)  # pyright: ignore[reportPrivateUsage]
+    assert coverage.covered == covered
+    assert coverage.complete == complete
 
 
 @pytest.mark.parametrize(
