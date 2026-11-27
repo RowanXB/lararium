@@ -128,6 +128,7 @@ async def _sync(
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
         ctx = CommandContext(session, CONNECTOR, uuid.uuid4())
         sync_ctx = SyncContext(
+            esplora_url="https://esplora.test/api",
             command=ctx,
             connection=await get_connection(session, connection.id),
             sync_id=uuid.uuid4(),

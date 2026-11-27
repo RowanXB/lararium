@@ -330,6 +330,7 @@ async def _set_cursor(session, connection, cursor: JSONValue) -> None:
 
 async def _ctx(session, connection, http: httpx.AsyncClient, tmp_path=None) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),

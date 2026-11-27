@@ -92,8 +92,13 @@ class Settings(BaseSettings):
 
     @field_validator("esplora_url")
     @classmethod
-    def _esplora_no_trailing_slash(cls, value: str) -> str:
-        return value.rstrip("/")
+    def _esplora_http_url(cls, value: str) -> str:
+        # Empty or another scheme would fail at the first request, or worse, send nothing
+        # where the operator expects a self-hosted server; refuse at startup.
+        url = value.rstrip("/")
+        if not (url.startswith(("http://", "https://")) and url.split("://", 1)[1]):
+            raise ValueError("esplora_url must be an http(s) URL")
+        return url
 
     @field_validator("webhook_secret")
     @classmethod

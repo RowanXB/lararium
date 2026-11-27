@@ -58,7 +58,9 @@ class SyncContext:
     # The operator's CoinGecko key, for a connector that prices what its provider cannot.
     coingecko_api_key: Secret | None = field(default=None, repr=False)
     # The Esplora API the Bitcoin connector reads from (Settings.esplora_url).
-    esplora_url: str = "https://mempool.space/api"
+    # No default: a context built without the operator's setting would send every address to a
+    # public server the operator may have chosen to avoid.
+    esplora_url: str = field(kw_only=True)
 
 
 class Connector(Protocol):

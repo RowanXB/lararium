@@ -124,6 +124,7 @@ async def context(
     session: AsyncSession, connection_id: uuid.UUID, http: httpx.AsyncClient
 ) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection_id),
         sync_id=uuid.uuid4(),

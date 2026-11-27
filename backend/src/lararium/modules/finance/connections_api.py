@@ -941,6 +941,7 @@ async def upload_ibkr_statement(
         async with healing_command(session, actor, "upload_ibkr_statement", args) as ctx:
             sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
             sync_ctx = SyncContext(
+                esplora_url=settings.esplora_url,
                 command=ctx,
                 connection=connection,
                 sync_id=sync_id,
@@ -1071,6 +1072,7 @@ def _upload_sync_context(
     session_factory: SessionFactoryDep,
 ) -> SyncContext:
     return SyncContext(
+        esplora_url=settings.esplora_url,
         command=ctx,
         connection=connection,
         sync_id=sync_id,
