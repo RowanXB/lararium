@@ -1,8 +1,9 @@
 """Trading 212 raw records into the ledger (design §5.5-5.11).
 
 Deterministic from its inputs and versioned (NORMALIZER_VERSION, stored in the connection's
-config, Decision 8): when the stored version differs, the run replays every raw record the
-connection holds (the latest copy of each history and metadata item, and every sighting of a
+config, Decision 8): when the stored version differs, or the accounts of the Trading 212
+family (FAMILY_KEY: whom a TRANSFER names, accounts.sibling), the run replays every raw record
+the connection holds (the latest copy of each history and metadata item, and every sighting of a
 report, report_sightings), so what a new version stores is filled in for what an older one
 saw, dated as it was then. A run otherwise applies the records it was given and its own
 sync's sightings.
@@ -20,6 +21,7 @@ postings, types of instrument the ledger does not hold, a TRANSFER) are reported
 to publish, as are the instruments still without a type, which every run finds in full.
 """
 
+import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
@@ -52,9 +54,12 @@ from lararium.modules.finance.trading212.state import (
 
 __all__ = ["NORMALIZER_VERSION", "NormalizeReport", "Trading212DataError", "normalize"]
 
-NORMALIZER_VERSION = "trading212-norm-1"
+NORMALIZER_VERSION = "trading212-norm-2"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
+# A digest of the family's accounts (accounts.family) the connection was last normalized
+# with, in its config: when they differ, a TRANSFER may name another sibling, or none.
+FAMILY_KEY = "family_accounts"
 # Items a key names once per connection, the ledger's (Decision 9) and the metadata's: the
 # latest copy of each is what counts. The others are reports, each dated by its fetch.
 _LEDGER = ("orders", "dividends", "transactions")
@@ -149,6 +154,11 @@ async def _movements(
     return movements, exports
 
 
+def _digest(account_ids: Sequence[UUID]) -> str:
+    """What FAMILY_KEY stores of the family's accounts."""
+    return hashlib.sha256("\n".join(sorted(map(str, account_ids))).encode()).hexdigest()
+
+
 def _tickers(by_endpoint: dict[str, list[Record]], reports_: Sequence[Report]) -> set[str]:
     found = {text_at(r.content, "order.instrument.ticker") for r in by_endpoint["orders"]}
     found |= {text_at(r.content, "instrument.ticker") for r in by_endpoint["dividends"]}
@@ -170,7 +180,9 @@ async def normalize(ctx: SyncContext, raw_record_ids: Sequence[UUID]) -> Normali
 
 async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeReport:
     connection = await get_connection(ctx.command.session, ctx.connection.id)
-    replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
+    replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION or (
+        connection.config.get(FAMILY_KEY) != _digest(await accounts.family(ctx.command.session))
+    )
     keyed, seen = await _records(ctx, raw_record_ids, replay)
     report = NormalizeReport(replayed=replay)
     run = Run(ctx, connection, report)
@@ -189,6 +201,11 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     summary = summaries[-1] if summaries else None
     latest = [r for r in seen if r.endpoint == "summary"]
     await accounts.account(run, (summary or latest[-1]).record if summary or latest else None)
+    # The family with this account in it (accounts.account sets its type), stored so the
+    # next run does not replay for it. It differs from the one the replay was decided on only
+    # when this run creates the account or gives it its type: outside the family, it named no
+    # sibling, so there is no counterpart to strip (unidentified_transfers adds one).
+    family = _digest(await accounts.family(run.session))
 
     unsupported = await reports.instruments(run, by_endpoint["instruments"], replay)
     await reports.exchanges(run, by_endpoint["exchanges"], replay)
@@ -241,6 +258,7 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     values: dict[str, JSONValue] = {
         accounts.ACCOUNT_MAP_KEY: run.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
+        FAMILY_KEY: family,
     }
     if any(connection.config.get(key) != value for key, value in values.items()):
         await update_config(ctx.command, connection.id, values)
