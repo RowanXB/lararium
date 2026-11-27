@@ -911,15 +911,20 @@ def _registry_edges(
     source says went outside the family (§5.9) is no family move's counterpart at all."""
     same, differing = _Edges(), _Edges()
     refused: set[frozenset[UUID]] = set()
-    pairs = list(_same_amount(records, settings))
-    familied = {
-        x.id
-        for s, c in pairs
-        if not decisions.apart(s, c)
-        for x, y in ((s, c), (c, s))
-        if not x.family and _family_pair(y, x, settings.near_window)
-    }
-    for s, c in pairs:
+    # Two passes over the pairs rather than one list of them: their count grows with the
+    # product of the records sharing an amount, and the first pass only runs for a family.
+    familied = (
+        {
+            x.id
+            for s, c in _same_amount(records, settings)
+            if (s.family or c.family) and not decisions.apart(s, c)
+            for x, y in ((s, c), (c, s))
+            if not x.family and _family_pair(y, x, settings.near_window)
+        }
+        if any(x.family for x in records)
+        else set[UUID]()
+    )
+    for s, c in _same_amount(records, settings):
         tier = registry_tier(s, c, settings.near_window)
         if tier is not None and any(_funded_only(x) and x.id in carded for x in (s, c)):
             tier = None
