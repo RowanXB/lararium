@@ -67,6 +67,11 @@ UPGRADE = [
       script_type text NOT NULL,
       first_used_at timestamptz,
       last_used_at timestamptz,
+      -- What the address's last complete history held (chain + mempool transactions) and the
+      -- chain tip then: a sync asks the history again only when the count differs, and stops
+      -- paging at a transaction that was 6 blocks deep at that tip. NULL until one completes.
+      history_tx_count bigint,
+      history_height bigint,
       PRIMARY KEY (connection_id, source, branch, address_index),
       UNIQUE (connection_id, address)
     )
@@ -105,6 +110,9 @@ UPGRADE = [
       block_time timestamptz,
       first_seen_at timestamptz,
       last_seen_at timestamptz,
+      -- The chain tip when the server last reported the transaction, for the recheck of those
+      -- under 6 confirmations then; NULL once the server no longer knows it.
+      seen_at_height bigint,
       left_chain_at timestamptz,
       fee_transaction_id uuid REFERENCES finance.transactions (id) ON DELETE SET NULL,
       net_transaction_id uuid REFERENCES finance.transactions (id) ON DELETE SET NULL,
