@@ -309,6 +309,49 @@ async def _follow(
         return await account.ledger()
 
 
+async def _follow_marked(
+    conn: AsyncConnection, api: FakeTrading212, history: History, schedule: Schedule
+) -> list[tuple[Any, ...]]:
+    """The ledger after the schedule, with the counterparty (column 6) and outside_family
+    checked against its export rows' Notes and then blanked."""
+    async with isolated(conn, api, history) as account:
+        await account.follow(schedule)
+        ledger = await account.ledger()
+        outside = set(
+            await account.session.scalars(
+                text(
+                    "select external_id from finance.transactions"
+                    " where connection_id = :c and outside_family"
+                ),
+                {"c": account.connection.id},
+            )
+        )
+    covered = {
+        e.n
+        for x in schedule.exports
+        for e in history.events
+        if x.first <= e.n <= x.last and e.kind in ("deposit", "withdrawal")
+    }
+    expected_outside: set[str] = set()
+    for e in history.events:
+        if e.n not in covered:
+            continue
+        # A deposit's Notes are a transaction ID (outside the family); a withdrawal's, empty.
+        if e.kind == "deposit":
+            expected_outside.add(f"transaction:{e.reference}")
+    named = {f"transaction:{e.reference}" for e in history.events if e.n in covered}
+    withdrawals = {
+        f"transaction:{e.reference}"
+        for e in history.events
+        if e.n in covered and e.kind == "withdrawal"
+    }
+    for t in ledger:
+        assert t[6] == ("trading212" if t[0] in withdrawals else None), t[0]
+        assert t[0] in named or t[0] not in outside
+    assert outside == expected_outside
+    return [(*t[:6], None, *t[7:]) for t in ledger]
+
+
 def _expected_keys(history: History) -> set[str]:
     """Every event's key (Decision 9): all of them post, but a cancelled order, which is a
     typed row only."""
@@ -355,9 +398,13 @@ async def test_ledger_independent_of_order(
     plain = data.draw(schedules(history, exports=False), label="without an export")
     note(f"first:\n{first.describe()}\nsecond:\n{second.describe()}\nplain:\n{plain.describe()}")
     _events(history, first)
-    one = await _follow(connection, api, history, first)
-    assert await _follow(connection, api, history, second) == one
-    assert await _follow(connection, api, history, plain) == one
+    # Schedules end with different export rows (a window each), and a row's Notes name the
+    # family or mark the movement outside it (design §5.9). So the counterparty (column 6) is
+    # compared against what the schedule's final rows say, whatever order they came in; the
+    # rest of the ledger is the same.
+    one = await _follow_marked(connection, api, history, first)
+    for schedule in (second, plain):
+        assert await _follow_marked(connection, api, history, schedule) == one
     # Every event is in the ledger, but the cancelled orders, and no opening.
     assert {t[0] for t in one} == _posted(one) == _expected_keys(history)
 
