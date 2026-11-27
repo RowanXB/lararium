@@ -4,8 +4,8 @@ payment, so the cash-flow report counts it as negative spending, not income.
 File imports mark a refund by the profile's card payment types. Stored catalog profiles and
 staged batches get their entry's types, found by their config as 0028 finds LemFi's (the owner
 may have renamed a profile; a profile the owner defined matches no entry and is left alone).
-The positive card rows already committed are then marked, by the types of their batch's
-profile. A committed batch's own config stays as it was at staging.
+The positive card rows already committed are then marked, by the types of the config that
+parsed them: their batch's own, as it was at staging, which stays unchanged.
 
 Revision ID: 0047
 Revises: 0046
@@ -82,26 +82,37 @@ PROFILES = _add_types(
 )
 STAGED_BATCHES = _add_types("import_batches", "profile_config", "", " AND status = 'staged'")
 
-# A committed statement row paid by card (its card number, or a type of its profile's card
-# payment types, as the profiles above now have them) that moved money in, and no interest.
-REFUNDS = """
+# A committed batch's card payment types, read from the config that parsed it (its own
+# snapshot, not its profile, which the owner may have edited since): the types it states, or
+# else those of the catalog entry the snapshot is, or none.
+_BATCH_TYPES = (
+    "coalesce(b.profile_config -> 'card_payment_types', CASE "
+    + " ".join(
+        f"WHEN {match.format(c='b.profile_config')} THEN '{types}'::jsonb"
+        for match, types in ENTRIES
+    )
+    + " ELSE '[]'::jsonb END)"
+)
+
+# A committed statement row paid by card (its card number, or one of its batch's card payment
+# types) that moved money in, and no interest.
+REFUNDS = f"""
 UPDATE finance.transactions AS t SET refund = true
 FROM finance.import_rows AS r
 JOIN finance.import_batches AS b ON b.id = r.batch_id
-JOIN finance.import_profiles AS p ON p.id = b.profile_id
 WHERE r.transaction_id = t.id
   AND r.kind = 'statement' AND r.status = 'committed'
   AND r.quantity > 0 AND NOT r.interest
   AND t.status <> 'void'
   AND (
     r.card_number IS NOT NULL
-    OR btrim(r.bank_type) IN (
-      SELECT jsonb_array_elements_text(p.config -> 'card_payment_types')
-    )
+    OR btrim(r.bank_type) IN (SELECT jsonb_array_elements_text({_BATCH_TYPES}))
   )
 """
 
-UPGRADE = [ADD_COLUMN, ADD_CARD_COLUMNS, *PROFILES, *STAGED_BATCHES, REFUNDS]
+# What the migration changes in the data, after the columns exist.
+DATA = [*PROFILES, *STAGED_BATCHES, REFUNDS]
+UPGRADE = [ADD_COLUMN, ADD_CARD_COLUMNS, *DATA]
 
 
 def upgrade() -> None:

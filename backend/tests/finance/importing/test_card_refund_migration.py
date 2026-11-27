@@ -36,8 +36,8 @@ def _migration() -> Any:
 
 
 async def _run_data_steps(session: AsyncSession) -> None:
-    """The statements after the column add, which the test database already has."""
-    for statement in _migration().UPGRADE[1:]:
+    """The migration's data statements; the test database already has its columns."""
+    for statement in _migration().DATA:
         await session.execute(text(statement))
     session.expire_all()
 
@@ -120,6 +120,36 @@ async def test_committed_positive_card_rows_become_refunds(
         ("Cheque in", False),
         ("Voided refund", False),
     ]
+
+
+async def test_committed_rows_are_read_by_the_config_that_parsed_them(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    """Review: the profile may have been edited since the commit; its batch's own config,
+    as staged, decides which types were card payments."""
+    profile = await _csv_profile(run, columns=COLUMNS)
+    content = "Date,Type,Description,Amount\n10/11/2026,VIS,Card refund,60.00\n"
+    batch = await commit((await stage(profile, content)).id)
+    await session.execute(text("UPDATE finance.transactions SET refund = false"))
+    # Staged as an HSBC statement before card payment types existed; the profile now matches
+    # no catalog entry.
+    await session.execute(
+        text(
+            "UPDATE finance.import_batches SET profile_config ="
+            ' \'{"format": "pdf", "layout": "hsbc_uk_statement"}\'::jsonb WHERE id = :b'
+        ),
+        {"b": batch.id},
+    )
+    await _as_stored_before(session, profile.id)
+
+    await _run_data_steps(session)
+
+    refund = await session.scalar(
+        select(models.Transaction.refund)
+        .join(models.ImportRow, models.ImportRow.transaction_id == models.Transaction.id)
+        .where(models.ImportRow.batch_id == batch.id, models.ImportRow.kind == "statement")
+    )
+    assert refund is True
 
 
 async def test_a_staged_batch_gains_the_types(
