@@ -919,6 +919,49 @@ checked against a real account:
 - Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
   records
 
+## Connecting a Bitcoin wallet
+
+A Bitcoin wallet is a connector: the `worker` syncs it every 6 hours (and on **Sync now**) from
+an Esplora server, which only answers public chain queries. It only reads: it sends only GET
+requests, only to that one server, and it never holds a key that can spend. One connection is one
+wallet and one account, whose balance is its transactions, checked against the balance the chain
+reports.
+
+On Accounts → Add account, pick **Bitcoin wallet** and enter the wallet in one of three forms:
+
+- **An Electrum master public key**: Electrum's Wallet → Information shows it. Pick the wallet
+  type (single key, multisig, 2FA or old seed) and paste the key or keys.
+- **An output descriptor** from Bitcoin Core, Sparrow or another wallet: one with a `<0;1>` step,
+  or a receiving and a change descriptor. Legacy, nested and native SegWit, Taproot (key path)
+  and multisig descriptors work.
+- **A list of addresses**: Electrum's "imported addresses" wallet, or any address you want
+  watched. Nothing is derived; the list is the wallet.
+
+Before saving, the form shows the first receiving address it derived: compare it with Electrum's
+Addresses tab, and a wrong wallet type shows up as a different address. Lararium refuses private
+material (an extended private key, a WIF key, a seed phrase) and keys of other networks, never
+stores or echoes it, and encrypts the key or descriptor you give at rest, because a public key
+reveals every address of the wallet. Never enter a seed phrase anywhere.
+
+Gap limits (how many unused addresses in a row Lararium scans past) default to 20 and 10 for an
+Electrum key and 20 and 20 for a descriptor; change them on the connection card under Advanced.
+
+Notes:
+
+- **Server.** Chain data comes from the Esplora server in `LARARIUM_ESPLORA_URL` (in `infra/.env`;
+  the default is `https://mempool.space/api`). A self-hosted Esplora server keeps your addresses
+  from a public one. The client sends at most one request a second.
+- **Confirmed only.** A transaction is posted once it has a confirmation; an unconfirmed one is
+  shown on the connection card. One that leaves the chain is voided again.
+- **Prices.** BTC is valued from Binance's public daily bars, the same price as BTC held at
+  Binance, with no key needed. Before January 2020 there is no price and the days show as missing
+  a price.
+- **Transfers.** Each address of the wallet is registered to its account, so a Binance withdrawal
+  to it is a transfer in transit, paired with the wallet's receipt by transaction hash; the
+  network fee stays a separate fee transaction.
+- **Checks.** A difference between the posted balance and the chain's is a warning on the
+  connection, never corrected automatically.
+
 ## Webhooks through Cloudflare Tunnel
 
 Polling every 30 minutes works without this. To see payments within about a minute, Monzo

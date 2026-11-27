@@ -145,6 +145,8 @@ The parent spec's M8 is Bitcoin and EVM chains. The owner holds only bitcoin, in
 - **Refused, never stored, never echoed**: anything private (an extended private key of any prefix, a WIF private key, 64 hex digits that are not a known public form, and twelve or more words, which is a seed phrase), and keys of other networks (`tpub`, `upub`, `vpub` and their multisig forms). The refusal names what was recognised ("this looks like a seed phrase: never enter it anywhere; Lararium needs the master public key from Wallet → Information") without repeating any of it. Request bodies of this route are never logged, as for the other credential routes.
 - **Storage.** The owner's input and the descriptors are a credential (encrypted at rest, purpose `descriptor`): a master public key reveals every past and future address. The connection's config holds what is not secret: the form, the wallet type, the gap limits and a fingerprint (the SHA-256 of the sorted descriptors) that refuses connecting the same wallet twice (409, as for a duplicate Binance account). No secret is needed to read the chain, so `check_access` returns true.
 - **Gap limits**, per branch and changeable on the connection: 20 receiving and 10 change for Electrum keys (Electrum's defaults), 20 and 20 for descriptors (BIP 44). An address list has none.
+  - Changed on the connection card through `PATCH /api/v1/connections/{id}/bitcoin/gaps`; a change requests a sync. (decided during implementation, 2026-11-27)
+  - Inputs are capped: at most 20 keys, 2 descriptors and 10,000 addresses; a key or address at most 1,000 characters, a descriptor at most 10,000. The web form also refuses, before sending anything, text made only of short lowercase words (a seed phrase). (decided during implementation, 2026-11-27)
 
 ### 5.2 Fetching and pacing
 
@@ -152,12 +154,15 @@ The parent spec's M8 is Bitcoin and EVM chains. The owner holds only bitcoin, in
 - **Pacing**: one request a second. A 429 waits out its `Retry-After`, or 60 seconds when it gives none (the shared client's default is 1 second, so this client sets its own), within the client's retry limit; a sync that is still refused stops and is retried at the next sync. The probe's 429s came at three requests a second.
 - **A long first scan commits as it goes** (through `ctx.session_factory`, as Binance's first sync does): the addresses, raw records and typed rows already fetched survive a failed sync, so the next one resumes instead of starting over. Posting happens only once a sync's scan and history are complete.
 - **How often**: a wallet syncs at most every 6 hours, or when the owner presses "Sync now" (`SyncContext.requested`). Transactions are posted only once confirmed (§5.5), and blocks come about every 10 minutes, so more often buys little and costs the public server.
-- **One sync:**
-  1. The tip height.
-  2. **Scan.** For each branch of each descriptor, the stats of addresses 0, 1, 2, … until *gap* addresses in a row have never had a transaction. Each scanned address is stored and registered (§5.3).
-  3. **History.** For an address whose `tx_count` (confirmed or unconfirmed) differs from the last sync's, the history pages newest first until a confirmed transaction already stored appears, or the history ends.
-  4. **Recheck.** Every stored transaction with fewer than 6 confirmations at the last sync is asked for again (`/tx/:txid/status`): one that left the chain or moved to another block is updated (§5.5).
-  5. **Post** what changed, **check** the balance (§5.6), publish flags.
+- **One sync** (new order, decided during implementation, 2026-11-27): tip, recheck, scan, history, prices, lock, post, check, flags.
+  1. **The tip height.** It is refused if it is below a stored block that was at least 6 confirmations deep, or more than `100 + minutes since the last sync / 5` blocks above the previous tip. A history transaction or status more than 2 blocks above the tip is refused too.
+  2. **Recheck**, before the scan. Every stored transaction with fewer than 6 confirmations at the last sync is asked for again (`/tx/:txid/status`): one that left the chain or moved to another block is updated (§5.5). A transaction found gone (404), unconfirmed again, or confirmed without a block time makes the sync forget the histories of the addresses it touches, so a replacing (RBF) or double-spending transaction is found in the same sync.
+  3. **Scan.** For each branch of each descriptor, the stats of addresses 0, 1, 2, … until *gap* addresses in a row have never had a transaction. Each scanned address is stored and registered (§5.3). A branch stops at 100,000 addresses ("The wallet has more addresses than Lararium scans.").
+  4. **History.** An address's history is asked for only when its reported count (confirmed plus unconfirmed) differs from the count whose history is fully stored (`history_tx_count`). The pages run newest first and stop only at a transaction that was at least 6 blocks deep when that address's history last completed (`history_height`); the sync fails if more distinct transactions arrive than the count says.
+  5. **Prices** (§5.7), then the sync **locks** its connection.
+  6. **Post** what changed, **check** the balance (§5.6), publish flags.
+- **Amounts.** Any satoshi amount or address sum above 2,100,000,000,000,000 (the coin's total supply) is a malformed response.
+- **A failed sync keeps what it committed.** The next sync asks every address's stats again from index 0 and only the histories it lacks. What still has to be posted is kept in the database (`bitcoin_transactions.pending`) and cleared only by the posting, in that sync's own transaction, so a sync that fails after fetching loses nothing.
 - **Cost.** About one request per scanned address per sync, plus history pages for the addresses that changed. The owner's wallet is about 35 requests. A wallet with a thousand used addresses takes about 20 minutes a sync at this pace; that is accepted, and the scan is the first thing the plan's pacing tests cover.
 - **Raw records.** Every response is a raw record (`record_type` the endpoint), deduplicated by content hash; address stats are reports and get a sighting per sync.
 
@@ -198,19 +203,21 @@ A chain transaction touches the wallet when one of its inputs spends, or one of 
 - **A receipt has no counterparty identifier**: its inputs are the sender's addresses (for Binance, its hot wallet), which say nothing about whose account it came from. Hash evidence pairs it (§5.8).
 - **Confirmed only.** An unconfirmed transaction is stored typed and shown on the connection ("1 unconfirmed incoming"), and posted when it has one confirmation. Pending postings count in balances, and an unconfirmed transaction can be replaced or dropped, so counting it would move net worth by money that may never arrive. A Binance withdrawal waiting for its block sits in In transit meanwhile, which is what it is.
 - **Leaving the chain.** A transaction with fewer than 6 confirmations is rechecked each sync. One that is no longer confirmed has its ledger transactions voided by the connector (and posted again, with the new block's time, if it confirms again); one the server no longer knows is voided and flagged.
+- **A fee that does not add up.** A spend whose inputs less outputs differ from the server's `fee` posts nothing new, keeps whatever it posted before, stays pending and is flagged "a transaction's fee does not add up"; the rest of the sync goes on. A shared transaction is flagged when its movement is first posted. (decided during implementation, 2026-11-27)
 - **Coinbase outputs** (mining) are receipts.
 - **Description**: "Received bitcoin", "Sent bitcoin", "Bitcoin network fee", "Shared transaction", in the house style; wording is the builder's.
 - **Normalizer.** Versioned; a new version replays every raw record, as the other connectors do.
 
 ### 5.6 Checking the balance
 
-- Each sync writes one `reported` snapshot of BTC on the account: the sum over every scanned address of `chain_stats.funded_txo_sum − chain_stats.spent_txo_sum` (confirmed only, the same basis as posting), as of the sync. The account is in `transactions` mode, so the snapshot is a check, never the balance, as Trading 212's is.
+- Each sync writes one `reported` snapshot of BTC on the account: the sum over every scanned address of `chain_stats.funded_txo_sum − chain_stats.spent_txo_sum` (confirmed only, the same basis as posting), as of the sync. The check is made at the later of the sync's time and the newest block time, because a block may be stamped up to two hours ahead (decided during implementation, 2026-11-27). The account is in `transactions` mode, so the snapshot is a check, never the balance, as Trading 212's is.
 - The difference between that snapshot and the account's posted balance is found and published through the shared `differences` / `publish_reconciliation` path: a warning on the connection, notified once, kept until a later sync agrees. It is never corrected automatically.
 - **What a difference means**: a transaction the history did not return, a posting rule wrong for a shape no real data has shown (the shared transaction, an address-less output), or the server answering inconsistently between the scan and the history. Because the two numbers come from separate endpoints, a missed address cannot be caught this way: the scan's gap rule is the only protection, and the gap limits are the owner's to raise (§6).
 
 ### 5.7 Prices
 
 - **Binance's public daily bars** price BTC for every day a connected Bitcoin wallet holds it, whether or not any Binance connection exists. The bars and the list of trading pairs need no key. The EUR conversion, the price date and the one-source-per-day rule are M7 §5.10's.
+- **Each connection keeps its own record of the days it asked for, as M7 does; the bars table is shared**, so a day two connections both fetch is stored once. Prices run before the sync locks its connection (§5.2), so BTC first posted in a sync is priced by the next one (at most 6 hours later, or at once with "Sync now"). "No price for BTC" stands while any held day has no price. (decided during implementation, 2026-11-27)
 - **This is more than moving M7's pricer.** M7's pricer takes the pairs from a connection's exchange information, keeps the days it has fetched in that connection's config, and finds the assets held through that connection's accounts. A wallet-only owner has none of these, so the shared pricer gets its own state: the pairs fetched without a connection, and the days fetched per instrument in a shared table, with the assets held found across every Binance wallet account and connected Bitcoin wallet account. M7's per-connection walk then uses the same state, so the two never fetch the same days twice. Where it lives is the builder's call within §3.4.
 - **Coverage.** Binance's EUR markets begin in January 2020 (BTCUSDT from 2017, but M7 never assumes a stablecoin is worth a dollar). CoinGecko (id `bitcoin`), when the operator has set a key, prices a day Binance cannot, but its free plan reaches back only 365 days. So BTC held before January 2020 shows `missing_price` for those days, flagged once, and the owner can enter prices by hand. This is a known limit for other owners; the owner's own wallet has no transaction before 2020 (probe, 2026-11-27).
 - **No price** is never 0.
@@ -225,6 +232,7 @@ A chain transaction touches the wallet when one of its inputs spends, or one of 
   - **Binance → wallet.** The withdrawal names the wallet's account (its address is the account's identifier), so it opens an awaiting transfer as soon as Binance syncs. When the wallet's receipt arrives, `HASH` pairs them and its contra moves to In transit. Binance's `transactionFee` stays Binance's fee transaction.
   - **Wallet → Binance.** The wallet's payment to Binance's deposit address pairs with Binance's deposit of the same hash, address and amount. The wallet's chain fee stays the wallet's fee transaction. (No real deposit has shown whether Binance credits exactly the output; if it credits less, the pair fails the amount and stays for the owner to pair.)
   - **Wallet → own wallet.** One connected wallet's payment pairs with the other's receipt.
+- **A hash pair is never held back by the coverage gate**, since a shared hash is no amount-and-date guess. Identical twins in one transaction pair in a fixed order, as other twins do. (decided during implementation, 2026-11-27)
 - **Several of the owner's movements in one chain transaction** pair one to one, because each is its own movement with its own address and amount. Two that share an address and an amount are a tie and go to review.
 - **The registry wins over the hash** (designer's call). When the shared address is registered to an account other than the record's own (the receiving account for a receipt), `HASH` makes no edge: the owner's registration says where that address's money goes, and the engine already acts on it (a placeholder on a manual account). The address-conflict flag (§5.3) tells the owner; moving the address re-matches, and `HASH` then pairs. (Production has no `chain_address` registered today, 2026-11-27, so the owner's wallet is not affected.)
 - **The pair loader** today loads only records that are bank transfers or name an identifier, an own account or a card merchant; a wallet receipt names none, so a record with a `tx_hash` is added to that condition.
@@ -236,6 +244,8 @@ A chain transaction touches the wallet when one of its inputs spends, or one of 
 - A reconciliation difference (§5.6).
 - An address of the wallet registered to another account (§5.3).
 - A shared transaction (§5.5), once each.
+- A spend whose fee does not add up (§5.5).
+- "No used address found", on every sync until the wallet is first used (decided during implementation, 2026-11-27).
 - A confirmed transaction that later left the chain (§5.5).
 - The server failing: the connection's existing `failing` status and its notification.
 
@@ -282,8 +292,8 @@ A chain transaction touches the wallet when one of its inputs spends, or one of 
 - Table, column and index names; the shared pricer's home; the client's structure within §5.2's pacing.
 - The detection rules for private material (§5.1) beyond the listed forms, erring towards refusing.
 - The wording of descriptions, warnings and help text; the UI layout.
-- Which descriptor library: embit (MIT, pure Python) is the expected one. Its Taproot support has an open TODO in its source: the plan checks `tr(...)` against the BIP 86 test vectors first, and if it fails, Taproot descriptors are refused with a clear message rather than derived wrongly.
-- The Esplora paging form (`/txs/chain/:last_seen_txid`) was not exercised by the probe (no address had 25 transactions): the plan checks it against the configured host with a busy public address before relying on it.
+- Which descriptor library: embit (MIT, pure Python) is the expected one. embit derives the BIP 86 Taproot test vector correctly (checked 2026-11-27), so Taproot descriptors are supported.
+- The Esplora paging form (`/txs/chain/:last_seen_txid`) was not exercised by the probe (no address had 25 transactions); it is used as documented, and the history-count check of §5.2 guards it (decided during implementation, 2026-11-27).
 
 ## 10. Answers from the owner (2026-11-27)
 
@@ -292,11 +302,12 @@ A chain transaction touches the wallet when one of its inputs spends, or one of 
 - **Balance.** Transactions are the balance, reported balances check it (§4.1 B).
 - **Chain data.** A public server by default, configurable.
 - **Designer's calls the owner reviews with this document**: one ledger transaction per movement (§4.4); posting only confirmed transactions (§5.5); syncing at most every 6 hours (§5.2); the registry winning over the hash (§5.8); prices from Binance's bars with no price before 2020 (§5.7); a new `chain_native` instrument scheme (§5.4); the master public key stored encrypted (§5.1).
+- **Prices (2026-11-27).** The wallet's BTC and Binance's BTC share one price from Binance's public market data; the owner asked whether the wallet should use another platform's price and was told one instrument has one price.
 - **Probe.** The owner saved the master public key to the gitignored probe folder and the read-only probe ran on 2026-11-27.
 
 ## 11. Verification
 
-- **Derivation** against published vectors: BIP 32, 44, 49, 84, 86 (if Taproot is kept), SLIP-0132 prefixes, Electrum's own test vectors for old seeds, multisig and 2FA, and descriptor checksums.
+- **Derivation** against published vectors: BIP 32, 44, 49, 84, 86, SLIP-0132 prefixes, Electrum's own test vectors for old seeds, multisig and 2FA, and descriptor checksums.
 - **Refusals**: every private form of §5.1 is refused, and a test proves the input appears in no response, log record or raw record.
 - **Posting**, with synthetic Esplora responses built from the documented format: receipt, spend with change, spend to own addresses, shared transaction, address-less output, coinbase, unconfirmed then confirmed, confirmed then dropped. A property test: for any transaction, the movements posted sum to the wallet's outputs less its inputs, and the posted balance equals the reported sums.
 - **Pairing**, in the engine's property tests: `HASH` pairs exactly the records sharing chain, hash, address and opposite equal amounts, regardless of the window; ties go to review; no record pairs twice.

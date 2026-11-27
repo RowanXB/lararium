@@ -194,7 +194,7 @@ Every object has an `owner` field, which defaults to the entity representing the
   - **Single authoritative source**: one connection, or "manual". The same account may not receive entries from two sources at the same time.
 - **Account identifiers (the "my accounts" registry)**: the identifier type (sort code + account number, IBAN, card last digits, payee name alias, deposit reference, wallet address, xpub, Monzo user id, Monzo pot id, "conduit"-type institution) plus the normalised value, pointing to an account. Transfer inference relies on it (§8). An xpub wallet is one account, and all addresses derived from it are identifiers of that account.
 - **Transactions and postings**:
-  - A transaction records: the instant it occurred (`timestamptz`), the booking date and value date (`date`), description, counterparty entity, status (pending / booked / inferred / confirmed / void), origin (connector / manual / inferred / rule), and it can be traced back to its raw records. On-chain transactions additionally record the chain and the transaction hash.
+  - A transaction records: the instant it occurred (`timestamptz`), the booking date and value date (`date`), description, counterparty entity, status (pending / booked / inferred / confirmed / void), origin (connector / manual / inferred / rule), and it can be traced back to its raw records. On-chain movements additionally record the chain, the transaction hash and the address the movement is at (columns on the transaction, M8 design §5.8).
   - A posting records: account, instrument, signed quantity; with cost or price attached when needed (trades, currency exchange). Fees (including on-chain gas fees) are a separate posting.
 - **Balance snapshot**: account, instrument, quantity, point in time, source. There are two kinds: "institution-reported" and "manually entered".
 - **Prices and FX rates**: instrument (or currency pair), price, point in time, source.
@@ -303,10 +303,10 @@ The implementer must first verify whether an eToro key can be restricted to read
 ### 7.7 Self-custodied wallets
 
 - **Read-only**: only addresses and xpubs are stored; private keys and seed phrases never enter the system.
-- **BTC**: derive addresses locally from a descriptor, scan up to the gap limit, and query the UTXO balance and transactions of each address. The data comes from an Esplora-compatible API (e.g. mempool.space); if privacy matters, connect to a self-hosted Electrum server.
-- **EVM chains**: query native coin and ERC-20 token balances, plus incoming and outgoing transfers. Data sources sit behind replaceable interfaces (e.g. Alchemy, Blockscout). Token metadata and prices are linked to CoinGecko by contract address. Spam airdrop tokens can be hidden by the user (§6.3).
+- **BTC**: derive addresses locally from an Electrum master public key, an output descriptor or a list of addresses, scan up to the gap limit, and read the transactions of each address. A wallet's balance is its transactions, checked against the balance the chain reports (M8 design §4.1). The data comes from an Esplora server (default mempool.space, set with `LARARIUM_ESPLORA_URL`); if privacy matters, point it at a self-hosted Esplora server.
+- **EVM chains** (a later milestone of their own, not Phase 1; owner, 2026-11-27): query native coin and ERC-20 token balances, plus incoming and outgoing transfers. Data sources sit behind replaceable interfaces (e.g. Alchemy, Blockscout). Token metadata and prices are linked to CoinGecko by contract address. Spam airdrop tokens can be hidden by the user (§6.3).
 - **Other chains** (e.g. Solana, Tron): added as new data source implementations when needed.
-- **Chain scope**: Phase 1 supports BTC and EVM chains (Ethereum and the major L2s) by default.
+- **Chain scope**: Phase 1 supports BTC only (owner, 2026-11-27); EVM chains (Ethereum and the major L2s) follow in their own milestone.
 - **Transfer matching**: on-chain transaction hashes and addresses are identifiers, used to pair Binance withdrawals and deposits with the wallet's incoming and outgoing transfers.
 
 ### 7.8 Manual import
@@ -471,9 +471,10 @@ For these modules, Phase 1 must:
 - **M5 IBKR Flex**: positions, cash, trades, deposits and withdrawals; prices and FX rates; valuation; pairing with outgoing transfers from Monzo (design: `2026-11-18-ibkr-flex-design.md`).
 - **M6 eToro and Trading 212**: each through its own API (path for eToro per §7.6); transfers whose two sides differ in currency or amount, with FX and fee postings.
 - **M7 Binance**: balance snapshots for each wallet, deposits and withdrawals, CoinGecko prices.
-- **M8 Self-custodied wallets**: BTC (xpub / descriptor) and EVM chains; pairing with Binance withdrawals and deposits by transaction hash.
+- **M8 Bitcoin wallets**: BTC by Electrum master public key, descriptor or address list; pairing with Binance withdrawals and deposits by transaction hash (design: `2026-11-27-bitcoin-wallet-design.md`).
 - **M9 SnapTrade**: the other brokers the user connects.
 - **M10 Wrap-up**: reconciliation alerts, Beancount and Parquet export, restore rehearsal, dependency license scan.
+- **EVM wallets** (a later milestone, unnumbered until scheduled, after M10): native coin and tokens on Ethereum and the major L2s, paired with Binance by transaction hash as M8's are.
 
 The roadmap after that:
 
@@ -483,10 +484,10 @@ The roadmap after that:
 ## 14. Acceptance criteria
 
 - For any chosen day, the net worth computed by the system matches a manual calculation, within the tolerance.
-- Each data source's balances match what the institution itself reports: Monzo must match exactly; IBKR must match the NAV it reports, Binance, SnapTrade, eToro and Trading 212 their reported balances and holdings, and wallets the balances shown on block explorers, each within the tolerance.
+- Each data source's balances match what the institution itself reports: Monzo must match exactly; IBKR must match the NAV it reports, Binance, SnapTrade, eToro and Trading 212 their reported balances and holdings, and wallets the balances shown on block explorers (for Bitcoin in M8; EVM wallets with their milestone), each within the tolerance.
 - Transfer money from Monzo to a manually imported bank account: both balances change correctly; importing that bank's CSV afterwards does not create duplicate entries.
 - Transfer money from Monzo to IBKR: the money first appears in the in-transit account; once IBKR reports the deposit, it is paired automatically. Throughout the process, net worth neither loses a chunk out of nowhere nor counts anything twice.
-- Withdraw crypto from Binance to your own wallet: both sides are paired automatically by transaction hash, and gas fees and service fees are recorded separately.
+- Withdraw crypto from Binance to your own wallet: both sides are paired automatically by transaction hash, and gas fees and service fees are recorded separately. Accepted with BTC in M8; other chains with their own milestones.
 - Delete all ledger rows that come from data sources, then regenerate from raw data: the result is exactly the same as before, and all of the user's decisions are still there.
 - Invalidate the Monzo token: an alert is received within the configured time.
 - Restore an environment from backup: the data is complete.
@@ -509,7 +510,7 @@ The roadmap after that:
 | eToro: connect directly to its API if a read-only key is available, otherwise go through SnapTrade | Default |
 | Accounts that can only export PDF are handled as balance snapshots until their bank has a PDF layout; HSBC UK, Lloyds and BOC UK statements are parsed in M2 (changed 2026-11-15) | Confirmed |
 | Every export format a bank offers is supported; for each bank the most information-complete one is recommended (2026-11-15) | Confirmed |
-| Wallets support BTC and EVM chains by default in Phase 1; DeFi positions are out of scope | Default |
+| Wallets support BTC in Phase 1 and EVM chains in a later milestone of their own (changed 2026-11-27); DeFi positions are out of scope | Confirmed |
 | Add a crypto price source in Phase 1; any instrument can be entered manually by quantity | Default |
 | Transfers through an intermediary institution are handled as either the "own account" or the "conduit" case | Default |
 | Reporting currency defaults to GBP and time zone to Europe/London, both configurable | Default |
