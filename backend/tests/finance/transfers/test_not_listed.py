@@ -9,7 +9,7 @@ placeholder and the review reason `not_listed_in_full`. When a later upload list
 the pair forms by itself."""
 
 import importlib.util
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,14 @@ from lararium.modules.finance import models
 from lararium.modules.finance.accounts import AccountRecord
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.ledger import void_transaction
-from lararium.modules.finance.transfers import TransferRecord, list_transfers
+from lararium.modules.finance.transfers import (
+    TransferRecord,
+    candidates,
+    is_overdue,
+    list_transfers,
+    load_transfer_settings,
+    pair,
+)
 
 from .conftest import (
     B_IDENTIFIER,
@@ -130,6 +137,64 @@ async def test_a_row_the_gate_refuses_opens_a_review_with_no_placeholder(
     assert balances.get(ids.in_transit, Decimal(0)) == 0
     await assert_consistent(session)
     assert await heal() == 0
+
+
+async def test_the_review_offers_the_row_and_pairing_it_settles_the_review(
+    session: AsyncSession,
+    run: Run,
+    ids: SystemIds,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """The row the gate refused is the review's candidate of the same amount, so the
+    Transfers page offers it with Pair; pairing it (the transfer's pair) matches the two
+    and clears the review."""
+    b, sent, row = await _setup(
+        session, run, connected_bank, connector_tx, imported_bank, statement_row
+    )
+    await heal()
+    transfer = await _transfer_of(session, sent)
+    assert transfer.review_reason == "not_listed_in_full"
+
+    found = await candidates(session, transfer.id)
+    assert [(c.transaction_id, c.account_id, c.reason) for c in found] == [(row, b.id, "exact")]
+
+    paired = await run(pair, transfer.id, row)
+
+    assert (paired.status, paired.review_reason) == ("matched", None)
+    assert (paired.out_transaction_id, paired.in_transaction_id) == (sent, row)
+    assert await placeholders(session) == []
+    balances = await balances_on(session)
+    assert balances[b.id] == Decimal(100)
+    assert balances.get(ids.in_transit, Decimal(0)) == 0
+    await assert_consistent(session)
+    assert await heal() == 0
+
+
+async def test_a_review_not_listed_in_full_is_never_overdue(
+    session: AsyncSession,
+    run: Run,
+    connected_bank: MakeConnected,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """It awaits an upload of a manual account, not a connection's report: however long it
+    waits, it is not overdue (its review already puts it in Needs attention)."""
+    _, sent, _ = await _setup(
+        session, run, connected_bank, connector_tx, imported_bank, statement_row
+    )
+    await heal()
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "not_listed_in_full")
+
+    settings = await load_transfer_settings(session)
+    later = datetime.now(UTC) + settings.overdue * 10
+    assert not is_overdue(transfer, later, settings)
 
 
 async def test_when_the_row_goes_the_placeholder_comes_back(

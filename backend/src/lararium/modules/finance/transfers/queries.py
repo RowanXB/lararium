@@ -684,8 +684,10 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
     pair can link again), each oldest first, each once. Only those pair would accept: not
     a leg of a matched transfer nor rejected (require_pairable), and a pair the owner could
     make (pairs.owner_pair_refusal). One the relation gives as the same amount that isn't
-    (the owner paired it, so its side differs) is labelled amount_differs. Empty for a
-    transfer with both sides."""
+    (the owner paired it, so its side differs) is labelled amount_differs. A transfer
+    awaiting review as not_listed_in_full lists the rows the coverage gate refused it
+    (PairRelation.unlisted) with those of the same amount, so the owner can pair one by hand
+    (account type catalog design §8.3 item 3). Empty for a transfer with both sides."""
     transfer = await get_transfer(session, transfer_id)
     if transfer.status not in OPEN_STATUSES:
         return []
@@ -697,8 +699,13 @@ async def candidates(session: AsyncSession, transfer_id: UUID) -> list[Candidate
         return []
     system = await system_account_ids(session)
     relation = await pair_relation(session, system, await load_transfer_settings(session))
+    unlisted = (
+        sorted(relation.unlisted(present_id))
+        if transfer.review_reason == "not_listed_in_full"
+        else []
+    )
     reasons: list[tuple[CandidateReason, list[UUID]]] = [
-        ("exact", relation.candidates(present_id)),
+        ("exact", relation.candidates(present_id) + unlisted),
         ("amount_differs", relation.candidates(present_id, exact=False)),
         ("amount_differs", sorted(relation.across.get(present_id, frozenset()))),
         ("unpaired", await unpaired_from(session, present_id)),
@@ -935,8 +942,13 @@ async def card_merchant_suggestions(session: AsyncSession) -> list[CardMerchantS
 
 def is_overdue(transfer: TransferRecord, now: datetime, settings: TransferSettings) -> bool:
     """Whether an awaiting transfer has been in transit too long, as due_notifications
-    judges it."""
-    return transfer.status == "awaiting" and transfer.opened_at < now - settings.overdue
+    judges it. One awaiting as not_listed_in_full never is: it waits for an upload of a
+    manual account, not a connection's report, and its review already asks the owner."""
+    return (
+        transfer.status == "awaiting"
+        and transfer.review_reason != "not_listed_in_full"
+        and transfer.opened_at < now - settings.overdue
+    )
 
 
 def stray_in_transit(in_transit: UUID) -> Select[*tuple[Any, ...]]:
