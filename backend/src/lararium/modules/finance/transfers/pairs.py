@@ -14,7 +14,14 @@ owner's decision 2026-11-27): with a record on an account it names that names th
 back, or with one there naming nobody when both are timed and at most the near window
 apart. No other tier pairs it, so it is never an external top-up or withdrawal. A record
 naming nobody that is such a move's counterpart is that move's first: no shared payee's
-record and no funding alone gives it another edge (_registry_edges)."""
+record and no funding alone gives it another edge (_registry_edges).
+
+Where a record has several candidates of the same amount, two more rules apply, in this
+order, each to what the one before leaves (account family identifier design §5.10 and §5.7,
+owner's decisions 2026-11-27): a record pairs with the one of them that is, both timed, its
+only candidate of any tier within the near window, when it is that one's only one too and
+the pair is takeable (_near_split); and a group of interchangeable records, one side of
+which is alike, pairs in time order (_twins)."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -963,7 +970,9 @@ class PairRelation:
     # may differ: _decided_edges), both ways round, with its strongest tier.
     tiers: Mapping[UUID, Mapping[UUID, Tier]]
     # A record's candidates of the same amount, or the owner's: those in the strongest tier
-    # it has any in, for which that is also their own strongest (Ruling 7).
+    # it has any in, for which that is also their own strongest (Ruling 7); a record with
+    # several, only the one the near window gives it (_near_split). A record dropped so
+    # still lists the one that dropped it (`partner` reads both ways).
     exact: Mapping[UUID, frozenset[UUID]]
     # The pairs of the same amount that can't be taken by themselves: the coverage gate
     # refused them (_one_sided_known, _weak_known). They are candidates all the same
@@ -998,7 +1007,7 @@ class PairRelation:
 
     def partner(self, record_id: UUID) -> UUID | None:
         """The record's unique partner: its only candidate, whose only candidate it is, when
-        the pair is takeable; or, among interchangeable candidates, the one a fixed order
+        the pair is takeable; or, among interchangeable candidates, the one time order
         gives it (_twins). With no candidate of the same amount, the one it converts with
         across currencies (`converts`), else the card payment or deposit it pairs with
         (`by_card`)."""
@@ -1009,7 +1018,8 @@ class PairRelation:
         if len(found) != 1:
             return self.twins.get(record_id)
         [partner] = found
-        if len(self.exact.get(partner, frozenset())) != 1:
+        # Its only candidate may have been narrowed to another (_near_split).
+        if self.exact.get(partner, frozenset()) != frozenset({record_id}):
             return None
         return partner if self.takeable(record_id, partner) else None
 
@@ -1060,21 +1070,85 @@ class PairRelation:
         return any(self.records[c].account_id == account_id for c in found)
 
 
+def _near_split(
+    records: Mapping[UUID, Pairable],
+    tiers: Mapping[UUID, Mapping[UUID, Tier]],
+    exact: Mapping[UUID, frozenset[UUID]],
+    untakeable: Collection[frozenset[UUID]],
+    near_window: timedelta,
+) -> dict[UUID, frozenset[UUID]]:
+    """`exact` with several candidates split by the near window (account family identifier
+    design §5.10, owner's decision 2026-11-27): a record r with two or more keeps only c,
+    one of them, and c only r, when both are timed (a connector's record, or an imported
+    row timed to the second), c is within `near_window` of r's instant, every other record
+    in r's `tiers` (of any tier, `untakeable` included) is timed and further than
+    `near_window` from it, the same holds of c's, and the pair is takeable. The owner
+    moves the same amount into an account every few days, and a payment and its deposit
+    are normally seconds apart, so the one nearby is the other side; a nearby candidate of
+    a lower tier, or one the coverage gate refuses, still might be, and then nothing is
+    split. So might an untimed candidate (a row giving only its date, stamped 00:00): its
+    real time is unknown, so it can't be shown to lie outside the window, and only timed
+    candidates are ruled out by time (owner's ruling, 2026-11-27). It only narrows: no
+    record gains a candidate, and a record dropped from r's or c's candidates still lists r
+    or c among its own, so its candidates and review reason are as before
+    (PairRelation.partner reads both ways). Whatever is left with several goes to review as
+    before."""
+
+    def near(r: UUID) -> set[UUID]:
+        """r's candidates time doesn't rule out: untimed ones, and timed ones within the
+        window. None when r itself is untimed."""
+        x = records[r]
+        if not x.timed:
+            return set()
+        return {
+            c
+            for c in tiers.get(r, {})
+            if not records[c].timed or abs(records[c].occurred_at - x.occurred_at) <= near_window
+        }
+
+    split = dict(exact)
+    for r, found in exact.items():
+        if len(found) < 2:
+            continue
+        nearby = near(r)
+        if len(nearby) != 1:
+            continue
+        [c] = nearby
+        if (
+            c in found
+            and records[c].timed
+            and near(c) == {r}
+            and frozenset((r, c)) not in untakeable
+        ):
+            split[r], split[c] = frozenset({c}), frozenset({r})
+    return split
+
+
 def _twins(
     records: Mapping[UUID, Pairable],
     exact: Mapping[UUID, frozenset[UUID]],
     untakeable: Collection[frozenset[UUID]],
 ) -> dict[UUID, UUID]:
     """Partners for groups of interchangeable records: n records whose candidates are
-    exactly the same n others, and the reverse, each side alike (account, instrument,
-    amount, booking date: a transfer split into equal parts, say). Any pairing of them
-    gives the same ledger, so they pair in a fixed order, by time and then by reference,
-    which doesn't depend on which side arrived first. Anything less alike stays for the
-    owner's review. A side naming no account is found by amount and date, as a single
-    counterpart is: an unrelated row can be among it until the real one arrives, and the
-    group then no longer matches (design §5.8). A group with a pair that can't be taken by
-    itself (`untakeable`) pairs none: which of its rows are the real ones is unknown until
-    an upload lists their days, and a group pairs as a whole or not at all."""
+    exactly the same n others, and the reverse, one side or both alike (account,
+    instrument, amount, booking date: a transfer split into equal parts, or the same amount
+    moved from two accounts into one, seconds apart). Owner's decision (account family
+    identifier design §5.7, 2026-11-27): one alike side is enough. Any pairing of such a
+    group gives the same ledger, the same transfers between the same accounts for the same
+    amounts, differing only in which of identical rows each links, so a fixed order can't
+    be wrong. Which links: time order, the one rule, which doesn't depend on which side
+    arrived first: each side sorted by instant (a record without a real time is stamped
+    00:00 on its booking date, so it sorts by that date), then by reference, the k-th of
+    one linked to the k-th of the other. With real times on both sides it is time
+    matching: in one dimension a sorted matching gives the least total time difference.
+    (An earlier draft also asked for exactly one counterpart within the near window; the
+    owner dropped it, 2026-11-27, since it never gave a link time order wouldn't.)
+    Anything less alike stays for the owner's review. A side naming no account is found by
+    amount and date, as a single counterpart is: an unrelated row can be among it until
+    the real one arrives, and the group then no longer matches (design §5.8). A group with
+    a pair that can't be taken by itself (`untakeable`) pairs none: which of its rows are
+    the real ones is unknown until an upload lists their days, and a group pairs as a
+    whole or not at all."""
 
     def alike(group: frozenset[UUID]) -> bool:
         return (
@@ -1101,8 +1175,7 @@ def _twins(
             len(others) == len(found)
             and all(exact.get(x) == others for x in found)
             and all(exact.get(x) == found for x in others)
-            and alike(found)
-            and alike(others)
+            and (alike(found) or alike(others))
             and not any(frozenset((x, y)) in untakeable for x in found for y in others)
         ):
             for x, y in zip(order(others), order(found), strict=True):
@@ -1147,6 +1220,14 @@ async def pair_relation(
     amount the coverage gate refuses (design §5.8) is a candidate like any other, one that
     can't be taken by itself (`untakeable`).
 
+    Where a record has several candidates of the same amount, two rules follow, in this
+    order (account family identifier design §5.10 then §5.7, owner's decisions
+    2026-11-27), after the one above of whether two records may pair at all: it pairs with
+    the one that is, both timed, each the other's only candidate of any tier within the
+    near window, when that pair is takeable (_near_split); then a group of interchangeable
+    records, one side of which (or both) is alike, pairs in time order (_twins). Whatever
+    is left with several is for review.
+
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
     their references included; `listing`, the days their import would list in full."""
@@ -1165,6 +1246,7 @@ async def pair_relation(
     }
     exact = {r: found for r, found in exact.items() if found}
     by_id = {x.id: x for x in records}
+    exact = _near_split(by_id, same.tiers, exact, untakeable, settings.near_window)
     across = {
         r: frozenset(found)
         for r, found in _cross_currency_edges(records, settings, decisions).tiers.items()

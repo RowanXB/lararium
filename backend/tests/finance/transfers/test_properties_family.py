@@ -7,11 +7,18 @@ identified to the other's account, else ONE_SIDED); or with a record there namin
 when both are timed and their instants are at most the near window apart (ONE_SIDED). No
 other rule gives it an edge (item 2). A record naming nobody that is a family move's
 counterpart so (item 3) gets no edge from a record naming a shared payee and none through
-its account's funding alone; its other edges are as without the family moves."""
+its account's funding alone; its other edges are as without the family moves.
 
+Several candidates of the same amount split by the near window (§5.10, pairs._near_split):
+only a pair both timed, each the other's only candidate of any tier within the window, and
+takeable. A group alike on one side pairs in time order (§5.7, pairs._twins), and any
+assignment of it gives the same balances."""
+
+from collections import defaultdict
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
+from itertools import permutations
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -28,7 +35,9 @@ from lararium.modules.finance.transfers.pairs import (
     _family_pair,
     _funded_only,
     _names_nobody,
+    _near_split,
     _registry_edges,
+    _twins,
     counterpart_bounds,
 )
 from lararium.modules.finance.transfers.settings import DEFAULTS
@@ -324,3 +333,212 @@ def test_time_only_narrows_family_pairs(case: tuple[frozenset[UUID], list[Pairab
         return {pair: tier for pair, tier in _edges(edges).items() if pair & family}
 
     assert touching(off) == {pair: tier for pair, tier in touching(on).items() if pair <= family}
+
+
+# Several candidates: the only one within the near window (§5.10).
+
+
+@st.composite
+def _crowd(draw: st.DrawFn) -> tuple[list[Pairable], frozenset[frozenset[UUID]]]:
+    """Payments of 100 from Monzo naming the shared payee the three Trading 212 accounts
+    hold (or one of them), deposits of 100 on those accounts naming nobody, and up to two
+    records of 100 either way of any kind (_record), within five minutes of BASE (the near
+    window's edge often), timed or not: most are each other's candidates, many several,
+    and some within the window of two. Some of their pairs untakeable."""
+
+    def at() -> datetime:
+        seconds = draw(st.sampled_from((-121, -120, -60, 0, 40, 119, 120, 121)))
+        return BASE + timedelta(seconds=draw(st.just(seconds) | st.integers(-300, 300)))
+
+    records = []
+    for _ in range(draw(st.integers(min_value=1, max_value=3))):
+        named: dict[str, Any] = draw(
+            st.sampled_from(({"payee_holders": _THREE},) * 3 + tuple({"holder": x} for x in _THREE))
+        )
+        records.append(
+            _p(MONZO, "-100", 0, bank_transfer=True, names_account=True, occurred_at=at(), **named)
+        )
+    for _ in range(draw(st.integers(min_value=1, max_value=3))):
+        records.append(
+            _p(
+                draw(st.sampled_from(sorted(_THREE))),
+                "100",
+                0,
+                bank_transfer=draw(st.booleans()),
+                funded_by_transfer=True,
+                occurred_at=at(),
+                source=(draw(st.sampled_from(("connection", "import"))), str(uuid4())),
+            )
+        )
+    for _ in range(draw(st.integers(min_value=0, max_value=2))):
+        account = draw(st.sampled_from(ACCOUNTS))
+        records.append(draw(_record(_THREE, account, draw(st.sampled_from(("-100", "100"))), at())))
+    timed = [draw(st.sampled_from((True, True, False))) for _ in records]
+    records = [
+        x
+        if on
+        # A row giving only its date is stamped 00:00.
+        else replace(x, timed=False, occurred_at=datetime.combine(x.booking_date, time(), UTC))
+        for x, on in zip(records, timed, strict=True)
+    ]
+    pairs = [frozenset((x.id, y.id)) for x in records for y in records if x.sends and not y.sends]
+    untakeable = draw(st.sets(st.sampled_from(pairs), max_size=2)) if pairs else set()
+    return records, frozenset(untakeable)
+
+
+@settings(max_examples=300, deadline=None)
+@given(crowd=_crowd())
+def test_near_split_never_takes_a_pair_with_a_second_candidate_within_the_window(
+    crowd: tuple[list[Pairable], frozenset[frozenset[UUID]]],
+) -> None:
+    """_near_split, exactly: it narrows a record r with two or more candidates to c, and c
+    to r, iff both are timed, each is the other's only record of any tier (untakeable
+    included) time doesn't rule out (an untimed one, or a timed one within the near
+    window), c is among r's candidates, and the pair is takeable. Nothing else changes, and
+    no record gains a candidate."""
+    records, untakeable = crowd
+    by_id = {x.id: x for x in records}
+    same, _, refused = _registry_edges(records, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
+    untakeable |= refused
+    tiers = same.tiers
+    best = {r: min(found.values()) for r, found in tiers.items()}
+    exact = {
+        r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])
+        for r, found in tiers.items()
+    }
+    exact = {r: found for r, found in exact.items() if found}
+    split = _near_split(by_id, tiers, exact, untakeable, NEAR)
+
+    def near(r: UUID) -> set[UUID]:
+        """r's candidates time doesn't rule out: untimed, or timed within the window."""
+        x = by_id[r]
+        return {
+            c
+            for c in tiers.get(r, {})
+            if x.timed and (not by_id[c].timed or abs(by_id[c].occurred_at - x.occurred_at) <= NEAR)
+        }
+
+    taken = {
+        frozenset((r, c))
+        for r, found in exact.items()
+        for c in found
+        if (len(found) >= 2 or len(exact[c]) >= 2)
+        and by_id[c].timed
+        and near(r) == {c}
+        and near(c) == {r}
+        and frozenset((r, c)) not in untakeable
+    }
+    assert split.keys() == exact.keys()
+    for r in exact:
+        assert split[r] <= exact[r]
+        [pair] = [p for p in taken if r in p] or [None]
+        if pair is None:
+            assert split[r] == exact[r]
+        else:
+            [c] = pair - {r}
+            assert split[r] == {c}
+            assert by_id[r].timed and by_id[c].timed
+    event("split" if taken else "none split")
+    event(
+        "a second candidate within the window"
+        if any(len(near(r)) >= 2 for r in exact)
+        else "at most one within the window"
+    )
+
+
+# Interchangeable on one side, in time order (§5.7).
+
+
+@st.composite
+def _group(draw: st.DrawFn) -> tuple[list[Pairable], list[Pairable]]:
+    """n in 2..3 senders of 100 on n distinct accounts and n receivers alike on CASH (one
+    amount and booking date), each timed or not, at instants drawn within the day."""
+    n = draw(st.integers(min_value=2, max_value=3))
+
+    def at(timed: bool) -> datetime:
+        if not timed:
+            return datetime.combine(BASE.date(), time(), UTC)
+        return BASE + timedelta(seconds=draw(st.integers(-3600, 3600)))
+
+    def side(accounts: list[UUID], quantity: str) -> list[Pairable]:
+        found = []
+        for account in accounts:
+            timed = draw(st.booleans())
+            found.append(
+                _p(
+                    account,
+                    quantity,
+                    0,
+                    occurred_at=at(timed),
+                    timed=timed,
+                    source=(draw(st.sampled_from(("connection", "import"))), str(uuid4())),
+                )
+            )
+        return found
+
+    senders = draw(st.permutations([INVEST, STOCKS, MONZO]))[:n]
+    return side(senders, "-100"), side([CASH] * n, "100")
+
+
+def _mutual(senders: list[Pairable], receivers: list[Pairable]) -> dict[UUID, frozenset[UUID]]:
+    """Every sender each receiver's candidate, and the reverse."""
+    return {x.id: frozenset(y.id for y in senders) for x in receivers} | {
+        x.id: frozenset(y.id for y in receivers) for x in senders
+    }
+
+
+def _balances(links: list[tuple[Pairable, Pairable]]) -> dict[tuple[UUID, UUID], Decimal]:
+    """Per (account, instrument), the sum of the linked records' quantities."""
+    found: dict[tuple[UUID, UUID], Decimal] = defaultdict(Decimal)
+    for s, c in links:
+        for x in (s, c):
+            found[(x.account_id, x.instrument_id)] += x.quantity
+    return found
+
+
+def _time_order(records: list[Pairable]) -> list[Pairable]:
+    return sorted(records, key=lambda x: (x.occurred_at, x.source))
+
+
+@settings(max_examples=200, deadline=None)
+@given(group=_group(), extra=st.sampled_from(("none", "outside", "untakeable", "neither")))
+def test_one_side_alike_any_assignment_gives_the_same_balances(
+    group: tuple[list[Pairable], list[Pairable]], extra: str
+) -> None:
+    """For an n-by-n group, receivers alike, senders on n accounts, all mutually
+    candidates: every assignment gives the same balances per account and instrument, and
+    _twins links the two sides in time order (each sorted by instant, then reference). A
+    group with a record having a candidate outside it, with an untakeable pair, or with
+    neither side alike pairs none."""
+    senders, receivers = group
+    if extra == "neither":  # the receivers on n accounts too
+        receivers = [replace(x, account_id=UUID(int=30 + k)) for k, x in enumerate(receivers)]
+    by_id = {x.id: x for x in (*senders, *receivers)}
+    exact = _mutual(senders, receivers)
+    untakeable: frozenset[frozenset[UUID]] = frozenset()
+    if extra == "outside":
+        outside = _p(STOCKS if senders[0].account_id != STOCKS else INVEST, "100", 0)
+        by_id[outside.id] = outside
+        exact[senders[0].id] |= {outside.id}
+        exact[outside.id] = frozenset({senders[0].id})
+    elif extra == "untakeable":
+        untakeable = frozenset({frozenset((senders[-1].id, receivers[0].id))})
+    balances = {
+        tuple(sorted(_balances(list(zip(senders, order, strict=True))).items()))
+        for order in permutations(receivers)
+    }
+    twins = _twins(by_id, exact, untakeable)
+    if extra != "none":
+        assert twins == {}
+        event(f"no twins: {extra}")
+        return
+    assert len(balances) == 1  # one ledger, whichever row each links
+    expected = dict(
+        zip(
+            (x.id for x in _time_order(senders)),
+            (x.id for x in _time_order(receivers)),
+            strict=True,
+        )
+    )
+    assert twins == expected | {c: s for s, c in expected.items()}
+    event("twins")
