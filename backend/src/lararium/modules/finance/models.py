@@ -161,6 +161,11 @@ class Transaction(Base):
     # The source says this movement was not a transfer (a withdrawal that failed after it
     # left the balance), so it is never a transfer's leg.
     never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The on-chain transaction this is (chain name, lower-case hex hash) and the wallet address
+    # it concerns; chain and hash come together (migration 0046).
+    chain: Mapped[str | None] = mapped_column(Text)
+    tx_hash: Mapped[str | None] = mapped_column(Text)
+    chain_address: Mapped[str | None] = mapped_column(Text)
     # The amount in the source's own currency, signed like the account's posting; both or neither.
     original_quantity: Mapped[Decimal | None] = mapped_column(Numeric)
     original_instrument_id: Mapped[UUID | None] = mapped_column(

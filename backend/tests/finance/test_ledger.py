@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import exc, text
 
+from lararium.core.connections import create_connection
 from lararium.modules.finance.errors import (
     AccountNotFoundError,
     FinanceValidationError,
@@ -13,10 +14,12 @@ from lararium.modules.finance.errors import (
 )
 from lararium.modules.finance.instruments import create_instrument
 from lararium.modules.finance.ledger import (
+    ChainFields,
     PostingInput,
     TransactionInput,
     find_unbalanced_transactions,
     post_transaction,
+    upsert_connector_transaction,
     void_transaction,
 )
 
@@ -444,3 +447,42 @@ async def test_unknown_instrument_rejected(session, run, make_account, gbp, wher
             ),
         )
     assert await session.scalar(text("select count(*) from finance.transactions")) == 0
+
+
+async def test_chain_fields_are_stored_and_compared(session, run, make_account, gbp) -> None:
+    connection = await run(create_connection, connector="bitcoin", display_name="w", config={})
+    a, b = await make_account(name="A"), await make_account(name="B")
+
+    def tx(chain: ChainFields | None) -> TransactionInput:
+        return TransactionInput(
+            occurred_at=LATE_31_MARCH,
+            description="Chain",
+            origin="connector",
+            connection_id=connection.id,
+            external_id="tx_chain",
+            chain=chain,
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-5")),
+                PostingInput(b.id, gbp.id, Decimal("5")),
+            ],
+        )
+
+    first = ChainFields("bitcoin", "ab" * 32, "bc1qexample")
+    created, outcome = await run(upsert_connector_transaction, tx(first))
+    assert outcome == "created"
+    assert created.chain == first
+    stored = (
+        await session.execute(
+            text("select chain, tx_hash, chain_address from finance.transactions where id = :id"),
+            {"id": created.id},
+        )
+    ).one()
+    assert tuple(stored) == ("bitcoin", "ab" * 32, "bc1qexample")
+    _, outcome = await run(upsert_connector_transaction, tx(first))
+    assert outcome == "unchanged"
+    other = ChainFields("bitcoin", "ab" * 32, "bc1qother")
+    changed, outcome = await run(upsert_connector_transaction, tx(other))
+    assert outcome == "updated"
+    assert changed.chain == other
+    _, outcome = await run(upsert_connector_transaction, tx(None))
+    assert outcome == "updated"
