@@ -272,6 +272,7 @@ class TransactionOut(_Out):
     origin: TransactionOrigin
     postings: list[PostingOut]
     cancels_transaction_id: UUID | None
+    refund: bool
 
 
 class PriceCreate(BaseModel):

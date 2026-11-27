@@ -83,6 +83,7 @@ class TransactionDetails:
     category: str | None = None
     labels: tuple[str, ...] = ()
     include_in_spending: bool | None = None
+    refund: bool = False
     payment_scheme: str | None = None
     place_entity_id: UUID | None = None
     category_splits: tuple[CategorySplit, ...] = ()
@@ -134,6 +135,10 @@ class TransactionRecord:
     postings: tuple[PostingRecord, ...]  # sorted by position
     details: TransactionDetails
     cancels_transaction_id: UUID | None
+
+    @property
+    def refund(self) -> bool:
+        return self.details.refund
 
 
 def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
@@ -239,6 +244,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.category,
                 t.labels,
                 t.include_in_spending,
+                t.refund,
                 t.payment_scheme,
                 t.place_entity_id,
                 t.cancels_transaction_id,
@@ -307,6 +313,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             category=row.category,
             labels=tuple(row.labels),
             include_in_spending=row.include_in_spending,
+            refund=row.refund,
             payment_scheme=row.payment_scheme,
             place_entity_id=row.place_entity_id,
             category_splits=tuple(CategorySplit(r.category, r.quantity) for r in split_rows),
@@ -330,6 +337,7 @@ def _details_data(details: TransactionDetails) -> dict[str, JSONValue]:
         "category": details.category,
         "labels": list(details.labels),
         "include_in_spending": details.include_in_spending,
+        "refund": details.refund,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": _optional_str(details.place_entity_id),
         "category_splits": [
@@ -485,6 +493,7 @@ def _details_values(details: TransactionDetails) -> dict[str, object]:
         "category": details.category,
         "labels": list(details.labels),
         "include_in_spending": details.include_in_spending,
+        "refund": details.refund,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": details.place_entity_id,
     }

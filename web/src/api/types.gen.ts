@@ -2321,6 +2321,10 @@ export type TransactionOut = {
      */
     postings: Array<PostingOut>;
     /**
+     * Refund
+     */
+    refund: boolean;
+    /**
      * Status
      */
     status: 'pending' | 'booked' | 'inferred' | 'confirmed' | 'void';

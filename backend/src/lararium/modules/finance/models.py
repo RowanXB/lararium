@@ -153,6 +153,8 @@ class Transaction(Base):
     category: Mapped[str | None] = mapped_column(Text)
     labels: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     include_in_spending: Mapped[bool | None]
+    # The source says money came back for an earlier payment: negative spending, not income.
+    refund: Mapped[bool] = mapped_column(server_default=text("false"))
     payment_scheme: Mapped[str | None] = mapped_column(Text)
     place_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
     recorded_at: Mapped[datetime] = mapped_column(

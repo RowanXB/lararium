@@ -3,7 +3,9 @@
 Money comes in or goes out where a transaction posts to an account outside net worth: an
 income, expense or equity account, which is also where a connector puts the unknown side of
 what it reads (Unassigned). A posting there is the mirror of what happened to the owner's
-money, so its negation is the flow: positive is income, negative is spending. A transfer
+money, so its negation is the flow: positive is income, negative is spending, except
+that a positive flow the source marks as a refund (money back for an earlier payment) is
+negative spending, counted in the month it arrives. A transfer
 between own accounts posts to In transit, an asset, and a trade moves value inside one
 account, so neither is a flow. Opening balances are where an account's history starts, not
 income. Only money counts: a security arriving from nowhere (a corporate action, a transfer
@@ -107,7 +109,7 @@ _FLOWS = (
     flows as (
       select t.id as transaction_id, t.booking_date as day, t.category,
         coalesce(nullif(t.counterparty_name, ''), nullif(t.description, '')) as payee,
-        t.include_in_spending, p.instrument_id, -p.quantity as quantity
+        t.include_in_spending, t.refund, p.instrument_id, -p.quantity as quantity
       from finance.postings p
       join finance.transactions t on t.id = p.transaction_id
       join finance.accounts a on a.id = p.account_id
@@ -135,7 +137,7 @@ _FLOWS = (
       from (select distinct flows.instrument_id, flows.day from flows) k
     )
     select flows.transaction_id, flows.day, flows.category, flows.payee,
-      flows.include_in_spending, flows.quantity * rates.fx_rate as amount
+      flows.include_in_spending, flows.refund, flows.quantity * rates.fx_rate as amount
     from flows
     join rates on rates.instrument_id = flows.instrument_id and rates.day = flows.day
     order by flows.day, flows.transaction_id
@@ -319,7 +321,7 @@ async def cash_flow(
             missing_count += 1
             continue
         period = period_start(row.day, bucket)
-        if amount > 0:
+        if amount > 0 and not row.refund:
             income_by_period[period] += amount
             for category, share in _by_category(amount, row.category, splits[row.transaction_id]):
                 income_by_category[category] += share

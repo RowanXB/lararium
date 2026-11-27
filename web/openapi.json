@@ -4816,6 +4816,10 @@
             "title": "Postings",
             "type": "array"
           },
+          "refund": {
+            "title": "Refund",
+            "type": "boolean"
+          },
           "status": {
             "enum": [
               "pending",
@@ -4836,7 +4840,8 @@
           "status",
           "origin",
           "postings",
-          "cancels_transaction_id"
+          "cancels_transaction_id",
+          "refund"
         ],
         "title": "TransactionOut",
         "type": "object"
