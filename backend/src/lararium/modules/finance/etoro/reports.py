@@ -426,6 +426,9 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
             values | {"raw_record_id": record.id},
         )
         parent = {"connection_id": run.connection_id, "snapshot_date": day}
+        # eToro can reorder accounts. Clear the old links before reusing their unique
+        # snapshot IDs at new indexes.
+        await run.prune("etoro_balance_account_snapshots", parent, keep=0)
         lines = objects_at(snapshot, "accountSnapshots")
         for n, line in enumerate(lines):
             values = await run.typed(
@@ -452,7 +455,6 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
                     "raw_record_id": record.id,
                 },
             )
-        await run.prune("etoro_balance_account_snapshots", parent, len(lines))
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:

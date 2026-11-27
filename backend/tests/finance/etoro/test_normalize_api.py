@@ -1014,6 +1014,40 @@ async def test_balance_history_snapshots_and_money_opening(session, ledger) -> N
     assert await _postings(session, key) == []
 
 
+async def test_balance_history_accepts_reordered_accounts(session, ledger) -> None:
+    day = NOW.date() - timedelta(days=1)
+    cash = (CASH_ACCOUNT, "Cash", "GBP", "350.00")
+    trading = (TRADING_ACCOUNT, "Trading", "USD", "5")
+    linked_snapshots = (
+        "select a.name, s.quantity, s.id from finance.etoro_balance_account_snapshots e"
+        " join finance.balance_snapshots s"
+        " on s.id = e.snapshot_id and s.account_id = e.finance_account_id"
+        " join finance.accounts a on a.id = s.account_id"
+        " where e.connection_id = :c and e.snapshot_date = :day order by e.item_index"
+    )
+    params = {"c": ledger.connection.id, "day": day}
+
+    await ledger.normalize(BALANCES, ("balance_history", history_body([(day, [cash, trading])])))
+    before = await _rows(session, linked_snapshots, **params)
+    assert [(row.name, row.quantity) for row in before] == [
+        (MONEY, Decimal("350.00")),
+        (TRADING, Decimal(5)),
+    ]
+
+    reordered = ("balance_history", history_body([(day, [trading, cash])]))
+    for hours in (1, 2):
+        await ledger.normalize(BALANCES, reordered, now=NOW + timedelta(hours=hours))
+        assert await _rows(session, linked_snapshots, **params) == before[::-1]
+
+    [count] = await _rows(
+        session,
+        "select count(*) from finance.balance_snapshots"
+        " where kind = 'reported' and as_of_date = :day",
+        day=day,
+    )
+    assert count[0] == 2
+
+
 # Regeneration (parent §6.6) ------------------------------------------------------------------
 
 
