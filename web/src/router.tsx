@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { DatabaseZap, LayoutDashboard, Settings2, Wallet } from "lucide-react";
 
+import { readRangeSearch } from "./components/RangePicker";
 import { AccountsPage } from "./pages/AccountsPage";
 import { AddAccountPage } from "./pages/AddAccountPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
@@ -119,9 +120,18 @@ const importBatchRoute = createRoute({
   },
 });
 
+const incomeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/income",
+  validateSearch: readRangeSearch,
+  component: function IncomeRoute() {
+    return <IncomePage initialRange={incomeRoute.useSearch()} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: OverviewPage }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/income", component: IncomePage }),
+  incomeRoute,
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts/new", component: AddAccountPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/transfers", component: TransfersPage }),

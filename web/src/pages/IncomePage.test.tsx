@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { getIncome, listAccounts, setTransactionCategories } from "../api";
+import { presetRange } from "../lib/range";
 import { IncomePage } from "./IncomePage";
 
 const ENTRY = {
@@ -71,11 +72,11 @@ beforeEach(() => {
   vi.mocked(setTransactionCategories).mockResolvedValue({ data: undefined } as never);
 });
 
-function renderPage() {
+function renderPage(initialRange?: Parameters<typeof IncomePage>[0]["initialRange"]) {
   const client = new QueryClient();
   render(
     <QueryClientProvider client={client}>
-      <IncomePage />
+      <IncomePage initialRange={initialRange} />
     </QueryClientProvider>,
   );
   return client;
@@ -332,4 +333,29 @@ it("sends the same category again after a failed write", async () => {
   await user.clear(field);
   await user.type(field, "salary{Enter}");
   await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(2));
+});
+
+it("opens on the dates it was given", async () => {
+  renderPage({ preset: "custom", start: "2026-09-01", end: "2026-09-30" });
+  await waitFor(() =>
+    expect(getIncome).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({ start: "2026-09-01", end: "2026-09-30" }),
+      }),
+    ),
+  );
+  expect(screen.getByRole("button", { name: "Custom" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("opens on the preset it was given", async () => {
+  renderPage({ preset: "month" });
+  await waitFor(() =>
+    expect(getIncome).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: expect.objectContaining(presetRange("month")) }),
+    ),
+  );
+  expect(screen.getByRole("button", { name: "This month" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });

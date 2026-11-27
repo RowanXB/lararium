@@ -16,7 +16,7 @@ import {
 import { CashFlowChart } from "../components/charts/CashFlowChart";
 import { NetWorthChart } from "../components/charts/NetWorthChart";
 import { type Share, ShareChart } from "../components/charts/ShareChart";
-import { initialChoice, RangePicker } from "../components/RangePicker";
+import { initialChoice, RangePicker, rangeSearch } from "../components/RangePicker";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
   Table,
@@ -424,7 +424,11 @@ export function OverviewPage() {
                 ))}
               </ul>
             )}
-            <Link to="/income" className="text-sm text-muted-foreground hover:text-foreground">
+            <Link
+              to="/income"
+              search={rangeSearch(choice)}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
               See all income
             </Link>
           </CardContent>

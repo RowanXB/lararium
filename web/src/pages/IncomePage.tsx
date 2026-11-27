@@ -13,7 +13,7 @@ import {
 import { type Share, ShareChart } from "../components/charts/ShareChart";
 import { CategoryPicker } from "../components/CategoryPicker";
 import { LabelledSelect } from "../components/LabelledSelect";
-import { initialChoice, RangePicker } from "../components/RangePicker";
+import { choiceFrom, RangePicker, type RangeSearch } from "../components/RangePicker";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Checkbox } from "../components/ui/checkbox";
@@ -226,9 +226,10 @@ function EntriesTable({ entries, currency, known, selected, onToggle, onCategory
   );
 }
 
-export function IncomePage() {
+// `initialRange`: the dates a link opened the page on (the Overview's), else its default.
+export function IncomePage({ initialRange = {} }: { initialRange?: RangeSearch }) {
   const queryClient = useQueryClient();
-  const [choice, setChoice] = useState(initialChoice);
+  const [choice, setChoice] = useState(() => choiceFrom(initialRange));
   const [accountId, setAccountId] = useState(ALL_ACCOUNTS);
   const [category, setCategory] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
