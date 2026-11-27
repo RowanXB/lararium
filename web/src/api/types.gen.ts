@@ -769,6 +769,7 @@ export type CsvProfileConfig = {
      */
     interest_descriptions?: Array<string>;
     overdraft_footer_label?: FooterLabel | null;
+    period_from_filename?: PeriodPattern | null;
     /**
      * Row Order
      */
@@ -1809,6 +1810,8 @@ export type PdfProfileConfig = {
     layout: 'hsbc_uk_statement' | 'lloyds_statement' | 'boc_uk_statement' | 'revolut_current_statement' | 'revolut_savings_statement' | 'tembo_statement' | 'lemfi_statement';
     timezone?: TimezoneName | null;
 };
+
+export type PeriodPattern = string;
 
 /**
  * PostingCreate

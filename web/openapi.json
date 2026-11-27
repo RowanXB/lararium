@@ -1508,6 +1508,16 @@
               }
             ]
           },
+          "period_from_filename": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeriodPattern"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "row_order": {
             "default": "oldest_first",
             "enum": [
@@ -3813,6 +3823,11 @@
         ],
         "title": "PdfProfileConfig",
         "type": "object"
+      },
+      "PeriodPattern": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
       },
       "PostingCreate": {
         "properties": {

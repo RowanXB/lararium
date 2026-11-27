@@ -500,7 +500,10 @@ Trading 212 拒绝了 key，连接上会提示：用 **Update keys** 换一对�
 Trading 212 的 Cash ISA 没有 API。把它添加为一个单独的账户，再上传 app History 页面导出的 CSV：
 在 Accounts → Add account 里选 **Trading 212 Cash ISA** 并在那里上传 History CSV（上传会自己使用现成的
 profile）。每次导出必须从该账户的第一天开始，
-或从之前某次上传已覆盖的某一天开始。利息行在其 `Action` 确定之前，按普通行导入。
+或从之前某次上传已覆盖的某一天开始。导出文件请保留 Trading 212 给的文件名
+（`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`）：它写明了这次导出的时段，时段内除最后一天外每天都
+完整列出（导出可能在最后一天中途生成）。改过名的导出只完整列出首行与末行之间的日子，上传时还会
+警告文件名没有给出时段。利息行在其 `Action` 确定之前，按普通行导入。
 
 ### 警告
 
@@ -790,7 +793,10 @@ profile 已经设好，例如 HSBC 的 `VIS` 和 `)))`、Lloyds 的 `DEB`；OFX 
   `currency`（文件只写一次而不逐行写币种时，每一行的币种，例如 LemFi 的 `Money in (GBP)`；否则用上传时
   选的币种，或映射的 `currency` 列）和 `interest_descriptions`（支付利息的行的描述，用于不印交易类型
   代码的银行，例如 LemFi 的 `Savings Interest Payout`：和刷卡付款一样，这样的行永远不会仅凭金额和日期
-  被当作一笔转账的另一侧）。
+  被当作一笔转账的另一侧），以及 `period_from_filename`（在上传文件的文件名中搜索的正则表达式，带命名组
+  `start` 和 `end`，各是一个 `YYYY-MM-DD` 日期，用于按时段给导出命名的银行，例如 Trading 212 的
+  Cash ISA：匹配到的就是文件的时段，除最后一天外每天都完整列出；文件名给不出时段，或有行落在范围之外时，
+  上传按原样读取，并附一条警告）。
   重复表头的行不算一行交易。
 - **`columns`** 给出文件里的列名：`date`、`description`（列表；多列用一个空格连接），然后是
   `amount`，或同时给出 `inflow` 和 `outflow`；可选的有 `balance`、`currency`、`external_id`、

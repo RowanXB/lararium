@@ -231,6 +231,8 @@ CATALOG: tuple[CatalogEntry, ...] = (
             # A Cash ISA takes bank transfers only (Trading 212's payment methods): every row is
             # one. An interest row's Action goes here once a real export shows it.
             card_types=[],
+            # The export states no period; Trading 212 names it by the one chosen.
+            period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
         ),
         recommended=True,
     ),

@@ -1335,6 +1335,27 @@ def test_statement_lists_in_full_only_the_days_before_it_was_made(
     assert coverage.complete == complete
 
 
+@pytest.mark.parametrize(
+    ("period", "filtered", "complete"),
+    [
+        # Every day in full but the last, which the export may have been taken partway through.
+        ((date(2026, 10, 1), date(2026, 10, 31)), False, (date(2026, 10, 1), date(2026, 10, 30))),
+        ((date(2026, 10, 1), date(2026, 10, 2)), False, (date(2026, 10, 1), date(2026, 10, 1))),
+        ((date(2026, 10, 1), date(2026, 10, 1)), False, (None, None)),
+        # Rows left out by include_only still list no day in full.
+        ((date(2026, 10, 1), date(2026, 10, 31)), True, (None, None)),
+    ],
+)
+def test_a_period_listed_from_its_start_lists_all_but_its_last_day(
+    period: tuple[date, date], filtered: bool, complete: tuple[date | None, date | None]
+) -> None:
+    statement = ParsedStatement(rows=[], period=period, period_lists_from_start=True)
+    rows = [staging._Row(0, "skipped", {})] if filtered else []  # pyright: ignore[reportPrivateUsage]
+    coverage = staging._covered(statement, rows)  # pyright: ignore[reportPrivateUsage]
+    assert coverage.covered == period
+    assert coverage.complete == complete
+
+
 async def test_duplicate_that_breaks_the_balance_chain_is_an_error(
     session: AsyncSession, run: Run, stage: Stage, commit: Commit
 ) -> None:

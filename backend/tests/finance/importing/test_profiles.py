@@ -88,6 +88,16 @@ def test_timezone_and_filters_validated() -> None:
         PROFILE_CONFIG.validate_python(_csv(include_only={"State": []}))
 
 
+def test_a_period_file_name_pattern_needs_both_groups_and_must_compile() -> None:
+    pattern = r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})"
+    config = PROFILE_CONFIG.validate_python(_csv(period_from_filename=pattern))
+    assert config.period_from_filename == pattern
+    assert PROFILE_CONFIG.validate_python(_csv()).period_from_filename is None
+    for refused in [r"from_(?P<start>.+)", r"to_(?P<end>.+)", r"(.+)_(.+)", r"(?P<start>[", ""]:
+        with pytest.raises(ValidationError):
+            PROFILE_CONFIG.validate_python(_csv(period_from_filename=refused))
+
+
 def test_header_names_need_no_header_row() -> None:
     config = PROFILE_CONFIG.validate_python(_csv(header=["Date", "Description", "Amount"]))
     assert config.header == ["Date", "Description", "Amount"]

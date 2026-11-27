@@ -549,8 +549,13 @@ stays until the next sync checks again, even when the upload supplied the missin
 
 A Trading 212 Cash ISA has no API. Add it as an account of its own, then upload the CSV from the
 app's History page: on Accounts → Add account pick the **Trading 212 Cash ISA** tile and upload
-the History CSV there (the upload uses the ready profile itself). Each export must start on the account's first day or on a day an earlier upload
-covers. Interest rows import as ordinary rows until their `Action` is known.
+the History CSV there (the upload uses the ready profile itself). Each export must start on the
+account's first day or on a day an earlier upload covers. Keep the export's file name as Trading
+212 gives it (`from_<YYYY-MM-DD>_to_<YYYY-MM-DD>_….csv`): it carries the period the export lists,
+every day of it in full but the last, which the export may have been taken partway through. A
+renamed export lists in full only the days between its first and last rows, and its upload warns
+that the file name gives no period. Interest rows import as ordinary rows until their `Action` is
+known.
 
 ### Transfers
 
@@ -959,8 +964,12 @@ by amount and date (below).
   (GBP)`; otherwise the one picked at upload, or a mapped `currency` column) and
   `interest_descriptions` (the descriptions of rows that pay interest, for a bank that prints
   no type codes, such as LemFi's `Savings Interest Payout`: like a card payment, such a row
-  is never taken as the other side of a transfer by amount and date). A line that repeats
-  the header is not a row.
+  is never taken as the other side of a transfer by amount and date), and
+  `period_from_filename` (a regular expression searched in the uploaded file's name, with named
+  groups `start` and `end`, each a `YYYY-MM-DD` date, for a bank that names its export by its
+  period, such as Trading 212's Cash ISA: a match is the file's period, every day of it listed in
+  full but the last; a name that gives none, or a range a row falls outside, leaves the upload
+  as read, with a warning). A line that repeats the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,

@@ -207,6 +207,9 @@ class ParsedStatement:
     # The source lists every transaction of the whole period (a closed, self-checked PDF
     # statement), not just what had posted when the file was taken (Decision 16).
     period_complete: bool = False
+    # The source lists its period in full from its first day; only its last day may be partial
+    # (an export named by its period, spec §8.3 of the account type catalog).
+    period_lists_from_start: bool = False
     opening_balance: Decimal | None = None
     money_in: Decimal | None = None
     money_out: Decimal | None = None
