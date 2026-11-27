@@ -280,6 +280,7 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
 ## 12. Open, for the owner
 
 - Interest: once a real interest row exists, export from the account's first day; a follow-up sets its `Action` in `card_types` (and adds a statement PDF if one is offered).
+- TODO (owner, 2026-11-27): a web form for a shared payee's references, to list, add and remove them, with a read-back of the current set. Part B registers them through the API only (the plan's Decision 2), and the only read-back is the registration response.
 
 ## 13. After deploy
 
