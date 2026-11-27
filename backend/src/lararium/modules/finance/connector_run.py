@@ -297,6 +297,27 @@ class ConnectorRun:
             {**parent, "keep": keep},
         )
 
+    async def release(
+        self, table: str, parent: Mapping[str, object], snapshots: Mapping[int, object]
+    ) -> None:
+        """Unlink each snapshot (by the index about to take it) from the parent's child row
+        at any other index. `snapshot_id` is unique, and an array that reordered or shrank
+        moves a snapshot it still reports to a new index."""
+        moved = {n: s for n, s in snapshots.items() if isinstance(s, UUID)}
+        if not moved:
+            return
+        where = " and ".join(f"t.{column} = :{column}" for column in parent)
+        await self.session.execute(
+            text(
+                f"update finance.{table} t set snapshot_id = null"
+                " from unnest(cast(:indexes as integer[]), cast(:ids as uuid[]))"
+                " as w(item_index, snapshot_id)"
+                f" where {where} and t.snapshot_id = w.snapshot_id"
+                " and t.item_index <> w.item_index"
+            ),
+            {**parent, "indexes": list(moved), "ids": list(moved.values())},
+        )
+
     # The ledger -----------------------------------------------------------------------------
 
     async def live(self, key: str) -> UUID | None:

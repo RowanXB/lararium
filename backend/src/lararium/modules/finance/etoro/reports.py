@@ -320,6 +320,7 @@ async def _rows(
     values = await run.typed(endpoint, table, flat(report.content))
     await run.upsert(table, parent, values | {"raw_record_id": report.record.id})
     items = objects_at(report.content, under.removesuffix("[]."))
+    await run.release(child, parent, {n: link.get("snapshot_id") for n, link in links.items()})
     for n, item in enumerate(items):
         values = await run.typed(endpoint, child, flat(item), under)
         await run.upsert(
@@ -426,11 +427,9 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
             values | {"raw_record_id": record.id},
         )
         parent = {"connection_id": run.connection_id, "snapshot_date": day}
-        # eToro can reorder accounts. Clear the old links before reusing their unique
-        # snapshot IDs at new indexes.
-        await run.prune("etoro_balance_account_snapshots", parent, keep=0)
         lines = objects_at(snapshot, "accountSnapshots")
-        for n, line in enumerate(lines):
+        rows: list[dict[str, object]] = []
+        for line in lines:
             values = await run.typed(
                 "balance_history",
                 "etoro_balance_account_snapshots",
@@ -445,16 +444,19 @@ async def _balance_history(run: Run, reports: Sequence[Report]) -> None:
                 snapshot_id = await reported_snapshot(
                     run.command, account_id, currency.id, cash, end_of(day), day
                 )
-            await run.upsert(
-                "etoro_balance_account_snapshots",
-                parent | {"item_index": n},
+            rows.append(
                 values
                 | {
                     "finance_account_id": account_id,
                     "snapshot_id": snapshot_id,
                     "raw_record_id": record.id,
-                },
+                }
             )
+        table = "etoro_balance_account_snapshots"
+        await run.release(table, parent, {n: row["snapshot_id"] for n, row in enumerate(rows)})
+        for n, row in enumerate(rows):
+            await run.upsert(table, parent | {"item_index": n}, row)
+        await run.prune(table, parent, len(rows))
 
 
 async def apply(run: Run, reports: Sequence[Report]) -> None:

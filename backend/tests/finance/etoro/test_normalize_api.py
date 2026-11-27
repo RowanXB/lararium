@@ -1048,6 +1048,42 @@ async def test_balance_history_accepts_reordered_accounts(session, ledger) -> No
     assert count[0] == 2
 
 
+async def _linked(session, ledger, table: str) -> list[Any]:
+    return [
+        row.snapshot_id
+        for row in await _rows(
+            session,
+            f"select snapshot_id from finance.{table}"
+            " where connection_id = :c and as_of_date = :day order by item_index",
+            c=ledger.connection.id,
+            day=NOW.date(),
+        )
+    ]
+
+
+async def test_balances_reordered_the_same_day_keep_their_snapshots(session, ledger) -> None:
+    body = balances_body(money="100.00", moneyfarm="200.00")
+    await ledger.normalize(("balances", body))
+    trading, money, moneyfarm = await _linked(session, ledger, "etoro_balance_accounts")
+    assert trading is None and money is not None and moneyfarm is not None
+
+    reordered = body | {"balances": [body["balances"][i] for i in (0, 2, 1)]}
+    await ledger.normalize(("balances", reordered), now=NOW + timedelta(hours=1))
+    assert await _linked(session, ledger, "etoro_balance_accounts") == [None, moneyfarm, money]
+
+
+async def test_aggregate_that_drops_an_instrument_the_same_day(session, ledger) -> None:
+    other = (INSTRUMENT_ID + 1, "USD", "3")
+    await ledger.normalize(
+        BALANCES, ("aggregate", aggregate_body([(INSTRUMENT_ID, "USD", "4"), other]))
+    )
+    _, kept = await _linked(session, ledger, "etoro_aggregate_instruments")
+    assert kept is not None
+
+    await ledger.normalize(("aggregate", aggregate_body([other])), now=NOW + timedelta(hours=1))
+    assert await _linked(session, ledger, "etoro_aggregate_instruments") == [kept]
+
+
 # Regeneration (parent §6.6) ------------------------------------------------------------------
 
 
