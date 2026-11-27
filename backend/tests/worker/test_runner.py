@@ -159,7 +159,47 @@ async def test_a_failed_requested_sync_keeps_the_request(session, run, fake, not
 
     after = await get_connection(session, connection.id)
     assert after.status == "failing"
-    assert after.config["sync_requested"] is True
+    assert after.config.get("sync_requested") is not None
+
+
+async def test_a_request_made_during_a_requested_sync_is_kept(
+    backend_url: str, owner_url: str, migrated: None, fake, notifier
+) -> None:
+    """The owner asks again (a key update, say) while a requested sync runs: that sync removes
+    only the request it saw, so the job queued for the new one still runs as requested. Real
+    commits: the new request commits while the sync runs, as the owner's would."""
+    engine = create_engine(backend_url)
+    sessions = make_sessionmaker(engine)
+    connection_id = None
+    owner = Actor("user", "dev")
+    try:
+        async with sessions() as setup, command_context(setup, owner, "test.setup", {}) as ctx:
+            connection = await create_connection(
+                ctx, connector="fake", display_name=f"Fake {uuid.uuid4()}", config={}
+            )
+            connection_id = connection.id
+            await set_status(ctx, connection_id, "healthy")
+            await request_sync(ctx, connection_id)
+
+        async def ask_again() -> None:
+            args = {"connection_id": str(connection_id)}
+            async with sessions() as other, command_context(other, owner, "sync_now", args) as ctx:
+                await request_sync(ctx, connection_id)
+
+        fake.during = ask_again
+        async with sessions() as session:
+            await _run_sync(session, connection, notifier, sessions)
+        fake.during = None
+        async with sessions() as session:
+            await _run_sync(session, connection, notifier, sessions)
+
+        assert [seen.requested for seen in fake.seen] == [True, True]
+        async with sessions() as fresh:
+            assert "sync_requested" not in (await get_connection(fresh, connection_id)).config
+    finally:
+        if connection_id is not None:
+            await _delete_connection(engine, owner_url, connection_id)
+        await engine.dispose()
 
 
 async def test_run_sync_passes_the_webhook_target(session, run, fake, notifier) -> None:

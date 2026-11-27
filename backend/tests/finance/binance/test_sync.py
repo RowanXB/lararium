@@ -291,7 +291,7 @@ async def test_request_survives_a_failed_sync(session, run, fake, connector, clo
 
     failed = await run_binance_sync(session, connection.id, unreachable)
     assert failed.status == "failing"
-    assert failed.config["sync_requested"] is True
+    assert failed.config.get("sync_requested") is not None
 
     # The next tick, with no new request, still runs the sync the owner asked for.
     clock.ms += MINUTE_MS

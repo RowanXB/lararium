@@ -9,7 +9,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, Text, bindparam, case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
@@ -329,13 +329,21 @@ async def update_config(
 
 
 # Set when the owner asks for a sync, removed by the next sync that succeeds: it survives a
-# failed one, and whichever queued job runs it sees the request.
+# failed one, and whichever queued job runs it sees the request. Each request is a new token,
+# so a sync removes only the one it saw (`settle_sync_request`), not one made while it ran.
 SYNC_REQUESTED_KEY = "sync_requested"
 
 
 async def request_sync(ctx: CommandContext, connection_id: UUID) -> None:
     """Record that the owner asked for a sync of this connection."""
-    await update_config(ctx, connection_id, {SYNC_REQUESTED_KEY: True})
+    await update_config(ctx, connection_id, {SYNC_REQUESTED_KEY: str(uuid4())})
+
+
+async def settle_sync_request(ctx: CommandContext, connection_id: UUID, seen: JSONValue) -> None:
+    """Remove the request a sync saw when it started, unless a newer one replaced it."""
+    current = (await lock_connection(ctx, connection_id)).config.get(SYNC_REQUESTED_KEY)
+    if current == seen:
+        await update_config(ctx, connection_id, remove=[SYNC_REQUESTED_KEY])
 
 
 OAUTH_STATE_KEY = "oauth_state"

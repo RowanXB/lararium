@@ -504,7 +504,7 @@ async def test_sync_now_tells_the_sync_the_owner_asked(api, session, queue) -> N
 
     assert synced.status_code == 202
     connection = await get_connection(session, uuid.UUID(created["id"]))
-    assert connection.config["sync_requested"] is True
+    assert connection.config.get("sync_requested") is not None
     audited = (
         await session.execute(
             text(

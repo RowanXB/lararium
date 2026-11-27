@@ -25,8 +25,8 @@ from lararium.core.connections import (
     get_connection,
     record_sync_failure,
     record_sync_success,
+    settle_sync_request,
     transition_status,
-    update_config,
 )
 from lararium.core.connectors import BACKFILL_FAILED, SyncContext, WebhookTarget
 from lararium.core.documents import LocalDocumentStore
@@ -107,7 +107,8 @@ async def run_sync(
     connector = registry.connector(connection.connector)
     actor = Actor("connector", connector.name)
     args = {"connection_id": str(connection_id), "connector": connector.name}
-    requested = connection.config.get(SYNC_REQUESTED_KEY) is True
+    seen_request = connection.config.get(SYNC_REQUESTED_KEY)
+    requested = seen_request is not None
 
     try:
         async with command_context(session, actor, "connection.sync", args) as ctx:
@@ -130,7 +131,7 @@ async def run_sync(
             )
             await record_sync_success(ctx, connection_id, cursor)
             if requested:
-                await update_config(ctx, connection_id, remove=[SYNC_REQUESTED_KEY])
+                await settle_sync_request(ctx, connection_id, seen_request)
             from_ = ("authorising",) if backfill else ("failing",)
             moved = await transition_status(
                 ctx, connection_id, "healthy", only_from=from_, authorised_at=backfill_for
