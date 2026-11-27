@@ -145,6 +145,9 @@ TABLE_LABELS: tuple[str, ...] = (
     "c2c",
     "pay",
     "rebate",
+    # Phase B: the Portfolio Margin account (its records are not posted, design 2).
+    "pm-account",
+    "pm-balance",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).

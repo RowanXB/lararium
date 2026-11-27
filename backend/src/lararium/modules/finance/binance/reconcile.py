@@ -42,6 +42,7 @@ from lararium.modules.finance import models
 from lararium.modules.finance.binance import notices
 from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_name
 from lararium.modules.finance.binance.balances import millis
+from lararium.modules.finance.binance.fetch import record_type
 from lararium.modules.finance.binance.models import ReconciliationDifference
 from lararium.modules.finance.binance.records import Run
 from lararium.modules.finance.binance.tables import moment
@@ -98,6 +99,14 @@ ACCOUNT_REPORTS: dict[str, tuple[str, str, str]] = {
     "cm_futures": ("binance_cm_account", "binance_cm_account_assets", "wallet_balance"),
     "options": ("binance_opt_account", "binance_opt_account_asset", "margin_balance"),
 }
+# The wallets whose report has no row of its own per read (its answer is the list of its assets,
+# so an empty one stores nothing typed): the read itself, by the raw record of the read its
+# snapshots were cut from, and the field of each asset that holds what the records change. The
+# Portfolio Margin wallet's is its `totalWalletBalance`, without the unrealised profit its
+# snapshot also carries (design 5.11).
+READ_REPORTS: dict[str, tuple[str, str]] = {
+    "portfolio_margin": ("pm-balance", "totalWalletBalance"),
+}
 
 
 async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
@@ -119,9 +128,15 @@ async def reported_at(
 
     A futures wallet's (`wallet`, `ACCOUNT_REPORTS`) is its wallet balance instead, the Options
     wallet's its margin balance (`_wallet_balances`), when its account has a typed report then;
-    a daily snapshot of the first sync has none, and is a wallet balance itself."""
+    a daily snapshot of the first sync has none, and is a wallet balance itself. The Portfolio
+    Margin wallet's (`READ_REPORTS`) is its wallet balance in the read made then
+    (`_read_balances`)."""
     if wallet in ACCOUNT_REPORTS:
         found = await _wallet_balances(session, account_id, ACCOUNT_REPORTS[wallet], at)
+        if found is not None:
+            return found
+    if wallet in READ_REPORTS:
+        found = await _read_balances(session, account_id, READ_REPORTS[wallet], at)
         if found is not None:
             return found
     s = models.BalanceSnapshot
@@ -166,6 +181,40 @@ async def _wallet_balances(
             " group by i.instrument_id"
         ),
         {"c": connection_id, "s": read},
+    )
+    return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
+
+
+async def _read_balances(
+    session: AsyncSession, account_id: UUID, report: tuple[str, str], at: datetime
+) -> dict[UUID, Decimal] | None:
+    """Each instrument's `report` field (the Portfolio Margin wallet's `totalWalletBalance`) in
+    the read made at `at` (its `read_from`, the snapshots' `as_of`), summed per asset; None when
+    no read was made then. An empty answer is an empty report. A read states the field for every
+    asset (`balances` refuses one that does not)."""
+    label, field = report
+    connection_id = await session.scalar(
+        select(models.Account.source_connection_id).where(models.Account.id == account_id)
+    )
+    read = await session.scalar(
+        text(
+            "select id from core.raw_records where connection_id = :c and record_type = :t"
+            " and (content ->> 'read_from_ms')::bigint = :ms order by id desc limit 1"
+        ),
+        {"c": connection_id, "t": record_type(label), "ms": millis(at)},
+    )
+    if read is None:
+        return None
+    rows = await session.execute(
+        text(
+            "select i.instrument_id, sum((e ->> :f)::numeric) as held"
+            " from core.raw_records r"
+            " cross join lateral jsonb_array_elements(r.content -> 'body') e"
+            " join finance.instrument_identifiers i"
+            "  on i.scheme = 'binance_asset' and i.value = e ->> 'asset'"
+            " where r.id = :r group by i.instrument_id"
+        ),
+        {"f": field, "r": read},
     )
     return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
 

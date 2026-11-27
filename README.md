@@ -876,6 +876,22 @@ difference** and sends one notification. The balance stays what Binance reports;
 difference stays listed until a record explains it, and nothing is corrected automatically.
 Notifications never carry values, addresses or hashes.
 
+### What is reported instead of handled
+
+Lararium names, once, what it cannot handle. Each one is listed in the connection's warnings,
+and all the new ones of a sync come in one notification, on one line. Each names a field, a
+record type, a wallet, a symbol or an asset, never a value:
+
+- a permission of the key Lararium does not know (the key is also refused when it is on), a
+  wallet, field, record type, status or value Binance's documentation does not list;
+- Portfolio Margin being on: its balance is counted, its records are not posted;
+- Trading Bots or Copy Trading holding something: Binance lists no records for them, so each
+  change of theirs shows as a reconciliation difference;
+- a symbol you traded that Binance no longer lists: its trades cannot be fetched, so trades of
+  it that were not fetched before show as reconciliation differences;
+- an asset no source can price, and a fiat currency Lararium has no instrument for (it is not
+  counted).
+
 ### Withdrawals to your own wallet
 
 An on-chain withdrawal to an address Lararium doesn't know goes to Unassigned, and the address
@@ -993,12 +1009,13 @@ Built from Binance's documentation and not checked against a real account:
   Unassigned; a rebate is income on Spot, posted
   once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
   makes the first sync about 7 minutes longer.
-
-Not built yet. When built, these will follow Binance's documentation and will not have been
-checked against a real account:
-
-- Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
-  records
+- Portfolio Margin (`pm-balance`, `pm-account`), when Binance's account information says it is
+  on: "Binance Portfolio Margin" holds each asset's wallet balance plus its unrealised USDⓈ-M
+  and COIN-M profit, and is reconciled on the wallet balance alone. Its records are not posted.
+  Portfolio Margin takes the place of Cross Margin and the two futures wallets, so those are not
+  asked while it is on; the sync that sees it off asks them again.
+- Trading Bots and Copy Trading, counted per asset from Binance's wallet list. Binance lists no
+  records for them.
 
 ## Webhooks through Cloudflare Tunnel
 

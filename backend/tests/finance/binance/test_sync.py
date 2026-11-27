@@ -36,6 +36,7 @@ from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import (
     CURSORS_KEY,
     PHASE_B_BUILT,
+    PORTFOLIO_MARGIN_PRODUCTS,
     cursor_keys,
     record_type,
 )
@@ -87,8 +88,8 @@ def test_the_labels_built_so_far() -> None:
     ]
     assert {"spot-account", "api-restrictions", "funding-asset"} <= set(BALANCE_LABELS)
     assert "rebate" in HISTORY_LABELS
-    # Portfolio Margin is not built yet.
-    assert "pm-balance" not in BALANCE_LABELS
+    # Portfolio Margin's two reads are the last built.
+    assert BALANCE_LABELS[-2:] == ["pm-account", "pm-balance"]
 
 
 def test_gate_problem_at_any_depth() -> None:
@@ -189,7 +190,9 @@ async def test_balances_are_read_with_their_bracket(session, run, fake, connecto
         )
     ).all()
     types = [row.record_type for row in rows]
-    assert sorted(types) == sorted(record_type(label) for label in BALANCE_LABELS)
+    # Portfolio Margin's are read only while `account-info` says it is on.
+    expected = [label for label in BALANCE_LABELS if label not in PORTFOLIO_MARGIN_PRODUCTS]
+    assert sorted(types) == sorted(record_type(label) for label in expected)
     for row in rows:
         assert row.request["read_from_ms"] <= row.request["read_to_ms"]
     # Each read has its own bracket: the reads follow one another.

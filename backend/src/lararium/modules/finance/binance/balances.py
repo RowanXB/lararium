@@ -65,6 +65,7 @@ from lararium.modules.finance.binance.parse import (
     Row,
     as_api,
     parse,
+    row_prefix,
     unknown_flags,
 )
 from lararium.modules.finance.binance.tables import millis, moment
@@ -94,10 +95,16 @@ _FUTURES_FIELDS = ("walletBalance", "unrealizedProfit")
 # Reconciliation compares the records with the change of the margin balance alone
 # (`reconcile.reported_at`), as a futures wallet's with its wallet balance.
 OPTIONS_SOURCES = {"options": "opt-account"}
+# The Portfolio Margin wallet's report (while `account-info` says it is on): its balance's rows,
+# an asset's balance its `totalWalletBalance` plus its unrealised USDⓈ-M and COIN-M profit.
+# Reconciliation compares the records with the change of the wallet balance alone
+# (`reconcile.reported_at`), as a futures wallet's.
+PORTFOLIO_SOURCES = {"portfolio_margin": "pm-balance"}
 # Each derivatives account's quantity per asset: the sum of these fields of its rows.
 _ACCOUNT_FIELDS: dict[str, tuple[str, ...]] = {
     **dict.fromkeys(FUTURES_SOURCES.values(), _FUTURES_FIELDS),
     "opt-account": ("equity",),
+    "pm-balance": ("totalWalletBalance", "umUnrealizedPNL", "cmUnrealizedPNL"),
 }
 # Fields a derivatives account must state for each asset beside those summed: what reconciliation
 # compares with the records (`reconcile.ACCOUNT_REPORTS`). A futures account sums its wallet
@@ -113,6 +120,7 @@ SOURCE_LABELS = (
     ISOLATED_MARGIN_LABEL,
     *FUTURES_SOURCES.values(),
     *OPTIONS_SOURCES.values(),
+    *PORTFOLIO_SOURCES.values(),
 )
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
@@ -148,7 +156,11 @@ OWN_SOURCES = {
     "isolated_margin": ISOLATED_MARGIN_LABEL,
     **FUTURES_SOURCES,
     **OPTIONS_SOURCES,
+    **PORTFOLIO_SOURCES,
 }
+# The wallets counted from the wallet list for which Binance has no record endpoint (design
+# 5.13): any change of theirs is a reconciliation difference, so a balance is flagged once.
+RECORD_LESS = ("trading_bots", "copy_trading")
 LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
 _NET_FIELDS = ("netAsset",)
@@ -607,10 +619,10 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     isolated = reads.get(ISOLATED_MARGIN_LABEL)
     if isolated is not None:
         wallets.append(_Wallet("isolated_margin", isolated, _isolated_held(isolated)))
-    for key, label in {**FUTURES_SOURCES, **OPTIONS_SOURCES}.items():
+    for key, label in {**FUTURES_SOURCES, **OPTIONS_SOURCES, **PORTFOLIO_SOURCES}.items():
         account = reads.get(label)
         if account is not None:
-            prefix = f"{ENDPOINTS[label].rows}[]."
+            prefix = row_prefix(label)
             rows = _source_rows(account)
             held = _per_asset(label, prefix, rows, _ACCOUNT_FIELDS[label])
             # Never read as 0 where it is left out.
@@ -644,11 +656,16 @@ def _listed_non_zero(row: Row) -> bool:
     return any(quantity != 0 for quantity in _listed_held(row).values())
 
 
+def record_less_flag(name: str) -> str:
+    return f"{name} has a balance: Binance lists no records for it"
+
+
 def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> list[str]:
     """What the wallet list says that the connector cannot account for: a wallet name it does
     not know, a wallet (by key, in `derived`) whose zero or non-zero state in the list
-    disagrees with its own source, and a wallet counted from the list whose `balance` is not
-    zero but which lists no asset to count."""
+    disagrees with its own source, a wallet counted from the list whose `balance` is not
+    zero but which lists no asset to count, and a wallet with no record endpoint (`RECORD_LESS`)
+    that is not empty."""
     flags: list[str] = []
     for row in wallet_balance:
         name = wallet_name_of(row)
@@ -665,6 +682,8 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
             flags.append(f"wallet {name} lists no asset detail")
         elif balance != 0 and not listed:
             flags.append(f"wallet {name} has a balance but lists no asset")
+        if key in RECORD_LESS and _listed_non_zero(row):
+            flags.append(record_less_flag(name))
     return flags
 
 

@@ -10,7 +10,9 @@ records and its cursor, so an interrupted walk continues where it stopped.
 "complete": bool}` (a label, or `<label>:<value>` per variant, `:<pair>` per isolated margin
 pair) or, for trades, `<label>:<symbol>` (`:isolated` for an isolated pair's margin trades) to
 the last trade id. `config["not_present"]` maps a key Binance said it does not serve to
-when it said so (epoch ms); such a key is asked again after 7 days.
+when it said so (epoch ms); such a key is asked again after 7 days. While Portfolio Margin is on,
+the keys of the wallets it replaces are there too, from the latest sync that saw it on
+(`portfolio_margin`).
 """
 
 import itertools
@@ -183,6 +185,25 @@ OPTIONS_PRODUCTS = (
 )
 # Fiat by bank, card purchases and sales, P2P orders, Pay and rebates.
 FIAT_PRODUCTS = ("fiat-orders", "fiat-payments", "c2c", "pay", "rebate")
+# The Portfolio Margin account (design 5.6): its account and its balance (the wallet's report,
+# `balances.PORTFOLIO_SOURCES`), read only while `account-info` says it is on. Its records are not
+# posted (design 2).
+PORTFOLIO_MARGIN_PRODUCTS = ("pm-account", "pm-balance")
+ACCOUNT_INFO_LABEL = "account-info"
+# Portfolio Margin unifies cross margin and the USDⓈ-M and COIN-M futures accounts (its balance
+# states each asset's cross margin, UM and CM parts, the catalogue's section 12): while it is on,
+# these are not asked, as a product Binance does not serve is not (`portfolio_margin`). Isolated
+# Margin is no part of it and stays asked, as do the futures hosts' public exchange information.
+PORTFOLIO_MARGIN_REPLACES = (
+    *(label for label in MARGIN_PRODUCTS if label != ISOLATED_MARGIN_LABEL),
+    MARGIN_TRADES,
+    *FUTURES_PRODUCTS,
+    "um-trades",
+    "cm-trades",
+)
+# When Portfolio Margin was first seen on (epoch ms); removed by the sync that sees it off. It
+# says the replaced keys in `not_present` are there because of it, not by Binance's word.
+PORTFOLIO_MARGIN_KEY = "portfolio_margin"
 # Each trade label walked per symbol, and the history whose rows name its symbols (design 5.2):
 # a futures trade's commission is an income row of its symbol, an options trade's premium and
 # fee are bill rows of its symbol, so every symbol traded is named there.
@@ -210,6 +231,8 @@ PHASE_B_BUILT = (
     *OPTIONS_PRODUCTS,
     # Fiat, cards, P2P, Pay and rebates (Task 21).
     *FIAT_PRODUCTS,
+    # Portfolio Margin (Task 22).
+    *PORTFOLIO_MARGIN_PRODUCTS,
 )
 UNIVERSAL_TRANSFER = "universal-transfer"
 
@@ -632,6 +655,50 @@ def walk_keys(label: str, isolated: Collection[str] = ()) -> list[tuple[str, dic
     return keys
 
 
+def portfolio_margin_keys() -> list[str]:
+    """The keys Portfolio Margin takes out while it is on: each replaced label (a read, a trade
+    label) and every cursor key of a replaced history but an isolated pair's."""
+    keys = list(PORTFOLIO_MARGIN_REPLACES)
+    for label in PORTFOLIO_MARGIN_REPLACES:
+        keys += [key for key, _ in walk_keys(label) if key not in keys]
+    return keys
+
+
+async def portfolio_margin(ctx: SyncContext, on: bool, now_ms: int) -> None:
+    """What `account-info` says of Portfolio Margin, in a short transaction of its own, before
+    any replaced label is asked. On: every key it replaces (`portfolio_margin_keys`) is put in
+    `not_present` from now, again on each sync while it stays on, so none is asked meanwhile, and
+    `config["portfolio_margin"]` records since when. Off after being on: they leave `not_present`
+    at once, and the sync asks them as it would any present product; a key Binance itself had
+    refused is asked again too, and goes back if Binance refuses it again. Kept apart from
+    `refused_hosts`, which is about the key's type, not the account."""
+    connection_id = ctx.connection.id
+    args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.portfolio_margin", args) as cmd,
+    ):
+        config = (await lock_connection(cmd, connection_id)).config
+        held = PORTFOLIO_MARGIN_KEY in config
+        if not on and not held:
+            return
+        missing = _mapping(config.get(NOT_PRESENT_KEY))
+        for key in portfolio_margin_keys():
+            if on:
+                missing[key] = now_ms
+            else:
+                missing.pop(key, None)
+        if on:
+            values: dict[str, JSONValue] = {NOT_PRESENT_KEY: missing}
+            if _int(config.get(PORTFOLIO_MARGIN_KEY)) is None:
+                values[PORTFOLIO_MARGIN_KEY] = now_ms
+            await update_config(cmd, connection_id, values)
+        else:
+            await update_config(
+                cmd, connection_id, {NOT_PRESENT_KEY: missing}, remove=[PORTFOLIO_MARGIN_KEY]
+            )
+
+
 def created_pairs(body: ApiValue) -> frozenset[str]:
     """The pairs an isolated margin account answer lists as created: each `assets[].symbol`
     whose `isolatedCreated` is not false (a pair not created holds nothing and has no
@@ -799,6 +866,38 @@ def trade_symbols(
         if wanted:
             chosen.append(symbol)
     return chosen
+
+
+def listed_symbols(exchange_info: ApiValue) -> set[str]:
+    """Every symbol an `exchangeInfo` answer lists."""
+    listed = exchange_info.get("symbols") if isinstance(exchange_info, dict) else None
+    return {
+        symbol
+        for entry in (listed if isinstance(listed, list) else [])
+        if isinstance(entry, dict) and isinstance(symbol := entry.get("symbol"), str)
+    }
+
+
+async def traded_symbols(ctx: SyncContext) -> set[str]:
+    """The symbols the connection's stored Spot and cross margin trades name: those whose trades
+    are asked by `exchangeInfo`'s list (an isolated pair's, by the row's `isIsolated` or the
+    request's, are asked by the isolated account's)."""
+    async with ctx.session_factory() as session:
+        found = await session.scalars(
+            text(
+                "select distinct content ->> 'symbol' from core.raw_records"
+                " where connection_id = :c and (record_type = :spot"
+                " or (record_type = :margin"
+                " and lower(coalesce(content ->> :flag, request ->> :flag, '')) <> 'true'))"
+            ),
+            {
+                "c": ctx.connection.id,
+                "spot": record_type(TRADES_LABEL),
+                "margin": record_type(MARGIN_TRADES),
+                "flag": ISOLATED_FLAG,
+            },
+        )
+        return {symbol for symbol in found if symbol}
 
 
 @dataclass(frozen=True)

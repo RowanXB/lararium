@@ -915,3 +915,16 @@ def test_fiat_tables_and_keys() -> None:
     rebate = layout.layout("rebate")[0]
     assert rebate.key == ("connection_id", "content_hash", "occurrence")
     assert rebate.column("dividend_id").sql == "text"
+
+
+def test_portfolio_margin_tables_and_keys() -> None:
+    assert {"pm-account", "pm-balance"} <= set(layout.TABLE_LABELS)
+    # Each is one report per read: the account a row, the balance a row per asset, which states
+    # the wallet balance reconciliation compares.
+    [account] = layout.layout("pm-account")
+    assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+    [balance] = layout.layout("pm-balance")
+    assert (balance.key, balance.record) == (("connection_id", "snapshot_at", "asset"), False)
+    assert balance.column("total_wallet_balance").nullable is False
+    for name in ("um_unrealized_pnl", "cm_unrealized_pnl", "cross_margin_borrowed"):
+        assert balance.column(name).sql == "numeric"

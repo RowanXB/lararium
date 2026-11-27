@@ -13,10 +13,14 @@ The connection's `config` keys, what each holds and who writes it:
   pair's `margin-trades:<symbol>:isolated`) the last trade id, per `um-trades:<symbol>`,
   `cm-trades:<symbol>` and `opt-trades:<symbol>` a window cursor as a history label's
   (`fetch.commit`).
-- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads).
-- `refused_hosts`: per derivatives host (`fapi`, `dapi`, `eapi`), when it refused the Ed25519
-  key's type (`refuse_host`); counted only while the key is an Ed25519 one, removed when the
-  host is asked again (`ask_refused_again`) and by a key update (the route).
+- `not_present`: label to when Binance said it does not serve it (`fetch`, the balance reads),
+  or to when Portfolio Margin was last seen on, for the labels it replaces
+  (`fetch.portfolio_margin`).
+- `portfolio_margin`: when `account-info` first said Portfolio Margin is on; removed, with the
+  replaced labels' `not_present` entries, by the sync that sees it off (`fetch.portfolio_margin`).
+- `refused_hosts`: per derivatives host (`fapi`, `dapi`, `eapi`, `papi`), when it refused the
+  Ed25519 key's type (`refuse_host`); counted only while the key is an Ed25519 one, removed when
+  the host is asked again (`ask_refused_again`) and by a key update (the route).
 - `first_sync_done`: every first walk has ended and the openings may be posted (`opening`).
 - `normalized_through`: the last raw record id applied (`normalize`).
 - `normalizer_version`: the NORMALIZER_VERSION that applied them; another replays all
@@ -94,12 +98,14 @@ from lararium.modules.finance.binance.client import (
     wall_clock,
 )
 from lararium.modules.finance.binance.fetch import (
+    ACCOUNT_INFO_LABEL,
     BALANCE_LABELS,
     CURSORS_KEY,
     HISTORY_LABELS,
     LIMITS_INFO,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
+    PORTFOLIO_MARGIN_PRODUCTS,
     REFUSED_HOSTS_KEY,
     SYMBOL_TRADES,
     TRADE_LABELS,
@@ -112,8 +118,11 @@ from lararium.modules.finance.binance.fetch import (
     due_refusals,
     fresh_config,
     isolated_symbols,
+    listed_symbols,
+    portfolio_margin,
     trade_cursor_key,
     trade_symbols,
+    traded_symbols,
     walk,
     walk_symbol_trades,
     walk_trades,
@@ -134,6 +143,7 @@ from lararium.modules.finance.binance.reconcile import (
     reconcile,
     wallets,
 )
+from lararium.modules.finance.binance.records import code
 from lararium.modules.finance.binance.tables import moment
 
 # Permissions a reading key may have; any other that is true refuses the sync.
@@ -157,6 +167,28 @@ ACCOUNT_LABEL = "spot-account"
 COIN_CONFIG_LABEL = "coin-config"
 ASSET_DETAIL_LABEL = "asset-detail"
 EXCHANGE_INFO_LABEL = "exchange-info"
+# `account-info`'s word that the account uses Portfolio Margin (design 5.13).
+PORTFOLIO_MARGIN_FIELD = "isPortfolioMarginRetailEnabled"
+PORTFOLIO_MARGIN_FLAG = "Portfolio Margin is on: its balance is counted, its records are not posted"
+
+
+def delisted_flag(symbol: str) -> str:
+    """A symbol with stored trades that `exchangeInfo` no longer lists (design 5.13): it is never
+    asked again (`fetch.trade_symbols`), so trades of it Binance lists later are not fetched."""
+    return f"{code(symbol)} is no longer listed: its trades cannot be fetched"
+
+
+async def delisted_flags(ctx: SyncContext, exchange_info: ApiValue) -> list[str]:
+    """A flag for each symbol the stored Spot and cross margin trades name that this sync's
+    `exchangeInfo` does not list."""
+    listed = listed_symbols(exchange_info)
+    return [delisted_flag(s) for s in sorted(await traded_symbols(ctx)) if s not in listed]
+
+
+def portfolio_margin_on(account_info: Read) -> bool:
+    """Whether an `account-info` read says Portfolio Margin is on; a field left out is off."""
+    body = as_api(account_info.body)
+    return isinstance(body, dict) and body.get(PORTFOLIO_MARGIN_FIELD) is True
 
 
 def due(cursor: JSONValue, now: datetime, requested: bool) -> bool:
@@ -460,6 +492,7 @@ class BinanceConnector:
         first = connection.config.get(FIRST_SYNC_DONE_KEY) is not True
         reference |= await read_balances(client, [EXCHANGE_INFO_LABEL])
         info = as_api(reference[EXCHANGE_INFO_LABEL].body)
+        flags += await delisted_flags(ctx, info)
         trades = [
             TradeWalk(
                 TRADES_LABEL,
@@ -490,8 +523,13 @@ class BinanceConnector:
         missing = config.get(NOT_PRESENT_KEY)
         missing = missing if isinstance(missing, dict) else {}
         reads: dict[str, Read] = {}
-        for label in BALANCE_LABELS:
+        # Before every other: whether Portfolio Margin replaces the margin and futures wallets.
+        portfolio = False
+        ordered = [ACCOUNT_INFO_LABEL, *(b for b in BALANCE_LABELS if b != ACCOUNT_INFO_LABEL)]
+        for label in ordered:
             if label in (GATE_LABEL, ACCOUNT_LABEL) or absent(config, label, client.now_ms()):
+                continue
+            if label in PORTFOLIO_MARGIN_PRODUCTS and not portfolio:
                 continue
             try:
                 read = (await read_balances(client, [label]))[label]
@@ -510,6 +548,14 @@ class BinanceConnector:
             reads[label] = read
             if label in missing:
                 await commit(ctx, label, present=True)
+            if label == ACCOUNT_INFO_LABEL:
+                portfolio = portfolio_margin_on(read)
+                await portfolio_margin(ctx, portfolio, client.now_ms())
+                if portfolio:
+                    flag(PORTFOLIO_MARGIN_FLAG)
+                config = await fresh_config(ctx)
+                missing = config.get(NOT_PRESENT_KEY)
+                missing = missing if isinstance(missing, dict) else {}
         return reads
 
 

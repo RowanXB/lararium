@@ -715,6 +715,19 @@ Binance 并没有列出所有改变过余额的事件（例如很久以前的一
 是 Binance 报告的数字；这条差异会一直列着，直到有记录能解释它，而且不会自动修正。通知里不会
 带数值、地址或哈希。
 
+### 报告而不处理的情况
+
+Lararium 无法处理的情况，会按名称标记一次。每一项都列在连接的警告里，一次同步新出现的所有标记
+放在同一条通知的同一行里。每一项写出的是字段、记录类型、钱包、交易对或资产，绝不是数值：
+
+- Lararium 不认识的密钥权限（开启时密钥也会被拒绝），以及 Binance 文档没有列出的钱包、字段、记录
+  类型、状态或取值；
+- Portfolio Margin 已开启：计入它的余额，不入账它的记录；
+- Trading Bots 或 Copy Trading 持有资产：Binance 没有为它们提供记录，所以它们的每次变化都显示为
+  对账差异；
+- 你交易过、但 Binance 已不再列出的交易对：它的成交无法再获取，此前没有取到的成交会显示为对账差异；
+- 任何来源都无法定价的资产，以及 Lararium 没有对应 instrument 的法币（不计入）。
+
 ### 提现到你自己的钱包
 
 提现到 Lararium 不认识的链上地址，会进入 Unassigned，该地址出现在 Suggestions 里。要让它成为
@@ -808,10 +821,11 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
   P2P 订单在“Binance Funding”上同样处理，按其单价。只有已完成的才入账。Pay 交易把付出或收到的金额
   记在它动用的每个钱包上（组合支付会涉及多个钱包），对 Unassigned 入账；返佣是 Spot 上的收入，若由资产分红发放则只入账一次。
   Binance 只提供 2020 年 6 月 10 日以来的返佣，这让首次同步多出大约 7 分钟。
-
-尚未实现。实现后将依据 Binance 的文档，并且不会用真实账户核对过：
-
-- Portfolio Margin，以及 Trading Bots 和 Copy Trading 钱包（Binance 没有为它们提供记录）
+- 统一账户 Portfolio Margin（`pm-balance`、`pm-account`），在 Binance 的账户信息显示已开启时：
+  “Binance Portfolio Margin”持有每种资产的钱包余额加 USDⓈ-M 和 COIN-M 的未实现盈亏，对账只用
+  钱包余额。它的记录不入账。Portfolio Margin 取代了 Cross Margin 和两个合约钱包，所以开启期间不会
+  请求它们；看到它关闭的那次同步会重新请求它们。
+- Trading Bots 和 Copy Trading，按 Binance 钱包列表逐个资产计入。Binance 没有为它们提供记录。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 

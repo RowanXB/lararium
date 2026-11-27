@@ -20,7 +20,8 @@ universal transfer history and by the options bill as a `TRANSFER` row, rule 2) 
 bill rows (premiums and exercise profit either way, fees paid), fiat deposits (some pending first)
 and withdrawals by bank on Spot, card purchases (from a card, or from the cash balance) and sales
 on Spot, P2P buys and sells on Funding, and Pay payments and receipts on Funding or Spot (a
-payment at times drawn from both). The fiat
+payment at times drawn from both). Trading Bots, which Binance lists no record of, holds only
+what it held before the history: its report is its opening, and it never changes. The fiat
 is EUR (`FIAT`), in cents; the other kinds never move it. Rebates are not drawn: Binance serves
 them from June 2020 only, and the histories start in July 2017. No wallet ever holds less than
 nothing, except Crypto Loans, whose holdings are debts: never more than nothing (a debt there
@@ -75,7 +76,16 @@ PAIRS = (
     ("AAABBB", "AAA", "BBB"),
     ("CCCSTB", "CCC", "STB"),
 )
-WALLET_KEYS = ("spot", "funding", "earn", "loans", "cross_margin", "um_futures", "options")
+WALLET_KEYS = (
+    "spot",
+    "funding",
+    "earn",
+    "loans",
+    "cross_margin",
+    "um_futures",
+    "options",
+    "trading_bots",
+)
 ACCOUNT_NAMES = {
     "spot": "Binance Spot",
     "funding": "Binance Funding",
@@ -84,6 +94,7 @@ ACCOUNT_NAMES = {
     "cross_margin": "Binance Cross Margin",
     "um_futures": "Binance USDⓈ-M Futures",
     "options": "Binance Options",
+    "trading_bots": "Binance Trading Bots",
 }
 CROSS = "cross_margin"
 FUTURES = "um_futures"

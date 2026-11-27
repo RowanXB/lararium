@@ -51,7 +51,7 @@ HOST_NOT_PRESENT: dict[str, frozenset[int]] = {"eapi": frozenset({-5002})}
 # The hosts Binance documents no Ed25519 key for (design 3.1): an Ed25519 signature refused there
 # (HTTP 401 or -1022) while `api` accepted it says the host takes no such key, not that the key
 # is wrong (`BinanceKeyTypeRefused`).
-KEY_TYPE_HOSTS = frozenset({"fapi", "dapi", "eapi"})
+KEY_TYPE_HOSTS = frozenset({"fapi", "dapi", "eapi", "papi"})
 INVALID_SIGNATURE = -1022
 # The rejection codes that name what is wrong with the key itself (its format; its IP or
 # permissions), never its type.

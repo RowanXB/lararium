@@ -52,7 +52,10 @@ _RATE_LIMIT: dict[str, ApiValue] = {
     "rateLimits[].intervalNum": 1,
     "rateLimits[].limit": 2400,
 }
+# The account has no Portfolio Margin, as the owner's key reports (the catalogue document): a
+# test that needs it sets `account-info`.
 _RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {
+    "account-info": {"isPortfolioMarginRetailEnabled": False},
     "snapshot": {"snapshotVos[].type": "spot"},
     "um-exchange-info": _RATE_LIMIT,
     "cm-exchange-info": _RATE_LIMIT,

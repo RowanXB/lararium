@@ -226,7 +226,7 @@ class World:
             for row, when in rows:
                 self.fake.add(label, row, when=when or (asked(row) if asked else None))
         held = self.history.balance(now_ms)
-        spot, funding, earn, loans, cross, futures, options = (
+        spot, funding, earn, loans, cross, futures, options, bots = (
             holdings_of(held, w) for w in WALLET_KEYS
         )
         # No position: the equity is the margin balance.
@@ -296,18 +296,7 @@ class World:
                 for a, q in sorted(funding.items())
             ],
         )
-        earn_listed: list[ApiValue] = [
-            {
-                "asset": a,
-                "assetName": a,
-                "free": format(q, "f"),
-                "locked": "0",
-                "freeze": "0",
-                "withdrawing": "0",
-                "btcValuation": "0",
-            }
-            for a, q in sorted(earn.items())
-        ]
+        earn_listed = _listed(earn)
         self.fake.set_rows(
             "wallet-balance",
             [
@@ -323,12 +312,35 @@ class World:
                     balance=_any(earn),
                     assetBalances=earn_listed,
                 ),
+                # Counted from the list: Binance has no record endpoint for it.
+                build_row(
+                    "wallet-balance",
+                    walletName="Trading Bots",
+                    balance=_any(bots),
+                    assetBalances=_listed(bots),
+                ),
             ],
         )
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.update(self.clock())
         return self.fake.handler(request)
+
+
+def _listed(held: dict[str, Decimal]) -> list[ApiValue]:
+    """A wallet list row's asset detail for what the wallet holds."""
+    return [
+        {
+            "asset": a,
+            "assetName": a,
+            "free": format(q, "f"),
+            "locked": "0",
+            "freeze": "0",
+            "withdrawing": "0",
+            "btcValuation": "0",
+        }
+        for a, q in sorted(held.items())
+    ]
 
 
 def _any(held: dict[str, Decimal]) -> str:

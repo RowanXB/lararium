@@ -19,6 +19,7 @@ from lararium.modules.finance.binance.balances import (
     ambiguous,
     backfill_daily_snapshots,
     read_balances,
+    record_less_flag,
     report_balances,
     settle_reads,
     wallet_flags,
@@ -504,7 +505,11 @@ async def test_a_wallet_with_a_balance_and_no_assets_listed_is_flagged(session, 
 
     await _report(run, connection, {"wallet-balance": _read("wallet-balance", listed)}, flags)
 
-    assert flags == ["wallet Trading Bots has a balance but lists no asset"]
+    # A wallet with no record endpoint that is not empty is named as such as well.
+    assert flags == [
+        "wallet Trading Bots has a balance but lists no asset",
+        record_less_flag("Trading Bots"),
+    ]
     assert await _snapshots(session, connection.id) == []
 
 
