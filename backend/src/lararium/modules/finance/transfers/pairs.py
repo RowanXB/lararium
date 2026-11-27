@@ -155,12 +155,17 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     other's account and each other one a bank transfer, or a record naming nobody on an
     account funded by bank transfer (_may_be_transfer); or one names a bank account the
     other's account is one of the holders of, and the other identifies no account and may
-    be a transfer (_names_held: ONE_SIDED). A record naming a card merchant (holders) is
-    none of these tiers' (card_tier pairs it). Decisions are not considered."""
+    be a transfer (_names_held: ONE_SIDED). A record naming a bank account several own
+    accounts hold says where its money went: its other side is on one of them, or there is
+    none. A record naming a card merchant (holders) is none of these tiers' (card_tier pairs
+    it). Decisions are not considered."""
     if c.account_id == r.account_id:
         return None
     if r.holders or c.holders:
         return None
+    for x, other in ((r, c), (c, r)):
+        if x.payee_holders and other.account_id not in x.payee_holders:
+            return None
     if _names_held(r, c) or _names_held(c, r):
         return ONE_SIDED
     if not (r.identified or c.identified):

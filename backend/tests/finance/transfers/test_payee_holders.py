@@ -101,6 +101,16 @@ def test_registry_tier_pairs_a_held_payee_with_a_holder_that_may_be_a_transfer()
     assert weak_tier(SENT, _pairable(X, "100", bank_transfer=True)) is None
 
 
+def test_a_held_payee_s_record_pairs_with_none_outside_its_holders() -> None:
+    """A record naming a payee only its holders hold says where its money went: a receipt
+    on another own account, even one naming the payer's account, is not its other side."""
+    sent = _pairable(
+        M, "-100", bank_transfer=True, names_account=True, payee_holders=frozenset({X})
+    )
+    elsewhere = _pairable(Y, "100", bank_transfer=True, holder=M, names_account=True)
+    assert registry_tier(sent, elsewhere) is None and registry_tier(elsewhere, sent) is None
+
+
 def test_a_card_merchant_s_holders_are_no_payee_s() -> None:
     """The two sets mean different evidence: a card payment's holders feed only card_tier."""
     card = _pairable(M, "-100", holders=frozenset({X}), source=("connection", "c:1"))
