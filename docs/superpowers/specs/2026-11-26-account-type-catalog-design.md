@@ -18,7 +18,7 @@ The owner wants the choice to be the *account type* ("Trading 212 Cash ISA"), wi
 - **No API.** Trading 212's API docs and its API-key help article say the API serves Invest and Stocks ISA accounts only. The owner confirmed the Cash ISA shows no API setting in the app.
 - **No card top-ups.** Trading 212's payment methods article says a Cash ISA takes bank transfers and instant bank transfers only. Every Cash ISA deposit is a bank transfer.
 - **CSV export.** The Cash ISA's History page exports a CSV with the header `Action,Time (UTC),Notes,ID,Total,Currency (Total)`, the same columns as the Invest and Stocks ISA export. The owner's first export (`private/t212-cash-isa/`, not committed) has one `Deposit` row: `Time (UTC)` to the second (`YYYY-MM-DD HH:MM:SS+00:00`), `Notes` = `Transaction ID: <uuid>`, `Total` signed (the connector's tests show a withdrawal as negative), `Currency (Total)` quoted.
-- **The Monzo side.** In production, Monzo's record of that deposit is a Faster Payment naming a `uk_bank_account` (Trading 212's payee account) with a payment reference, seconds before the export's time. The owner confirmed Invest, Stocks ISA and Cash ISA show the same sort code and account number for bank transfers and differ only by reference. Trading 212's help says to use "your account number" as the reference; it does not say whether every customer pays the same payee account.
+- **The Monzo side.** In production, Monzo's record of that deposit is a Faster Payment naming a `uk_bank_account` (Trading 212's payee account) with a payment reference, seconds before the export's time. The owner confirmed Invest, Stocks ISA and Cash ISA show the same sort code and account number for bank transfers and differ only by reference. (Later production data showed the reference is not fixed per account, so it can't tell them apart; §8.1.) Trading 212's help says to use "your account number" as the reference; it does not say whether every customer pays the same payee account.
 - **Not yet seen:** an interest row, a withdrawal, a transfer between Trading 212 accounts, a statement PDF.
 
 ## 3. Goals, non-goals, anti-goals
@@ -29,7 +29,7 @@ The owner wants the choice to be the *account type* ("Trading 212 Cash ISA"), wi
 2. The Add account page is one list of account types. The owner never chooses between "connect" and "upload".
 3. An account whose type a rule or a page reads remembers that type. Uploading a file to such an account needs no profile choice.
 4. "Trading 212 Cash ISA" is an account type. Picking it creates the account; its History CSV imports with every column stored.
-5. A Monzo bank transfer to a payee account shared by several own accounts pairs with the deposit on the account its payment reference names, for the Cash ISA and equally for Invest and Stocks ISA.
+5. A Monzo bank transfer to a payee account shared by several own accounts pairs with the deposit on any of the payee's holder accounts, for the Cash ISA and equally for Invest and Stocks ISA.
 6. The Invest and Stocks ISA inference about moves between them stops only when the owner has a Cash ISA.
 7. Existing accounts keep working with no change to their data.
 
@@ -216,15 +216,17 @@ Format `csv`, `recommended`, with this profile (staged for the owner's review, a
 
 Needed for goal 6. Two pieces of transfer evidence, both generic.
 
-### 8.1 References on a shared payee account
+### 8.1 A payee bank account held by several own accounts (replaces references, 2026-11-27)
 
-- A `uk_bank_account` identifier registered to no account may carry **references**: pairs of (own account, reference), a reference unique within the identifier. An identifier carries either an account (as today) or references, never both.
-- A record naming that identifier whose payment reference matches a registered reference names that reference's account, as if the identifier were registered to it. The existing tiers then apply. "The account a record's identifier names" is read in three places today (`contra.eligible_records` for pairing, `contra.transfer_contra` for which contra a new record posts to, `engine.preview_match` for import previews); all three resolve it the same way, through one definition.
-- An identifier carrying references is not offered as a suggestion to register (`queries.suggestions`), and can't be dismissed while it carries any.
-- Registering an account on an identifier that carries references is refused, and so is adding references to one that has an account.
-- Matching is exact after trimming surrounding spaces and upper-casing both sides. No reference, or one matching none, leaves the record unidentified; it still names a bank account (`names_account`), so the weak sort-code tier never pairs it.
-- Registering, changing or removing references re-runs matching, as registering a card merchant does.
-- No provider's account number or reference is in code. The owner registers what their own app shows.
+Built first as per-account payment references (PR #46). Production showed Trading 212's reference is not fixed: the one a payment used and the three the app shows share every character but four, and those four differ between payments. A reference can't tell the three accounts apart, so it is dropped (table, route and resolution) and replaced by the model card merchants already use:
+
+- A `uk_bank_account` identifier may be **held by several own accounts** (`finance.account_identifier_holders`, as a card merchant is), instead of being registered to one. An identifier has either one account (`account_id`) or holders, never both.
+- A record naming a held bank account is identified **to that set**: in the one-sided registry tier its counterpart is a record on any holder account that may be a transfer (marked a bank transfer, or funded by bank transfer and naming nobody, §8.2), by amount and date window as today. The set decides which accounts may hold the other side: such a record pairs only with a record on one of them, even when a record elsewhere names its account. Uniqueness, card precedence and every other rule are unchanged; the coverage gate asks the ledger to hold, from the gate's day, not only the candidate's account but every manual holder, since the real row may be on any of them, inside its opening (fixed after review, 2026-11-27).
+- It is not a suggestion to register while it has holders, and can't be dismissed. Registering holders re-runs matching. The owner registers the bank details their app shows once; no provider's details are in code.
+- Its contra at posting is Unassigned, as a record naming a card merchant's holders is, until it pairs.
+- **Known limitation:** a held-payee payment that can't pair (several candidate deposits, or a lone candidate the coverage gate refuses) opens no transfer and shows only on Unassigned, as an unpaired card payment does; the owner pairs it by hand.
+- **Known limitation:** a held payee is never settled before history and never gets an inferred placeholder.
+- **Known limitation:** with three Trading 212 accounts a TRANSFER between them names no counterpart (§9), so its incoming side may be taken as the top-up for a same-amount payment to the shared payee. When the real deposit becomes a second eligible candidate, the wrong pair dissolves automatically. Both records from that pair return to Unassigned. The unmatched held-payee payment has no transfer record, so there is no review item on the Transfers page. The owner finds the payment on Unassigned and pairs it with the real deposit. A real deposit booked after the window leaves the wrong pair in place until the owner rejects it. A family identifier held by all Trading 212 accounts, named by every TRANSFER, would close this; it is a separate design (owner, 2026-11-27).
 
 ### 8.2 A deposit whose method the source doesn't state
 
@@ -234,13 +236,15 @@ The account type now says what the API doesn't. In `registry_tier`, the unidenti
 
 - its account's type lists `bank_transfer` in `funding`;
 - it names nobody: no own account, no card merchant, no bank account (`_card_receiver`'s test without its "from a connection" clause);
-- the other side is identified and names its account.
+- the other side is identified and names its account, or names a payee held by its account.
 
 Such a deposit also has to be loaded for pairing at all: today `pairs._load_records` drops a record that is no bank transfer and names nothing unless its account is a card merchant's holder, so it gains the same condition.
 
 Nothing else about the tier changes: equal amounts, opposite signs, the date window and uniqueness still decide, and the tier stays `ONE_SIDED`. The weak sort-code tier is not widened: it still needs both sides marked bank transfers.
 
-A deposit that was a card payment is not caught by this. Its Monzo side names a card merchant, not a bank account, so it is identified by no reference and only `card_tier` can pair it, as today.
+A deposit that was a card payment is not caught by this. Its Monzo side names a card merchant, not a bank account, so it is identified by no held payee and only `card_tier` can pair it, as today.
+
+Trading 212 dividends, fees, interest and order fills also name nobody, so they are marked `never_transfer` (the generic marker Binance uses): only a DEPOSIT, WITHDRAW or TRANSFER, or shares moved free of payment (FOP), can be a transfer's leg, and a dividend or interest is never taken for a top-up (`trading212-norm-3` re-posts the rows already in the ledger with the marker).
 
 Effect on today's data: an identified bank transfer to a Trading 212 Invest or Stocks ISA account now pairs with that account's same-amount deposit in the window. No other account type lists a funding method, so no other pairing changes. *(My call: the transaction's stored `bank_transfer` flag is left as the source gave it; the type is read at pairing time, so a type's configuration can be corrected without rewriting records.)*
 
@@ -272,26 +276,26 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
 ## 10. Building it in two parts
 
 - **Part A (§6, §7):** the catalog, `type_key`, the Add account page, the "Upload file" action, and the Cash ISA type with its profile. After it, the Cash ISA is added and imported; its top-ups are paired by hand.
-- **Part B (§8, §9):** references, the widened one-sided tier and the family rule. It reads `funding`, `family` and `type_key`, so it comes after Part A. After it, bank top-ups to all three Trading 212 accounts pair on their own.
+- **Part B (§8, §9):** a payee held by several accounts (built first as per-account references, then dropped, §8.1), the widened one-sided tier and the family rule. It reads `funding`, `family` and `type_key`, so it comes after Part A. After it, bank top-ups to all three Trading 212 accounts pair on their own.
 
 ## 11. Left to the builder
 
 - Module layout and helper names.
 - The exact `date_format` string, checked against the real file by `make real-check`, which reads `private/t212-cash-isa/` when present.
-- Storage for references (a table, or a column on the holders table), its migration, and the API route and form for registering them.
+- The API route and form for registering a held payee's holders.
 - Response and form models, and the generated web client.
 - Tests. Expected coverage:
   - catalog invariants; the derived import catalog equal to today's plus the Cash ISA entry; the Trading 212 `type_key` backfill;
   - creating an account from a type; `type_key` refusals; the web's upload for a typed account asks for no profile;
   - the profile: a synthetic CSV with the real header stages and commits (signed amounts, UTC times, `memo`, `external_id`, currency; every row a bank transfer); re-importing an overlapping file adds nothing;
-  - references (Hypothesis properties where the engine is involved): a transfer naming the shared payee with the Cash ISA's reference pairs with the Cash ISA row; with another account's reference, not with it; with none or an unknown one, with nothing; case and surrounding spaces don't matter; an identifier refuses both an account and references;
+  - holders (Hypothesis properties where the engine is involved): a transfer naming the held payee pairs with a deposit on any holder account and with none on a non-holder; with several fitting deposits, with nothing; case and surrounding spaces in the identifier don't matter; an identifier refuses both an account and holders;
   - funding (Hypothesis properties): an identified bank transfer pairs with a same-amount unmarked deposit on an account whose type lists `bank_transfer`; not when the type doesn't, when the deposit names anybody, or when two deposits fit; the weak tier is unchanged; a card payment still pairs only by the card rule;
   - family: with Invest and Stocks ISA, a TRANSFER names the other; with a Cash ISA added, none does, and the earlier ones are re-posted without a counterpart; closing the Cash ISA changes nothing.
 
 ## 12. Open, for the owner
 
 - Interest: once a real interest row exists, export from the account's first day; a follow-up sets its `Action` in `card_types` (and adds a statement PDF if one is offered).
-- TODO (owner, 2026-11-27): a web form for a shared payee's references, to list, add and remove them, with a read-back of the current set. Part B registers them through the API only (the plan's Decision 2), and the only read-back is the registration response.
+- TODO (owner, 2026-11-27): a web form to register a shared payee bank account's holders, with a read-back of the current set (API only today).
 - TODO (2026-11-27): setting or changing an existing account's opening date (§8.3 item 2). It is set only when an account is created (the Add account upload form asks for it); no route sets or changes it on an account that exists.
 
 ## 13. After deploy
@@ -299,4 +303,4 @@ Known limitation, in the README: Lararium knows only the accounts added to it. A
 1. Check the two Trading 212 accounts carry their type, and that the Add account page lists every type.
 2. Add the Cash ISA from the Add account page, giving its opening date, and upload its History CSV from the account's first day, keeping the file name Trading 212 gives it (§8.3).
 3. Give accounts made before account types existed their type with `PATCH /api/v1/finance/accounts/{id}` and `{"type_key": ...}` (as the README's Importing statements section says). After deploy each Trading 212 connection replays once at its next sync (the normaliser version is bumped).
-4. Register the shared payee account's references for the three Trading 212 accounts; check the first Cash ISA deposit pairs with its Monzo payment, and that the two earlier Invest and Stocks ISA deposits pair or stay as they are for a stated reason.
+4. Register the shared payee bank account as held by the three Trading 212 accounts (`POST /api/v1/finance/accounts/identifiers/holders`, §8.1); check the first Cash ISA deposit pairs with its Monzo payment, and that the two earlier Invest and Stocks ISA deposits pair or stay as they are for a stated reason.

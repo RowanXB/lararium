@@ -599,18 +599,37 @@ until their `Action` is known.
   Transfers page: **Pair** the right one.
 - **Bank top-ups to a payee shared by several accounts.** If your bank pays Trading 212 Invest,
   Stocks ISA and Cash ISA through one bank account (one sort code and account number), the
-  payment names which of them only by its payment reference. Register the references once, in the
-  API only, with `POST /api/v1/finance/accounts/identifiers/references` and
-  `{"value": "<sort code> <account number>", "references": [{"account_id": "<account id>",
-  "reference": "<payment reference>"}]}` (placeholders; use what your banking app shows, the sort code as
-  in 11-22-33 or 112233). One call replaces the identifier's whole
-  set of references, and an empty `references` list removes them. References match ignoring case and
-  surrounding spaces. A bank account carries either an account (registered as in [Registering
-  identifiers](#registering-identifiers)) or references, never both. Lararium then goes through the
-  whole history: a bank transfer to that payee with a matching reference names that account, and
-  bank top-ups to Trading 212 Invest, Stocks ISA and Cash ISA pair on their own. Card top-ups
-  still pair by the card rule above, and card evidence comes first: a deposit that has a
-  card-payment candidate is not paired as a bank transfer by its account's funding.
+  payment doesn't say which of them it went to: its payment reference isn't fixed, so it can't
+  tell them apart. Register the bank account once as held by all of them, in the API only, with
+  `POST /api/v1/finance/accounts/identifiers/holders` and `{"kind": "uk_bank_account",
+  "value": "<sort code> <account number>", "account_ids": ["<account id>", ...]}`
+  (placeholders; use what your banking app shows, the sort code as in 11-22-33 or 112233). One
+  call replaces its whole set of holders, and an empty `account_ids` list removes them. A bank
+  account is either registered to one account (as in [Registering
+  identifiers](#registering-identifiers)) or held by several, never both; while it has holders
+  it is no suggestion and can't be dismissed. Lararium then goes through the whole history: a
+  bank transfer to that payee pairs with the one deposit of the same amount in its window on
+  any of the holder accounts that may be a bank transfer (one marked as such, or, on Trading
+  212 Invest, Stocks ISA and Cash ISA, one naming nobody; a Trading 212 dividend, fee,
+  interest payment or order fill is never one). It never pairs with a record on an account outside the
+  holders, even one naming your bank account. Until it pairs, the payment stays on
+  Unassigned. When it can't pair (deposits on two of the holders fit, or the only one is
+  refused by the coverage check, which asks it of every manual or imported holder: the real
+  deposit may be on any of them, hidden in its opening), no transfer is opened and nothing prompts you: the payment
+  shows only on Unassigned, like an unpaired card payment, and a held payee is never settled
+  before history or given a placeholder. Find such a payment on Unassigned and pair the right
+  one by hand (`GET /api/v1/finance/transactions/{id}/pair-candidates`, then `POST
+  /api/v1/finance/transactions/{id}/pair`, as for records that name no account, above). Card
+  top-ups still pair by the card rule above, and card evidence comes first: a deposit that has
+  a card-payment candidate is not paired as a bank transfer by its account's funding. A pair
+  made this way shows **Reject** on the Transfers page, not Unpair, like a card pair: neither
+  record is a transfer without the other. With three Trading 212 accounts, a transfer between
+  them names no counterpart (see below), so its incoming side may be taken as the top-up for a
+  same-amount payment to the shared payee. When the real deposit becomes a second eligible
+  candidate, Lararium breaks the wrong pair and returns its two records to Unassigned without
+  creating a review item on the Transfers page. Find the payment on Unassigned and pair it with
+  the real deposit by hand. If the real deposit is booked after the window, the wrong pair stays
+  until you reject it.
 - **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
   you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
   accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and

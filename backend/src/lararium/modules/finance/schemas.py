@@ -29,7 +29,7 @@ from lararium.modules.finance.accounts import (
     TaxWrapper,
 )
 from lararium.modules.finance.cashflow import Bucket
-from lararium.modules.finance.identifiers import IdentifierKind
+from lararium.modules.finance.identifiers import HeldKind, IdentifierKind
 from lararium.modules.finance.importing.profiles import ProfileConfig, TimeUnit
 from lararium.modules.finance.importing.staging import BatchStatus, RowKind, RowStatus
 from lararium.modules.finance.instruments import IdentifierScheme, InstrumentKind
@@ -521,14 +521,6 @@ class IdentifierCreate(BaseModel):
     value: str  # a sort code and account number, e.g. "11-22-33 12345678", or an address
 
 
-class IdentifierReference(BaseModel):
-    """One own account behind a shared payee bank account, told apart by the payment
-    reference it is paid with (stored trimmed and upper-cased)."""
-
-    account_id: UUID
-    reference: str
-
-
 class IdentifierOut(BaseModel):
     id: UUID
     kind: IdentifierKind
@@ -536,11 +528,9 @@ class IdentifierOut(BaseModel):
     sort_code: str | None  # a UK bank account's only
     account_number: str | None
     account_id: UUID | None
-    # A card merchant's own accounts (it has no account_id); empty for every other kind.
+    # The own accounts holding it (it then has no account_id): a card merchant's, or a payee
+    # bank account's several share; empty for every other row.
     holder_account_ids: list[UUID]
-    # A shared payee bank account's own accounts by reference (it has no account_id), sorted
-    # by reference; empty for every other row.
-    references: list[IdentifierReference]
     dismissed_at: AwareDatetime | None
     created_by: str
     created_at: AwareDatetime
@@ -553,12 +543,15 @@ class CardMerchantRegister(BaseModel):
     account_ids: list[UUID]
 
 
-class IdentifierReferencesRegister(BaseModel):
-    """The own accounts payments to a shared payee bank account go into, by reference; none
-    removes them."""
+class IdentifierHoldersRegister(BaseModel):
+    """The own accounts payments to an identifier go into: a card merchant (`value` its
+    Monzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts
+    are paid through (`value` its sort code and account number, e.g. "11-22-33 12345678");
+    none removes them."""
 
-    value: str  # a sort code and account number, e.g. "11-22-33 12345678"
-    references: list[IdentifierReference]
+    kind: HeldKind
+    value: str
+    account_ids: list[UUID]
 
 
 class CardMerchantDismiss(BaseModel):
@@ -619,7 +612,8 @@ class TransferOut(BaseModel):
     out_transaction_id: UUID | None
     in_transaction_id: UUID | None
     placeholder_transaction_id: UUID | None
-    # A matched pair a sort code alone made: the Transfers page offers Reject, not Unpair.
+    # A matched pair where neither leg names an own account (a sort code alone, a card
+    # merchant's or a held payee's holders): the Transfers page offers Reject, not Unpair.
     weak: bool = False
 
 

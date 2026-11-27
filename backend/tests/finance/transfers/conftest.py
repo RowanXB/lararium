@@ -133,8 +133,7 @@ def connector_tx(
     session: AsyncSession, run: Run, gbp: InstrumentRecord, ids: SystemIds
 ) -> ConnectorTx:
     """Post (or re-post) a connector transaction as a normalizer would: its contra from
-    transfer_contra, and the given counterparty fields (`reference`, its payment
-    reference)."""
+    transfer_contra, and the given counterparty fields."""
 
     async def _post(
         bank: Connected,
@@ -143,7 +142,6 @@ def connector_tx(
         external_id: str = "tx_1",
         occurred_at: datetime = WHEN,
         identifier_id: UUID | None = None,
-        reference: str | None = None,
         bank_transfer: bool = True,
         status: TransactionStatus = "booked",
         description: str = "Transfer",
@@ -154,7 +152,6 @@ def connector_tx(
             source=("connection", f"{bank.connection_id}:{external_id}"),
             own_account_id=bank.account.id,
             counterparty_identifier_id=identifier_id,
-            payment_reference=reference,
             other_postings=0,
             never_transfer=never_transfer,
         )
@@ -175,7 +172,6 @@ def connector_tx(
                 counterparty=CounterpartyFields(
                     identifier_id=identifier_id,
                     name="Test Owner",
-                    reference=reference,
                     bank_transfer=bank_transfer,
                     never_transfer=never_transfer,
                 ),
@@ -447,12 +443,11 @@ def statement_row(
 ) -> StatementRow:
     """Post a row as an M2 import would, naming nobody (its contra from transfer_contra),
     and record it as a committed import row printing `details`. `identifier_id`: the bank
-    account the posted transaction names, which a row naming one does; `reference`, its
-    payment reference. `key`: the row's dedupe key (record_import_rows), its reference; by
-    default one from the transaction. `at`: the row's time, which its file gives to
-    `time_unit`; by default `day`'s midnight, a date only. `zone`: the time zone its file
-    is read in (its import profile's), which it is booked on `at`'s date in; by default the
-    owner's, as posting gives."""
+    account the posted transaction names, which a row naming one does. `key`: the row's
+    dedupe key (record_import_rows), its reference; by default one from the transaction.
+    `at`: the row's time, which its file gives to `time_unit`; by default `day`'s midnight,
+    a date only. `zone`: the time zone its file is read in (its import profile's), which it
+    is booked on `at`'s date in; by default the owner's, as posting gives."""
 
     async def _post(
         account: AccountRecord,
@@ -461,7 +456,6 @@ def statement_row(
         day: date = DAY,
         details: RowDetails | None = None,
         identifier_id: UUID | None = None,
-        reference: str | None = None,
         bank_transfer: bool = True,
         complete: tuple[date, date] = IMPORTED,
         key: str | None = None,
@@ -475,7 +469,6 @@ def statement_row(
             source=None,
             own_account_id=account.id,
             counterparty_identifier_id=identifier_id,
-            payment_reference=reference,
             other_postings=0,
         )
         amount = Decimal(quantity)
@@ -492,7 +485,7 @@ def statement_row(
                     PostingInput(contra, gbp.id, -amount),
                 ],
                 counterparty=CounterpartyFields(
-                    identifier_id=identifier_id, reference=reference, bank_transfer=bank_transfer
+                    identifier_id=identifier_id, bank_transfer=bank_transfer
                 ),
             ),
         )

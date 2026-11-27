@@ -1088,6 +1088,29 @@ export type IdentifierCreate = {
 };
 
 /**
+ * IdentifierHoldersRegister
+ *
+ * The own accounts payments to an identifier go into: a card merchant (`value` its
+ * Monzo merchant id, as CardMerchantRegister), or a UK bank account several own accounts
+ * are paid through (`value` its sort code and account number, e.g. "11-22-33 12345678");
+ * none removes them.
+ */
+export type IdentifierHoldersRegister = {
+    /**
+     * Account Ids
+     */
+    account_ids: Array<string>;
+    /**
+     * Kind
+     */
+    kind: 'card_merchant' | 'uk_bank_account';
+    /**
+     * Value
+     */
+    value: string;
+};
+
+/**
  * IdentifierOut
  */
 export type IdentifierOut = {
@@ -1124,47 +1147,9 @@ export type IdentifierOut = {
      */
     kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address';
     /**
-     * References
-     */
-    references: Array<IdentifierReference>;
-    /**
      * Sort Code
      */
     sort_code: string | null;
-    /**
-     * Value
-     */
-    value: string;
-};
-
-/**
- * IdentifierReference
- *
- * One own account behind a shared payee bank account, told apart by the payment
- * reference it is paid with (stored trimmed and upper-cased).
- */
-export type IdentifierReference = {
-    /**
-     * Account Id
-     */
-    account_id: string;
-    /**
-     * Reference
-     */
-    reference: string;
-};
-
-/**
- * IdentifierReferencesRegister
- *
- * The own accounts payments to a shared payee bank account go into, by reference; none
- * removes them.
- */
-export type IdentifierReferencesRegister = {
-    /**
-     * References
-     */
-    references: Array<IdentifierReference>;
     /**
      * Value
      */
@@ -3238,30 +3223,30 @@ export type RegisterCardMerchantResponses = {
 
 export type RegisterCardMerchantResponse = RegisterCardMerchantResponses[keyof RegisterCardMerchantResponses];
 
-export type RegisterIdentifierReferencesData = {
-    body: IdentifierReferencesRegister;
+export type RegisterIdentifierHoldersData = {
+    body: IdentifierHoldersRegister;
     path?: never;
     query?: never;
-    url: '/api/v1/finance/accounts/identifiers/references';
+    url: '/api/v1/finance/accounts/identifiers/holders';
 };
 
-export type RegisterIdentifierReferencesErrors = {
+export type RegisterIdentifierHoldersErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type RegisterIdentifierReferencesError = RegisterIdentifierReferencesErrors[keyof RegisterIdentifierReferencesErrors];
+export type RegisterIdentifierHoldersError = RegisterIdentifierHoldersErrors[keyof RegisterIdentifierHoldersErrors];
 
-export type RegisterIdentifierReferencesResponses = {
+export type RegisterIdentifierHoldersResponses = {
     /**
      * Successful Response
      */
     200: IdentifierOut;
 };
 
-export type RegisterIdentifierReferencesResponse = RegisterIdentifierReferencesResponses[keyof RegisterIdentifierReferencesResponses];
+export type RegisterIdentifierHoldersResponse = RegisterIdentifierHoldersResponses[keyof RegisterIdentifierHoldersResponses];
 
 export type RenameAccountData = {
     body: AccountRename;

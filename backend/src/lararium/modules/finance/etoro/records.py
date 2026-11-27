@@ -701,9 +701,7 @@ async def cash(run: Run, record: Record) -> None:
             currency = await run.currency(text_at(content, "currency"))
             counterparty, through = await _counterparty(run, record, kind)
             contra = (
-                await run.contra(
-                    key, account_id, counterparty.identifier_id, counterparty.reference
-                )
+                await run.contra(key, account_id, counterparty.identifier_id)
                 if through
                 else await run.system_account("unassigned")
             )
