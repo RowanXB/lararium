@@ -12,6 +12,10 @@ currency; the cash besides the fees weighs the shares, at |cash| / quantity per 
 whose postings still do not balance within rounding fails the run, naming the fill. A cash
 movement's sign comes from its type; a TRANSFER's is taken as given and flagged.
 
+A TRANSFER names the Trading 212 family (accounts.family_identifier; account family identifier
+design §5.5), not an account: pairing finds the other accounts of the family. A DEPOSIT or
+WITHDRAW names nobody. A stale `family_accounts` config key is ignored.
+
 Opening balances (design §5.5): Trading 212's history depth is undocumented. What the
 account's first summary reports (cash and the positions its sync saw), less what the history
 posts up to the time that summary arrived, is one opening adjustment per instrument, against
@@ -26,7 +30,6 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text
 
-from lararium.core import models as core_models
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models, source_merge
 from lararium.modules.finance.connector_run import (
@@ -56,7 +59,6 @@ from lararium.modules.finance.trading212.state import (
     objects_at,
     record_key,
     reports_of,
-    stored,
     text_at,
 )
 
@@ -320,9 +322,9 @@ async def _post_movement(
     run: Run, key: str, kind: str, description: str, values: CashEvent
 ) -> UUID:
     currency = await run.currency(values.currency)
-    # A TRANSFER is with the sibling account when there is one (accounts.sibling); a deposit
-    # or withdrawal names nothing: the card payment pairs with it.
-    identifier = await accounts.sibling(run) if kind == TRANSFER else None
+    # A TRANSFER names the family (accounts.family_identifier); a deposit or withdrawal
+    # names nothing: the card payment pairs with it.
+    identifier = await accounts.family_identifier(run) if kind == TRANSFER else None
     contra = (
         await run.contra(key, 0, identifier)
         if kind in _THROUGH_CONTRA
@@ -401,36 +403,6 @@ async def export_rows(run: Run, exports: Sequence[ExportRecord]) -> None:
     for export in exports:
         merge.flag(run, export)
         await merge.write(run, export, await run.live(export.key))
-
-
-async def unidentified_transfers(run: Run) -> list[Record]:
-    """The connection's stored TRANSFERs posted before the sibling was known: once it is,
-    they are posted again, naming it."""
-    if await accounts.sibling(run) is None:
-        return []
-    t, r = models.Transaction, core_models.RawRecord
-    keys = set(
-        await run.session.scalars(
-            select(t.external_id).where(
-                t.connection_id == run.connection_id,
-                t.external_id.like("transaction:%"),
-                t.status != "void",
-                t.counterparty_identifier_id.is_(None),
-            )
-        )
-    )
-    if not keys:
-        return []
-    latest: dict[str, Record] = {}
-    for record in await stored(
-        run.session, run.connection_id, ["transactions"], r.content["type"].astext == TRANSFER
-    ):
-        if record_key(record) in keys:
-            latest[record_key(record)] = record
-    return list(latest.values())
-
-
-# Openings ------------------------------------------------------------------------------
 
 
 async def _earliest_report(run: Run) -> tuple[Report, list[Record]] | None:
