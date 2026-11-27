@@ -128,8 +128,9 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
 
 
 def normalize_reference(text: str) -> str:
-    """A payment reference as stored and matched: surrounding spaces trimmed, upper-cased."""
-    return text.strip().upper()
+    """A payment reference as stored and matched: surrounding spaces trimmed (spaces only,
+    as SQL's btrim in named_account_expression), upper-cased."""
+    return text.strip(" ").upper()
 
 
 def uk_bank_account_parts(value: str) -> tuple[str, str]:

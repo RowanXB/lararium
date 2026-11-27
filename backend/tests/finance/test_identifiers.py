@@ -26,6 +26,7 @@ from lararium.modules.finance.identifiers import (
     get_or_create_identifier,
     identifier_account,
     list_identifiers,
+    named_account,
     normalize_identifier,
     normalize_reference,
     register_references,
@@ -309,6 +310,18 @@ async def _reference_rows(session, identifier_id: uuid.UUID) -> set[tuple[uuid.U
 def test_normalize_reference_trims_and_upper_cases() -> None:
     assert normalize_reference(" ab12 ") == "AB12"
     assert normalize_reference("Ref-A") == "REF-A"
+    # Spaces only, as matching trims a payment reference (SQL btrim).
+    assert normalize_reference("\tab\t") == "\tAB\t"
+
+
+async def test_a_registered_reference_matches_as_it_was_given(session, run, make_account) -> None:
+    """Registering normalises a reference as matching normalises a payment reference, so
+    one registered with edge tabs is named by a payment reference with the same tabs."""
+    invest, _ = await _payee_accounts(make_account)
+    record = await run(register_references, PAYEE, [(invest.id, "\tref-a\t ")])
+    assert record.references == ((invest.id, "\tREF-A\t"),)
+    assert await named_account(session, record.id, " \tRef-A\t") == invest.id
+    assert await named_account(session, record.id, "REF-A") is None
 
 
 async def test_register_references_replaces_the_set(session, run, make_account) -> None:
