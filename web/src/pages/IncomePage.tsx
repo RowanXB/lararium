@@ -32,6 +32,8 @@ import { refreshAfterCategoryWrite } from "../lib/refresh";
 import { bucketFor, periodLabel } from "../lib/range";
 import { CHART } from "../lib/theme";
 
+// The most transactions one category write takes (TransactionCategoriesUpdate in the API).
+const WRITE_LIMIT = 500;
 // Instruments allow up to 30 decimals; Intl drops the trailing zeros.
 const MAX_DECIMALS = 30;
 const ALL_ACCOUNTS = "all";
@@ -263,19 +265,25 @@ export function IncomePage({ initialRange = {} }: { initialRange?: RangeSearch }
   });
 
   const write = useMutation({
-    mutationFn: (v: { ids: string[]; category: string | null; bulk?: boolean }) =>
-      setTransactionCategories({
-        body: { transaction_ids: v.ids, category: v.category },
-        throwOnError: true,
-      }),
-    onSuccess: async (_, v) => {
+    mutationFn: async (v: { ids: string[]; category: string | null; bulk?: boolean }) => {
+      // The API takes at most WRITE_LIMIT ids a request, each request all or nothing; a
+      // year of daily rewards selected at once is more, so it goes in turn.
+      for (let at = 0; at < v.ids.length; at += WRITE_LIMIT) {
+        await setTransactionCategories({
+          body: { transaction_ids: v.ids.slice(at, at + WRITE_LIMIT), category: v.category },
+          throwOnError: true,
+        });
+      }
+    },
+    onSuccess: (_, v) => {
       // A single row's write leaves a bulk selection in progress alone.
       if (v.bulk) {
         setSelected(new Set());
         setBulk(null);
       }
-      await refreshAfterCategoryWrite(queryClient);
     },
+    // After a failure too: the requests before it were written, and the page shows them.
+    onSettled: () => refreshAfterCategoryWrite(queryClient),
   });
 
   // What the selection was made on is gone when the view changes; never act on rows unseen.

@@ -173,6 +173,29 @@ it("sets many at once and clears", async () => {
   );
 });
 
+it("sends a selection larger than the API takes in turns", async () => {
+  const many = Array.from({ length: 501 }, (_, i) => ({
+    ...ENTRY,
+    description: `Reward ${i}`,
+    transaction_id: `r${i}`,
+  }));
+  vi.mocked(getIncome).mockResolvedValue({ data: { ...INCOME, entries: many } } as never);
+  const user = userEvent.setup();
+  renderPage();
+  await screen.findByText("Reward 500");
+
+  await user.click(screen.getByLabelText("Select all"));
+  expect(screen.getByText("501 selected")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Clear category" }));
+
+  await waitFor(() => expect(setTransactionCategories).toHaveBeenCalledTimes(2));
+  const sent = vi.mocked(setTransactionCategories).mock.calls.map(
+    ([options]) => (options as { body: { transaction_ids: string[] } }).body.transaction_ids,
+  );
+  expect(sent.map((ids) => ids.length)).toEqual([500, 1]);
+  expect(sent.flat()).toEqual(many.map((entry) => entry.transaction_id));
+});
+
 it("shows the source column unchanged after categorising", async () => {
   vi.mocked(getIncome).mockResolvedValue({
     data: {
