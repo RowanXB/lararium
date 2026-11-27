@@ -46,7 +46,7 @@ from sqlalchemy.types import TypeEngine
 from lararium.modules.finance import models
 from lararium.modules.finance.account_types import keys_funded_by
 from lararium.modules.finance.errors import TransactionNotFoundError
-from lararium.modules.finance.identifiers import identifier_account
+from lararium.modules.finance.identifiers import named_accounts
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
 
 # Derived transactions (placeholders, settlements) are never legs themselves.
@@ -730,7 +730,7 @@ async def transfer_contra(
         if transaction_id is not None and await is_active_leg(session, transaction_id):
             return system["in_transit"]
     if counterparty_identifier_id is not None:
-        holder = await identifier_account(session, counterparty_identifier_id)
+        holder, _ = await named_accounts(session, counterparty_identifier_id, own_account_id)
         if holder is not None and holder != own_account_id:
             return system["in_transit"]
     return system["unassigned"]
