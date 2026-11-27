@@ -1,4 +1,4 @@
-"""Migration 0047: the income kind column and the owner categories table."""
+"""Migration 0048: the income kind column and the owner categories table."""
 
 import importlib.util
 from pathlib import Path
@@ -9,7 +9,7 @@ from alembic.operations import Operations
 from sqlalchemy import Connection, create_engine, text
 
 MIGRATION = (
-    Path(__file__).parents[2] / "migrations" / "versions" / "0047_finance_income_categories.py"
+    Path(__file__).parents[2] / "migrations" / "versions" / "0048_finance_income_categories.py"
 )
 
 
@@ -38,7 +38,7 @@ def _present(connection: Connection) -> tuple[int, int]:
     return column, table
 
 
-def test_0047_and_its_downgrade(owner_url: str, migrated: None) -> None:
+def test_0048_and_its_downgrade(owner_url: str, migrated: None) -> None:
     engine = create_engine(owner_url)
     try:
         with engine.connect() as connection:

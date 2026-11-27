@@ -36,7 +36,7 @@ def post(run, unassigned, gbp):
 
     async def _post(account, amount: str, day: date, *, instrument=None, **more):
         instrument_id = (instrument or gbp).id
-        details = {k: more.pop(k) for k in ("category", "income_kind") if k in more}
+        details = {k: more.pop(k) for k in ("category", "income_kind", "refund") if k in more}
         return await run(
             post_transaction,
             TransactionInput(
@@ -105,6 +105,22 @@ async def test_entries_totals_and_filters(session, run, make_account, post, btc)
 
 
 OWNER_CATEGORIES = [None, "family_money", "gift"]
+
+
+async def test_a_refund_is_not_income(session, make_account, post) -> None:
+    """A refund is negative spending in the cash flow (card-refunds design), so it is no
+    entry here, and the page's total still agrees with the Overview's income."""
+    bank = await make_account(name="Bank", balance_mode="transactions")
+    await post(bank, "500", date(2026, 11, 2), payee="Employer")
+    await post(bank, "-40", date(2026, 11, 3), category="shopping", payee="Shop")
+    await post(bank, "15", date(2026, 11, 4), category="shopping", payee="Shop", refund=True)
+
+    report = await income_report(session, START, END, "month", ())
+    flow = await cash_flow(session, START, END, "month", ())
+
+    assert [e.amount for e in report.entries] == [Decimal("500")]
+    assert report.total == flow.income == Decimal("500")
+    assert flow.spending == Decimal("25")
 
 
 @st.composite

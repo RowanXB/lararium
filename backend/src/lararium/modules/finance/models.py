@@ -153,6 +153,11 @@ class Transaction(Base):
     category: Mapped[str | None] = mapped_column(Text)
     labels: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     include_in_spending: Mapped[bool | None]
+    # The source says money came back for an earlier payment: negative spending, not income.
+    refund: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Monzo's card fields: the id an authorisation and its settlement share, and its is_reversal.
+    card_lifecycle_id: Mapped[str | None] = mapped_column(Text)
+    card_reversal: Mapped[bool | None]
     payment_scheme: Mapped[str | None] = mapped_column(Text)
     place_entity_id: Mapped[UUID | None] = mapped_column(ForeignKey("core.entities.id"))
     # What the source says this income is (interest, dividend, share_lending, reward); only

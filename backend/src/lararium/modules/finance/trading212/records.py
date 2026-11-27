@@ -36,7 +36,12 @@ from lararium.modules.finance.connector_run import (
     settle_rounding,
 )
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
-from lararium.modules.finance.ledger import CounterpartyFields, IncomeKind, PostingInput
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    IncomeKind,
+    PostingInput,
+    TransactionDetails,
+)
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import first_sighting, list_sightings
 from lararium.modules.finance.trading212 import accounts, merge, reports
@@ -309,7 +314,7 @@ async def dividend(run: Run, record: Record) -> None:
                 PostingInput(unassigned, currency.id, -amount),
             ],
             CounterpartyFields(never_transfer=True),
-            income_kind="dividend",
+            details=TransactionDetails(income_kind="dividend"),
         )
     if transaction_id is None:
         await run.void(key)
@@ -344,7 +349,7 @@ async def _post_movement(
         ],
         # Anything else (a fee, interest) is no transfer: the funding rule must not take it.
         CounterpartyFields(identifier_id=identifier, never_transfer=kind not in _THROUGH_CONTRA),
-        income_kind=_INCOME_KINDS.get(kind),
+        details=TransactionDetails(income_kind=_INCOME_KINDS.get(kind)),
     )
 
 

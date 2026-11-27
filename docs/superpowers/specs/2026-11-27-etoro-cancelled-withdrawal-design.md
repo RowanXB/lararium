@@ -38,7 +38,7 @@ Voiding the transactions was rejected for this reason: a void says the record is
 
 **Non-goals**
 
-- Any other connector. Only eToro's statement writes the new link (owner, 2026-11-27).
+- Any other connector. Only eToro's statement writes the new link (owner, 2026-11-27). Amended by the card refunds design (`2026-11-27-card-refunds-design.md` §4.3): the link has a second writer, Monzo's normalizer, which posts a card authorisation and the reversal that cancels it exactly as a cancelled pair.
 - A web page that lists transactions. There is none today; these transactions are booked and linked, so a later one can show them as cancelled.
 - Showing the pair on the Transfers page.
 - A partial cancellation (a cancellation of another amount than its request). The owner's statements show none.

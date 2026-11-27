@@ -30,7 +30,7 @@ from lararium.modules.finance.identifiers import (
     normalize_identifier,
 )
 from lararium.modules.finance.importing.income_kinds import refresh_income_kinds
-from lararium.modules.finance.importing.profiles import is_bank_transfer
+from lararium.modules.finance.importing.profiles import is_bank_transfer, is_card_payment
 from lararium.modules.finance.importing.staging import (
     BatchStatus,
     ImportBatchRecord,
@@ -45,6 +45,7 @@ from lararium.modules.finance.importing.staging import (
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     post_transaction,
     void_transaction,
@@ -125,13 +126,18 @@ async def _check_openings(session: AsyncSession, batch_id: UUID) -> None:
         raise ImportBatchStaleError(STALE)
 
 
-async def _card_types(session: AsyncSession, batch_id: UUID) -> list[str]:
-    """The batch's profile's card types (as it was at staging), for is_bank_transfer."""
+async def _profile_codes(session: AsyncSession, batch_id: UUID) -> tuple[list[str], list[str]]:
+    """The batch's profile's card types and card payment types (as it was at staging), for
+    is_bank_transfer and is_card_payment."""
     b = models.ImportBatch
     config = await session.scalar(select(b.profile_config).where(b.id == batch_id))
     assert config is not None
-    found = config.get("card_types", [])
-    return [str(code) for code in found] if isinstance(found, list) else []
+
+    def codes(key: str) -> list[str]:
+        found = config.get(key, [])
+        return [str(code) for code in found] if isinstance(found, list) else []
+
+    return codes("card_types"), codes("card_payment_types")
 
 
 async def _own_account(session: AsyncSession, batch_id: UUID) -> str | None:
@@ -240,7 +246,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
     await get_or_create_system_account(ctx, "unassigned")
     await get_or_create_system_account(ctx, "in_transit")  # transfer_contra needs both
     await _register_own_account(ctx, batch_id, account_id)
-    card_types = await _card_types(session, batch_id)
+    card_types, card_payment_types = await _profile_codes(session, batch_id)
     opening_id: UUID | None = None
     rows = list(
         await session.scalars(
@@ -258,12 +264,19 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
         # committed row has into duplicates, under the account lock, and a file can't repeat
         # a key. import_rows_committed_once is the database backstop.
         counterparty = CounterpartyFields()
+        details = TransactionDetails()
         if row.kind == "opening_adjustment":
             if opening_id is None:
                 opening_id = await get_or_create_system_account(ctx, "opening_balances")
             postings = _postings(account_id, opening_id, row.instrument_id, row.quantity, row.fee)
         else:
             counterparty = await _counterparty(ctx, row, card_types)
+            # Money back on a card, as the bank's own type code or the card number says.
+            details = TransactionDetails(
+                refund=row.quantity > 0
+                and not row.interest
+                and is_card_payment(card_payment_types, row.bank_type, row.card_number)
+            )
             contra_id = await transfer_contra(
                 session,
                 source=("import", row.dedupe_key) if row.dedupe_key else None,
@@ -282,6 +295,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
                 description=row.description,
                 postings=postings,
                 counterparty=counterparty,
+                details=details,
             ),
         )
         await session.execute(

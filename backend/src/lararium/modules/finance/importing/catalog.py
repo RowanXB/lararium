@@ -35,8 +35,12 @@ _UK_DATE = "%d/%m/%Y"
 _GROUPED = AmountFormat(thousands_separator=",")
 # Card (Visa, contactless), cash machine and cheque codes, which are no bank transfers.
 _HSBC_CARD_TYPES = [")))", "VIS", "ATM", "CHQ"]
+_HSBC_CARD_PAYMENTS = [")))", "VIS"]
 _LLOYDS_CARD_TYPES = ["DEB", "CPT", "CHQ"]
+_LLOYDS_CARD_PAYMENTS = ["DEB"]
 _REVOLUT_CARD_TYPES = ["Card Payment", "Card Refund"]
+# Every card_types code of Revolut Current is a card payment.
+_REVOLUT_CARD_PAYMENTS = _REVOLUT_CARD_TYPES
 # Revolut pays savings interest itself, never from another bank account.
 _REVOLUT_INTEREST = ["Gross Interest"]
 _REVOLUT_AMOUNTS = AmountFormat(thousands_separator=",")
@@ -45,7 +49,12 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         "HSBC UK",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="hsbc_uk_statement", card_types=_HSBC_CARD_TYPES),
+        PdfProfileConfig(
+            format="pdf",
+            layout="hsbc_uk_statement",
+            card_types=_HSBC_CARD_TYPES,
+            card_payment_types=_HSBC_CARD_PAYMENTS,
+        ),
         recommended=True,
     ),
     CatalogEntry(
@@ -66,6 +75,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             overdraft_footer_label="Arranged overdraft limit",
             amount_format=_GROUPED,
             card_types=_HSBC_CARD_TYPES,
+            card_payment_types=_HSBC_CARD_PAYMENTS,
         ),
     ),
     CatalogEntry("HSBC UK", "OFX", OfxProfileConfig(format="ofx")),
@@ -101,19 +111,30 @@ CATALOG: tuple[CatalogEntry, ...] = (
             row_order="newest_first",
             amount_format=_GROUPED,
             card_types=_LLOYDS_CARD_TYPES,
+            card_payment_types=_LLOYDS_CARD_PAYMENTS,
         ),
         recommended=True,
     ),
     CatalogEntry(
         "Lloyds",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="lloyds_statement", card_types=_LLOYDS_CARD_TYPES),
+        PdfProfileConfig(
+            format="pdf",
+            layout="lloyds_statement",
+            card_types=_LLOYDS_CARD_TYPES,
+            card_payment_types=_LLOYDS_CARD_PAYMENTS,
+        ),
     ),
     CatalogEntry("Lloyds", "QIF", QifProfileConfig(format="qif", date_format=_UK_DATE)),
     CatalogEntry(
         "BOC UK",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
+        # Its kind for a completed card pre-authorisation (pdf/boc_uk.py).
+        PdfProfileConfig(
+            format="pdf",
+            layout="boc_uk_statement",
+            card_payment_types=["Pre-Authorization Completed"],
+        ),
         recommended=True,
     ),
     # Two accounts with different exports, so two entries: each account's PDF statement
@@ -145,6 +166,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             # Pending and reverted payments have not moved the balance.
             include_only={"State": ["COMPLETED"]},
             card_types=_REVOLUT_CARD_TYPES,
+            card_payment_types=_REVOLUT_CARD_PAYMENTS,
         ),
     ),
     CatalogEntry(

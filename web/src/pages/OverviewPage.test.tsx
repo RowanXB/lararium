@@ -223,6 +223,27 @@ it("leads to adding a first account when there is none", async () => {
   );
 });
 
+it("shows a category its refunds took below zero without a share", async () => {
+  vi.mocked(getCashFlow).mockResolvedValue({
+    data: {
+      ...FLOW,
+      spending: "20.00",
+      net: "1980.00",
+      categories: [
+        { category: "eating_out", income: "0", spending: "100.00" },
+        { category: "shopping", income: "0", spending: "-80.00" },
+      ],
+    },
+  } as never);
+  renderPage();
+
+  // Shares are of the categories that spent; a refunded one shows its amount alone.
+  expect(await screen.findByText("Shopping")).toBeInTheDocument();
+  expect(screen.getByText("100%")).toBeInTheDocument();
+  expect(screen.queryByText(/-\d+%/)).not.toBeInTheDocument();
+  expect(screen.queryByText("500%")).not.toBeInTheDocument();
+});
+
 it("shows money moved to and from hidden accounts apart from categories", async () => {
   vi.mocked(getCashFlow).mockResolvedValue({
     data: {

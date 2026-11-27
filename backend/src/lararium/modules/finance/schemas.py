@@ -279,6 +279,9 @@ class TransactionOut(_Out):
     origin: TransactionOrigin
     postings: list[PostingOut]
     cancels_transaction_id: UUID | None
+    refund: bool
+    card_lifecycle_id: str | None
+    card_reversal: bool | None
 
 
 class PriceCreate(BaseModel):

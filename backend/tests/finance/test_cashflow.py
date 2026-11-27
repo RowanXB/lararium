@@ -52,7 +52,13 @@ def move(run, bank, unassigned, gbp):
     async def _move(amount: str, day: date, *, account=None, contra=None, instrument=None, **more):
         details = {
             key: more.pop(key)
-            for key in ("category", "include_in_spending", "category_splits", "income_kind")
+            for key in (
+                "category",
+                "include_in_spending",
+                "category_splits",
+                "income_kind",
+                "refund",
+            )
             if key in more
         }
         instrument_id = (instrument or gbp).id
@@ -178,6 +184,58 @@ async def test_category_splits_share_the_amount(session, move) -> None:
         "eating_out": Decimal("10"),
     }
     assert flow.spending == Decimal("30")
+
+
+async def test_a_refund_lowers_spending_and_is_no_income(session, move) -> None:
+    await move("-100", date(2026, 11, 2), category="shopping", payee="Shop")
+    await move("60", date(2026, 11, 9), category="shopping", payee="Shop", refund=True)
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.spending) == (0, 40)
+    assert flow.categories == [CategoryTotal("shopping", Decimal(0), Decimal("40"))]
+    assert flow.payees == [PayeeTotal("Shop", Decimal("40"))]
+
+
+async def test_a_refund_counts_in_its_own_month(session, move) -> None:
+    await move("-100", date(2026, 10, 30), category="shopping")
+    await move("100", date(2026, 11, 3), category="shopping", refund=True)
+
+    flow = await cash_flow(session, date(2026, 10, 1), date(2026, 11, 30))
+
+    assert [(p.start, p.income, p.spending) for p in flow.periods] == [
+        (date(2026, 10, 1), 0, 100),
+        (date(2026, 11, 1), 0, -100),
+    ]
+
+
+async def test_a_refund_the_source_says_is_not_spending_is_left_out(session, move) -> None:
+    await move("60", date(2026, 11, 9), refund=True, include_in_spending=False)
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.spending) == (0, 0)
+
+
+async def test_a_refund_shares_its_category_splits(session, move) -> None:
+    splits = (CategorySplit("groceries", Decimal("20")), CategorySplit("eating_out", Decimal("10")))
+    await move("30", date(2026, 11, 2), category="groceries", category_splits=splits, refund=True)
+
+    flow = await cash_flow(session, START, END)
+
+    assert {c.category: c.spending for c in flow.categories} == {
+        "groceries": Decimal("-20"),
+        "eating_out": Decimal("-10"),
+    }
+    assert flow.spending == Decimal("-30")
+
+
+async def test_a_positive_flow_that_is_no_refund_is_still_income(session, move) -> None:
+    await move("60", date(2026, 11, 9))
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.spending) == (60, 0)
 
 
 async def test_other_currencies_use_the_rate_of_the_day(session, run, move, usd, eur, gbp) -> None:

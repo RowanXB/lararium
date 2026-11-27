@@ -102,7 +102,12 @@ from lararium.modules.finance.instruments import (
     find_by_identifier,
     normalize_identifier,
 )
-from lararium.modules.finance.ledger import CounterpartyFields, IncomeKind, PostingInput
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    IncomeKind,
+    PostingInput,
+    TransactionDetails,
+)
 from lararium.modules.finance.typed_tables import Value, typed_values, upsert_typed
 
 ACTIVITY = "activity:"
@@ -768,7 +773,13 @@ async def _unassigned(
             PostingInput(run.trading, usd.id, -tax, is_fee=True, memo="Withholding tax"),
             PostingInput(unassigned, usd.id, tax),
         ]
-    return await run.post(key, _when(row), kind.description, postings, income_kind=kind.income_kind)
+    return await run.post(
+        key,
+        _when(row),
+        kind.description,
+        postings,
+        details=TransactionDetails(income_kind=kind.income_kind),
+    )
 
 
 @dataclass(frozen=True)

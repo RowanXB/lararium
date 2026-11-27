@@ -17,7 +17,7 @@
 - Owner category normalisation: trim, collapse inner whitespace runs to `_`, lower-case; 1 to 64 characters after normalising, else `FinanceValidationError`.
 - Effective category, in order: the owner's category (every flow of its transaction); else `income_kind` for a positive flow only; else the source's `category`; else none. An owner category replaces category splits.
 - A non-fiat posting is a flow only when its transaction has an `income_kind`, of either sign. It is valued at the instrument's latest price on or before the booking day (`as_of_date desc, source = 'manual' desc, recorded_at desc`), times `finance.v1_fx_rate(price currency, reporting, booking day)`. Without a price or rate it is left out and counted in `missing_count`.
-- Migration `0047`, revises `0046`. (Open PRs #52 and #53 also use 0047; whoever merges later renumbers.)
+- Migration `0048`, revises `0047` (renumbered from 0047 when #53 merged first).
 - `NORMALIZER_VERSION` bumps: `trading212-norm-4`, `etoro-norm-5`, `ibkr-norm-5`, `binance-norm-3`. Monzo is unchanged.
 - Money is Decimal / Decimal strings, never floats. Tests and docs use invented amounts and names.
 - UI copy is English. Docs English only.

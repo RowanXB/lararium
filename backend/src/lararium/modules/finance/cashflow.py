@@ -3,7 +3,9 @@
 Money comes in or goes out where a transaction posts to an account outside net worth: an
 income, expense or equity account, which is also where a connector puts the unknown side of
 what it reads (Unassigned). A posting there is the mirror of what happened to the owner's
-money, so its negation is the flow: positive is income, negative is spending. A transfer
+money, so its negation is the flow: positive is income, negative is spending, except
+that a positive flow the source marks as a refund (money back for an earlier payment) is
+negative spending, counted in the period it is booked. A transfer
 between own accounts posts to In transit, an asset, and a trade moves value inside one
 account, so neither is a flow. Opening balances are where an account's history starts, not
 income. Money counts, and an asset other than money only when the source states its
@@ -99,6 +101,7 @@ class Flow:
     description: str
     counterparty_name: str | None
     include_in_spending: bool | None
+    refund: bool  # the source marks it money back for an earlier payment: negative spending
 
 
 @dataclass(frozen=True)
@@ -152,7 +155,7 @@ _FLOWS = (
     + OWNER_CATEGORY_SQL
     + """ as owner_category,
         coalesce(nullif(t.counterparty_name, ''), nullif(t.description, '')) as payee,
-        t.description, t.counterparty_name, t.include_in_spending
+        t.description, t.counterparty_name, t.include_in_spending, t.refund
       from finance.postings p
       join finance.transactions t on t.id = p.transaction_id
       join finance.accounts a on a.id = p.account_id
@@ -200,11 +203,11 @@ _FLOWS = (
     + str(_PLACES)
     + """) as amount,
       coalesce(base.owner_category,
-               case when base.quantity > 0 then base.income_kind end,
+               case when base.quantity > 0 and not base.refund then base.income_kind end,
                base.source_category) as category,
       base.owner_category is not null as has_owner_category,
       base.source_category, base.income_kind, base.owner_category, base.payee,
-      base.description, base.counterparty_name, base.include_in_spending
+      base.description, base.counterparty_name, base.include_in_spending, base.refund
     from base
     join valuations
       on valuations.instrument_id = base.instrument_id and valuations.day = base.day
@@ -424,7 +427,7 @@ async def cash_flow(
             continue
         period = period_start(entry.day, bucket)
         shares = _by_category(amount, entry.category, splits[entry.transaction_id])
-        if amount > 0:
+        if amount > 0 and not entry.refund:
             income_by_period[period] += amount
             for category, share in shares:
                 income_by_category[category] += share

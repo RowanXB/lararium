@@ -165,7 +165,7 @@ The owner asked (2026-11-27) for the Overview's "Where your money is" card, besi
 
 ## 5. Constraints
 
-- Migration number: `0047` is also taken by open PRs #52 and #53; whichever merges later renumbers.
+- Migration number: `0048`, after #53's `0047` (open PR #52 also uses `0047` and renumbers when it merges).
 - PR #53 changes the flows query in `cashflow.py`; expect a merge conflict there and keep one shared definition.
 - Goal 7 holds with asset income too: both views read the same flows.
 - Decimal strings, never floats. Repo documents and tests use invented amounts and names.

@@ -1,6 +1,7 @@
 """The Income page's report: what came in over a range, by period, category and entry.
 
 It reads the same flows as the cash-flow report (`cashflow.flows`), keeps the positive ones
+that are not refunds (a refund is negative spending there, never income)
 and groups them. An entry is the positive flows of one transaction and instrument added up,
 in the source's instrument (a reward of 0.00012 BTC is one entry) beside its value in the
 reporting currency. An entry without a price or an FX rate is listed with no amount and left
@@ -135,7 +136,9 @@ async def income_report(
     `account_id` narrows everything to one account's entries. `category` narrows the listed
     entries only, never the totals: "uncategorised" picks those with no category.
     """
-    positive = [f for f in await flows(session, start, end, excluded) if f.quantity > 0]
+    positive = [
+        f for f in await flows(session, start, end, excluded) if f.quantity > 0 and not f.refund
+    ]
     if account_id is not None:
         positive = [f for f in positive if f.account_id == account_id]
     entries = _entries(positive)
