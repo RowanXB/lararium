@@ -6,17 +6,17 @@
 
 ## 1. Intent
 
-The owner asked eToro to withdraw $271.13 from the Trading account and cancelled the request three minutes later. The statement's Account Activity sheet lists it as five rows:
+The owner asked eToro to withdraw cash from the Trading account and cancelled the request a few minutes later. The statement's Account Activity sheet lists such a withdrawal as five rows (amounts and times here are invented):
 
 | Time (UTC) | Type | Amount |
 |---|---|---|
-| 23:25:18 | Withdraw Request | −271.13 |
-| 23:25:18 | Withdraw Fee | −5 |
-| 23:28:20 | Withdraw Request Cancelled | +271.13 |
-| 23:28:20 | Withdraw Fee Cancelled | +5 |
-| 23:28:20 | Withdraw Fee | +5 |
+| 10:00:00 | Withdraw Request | −100.00 |
+| 10:00:00 | Withdraw Fee | −5 |
+| 10:04:00 | Withdraw Request Cancelled | +100.00 |
+| 10:04:00 | Withdraw Fee Cancelled | +5 |
+| 10:04:00 | Withdraw Fee | +5 |
 
-Today each row that moves cash posts against Unassigned (M6 design §5.7). The cash-flow report reads Unassigned, so the month shows £207.16 of spending and £207.16 of income that never happened, and the same for the fee. The request is also still a bank transfer waiting for a counterpart, so the transfer engine could pair it with an unrelated receipt of the same amount.
+Today each row that moves cash posts against Unassigned (M6 design §5.7). The cash-flow report reads Unassigned, so the month shows the withdrawal as spending and its cancellation as income, though neither happened, and the same for the fee. The request is also still a bank transfer waiting for a counterpart, so the transfer engine could pair it with an unrelated receipt of the same amount.
 
 The owner wants three things to hold together:
 
@@ -113,7 +113,7 @@ No change to the code. The cash-flow report reads income, expense and equity acc
 
 - `NORMALIZER_VERSION` goes from `etoro-norm-3` to `etoro-norm-4`, so the next sync replays the stored statements.
 - Migration `0045` adds the column (renumbered from `0041` after the Binance connector's `0041`–`0044` reached `main`).
-- After deployment, in production: the four transactions of 2026-11-19 post against In transit, the cancellation and the refund each carry the link, In transit's balance is unchanged, and November's spending and income are each lower by the pair's and the fee's value.
+- After deployment, in production: the owner's cancelled withdrawal and its fee (four transactions) post against In transit, the cancellation and the refund each carry the link, In transit's balance is unchanged, and November's spending and income are each lower by the pair's and the fee's value.
 
 ## 5. Tests
 
