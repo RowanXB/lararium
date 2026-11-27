@@ -398,3 +398,14 @@ async def test_a_query_without_a_parameter_the_catalogue_always_sends_is_refused
     with pytest.raises(BinanceError) as caught:
         await ask(FakeBinance(), "earn-flexible-rewards")
     assert caught.value.code == -1102
+
+
+async def test_a_time_range_is_refused_where_the_documents_give_none() -> None:
+    fake = FakeBinance()
+    row = build_row("vip-loan-requests")
+    fake.add("vip-loan-requests", row)
+    with pytest.raises(BinanceError) as caught:
+        await ask(fake, "vip-loan-requests", {"startTime": BASE_TIME_MS, "endTime": NOW_MS})
+    assert caught.value.code == -1104
+    body = await ask(fake, "vip-loan-requests", {"current": 1, "limit": 100})
+    assert parse("vip-loan-requests", body).rows == [row]

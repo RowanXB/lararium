@@ -694,6 +694,15 @@ async def test_consistent_history_has_no_difference(
         assert await env.open_differences() == []
         after = await get_connection(env.session, env.connection_id)
         assert [w for w in after.warnings if _CHANGED in w] == []
+        # The histories accrue no interest: no debt grows beyond its records.
+        interest = await env.session.scalar(
+            text(
+                "select count(*) from finance.transactions where connection_id = :c"
+                " and external_id like 'loan\\_interest:%'"
+            ),
+            {"c": env.connection_id},
+        )
+        assert interest == 0
 
 
 async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ...]]:

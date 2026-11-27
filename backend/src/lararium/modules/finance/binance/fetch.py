@@ -34,6 +34,7 @@ from lararium.modules.finance.binance.catalogue import (
     ISOLATED_TRANSFER_TYPES,
     Endpoint,
     paging_params,
+    time_range,
 )
 from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
@@ -413,8 +414,7 @@ async def window_pages(
     one (a half of a split window, a later page) is refused inside a window that answered,
     so it fails: the walk keeps its cursor and asks again. A refusal seen on a later sync is
     not known to follow an answer (design §6)."""
-    low, high = endpoint.time_params
-    params: dict[str, str | int] = {**fixed, low: start, high: end}
+    params: dict[str, str | int] = {**fixed, **time_range(endpoint, start, end)}
     cursor_name, size_name, first = paging_params(endpoint)
     size = endpoint.page_size
     if size_name and size:
@@ -595,8 +595,7 @@ async def _walk_key(
                 # Refused before it ever answered: the product is not present.
                 await commit(ctx, key, absent_since=now_ms)
             return ids
-        low, high = endpoint.time_params
-        request: dict[str, JSONValue] = {**fixed, low: start, high: end}
+        request: dict[str, JSONValue] = {**fixed, **time_range(endpoint, start, end)}
         if backfilling:
             state: dict[str, JSONValue] = {
                 "fetched_to": fetched_to,
@@ -720,12 +719,10 @@ async def _sweep_trades(
             end = min(start + TRADE_SPAN_MS, until_ms)
             rows = await _trades_between(client, endpoint, symbol, start, end)
             if rows:
-                low, high = endpoint.time_params
                 _, size_name, _ = paging_params(endpoint)
                 request: dict[str, JSONValue] = {
                     "symbol": symbol,
-                    low: start,
-                    high: end,
+                    **time_range(endpoint, start, end),
                     size_name: endpoint.page_size,
                 }
                 ids += await commit(
@@ -745,10 +742,13 @@ async def _trades_between(
     """Every trade of the symbol in [start, end]. A time range cannot be paged by id (the
     catalogue lists no such combination), so a full answer has its range split in two until
     each half fits, whichever trades of the range Binance gave first."""
-    low, high = endpoint.time_params
     _, size_name, _ = paging_params(endpoint)
     size = endpoint.page_size
-    params: dict[str, str | int] = {"symbol": symbol, low: start, high: end, size_name: size}
+    params: dict[str, str | int] = {
+        "symbol": symbol,
+        **time_range(endpoint, start, end),
+        size_name: size,
+    }
     rows = await _ask(client, endpoint, params)
     if len(rows) < size:
         return rows

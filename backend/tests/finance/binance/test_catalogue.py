@@ -194,6 +194,8 @@ def test_time_params_are_the_documented_names() -> None:
         "fiat-orders": ("beginTime", "endTime"),
         "fiat-payments": ("beginTime", "endTime"),
         "c2c": ("startTimestamp", "endTimestamp"),
+        # The documents give it paging only.
+        "vip-loan-requests": None,
     }
 
 

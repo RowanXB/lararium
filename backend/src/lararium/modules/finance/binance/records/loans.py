@@ -223,7 +223,10 @@ async def liquidation(run: Run, row: Row) -> None:
     if status not in _LIQUIDATION_STATUSES:
         run.flag(f"{LIQUIDATIONS}.status={code(status)}")
     if debt is None or sold is None:
-        run.flag(f"{LIQUIDATIONS}.liquidationDebt or liquidationCollateralAmount missing")
+        # Typed only. Only a finished liquidation needs its amounts: one still in progress
+        # without them is not posted yet, and says nothing wrong.
+        if status == _LIQUIDATED:
+            run.flag(f"{LIQUIDATIONS}.liquidationDebt or liquidationCollateralAmount missing")
         return
     key = _key(run, coin, collateral, str(tables.millis(at)), _plain(debt))
     identity = {
@@ -314,28 +317,98 @@ def _sum_between(
     return upper - lower
 
 
-async def _flexible(run: Run, coin: str, after: datetime, through: datetime) -> bool:
-    """Whether the coin had a flexible loan in the interval: an ongoing flexible order of it in
-    the latest flexible report up to either end, or a flexible borrow, repay or liquidation of
-    it inside the interval."""
-    ongoing = layout.table_name(FLEXIBLE_ORDERS)
-    listed = (
-        f"exists (select 1 from finance.{ongoing} o where o.connection_id = :c"
-        " and o.loan_coin = :a and o.snapshot_at = (select max(r.snapshot_at)"
-        f" from finance.{ongoing}_responses r where r.connection_id = :c"
-        " and r.snapshot_at <= {at}))"
+class _FlexibleCoins:
+    """Which coins had a flexible loan when, from one read of each source: the coins of each
+    flexible report (by its read's start; an answer listing none lists no coin) and the times of
+    each coin's flexible borrows, repays and liquidations."""
+
+    def __init__(
+        self, reports: list[tuple[datetime, frozenset[str]]], moved: dict[str, list[datetime]]
+    ):
+        self._times = [at for at, _ in reports]
+        self._coins = [coins for _, coins in reports]
+        self._moved = moved
+
+    @classmethod
+    async def load(cls, run: Run) -> "_FlexibleCoins":
+        ongoing = layout.table_name(FLEXIBLE_ORDERS)
+        c = {"c": run.connection.id}
+        answers = await run.session.execute(
+            sql(
+                "select r.snapshot_at,"
+                " array_remove(array_agg(distinct o.loan_coin), null) as coins"
+                f" from finance.{ongoing}_responses r left join finance.{ongoing} o"
+                "  on o.connection_id = r.connection_id and o.snapshot_at = r.snapshot_at"
+                " where r.connection_id = :c group by r.snapshot_at order by r.snapshot_at"
+            ),
+            c,
+        )
+        reports: list[tuple[datetime, frozenset[str]]] = [
+            (row.snapshot_at, frozenset[str](row.coins or ())) for row in answers
+        ]
+        parts = [
+            f"select loan_coin, {column} as at from finance.{layout.table_name(label)}"
+            " where connection_id = :c"
+            for label, column in _FLEXIBLE_HISTORIES.items()
+        ]
+        moved: dict[str, list[datetime]] = {}
+        rows = await run.session.execute(sql(" union all ".join(parts) + " order by at"), c)
+        for row in rows:
+            moved.setdefault(row.loan_coin, []).append(row.at)
+        return cls(reports, moved)
+
+    def _listed(self, coin: str, at: datetime) -> bool:
+        index = bisect.bisect_right(self._times, at) - 1
+        return index >= 0 and coin in self._coins[index]
+
+    def had(self, coin: str, after: datetime, through: datetime) -> bool:
+        """Whether the coin had a flexible loan in (after, through]: an ongoing flexible order
+        of it in the latest flexible report up to either end, or a flexible borrow, repay or
+        liquidation of it inside the interval."""
+        if self._listed(coin, after) or self._listed(coin, through):
+            return True
+        times = self._moved.get(coin, [])
+        return bisect.bisect_right(times, through) > bisect.bisect_right(times, after)
+
+
+type _Shape = tuple[datetime, tuple[tuple[UUID, UUID, Decimal, bool, str], ...]]
+
+
+async def _held_interest(run: Run) -> dict[str, _Shape]:
+    """The connection's live `loan_interest:` transactions: each one's time and postings
+    (account, instrument, quantity, fee, memo) in order, from one query."""
+    t, p = models.Transaction, models.Posting
+    rows = await run.session.execute(
+        select(
+            t.external_id,
+            t.occurred_at,
+            p.account_id,
+            p.instrument_id,
+            p.quantity,
+            p.is_fee,
+            p.memo,
+        )
+        .join(p, p.transaction_id == t.id)
+        .where(
+            t.connection_id == run.connection.id,
+            t.status != "void",
+            t.external_id.startswith(INTEREST_PREFIX),
+        )
+        .order_by(t.external_id, p.position)
     )
-    moved = [
-        f"exists (select 1 from finance.{layout.table_name(label)} h where h.connection_id = :c"
-        f" and h.loan_coin = :a and h.{column} > :after and h.{column} <= :through)"
-        for label, column in _FLEXIBLE_HISTORIES.items()
-    ]
-    conditions = [listed.format(at=":after"), listed.format(at=":through"), *moved]
-    found = await run.session.scalar(
-        sql("select " + " or ".join(conditions)),
-        {"c": run.connection.id, "a": coin, "after": after, "through": through},
+    held: dict[str, tuple[datetime, list[tuple[UUID, UUID, Decimal, bool, str]]]] = {}
+    for row in rows:
+        if row.external_id is None:
+            continue
+        _, postings = held.setdefault(row.external_id, (row.occurred_at, []))
+        postings.append((row.account_id, row.instrument_id, row.quantity, row.is_fee, row.memo))
+    return {key: (at, tuple(postings)) for key, (at, postings) in held.items()}
+
+
+def _shape(at: datetime, postings: list[PostingInput]) -> _Shape:
+    return at, tuple(
+        (p.account_id, p.instrument_id, p.quantity, p.is_fee, p.memo) for p in postings
     )
-    return found is True
 
 
 async def set_interest(run: Run) -> None:
@@ -346,7 +419,8 @@ async def set_interest(run: Run) -> None:
     `loan_interest:<coin>:<later report ms>`: a fee on the loan against Unassigned, dated at the
     later report. A fall nothing explains stays a reconciliation difference; a VIP loan's
     interest is posted when it is paid."""
-    wanted: dict[str, tuple[UUID, UUID, datetime, Decimal, str]] = {}
+    wanted: dict[str, tuple[datetime, str, list[PostingInput]]] = {}
+    flexible: _FlexibleCoins | None = None
     for account_id, wallet in (await wallets(run.session, run.connection.id)).items():
         if wallet != LOANS:
             continue
@@ -376,25 +450,25 @@ async def set_interest(run: Run) -> None:
             if instrument not in codes:
                 codes[instrument] = await asset_code(run.session, instrument)
             coin = codes[instrument]
-            if await _flexible(run, coin, after, through):
+            if flexible is None:
+                flexible = await _FlexibleCoins.load(run)
+            if flexible.had(coin, after, through):
                 key = f"{INTEREST_PREFIX}{coin}:{tables.millis(through)}"
-                wanted[key] = (account_id, instrument, through, grown, coin)
-    t = models.Transaction
-    held = await run.session.scalars(
-        select(t.external_id).where(
-            t.connection_id == run.connection.id,
-            t.status != "void",
-            t.external_id.startswith(INTEREST_PREFIX),
-        )
-    )
-    for key in sorted({key for key in held if key is not None} - set(wanted)):
+                postings = fees(account_id, run.unassigned, [(instrument, grown, INTEREST_MEMO)])
+                wanted[key] = (through, coin, postings)
+    held = await _held_interest(run)
+    # Only what is new, changed or no longer explained is written: an unchanged one is left as
+    # it is, as `post` would leave it.
+    for key in sorted(set(held) - set(wanted)):
         await remove(run, key)
     for key in sorted(wanted):
-        account_id, instrument, through, grown, coin = wanted[key]
+        through, coin, postings = wanted[key]
+        if held.get(key) == _shape(through, postings):
+            continue
         await post(
             run,
             key,
             occurred_at=through,
             description=f"Crypto loan interest {coin}",
-            postings=fees(account_id, run.unassigned, [(instrument, grown, INTEREST_MEMO)]),
+            postings=postings,
         )

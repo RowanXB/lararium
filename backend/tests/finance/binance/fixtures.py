@@ -399,7 +399,7 @@ class FakeBinance:
         return None
 
     def _failure_for(self, endpoint: Endpoint, own: Mapping[str, str]) -> httpx.Response | None:
-        start = own.get(endpoint.time_params[0])
+        start = own.get(endpoint.time_params[0]) if endpoint.time_params else None
         for failure in self._failures:
             if failure.label != endpoint.label:
                 continue
@@ -425,6 +425,10 @@ class FakeBinance:
         # A parameter the catalogue always sends is one Binance refuses to go without.
         if any(name not in own for name, _ in endpoint.variants):
             return _error(400, -1102)
+        # A time range sent to an endpoint whose documents give it none: Binance's code for a
+        # parameter it did not read.
+        if endpoint.time_params is None and {"startTime", "endTime"} & set(own):
+            return _error(400, -1104)
         if too_wide := self._too_wide(endpoint, own):
             return too_wide
         own, refused = self._spanned(endpoint, own)
@@ -441,8 +445,10 @@ class FakeBinance:
 
     @staticmethod
     def _too_wide(endpoint: Endpoint, own: Mapping[str, str]) -> httpx.Response | None:
+        if endpoint.time_params is None or endpoint.window_days is None:
+            return None
         low, high = endpoint.time_params
-        if endpoint.window_days is None or low not in own or high not in own:
+        if low not in own or high not in own:
             return None
         if int(own[high]) - int(own[low]) >= (endpoint.window_days + 1) * DAY_MS:
             return _error(400, -1127)
@@ -455,8 +461,10 @@ class FakeBinance:
         """The request's time range as Binance reads it for a label with a fixed longest span:
         refused when wider or combined with `fromId`, completed when one end is missing."""
         span = _TIME_SPANS.get(endpoint.label)
+        if span is None or endpoint.time_params is None:
+            return own, None
         low, high = endpoint.time_params
-        if span is None or (low not in own and high not in own):
+        if low not in own and high not in own:
             return own, None
         if "fromId" in own:
             return own, _error(400, -1128)
@@ -476,7 +484,7 @@ class FakeBinance:
         for name in _FILTERS:
             if name in own:
                 rows = [row for row in rows if name not in row or str(row[name]) == own[name]]
-        if endpoint.time_field is not None:
+        if endpoint.time_field is not None and endpoint.time_params is not None:
             low, high = endpoint.time_params
             field = endpoint.time_field
 

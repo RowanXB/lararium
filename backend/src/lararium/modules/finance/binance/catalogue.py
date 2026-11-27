@@ -48,7 +48,9 @@ class Endpoint:
     # the documents give none.
     window_days: int | None
     lookback_days: int | None
-    time_params: tuple[str, str]
+    # The names of a request's time range (start, end); None when the documents give the
+    # endpoint none: it is asked without one.
+    time_params: tuple[str, str] | None
     paging: Literal["none", "offset", "page", "from_id"]
     # The `limit` or page size to ask for; 0 when the endpoint takes none.
     page_size: int
@@ -82,7 +84,7 @@ def _ep(
     time: str | None = None,
     window: int | None = None,
     lookback: int | None = None,
-    params: tuple[str, str] = _TIME_PARAMS,
+    params: tuple[str, str] | None = _TIME_PARAMS,
     paging: Literal["none", "offset", "page", "from_id"] = "none",
     page: int = 0,
     variants: tuple[tuple[str, tuple[str, ...]], ...] = (),
@@ -1377,6 +1379,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="rows",
         ids=("requestId",),
         time="loanDate",
+        # The documents give it paging only: no time range is sent.
+        params=None,
         paging="page",
         page=100,
         kind="history",
@@ -3077,6 +3081,15 @@ _PAGING_PARAMS: dict[str, tuple[str, str, int]] = {
     ),
     "opt-bill": ("recordId", "limit", 0),
 }
+
+
+def time_range(endpoint: Endpoint, start: int, end: int) -> dict[str, int]:
+    """The parameters asking for [start, end] (epoch ms): none for an endpoint that takes no
+    time range, which then answers its whole history whatever the window."""
+    if endpoint.time_params is None:
+        return {}
+    low, high = endpoint.time_params
+    return {low: start, high: end}
 
 
 def paging_params(endpoint: Endpoint) -> tuple[str, str, int]:

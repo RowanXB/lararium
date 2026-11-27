@@ -373,6 +373,28 @@ async def test_collateral_is_not_counted_twice(session, run) -> None:
     await assert_balanced_and_quiet(session, connection.id)
 
 
+async def test_vip_requests_are_asked_without_a_time_range(
+    session, run, fake: FakeBinance, clock: Clock
+) -> None:
+    # The documents give the VIP request history paging only: each walk asks it whole, page
+    # by page, with no time range (the fake refuses one).
+    fake.add(VIP_REQUESTS, build_row(VIP_REQUESTS, loanCoin="BBB"))
+    connection = await binance_connection(run)
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        await client.sync_clock()
+        stored = await walk(ctx, client, VIP_REQUESTS)
+        clock.ms += HOUR_MS
+        await walk(ctx, client, VIP_REQUESTS)
+
+    assert len(stored) == 1
+    calls = fake.calls(VIP_REQUESTS)
+    assert len(calls) == 2
+    assert all({"current", "limit"} <= set(c.params) for c in calls)
+    assert not [c for c in calls if {"startTime", "endTime"} & set(c.params)]
+
+
 async def test_vip_records_without_a_movement_are_typed_only(session, run) -> None:
     connection = await binance_connection(run)
     interest = build_row(VIP_INTEREST, loanCoin="BBB", interestAmount="0.1", orderId=900)
@@ -519,6 +541,9 @@ async def test_interest_is_a_fee_on_the_loan(session, run) -> None:
     assert await _never_transfer(session, interest_key) is True
     # It explains the change: no difference on the loan.
     assert [d for d in await check(session, connection.id, ()) if d.to_at == at(end)] == []
+    # Another run finds it unchanged and writes nothing for it, not even through `post`.
+    again = await run_normalize(session, connection.id)
+    assert (again.created, again.updated, again.unchanged, again.removed) == (0, 0, 0, 0)
     await assert_balanced_and_quiet(session, connection.id)
 
     # It is derived afresh: a record that arrives later and explains the change takes its place.
@@ -641,3 +666,16 @@ async def test_a_missing_repay_is_a_difference_on_the_loan(
 
     assert await _differences(session, after.id) == [(LOANS, "AAA"), ("Binance Spot", "AAA")]
     assert not [k for k in await keys(session, after.id) if k.startswith("loan_interest:")]
+    # The debt fell by the 30.2 repaid less the 0.7 of interest: a fall, never interest.
+    figures = await session.execute(
+        text(
+            "select d.reported_change, d.posted_sum"
+            " from finance.binance_reconciliation_differences d"
+            " join finance.accounts a on a.id = d.account_id"
+            " where a.source_connection_id = :c and a.name = :n and d.closed_at is null"
+        ),
+        {"c": after.id, "n": LOANS},
+    )
+    [(reported_change, posted_sum)] = figures.all()
+    assert (reported_change, posted_sum) == (Decimal("-70.5"), Decimal(-100))
+    assert reported_change - posted_sum == Decimal("30.2") - Decimal("0.7")

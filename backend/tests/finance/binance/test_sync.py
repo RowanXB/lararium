@@ -498,9 +498,15 @@ async def test_a_flag_is_told_after_a_sync_that_failed_later(
 
 
 def _windows(fake: FakeBinance) -> set[tuple[str, str, str, str]]:
-    """The history windows asked: label, variant, start, end."""
+    """The history windows asked: label, variant, start, end (none for a label asked without
+    a time range)."""
     return {
-        (s.label, s.params.get("type", ""), s.params["startTime"], s.params["endTime"])
+        (
+            s.label,
+            s.params.get("type", ""),
+            s.params.get("startTime", ""),
+            s.params.get("endTime", ""),
+        )
         for s in fake.requests
         if s.label in HISTORY_LABELS
     }
