@@ -12,13 +12,20 @@ normalised (lower case, at most 64 characters), and clearing it deletes the row.
 backend role gets its privileges on the table from the default privileges 0001 set for the
 finance schema.
 
-The backfill gives `interest` to the transaction of every committed import row that states
-interest, or that has a duplicate in a committed batch stating it: most CSV profiles cannot
-state interest while the PDF layouts do, so with the CSV committed first the PDF's rows land
-as duplicates. Connectors fill the column when their next sync replays under a new
+Revolut Savings (its PDF and CSV) and Tembo (its PDF) state interest by the row's type, which
+their parsers now read as interest. Their import rows are marked the same way first, by the
+config that parsed them (their batch's own, found by its format and layout, or a CSV's
+columns and date format, as 0047 finds its entries), and the stored catalog profiles and
+staged batches of the Revolut Savings CSV get its interest descriptions.
+
+The backfill then gives `interest` to the transaction of every committed import row that
+states interest, or that has a duplicate in a committed batch stating it: most CSV profiles
+cannot state interest while the PDF layouts do, so with the CSV committed first the PDF's
+rows land as duplicates. Connectors fill the column when their next sync replays under a new
 normalizer version.
 
-Downgrading drops the table and the column.
+Downgrading unmarks those rows, takes the Revolut Savings CSV's interest descriptions off
+again, and drops the table and the column.
 
 Revision ID: 0048
 Revises: 0047
@@ -33,6 +40,56 @@ revision: str = "0048"
 down_revision: str | None = "0047"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# How a stored config ({c}) is recognised as the catalog entry, and the row types that pay
+# interest under it.
+_REVOLUT_SAVINGS_CSV = (
+    "{c} ->> 'format' = 'csv'"
+    " AND {c} -> 'columns' ->> 'type' = 'Description'"
+    " AND {c} -> 'columns' ->> 'inflow' = 'Money in'"
+    " AND {c} ->> 'date_format' = '%b %d, %Y'"
+)
+INTEREST_TYPES = [
+    (
+        "{c} ->> 'format' = 'pdf' AND {c} ->> 'layout' = 'revolut_savings_statement'",
+        "('Gross Interest')",
+    ),
+    (_REVOLUT_SAVINGS_CSV, "('Gross Interest')"),
+    (
+        "{c} ->> 'format' = 'pdf' AND {c} ->> 'layout' = 'tembo_statement'",
+        "('Interest', 'Interest Adjustment')",
+    ),
+]
+
+
+def _mark_rows(value: str) -> str:
+    """Sets `interest` to value on the statement rows, of any status, that pay interest by
+    the config that parsed them: their batch's own."""
+    matches = " OR ".join(
+        f"({match.format(c='b.profile_config')} AND btrim(r.bank_type) IN {types})"
+        for match, types in INTEREST_TYPES
+    )
+    return (
+        f"UPDATE finance.import_rows AS r SET interest = {value}"
+        " FROM finance.import_batches AS b"
+        f" WHERE b.id = r.batch_id AND r.kind = 'statement' AND ({matches})"
+    )
+
+
+MARK_ROWS = _mark_rows("true")
+
+_DESCRIPTIONS = """'{"interest_descriptions": ["Gross Interest"]}'::jsonb"""
+_NONE_YET = "coalesce({c} -> 'interest_descriptions', '[]'::jsonb) = '[]'::jsonb"
+CONFIGS = [
+    "UPDATE finance.import_profiles SET config = config || "
+    + _DESCRIPTIONS
+    + ", version = version + 1, updated_at = now()"
+    f" WHERE {_NONE_YET.format(c='config')} AND {_REVOLUT_SAVINGS_CSV.format(c='config')}",
+    "UPDATE finance.import_batches SET profile_config = profile_config || "
+    + _DESCRIPTIONS
+    + f" WHERE {_NONE_YET.format(c='profile_config')}"
+    f" AND {_REVOLUT_SAVINGS_CSV.format(c='profile_config')} AND status = 'staged'",
+]
 
 BACKFILL = """
 UPDATE finance.transactions t
@@ -55,6 +112,9 @@ WHERE t.income_kind IS NULL
   )
 """
 
+# What the migration changes in the data, after the column exists.
+DATA = [MARK_ROWS, *CONFIGS, BACKFILL]
+
 UPGRADE = [
     """
     ALTER TABLE finance.transactions
@@ -72,10 +132,18 @@ UPGRADE = [
       PRIMARY KEY (source_kind, source_ref)
     )
     """,
-    BACKFILL,
+    *DATA,
 ]
 
+# The older code takes interest descriptions too: only those the upgrade added go.
+_ADDED = """{c} -> 'interest_descriptions' = '["Gross Interest"]'::jsonb"""
 DOWNGRADE = [
+    _mark_rows("false"),
+    "UPDATE finance.import_profiles SET config = config - 'interest_descriptions'"
+    f" WHERE {_ADDED.format(c='config')} AND {_REVOLUT_SAVINGS_CSV.format(c='config')}",
+    "UPDATE finance.import_batches SET profile_config = profile_config - 'interest_descriptions'"
+    f" WHERE {_ADDED.format(c='profile_config')}"
+    f" AND {_REVOLUT_SAVINGS_CSV.format(c='profile_config')}",
     "DROP TABLE finance.transaction_owner_categories",
     "ALTER TABLE finance.transactions DROP COLUMN income_kind",
 ]

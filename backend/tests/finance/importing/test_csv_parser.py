@@ -780,10 +780,12 @@ def test_revolut_exports_through_the_catalog() -> None:
         "Date,Description,Money out,Money in,Balance\n"
         '"Oct 1, 2027",Deposit,,"£1,000.00","£1,500.00"\n'
         '"Oct 2, 2027",Withdrawal,£200.00,,"£1,300.00"\n'
+        '"Oct 2, 2027",Gross Interest,,£0.10,"£1,300.10"\n'
         "\nDate,Description,Money out,Money in,Balance\n"
     ).encode()
     rows = _rows(parse_csv(savings_file, savings, LONDON))
-    assert [(r.booking_date, r.bank_type, r.quantity) for r in rows] == [
-        (date(2027, 10, 1), "Deposit", Decimal("1000.00")),
-        (date(2027, 10, 2), "Withdrawal", Decimal("-200.00")),
+    assert [(r.booking_date, r.bank_type, r.quantity, r.interest) for r in rows] == [
+        (date(2027, 10, 1), "Deposit", Decimal("1000.00"), False),
+        (date(2027, 10, 2), "Withdrawal", Decimal("-200.00"), False),
+        (date(2027, 10, 2), "Gross Interest", Decimal("0.10"), True),
     ]
