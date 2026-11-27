@@ -802,6 +802,284 @@
         "title": "BinanceDifferenceOut",
         "type": "object"
       },
+      "BitcoinBranchesOut": {
+        "properties": {
+          "change": {
+            "title": "Change",
+            "type": "integer"
+          },
+          "receiving": {
+            "title": "Receiving",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receiving",
+          "change"
+        ],
+        "title": "BitcoinBranchesOut",
+        "type": "object"
+      },
+      "BitcoinPreviewIn": {
+        "description": "A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses\nare secret: a master public key reveals every address the wallet will ever use. Checked in\nthe route (keys.py), whose messages never repeat the input.",
+        "properties": {
+          "addresses": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Addresses",
+            "type": "array"
+          },
+          "descriptors": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Descriptors",
+            "type": "array"
+          },
+          "electrum_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "single",
+                  "multisig",
+                  "2fa",
+                  "old"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Electrum Type"
+          },
+          "form": {
+            "enum": [
+              "electrum",
+              "descriptor",
+              "addresses"
+            ],
+            "title": "Form",
+            "type": "string"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          }
+        },
+        "required": [
+          "form"
+        ],
+        "title": "BitcoinPreviewIn",
+        "type": "object"
+      },
+      "BitcoinPreviewOut": {
+        "properties": {
+          "first_receiving_address": {
+            "title": "First Receiving Address",
+            "type": "string"
+          },
+          "script_type": {
+            "title": "Script Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "first_receiving_address",
+          "script_type"
+        ],
+        "title": "BitcoinPreviewOut",
+        "type": "object"
+      },
+      "BitcoinStateOut": {
+        "description": "What the connection card shows; never a key, a descriptor or an address.",
+        "properties": {
+          "electrum_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "single",
+                  "multisig",
+                  "2fa",
+                  "old"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Electrum Type"
+          },
+          "form": {
+            "enum": [
+              "electrum",
+              "descriptor",
+              "addresses"
+            ],
+            "title": "Form",
+            "type": "string"
+          },
+          "last_check": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check"
+          },
+          "scanned": {
+            "$ref": "#/components/schemas/BitcoinBranchesOut"
+          },
+          "server": {
+            "title": "Server",
+            "type": "string"
+          },
+          "unconfirmed": {
+            "title": "Unconfirmed",
+            "type": "integer"
+          },
+          "used": {
+            "$ref": "#/components/schemas/BitcoinBranchesOut"
+          }
+        },
+        "required": [
+          "form",
+          "electrum_type",
+          "scanned",
+          "used",
+          "last_check",
+          "unconfirmed",
+          "server"
+        ],
+        "title": "BitcoinStateOut",
+        "type": "object"
+      },
+      "BitcoinWalletCreate": {
+        "properties": {
+          "addresses": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Addresses",
+            "type": "array"
+          },
+          "descriptors": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Descriptors",
+            "type": "array"
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "electrum_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "single",
+                  "multisig",
+                  "2fa",
+                  "old"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Electrum Type"
+          },
+          "form": {
+            "enum": [
+              "electrum",
+              "descriptor",
+              "addresses"
+            ],
+            "title": "Form",
+            "type": "string"
+          },
+          "gaps": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gaps"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "format": "password",
+              "type": "string",
+              "writeOnly": true
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          }
+        },
+        "required": [
+          "form",
+          "display_name"
+        ],
+        "title": "BitcoinWalletCreate",
+        "type": "object"
+      },
       "Body_stage_import": {
         "properties": {
           "account_id": {
@@ -1247,6 +1525,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BinanceConnectionState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bitcoin": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BitcoinStateOut"
               },
               {
                 "type": "null"
@@ -3669,7 +3957,8 @@
               "trading212_ticker",
               "chain_contract",
               "coingecko",
-              "binance_asset"
+              "binance_asset",
+              "chain_native"
             ],
             "title": "Scheme",
             "type": "string"
@@ -5166,6 +5455,89 @@
           }
         },
         "summary": "Create Binance Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/bitcoin": {
+      "post": {
+        "operationId": "create_bitcoin_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BitcoinWalletCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Bitcoin Connection",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/v1/connections/bitcoin/preview": {
+      "post": {
+        "description": "The wallet's first receiving address, to compare with the wallet's own before saving.\nDerived here, stored nowhere, asked of no server.",
+        "operationId": "preview_bitcoin_wallet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BitcoinPreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BitcoinPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Bitcoin Wallet",
         "tags": [
           "connections"
         ]
