@@ -936,13 +936,20 @@ async def card_merchant_suggestions(session: AsyncSession) -> list[CardMerchantS
     return found
 
 
-def is_overdue(transfer: TransferRecord, now: datetime, settings: TransferSettings) -> bool:
+def is_overdue(
+    transfer: TransferRecord, now: datetime, settings: TransferSettings, *, manual: Collection[UUID]
+) -> bool:
     """Whether an awaiting transfer has been in transit too long, as due_notifications
-    judges it. One awaiting as not_listed_in_full never is: it waits for an upload of a
-    manual account, not a connection's report, and its review already asks the owner."""
+    judges it: its connected other side hasn't reported. One awaiting a manual account
+    (`manual`: the manual accounts' ids) never is: it waits for an upload, not a
+    connection's report, and is awaiting only while held for review, which already asks the
+    owner (PairRelation.held_back)."""
+    counterpart = (
+        transfer.to_account_id if transfer.out_transaction_id else transfer.from_account_id
+    )
     return (
         transfer.status == "awaiting"
-        and transfer.review_reason != "not_listed_in_full"
+        and counterpart not in manual
         and transfer.opened_at < now - settings.overdue
     )
 

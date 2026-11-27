@@ -186,7 +186,7 @@ async def test_a_review_not_listed_in_full_is_never_overdue(
 ) -> None:
     """It awaits an upload of a manual account, not a connection's report: however long it
     waits, it is not overdue (its review already puts it in Needs attention)."""
-    _, sent, _ = await _setup(
+    b, sent, _ = await _setup(
         session, run, connected_bank, connector_tx, imported_bank, statement_row
     )
     await heal()
@@ -195,7 +195,35 @@ async def test_a_review_not_listed_in_full_is_never_overdue(
 
     settings = await load_transfer_settings(session)
     later = datetime.now(UTC) + settings.overdue * 10
-    assert not is_overdue(transfer, later, settings)
+    assert not is_overdue(transfer, later, settings, manual={b.id})
+
+
+async def test_a_transfer_awaiting_a_manual_account_is_never_overdue(
+    session: AsyncSession,
+    run: Run,
+    registered: Any,
+    connector_tx: ConnectorTx,
+    imported_bank: ImportedBank,
+    statement_row: StatementRow,
+    heal: Heal,
+) -> None:
+    """Overdue means a connected side hasn't reported: one awaiting a manual account, held
+    back for review for another reason (amount_differs), never is."""
+    a, a_id = await registered("A", A_IDENTIFIER)
+    b = await imported_bank("B", identifier=B_IDENTIFIER)
+    identifier = await run(get_or_create_identifier, "uk_bank_account", B_IDENTIFIER)
+    sent = (await connector_tx(a, "-100", occurred_at=WHEN, identifier_id=identifier)).id
+    await statement_row(b, "99.30", day=WHEN.date(), identifier_id=a_id)
+    await statement_row(b, "100", day=WHEN.date())
+    await _list_no_full_day(session, b)
+    await heal()
+    transfer = await _transfer_of(session, sent)
+    assert (transfer.status, transfer.review_reason) == ("awaiting", "amount_differs")
+
+    settings = await load_transfer_settings(session)
+    later = datetime.now(UTC) + settings.overdue * 10
+    assert not is_overdue(transfer, later, settings, manual={b.id})
+    assert is_overdue(transfer, later, settings, manual=set())
 
 
 async def test_when_the_row_goes_the_placeholder_comes_back(

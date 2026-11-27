@@ -226,7 +226,9 @@ async def _transfers_out(
 ) -> list[TransferOut]:
     # Loaded even for no transfers, so a malformed setting shows on the Transfers page.
     settings = await transfers.load_transfer_settings(session)
-    names = {account.id: account.name for account in await accounts.list_accounts(session)}
+    listed = await accounts.list_accounts(session)
+    names = {account.id: account.name for account in listed}
+    manual = {account.id for account in listed if account.source_kind == "manual"}
     symbols = await _symbols(session)
     now = datetime.now(UTC)
     timezone = await get_timezone(session)
@@ -251,7 +253,7 @@ async def _transfers_out(
                 if record.status == "awaiting"
                 else None
             ),
-            overdue=transfers.is_overdue(record, now, settings),
+            overdue=transfers.is_overdue(record, now, settings, manual=manual),
             out_transaction_id=record.out_transaction_id,
             in_transaction_id=record.in_transaction_id,
             placeholder_transaction_id=record.placeholder_transaction_id,
