@@ -300,7 +300,7 @@ def _next_period(start: date, bucket: Bucket) -> date | None:
         return None
 
 
-def _periods(start: date, end: date, bucket: Bucket) -> list[date]:
+def periods_of(start: date, end: date, bucket: Bucket) -> list[date]:
     periods = [period_start(start, bucket)]
     while (following := _next_period(periods[-1], bucket)) is not None and following <= end:
         periods.append(following)
@@ -475,7 +475,7 @@ async def cash_flow(
         missing_count=missing_count,
         periods=[
             PeriodTotal(period, income_by_period[period], spending_by_period[period])
-            for period in _periods(start, end, bucket)
+            for period in periods_of(start, end, bucket)
         ],
         categories=categories,
         payees=[PayeeTotal(name, spending) for name, spending in payees[:TOP_PAYEES]],

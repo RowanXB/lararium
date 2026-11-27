@@ -32,6 +32,7 @@ from lararium.modules.finance import (
     accounts,
     cashflow,
     errors,
+    income,
     instruments,
     ledger,
     owner_categories,
@@ -62,6 +63,7 @@ from lararium.modules.finance.schemas import (
     ImportProfileCreate,
     ImportProfileOut,
     ImportRowOut,
+    IncomeOut,
     InstrumentCreate,
     InstrumentOut,
     InstrumentUpdate,
@@ -553,6 +555,25 @@ async def get_cash_flow(
     excluded = await accounts.excluded_account_ids(session)
     return CashFlowOut.model_validate(
         await cashflow.cash_flow(session, start, end, bucket, excluded)
+    )
+
+
+@router.get("/income", name="get_income")
+async def get_income(
+    session: SessionDep,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: cashflow.Bucket = "month",
+    account_id: UUID | None = None,
+    category: str | None = None,
+) -> IncomeOut:
+    """What came in by period, category and entry, without the accounts left out of reports;
+    defaults to the 365 days up to and including today. `category` narrows the entries only
+    ("uncategorised" for none)."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    return IncomeOut.model_validate(
+        await income.income_report(session, start, end, bucket, excluded, account_id, category)
     )
 
 

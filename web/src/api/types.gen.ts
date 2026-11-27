@@ -1679,6 +1679,146 @@ export type ImportStatementRateOut = {
 };
 
 /**
+ * IncomeCategoryOut
+ */
+export type IncomeCategoryOut = {
+    /**
+     * Amount
+     */
+    amount: string;
+    /**
+     * Category
+     */
+    category: string | null;
+};
+
+/**
+ * IncomeEntryOut
+ *
+ * The positive flows of one transaction in one instrument, added up.
+ */
+export type IncomeEntryOut = {
+    /**
+     * Account Id
+     */
+    account_id: string | null;
+    /**
+     * Account Name
+     */
+    account_name: string | null;
+    /**
+     * Amount
+     */
+    amount: string | null;
+    /**
+     * Booking Date
+     */
+    booking_date: string;
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Counterparty Name
+     */
+    counterparty_name: string | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Income Kind
+     */
+    income_kind: string | null;
+    /**
+     * Instrument
+     */
+    instrument: string;
+    /**
+     * Owner Category
+     */
+    owner_category: string | null;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Source Category
+     */
+    source_category: string | null;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
+};
+
+/**
+ * IncomeOut
+ *
+ * What came in over a range, in the reporting currency.
+ */
+export type IncomeOut = {
+    /**
+     * Bucket
+     */
+    bucket: 'day' | 'week' | 'month';
+    /**
+     * Categories
+     */
+    categories: Array<IncomeCategoryOut>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Entries
+     */
+    entries: Array<IncomeEntryOut>;
+    /**
+     * Hidden Moved In
+     */
+    hidden_moved_in: string;
+    /**
+     * Known Categories
+     */
+    known_categories: Array<string>;
+    /**
+     * Missing Count
+     */
+    missing_count: number;
+    /**
+     * Periods
+     */
+    periods: Array<IncomePeriodOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
+};
+
+/**
+ * IncomePeriodOut
+ */
+export type IncomePeriodOut = {
+    /**
+     * By Category
+     */
+    by_category: Array<IncomeCategoryOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
+};
+
+/**
  * InstrumentCreate
  */
 export type InstrumentCreate = {
@@ -2264,6 +2404,22 @@ export type Trading212UploadOut = {
      * Raw Records
      */
     raw_records: number;
+};
+
+/**
+ * TransactionCategoriesUpdate
+ *
+ * Set the owner's category on transactions, or clear it with null.
+ */
+export type TransactionCategoriesUpdate = {
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Transaction Ids
+     */
+    transaction_ids: Array<string>;
 };
 
 /**
@@ -3877,6 +4033,52 @@ export type RollbackImportResponses = {
 
 export type RollbackImportResponse = RollbackImportResponses[keyof RollbackImportResponses];
 
+export type GetIncomeData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Start
+         */
+        start?: string | null;
+        /**
+         * End
+         */
+        end?: string | null;
+        /**
+         * Bucket
+         */
+        bucket?: 'day' | 'week' | 'month';
+        /**
+         * Account Id
+         */
+        account_id?: string | null;
+        /**
+         * Category
+         */
+        category?: string | null;
+    };
+    url: '/api/v1/finance/income';
+};
+
+export type GetIncomeErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetIncomeError = GetIncomeErrors[keyof GetIncomeErrors];
+
+export type GetIncomeResponses = {
+    /**
+     * Successful Response
+     */
+    200: IncomeOut;
+};
+
+export type GetIncomeResponse = GetIncomeResponses[keyof GetIncomeResponses];
+
 export type ListInstrumentsData = {
     body?: never;
     path?: never;
@@ -4065,6 +4267,31 @@ export type UpdateFinanceSettingsResponses = {
 };
 
 export type UpdateFinanceSettingsResponse = UpdateFinanceSettingsResponses[keyof UpdateFinanceSettingsResponses];
+
+export type SetTransactionCategoriesData = {
+    body: TransactionCategoriesUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/transaction-categories';
+};
+
+export type SetTransactionCategoriesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetTransactionCategoriesError = SetTransactionCategoriesErrors[keyof SetTransactionCategoriesErrors];
+
+export type SetTransactionCategoriesResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetTransactionCategoriesResponse = SetTransactionCategoriesResponses[keyof SetTransactionCategoriesResponses];
 
 export type PostTransactionData = {
     body: TransactionCreate;

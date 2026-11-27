@@ -647,3 +647,22 @@ async def test_set_transaction_categories(client, session, run) -> None:
     assert (await client.put(url, json=empty)).status_code == 422
     unknown = {"transaction_ids": ["00000000-0000-0000-0000-000000000001"], "category": "x"}
     assert (await client.put(url, json=unknown)).status_code == 404
+
+
+async def test_get_income(client) -> None:
+    day = {"start": "2026-11-02", "end": "2026-11-02", "bucket": "day"}
+    income = (await client.get("/api/v1/finance/income", params=day)).json()
+    assert income == {
+        "start": "2026-11-02",
+        "end": "2026-11-02",
+        "bucket": "day",
+        "total": "0",
+        "missing_count": 0,
+        "periods": [{"start": "2026-11-02", "total": "0", "by_category": []}],
+        "categories": [],
+        "entries": [],
+        "known_categories": [],
+        "hidden_moved_in": "0",
+    }
+    bad = await client.get("/api/v1/finance/income", params={"bucket": "year"})
+    assert bad.status_code == 422
