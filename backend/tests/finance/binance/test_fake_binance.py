@@ -56,7 +56,7 @@ async def ask(
 
 @pytest.mark.parametrize("label", sorted(ENDPOINTS))
 async def test_every_label_answers_in_its_catalogue_shape(label: str) -> None:
-    fake = FakeBinance()
+    fake = FakeBinance(margin=True)
     # The parameters the catalogue always sends: Binance refuses the query without them.
     always = {name: values[0] for name, values in ENDPOINTS[label].variants}
     body = await ask(fake, label, always)
@@ -65,6 +65,18 @@ async def test_every_label_answers_in_its_catalogue_shape(label: str) -> None:
     assert parsed.unknown_fields == set() and parsed.unknown_enums == set()
     assert len(parsed.rows) == (1 if ENDPOINTS[label].rows == "" else 0)
     assert [seen.label for seen in fake.requests] == [label]
+
+
+async def test_the_default_account_has_no_margin() -> None:
+    # As the probe's account: the cross margin account is not created, its histories -3003.
+    fake = FakeBinance()
+    body = await ask(fake, "margin-account")
+    assert isinstance(body, dict) and body["created"] is False
+    with pytest.raises(BinanceNotPresent):
+        await ask(fake, "margin-trades", {"symbol": "AAABBB"})
+    fake.margin = True
+    opened = await ask(fake, "margin-account")
+    assert isinstance(opened, dict) and opened["created"] is True
 
 
 async def test_stored_rows_come_back_oldest_first_in_the_labels_envelope() -> None:

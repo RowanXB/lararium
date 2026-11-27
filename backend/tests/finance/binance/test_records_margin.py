@@ -11,12 +11,18 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from lararium.modules.finance.binance.balances import Read, report_balances
+from lararium.modules.finance.binance.balances import (
+    Read,
+    backfill_daily_snapshots,
+    report_balances,
+)
 from lararium.modules.finance.binance.catalogue import ENDPOINTS, ISOLATED_PARAMS
+from lararium.modules.finance.binance.client import BinanceError
 from lararium.modules.finance.binance.fetch import (
     BALANCE_LABELS,
     CURSORS_KEY,
     HISTORY_LABELS,
+    MARGIN_PAIR_REFUSALS,
     MARGIN_TRADES,
     NOT_PRESENT_KEY,
     PHASE_B_BUILT,
@@ -25,6 +31,7 @@ from lararium.modules.finance.binance.fetch import (
     cursor_keys,
     to_json,
     walk_keys,
+    walk_trades,
 )
 from lararium.modules.finance.binance.reconcile import check
 from lararium.modules.finance.binance.sync import FIRST_SYNC_DONE_KEY, SWEPT_KEY
@@ -50,6 +57,8 @@ from .syncing import (
     Clock,
     RecordingNotifier,
     binance_connection,
+    client_for,
+    context,
     later_config,
     run_binance_sync,
 )
@@ -222,10 +231,20 @@ async def _differences(session, connection_id) -> list[tuple]:
     return [tuple(r) for r in rows]
 
 
-def _pairs(fake: FakeBinance, *pairs: tuple[str, str]) -> None:
+def _pairs(fake: FakeBinance, *pairs: tuple[str, str], not_margin: tuple[str, ...] = ()) -> None:
+    """`exchangeInfo` listing the pairs, margin traded but for the symbols in `not_margin`."""
     fake.set_rows(
         "exchange-info",
-        [build_row("exchange-info", symbol=b + q, baseAsset=b, quoteAsset=q) for b, q in pairs],
+        [
+            build_row(
+                "exchange-info",
+                symbol=b + q,
+                baseAsset=b,
+                quoteAsset=q,
+                isMarginTradingAllowed=b + q not in not_margin,
+            )
+            for b, q in pairs
+        ],
     )
 
 
@@ -345,12 +364,10 @@ async def test_isolated_pairs_sum_per_asset(session, run) -> None:
 async def test_uncreated_margin_account_is_skipped(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
-    # The account the probe saw: the cross account answers `created: false` and every margin
-    # history -3003; the isolated account lists no pair.
+    # The account the probe saw, the fake's default: the cross account answers
+    # `created: false` and every margin history -3003; the isolated account lists no pair.
     _pairs(fake, ("AAA", "STB"))
-    fake.set_envelope(ACCOUNT, created=False)
-    for label in HISTORIES:
-        fake.fail(label, code=-3003)
+    assert not fake.margin
     connection = await binance_connection(run)
 
     first = await run_binance_sync(session, connection.id, fake.handler)
@@ -392,8 +409,9 @@ async def test_borrowing_leaves_the_net_quantity_unchanged(session, run) -> None
     )
     await ingest(session, connection.id, BORROW_REPAY, [borrowed], request={"type": "BORROW"})
     await ingest(session, connection.id, BORROW_REPAY, [repaid], request={"type": "REPAY"})
-    # 5 borrowed, 2 of it repaid with 0.01 of interest: free 13, borrowed 3, net still 10 (the
-    # interest was charged, and posted, when it accrued).
+    # 5 borrowed, then 2 of the principal repaid with the 0.01 of interest it had accrued: 3
+    # still borrowed, and the net quantity 10 in both reports. (The interest left the net
+    # quantity when it accrued, a record of the interest history, not of this one.)
     later = [_user_asset("AAA", "10", borrowed="3")]
     await run(report_balances, connection, {ACCOUNT: _read(ACCOUNT, later, T + HOUR_MS)})
 
@@ -644,6 +662,7 @@ def test_isolated_pair_cursors_count_toward_the_first_sync() -> None:
 async def test_isolated_pairs_are_asked_for_their_transfers_and_trades(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
+    fake.margin = True
     _pairs(fake, ("AAA", "STB"), ("BBB", "STB"))
     fake.set_rows(
         ISOLATED_ACCOUNT,
@@ -706,6 +725,7 @@ async def test_isolated_pairs_are_asked_for_their_transfers_and_trades(
 async def test_capital_flow_is_asked_in_windows_without_paging_by_id(
     session, run, fake: FakeBinance, connector
 ) -> None:
+    fake.margin = True
     connection = await binance_connection(run)
 
     after = await run_binance_sync(session, connection.id, fake.handler)
@@ -724,6 +744,7 @@ async def test_capital_flow_is_asked_in_windows_without_paging_by_id(
 async def test_cross_margin_reconciles_with_a_consistent_history(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
+    fake.margin = True
     _pairs(fake, ("AAA", "STB"))
     fake.set_rows("spot-account", _spot(("STB", "100")))
     fake.set_rows(ACCOUNT, [_user_asset("AAA", "1")])
@@ -774,6 +795,7 @@ async def test_cross_margin_reconciles_with_a_consistent_history(
 async def test_isolated_margin_reconciles_with_a_consistent_history(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
+    fake.margin = True
     _pairs(fake, ("AAA", "STB"))
     fake.set_rows("spot-account", _spot(("STB", "100")))
     fake.set_rows(ISOLATED_ACCOUNT, [_pair("AAASTB", ("AAA", "0"), ("STB", "10"))])
@@ -820,6 +842,7 @@ async def test_isolated_margin_reconciles_with_a_consistent_history(
 async def test_a_margin_round_trip_through_an_unseen_asset_is_found_by_the_sweep(
     session, run, fake: FakeBinance, connector, clock: Clock
 ) -> None:
+    fake.margin = True
     _pairs(fake, ("ZZZ", "STB"), ("AAA", "STB"))
     fake.set_rows(ACCOUNT, [_user_asset("STB", "100")])
     connection = await binance_connection(run, config=later_config())
@@ -845,3 +868,201 @@ async def test_a_margin_round_trip_through_an_unseen_asset_is_found_by_the_sweep
     assert await _differences(session, after.id) == []
     [(code, _, wallet)] = after.config[SWEPT_KEY]
     assert (code, wallet) == ("STB", "cross_margin")
+
+
+# Only margin pairs are asked for cross margin trades (ruling R18).
+
+
+async def test_cross_margin_trades_are_asked_only_for_margin_pairs(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.margin = True
+    _pairs(fake, ("AAA", "STB"), ("BBB", "STB"), not_margin=("BBBSTB",))
+    fake.set_rows(
+        ACCOUNT, [_user_asset("AAA", "1"), _user_asset("BBB", "1"), _user_asset("STB", "1")]
+    )
+    connection = await binance_connection(run)
+
+    first = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert first.status == "healthy", first.last_error
+    # The first sync asks every margin pair; Spot's walk still asks both.
+    assert {s.params["symbol"] for s in fake.calls(MARGIN_TRADES)} == {"AAASTB"}
+    assert {s.params["symbol"] for s in fake.calls("my-trades")} == {"AAASTB", "BBBSTB"}
+
+    # A later sync, and its sweep, the same: BBB and STB are both seen.
+    fake.add(MARGIN_TRADES, _trade(0, symbol="BBBSTB", time=clock.ms + HOUR_MS))
+    fake.set_rows(
+        ACCOUNT, [_user_asset("AAA", "1"), _user_asset("BBB", "3"), _user_asset("STB", "-19")]
+    )
+    fake.requests.clear()
+    clock.ms += 4 * HOUR_MS
+    later = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert later.status == "healthy", later.last_error
+    assert {s.params["symbol"] for s in fake.calls(MARGIN_TRADES)} == {"AAASTB"}
+    # A pair Binance stopped margin trading loses its margin trades: a difference (design 6).
+    assert (CROSS, "BBB") in await _differences(session, later.id)
+
+
+@pytest.mark.parametrize("code", [*sorted(MARGIN_PAIR_REFUSALS), -3003])
+async def test_a_symbol_refused_for_margin_trades_is_skipped_and_the_walk_goes_on(
+    session, run, fake: FakeBinance, clock: Clock, code: int
+) -> None:
+    fake.margin = True
+    fake.fail(MARGIN_TRADES, code=code, when={"symbol": "AAASTB"})
+    fake.add(MARGIN_TRADES, _trade(0, symbol="BBBSTB"))
+    connection = await binance_connection(run)
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        await client.sync_clock()
+        stored = await walk_trades(ctx, client, MARGIN_TRADES, ["AAASTB", "BBBSTB"])
+        swept = await walk_trades(
+            ctx,
+            client,
+            MARGIN_TRADES,
+            ["AAASTB", "BBBSTB"],
+            since_ms=T + HOUR_MS,
+            until_ms=T + 2 * HOUR_MS,
+        )
+        # The same refusal of a Spot trade request is no such answer: it fails.
+        fake.fail("my-trades", code=-3028)
+        with pytest.raises(BinanceError):
+            await walk_trades(ctx, client, "my-trades", ["AAASTB"])
+
+    assert len(stored) == 1 and len(swept) == 0
+    cursors = await _cursors(session, connection.id)
+    assert f"{MARGIN_TRADES}:BBBSTB" in cursors and f"{MARGIN_TRADES}:AAASTB" not in cursors
+    asked = [s.params["symbol"] for s in fake.calls(MARGIN_TRADES)]
+    assert "AAASTB" in asked and "BBBSTB" in asked
+
+
+async def _cursors(session, connection_id) -> dict:
+    found = await session.scalar(
+        text("select config -> 'cursors' from core.connections where id = :c"),
+        {"c": connection_id},
+    )
+    return found or {}
+
+
+async def test_an_isolated_margin_difference_sweeps_its_pairs(
+    session, run, fake: FakeBinance, connector, clock: Clock
+) -> None:
+    fake.margin = True
+    _pairs(fake, ("ZZZ", "STB"), ("AAA", "STB"))
+    fake.set_rows(ISOLATED_ACCOUNT, [_pair("ZZZSTB", ("ZZZ", "0"), ("STB", "100"))])
+    connection = await binance_connection(run, config=later_config())
+    await run_binance_sync(session, connection.id, fake.handler)
+    start = clock.ms
+    # STB falls and rises through ZZZ on the isolated pair.
+    fake.set_rows(ISOLATED_ACCOUNT, [_pair("ZZZSTB", ("ZZZ", "0"), ("STB", "102"))])
+    trades = [
+        _trade(0, isolated=True, symbol="ZZZSTB", qty="5", price="2", time=start + HOUR_MS),
+        _trade(
+            1,
+            isolated=True,
+            symbol="ZZZSTB",
+            isBuyer=False,
+            qty="5",
+            price="2.4",
+            time=start + 2 * HOUR_MS,
+        ),
+    ]
+    # The walk by id does not list them (as a trade Binance lists late); the sweep by time does.
+    fake.fail(MARGIN_TRADES, code=-3028, when={"isIsolated": "TRUE", "fromId": "0"})
+    fake.add(MARGIN_TRADES, *trades)
+    fake.requests.clear()
+    clock.ms += 4 * HOUR_MS
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    swept = [s for s in fake.calls(MARGIN_TRADES) if "startTime" in s.params]
+    assert {(s.params["symbol"], s.params.get("isIsolated")) for s in swept} == {("ZZZSTB", "TRUE")}
+    assert await _differences(session, after.id) == []
+    [(code, _, wallet)] = after.config[SWEPT_KEY]
+    assert (code, wallet) == ("STB", "isolated_margin")
+
+
+# The pair a record does not name comes from the request.
+
+
+async def test_interest_and_fee_without_their_pair_take_the_request(session, run) -> None:
+    connection = await binance_connection(run)
+    accrued = _interest(0, isolatedSymbol=None)
+    fee = build_row(
+        CAPITAL_FLOW, 0, type="LIQUIDATION_FEE", asset="STB", amount="-1", symbol=None, timestamp=T
+    )
+    await ingest(session, connection.id, INTEREST, [accrued], request={"isolatedSymbol": "AAASTB"})
+    await ingest(session, connection.id, CAPITAL_FLOW, [fee], request={"symbol": "AAASTB"})
+
+    await run_normalize(session, connection.id)
+
+    assert plain(await postings(session, f"margin_interest:{accrued['txId']}:{T}:STB")) == [
+        (ISOLATED, "STB", Decimal("-0.1")),
+        ("Unassigned", "STB", Decimal("0.1")),
+    ]
+    assert plain(await postings(session, f"margin_capital_flow:{fee['id']}")) == [
+        (ISOLATED, "STB", Decimal(-1)),
+        ("Unassigned", "STB", Decimal(1)),
+    ]
+
+
+async def test_a_transfer_that_can_no_longer_be_posted_loses_its_posting(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _transfer(0)
+    await normalize_rows(session, connection.id, (TRANSFERS, [row]))
+    key = f"margin_transfer:{row['txId']}"
+    assert await keys(session, connection.id) == [key]
+
+    # Seen again with a side the catalogue does not list: it no longer says where it went.
+    report = await normalize_rows(session, connection.id, (TRANSFERS, [{**row, "transTo": "NEW"}]))
+
+    assert await keys(session, connection.id) == []
+    [typed_row] = await typed(session, "binance_margin_transfers", connection.id)
+    assert typed_row.transaction_id is None
+    assert report.new_flags
+    await assert_balanced_and_quiet(session, connection.id)
+
+
+# Margin daily snapshots.
+
+
+async def test_margin_daily_snapshots_are_cross_margin_reports(session, run) -> None:
+    connection = await binance_connection(run)
+    day = NOW_MS - 2 * 24 * HOUR_MS
+    row = build_row("snapshot", type="margin", updateTime=day)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["userAssets"] = [
+        {
+            "asset": "AAA",
+            "borrowed": "0",
+            "free": "2",
+            "interest": "0",
+            "locked": "0",
+            "netAsset": "2",
+        },
+        {
+            "asset": "BBB",
+            "borrowed": "4",
+            "free": "1",
+            "interest": "0",
+            "locked": "0",
+            "netAsset": "-3",
+        },
+    ]
+    spot = build_row("snapshot", type="spot", updateTime=day)
+    spot_data = dict(spot["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    spot_data["balances"] = [{"asset": "AAA", "free": "1", "locked": "0"}]
+    rows = [{**row, "data": data}, {**spot, "data": spot_data}]
+
+    written = await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
+
+    assert written == 3
+    assert await _snapshots(session, connection.id) == [
+        (CROSS, "AAA", Decimal(2), at(day)),
+        (CROSS, "BBB", Decimal(-3), at(day)),
+        (SPOT, "AAA", Decimal(1), at(day)),
+    ]
+    assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 0

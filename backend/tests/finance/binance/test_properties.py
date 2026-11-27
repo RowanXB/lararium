@@ -4,9 +4,9 @@
 The fake is the history at Binance's clock: every request first sets what it lists (the rows
 listed by then, in their state then: a deposit credited, a withdrawal failed) and what each
 wallet reports (the true balance then). The first sync walks back to the fetch floor and reads
-the daily Spot snapshots; the later ones walk forwards from their cursors with the 7-day
-overlap. A record the test removes is the history's still (its effects are in every report)
-but the fake never lists it.
+the daily Spot and Cross Margin snapshots; the later ones walk forwards from their cursors with
+the 7-day overlap. A record the test removes is the history's still (its effects are in every
+report) but the fake never lists it.
 
 - Windows and order: two schedules of the same history give the same transactions, postings
   and typed record rows; only an opening dated at its wallet's first report (no record, or
@@ -147,7 +147,8 @@ class World:
         self.clock = clock
         hidden_ids = {id(record) for record in hidden}
         self.listed = [r for r in history.records if id(r) not in hidden_ids]
-        self.fake = FakeBinance(now=clock, secret=API_SECRET)
+        # The histories trade and transfer on Cross Margin: the account has it.
+        self.fake = FakeBinance(now=clock, secret=API_SECRET, margin=True)
         self.fake.set_rows(
             "exchange-info",
             [
@@ -155,24 +156,39 @@ class World:
                 for symbol, base, quote in PAIRS
             ],
         )
-        self.fake.set_rows("snapshot", self._daily(), when={"type": "SPOT"})
+        self.fake.set_rows("snapshot", self._daily("spot"), when={"type": "SPOT"})
+        self.fake.add("snapshot", *self._daily("cross_margin"), when={"type": "MARGIN"})
 
-    def _daily(self) -> list[dict[str, ApiValue]]:
-        """A Spot snapshot at 23:59:59 of every day, from the day before the history to three
-        days after it; the fake lists only those up to the request's end."""
+    def _daily(self, wallet: str) -> list[dict[str, ApiValue]]:
+        """A Spot (or Cross Margin) snapshot at 23:59:59 of every day, from the day before the
+        history to three days after it; the fake lists only those up to the request's end."""
         first = _at(self.history.start_ms).date() - timedelta(days=1)
         last = _at(self.history.end_ms).date() + timedelta(days=3)
         rows: list[dict[str, ApiValue]] = []
         day = first
         while day <= last:
             at = _day_end_ms(day) - 999
-            held = holdings_of(self.history.balance(at), "spot")
-            row = build_row("snapshot", type="spot", updateTime=at)
+            held = holdings_of(self.history.balance(at), wallet)
+            kind = "spot" if wallet == "spot" else "margin"
+            row = build_row("snapshot", type=kind, updateTime=at)
             data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
-            data["balances"] = [
-                {"asset": asset, "free": format(q, "f"), "locked": "0"}
-                for asset, q in sorted(held.items())
-            ]
+            if wallet == "spot":
+                data["balances"] = [
+                    {"asset": asset, "free": format(q, "f"), "locked": "0"}
+                    for asset, q in sorted(held.items())
+                ]
+            else:
+                data["userAssets"] = [
+                    {
+                        "asset": asset,
+                        "borrowed": "0",
+                        "free": format(q, "f"),
+                        "interest": "0",
+                        "locked": "0",
+                        "netAsset": format(q, "f"),
+                    }
+                    for asset, q in sorted(held.items())
+                ]
             rows.append({**row, "data": data})
             day += timedelta(days=1)
         return rows

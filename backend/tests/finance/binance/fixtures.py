@@ -230,6 +230,22 @@ _TIME_SPANS = {"my-trades": DAY_MS, "margin-trades": DAY_MS}
 # A margin trade request asks cross margin's trades, or an isolated pair's with
 # `isIsolated=TRUE` (the default is FALSE): a row answers the one its `isIsolated` says.
 _ISOLATED_FLAG = "isIsolated"
+# What an account without margin answers (the probe's account): the cross margin account
+# `created: false`, the isolated one no pair, and these -3003 "Margin account does not exist".
+_NO_MARGIN = frozenset(
+    {
+        "margin-trades",
+        "margin-transfers",
+        "margin-borrow-repay",
+        "margin-interest",
+        "margin-capital-flow",
+        "margin-liquidations",
+        "margin-small-liability",
+        "margin-liquidation-loan",
+        "margin-liquidation-loan-repays",
+    }
+)
+_NO_MARGIN_CODE = -3003
 
 
 @dataclass(frozen=True)
@@ -250,6 +266,7 @@ class _Failure:
     older_than_ms: int | None
     times: int | None
     retry_after: int | None
+    when: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -272,12 +289,21 @@ class FakeBinance:
     many answers with none. The rows come back oldest first, cut to the request's window and
     page. `now` is the clock `/api/v3/time` reads. Give `secret` and a request with the wrong
     HMAC signature is refused.
+
+    By default the account has no margin, as the probe's: the cross margin account answers
+    `created: false` and the margin histories -3003. `margin=True` (or setting `margin`) opens
+    it: then they answer from what is stored, as every other label does.
     """
 
     def __init__(
-        self, *, now: Callable[[], int] = lambda: NOW_MS, secret: str | None = None
+        self,
+        *,
+        now: Callable[[], int] = lambda: NOW_MS,
+        secret: str | None = None,
+        margin: bool = False,
     ) -> None:
         self.now = now
+        self.margin = margin
         self.permissions: dict[str, ApiValue] = dict(PERMISSIONS)
         self.requests: list[Seen] = []
         self._secret = secret
@@ -332,10 +358,13 @@ class FakeBinance:
         older_than_ms: int | None = None,
         times: int | None = None,
         retry_after: int | None = None,
+        when: Mapping[str, str] | None = None,
     ) -> None:
         """Answer `label` with an error: always, or `times` times, or only for a request whose
-        start time is before `older_than_ms`."""
-        self._failures.append(_Failure(label, status, code, older_than_ms, times, retry_after))
+        start time is before `older_than_ms`, or only for one with the parameters `when`."""
+        self._failures.append(
+            _Failure(label, status, code, older_than_ms, times, retry_after, when or {})
+        )
 
     def clear_failures(self) -> None:
         self._failures.clear()
@@ -390,6 +419,8 @@ class FakeBinance:
         failure = self._failure_for(endpoint, own)
         if failure is not None:
             return failure
+        if not self.margin and endpoint.label in _NO_MARGIN:
+            return _error(400, _NO_MARGIN_CODE)
         return self._answer(endpoint, own)
 
     def _check_signature(
@@ -411,6 +442,8 @@ class FakeBinance:
         start = own.get(endpoint.time_params[0]) if endpoint.time_params else None
         for failure in self._failures:
             if failure.label != endpoint.label:
+                continue
+            if any(own.get(name) != value for name, value in failure.when.items()):
                 continue
             if failure.older_than_ms is not None and (
                 start is None or int(start) >= failure.older_than_ms
@@ -450,6 +483,8 @@ class FakeBinance:
         body = build_response(label, page)
         if isinstance(body, dict):
             self._patch_envelope(body, total, more)
+            if label == "margin-account" and not self.margin:
+                body["created"] = False
             body.update(self._envelopes.get(label, {}))
         return _json(body)
 

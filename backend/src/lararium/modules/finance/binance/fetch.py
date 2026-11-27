@@ -40,7 +40,7 @@ from lararium.modules.finance.binance.catalogue import (
     paging_params,
     time_range,
 )
-from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
+from lararium.modules.finance.binance.client import BinanceClient, BinanceError, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
     ApiValue,
     BinanceDataError,
@@ -77,6 +77,10 @@ TRADE_LABELS = (TRADES_LABEL, MARGIN_TRADES)
 TRADE_SPAN_MS = DAY_MS - 1
 # The margin trade request's flag for an isolated pair ("TRUE"/"FALSE" text, default FALSE).
 ISOLATED_FLAG = "isIsolated"
+# What Binance answers a margin trade request for a symbol it does not margin trade (its margin
+# error-code page): -3021 "Margin account are not allowed to trade this trading pair", -3028
+# "Not a valid margin pair". For margin trades only, such a refusal means the symbol has none.
+MARGIN_PAIR_REFUSALS = frozenset({-3021, -3028})
 ISOLATED_MARGIN_LABEL = "margin-isolated-account"
 
 # Locked Simple Earn, the flexible collateral record, BFUSD and RWUSD, ETH and SOL staking,
@@ -692,11 +696,14 @@ def trade_symbols(
     *,
     everything: bool = False,
     either_side_of: str | None = None,
+    margin: bool = False,
 ) -> list[str]:
     """The symbols to ask for trades, in `exchangeInfo`'s order.
 
     `either_side_of`: every symbol with that asset as base or quote. `everything`: every
     symbol (the first sync). Otherwise: the symbols both of whose assets are in `seen`.
+    `margin`: only those `exchangeInfo` says are margin traded (`isMarginTradingAllowed`), the
+    symbols cross margin trades can be in (ruling R18).
     """
     listed = exchange_info.get("symbols") if isinstance(exchange_info, dict) else None
     chosen: list[str] = []
@@ -705,6 +712,8 @@ def trade_symbols(
             continue
         symbol, base, quote = entry.get("symbol"), entry.get("baseAsset"), entry.get("quoteAsset")
         if not isinstance(symbol, str):
+            continue
+        if margin and entry.get("isMarginTradingAllowed") is not True:
             continue
         if either_side_of is not None:
             wanted = either_side_of in (base, quote)
@@ -754,8 +763,9 @@ async def walk_trades(
     accepts (`TRADE_SPAN_MS`). The sweep leaves the cursors as they are: the walk by trade id
     still asks everything after a symbol's last id, so nothing before the interval is skipped.
 
-    A margin trade request Binance refuses as not served (`BinanceNotPresent`) leaves that
-    symbol out: a symbol Binance does not margin trade has no margin trades.
+    A margin trade request Binance refuses as not served (`BinanceNotPresent`) or as not a
+    margin pair (`MARGIN_PAIR_REFUSALS`) leaves that symbol out and the walk goes on with the
+    next: a symbol Binance does not margin trade has no margin trades (ruling R18).
     """
     if since_ms is not None:
         until = until_ms if until_ms is not None else client.now_ms()
@@ -779,8 +789,8 @@ async def walk_trades(
         while True:
             try:
                 rows = await _ask(client, endpoint, params)
-            except BinanceNotPresent:
-                if label != MARGIN_TRADES:
+            except BinanceError as error:
+                if not _no_margin_trades(label, error):
                     raise
                 break
             if not rows:
@@ -801,6 +811,14 @@ async def walk_trades(
     return ids
 
 
+def _no_margin_trades(label: str, error: BinanceError) -> bool:
+    """Whether a refused trade request says the symbol has no margin trades: only for margin
+    trades, a "not present" code or a margin pair refusal."""
+    if label != MARGIN_TRADES:
+        return False
+    return isinstance(error, BinanceNotPresent) or error.code in MARGIN_PAIR_REFUSALS
+
+
 async def _sweep_trades(
     ctx: SyncContext,
     client: BinanceClient,
@@ -819,8 +837,8 @@ async def _sweep_trades(
             end = min(start + TRADE_SPAN_MS, until_ms)
             try:
                 rows = await _trades_between(client, endpoint, symbol, start, end, isolated)
-            except BinanceNotPresent:
-                if label != MARGIN_TRADES:
+            except BinanceError as error:
+                if not _no_margin_trades(label, error):
                     raise
                 break
             if rows:

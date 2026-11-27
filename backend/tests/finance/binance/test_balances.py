@@ -518,6 +518,24 @@ def _daily(kind: str, at_ms: int, *balances: tuple[str, str]) -> dict[str, Any]:
     return {**row, "data": data}
 
 
+def _margin_day(at_ms: int, *held: tuple[str, str]) -> dict[str, Any]:
+    """A daily MARGIN snapshot: each asset's net quantity in `userAssets`."""
+    row = build_row("snapshot", type="margin", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["userAssets"] = [
+        {
+            "asset": code,
+            "borrowed": "0",
+            "free": net,
+            "interest": "0",
+            "locked": "0",
+            "netAsset": net,
+        }
+        for code, net in held
+    ]
+    return {**row, "data": data}
+
+
 async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> None:
     connection = await binance_connection(run)
     day_one = NOW_MS - 2 * 24 * HOUR_MS - 1_000  # 23:59:59 UTC
@@ -525,7 +543,9 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     rows = [
         _daily("spot", day_two, ("AAA", "3")),
         _daily("spot", day_one, ("AAA", "2"), ("BBB", "1"), ("LDAAA", "5")),
-        _daily("margin", day_two, ("CCC", "7")),
+        _margin_day(day_two, ("CCC", "7")),
+        # FUTURES days are not written (yet).
+        _daily("futures", day_two, ("DDD", "9")),
     ]
 
     written = await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
@@ -534,10 +554,11 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     assert found == [
         ("Binance Spot", "AAA", 2, _at(day_one)),
         ("Binance Spot", "BBB", 1, _at(day_one)),
+        ("Binance Cross Margin", "CCC", 7, _at(day_two)),
         ("Binance Spot", "AAA", 3, _at(day_two)),
         ("Binance Spot", "BBB", 0, _at(day_two)),
     ]
-    assert written == 4
+    assert written == 5
     # Once written, the same rows write nothing.
     assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 0
 

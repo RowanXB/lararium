@@ -32,7 +32,11 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.binance import layout, tables
-from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_account
+from lararium.modules.finance.binance.accounts import (
+    ACCOUNT_MAP_KEY,
+    wallet_account,
+    wallet_name,
+)
 from lararium.modules.finance.binance.catalogue import (
     ENDPOINTS,
     FIELDS,
@@ -118,9 +122,26 @@ _NET_FIELDS = ("netAsset",)
 _LEGS = ("baseAsset", "quoteAsset")
 _HELD_FIELDS = ("free", "locked", "freeze", "withdrawing")
 _DAILY = "snapshot"
-# Binance answers the daily snapshot's `type` in lower case (`spot`) although the request asks
-# for `SPOT` (the catalogue document): it is compared without case.
-_DAILY_SPOT = "SPOT"
+
+
+@dataclass(frozen=True)
+class _DailyWallet:
+    """Which wallet a daily snapshot of one `type` reports, where its quantities are and which
+    of their fields sum to an asset's quantity there."""
+
+    wallet: str
+    entries: str
+    fields: tuple[str, ...]
+
+
+# The daily snapshot types written as reports, by the request's `type`. Binance answers the
+# daily snapshot's `type` in lower case (`spot`) although the request asks for `SPOT` (the
+# catalogue document): it is compared without case. Cross Margin's day holds each asset's
+# `netAsset`, as its account does; FUTURES is Task 19's to add.
+DAILY_WALLETS: dict[str, _DailyWallet] = {
+    "SPOT": _DailyWallet("spot", "balances", _SPOT_FIELDS),
+    "MARGIN": _DailyWallet("cross_margin", "userAssets", _NET_FIELDS),
+}
 
 
 @dataclass(frozen=True)
@@ -859,8 +880,8 @@ async def record_reads(
     read: for every wallet whose source read is clear and whose account exists now, its report
     (`record_report`: its time, and a 0 for each instrument it does not list that the records
     would otherwise hold then); with `daily`, the first sync's daily snapshots again
-    (`backfill_daily_snapshots`), which reports the days it writes on the Spot account if it
-    exists now. Run, in the transaction that applies the records, after they made the accounts
+    (`backfill_daily_snapshots`), which reports the days it writes on each wallet's account
+    that exists now. Run, in the transaction that applies the records, after they made the accounts
     and postings they name; writing one twice writes nothing."""
     wallets = _wallets(reads)
     assets = _Assets(ctx, connection, flag or (lambda _: None))
@@ -878,13 +899,14 @@ async def record_reads(
 
 
 async def daily_rows(session: AsyncSession, connection_id: UUID) -> list[Row]:
-    """The Spot daily snapshots the connection fetched (on its first sync)."""
+    """The daily snapshots the connection fetched (on its first sync) of the types written as
+    reports (`DAILY_WALLETS`)."""
     contents = await session.scalars(
         text(
             "select content from core.raw_records where connection_id = :c"
-            " and record_type = :t and upper(content ->> 'type') = :k"
+            " and record_type = :t and upper(content ->> 'type') = any(:k)"
         ),
-        {"c": connection_id, "t": record_type(_DAILY), "k": _DAILY_SPOT},
+        {"c": connection_id, "t": record_type(_DAILY), "k": list(DAILY_WALLETS)},
     )
     return [cast(Row, content) for content in contents if isinstance(content, dict)]
 
@@ -907,14 +929,21 @@ async def _reported_at(
     return found is not None
 
 
-def _daily_day(row: Row) -> tuple[datetime, dict[str, Decimal]]:
-    """A daily Spot snapshot's time and quantity per asset; a `BinanceDataError` naming the
-    field when it cannot be read in full (its list not stated, an entry, an amount, its time)."""
+def _daily_kind(row: Row) -> str | None:
+    kind = row.get("type")
+    kind = kind.upper() if isinstance(kind, str) else None
+    return kind if kind in DAILY_WALLETS else None
+
+
+def _daily_day(row: Row, daily: _DailyWallet) -> tuple[datetime, dict[str, Decimal]]:
+    """A daily snapshot's time and quantity per asset; a `BinanceDataError` naming the field
+    when it cannot be read in full (its list not stated, an entry, an amount, its time)."""
     data = row.get("data")
-    balances = data.get("balances") if isinstance(data, dict) else None
-    entries = _stated(_DAILY, "snapshotVos[].data.balances", balances)
+    listed = data.get(daily.entries) if isinstance(data, dict) else None
+    where = f"snapshotVos[].data.{daily.entries}"
+    entries = _stated(_DAILY, where, listed)
     at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
-    return at, _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
+    return at, _per_asset(_DAILY, f"{where}[].", entries, daily.fields)
 
 
 async def backfill_daily_snapshots(
@@ -924,49 +953,50 @@ async def backfill_daily_snapshots(
     *,
     flag: Flag | None = None,
 ) -> int:
-    """Each `snapshot` row of type SPOT as `reported` Spot snapshots at its own `updateTime`
-    (`free + locked`, `LD` mirrors dropped), an asset held then that the day does not list at
-    0 (`record_report`); how many were written. A snapshot already written is not written
-    again.
+    """Each daily snapshot row of a type in `DAILY_WALLETS` (Spot: `free + locked`, `LD` mirrors
+    dropped; Cross Margin: `netAsset`) as `reported` snapshots of its wallet at its own
+    `updateTime`, an asset held then that the day does not list at 0 (`record_report`); how many
+    were written. A snapshot already written is not written again.
 
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
-    Spot account exists and every quantity of the day has its instrument. A day with a code
+    wallet's account exists and every quantity of the day has its instrument. A day with a code
     that has none (other than an `LD` mirror), or that cannot be read in full (any
     `BinanceDataError`: its list, an entry, an amount, its `updateTime`), is not written at all
     and is flagged: the rows are fetched on the first sync only, so a failure raised from one
     could never be healed by a later sync."""
     flag = flag or (lambda _: None)
-    days: list[tuple[datetime, dict[str, Decimal]]] = []
-    for row in rows:
-        kind = row.get("type")
-        if not isinstance(kind, str) or kind.upper() != _DAILY_SPOT:
-            continue
-        try:
-            days.append(_daily_day(row))
-        except BinanceDataError as error:
-            flag(
-                f"a daily Spot snapshot was not written: {error.label}.{error.field} is unreadable"
-            )
-    days.sort(key=lambda day: day[0])
-    assets = _Assets(ctx, connection, flag)
-    await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
-
-    account = await _mapped_account(ctx, connection, "spot")
     written = 0
-    for at, held in days:
-        missing = assets.unresolved(held)
-        if missing is not None:
-            flag(f"a daily Spot snapshot was not written: {missing} has no instrument")
-            continue
-        quantities = assets.per_instrument(held)
-        if quantities and account is None:
-            account = await wallet_account(ctx, connection, "spot")
-        if account is None:
-            continue
-        for instrument, quantity in quantities.items():
-            if not await _reported_at(ctx.session, account, instrument, at, quantity):
-                await _snapshot(ctx, account, instrument, quantity, at)
-                written += 1
-        written += len(await record_report(ctx, connection, account, at, at, listed=quantities))
+    for kind, daily in DAILY_WALLETS.items():
+        shown = wallet_name(daily.wallet)
+        days: list[tuple[datetime, dict[str, Decimal]]] = []
+        for row in rows:
+            if _daily_kind(row) != kind:
+                continue
+            try:
+                days.append(_daily_day(row, daily))
+            except BinanceDataError as error:
+                flag(
+                    f"a daily {shown} snapshot was not written:"
+                    f" {error.label}.{error.field} is unreadable"
+                )
+        days.sort(key=lambda day: day[0])
+        assets = _Assets(ctx, connection, flag)
+        await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
+        account = await _mapped_account(ctx, connection, daily.wallet)
+        for at, held in days:
+            missing = assets.unresolved(held)
+            if missing is not None:
+                flag(f"a daily {shown} snapshot was not written: {missing} has no instrument")
+                continue
+            quantities = assets.per_instrument(held)
+            if quantities and account is None:
+                account = await wallet_account(ctx, connection, daily.wallet)
+            if account is None:
+                continue
+            for instrument, quantity in quantities.items():
+                if not await _reported_at(ctx.session, account, instrument, at, quantity):
+                    await _snapshot(ctx, account, instrument, quantity, at)
+                    written += 1
+            written += len(await record_report(ctx, connection, account, at, at, listed=quantities))
     return written

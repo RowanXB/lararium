@@ -156,33 +156,40 @@ async def _linked(run: Run) -> bool:
     return found is not None
 
 
+async def _unpost(run: Run, *, unlink: bool = False) -> None:
+    """The current transfer posts nothing (now): its earlier posting, if any, is removed."""
+    await remove(run, run.record.key)
+    if unlink:
+        await run.typed(transaction_id=None, movement_key=None)
+    else:
+        await run.typed(transaction_id=None)
+
+
 async def transfer(run: Run, row: Row) -> None:
     key = run.record.key
     if text(row, "status") != _CONFIRMED:
         # Pending: not moved yet; failed: moved nothing. A link it had no longer holds.
-        await remove(run, key)
-        await run.typed(transaction_id=None, movement_key=None)
+        await _unpost(run, unlink=True)
         return
     sides = _sides(run, row)
     coin = text(row, "asset") or ""
+    instrument_id = await run.asset(coin)
     quantity = amount(TRANSFERS, row, "amount")
     occurred_at = when(TRANSFERS, row, "timestamp")
-    if sides is None or quantity is None or occurred_at is None:
+    if sides is None or instrument_id is None or quantity is None or occurred_at is None:
+        await _unpost(run)
         return
     source, destination = sides
     if source is not None and destination is not None:
         if await _linked(run):
-            await remove(run, key)
-            await run.typed(transaction_id=None)
+            await _unpost(run)
             return
         movement = Movement(key, coin, quantity, (source, destination), occurred_at)
         await run.typed(transaction_id=await post_movement(run, movement))
         return
     if source is None and destination is None:
         run.flag(f"{TRANSFERS} between two wallets outside the account")
-        return
-    instrument_id = await run.asset(coin)
-    if instrument_id is None:
+        await _unpost(run)
         return
     taken = (
         await run.account(source) if source is not None else run.unassigned,

@@ -350,7 +350,8 @@ async def sweep(
     pairs = await isolated_symbols(ctx)
     for code, wallet, difference in wanted:
         label, isolated = SWEPT_WALLETS[wallet]
-        symbols = trade_symbols(info, seen_now, either_side_of=code)
+        cross = label == MARGIN_TRADES and not isolated
+        symbols = trade_symbols(info, seen_now, either_side_of=code, margin=cross)
         if isolated:
             symbols = [symbol for symbol in symbols if symbol in pairs]
         await walk_trades(
@@ -498,7 +499,8 @@ async def walk_symbols(
         through = (await fresh_config(ctx)).get(NORMALIZED_THROUGH_KEY)
         after = UUID(through) if isinstance(through, str) else None
         shown = await assets_seen(ctx) | read_assets(reads) | await record_assets(ctx, after)
-        more = [s for s in trade_symbols(info, shown, everything=everything) if s not in walked]
+        listed = trade_symbols(info, shown, everything=everything, margin=label == MARGIN_TRADES)
+        more = [s for s in listed if s not in walked]
         if not more:
             return walked
         await walk_trades(ctx, client, label, more)
