@@ -59,6 +59,10 @@ UPGRADE = [
 ]
 
 DOWNGRADE = [
+    # Forget the replay marker, so that the first sync after upgrading again re-posts the
+    # TRANSFERs naming the family and the evidence dropped here (as 0013 does for Monzo).
+    "UPDATE core.connections SET config = config - 'normalizer_version'"
+    " WHERE connector = 'trading212'",
     "UPDATE finance.transactions SET counterparty_identifier_id = NULL"
     " WHERE counterparty_identifier_id IN"
     " (SELECT id FROM finance.account_identifiers WHERE kind = 'account_family')",

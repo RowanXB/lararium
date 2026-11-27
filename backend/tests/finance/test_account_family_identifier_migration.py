@@ -107,6 +107,16 @@ def test_0047_and_its_downgrade(owner_url: str, migrated: None) -> None:
                 account_id=account_id,
             )
 
+            trading212 = connection.execute(
+                text(
+                    "insert into core.connections (connector, display_name, status, config,"
+                    " owner_entity_id) values ('trading212', 'Invest', 'healthy',"
+                    " cast(:config as jsonb), (select id from core.entities where is_self))"
+                    " returning id"
+                ),
+                {"config": '{"normalizer_version": "trading212-norm-4", "kept": 1}'},
+            ).scalar_one()
+
             with Operations.context(MigrationContext.configure(connection)):
                 _migration().downgrade()
             left = connection.execute(
@@ -115,6 +125,11 @@ def test_0047_and_its_downgrade(owner_url: str, migrated: None) -> None:
                 )
             ).scalar_one()
             assert left == 0
+            # The next sync after upgrading again replays the history (0013's precedent).
+            config = connection.execute(
+                text("select config from core.connections where id = :id"), {"id": trading212}
+            ).scalar_one()
+            assert config == {"kept": 1}
             assert _columns(connection) == {}
             _rejected(
                 connection,
@@ -152,7 +167,7 @@ async def test_downgrading_0047_first_clears_the_transactions_naming_a_family(
             )
         )
 
-    for statement in _migration().DOWNGRADE[:2]:
+    for statement in _migration().DOWNGRADE[:3]:
         await session.execute(text(statement))
 
     t, i = models.Transaction, models.AccountIdentifier
