@@ -659,12 +659,30 @@ Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，�
 账户，其余额就是 Binance 报告的余额，而 Binance 列出的记录（充值、提现、交易等）用来解释余额
 是怎么来的。
 
-目前已实现的部分（阶段 A）：
+Lararium 从 Binance 读取的内容：
 
-- **钱包**：Spot、Funding 和 Earn。Binance 钱包列表中其他每个有余额的钱包（Cross Margin、
-  Futures、Trading Bots、未知的钱包等）都按该列表逐个资产计入；在阶段 A 它们没有自己的记录，
-  所以它们的变化会显示为对账差异。Lararium 不认识的钱包会按名称标记，并且仍会得到一个账户；
-  余额不为零却没有列出任何资产的钱包也会按名称标记。加密货币借贷的负债在阶段 B 读取（见下文）。
+- **钱包**：每个有余额的钱包是一个名为“Binance <钱包>”的账户，逐个资产持有 Binance 报告的数量：
+  - Spot（`spot-account`）、Funding（`funding-asset`）和 Earn（Binance 的钱包列表）；
+  - Cross Margin 和 Isolated Margin（`margin-account`、`margin-isolated-account`）：每种资产的
+    净数量，所以借入的资产是负持仓（Isolated Margin 按资产汇总它的各个交易对）；
+  - USDⓈ-M 和 COIN-M Futures（`um-account`、`cm-account`）：每种资产的钱包余额加未实现盈亏，
+    对账只用钱包余额；
+  - Options（`opt-account`）：期权保证金账户中每种资产的权益（equity），对账只用保证金余额
+    （margin balance）；
+  - Crypto Loans（`loan-flexible-ongoing`、`vip-loan-ongoing`）：进行中借款的负债，是负持仓
+    （负债类账户）；
+  - 统一账户 Portfolio Margin（`pm-balance`，并保存 `pm-account`），在 Binance 的账户信息显示已
+    开启时：每种资产的钱包余额减去借入额及其利息（借入的资产是负持仓），再加 USDⓈ-M 和 COIN-M 的
+    未实现盈亏，对账时不含未实现盈亏。它的记录不入账。Portfolio Margin 取代了 Cross Margin 和两个
+    合约钱包，所以开启期间不会请求它们，它们报告为空；看到它关闭的那次同步会重新请求它们，而
+    Portfolio Margin 报告为空。同一资产绝不会在两边各算一次：切换会显示为对账差异。
+  - Trading Bots 和 Copy Trading，来自 Binance 的钱包列表。Binance 没有为它们提供记录，所以它们的
+    每次变化都会显示为对账差异。
+  - Pending redemptions：Binance 稍后才到账的赎回所换得的资产，在到账 Spot 之前记在这里。
+
+  账户没有的产品（Binance 说尚未开通的杠杆账户、没有期权的账户）会跳过。Binance 钱包列表中其他
+  每个有余额的钱包都按该列表逐个资产计入，并按名称标记，仍会得到一个账户；余额不为零却没有列出
+  任何资产的钱包也会按名称标记。
 - **Binance 上的法币**（Binance 标记为法定货币的资产，例如 EUR）就是 Lararium 已有的那个币种。
   如果 Lararium 没有该 ISO 4217 代码的币种，且该代码还没有任何 instrument，该资产不计入：连接会被
   标记并写出该代码，其余额不计入，其记录保留但不入账。已有 instrument 的代码（在 Binance 标记它为法定
@@ -675,10 +693,78 @@ Binance 是一个连接器：`worker` 通过 Binance 的 REST API 同步它，�
   记录时才会入账。如果添加该币种时，该代码已有一个加密资产 instrument，从此该资产就是该币种：在下一次
   报告中，加密资产 instrument 读数为 0，该币种读数为该金额，显示为两笔相等且相反的对账差异并保持未结；
   此前的入账留在加密资产 instrument 上，直到 Lararium 重放其记录。
-- **记录**：充值、提现、现货交易、闪兑（convert）、资产分红，以及活期 Earn（申购、赎回和收益）。
+- **记录**：Binance 只读 API 文档列出的每种记录都会拉取，按每个字段一个有类型的列保存，并在它改变
+  余额的地方入账：
+  - 充值和提现（`deposits`、`withdrawals`；提现手续费单独入账）、现货交易（`my-trades`）、闪兑
+    （`convert`）和资产分红（`dividends`）。travel rule 的充值和提现历史（`travel-deposits`、
+    `travel-withdrawals`）保存下来并关联到它们描述的那笔充值或提现，不会再入账一次。
+  - 钱包之间的划转（`universal-transfer`）：每笔是两个钱包账户上的一笔交易，从不作为在途转账。
+    与逐仓杠杆之间的划转按账户的每个逐仓交易对分别拉取。另一个历史也列出的划转（杠杆划转，或类型
+    为 `TRANSFER` 的合约资金流水或期权账单）只入账一次。
+  - 小额资产兑换成 BNB（`dust`），手续费单独记为费用；Cloud Mining 的付款和退款记在 Spot 上
+    （`cloud-mining`）。
+  - 活期和定期 Simple Earn 以及链上收益（`earn-flexible-subscriptions`、
+    `earn-flexible-redemptions`、`earn-flexible-rewards`、`earn-locked-subscriptions`、
+    `earn-locked-redemptions`、`earn-locked-rewards`、`onchain-subscriptions`、
+    `onchain-redemptions`、`onchain-rewards`）：某个钱包与 Earn 之间的移动，收益记为收入。它们的
+    持仓和账户（`earn-flexible-position`、`earn-locked-position`、`earn-account`、
+    `onchain-locked-position`、`onchain-account`）以及活期质押记录（`earn-flexible-collateral`）
+    只保存。Binance 以资产分红方式发放的每一笔奖励只入账一次，记为那笔分红。
+  - BFUSD 和 RWUSD（`bfusd-subscriptions`、`bfusd-redemptions`、`bfusd-rewards`、
+    `rwusd-subscriptions`、`rwusd-redemptions`、`rwusd-rewards`、`bfusd-account`、`rwusd-account`），
+    ETH 和 SOL 质押（`eth-stakes`、`eth-redemptions`、`wbeth-wraps`、`wbeth-unwraps`、`sol-stakes`、
+    `sol-redemptions`、`sol-boost-rewards`、`eth-staking-account`、`sol-staking-account`、
+    `sol-unclaimed-rewards`）：在 Spot 上资产和它的代币之间的兑换。Binance 稍后才到账的赎回，在到账
+    之前记在“Binance Pending redemptions”账户上。WBETH 和 BNSOL 的奖励（`wbeth-rewards`、
+    `bnsol-rewards`）体现在代币的兑换比例里，只保存。
+  - Soft Staking（`soft-staking-rewards`、`soft-staking-list`）：奖励记在 Spot 上。
+  - Dual Investment 和 Discount Buy（`dci-positions`、`discount-positions`、`dci-accounts`、
+    `discount-accounts`）：投入的资产转入 Earn，持仓结算时离开 Earn。Binance 没有说明持仓结算成什么，
+    所以 Spot 上收到的部分会显示为一处对账差异。
+  - 加密货币借贷，活期和 VIP（`loan-flexible-borrows`、`loan-flexible-repays`、
+    `loan-flexible-ltv-adjustments`、`loan-flexible-liquidations`、`vip-loan-repays`、
+    `vip-loan-interest`、`vip-loan-requests`、`vip-loan-collateral-account`）：借款把币转入 Spot，
+    记为对应的负债；还款再转回；VIP 还款中的利息记为费用。Binance 不列出活期借款的利息，所以两次报告
+    之间没有任何记录能解释的负债增长记为它的利息。强制平仓从 Earn 卖出抵押物。借款自身的记录从不移动
+    抵押物：抵押物留在 Binance 报告它所在的钱包里。
+  - 杠杆，全仓和逐仓（`margin-trades`、`margin-transfers`、`margin-borrow-repay`、
+    `margin-interest`、`margin-capital-flow`、`margin-liquidations`、`margin-small-liability`、
+    `margin-liquidation-loan`、`margin-liquidation-loan-repays`）：杠杆成交按现货成交记在它的钱包上；
+    利息和强平手续费记为费用。借款和还款不改变净数量，只保存；资金流水、强制平仓、小额负债兑换和
+    强平借款也只保存。
+  - USDⓈ-M 和 COIN-M 合约（`um-income`、`um-trades`、`um-balance`、`um-positions`、
+    `um-exchange-info`、`cm-income`、`cm-trades`、`cm-balance`、`cm-positions`、`cm-exchange-info`）：
+    除划转外，每条资金流水都对 Unassigned 入账（支付的手续费、资金费和保险清算记为费用）。成交（按
+    资金流水提到的交易对获取）和持仓只保存；合约永远不是一个 instrument。每个合约主机的请求限额从它
+    自己的交易规则信息读取。
+  - 期权（`opt-bill`、`opt-trades`、`opt-exercises`、`opt-positions`、`opt-exchange-info`）：除划转
+    外，每条账单都对 Unassigned 入账（支付的手续费记为费用）。成交（按账单提到的交易对获取）、行权
+    记录和持仓只保存；合约永远不是一个 instrument。期权主机的请求限额从它自己的交易规则信息读取。
+  - 银行法币出入金、银行卡买卖、P2P、Pay 和返佣（`fiat-orders`、`fiat-payments`、`c2c`、`pay`、
+    `rebate`）：法币充值或提现是你的银行与“Binance Spot”之间的转账（见[来自银行的法币充值](#来自银行的法币充值)）；
+    银行卡购买是法币从卡里到账，再换成加密资产，手续费单独记账（用现金余额支付的只有兑换这一笔）；
+    P2P 订单在“Binance Funding”上同样处理，按其单价。只有已完成的才入账。Pay 交易把付出或收到的金额
+    记在它动用的每个钱包上（组合支付会涉及多个钱包），对 Unassigned 入账；返佣是 Spot 上的收入，若由
+    资产分红发放则只入账一次。Binance 只提供 2020 年 6 月 10 日以来的返佣，这让首次同步多出大约 7 分钟。
 
-Spot、活期 Earn、充值、提现、交易、闪兑和分红已用真实账户核对过。Funding 和阶段 A 其余的响应
-结构依据 Binance 的文档，尚未用真实账户核对。
+已用真实账户核对：密钥检查，以及在 `api.binance.com`、`fapi.binance.com` 和 `dapi.binance.com` 上的
+HMAC 签名；Spot 和 Earn 的余额；充值、提现、现货交易、闪兑、资产分红和活期 Earn，包括 Spot 的精确对账
+和以分红发放的奖励。
+
+依据 Binance 的文档实现、尚未在真实账户上见过（每种的第一条真实记录都会对照它的对账检查，规则有误时
+届时更正）：
+
+- Funding、Cross Margin、Isolated Margin、USDⓈ-M 和 COIN-M Futures、Options、Crypto Loans 和
+  Portfolio Margin 的余额，以及钱包列表中 Trading Bots 和 Copy Trading 的明细；
+- 钱包之间的划转、小额资产兑换、Cloud Mining 和 travel rule 历史；
+- 定期 Simple Earn、链上收益、活期质押记录、BFUSD 和 RWUSD、ETH 和 SOL 质押（含 WBETH 和 BNSOL）、
+  Soft Staking、Dual Investment 和 Discount Buy；
+- 加密货币借贷，活期和 VIP；
+- 每种杠杆、合约和期权记录，以及 Portfolio Margin 的切换；
+- 银行法币出入金、银行卡买卖、P2P、Pay 和返佣；
+- 期权和 Portfolio Margin 主机（`eapi.binance.com`、`papi.binance.com`）上的 HMAC 签名，以及 Ed25519
+  签名；
+- 这些记录各自落在哪个钱包。
 
 ### 1. 创建只读 API 密钥
 
@@ -760,73 +846,6 @@ Binance 持仓按每个资产的每日价格以 EUR 估值：
 - **ECB 参考汇率**，每天通过 Frankfurter（`api.frankfurter.dev`，无需密钥）获取，每个安装都会
   运行，无论有没有 Binance 连接，使 EUR 价格可以显示为你的报告币种。它们只填补没有任何其他
   来源提供这两种币种之间汇率的日子。
-
-### 阶段 B 将增加
-
-已依据 Binance 的文档实现，尚未用真实账户核对：
-
-- 钱包之间的划转（`universal-transfer`）：每笔是两个钱包账户上的一笔交易，从不作为在途转账。
-  与逐仓杠杆之间的划转按账户的每个逐仓交易对分别拉取。
-- 小额资产兑换成 BNB（`dust`），手续费单独记为费用
-- Cloud Mining 的付款和退款（`cloud-mining`），记在 Spot 上
-- travel rule 的充值和提现历史（`travel-deposits`、`travel-withdrawals`）：保存下来并关联到它们
-  描述的那笔充值或提现，不会再入账一次
-- 定期 Simple Earn 和链上收益（`earn-locked-subscriptions`、`earn-locked-redemptions`、
-  `earn-locked-rewards`、`onchain-subscriptions`、`onchain-redemptions`、`onchain-rewards`）：
-  和活期一样，是某个钱包与 Earn 之间的移动；它们的持仓（`earn-locked-position`、
-  `onchain-locked-position`、`onchain-account`）会保存下来。活期质押记录
-  （`earn-flexible-collateral`）只保存。
-- BFUSD 和 RWUSD（`bfusd-subscriptions`、`bfusd-redemptions`、`bfusd-rewards`、
-  `rwusd-subscriptions`、`rwusd-redemptions`、`rwusd-rewards`、`bfusd-account`、`rwusd-account`），
-  ETH 和 SOL 质押（`eth-stakes`、`eth-redemptions`、`wbeth-wraps`、`wbeth-unwraps`、`sol-stakes`、
-  `sol-redemptions`、`sol-boost-rewards`、`eth-staking-account`、`sol-staking-account`、
-  `sol-unclaimed-rewards`）：在 Spot 上资产和它的代币之间的兑换。Binance 稍后才到账的赎回，在到账
-  之前记在“Binance Pending redemptions”账户上。WBETH 和 BNSOL 的奖励（`wbeth-rewards`、
-  `bnsol-rewards`）体现在代币的兑换比例里，只保存。
-- Soft Staking（`soft-staking-rewards`、`soft-staking-list`）：奖励记在 Spot 上
-- Dual Investment 和 Discount Buy（`dci-positions`、`discount-positions`、`dci-accounts`、
-  `discount-accounts`）：投入的资产转入 Earn，持仓结算时离开 Earn。Binance 没有说明持仓结算成什么，
-  所以 Spot 上收到的部分会显示为一处对账差异。
-- Binance 以资产分红方式发放的每一笔奖励只入账一次，记为那笔分红。
-- 加密货币借贷，活期和 VIP（`loan-flexible-borrows`、`loan-flexible-repays`、
-  `loan-flexible-ltv-adjustments`、`loan-flexible-liquidations`、`loan-flexible-ongoing`、
-  `vip-loan-ongoing`、`vip-loan-repays`、`vip-loan-interest`、`vip-loan-requests`、
-  `vip-loan-collateral-account`）：负债是“Binance Crypto Loans”账户（负债类账户）上的负持仓，
-  按进行中的借款订单报告。借款把币转入 Spot，记为对应的负债；还款再转回；VIP 还款中的利息记为
-  费用。Binance 不列出活期借款的利息，所以两次报告之间没有任何记录能解释的负债增长记为它的利息。
-  强制平仓从 Earn 卖出抵押物。借款自身的记录从不移动抵押物：抵押物留在 Binance 报告它所在的钱包里。
-- 杠杆，全仓和逐仓（`margin-account`、`margin-isolated-account`、`margin-trades`、
-  `margin-transfers`、`margin-borrow-repay`、`margin-interest`、`margin-capital-flow`、
-  `margin-liquidations`、`margin-small-liability`、`margin-liquidation-loan`、
-  `margin-liquidation-loan-repays`）：“Binance Cross Margin”和“Binance Isolated Margin”持有每种资产的
-  净数量，所以借入的资产是负持仓（Isolated Margin 按资产汇总它的各个交易对）。杠杆成交按现货成交
-  记在它的钱包上；利息和强平手续费记为费用；钱包之间划转历史也列出的杠杆划转只入账一次。借款和
-  还款不改变净数量，只保存；资金流水、强制平仓、小额负债兑换和强平借款也只保存。Binance 说尚未开通
-  的账户会跳过，和账户没有的产品一样。
-- USD-M 和 COIN-M 合约（`um-account`、`um-balance`、`um-positions`、`um-income`、`um-trades`、
-  `um-exchange-info`、`cm-account`、`cm-balance`、`cm-positions`、`cm-income`、`cm-trades`、
-  `cm-exchange-info`）：“Binance USDⓈ-M Futures”和“Binance COIN-M Futures”持有每种资产的钱包余额
-  加未实现盈亏，对账只用钱包余额。除划转外，每条资金流水都对 Unassigned 入账（支付的手续费、资金费
-  和保险清算记为费用）；划转如果钱包之间划转历史也列出，只入账一次。成交（按资金流水提到的交易对
-  获取）和持仓只保存；合约永远不是一个 instrument。每个合约主机的请求限额从它自己的交易规则信息读取。
-- 期权（`opt-account`、`opt-positions`、`opt-bill`、`opt-trades`、`opt-exercises`、
-  `opt-exchange-info`）：“Binance Options”持有期权保证金账户中每种资产的权益（equity），对账只用
-  保证金余额（margin balance）。除划转外，每条账单都对 Unassigned 入账（支付的手续费记为费用）；划转
-  如果钱包之间划转历史也列出，只入账一次。成交（按账单提到的交易对获取）、行权记录和持仓只保存；合约
-  永远不是一个 instrument。没有期权账户的账户会被跳过，与账户没有的产品一样。期权主机的请求限额从它
-  自己的交易规则信息读取。
-- 银行法币出入金、银行卡买卖、P2P、Pay 和返佣（`fiat-orders`、`fiat-payments`、`c2c`、`pay`、
-  `rebate`）：法币充值或提现是你的银行与“Binance Spot”之间的转账（见[来自银行的法币充值](#来自银行的法币充值)）；
-  银行卡购买是法币从卡里到账，再换成加密资产，手续费单独记账（用现金余额支付的只有兑换这一笔）；
-  P2P 订单在“Binance Funding”上同样处理，按其单价。只有已完成的才入账。Pay 交易把付出或收到的金额
-  记在它动用的每个钱包上（组合支付会涉及多个钱包），对 Unassigned 入账；返佣是 Spot 上的收入，若由资产分红发放则只入账一次。
-  Binance 只提供 2020 年 6 月 10 日以来的返佣，这让首次同步多出大约 7 分钟。
-- 统一账户 Portfolio Margin（`pm-balance`、`pm-account`），在 Binance 的账户信息显示已开启时：
-  “Binance Portfolio Margin”持有每种资产的钱包余额减去借入额及其利息（借入的资产是负持仓），再加
-  USDⓈ-M 和 COIN-M 的未实现盈亏，对账时不含未实现盈亏。它的记录不入账。Portfolio Margin 取代了
-  Cross Margin 和两个合约钱包，所以开启期间不会请求它们，它们报告为空；看到它关闭的那次同步会重新
-  请求它们，而 Portfolio Margin 报告为空。同一资产绝不会在两边各算一次：切换会显示为对账差异。
-- Trading Bots 和 Copy Trading，按 Binance 钱包列表逐个资产计入。Binance 没有为它们提供记录。
 
 ## 通过 Cloudflare Tunnel 接收 Webhook
 
