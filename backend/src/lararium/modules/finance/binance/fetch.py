@@ -907,16 +907,17 @@ async def _trades_between(
     ]
 
 
-async def income_symbols(ctx: SyncContext, income_label: str) -> list[str]:
-    """The symbols the connection's stored rows of a futures income history name, sorted; a
-    row with no symbol (a transfer) names none."""
+async def income_symbols(ctx: SyncContext, income_label: str, since_ms: int) -> list[str]:
+    """The symbols the connection's stored rows of a futures income history dated `since_ms`
+    or later name, sorted; a row with no symbol (a transfer) names none."""
     async with ctx.session_factory() as session:
         found = await session.scalars(
             text(
                 "select distinct content ->> 'symbol' from core.raw_records"
                 " where connection_id = :c and record_type = :t"
+                " and (content ->> 'time')::bigint >= :since"
             ),
-            {"c": ctx.connection.id, "t": record_type(income_label)},
+            {"c": ctx.connection.id, "t": record_type(income_label), "since": since_ms},
         )
         return sorted({symbol.strip() for symbol in found if symbol and symbol.strip()})
 
@@ -931,10 +932,12 @@ async def walk_futures_trades(ctx: SyncContext, client: BinanceClient, label: st
     raw record ids stored. Binance takes a time range of at most 7 days and keeps 3 months
     (the catalogue), so each symbol is walked by windows as a history label is, from its own
     cursor (`futures_trade_key`): its first walk back 3 months, later ones from the last minus 7
-    days."""
+    days. Only a symbol named by income within those 3 months is asked: Binance serves no older
+    trade, so a symbol traded long ago is not walked for ever."""
     endpoint = ENDPOINTS[label]
+    since = _floor(endpoint, client.now_ms())
     ids: list[UUID] = []
-    for symbol in await income_symbols(ctx, FUTURES_TRADES[label]):
+    for symbol in await income_symbols(ctx, FUTURES_TRADES[label], since):
         key = futures_trade_key(label, symbol)
         ids += await _walk_key(ctx, client, endpoint, key, {"symbol": symbol})
     return ids

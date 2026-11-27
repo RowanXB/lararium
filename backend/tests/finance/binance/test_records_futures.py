@@ -39,12 +39,14 @@ from lararium.modules.finance.binance.records.futures import (
     TRANSFER,
     income_types,
 )
+from lararium.modules.finance.binance.sync import limits_unread_flag, read_limits
 
 from .fixtures import BASE_TIME_MS, DAY_MS, HOUR_MS, FakeBinance, build_response, build_row
 from .normalizing import (
     assert_balanced_and_quiet,
     at,
     holdings,
+    ingest,
     keys,
     normalize_rows,
     plain,
@@ -56,6 +58,7 @@ from .syncing import (
     Clock,
     RecordingNotifier,
     binance_connection,
+    client_for,
     context,
     later_config,
     run_binance_sync,
@@ -246,6 +249,42 @@ async def test_futures_daily_snapshots_are_usdm_wallet_balances(session, run) ->
 
     assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 1
     assert await _snapshots(session, connection.id) == [(UM_NAME, "STB", Decimal(100), at(day))]
+
+
+async def test_the_first_live_read_after_the_daily_snapshots_reconciles_on_wallet_balance(
+    session, run
+) -> None:
+    connection = await binance_connection(run)
+    day = T + DAY_MS - 1_000
+    # A commission before the last daily snapshot, a realised profit after it.
+    await normalize_rows(
+        session,
+        connection.id,
+        (UM, [_income(UM, 0, "COMMISSION", "-1"), _income(UM, 30, "REALIZED_PNL", "3")]),
+    )
+    row = build_row("snapshot", type="futures", updateTime=day)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["assets"] = [{"asset": "STB", "marginBalance": "100", "walletBalance": "100"}]
+    data["position"] = []
+    await run(backfill_daily_snapshots, connection, [{**row, "data": data}], flag=lambda _: None)
+    # The first live read: the wallet balance is the day's and the profit (103); the open
+    # position's unrealised profit (7) is in the report only.
+    live = [_asset(UM_ACCOUNT, "STB", "103", "7")]
+    await run(report_balances, connection, {UM_ACCOUNT: _read(UM_ACCOUNT, live, T + 2 * DAY_MS)})
+
+    async with httpx.AsyncClient() as http:
+        ctx = await context(session, connection.id, http)
+        async with command_context(session, CONNECTOR, "binance.opening", {}) as cmd:
+            assert await set_openings(await Run.start(ctx, cmd, ctx.connection)) == 1
+
+    assert [q for _, _, q, _ in await _snapshots(session, connection.id)] == [
+        Decimal(100),
+        Decimal(110),
+    ]
+    assert await check(session, connection.id, ()) == []
+    [opening] = [k for k in await keys(session, connection.id) if k.startswith("opening:")]
+    # At the daily snapshot: 100, of which the records before it explain -1.
+    assert plain(await postings(session, opening))[0] == (UM_NAME, "STB", Decimal(101))
 
 
 # The income records.
@@ -489,11 +528,15 @@ async def test_futures_trades_are_walked_for_the_symbols_the_income_names(
     fake.add(CM, _income(CM, 0, "COMMISSION", "-0.1", symbol="BBBUSD_PERP", time=traded))
     fake.add("um-trades", build_row("um-trades", 0, symbol="AAASTB", time=traded))
     connection = await binance_connection(run, config=later_config())
+    # Income of a symbol more than 3 months old: Binance serves none of its trades now.
+    long_ago = _income(UM, 7, "COMMISSION", "-0.1", symbol="OLDSTB", time=clock.ms - 100 * DAY_MS)
+    await ingest(session, connection.id, UM, [long_ago])
 
     after = await run_binance_sync(session, connection.id, fake.handler)
 
     assert after.status == "healthy", after.last_error
     assert {s.params["symbol"] for s in fake.calls("um-trades")} == {"AAASTB"}
+    assert "um-trades:OLDSTB" not in after.config[CURSORS_KEY]
     assert {s.params["symbol"] for s in fake.calls("cm-trades")} == {"BBBUSD_PERP"}
     for label in FUTURES_TRADES:
         for seen in fake.calls(label):
@@ -525,3 +568,36 @@ async def test_each_futures_host_is_asked_its_limits_first(
     )
     # The futures wallets are there and empty, as the probe's were: no account is made.
     assert not [n for n, *_ in await _snapshots(session, after.id) if "Futures" in n]
+
+
+@pytest.mark.parametrize("failure", ["shape", "error"])
+@pytest.mark.parametrize(
+    ("label", "host"), [("um-exchange-info", "fapi"), ("cm-exchange-info", "dapi")]
+)
+async def test_a_futures_limits_read_that_fails_never_stops_the_sync(
+    session, run, fake: FakeBinance, connector, clock: Clock, label: str, host: str, failure: str
+) -> None:
+    if failure == "shape":
+        # COIN-M's page gives `exchangeFilters` as strings in its schema and `[[]]` in its
+        # example: an answer the catalogue cannot type.
+        fake.set_envelope(label, exchangeFilters=[[]])
+    else:
+        fake.fail(label, status=500)
+    connection = await binance_connection(run, config=later_config())
+
+    after = await run_binance_sync(session, connection.id, fake.handler)
+
+    assert after.status == "healthy", after.last_error
+    assert [f for f in after.config["flags"] if label in f] == [limits_unread_flag(label)]
+    assert await typed(session, f"binance_{label.replace('-', '_')}", after.id) == []
+    other = next(info for info in FUTURES_INFO if info != label)
+    assert len(await typed(session, f"binance_{other.replace('-', '_')}", after.id)) == 1
+    # The host keeps the assumed limit; the other takes its own.
+    flags: list[str] = []
+    async with fake.http() as http:
+        client = client_for(clock, http)
+        await client.sync_clock()
+        await read_limits(client, flag=flags.append)
+    assert flags == [limits_unread_flag(label)]
+    other_host = "dapi" if host == "fapi" else "fapi"
+    assert (client.caps[host], client.caps[other_host]) == (600, 2400)

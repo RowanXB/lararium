@@ -75,7 +75,10 @@ from lararium.modules.finance.binance.balances import (
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.client import (
     MAX_RETRIES,
+    BinanceBanned,
     BinanceClient,
+    BinanceError,
+    BinanceKeyRejected,
     BinanceNotPresent,
     Clock,
     Ed25519Signer,
@@ -112,7 +115,7 @@ from lararium.modules.finance.binance.instruments import assets_seen as seen
 from lararium.modules.finance.binance.normalize import NORMALIZED_THROUGH_KEY, Run, normalize
 from lararium.modules.finance.binance.notices import tell
 from lararium.modules.finance.binance.opening import set_openings
-from lararium.modules.finance.binance.parse import ApiValue, as_api, parse
+from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, as_api, parse
 from lararium.modules.finance.binance.prices import refresh_ids_quietly, update_prices
 from lararium.modules.finance.binance.reconcile import (
     Difference,
@@ -423,8 +426,11 @@ class BinanceConnector:
         uid = uid_of(account)
         if uid is None or uid != str(connection.config.get("uid")):
             raise DisplayableError("Binance answered for another account than this connection's")
+        # The wallet checks' flags and the limits reads', published with the records' (one line,
+        # Decision 15).
+        flags: list[str] = []
         # Before any other request to a futures host: its own limits (plan Decision 4).
-        limits = await read_limits(client)
+        limits = await read_limits(client, flag=flags.append)
         reads = {GATE_LABEL: gate, ACCOUNT_LABEL: account, **await self._read_balances(ctx, client)}
         # Before any asset is met: an instrument first needed can then be matched by its
         # CoinGecko id (design 5.5). A failure is logged and the sync goes on.
@@ -452,8 +458,6 @@ class BinanceConnector:
 
         traded = [await _traded(ctx, trade, first) for trade in trades]
         settled = await settle_reads(ctx, client, reads, trades=traded)
-        # The wallet checks' flags, published with the records' (one line, Decision 15).
-        flags: list[str] = []
         await _report(ctx, reference, settled, first=first, flag=flags.append)
         touched = set((await normalize(ctx, flags=flags, reads=settled, daily=first)).touched)
         touched |= await opening(ctx)
@@ -490,15 +494,26 @@ class BinanceConnector:
         return reads
 
 
-async def read_limits(client: BinanceClient) -> dict[str, Read]:
+def limits_unread_flag(label: str) -> str:
+    return f"{label} could not be read: its host's request limit stays at the assumed 600 a minute"
+
+
+async def read_limits(client: BinanceClient, *, flag: Callable[[str], None]) -> dict[str, Read]:
     """Each futures host's exchange information, and its request weight per minute taken from
-    it (`BinanceClient.read_limits`); the reads, stored with the reference reports. A host that
-    does not serve it (a "not present" answer) keeps the assumed limit."""
+    it (`BinanceClient.read_limits`); the reads, stored with the reference reports.
+
+    A read used only for a limit that has a safe default never stops the sync: one that cannot
+    be fetched (any Binance error but a ban or a rejected key, which stop every request) or
+    typed (`BinanceDataError`: an answer whose shape the catalogue refuses) leaves that host at
+    the assumed limit, is flagged by its label (never a value), and nothing of it is stored."""
     reads: dict[str, Read] = {}
     for label in FUTURES_INFO:
         try:
             read = (await read_balances(client, [label]))[label]
-        except BinanceNotPresent:
+        except (BinanceBanned, BinanceKeyRejected):
+            raise
+        except (BinanceError, BinanceDataError):
+            flag(limits_unread_flag(label))
             continue
         client.read_limits(ENDPOINTS[label], as_api(read.body))
         reads[label] = read

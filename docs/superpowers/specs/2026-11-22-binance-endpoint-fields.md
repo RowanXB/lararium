@@ -1838,7 +1838,7 @@ Id: `id` (per symbol; the schema's description says "positionId", it is the trad
 ### `um-exchange-info` (not probed) — GET /fapi/v1/exchangeInfo
 Host fapi.binance.com · weight 1 (IP, fapi pool) · unsigned · doc `core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data#exchange-information` (read 2026-11-27)
 Request: none. Id: `symbols[].symbol`. Time: none (`serverTime`: "please ignore"). Seen: not probed.
-M7 reads it at the start of each sync for its `rateLimits` (the `REQUEST_WEIGHT` per minute that the fapi pool's limiter keeps under, plan Decision 4) and stores the symbol list; the rest is stored as reference data.
+M7 reads it at the start of each sync for its `rateLimits` (the `REQUEST_WEIGHT` per minute that the fapi pool's limiter keeps under, plan Decision 4) and stores the symbol list; the rest is stored as reference data. A read that cannot be fetched or typed never stops a sync: the host keeps 600 a minute and the label is flagged.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1876,13 +1876,13 @@ M7 reads it at the start of each sync for its `rateLimits` (the `REQUEST_WEIGHT`
 ### `cm-exchange-info` (not probed) — GET /dapi/v1/exchangeInfo
 Host dapi.binance.com · weight 1 (IP, dapi pool) · unsigned · doc `core-trading-derivatives-trading-coin-m-futures/api/rest-api/market-data#exchange-information` (read 2026-11-27)
 Request: none. Id: `symbols[].symbol`. Time: none (`serverTime`: "Ignore please"). Seen: not probed.
-Read as `um-exchange-info` is, for the dapi pool's limit.
+Read as `um-exchange-info` is, for the dapi pool's limit. A read that cannot be fetched or typed never stops a sync: the host keeps 600 a minute and the label is flagged.
 
 | Field | Type | Meaning |
 |---|---|---|
 | timezone | string | "UTC" |
 | serverTime | integer | epoch ms; "Ignore please", use `/dapi/v1/time` |
-| exchangeFilters[] | string | exchange filters (documented as strings; the example shows empty arrays) |
+| exchangeFilters[] | string | exchange filters. **Docs disagree with themselves**: the schema says `string[]`, the page's own example is `[ [] ]` (an array of empty arrays). Catalogued as the schema says; an answer that is not strings is flagged and the read skipped (the limit stays 600), so the first real answer settles the type. |
 | rateLimits[] | array | one object per limit |
 | rateLimits[].rateLimitType | string | example REQUEST_WEIGHT (enum not listed) |
 | rateLimits[].interval | string | example MINUTE (enum not listed) |
@@ -1900,7 +1900,7 @@ Read as `um-exchange-info` is, for the dapi pool's limit.
 | symbols[].triggerProtect | decimal string | threshold for algo orders with "priceProtect" |
 | symbols[].maintMarginPercent, requiredMarginPercent | decimal string | "ignore" |
 | symbols[].underlyingType | string | e.g. COIN |
-| symbols[].underlyingSubType[] | string | documented as strings; the example shows empty arrays |
+| symbols[].underlyingSubType[] | string | underlying sub-types. **Docs disagree with themselves**: the schema says `string[]`, the example is `[ [] ]`. Catalogued as the schema says, settled by the first real answer as `exchangeFilters` is. |
 | symbols[].filters[] | array | oneOf by `filterType`; fields vary by kind |
 | symbols[].filters[].filterType | string | filter kind |
 | symbols[].orderTypes[] | string | order types |
