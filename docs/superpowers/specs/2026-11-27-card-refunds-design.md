@@ -95,7 +95,7 @@ A profile the owner defines starts with none, except an OFX one (`POS`).
 
 ### 4.3 A Monzo authorisation and its reversal
 
-**Typed fields.** The Monzo normalizer stores two metadata fields it now leaves in the raw records: `mastercard_lifecycle_id` and `is_reversal`, as typed columns of the transaction (names left to the builder, §8). The match needs the lifecycle id of a transaction posted in an earlier sync.
+**Typed fields.** The Monzo normalizer stores two metadata fields it now leaves in the raw records: `mastercard_lifecycle_id` and `is_reversal`, as typed columns of the transaction (names left to the builder, §8), as every field a source returns is stored typed.
 
 **The pair.** A Monzo transaction R is the reversal of an authorisation A when:
 
@@ -109,7 +109,7 @@ Of several such authorisations, R cancels the latest. A shared lifecycle id is n
 
 Booked, not a new status (owner, 2026-11-27): a status says whether the bank may still change the record, and a reversed authorisation is closed. That it was cancelled is the link's to say, as for eToro's cancelled withdrawal; a second record of it in the status could disagree with the link.
 
-**Arrival order.** A run that posts R re-posts A from its stored record, so an authorisation posted pending against Unassigned by an earlier sync moves to In transit and booked. A run that posts A asks whether a live R names it. Until R arrives, A is pending and the sync keeps fetching from it (`oldest_pending`), so R normally arrives in a run that also fetches A. The match reads the ledger, by lifecycle id, so it holds when R comes later than that.
+**Arrival order.** A run that posts R re-posts A from its stored record, so an authorisation posted pending against Unassigned by an earlier sync moves to In transit and booked. A run that posts A asks whether a live R names it. Until R arrives, A is pending and the sync keeps fetching from it (`oldest_pending`), so R normally arrives in a run that also fetches A. The match reads the latest stored copy of every Monzo transaction the connection fetched (the copies the replay reads), not only this sync's, so it holds when R comes later than that.
 
 **Dissolving.** When R is voided (Monzo returns it declined or zero) the pair dissolves: A is posted again as its record says, pending against Unassigned. The eToro rule is the same: a pair with a void side is no pair.
 
