@@ -10,6 +10,7 @@ import pytest
 from lararium.core.errors import DisplayableError
 from lararium.modules.finance.bitcoin.client import EsploraClient
 from lararium.modules.finance.bitcoin.parse import (
+    MAX_SATOSHIS,
     MalformedResponse,
     parse_stats,
     parse_txs,
@@ -145,6 +146,39 @@ async def test_negative_amount_is_malformed() -> None:
     bad["vout"][0]["value"] = -1
     with pytest.raises(MalformedResponse):
         await Env(ok([bad])).client().txs(fx.RECEIVING_0)
+
+
+def _tx_with(field: str, value: int) -> dict[str, Any]:
+    built = fx.tx()
+    if field == "vout[].value":
+        built["vout"][0]["value"] = value
+    elif field == "vin[].prevout.value":
+        built["vin"][0]["prevout"]["value"] = value
+    else:
+        built["fee"] = value
+    return built
+
+
+@pytest.mark.parametrize("field", ["vout[].value", "vin[].prevout.value", "fee"])
+async def test_amount_above_the_total_supply_is_malformed(field: str) -> None:
+    with pytest.raises(MalformedResponse) as caught:
+        await Env(ok([_tx_with(field, MAX_SATOSHIS + 1)])).client().txs(fx.RECEIVING_0)
+    assert str(caught.value) == f"The Esplora txs response is malformed at {field}"
+    (parsed,), _ = await Env(ok([_tx_with(field, MAX_SATOSHIS)])).client().txs(fx.RECEIVING_0)
+    prevout = parsed.vin[0].prevout
+    assert prevout is not None
+    read = {"vout[].value": parsed.vout[0].value, "vin[].prevout.value": prevout.value}
+    assert read.get(field, parsed.fee) == MAX_SATOSHIS
+
+
+@pytest.mark.parametrize("field", ["funded_txo_sum", "spent_txo_sum"])
+async def test_stats_sum_above_the_total_supply_is_malformed(field: str) -> None:
+    client = Env(ok(fx.stats(**{field: MAX_SATOSHIS + 1}))).client()
+    with pytest.raises(MalformedResponse) as caught:
+        await client.stats(fx.RECEIVING_0)
+    assert str(caught.value) == f"The Esplora address response is malformed at chain_stats.{field}"
+    stats, _ = await Env(ok(fx.stats(**{field: MAX_SATOSHIS}))).client().stats(fx.RECEIVING_0)
+    assert getattr(stats.chain, field) == MAX_SATOSHIS
 
 
 @pytest.mark.parametrize("raw", ["null", "[]", '"x"', "{}", '{"chain_stats": 1}'])

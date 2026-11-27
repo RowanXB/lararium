@@ -18,6 +18,11 @@ from decimal import Decimal
 from lararium.core.errors import DisplayableError
 from lararium.modules.finance.readonly_http import JSONValue
 
+# Every bitcoin there will ever be, in satoshis: no amount can be more, and a larger one would
+# overflow the typed tables' bigint columns.
+MAX_SATOSHIS = 2_100_000_000_000_000
+# The stats fields that are amounts (the others are counts).
+_TXO_SUMS = frozenset({"funded_txo_sum", "spent_txo_sum"})
 _TXO_STATS = (
     "tx_count",
     "funded_txo_count",
@@ -149,6 +154,13 @@ class _Reader:
     def integer(self, key: str, *, minimum: int | None = 0) -> int:
         return as_int(self._field(key), self._endpoint, f"{self._path}{key}", minimum)
 
+    def amount(self, key: str) -> int:
+        """An amount in satoshis: a whole number from 0 to `MAX_SATOSHIS`."""
+        found = self.integer(key)
+        if found > MAX_SATOSHIS:
+            raise self.bad(key)
+        return found
+
     def optional_integer(self, key: str) -> int | None:
         return self.integer(key) if self.has(key) else None
 
@@ -190,7 +202,9 @@ def as_int(value: JSONValue, endpoint: str, field: str, minimum: int | None = 0)
 
 def _txo_stats(parent: _Reader, key: str) -> TxoStats:
     reader = parent.child(key)
-    return TxoStats(*(reader.integer(name) for name in _TXO_STATS))
+    return TxoStats(
+        *(reader.amount(name) if name in _TXO_SUMS else reader.integer(name) for name in _TXO_STATS)
+    )
 
 
 def parse_stats(body: JSONValue) -> AddressStats:
@@ -231,7 +245,7 @@ def _prevout(reader: _Reader) -> Prevout:
         reader.string("scriptpubkey_asm"),
         reader.string("scriptpubkey_type"),
         reader.optional_string("scriptpubkey_address"),
-        reader.integer("value"),
+        reader.amount("value"),
     )
 
 
@@ -276,7 +290,7 @@ def _tx(value: JSONValue, endpoint: str, path: str) -> Tx:
         reader.integer("size"),
         reader.integer("weight"),
         reader.optional_integer("sigops"),
-        reader.integer("fee"),
+        reader.amount("fee"),
         vin,
         vout,
         _status(reader.child("status")),
