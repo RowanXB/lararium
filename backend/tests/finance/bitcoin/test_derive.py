@@ -23,6 +23,15 @@ _ZPUB_AS_XPUB = (
 )
 _BIP84_RECEIVING_0 = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 _BIP84_CHANGE_0 = "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el"
+# Keys from Electrum's test_electrum_multisig_seed_standard and test_electrum_seed_2fa_segwit.
+_MULTISIG_KEY = (
+    "xpub661MyMwAqRbcGNEPu3aJQqXTydqR9t49Tkwb4Esrj112kw8xLthv8uybxvaki4Ygt9xiwZUQGeFTG7T2TUzR3eA4"
+    "Zp3aq5RXsABHFBUrq4c"
+)
+_TWO_FACTOR_KEY = (
+    "Zpub6yzmSw6Fh7zdkoe7x9wEZQkLgpzVpsdB36vV68b5L3Zx7vkrJuKYyPReXMSjBegmtUjFBxP2uZEdL87cYvtTtGaV"
+    "uwtRRCTSFUsoAdKZMge"
+)
 
 
 def _electrum(kind: str, *keys: str, threshold: int | None = None) -> WalletInput:
@@ -280,11 +289,56 @@ def test_gap_override_is_applied() -> None:
         pytest.param(f"wpkh({_ZPUB}/<0;1;2>/*)", id="three-branches"),
         pytest.param(f"wsh(pk({_ZPUB}/<0;1>/*))", id="not-multisig"),
         pytest.param(f"wpkh({_ZPUB}/0'/*)", id="hardened"),
+        pytest.param(f"wpkh({_ZPUB}//<0;1>/*)", id="empty-step"),
+        pytest.param(f"wpkh({_ZPUB}/<;1>/*)", id="empty-branch"),
     ],
 )
 def test_unsupported_descriptor_is_refused(descriptor: str) -> None:
     with pytest.raises(WalletInputError):
         build_wallet(_descriptors(descriptor))
+
+
+def test_old_key_off_the_curve_is_refused() -> None:
+    with pytest.raises(WalletInputError) as caught:
+        build_wallet(_electrum("old", "1" * 128))
+    assert str(caught.value) == "An old Electrum master public key could not be read."
+
+
+@pytest.mark.parametrize(
+    ("kind", "count"),
+    [("single", 1), ("multisig", 2), ("2fa", 2)],
+)
+def test_unreadable_electrum_key_is_refused(kind: str, count: int) -> None:
+    # A well-shaped zpub, xpub or Zpub whose base58 checksum is broken.
+    keys = {"single": _ZPUB, "multisig": _MULTISIG_KEY, "2fa": _TWO_FACTOR_KEY}
+    broken = keys[kind][:-1] + ("t" if keys[kind][-1] != "t" else "u")
+    spec = _electrum(kind, broken, *[keys[kind]] * (count - 1), threshold=1 if count > 1 else None)
+    with pytest.raises(WalletInputError) as caught:
+        build_wallet(spec)
+    assert str(caught.value) == "The master public key could not be read."
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param(WalletInput("electrum", "single", (_ZPUB,)), id="descriptor"),
+        pytest.param(
+            WalletInput(
+                "electrum",
+                "old",
+                (
+                    "e9d4b7866dd1e91c862aebf62a49548c7dbf7bcc6e4b7b8c9da820c7737968df9c09d5a3e271dc814a29981f81b3faaf2737b551ef5dcc6189cf0f8252c442b3",
+                ),
+            ),
+            id="old",
+        ),
+        pytest.param(WalletInput("addresses", addresses=(_BIP84_RECEIVING_0,)), id="list"),
+    ],
+)
+def test_negative_index_is_a_programming_error(spec: WalletInput) -> None:
+    wallet = build_wallet(parse_input(spec))
+    with pytest.raises(ValueError, match="never negative"):
+        wallet.address(wallet.sources[0].name, 0, -1)
 
 
 @pytest.mark.parametrize(

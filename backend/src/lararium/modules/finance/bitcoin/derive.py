@@ -68,6 +68,8 @@ class Wallet(Protocol):
 
 
 _UNREADABLE = "The descriptor could not be read."
+_KEY_UNREADABLE = "The master public key could not be read."
+_OLD_KEY_UNREADABLE = "An old Electrum master public key could not be read."
 _NO_BRANCH = "A gap limit names a branch the wallet does not have."
 _ELECTRUM_GAPS: dict[Branch, int] = {0: 20, 1: 10}
 _DESCRIPTOR_GAPS: dict[Branch, int] = {0: 20, 1: 20}
@@ -104,7 +106,9 @@ def _sha256_hex(parts: Sequence[str]) -> str:
 def _parse(text: str) -> Any:
     try:
         return _Descriptor.from_string(text)
-    except (EmbitError, ValueError, AssertionError):
+    # embit fails in many ways on malformed text (IndexError among them); every one of
+    # them means the same to the owner.
+    except Exception:
         raise WalletInputError(_UNREADABLE) from None
 
 
@@ -166,7 +170,13 @@ def _merge_split(bodies: list[str]) -> list[str]:
     return merged
 
 
-def _position(sources: tuple[Source, ...], name: str, branch: Branch) -> int:
+def _check_index(index: int) -> None:
+    if index < 0:
+        raise ValueError("An address index is never negative.")
+
+
+def _position(sources: tuple[Source, ...], name: str, branch: Branch, index: int) -> int:
+    _check_index(index)
     for position, source in enumerate(sources):
         if source.name == name and branch in source.gaps:
             return position
@@ -193,7 +203,7 @@ class _Derived:
     parsed: tuple[Any, ...]
 
     def address(self, source: str, branch: Branch, index: int) -> tuple[str, str]:
-        parsed = self.parsed[_position(self.sources, source, branch)]
+        parsed = self.parsed[_position(self.sources, source, branch, index)]
         branch_index = branch if parsed.num_branches == 2 else None
         address: str = parsed.derive(index, branch_index=branch_index).address()
         return address, _SHAPES[_shape(parsed)][1]
@@ -212,7 +222,7 @@ class _OldElectrum:
     descriptors: tuple[str, ...] = ()
 
     def address(self, source: str, branch: Branch, index: int) -> tuple[str, str]:
-        _position(self.sources, source, branch)
+        _position(self.sources, source, branch, index)
         # Electrum 4.8.4 electrum/keystore.py `Old_KeyStore.get_pubkey_from_mpk`.
         tweak = hashlib.sha256(
             hashlib.sha256(f"{index}:{branch}:".encode() + self.mpk).digest()
@@ -238,6 +248,7 @@ class _Listed:
     def address(self, source: str, branch: Branch, index: int) -> tuple[str, str]:
         if source != "list" or branch != 0:
             raise ValueError("An address list has only the source 'list', branch 0.")
+        _check_index(index)
         address = self.addresses[index]
         kind: str = _script.address_to_scriptpubkey(address).script_type()
         return address, kind
@@ -274,13 +285,25 @@ def _trustedcoin_key(key1: str, key2: str) -> str:
     return child
 
 
+def _check_readable(keys: Sequence[str]) -> None:
+    for key in keys:
+        try:
+            _HDKey.from_base58(key)
+        except Exception:  # embit is untyped and fails in many ways
+            raise WalletInputError(_KEY_UNREADABLE) from None
+
+
 def _electrum_wallet(spec: WalletInput, gaps: Gaps | None) -> Wallet:
     keys = spec.keys
     prefix = keys[0][:4]
     if spec.electrum_type == "old":
-        return _OldElectrum(
-            _sources([_ELECTRUM_GAPS], gaps), _sha256_hex(keys), bytes.fromhex(keys[0])
-        )
+        mpk = bytes.fromhex(keys[0])
+        try:
+            _secp.ec_pubkey_parse(b"\x04" + mpk)
+        except Exception:  # not a point on the curve
+            raise WalletInputError(_OLD_KEY_UNREADABLE) from None
+        return _OldElectrum(_sources([_ELECTRUM_GAPS], gaps), _sha256_hex(keys), mpk)
+    _check_readable(keys)
     if spec.electrum_type == "single":
         wrapper = _ELECTRUM_SINGLE.get(prefix)
         if wrapper is None:
