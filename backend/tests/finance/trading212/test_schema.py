@@ -262,6 +262,8 @@ async def test_export_table_has_every_known_column(session) -> None:
         assert kind == _DATA_TYPES[EXPORT_KINDS[header]], header
         assert nullable == (header not in EXPORT_REQUIRED), header
     assert found[NOTES_TRANSACTION_ID] == ("text", True)
+    assert found["notes_sort_code"] == ("text", True)
+    assert found["notes_account_number"] == ("text", True)
     assert found["transaction_id"] == ("uuid", True)
     assert EXPORT_COLUMNS["Time (UTC)"] == "time_utc"
     assert EXPORT_COLUMNS["Currency (Total)"] == "currency_total"

@@ -11,10 +11,12 @@ What a History CSV's Notes say of a row (account family identifier design §5.9,
 decision 2026-11-27), typed: `import_rows.family_move` (true: a move within the account's
 family; false: a movement outside it; NULL: the profile says nothing), and
 `transactions.outside_family` (the source says the money went outside the family, so the
-record is never a family move's counterpart).
+record is never a family move's counterpart). A Trading 212 export row also types the bank
+account its Notes name as sent to: `trading212_export_rows.notes_sort_code` and
+`notes_account_number` (digits only).
 
 Downgrading clears `counterparty_identifier_id` on the transactions naming such a row,
-deletes the rows, restores the kind CHECK as 0041 left it and drops the two columns.
+deletes the rows, restores the kind CHECK as 0041 left it and drops the four columns.
 
 Revision ID: 0046
 Revises: 0045
@@ -52,6 +54,8 @@ UPGRADE = [
     """,
     "ALTER TABLE finance.transactions ADD COLUMN outside_family boolean NOT NULL DEFAULT false",
     "ALTER TABLE finance.import_rows ADD COLUMN family_move boolean",
+    "ALTER TABLE finance.trading212_export_rows ADD COLUMN notes_sort_code text,"
+    " ADD COLUMN notes_account_number text",
 ]
 
 DOWNGRADE = [
@@ -64,6 +68,8 @@ DOWNGRADE = [
       DROP CONSTRAINT account_identifiers_account_family_check
     """,
     _kind_check(""),
+    "ALTER TABLE finance.trading212_export_rows DROP COLUMN notes_sort_code,"
+    " DROP COLUMN notes_account_number",
     "ALTER TABLE finance.import_rows DROP COLUMN family_move",
     "ALTER TABLE finance.transactions DROP COLUMN outside_family",
 ]

@@ -3,6 +3,9 @@
 **Optional.** Nothing depends on it: the API alone posts, reconciles and pairs every record,
 and nothing asks for an export. An upload adds what the API lacks: the deposit's card
 "Transaction ID" in `Notes`, and any deposit or withdrawal the API skipped (merge.py).
+A deposit or withdrawal's Notes are also evidence of its kind (design §5.9): empty (a move
+within the Trading 212 family), a transaction ID, or the bank account sent to; Notes of
+another form refuse the file.
 
 The owner downloads it in the app (History → export); Lararium never asks Trading 212 for one
 (`POST /history/exports` is a write). The file is read as UTF-8, with or without a byte-order
@@ -40,6 +43,7 @@ from lararium.modules.finance.trading212.fields import (
     EXPORT_RECORD_TYPE,
     EXPORT_REQUIRED,
 )
+from lararium.modules.finance.trading212.merge import ACTIONS, has_known_notes
 from lararium.modules.finance.trading212.normalize import normalize
 from lararium.modules.finance.trading212.sync import (
     EXPORT,
@@ -164,6 +168,11 @@ def parse_export(body: bytes) -> tuple[tuple[ExportRow, ...], frozenset[str]]:
                     cells[name] = value
                     flagged.add(name)
             _check_row(cells)
+            if cells["Action"].strip() in ACTIONS and not has_known_notes(cells.get("Notes", "")):
+                raise ExportError(
+                    f"line {reader.line_num} of the export: the Notes of a Deposit or Withdrawal"
+                    " must be a transaction ID, a bank account sent to, or empty"
+                )
             key = cells[EXPORT_KEY].strip()
             held = rows.get(key)
             if held is not None and held.cells != cells:

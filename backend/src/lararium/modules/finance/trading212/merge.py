@@ -2,9 +2,9 @@
 (design §5.3a, §5.7, Decision 14).
 
 Both key it `transaction:<reference>`: the export's `ID` is the API's `reference` (as the owner's
-export shows). The
-API's values make the postings and the export only enriches (its typed row links the
-transaction); a deposit or withdrawal only the export has posts from it, under the key the API
+export shows). The API's values make the postings and the export only enriches (its typed
+row links the transaction, and its Notes are evidence of the movement's kind, `evidence`,
+design §5.9); a deposit or withdrawal only the export has posts from it, under the key the API
 would use, so the API's later arrival re-posts it in place only if its values differ. The
 export's sign comes from its `Action`, its amount from `Total`. Another `Action` (a trade, a
 dividend, interest) is stored typed and flagged, and posts nothing: how its rows match the
@@ -35,6 +35,8 @@ from lararium.modules.finance.trading212.fields import (
     EXPORT_KEY,
     EXPORT_RECORD_TYPE,
     EXPORT_TABLE,
+    NOTES_ACCOUNT_NUMBER,
+    NOTES_SORT_CODE,
     NOTES_TRANSACTION_ID,
 )
 from lararium.modules.finance.trading212.state import LONDON, Run, Trading212DataError
@@ -56,6 +58,8 @@ ACTIONS: Mapping[str, tuple[int, str]] = {"Deposit": (1, "DEPOSIT"), "Withdrawal
 # The API's types an export row is compared with.
 COMPARED = frozenset({"DEPOSIT", "WITHDRAW"})
 NOTES_ID = re.compile(r"^Transaction ID: (\S+)$")
+# A withdrawal's Notes name the bank account it was sent to (design §5.9).
+NOTES_SENT = re.compile(r"^Sent to Bank Account (\d{2})-(\d{2})-(\d{2}) / (\d{8})$")
 # An action fit to name in a flag: words, as Trading 212 writes them ("Market buy").
 _ACTION_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 ()/.,'-]{0,59}")
 
@@ -192,6 +196,52 @@ def notes_transaction_id(notes: str) -> str | None:
     return found.group(1) if found else None
 
 
+def notes_bank_account(notes: str) -> tuple[str, str] | None:
+    """(sort code, account number), digits only, of a "Sent to Bank Account" note."""
+    found = NOTES_SENT.match(notes.strip())
+    return ("".join(found.group(1, 2, 3)), found.group(4)) if found else None
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What an export row's Notes say of a deposit or withdrawal (design §5.9): `family`, a
+    move from or to another Trading 212 account (empty Notes); `outside`, money outside the
+    family (a transaction id, or a bank account, whose parts are then given)."""
+
+    family: bool
+    outside: bool
+    sort_code: str | None
+    account_number: str | None
+
+
+# What a row of another form, or of another action, says: nothing.
+NO_EVIDENCE = Evidence(False, False, None, None)
+
+
+def has_known_notes(notes: str) -> bool:
+    """Whether Notes are one of the three forms a deposit or withdrawal prints (§5.9)."""
+    return (
+        not notes.strip()
+        or notes_transaction_id(notes) is not None
+        or notes_bank_account(notes) is not None
+    )
+
+
+def evidence(record: ExportRecord) -> Evidence:
+    """The evidence of the row's Notes. A row of another action, or with Notes of another form
+    (an upload refuses those, export.py), says nothing."""
+    if record.action not in ACTIONS:
+        return NO_EVIDENCE
+    notes = record.cells.get("Notes", "")
+    if not notes.strip():
+        return Evidence(True, False, None, None)
+    if notes_transaction_id(notes) is not None:
+        return Evidence(False, True, None, None)
+    if (account := notes_bank_account(notes)) is not None:
+        return Evidence(False, True, *account)
+    return NO_EVIDENCE
+
+
 async def write(run: Run, record: ExportRecord, transaction_id: UUID | None) -> None:
     """The row typed in finance.trading212_export_rows, linking the transaction it enriches
     or posts (None: neither)."""
@@ -203,7 +253,12 @@ async def write(run: Run, record: ExportRecord, transaction_id: UUID | None) -> 
             labels[column] = f"{EXPORT_RECORD_TYPE} {header}"
     if "Currency (Total)" in record.cells:
         by_column[EXPORT_COLUMNS["Currency (Total)"]] = currency(record)
-    by_column[NOTES_TRANSACTION_ID] = notes_transaction_id(record.cells.get("Notes", ""))
+    notes = record.cells.get("Notes", "")
+    by_column[NOTES_TRANSACTION_ID] = notes_transaction_id(notes)
+    by_column[NOTES_SORT_CODE], by_column[NOTES_ACCOUNT_NUMBER] = notes_bank_account(notes) or (
+        None,
+        None,
+    )
     try:
         values = dict(await typed_values(run.session, EXPORT_TABLE, by_column, labels))
     except TypedValueError as error:

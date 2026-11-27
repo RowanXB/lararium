@@ -1,6 +1,6 @@
 """Migration 0046: the account_family kind, which never has an account, and the typed Notes
-evidence (account family identifier design §5.9): transactions.outside_family and
-import_rows.family_move."""
+evidence (account family identifier design §5.9): transactions.outside_family,
+import_rows.family_move and the Trading 212 export row's sent-to bank account."""
 
 import importlib.util
 from datetime import UTC, datetime
@@ -57,13 +57,15 @@ def _rejected(connection: Connection, statement: str, **params: Any) -> None:
 
 
 def _columns(connection: Connection) -> dict[tuple[str, str], tuple[str, str, str | None]]:
-    """(table, column): (type, nullable, default) of the two Notes columns, where they exist."""
+    """(table, column): (type, nullable, default) of the Notes columns, where they exist."""
     rows = connection.execute(
         text(
             "select table_name, column_name, data_type, is_nullable, column_default"
             " from information_schema.columns where table_schema = 'finance'"
             " and (table_name, column_name) in"
-            " (('transactions', 'outside_family'), ('import_rows', 'family_move'))"
+            " (('transactions', 'outside_family'), ('import_rows', 'family_move'),"
+            " ('trading212_export_rows', 'notes_sort_code'),"
+            " ('trading212_export_rows', 'notes_account_number'))"
         )
     )
     return {(row[0], row[1]): (row[2], row[3], row[4]) for row in rows}
@@ -76,6 +78,8 @@ def test_0046_and_its_downgrade(owner_url: str, migrated: None) -> None:
             assert _columns(connection) == {
                 ("transactions", "outside_family"): ("boolean", "NO", "false"),
                 ("import_rows", "family_move"): ("boolean", "YES", None),
+                ("trading212_export_rows", "notes_sort_code"): ("text", "YES", None),
+                ("trading212_export_rows", "notes_account_number"): ("text", "YES", None),
             }
             account_id = connection.execute(
                 text(

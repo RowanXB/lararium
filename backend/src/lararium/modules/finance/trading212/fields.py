@@ -215,6 +215,9 @@ EXPORT_REQUIRED: tuple[str, ...] = ("Action", "Time (UTC)", "ID", "Total", "Curr
 EXPORT_COLUMNS: Mapping[str, str] = column_map(EXPORT_KINDS)
 # The card's "Transaction ID: <id>" in Notes, typed on its own.
 NOTES_TRANSACTION_ID = "notes_transaction_id"
+# The bank account a withdrawal's Notes say it was sent to, as digits (design §5.9).
+NOTES_SORT_CODE = "notes_sort_code"
+NOTES_ACCOUNT_NUMBER = "notes_account_number"
 
 # Each table's row key, as migrations 0030 and 0034 declare it.
 KEYS: Mapping[str, tuple[str, ...]] = {
