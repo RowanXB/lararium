@@ -100,3 +100,32 @@ def make_balance(**overrides: Any) -> dict[str, Any]:
         "spend_today": -1234,
     }
     return balance | overrides
+
+
+LIFECYCLE_ID = "mclifecycle_TEST1"
+
+
+def make_card_transaction(
+    id: str,
+    amount: int,
+    created: str,
+    *,
+    lifecycle: str = LIFECYCLE_ID,
+    reversal: bool = False,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A Mastercard transaction on a card lifecycle, unsettled unless `settled` is given: an
+    authorisation, or with `reversal` the reversal of one."""
+    metadata: dict[str, Any] = {"mastercard_lifecycle_id": lifecycle}
+    if reversal:
+        metadata["is_reversal"] = "true"
+    card: dict[str, Any] = {
+        "id": id,
+        "amount": amount,
+        "local_amount": amount,
+        "created": created,
+        "settled": "",
+        "scheme": "mastercard",
+        "metadata": metadata,
+    }
+    return make_transaction(**(card | overrides))

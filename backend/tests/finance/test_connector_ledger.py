@@ -450,6 +450,27 @@ async def test_changed_details_update_in_place(session, run, make_account, gbp, 
     )
 
 
+async def test_a_connector_transaction_records_that_it_is_a_refund(
+    session, run, make_account, gbp
+) -> None:
+    conn = await _connection(run)
+    a, b = await make_account(name="A"), await make_account(name="B")
+    refund = TransactionDetails(refund=True)
+    created, _ = await run(
+        upsert_connector_transaction, _tx(conn.id, a, b, gbp, "5.00", details=refund)
+    )
+    assert created.details.refund is True
+    assert (await ledger._load_transaction(session, created.id)).details.refund is True
+
+    updated, outcome = await run(
+        upsert_connector_transaction,
+        _tx(conn.id, a, b, gbp, "5.00", details=TransactionDetails(refund=False)),
+    )
+    assert outcome == "updated"
+    assert updated.details.refund is False
+    assert (await ledger._load_transaction(session, created.id)).details.refund is False
+
+
 async def test_same_details_are_unchanged(session, run, make_account, gbp, usd) -> None:
     conn = await _connection(run)
     a, b = await make_account(name="A"), await make_account(name="B")
