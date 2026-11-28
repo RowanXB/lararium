@@ -293,9 +293,20 @@ def test_normalize_ibkr_account_rejects_anything_else(bad) -> None:
         ("  0xAbCd" + "0" * 36 + " ", "0xabcd" + "0" * 36),
         ("0X" + "A" * 40, "0x" + "a" * 40),
         ("T" + "Ab1" * 11, "T" + "Ab1" * 11),  # not 0x: the case is kept
+        # Bitcoin's bech32 addresses are case-insensitive (BIP173), stored as wallets show them.
+        (
+            "BC1QAR0SRRR7XFKVY5L643LYDNW9RE59GTZZWF5MDQ",
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        ),
+        (
+            "bC1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        ),
+        # Base58 addresses are case-sensitive: kept.
+        ("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"),
     ],
 )
-def test_chain_address_is_lower_cased_only_when_evm(given, stored) -> None:
+def test_chain_address_is_lower_cased_only_when_evm_or_bech32(given, stored) -> None:
     assert normalize_identifier("chain_address", given) == stored
 
 

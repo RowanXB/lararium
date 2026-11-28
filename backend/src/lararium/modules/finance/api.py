@@ -32,8 +32,10 @@ from lararium.modules.finance import (
     accounts,
     cashflow,
     errors,
+    income,
     instruments,
     ledger,
+    owner_categories,
     pricing,
     snapshots,
     valuation,
@@ -61,6 +63,7 @@ from lararium.modules.finance.schemas import (
     ImportProfileCreate,
     ImportProfileOut,
     ImportRowOut,
+    IncomeOut,
     InstrumentCreate,
     InstrumentOut,
     InstrumentUpdate,
@@ -68,6 +71,7 @@ from lararium.modules.finance.schemas import (
     PriceCreate,
     SnapshotCreate,
     SnapshotOut,
+    TransactionCategoriesUpdate,
     TransactionCreate,
     TransactionOut,
 )
@@ -313,7 +317,8 @@ async def list_accounts(session: SessionDep) -> list[AccountOut]:
 @router.post("/accounts", name="create_account", status_code=status.HTTP_201_CREATED)
 async def create_account(body: AccountCreate, session: SessionDep, actor: ActorDep) -> AccountOut:
     found = None if body.type_key is None else _require_type_shape(body, body.type_key)
-    async with command_context(session, actor, "create_account", _args(body)) as ctx:
+    command = healing_command if account_types.family_of(body.type_key) else command_context
+    async with command(session, actor, "create_account", _args(body)) as ctx:
         institution_id = None
         if found is not None:
             institution_id = await get_or_create_organization(ctx, found.institution)
@@ -345,7 +350,11 @@ async def rename_account(
     # The audit records what was sent, not the fields left out.
     args = _args(account_id=account_id) | body.model_dump(mode="json", exclude_unset=True)
     set_type = "type_key" in body.model_fields_set
-    async with command_context(session, actor, "rename_account", args) as ctx:
+    # Setting the type can move the account into or out of a family, which changes which
+    # accounts the family's records name: heal at once, as a registered identifier does. The
+    # old type is read inside the command, after its lock.
+    command = healing_command if set_type else command_context
+    async with command(session, actor, "rename_account", args) as ctx:
         if set_type:
             account = await accounts.get_account(session, account_id)
             staging.require_importable(account)
@@ -454,6 +463,19 @@ async def void_transaction(
     return TransactionOut.model_validate(record)
 
 
+@router.put(
+    "/transaction-categories",
+    name="set_transaction_categories",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def set_transaction_categories(
+    body: TransactionCategoriesUpdate, session: SessionDep, actor: ActorDep
+) -> None:
+    """Set the owner's category on the transactions, or clear it with null. All or nothing."""
+    async with command_context(session, actor, "set_transaction_categories", _args(body)) as ctx:
+        await owner_categories.set_owner_category(ctx, body.transaction_ids, body.category)
+
+
 # Prices and FX rates
 
 
@@ -538,6 +560,25 @@ async def get_cash_flow(
     excluded = await accounts.excluded_account_ids(session)
     return CashFlowOut.model_validate(
         await cashflow.cash_flow(session, start, end, bucket, excluded)
+    )
+
+
+@router.get("/income", name="get_income")
+async def get_income(
+    session: SessionDep,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: cashflow.Bucket = "month",
+    account_id: UUID | None = None,
+    category: str | None = None,
+) -> IncomeOut:
+    """What came in by period, category and entry, without the accounts left out of reports;
+    defaults to the 365 days up to and including today. `category` narrows the entries only
+    ("uncategorised" for none)."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    return IncomeOut.model_validate(
+        await income.income_report(session, start, end, bucket, excluded, account_id, category)
     )
 
 

@@ -151,6 +151,7 @@ class Ledger:
 
     async def context(self, sync_id: uuid.UUID | None = None) -> SyncContext:
         return SyncContext(
+            esplora_url="https://esplora.test/api",
             command=CommandContext(self.session, CONNECTOR, uuid.uuid4()),
             connection=await get_connection(self.session, self.connection.id),
             sync_id=sync_id or uuid.uuid4(),
@@ -937,6 +938,52 @@ async def test_card_payment_against_unassigned(session, ledger) -> None:
         (MONEY, "GBP", Decimal("-9.99"), None, None, None, None, False),
         ("Unassigned", "GBP", Decimal("9.99"), None, None, None, None, False),
     ]
+
+
+async def _refund_flag(session, external_id: str) -> bool:
+    return (
+        await session.execute(
+            text("select refund from finance.transactions where external_id = :e"),
+            {"e": external_id},
+        )
+    ).scalar_one()
+
+
+def _card_item(item_id: str, subtype: str, direction: str) -> dict[str, Any]:
+    return cash_item(item_id, "9.99") | {
+        "transactionType": "card",
+        "transactionSubtype": subtype,
+        "direction": direction,
+        "counterparty": {"name": "Synthetic Cafe", "type": "merchant"},
+        "internalTransferTransactionDetails": None,
+        "cardTransactionDetails": {"cardId": "c1", "merchantName": "Synthetic Cafe"},
+    }
+
+
+async def test_a_card_refund_is_marked_a_refund(session, ledger) -> None:
+    refund = _card_item("80000052", "refund", "credit")
+    report = await ledger.normalize(BALANCES, ("cash_transactions", refund))
+    assert await _postings(session, "cash:80000052") == [
+        (MONEY, "GBP", Decimal("9.99"), None, None, None, None, False),
+        ("Unassigned", "GBP", Decimal("-9.99"), None, None, None, None, False),
+    ]
+    assert await _refund_flag(session, "cash:80000052") is True
+    assert report.flagged == set()
+
+
+async def test_a_card_credit_of_another_subtype_is_no_refund_and_is_flagged(
+    session, ledger
+) -> None:
+    credit = _card_item("80000053", "paymentReceived", "credit")
+    report = await ledger.normalize(BALANCES, ("cash_transactions", credit))
+    assert await _refund_flag(session, "cash:80000053") is False
+    assert report.flagged == {"cash_transactions.transactionSubtype=paymentReceived"}
+
+
+async def test_a_card_payment_is_no_refund(session, ledger) -> None:
+    payment = _card_item("80000054", "cardPayment", "debit")
+    await ledger.normalize(BALANCES, ("cash_transactions", payment))
+    assert await _refund_flag(session, "cash:80000054") is False
 
 
 # Balance history and the eToro Money opening (design §5.5, §5.8) ------------------------------

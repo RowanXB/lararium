@@ -5,6 +5,13 @@ voids them (Decision 7). Both re-align the account's opening adjustments (Decisi
 both go through M4's transfer matching (its design §5.8): a row's contra comes from
 transfer_contra, its counterparty fields are the transaction's, and heal_transfers pairs
 what the commit or the rollback changed.
+
+A row's file may say whether it moved money within its account's family (family_move,
+account family identifier design §5.9, owner's decision 2026-11-27): a move within it
+posts naming the family's identifier, as a connector's internal move does, so it pairs
+only within the family; one outside it posts with outside_family, so it is never a family
+move's counterpart, however close in time to one, and pairs with its payment as any
+deposit does.
 """
 
 from decimal import MAX_PREC, Decimal, localcontext
@@ -16,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
+from lararium.modules.finance.account_types import family_of
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.errors import (
     FinanceValidationError,
@@ -26,10 +34,12 @@ from lararium.modules.finance.errors import (
 )
 from lararium.modules.finance.identifiers import (
     ensure_identifier,
+    family_identifier,
     get_or_create_identifier,
     normalize_identifier,
 )
-from lararium.modules.finance.importing.profiles import is_bank_transfer
+from lararium.modules.finance.importing.income_kinds import refresh_income_kinds
+from lararium.modules.finance.importing.profiles import is_bank_transfer, is_card_payment
 from lararium.modules.finance.importing.staging import (
     BatchStatus,
     ImportBatchRecord,
@@ -44,6 +54,7 @@ from lararium.modules.finance.importing.staging import (
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     post_transaction,
     void_transaction,
@@ -124,13 +135,18 @@ async def _check_openings(session: AsyncSession, batch_id: UUID) -> None:
         raise ImportBatchStaleError(STALE)
 
 
-async def _card_types(session: AsyncSession, batch_id: UUID) -> list[str]:
-    """The batch's profile's card types (as it was at staging), for is_bank_transfer."""
+async def _profile_codes(session: AsyncSession, batch_id: UUID) -> tuple[list[str], list[str]]:
+    """The batch's profile's card types and card payment types (as it was at staging), for
+    is_bank_transfer and is_card_payment."""
     b = models.ImportBatch
     config = await session.scalar(select(b.profile_config).where(b.id == batch_id))
     assert config is not None
-    found = config.get("card_types", [])
-    return [str(code) for code in found] if isinstance(found, list) else []
+
+    def codes(key: str) -> list[str]:
+        found = config.get(key, [])
+        return [str(code) for code in found] if isinstance(found, list) else []
+
+    return codes("card_types"), codes("card_payment_types")
 
 
 async def _own_account(session: AsyncSession, batch_id: UUID) -> str | None:
@@ -179,13 +195,19 @@ async def _unregister_own_account(ctx: CommandContext, batch_id: UUID, account_i
 
 
 async def _counterparty(
-    ctx: CommandContext, row: models.ImportRow, card_types: list[str]
+    ctx: CommandContext, row: models.ImportRow, card_types: list[str], family: str | None
 ) -> CounterpartyFields:
     """The transaction's counterparty fields from the row's typed ones (M4, design §5.4):
     the other side's UK bank account through the registry, its name, the payment
-    reference, and whether the bank marks the row a bank transfer."""
+    reference, and whether the bank marks the row a bank transfer. A row its file says
+    moved money within the account's family names the family (`family`, the account's
+    type's) instead; one outside it is marked so (account family identifier design §5.9)."""
     identifier_id: UUID | None = None
-    if row.counterparty_sort_code is not None and row.counterparty_account_number is not None:
+    if row.family_move:
+        if family is None:  # staging refused it: the account's type changed since
+            raise ImportBatchStaleError(STALE)
+        identifier_id = await family_identifier(ctx, family)
+    elif row.counterparty_sort_code is not None and row.counterparty_account_number is not None:
         try:
             identifier_id = await get_or_create_identifier(
                 ctx,
@@ -200,6 +222,7 @@ async def _counterparty(
         reference=row.payment_reference,
         bank_transfer=not row.interest
         and is_bank_transfer(card_types, row.bank_type, row.card_number),
+        outside_family=row.family_move is False,
     )
 
 
@@ -239,7 +262,8 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
     await get_or_create_system_account(ctx, "unassigned")
     await get_or_create_system_account(ctx, "in_transit")  # transfer_contra needs both
     await _register_own_account(ctx, batch_id, account_id)
-    card_types = await _card_types(session, batch_id)
+    card_types, card_payment_types = await _profile_codes(session, batch_id)
+    family = family_of(account.type_key)
     opening_id: UUID | None = None
     rows = list(
         await session.scalars(
@@ -257,12 +281,19 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
         # committed row has into duplicates, under the account lock, and a file can't repeat
         # a key. import_rows_committed_once is the database backstop.
         counterparty = CounterpartyFields()
+        details = TransactionDetails()
         if row.kind == "opening_adjustment":
             if opening_id is None:
                 opening_id = await get_or_create_system_account(ctx, "opening_balances")
             postings = _postings(account_id, opening_id, row.instrument_id, row.quantity, row.fee)
         else:
-            counterparty = await _counterparty(ctx, row, card_types)
+            counterparty = await _counterparty(ctx, row, card_types, family)
+            # Money back on a card, as the bank's own type code or the card number says.
+            details = TransactionDetails(
+                refund=row.quantity > 0
+                and not row.interest
+                and is_card_payment(card_payment_types, row.bank_type, row.card_number)
+            )
             contra_id = await transfer_contra(
                 session,
                 source=("import", row.dedupe_key) if row.dedupe_key else None,
@@ -281,6 +312,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
                 description=row.description,
                 postings=postings,
                 counterparty=counterparty,
+                details=details,
             ),
         )
         await session.execute(
@@ -296,6 +328,7 @@ async def commit_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchRecord
         .where(b.id == batch_id)
         .values(status="committed", committed_at=func.clock_timestamp())
     )
+    await refresh_income_kinds(session, batch_id)
     # Pair the new rows with the transfers they are a side of, replacing placeholders, and
     # whatever else the commit changed (M4, design §5.8: the registration, the span).
     await heal_transfers(ctx)
@@ -339,7 +372,8 @@ async def rollback_batch(ctx: CommandContext, batch_id: UUID) -> ImportBatchReco
     await session.execute(
         update(b).where(b.id == batch_id).values(status="rolled_back", rolled_back_at=func.now())
     )
-    # Without this batch, the remaining batches' adjustments follow (Decision 13).
+    # Another batch's event may have been interest only through this batch's duplicate row.
+    await refresh_income_kinds(session, batch_id)
     await _unregister_own_account(ctx, batch_id, account_id)
     await heal_transfers(ctx)
     # Without this batch, the remaining batches' adjustments follow (Decision 13).

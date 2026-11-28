@@ -16,7 +16,7 @@ import {
 import { CashFlowChart } from "../components/charts/CashFlowChart";
 import { NetWorthChart } from "../components/charts/NetWorthChart";
 import { type Share, ShareChart } from "../components/charts/ShareChart";
-import { initialChoice, RangePicker } from "../components/RangePicker";
+import { initialChoice, RangePicker, rangeSearch } from "../components/RangePicker";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
   Table,
@@ -195,14 +195,17 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
     [flow.categories],
   );
   const format = useCallback((value: string) => formatMoney(value, currency), [currency]);
-  // Money moved to hidden accounts is spending too, but no category's.
-  const categorised = sumDecimalStrings(shares.map((share) => share.value));
+  // A category its refunds took below zero has no share of what was spent: shares are of
+  // the categories that spent. Money moved to hidden accounts is spending too, but no
+  // category's.
+  const spent = useMemo(() => shares.filter((share) => !share.value.startsWith("-")), [shares]);
+  const categorised = sumDecimalStrings(spent.map((share) => share.value));
   if (shares.length === 0) {
     return <p className="text-sm text-muted-foreground">No spending in these dates</p>;
   }
   return (
     <div className="flex flex-wrap items-start gap-6">
-      <ShareChart shares={shares} format={format} label="Spending by category" />
+      <ShareChart shares={spent} format={format} label="Spending by category" />
       <ul className="max-h-64 min-w-48 flex-1 space-y-2 overflow-y-auto pr-1">
         {shares.map((share) => (
           <li key={share.name} className="flex items-baseline justify-between gap-3 text-sm">
@@ -216,9 +219,11 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
             </span>
             <span className="shrink-0 tabular-nums">
               {format(share.value)}
-              <span className="ml-2 text-muted-foreground">
-                {Math.round(percent(share.value, categorised))}%
-              </span>
+              {!share.value.startsWith("-") && (
+                <span className="ml-2 text-muted-foreground">
+                  {Math.round(percent(share.value, categorised))}%
+                </span>
+              )}
             </span>
           </li>
         ))}
@@ -271,18 +276,14 @@ export function OverviewPage() {
   const hidden = own.filter((a) => a.excluded_from_reports).length;
   const toReview = (transfers.data ?? []).filter(needsAttention).length;
 
-  // What each account is worth on the last day, largest first.
-  const byAccount = useMemo(() => {
-    const rows = groupByAccount((holdings.data ?? []).filter((h) => h.value !== null)).map(
-      (group) => ({
-        id: group[0].account_id,
-        name: group[0].account_name,
-        value: sumDecimalStrings(group.map((h) => h.value as string)),
-      }),
-    );
-    return rows.sort((a, b) => Number(b.value) - Number(a.value));
-  }, [holdings.data]);
-  const largest = byAccount.reduce((max, row) => Math.max(max, Math.abs(Number(row.value))), 0);
+  // Where the income came from: each effective category's income, largest first.
+  const incomeByCategory = useMemo(
+    () =>
+      (flow?.categories ?? [])
+        .filter((c) => Number(c.income) > 0)
+        .sort((a, b) => Number(b.income) - Number(a.income)),
+    [flow],
+  );
 
   if (accounts.isSuccess && own.length === 0) return <Welcome />;
 
@@ -410,24 +411,31 @@ export function OverviewPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Where your money is</CardTitle>
+            <CardTitle>Where it came from</CardTitle>
           </CardHeader>
-          <CardContent>
-            {byAccount.length === 0 || !currency ? (
-              <p className="text-sm text-muted-foreground">Nothing valued on {dayLabel(end)}</p>
+          <CardContent className="space-y-4">
+            {!flow || !currency || incomeByCategory.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No income in these dates</p>
             ) : (
               <ul className="space-y-3">
-                {byAccount.map((row) => (
+                {incomeByCategory.map((c) => (
                   <BarRow
-                    key={row.id}
-                    name={row.name}
-                    amount={formatMoney(row.value, currency)}
-                    share={largest > 0 ? (Math.abs(Number(row.value)) / largest) * 100 : 0}
-                    color={row.value.startsWith("-") ? CHART.spending : CHART.accent}
+                    key={c.category ?? ""}
+                    name={categoryLabel(c.category)}
+                    amount={formatMoney(c.income, currency)}
+                    share={percent(c.income, incomeByCategory[0].income)}
+                    color={CHART.income}
                   />
                 ))}
               </ul>
             )}
+            <Link
+              to="/income"
+              search={rangeSearch(choice)}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              See all income
+            </Link>
           </CardContent>
         </Card>
         <Card>

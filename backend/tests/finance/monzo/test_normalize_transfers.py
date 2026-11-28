@@ -109,6 +109,7 @@ async def sync_monzo(
             await store("transactions_page", {"account_id": monzo_id}, list(page))
         async with httpx.AsyncClient(transport=httpx.MockTransport(_no_http)) as http:
             ctx = SyncContext(
+                esplora_url="https://esplora.test/api",
                 command=command,
                 connection=await get_connection(session, connection.id),
                 sync_id=sync_id,
@@ -223,7 +224,7 @@ async def count_events(session: AsyncSession, event_type: str) -> int:
 
 
 def test_normalizer_version() -> None:
-    assert NORMALIZER_VERSION == "monzo-norm-5"
+    assert NORMALIZER_VERSION == "monzo-norm-6"
 
 
 async def test_faster_payment_to_registered_account(session, run) -> None:

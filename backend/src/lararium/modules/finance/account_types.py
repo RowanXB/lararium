@@ -123,6 +123,7 @@ ACCOUNT_TYPES: tuple[AccountType, ...] = (
         frozenset({"bank_transfer"}),
         "trading212",
     ),
+    AccountType("bitcoin_wallet", "Bitcoin", "wallet", None, Api("bitcoin", {}), ()),
     _statement_type("hsbc_uk", "HSBC UK"),
     _statement_type("lloyds", "Lloyds"),
     _statement_type("boc_uk", "BOC UK"),
@@ -156,6 +157,16 @@ _BY_KEY = {t.key: t for t in ACCOUNT_TYPES}
 
 def account_type(key: str | None) -> AccountType | None:
     return _BY_KEY.get(key) if key is not None else None
+
+
+def families() -> frozenset[str]:
+    """Every family some account type belongs to."""
+    return frozenset(t.family for t in ACCOUNT_TYPES if t.family)
+
+
+def family_of(type_key: str | None) -> str | None:
+    found = account_type(type_key)
+    return None if found is None else found.family
 
 
 def family_keys(family: str) -> frozenset[str]:

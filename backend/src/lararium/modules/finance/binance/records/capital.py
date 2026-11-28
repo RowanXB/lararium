@@ -13,6 +13,8 @@ The chain address on the other side is the counterparty identifier
 the leg.
 """
 
+import re
+from collections.abc import Mapping
 from decimal import Decimal
 from uuid import UUID
 
@@ -31,7 +33,7 @@ from lararium.modules.finance.binance.records import (
 )
 from lararium.modules.finance.errors import FinanceValidationError
 from lararium.modules.finance.identifiers import normalize_identifier
-from lararium.modules.finance.ledger import PostingInput
+from lararium.modules.finance.ledger import ChainFields, PostingInput
 from lararium.modules.finance.transfers import transfer_contra
 
 DEPOSITS = "deposits"
@@ -46,6 +48,10 @@ _APPLIED = frozenset({0, 2, 4, 6})
 _ENDED = frozenset({1, 3, 5})
 # What Binance puts in `txId` for a movement that never went on chain.
 _OFF_CHAIN = ("Off-chain transfer", "Internal transfer")
+# Binance networks whose movements are on-chain Bitcoin transactions (the wallet connector's
+# chain name). BTC on BSC or Lightning is another ledger and never pairs with a wallet.
+CHAINS: Mapping[str, str] = {"BTC": "bitcoin", "SEGWITBTC": "bitcoin"}
+_HASH = re.compile(r"[0-9a-f]{64}")
 
 
 def chain_hash(row: Row) -> str | None:
@@ -55,6 +61,22 @@ def chain_hash(row: Row) -> str | None:
     if tx_id is None or integer(row, "transferType") != 0 or tx_id.startswith(_OFF_CHAIN):
         return None
     return tx_id.lower()
+
+
+def chain_fields(label: str, row: Row) -> ChainFields | None:
+    """The chain, hash and address the transfer engine pairs an on-chain movement with a
+    wallet's on, or None for a network not in `CHAINS` or a hash that is not 64 hex digits
+    (the database requires it). The address is the row's own: a withdrawal's destination, a
+    deposit's Binance address, lower-cased when it is bech32 (`bc1`, case-insensitive), as
+    the Bitcoin wallet stores its own."""
+    found = chain_hash(row)
+    chain = CHAINS.get(text(row, "network") or "")
+    if found is None or chain is None or _HASH.fullmatch(found) is None:
+        return None
+    address = text(row, "address")
+    if address is not None and (address.startswith("0x") or address.lower().startswith("bc1")):
+        address = address.lower()
+    return ChainFields(chain, found, address)
 
 
 async def counterparty_identifier(run: Run, label: str, row: Row) -> UUID | None:
@@ -143,6 +165,7 @@ async def deposit(run: Run, row: Row) -> None:
         counterparty_identifier_id=identifier_id,
         counterparty_name=counterparty_name(row, identifier_id),
         transfer_leg=True,
+        chain=chain_fields(DEPOSITS, row),
     )
     await run.typed(transaction_id=transaction_id)
 
@@ -180,6 +203,7 @@ async def withdrawal(run: Run, row: Row) -> None:
         counterparty_identifier_id=identifier_id,
         counterparty_name=counterparty_name(row, identifier_id),
         transfer_leg=not ended,
+        chain=None if ended else chain_fields(WITHDRAWALS, row),
     )
     await run.typed(transaction_id=transaction_id)
     await post(

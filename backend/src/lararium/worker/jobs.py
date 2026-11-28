@@ -127,6 +127,7 @@ async def run_sync(
                     documents=LocalDocumentStore(settings.document_dir),
                     requested=requested,
                     coingecko_api_key=_coingecko_key(settings),
+                    esplora_url=settings.esplora_url,
                 )
             )
             await record_sync_success(ctx, connection_id, cursor)
@@ -334,6 +335,7 @@ async def run_await_approval(
                     http=http,
                     notifier=notifier,
                     session_factory=session_factory,
+                    esplora_url=settings.esplora_url,
                 )
             )
         except CredentialRejectedError as exc:

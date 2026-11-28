@@ -242,6 +242,13 @@ class PostingCreate(BaseModel):
         return self
 
 
+class TransactionCategoriesUpdate(BaseModel):
+    """Set the owner's category on transactions, or clear it with null."""
+
+    transaction_ids: list[UUID] = Field(min_length=1, max_length=500)
+    category: str | None
+
+
 class TransactionCreate(BaseModel):
     occurred_at: AwareDatetime
     description: str
@@ -272,6 +279,9 @@ class TransactionOut(_Out):
     origin: TransactionOrigin
     postings: list[PostingOut]
     cancels_transaction_id: UUID | None
+    refund: bool
+    card_lifecycle_id: str | None
+    card_reversal: bool | None
 
 
 class PriceCreate(BaseModel):
@@ -368,6 +378,51 @@ class CashFlowOut(_Out):
     payees: list[CashFlowPayeeOut]
     # Also in the totals and periods, apart from categories and payees.
     hidden_accounts: list[CashFlowHiddenAccountOut]
+
+
+class IncomeCategoryOut(_Out):
+    category: str | None  # None: neither the owner nor the source gave one
+    amount: DecimalStr
+
+
+class IncomePeriodOut(_Out):
+    start: date
+    total: DecimalStr
+    by_category: list[IncomeCategoryOut]
+
+
+class IncomeEntryOut(_Out):
+    """The positive flows of one transaction in one instrument, added up."""
+
+    transaction_id: UUID
+    booking_date: date
+    account_id: UUID | None
+    account_name: str | None
+    description: str
+    counterparty_name: str | None
+    quantity: DecimalStr  # in the instrument the source gave
+    instrument: str  # a currency code or an asset's symbol
+    amount: DecimalStr | None  # reporting currency; None without a price or FX rate
+    source_category: str | None
+    income_kind: str | None
+    owner_category: str | None
+    category: str | None  # the effective category
+
+
+class IncomeOut(_Out):
+    """What came in over a range, in the reporting currency."""
+
+    start: date
+    end: date
+    bucket: Bucket
+    total: DecimalStr
+    missing_count: int
+    periods: list[IncomePeriodOut]
+    categories: list[IncomeCategoryOut]
+    entries: list[IncomeEntryOut]
+    known_categories: list[str]
+    # Moved in from hidden accounts: in the Overview's income, not listed here.
+    hidden_moved_in: DecimalStr
 
 
 # Imports
@@ -469,6 +524,9 @@ class ImportRowOut(_Out):
     time_unit: TimeUnit | None
     # The row pays interest, so it is never a bank transfer.
     interest: bool
+    # What the profile's family_notes read of it: a move within its account's family, one
+    # outside it, or None, nothing said (account family identifier design §5.9).
+    family_move: bool | None
     value_date: date | None
     description: str
     payee: str | None
@@ -613,7 +671,8 @@ class TransferOut(BaseModel):
     in_transaction_id: UUID | None
     placeholder_transaction_id: UUID | None
     # A matched pair where neither leg names an own account (a sort code alone, a card
-    # merchant's or a held payee's holders): the Transfers page offers Reject, not Unpair.
+    # merchant's or a held payee's holders) and the two are not one chain transaction's (a
+    # shared tx_hash names both sides): the Transfers page offers Reject, not Unpair.
     weak: bool = False
 
 

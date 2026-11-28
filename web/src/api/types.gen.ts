@@ -378,6 +378,162 @@ export type BinanceDifferenceOut = {
 };
 
 /**
+ * BitcoinBranchesOut
+ */
+export type BitcoinBranchesOut = {
+    /**
+     * Change
+     */
+    change: number;
+    /**
+     * Receiving
+     */
+    receiving: number;
+};
+
+/**
+ * BitcoinGapsUpdate
+ */
+export type BitcoinGapsUpdate = {
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    };
+};
+
+/**
+ * BitcoinPreviewIn
+ *
+ * A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
+ * are secret: a master public key reveals every address the wallet will ever use. Checked in
+ * the route (keys.py), whose messages never repeat the input.
+ */
+export type BitcoinPreviewIn = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<unknown>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<unknown>;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Keys
+     */
+    keys?: Array<unknown>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
+ * BitcoinPreviewOut
+ */
+export type BitcoinPreviewOut = {
+    /**
+     * First Receiving Address
+     */
+    first_receiving_address: string;
+    /**
+     * Script Type
+     */
+    script_type: string;
+};
+
+/**
+ * BitcoinStateOut
+ *
+ * What the connection card shows; never a key, a descriptor or an address.
+ */
+export type BitcoinStateOut = {
+    /**
+     * Electrum Type
+     */
+    electrum_type: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: number;
+        };
+    };
+    /**
+     * Last Check
+     */
+    last_check: string | null;
+    scanned: BitcoinBranchesOut;
+    /**
+     * Server
+     */
+    server: string;
+    /**
+     * Unconfirmed
+     */
+    unconfirmed: number;
+    used: BitcoinBranchesOut;
+};
+
+/**
+ * BitcoinWalletCreate
+ */
+export type BitcoinWalletCreate = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<unknown>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<unknown>;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps?: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    } | null;
+    /**
+     * Keys
+     */
+    keys?: Array<unknown>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
  * Body_stage_import
  */
 export type BodyStageImport = {
@@ -662,11 +818,16 @@ export type CashFlowPeriodOut = {
     start: string;
 };
 
+export type CellPattern = string;
+
+export type CellPatterns = Array<CellPattern>;
+
 /**
  * ConnectionOut
  */
 export type ConnectionOut = {
     binance?: BinanceConnectionState | null;
+    bitcoin?: BitcoinStateOut | null;
     /**
      * Connector
      */
@@ -832,6 +993,7 @@ export type CsvExtract = {
  */
 export type CsvProfileConfig = {
     amount_format?: AmountFormat;
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     columns: CsvColumns;
     /**
@@ -845,6 +1007,7 @@ export type CsvProfileConfig = {
      * Extract
      */
     extract?: Array<CsvExtract>;
+    family_notes?: FamilyNotes | null;
     /**
      * Format
      */
@@ -919,6 +1082,29 @@ export type EtoroUploadOut = {
      * Raw Records
      */
     raw_records: number;
+};
+
+/**
+ * FamilyNotes
+ *
+ * Whether a row moved money within its account's family, as `column` says (account
+ * family identifier design §5.9): for a row whose type (the type column's value) is one
+ * of `types`, a stripped cell matching one of `within` in full is a move within the
+ * family (family_move true), one matching one of `outside` a movement outside it (false),
+ * and any other a row error naming the column and the rule, never the value. Every other
+ * row's family_move is None: the profile says nothing of it.
+ */
+export type FamilyNotes = {
+    /**
+     * Column
+     */
+    column: string;
+    outside: CellPatterns;
+    /**
+     * Types
+     */
+    types: Array<string>;
+    within: CellPatterns;
 };
 
 /**
@@ -1145,7 +1331,7 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address' | 'account_family';
     /**
      * Sort Code
      */
@@ -1399,6 +1585,10 @@ export type ImportRowOut = {
      * External Id
      */
     external_id: string | null;
+    /**
+     * Family Move
+     */
+    family_move: boolean | null;
     /**
      * Fee
      */
@@ -1679,6 +1869,146 @@ export type ImportStatementRateOut = {
 };
 
 /**
+ * IncomeCategoryOut
+ */
+export type IncomeCategoryOut = {
+    /**
+     * Amount
+     */
+    amount: string;
+    /**
+     * Category
+     */
+    category: string | null;
+};
+
+/**
+ * IncomeEntryOut
+ *
+ * The positive flows of one transaction in one instrument, added up.
+ */
+export type IncomeEntryOut = {
+    /**
+     * Account Id
+     */
+    account_id: string | null;
+    /**
+     * Account Name
+     */
+    account_name: string | null;
+    /**
+     * Amount
+     */
+    amount: string | null;
+    /**
+     * Booking Date
+     */
+    booking_date: string;
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Counterparty Name
+     */
+    counterparty_name: string | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Income Kind
+     */
+    income_kind: string | null;
+    /**
+     * Instrument
+     */
+    instrument: string;
+    /**
+     * Owner Category
+     */
+    owner_category: string | null;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Source Category
+     */
+    source_category: string | null;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
+};
+
+/**
+ * IncomeOut
+ *
+ * What came in over a range, in the reporting currency.
+ */
+export type IncomeOut = {
+    /**
+     * Bucket
+     */
+    bucket: 'day' | 'week' | 'month';
+    /**
+     * Categories
+     */
+    categories: Array<IncomeCategoryOut>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Entries
+     */
+    entries: Array<IncomeEntryOut>;
+    /**
+     * Hidden Moved In
+     */
+    hidden_moved_in: string;
+    /**
+     * Known Categories
+     */
+    known_categories: Array<string>;
+    /**
+     * Missing Count
+     */
+    missing_count: number;
+    /**
+     * Periods
+     */
+    periods: Array<IncomePeriodOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
+};
+
+/**
+ * IncomePeriodOut
+ */
+export type IncomePeriodOut = {
+    /**
+     * By Category
+     */
+    by_category: Array<IncomeCategoryOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
+};
+
+/**
  * InstrumentCreate
  */
 export type InstrumentCreate = {
@@ -1715,7 +2045,7 @@ export type InstrumentIdentifierModel = {
     /**
      * Scheme
      */
-    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko' | 'binance_asset';
+    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko' | 'binance_asset' | 'chain_native';
     /**
      * Value
      */
@@ -1820,6 +2150,7 @@ export type NetWorthPointOut = {
  * OfxProfileConfig
  */
 export type OfxProfileConfig = {
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     /**
      * Format
@@ -1879,6 +2210,7 @@ export type Pattern = string;
  * PdfProfileConfig
  */
 export type PdfProfileConfig = {
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     /**
      * Format
@@ -2022,6 +2354,7 @@ export type ProfileConfig = ({
  */
 export type QifProfileConfig = {
     amount_format?: AmountFormat;
+    card_payment_types?: CardTypes;
     card_types?: CardTypes;
     date_format: DateFormat;
     encoding?: Encoding;
@@ -2267,6 +2600,22 @@ export type Trading212UploadOut = {
 };
 
 /**
+ * TransactionCategoriesUpdate
+ *
+ * Set the owner's category on transactions, or clear it with null.
+ */
+export type TransactionCategoriesUpdate = {
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Transaction Ids
+     */
+    transaction_ids: Array<string>;
+};
+
+/**
  * TransactionCreate
  */
 export type TransactionCreate = {
@@ -2301,6 +2650,14 @@ export type TransactionOut = {
      */
     cancels_transaction_id: string | null;
     /**
+     * Card Lifecycle Id
+     */
+    card_lifecycle_id: string | null;
+    /**
+     * Card Reversal
+     */
+    card_reversal: boolean | null;
+    /**
      * Description
      */
     description: string;
@@ -2320,6 +2677,10 @@ export type TransactionOut = {
      * Postings
      */
     postings: Array<PostingOut>;
+    /**
+     * Refund
+     */
+    refund: boolean;
     /**
      * Status
      */
@@ -2502,6 +2863,84 @@ export type BinanceConnectionUpdateWritable = {
 };
 
 /**
+ * BitcoinPreviewIn
+ *
+ * A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
+ * are secret: a master public key reveals every address the wallet will ever use. Checked in
+ * the route (keys.py), whose messages never repeat the input.
+ */
+export type BitcoinPreviewInWritable = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<string>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<string>;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Keys
+     */
+    keys?: Array<string>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
+ * BitcoinWalletCreate
+ */
+export type BitcoinWalletCreateWritable = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<string>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<string>;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps?: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    } | null;
+    /**
+     * Keys
+     */
+    keys?: Array<string>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+export type CellPatternsWritable = Array<CellPattern>;
+
+/**
  * EtoroConnectionIn
  */
 export type EtoroConnectionInWritable = {
@@ -2671,6 +3110,56 @@ export type CreateBinanceConnectionResponses = {
 
 export type CreateBinanceConnectionResponse = CreateBinanceConnectionResponses[keyof CreateBinanceConnectionResponses];
 
+export type CreateBitcoinConnectionData = {
+    body: BitcoinWalletCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/bitcoin';
+};
+
+export type CreateBitcoinConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBitcoinConnectionError = CreateBitcoinConnectionErrors[keyof CreateBitcoinConnectionErrors];
+
+export type CreateBitcoinConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateBitcoinConnectionResponse = CreateBitcoinConnectionResponses[keyof CreateBitcoinConnectionResponses];
+
+export type PreviewBitcoinWalletData = {
+    body: BitcoinPreviewInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/bitcoin/preview';
+};
+
+export type PreviewBitcoinWalletErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PreviewBitcoinWalletError = PreviewBitcoinWalletErrors[keyof PreviewBitcoinWalletErrors];
+
+export type PreviewBitcoinWalletResponses = {
+    /**
+     * Successful Response
+     */
+    200: BitcoinPreviewOut;
+};
+
+export type PreviewBitcoinWalletResponse = PreviewBitcoinWalletResponses[keyof PreviewBitcoinWalletResponses];
+
 export type CreateEtoroConnectionData = {
     body: EtoroConnectionInWritable;
     path?: never;
@@ -2830,6 +3319,36 @@ export type UpdateBinanceConnectionResponses = {
 };
 
 export type UpdateBinanceConnectionResponse = UpdateBinanceConnectionResponses[keyof UpdateBinanceConnectionResponses];
+
+export type UpdateBitcoinGapsData = {
+    body: BitcoinGapsUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/bitcoin/gaps';
+};
+
+export type UpdateBitcoinGapsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBitcoinGapsError = UpdateBitcoinGapsErrors[keyof UpdateBitcoinGapsErrors];
+
+export type UpdateBitcoinGapsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateBitcoinGapsResponse = UpdateBitcoinGapsResponses[keyof UpdateBitcoinGapsResponses];
 
 export type DisableConnectionData = {
     body?: never;
@@ -3877,6 +4396,52 @@ export type RollbackImportResponses = {
 
 export type RollbackImportResponse = RollbackImportResponses[keyof RollbackImportResponses];
 
+export type GetIncomeData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Start
+         */
+        start?: string | null;
+        /**
+         * End
+         */
+        end?: string | null;
+        /**
+         * Bucket
+         */
+        bucket?: 'day' | 'week' | 'month';
+        /**
+         * Account Id
+         */
+        account_id?: string | null;
+        /**
+         * Category
+         */
+        category?: string | null;
+    };
+    url: '/api/v1/finance/income';
+};
+
+export type GetIncomeErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetIncomeError = GetIncomeErrors[keyof GetIncomeErrors];
+
+export type GetIncomeResponses = {
+    /**
+     * Successful Response
+     */
+    200: IncomeOut;
+};
+
+export type GetIncomeResponse = GetIncomeResponses[keyof GetIncomeResponses];
+
 export type ListInstrumentsData = {
     body?: never;
     path?: never;
@@ -4065,6 +4630,31 @@ export type UpdateFinanceSettingsResponses = {
 };
 
 export type UpdateFinanceSettingsResponse = UpdateFinanceSettingsResponses[keyof UpdateFinanceSettingsResponses];
+
+export type SetTransactionCategoriesData = {
+    body: TransactionCategoriesUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/finance/transaction-categories';
+};
+
+export type SetTransactionCategoriesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetTransactionCategoriesError = SetTransactionCategoriesErrors[keyof SetTransactionCategoriesErrors];
+
+export type SetTransactionCategoriesResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SetTransactionCategoriesResponse = SetTransactionCategoriesResponses[keyof SetTransactionCategoriesResponses];
 
 export type PostTransactionData = {
     body: TransactionCreate;

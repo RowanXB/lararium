@@ -3,11 +3,15 @@
 Money comes in or goes out where a transaction posts to an account outside net worth: an
 income, expense or equity account, which is also where a connector puts the unknown side of
 what it reads (Unassigned). A posting there is the mirror of what happened to the owner's
-money, so its negation is the flow: positive is income, negative is spending. A transfer
+money, so its negation is the flow: positive is income, negative is spending, except
+that a positive flow the source marks as a refund (money back for an earlier payment) is
+negative spending, counted in the period it is booked. A transfer
 between own accounts posts to In transit, an asset, and a trade moves value inside one
 account, so neither is a flow. Opening balances are where an account's history starts, not
-income. Only money counts: a security arriving from nowhere (a corporate action, a transfer
-in kind) is not income.
+income. Money counts, and an asset other than money only when the source states its
+transaction is income of a kind (a coin reward, and its reversal), valued at the asset's
+price on its booking day: a security arriving from nowhere (a corporate action, a transfer
+in kind) or a coin spent on a fee is neither income nor spending.
 
 An account left out of reports is treated as if it were someone else's: money moved between
 it and an account still in the reports is a flow, income when it arrives and spending when it
@@ -15,8 +19,10 @@ leaves, so net worth's change and income less spending agree. These moves are co
 totals and periods but kept apart from categories and payees (`hidden_accounts`), as a
 transfer to a hidden pension is saving, not a shop.
 
-A category is whatever text the transaction carries, not one of a fixed list, so categories
-the owner defines or a rule assigns later need no change to what this returns.
+A category is whatever text decides it, not one of a fixed list: the owner's category for the
+whole transaction; else, for income only, the kind of income the source states; else the
+source's own category (income-categories design §4.2). `flows` is the one definition of a
+flow, its category and its value, which every report reads.
 """
 
 from collections import defaultdict
@@ -33,6 +39,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
+from lararium.modules.finance.owner_categories import OWNER_CATEGORY_SQL
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.valuation import require_series_range
 
@@ -72,6 +79,32 @@ class HiddenAccountTotal:
 
 
 @dataclass(frozen=True)
+class Flow:
+    """Income or spending: one posting outside net worth, negated."""
+
+    transaction_id: UUID
+    day: date  # the booking day, on which it is valued
+    # The asset or liability account its transaction posts to (not In transit), first by
+    # position: whose money it is. None when it posts to none (a transfer's settlement).
+    account_id: UUID | None
+    account_name: str | None
+    instrument_id: UUID
+    instrument_code: str
+    quantity: Decimal  # in the instrument; positive is income
+    amount: Decimal | None  # in the reporting currency; None without a price or FX rate
+    category: str | None  # the effective category
+    has_owner_category: bool  # the owner's category decides it, so splits don't apply
+    source_category: str | None
+    income_kind: str | None
+    owner_category: str | None
+    payee: str | None  # the counterparty, else the description
+    description: str
+    counterparty_name: str | None
+    include_in_spending: bool | None
+    refund: bool  # the source marks it money back for an earlier payment: negative spending
+
+
+@dataclass(frozen=True)
 class CashFlow:
     start: date
     end: date
@@ -79,16 +112,27 @@ class CashFlow:
     income: Decimal
     spending: Decimal  # positive: what went out
     net: Decimal  # income less spending
-    missing_count: int  # flows left out for lack of an FX rate
+    missing_count: int  # flows left out for lack of a price or an FX rate
     periods: list[PeriodTotal]  # every period of the range, in order
     categories: list[CategoryTotal]  # largest spending first
     payees: list[PayeeTotal]  # the TOP_PAYEES largest, by spending
     hidden_accounts: list[HiddenAccountTotal]  # by name; their moves are in the totals too
 
 
-# Each flow valued on its booking day. The FX rate is looked up once per currency and day,
-# not once per posting. `category` is the one place a flow's category is decided: today the
-# source's own, later the owner's override or an automatic one before it.
+# Every amount, and every split's share of one, is rounded once to this many places. Postgres
+# gives a product all its digits: an inverse FX rate (1 / rate) has twenty, and times a coin's
+# eight places and a price the amount is past Decimal's 28 significant digits; so is a third
+# of an amount. Adding such amounts rounds, at different points when summing by period and by
+# category, so the two would not add up to the same total. With a fixed scale every sum is
+# exact while totals stay below 10**16.
+_PLACES = 12
+_SHARE_UNIT = Decimal(1).scaleb(-_PLACES)
+
+# Each flow valued on its booking day, once per instrument and day, not once per posting:
+# money at the day's FX rate, another asset as net worth values a holding (valuation.py), at
+# its latest price on or before the day converted at the day's rate. The owner's category is
+# read once per flow, in `base`, and the effective category decided from it in the final
+# select (income-categories design §4.2).
 _REPORTING = """
     reporting as (
       select i.id
@@ -104,10 +148,14 @@ _FLOWS = (
     "with"
     + _REPORTING
     + """,
-    flows as (
-      select t.id as transaction_id, t.booking_date as day, t.category,
+    base as (
+      select t.id as transaction_id, t.booking_date as day, p.position, p.instrument_id,
+        -p.quantity as quantity, t.category as source_category, t.income_kind,
+        """
+    + OWNER_CATEGORY_SQL
+    + """ as owner_category,
         coalesce(nullif(t.counterparty_name, ''), nullif(t.description, '')) as payee,
-        t.include_in_spending, p.instrument_id, -p.quantity as quantity
+        t.description, t.counterparty_name, t.include_in_spending, t.refund
       from finance.postings p
       join finance.transactions t on t.id = p.transaction_id
       join finance.accounts a on a.id = p.account_id
@@ -115,7 +163,10 @@ _FLOWS = (
       where t.status <> 'void' and t.booking_date between :start and :end
         and a.ledger_type in ('income', 'expense', 'equity')
         and a.id <> all(:skipped)
-        and i.kind = 'fiat' and not i.hidden and p.quantity <> 0
+        and not i.hidden and p.quantity <> 0
+        -- Another asset is income only when the source says what kind, whatever its sign:
+        -- a reward and its reversal both count, as money does.
+        and (i.kind = 'fiat' or t.income_kind is not null)
         and not exists (
           select 1 from finance.postings x
           where x.transaction_id = t.id and x.account_id = any(:excluded)
@@ -128,17 +179,49 @@ _FLOWS = (
             and (tr.from_account_id = any(:excluded) or tr.to_account_id = any(:excluded))
         )
     ),
-    rates as (
+    valuations as (
       select k.instrument_id, k.day,
-        finance.v1_fx_rate(k.instrument_id, (select reporting.id from reporting), k.day)
-          as fx_rate
-      from (select distinct flows.instrument_id, flows.day from flows) k
+        pr.unit_price
+          * finance.v1_fx_rate(pr.price_currency_id, (select reporting.id from reporting), k.day)
+          as unit_value
+      from (select distinct base.instrument_id, base.day from base) k
+      join finance.instruments i on i.id = k.instrument_id
+      left join lateral (
+        select 1::numeric as unit_price, i.id as price_currency_id
+        where i.kind = 'fiat'
+        union all
+        (select pc.price, pc.quote_instrument_id
+         from finance.prices pc
+         where i.kind <> 'fiat' and pc.instrument_id = i.id and pc.as_of_date <= k.day
+         order by pc.as_of_date desc, (pc.source = 'manual') desc, pc.recorded_at desc
+         limit 1)
+      ) pr on true
     )
-    select flows.transaction_id, flows.day, flows.category, flows.payee,
-      flows.include_in_spending, flows.quantity * rates.fx_rate as amount
-    from flows
-    join rates on rates.instrument_id = flows.instrument_id and rates.day = flows.day
-    order by flows.day, flows.transaction_id
+    select base.transaction_id, base.day, own.id as account_id, own.name as account_name,
+      base.instrument_id, i.symbol as instrument_code, base.quantity,
+      round(base.quantity * valuations.unit_value, """
+    + str(_PLACES)
+    + """) as amount,
+      coalesce(base.owner_category,
+               case when base.quantity > 0 and not base.refund then base.income_kind end,
+               base.source_category) as category,
+      base.owner_category is not null as has_owner_category,
+      base.source_category, base.income_kind, base.owner_category, base.payee,
+      base.description, base.counterparty_name, base.include_in_spending, base.refund
+    from base
+    join valuations
+      on valuations.instrument_id = base.instrument_id and valuations.day = base.day
+    join finance.instruments i on i.id = base.instrument_id
+    left join lateral (
+      select a.id, a.name
+      from finance.postings ap
+      join finance.accounts a on a.id = ap.account_id
+      where ap.transaction_id = base.transaction_id
+        and a.ledger_type in ('asset', 'liability') and a.id is distinct from :in_transit
+      order by ap.position
+      limit 1
+    ) own on true
+    order by base.day, base.transaction_id, base.position
 """
 )
 
@@ -190,7 +273,10 @@ _HIDDEN_MOVES = (
           as fx_rate
       from (select distinct moves.instrument_id, moves.day from moves) k
     )
-    select moves.day, moves.hidden_id, a.name, moves.quantity * rates.fx_rate as amount
+    select moves.day, moves.hidden_id, a.name,
+      round(moves.quantity * rates.fx_rate, """
+    + str(_PLACES)
+    + """) as amount
     from moves
     join finance.accounts a on a.id = moves.hidden_id
     join rates on rates.instrument_id = moves.instrument_id and rates.day = moves.day
@@ -217,7 +303,7 @@ def _next_period(start: date, bucket: Bucket) -> date | None:
         return None
 
 
-def _periods(start: date, end: date, bucket: Bucket) -> list[date]:
+def periods_of(start: date, end: date, bucket: Bucket) -> list[date]:
     periods = [period_start(start, bucket)]
     while (following := _next_period(periods[-1], bucket)) is not None and following <= end:
         periods.append(following)
@@ -256,11 +342,41 @@ def _by_category(
     shares: list[tuple[str | None, Decimal]] = []
     left = amount
     for name, quantity in splits[:-1]:
-        share = amount * quantity / total
+        share = (amount * quantity / total).quantize(_SHARE_UNIT)
         shares.append((name, share))
         left -= share
     shares.append((splits[-1][0], left))
     return shares
+
+
+async def flows(
+    session: AsyncSession, start: date, end: date, excluded: Collection[UUID]
+) -> list[Flow]:
+    """Every flow from start to end, both included, by day.
+
+    A transaction touching one of the `excluded` accounts is left out whole, and so is the
+    settlement of a transfer to or from one, which touches neither side. What a transfer to
+    or from a hidden account moved is not a flow here (cash_flow's hidden_accounts).
+    """
+    require_series_range(start, end)
+    system = await system_account_ids(session)
+    opening = system.get("opening_balances")
+    uuids = ARRAY(PG_UUID(as_uuid=True))
+    rows = await session.execute(
+        text(_FLOWS).bindparams(
+            bindparam("skipped", type_=uuids),
+            bindparam("excluded", type_=uuids),
+            bindparam("in_transit", type_=PG_UUID(as_uuid=True)),
+        ),
+        {
+            "start": start,
+            "end": end,
+            "skipped": [] if opening is None else [opening],
+            "excluded": list(excluded),
+            "in_transit": system.get("in_transit"),
+        },
+    )
+    return [Flow(**row) for row in rows.mappings()]
 
 
 async def cash_flow(
@@ -277,20 +393,11 @@ async def cash_flow(
     moved on the side still in the reports counts instead (hidden_accounts). Spending the
     source itself marks as not spending (include_in_spending false) is left out too.
     """
-    require_series_range(start, end)
+    entries = await flows(session, start, end, excluded)
+    # The owner's category covers the whole transaction, so its splits are not read.
+    splits = await _splits(session, {e.transaction_id for e in entries if not e.has_owner_category})
     system = await system_account_ids(session)
-    opening = system.get("opening_balances")
-    skipped = [] if opening is None else [opening]
     uuids = ARRAY(PG_UUID(as_uuid=True))
-    rows = (
-        await session.execute(
-            text(_FLOWS).bindparams(
-                bindparam("skipped", type_=uuids), bindparam("excluded", type_=uuids)
-            ),
-            {"start": start, "end": end, "skipped": skipped, "excluded": list(excluded)},
-        )
-    ).all()
-    splits = await _splits(session, {row.transaction_id for row in rows})
     moves = (
         await session.execute(
             text(_HIDDEN_MOVES).bindparams(
@@ -313,22 +420,23 @@ async def cash_flow(
     spending_by_category: dict[str | None, Decimal] = defaultdict(Decimal)
     spending_by_payee: dict[str, Decimal] = defaultdict(Decimal)
     missing_count = 0
-    for row in rows:
-        amount: Decimal | None = row.amount
+    for entry in entries:
+        amount = entry.amount
         if amount is None:
             missing_count += 1
             continue
-        period = period_start(row.day, bucket)
-        if amount > 0:
+        period = period_start(entry.day, bucket)
+        shares = _by_category(amount, entry.category, splits[entry.transaction_id])
+        if amount > 0 and not entry.refund:
             income_by_period[period] += amount
-            for category, share in _by_category(amount, row.category, splits[row.transaction_id]):
+            for category, share in shares:
                 income_by_category[category] += share
-        elif row.include_in_spending is not False:
+        elif entry.include_in_spending is not False:
             spending_by_period[period] -= amount
-            for category, share in _by_category(amount, row.category, splits[row.transaction_id]):
+            for category, share in shares:
                 spending_by_category[category] -= share
-            if row.payee is not None:
-                spending_by_payee[row.payee] -= amount
+            if entry.payee is not None:
+                spending_by_payee[entry.payee] -= amount
 
     hidden: dict[UUID, HiddenAccountTotal] = {}
     for move in moves:
@@ -370,7 +478,7 @@ async def cash_flow(
         missing_count=missing_count,
         periods=[
             PeriodTotal(period, income_by_period[period], spending_by_period[period])
-            for period in _periods(start, end, bucket)
+            for period in periods_of(start, end, bucket)
         ],
         categories=categories,
         payees=[PayeeTotal(name, spending) for name, spending in payees[:TOP_PAYEES]],

@@ -104,3 +104,10 @@ The Geist font files the web app serves. The SIL Open Font License lets the font
 and distributed with any software; the font stays under OFL-1.1 as a separate work and no
 code is combined with it, so AGPL compatibility doesn't arise.
 """
+
+[[exception]]
+ecosystem = "python"
+package = "embit"
+license = "classifiers: OSI Approved :: MIT License"
+concluded = "MIT"
+reason = "Only a classifier in the metadata; the wheel's licenses/LICENSE is the MIT licence."

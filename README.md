@@ -560,6 +560,13 @@ interest) are stored and flagged but not posted: the API posts those, and how th
 the API's has not been seen yet. If the export and the API state an amount, a currency or a
 booking date differently, Lararium opens a [review item](#review-items).
 
+The export's `Notes` also say which kind of movement a deposit or withdrawal is, and the record
+takes that as evidence (see [Transfers](#transfers) below): empty Notes mean a move from or to
+another of your Trading 212 accounts, `Transaction ID: …` an external deposit, and `Sent to Bank
+Account …` a withdrawal to that bank account. Notes of another form refuse the file, naming the
+row's line and the rule, never its value. A record the export doesn't cover (API only) has no
+such evidence. An upload that brings Notes later re-pairs the records it changes.
+
 A warning that Lararium's cash differs from Trading 212's report, raised before an upload,
 stays until the next sync checks again, even when the upload supplied the missing record.
 
@@ -576,6 +583,20 @@ every day of it in full but the last, which the export may have been taken partw
 renamed export lists in full every day from its first row's to the day before its last row's,
 and its upload warns that the file name gives no period. Interest rows import as ordinary rows
 until their `Action` is known.
+
+The History CSV's `Notes` say which kind each `Deposit` or `Withdrawal` is, and the ready
+profile reads them (its `family_notes` option, see [Profiles](#profiles)): empty Notes are a
+move from or to another of your Trading 212 accounts, `Transaction ID: …` a deposit from
+outside, `Sent to Bank Account …` a withdrawal to that bank account (its sort code and
+account number are read, so it names your own account there and pairs with that account's
+receipt). A row with Notes of another form is an error and blocks the batch, so a change in
+Trading 212's wording is seen at once. A batch committed before Lararium read the Notes has no such evidence on its rows (they
+pair by the two-minute rule meanwhile, see [Transfers](#transfers)): roll each back and upload
+its file again from the account's **Upload file** tile.
+
+Adding a family account (or giving one its type) with no history listed from its opening makes
+matched Invest to Stocks ISA moves come apart, to Unassigned, until that account's file from its
+opening is uploaded.
 
 ### Transfers
 
@@ -623,24 +644,27 @@ until their `Action` is known.
   top-ups still pair by the card rule above, and card evidence comes first: a deposit that has
   a card-payment candidate is not paired as a bank transfer by its account's funding. A pair
   made this way shows **Reject** on the Transfers page, not Unpair, like a card pair: neither
-  record is a transfer without the other. With three Trading 212 accounts, a transfer between
-  them names no counterpart (see below), so its incoming side may be taken as the top-up for a
-  same-amount payment to the shared payee. When the real deposit becomes a second eligible
-  candidate, Lararium breaks the wrong pair and returns its two records to Unassigned without
-  creating a review item on the Transfers page. Find the payment on Unassigned and pair it with
-  the real deposit by hand. If the real deposit is booked after the window, the wrong pair stays
-  until you reject it.
-- **Between your Trading 212 accounts.** A Trading 212 TRANSFER names the other account only when
-  you have exactly two accounts of the Trading 212 family in Lararium (any status; two Invest
-  accounts count as two). With an Invest and a Stocks ISA, each is the other's counterpart and
-  the transfer pairs by itself. With a Cash ISA added as well, transfers name no counterpart and
-  are paired by hand: both sides name nobody, so neither is identified and nothing pairs them
-  on its own. With only an Invest (or a Stocks ISA) and a Cash ISA, no counterpart is named
-  either: a Cash ISA has no Trading 212 id to name, so such transfers are also paired by hand.
-  Lararium counts only the accounts added to it: a Cash ISA you hold
-  but haven't added leaves the two-account rule in force, so a move to it would be named as the
-  other account's. A newly added family account takes effect at each Trading 212 connection's next
-  sync, which replays its transfers.
+  record is a transfer without the other. A transfer between your Trading 212 accounts names
+  their family, not the payee, so it is never taken as such a top-up (see below), and neither
+  is a deposit that is its other side.
+- **Between your Trading 212 accounts.** A Trading 212 TRANSFER names no account on the other
+  side, so the accounts of the Trading 212 family (Invest, Stocks ISA and Cash ISA, however
+  many you have added, whatever their status) jointly hold one identifier and the TRANSFER names
+  it. It then pairs only within the family, by amount and date, when it is the only candidate,
+  and is never taken as a bank top-up or a card payment. The other side is usually a deposit
+  or withdrawal naming nobody (Trading 212 books a received move as an ordinary deposit): that
+  pairs with it when both have a time and are within two minutes of each other, or when its
+  Notes say it is a move within the family (empty Notes, see the export and the Cash ISA
+  above). A deposit whose Notes say it came from outside (a transaction id) is never a move's
+  other side, even seconds from one, so it still pairs with your bank's payment. When several
+  same-amount candidates fit, the one within two minutes of the other is taken, so repeated
+  top-ups of the same amount pair one by one; equal moves out of two accounts into the Cash ISA
+  pair with its identical rows in time order. What can't be told apart waits under Needs
+  attention or on Unassigned: pair it by hand. A move whose counterpart may be in a manual
+  account's unlisted days isn't taken by itself: upload that account's file for those days.
+  A move whose other side names nobody, is more than two minutes away and has no Notes doesn't
+  pair by itself until an upload brings Notes: pair it by hand. Adding an account of the
+  family, giving one its type or clearing it, re-checks the transfers at once.
 
 ### Warnings
 
@@ -790,6 +814,21 @@ itself.
   statement that covers it).
 - Between Monzo's sync and Trading 212's, a card deposit shows as spending on Unassigned and
   net worth dips by it, until both sides are in.
+- Lararium knows only the accounts added to it. With a Trading 212 account you haven't added (a
+  SIPP, a Crypto account, a Cash ISA) and exactly one other added, a move to it is named as
+  that other account's.
+- A move naming several accounts that can't pair (several candidates, none, or refused by the
+  coverage check) opens no transfer and no review item: it shows on Unassigned, as a
+  shared-payee payment does.
+- A record with no Notes (API only) and a same-amount real top-up within two minutes of a move
+  on another account of the family would be taken as that move's side; an upload's Notes
+  correct it.
+- Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider
+  were one, it would name the family wrongly and pair with nothing (or, with one other account of
+  the family, await a record there and go overdue); reject it. Not seen.
+- Adding a family account (or giving one its type) with no history listed from its opening makes
+  matched Invest to Stocks ISA moves come apart, to Unassigned, until that account's file from
+  its opening is uploaded.
 
 ## Connecting Binance
 
@@ -915,6 +954,49 @@ checked against a real account:
 - Fiat orders, card payments, P2P, Pay and rebates
 - Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
   records
+
+## Connecting a Bitcoin wallet
+
+A Bitcoin wallet is a connector: the `worker` syncs it every 6 hours (and on **Sync now**) from
+an Esplora server, which only answers public chain queries. It only reads: it sends only GET
+requests, only to that one server, and it never holds a key that can spend. One connection is one
+wallet and one account, whose balance is its transactions, checked against the balance the chain
+reports.
+
+On Accounts → Add account, pick **Bitcoin wallet** and enter the wallet in one of three forms:
+
+- **An Electrum master public key**: Electrum's Wallet → Information shows it. Pick the wallet
+  type (single key, multisig, 2FA or old seed) and paste the key or keys.
+- **An output descriptor** from Bitcoin Core, Sparrow or another wallet: one with a `<0;1>` step,
+  or a receiving and a change descriptor. Legacy, nested and native SegWit, Taproot (key path)
+  and multisig descriptors work.
+- **A list of addresses**: Electrum's "imported addresses" wallet, or any address you want
+  watched. Nothing is derived; the list is the wallet.
+
+Before saving, the form shows the first receiving address it derived: compare it with Electrum's
+Addresses tab, and a wrong wallet type shows up as a different address. Lararium refuses private
+material (an extended private key, a WIF key, a seed phrase) and keys of other networks, never
+stores or echoes it, and encrypts the key or descriptor you give at rest, because a public key
+reveals every address of the wallet. Never enter a seed phrase anywhere.
+
+Gap limits (how many unused addresses in a row Lararium scans past) default to 20 and 10 for an
+Electrum key and 20 and 20 for a descriptor; change them on the connection card under Advanced.
+
+Notes:
+
+- **Server.** Chain data comes from the Esplora server in `LARARIUM_ESPLORA_URL` (in `infra/.env`;
+  the default is `https://mempool.space/api`). A self-hosted Esplora server keeps your addresses
+  from a public one. The client sends at most one request a second.
+- **Confirmed only.** A transaction is posted once it has a confirmation; an unconfirmed one is
+  shown on the connection card. One that leaves the chain is voided again.
+- **Prices.** BTC is valued from Binance's public daily bars, the same price as BTC held at
+  Binance, with no key needed. Before January 2020 there is no price and the days show as missing
+  a price.
+- **Transfers.** Each address of the wallet is registered to its account, so a Binance withdrawal
+  to it is a transfer in transit, paired with the wallet's receipt by transaction hash; the
+  network fee stays a separate fee transaction.
+- **Checks.** A difference between the posted balance and the chain's is a warning on the
+  connection, never corrected automatically.
 
 ## Webhooks through Cloudflare Tunnel
 
@@ -1150,7 +1232,14 @@ by amount and date (below).
   groups `start` and `end`, each a `YYYY-MM-DD` date, for a bank that names its export by its
   period, such as Trading 212's Cash ISA: a match is the file's period, every day of it listed in
   full but the last; a name that gives none, or a range a row falls outside, leaves the upload
-  as read, with a warning). A line that repeats the header is not a row.
+  as read, with a warning), and `family_notes` (`{"column": "Notes", "types": ["Deposit",
+  "Withdrawal"], "within": [...], "outside": [...]}`, which needs `columns.type`: for a
+  provider whose notes say whether a row moved money between your own accounts of one family,
+  as Trading 212's do. For a row of one of the `types`, a cell matching a `within` pattern in
+  full, such as the empty pattern for an empty cell, is a move within the account's family, one
+  matching an `outside` pattern is a movement outside it, and any other cell is a row error that
+  names the column, never the value; the account must be of a type with a family). A line that
+  repeats the header is not a row.
 - **`columns`** names the file's columns: `date`, `description` (a list; several are joined
   with a space), then either `amount` or both `inflow` and `outflow`, and optionally `balance`,
   `currency`, `external_id`, `fee` (charged on top of the amount), `type`, `value_date`,

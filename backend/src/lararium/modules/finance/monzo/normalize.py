@@ -21,6 +21,13 @@ regenerated from raw records. Mapping rules (plan Decisions 5, 6 and 9):
   the difference from Monzo's balance is posted as its opening balance adjustment, replaced
   in place, so older history fetched later corrects it instead of adding to it (ruling R18);
   any other difference is a warning, never corrected;
+- a card authorisation that a reversal cancels exactly (reversals.reversal_pairs, over the
+  latest raw copy of every transaction the connection fetched) is posted booked, and the
+  pair is posted against "In transit", which it leaves level, the reversal naming the
+  authorisation (cancels_transaction_id) and not a refund (card refunds design §4.3);
+  whichever sync brings either side posts both, and one whose pairing changed is posted
+  again as its record now says; a pair with a side the owner voided is no pair; a reversal
+  that matches no authorisation is a refund, with a warning;
 - what Monzo says about a transaction, its merchant, an account or a pot is stored typed, a
   fee as a posting of its own, and a declined transaction outside the ledger (the
   structured-fields plan, Decisions 5-11); a field in a shape not mapped yet stays in the raw
@@ -45,9 +52,10 @@ from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, and_, case, column, func, select, true
+from sqlalchemy import DateTime, and_, case, column, func, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext, command_context
 from lararium.core.connections import get_connection, set_warnings, update_config
@@ -82,12 +90,14 @@ from lararium.modules.finance.ledger import (
     PostingInput,
     TransactionDetails,
     TransactionInput,
+    TransactionRecord,
     TransactionStatus,
     set_counterparty_fields,
     upsert_connector_transaction,
     void_transaction,
 )
 from lararium.modules.finance.money import require_amount, to_plain_str, tolerance
+from lararium.modules.finance.monzo.reversals import reversal_pairs
 from lararium.modules.finance.snapshots import record_snapshot
 from lararium.modules.finance.system_accounts import (
     SystemAccountKey,
@@ -97,7 +107,7 @@ from lararium.modules.finance.transfers import transfer_contra
 
 logger = logging.getLogger(__name__)
 
-NORMALIZER_VERSION = "monzo-norm-5"
+NORMALIZER_VERSION = "monzo-norm-6"
 # The version that last normalized the connection, in its config. Bumping NORMALIZER_VERSION
 # makes the next sync replay the history already posted (see _Normalizer.replay).
 NORMALIZER_VERSION_KEY = "normalizer_version"
@@ -179,6 +189,13 @@ def _mismatch_prefix(monzo_account_id: str) -> str:
 
 def _unmapped_warning(name: str) -> str:
     return f"Monzo field {name} is not stored yet; it stays in the raw records"
+
+
+def _unmatched_warning(monzo_id: str) -> str:
+    return (
+        f"Monzo transaction {monzo_id}: a reversal that matches no authorisation;"
+        " counted as a refund"
+    )
 
 
 def _fields(value: object) -> dict[str, Any]:
@@ -336,6 +353,21 @@ def _mcc(metadata: _Reader) -> str | None:
     return None
 
 
+def _card_reversal(metadata: _Reader) -> bool | None:
+    """Monzo's metadata.is_reversal, a string "true" or "false"."""
+    value = metadata.text("is_reversal")
+    if value in (None, "true", "false"):
+        return None if value is None else value == "true"
+    metadata.unreadable_field("is_reversal")
+    return None
+
+
+def _is_refund(tx: dict[str, Any]) -> bool:
+    """Money came back for a card payment: a positive card-scheme transaction."""
+    amount = _minor_units(tx.get("amount"))
+    return tx.get("scheme") == "mastercard" and amount is not None and amount > 0
+
+
 # A pot's fields by the account field each one fills, where the names differ.
 _POT_FIELDS = {"type": "product_type"}
 
@@ -384,6 +416,52 @@ async def _connector_transaction(
     if row is None:
         return None
     return row.id, cast(TransactionStatus, row.status), row.voided_by
+
+
+@dataclass(frozen=True)
+class _Linked:
+    """A transaction a cancellation link touches, or that a reversal pairing names."""
+
+    status: TransactionStatus
+    voided_by: str | None
+    cancels: str | None  # the external id of the transaction it cancels
+    contra: UUID  # the account of its contra posting (position 1)
+
+
+async def _linked(
+    session: AsyncSession, connection_id: UUID, external_ids: Collection[str]
+) -> dict[str, _Linked]:
+    """By external id, the connection's transactions under `external_ids`, those that cancel
+    another and those another cancels."""
+    t, c, p = models.Transaction, aliased(models.Transaction), models.Posting
+    named = select(t.cancels_transaction_id).where(
+        t.connection_id == connection_id, t.cancels_transaction_id.is_not(None)
+    )
+    rows = await session.execute(
+        select(
+            t.external_id,
+            t.status,
+            t.voided_by,
+            c.external_id.label("cancels"),
+            p.account_id.label("contra"),
+        )
+        .join(p, and_(p.transaction_id == t.id, p.position == 1))
+        .outerjoin(c, c.id == t.cancels_transaction_id)
+        .where(
+            t.connection_id == connection_id,
+            or_(
+                t.external_id.in_(list(external_ids)),
+                t.cancels_transaction_id.is_not(None),
+                t.id.in_(named),
+            ),
+        )
+    )
+    return {
+        row.external_id: _Linked(
+            cast(TransactionStatus, row.status), row.voided_by, row.cancels, row.contra
+        )
+        for row in rows
+    }
 
 
 async def _latest_transactions(
@@ -599,6 +677,22 @@ class _Normalizer:
         self._deleted_pots: list[tuple[UUID, date]] = []
         # Fields seen in a shape not mapped yet (structured-fields Decision 10), by their name.
         self.unmapped: set[str] = set()
+        # Card reversals (prepare_pairs): the latest copy of every transaction, with its
+        # Monzo account; every reversal reversal_pairs matches; the pairs to post (reversal
+        # → authorisation, and back); the transactions a pairing or a link touches, which
+        # are posted once a run (`settled`); of those, the ones the ledger holds otherwise
+        # than the pairing now calls for, posted even when the run's pages don't bring them
+        # (`unsettled`); the live ones whose link goes away or moves, posted alone first; and
+        # the reversals that match nothing.
+        self.copies: dict[str, tuple[dict[str, Any], str]] = {}
+        self.matched: set[str] = set()
+        self.pairs: dict[str, str] = {}
+        self.cancelled: dict[str, str] = {}
+        self.involved: set[str] = set()
+        self.settled: set[str] = set()
+        self.unsettled: set[str] = set()
+        self.relinked: list[str] = []
+        self.unmatched: set[str] = set()
 
     async def currency(self, code: str) -> InstrumentRecord:
         if code not in self._currencies:
@@ -887,11 +981,119 @@ class _Normalizer:
             self.report.voided += 1
         return True
 
+    async def prepare_pairs(
+        self, latest: Sequence[tuple[dict[str, Any], str]], page_ids: Collection[str]
+    ) -> None:
+        """Find the card reversal pairs (module doc) before anything is posted: those
+        reversal_pairs matches, but none with a side the owner voided, or with a side the
+        ledger does not hold that this run's pages do not bring either."""
+        self.copies = {tx["id"]: (tx, monzo_account_id) for tx, monzo_account_id in latest}
+        matched = reversal_pairs(latest)
+        self.matched = set(matched)
+        linked = await _linked(self.session, self.connection_id, {*matched, *matched.values()})
+
+        def postable(external_id: str) -> bool:
+            found = linked.get(external_id)
+            if found is None:
+                return external_id in page_ids
+            return found.status != "void" or found.voided_by == "connector"
+
+        self.pairs = {r: a for r, a in matched.items() if postable(r) and postable(a)}
+        self.cancelled = {a: r for r, a in self.pairs.items()}
+        involved = {*matched, *matched.values()}
+        for external_id, found in linked.items():
+            if found.cancels is not None:
+                involved |= {external_id, found.cancels}
+        self.involved = {external_id for external_id in involved if external_id in self.copies}
+        self.relinked = sorted(
+            external_id
+            for external_id, found in linked.items()
+            if found.status != "void"
+            and found.cancels is not None
+            and self.pairs.get(external_id) != found.cancels
+            and external_id in self.copies
+        )
+        if linked:
+            in_transit = await self.system_account("in_transit")
+            self.unsettled = {
+                external_id
+                for external_id in self.involved
+                if (found := linked.get(external_id)) is not None
+                and not self._holds(external_id, found, in_transit)
+            }
+
+    def _holds(self, external_id: str, found: _Linked, in_transit: UUID) -> bool:
+        """Whether the ledger holds the transaction as the pairing calls for: a paired
+        reversal naming its authorisation, a paired authorisation booked, both on In transit;
+        anything else naming none, and booked only when its record is settled. A void stays:
+        an owner's is never rewritten, and a connector's posted its latest copy already."""
+        if found.status == "void":
+            return external_id not in self.pairs and external_id not in self.cancelled
+        if external_id in self.pairs:
+            return found.cancels == self.pairs[external_id] and found.contra == in_transit
+        if external_id in self.cancelled:
+            return found.cancels is None and found.contra == in_transit and found.status == "booked"
+        # Its contra is left to transfer_contra, which may put it on In transit as a transfer.
+        tx = self.copies[external_id][0]
+        return found.cancels is None and (found.status != "booked" or bool(tx.get("settled")))
+
+    async def relink(self) -> None:
+        """Post alone, first, each live transaction whose link goes away or moves, so none
+        names a transaction another is about to (a run posts it again later, paired or not)."""
+        for external_id in self.relinked:
+            await self._apply(*self.copies[external_id], backfill=True)
+
+    async def settle_pairs(self) -> None:
+        """Post what the ledger holds otherwise than the pairing calls for that this run has
+        not posted yet, from its latest copy: an authorisation whose reversal came in an
+        earlier sync, or one whose pair dissolved, say. One that holds is not posted again, so
+        an unchanged sync writes nothing and what an old copy notes is not noted again."""
+        for external_id in sorted(self.unsettled - self.settled):
+            await self.transaction(*self.copies[external_id], backfill=True)
+
     async def transaction(
         self, tx: dict[str, Any], monzo_account_id: str, *, backfill: bool = False
     ) -> None:
-        """Apply one Monzo transaction: posted, voided when reversed, or recorded as declined.
-        `backfill` (the replay): never post one the ledger does not already hold."""
+        """Apply one Monzo transaction: posted, voided when reversed, or recorded as declined;
+        a side of a card reversal pair posts the pair. `backfill` (the replay): never post one
+        the ledger does not already hold."""
+        external_id: str = tx["id"]
+        if external_id in self.involved:
+            if external_id in self.settled:
+                return  # posted already in this run, with the other side of its pair
+            self.settled.add(external_id)
+        if external_id in self.pairs:
+            await self._pair(self.pairs[external_id], external_id)
+        elif external_id in self.cancelled:
+            await self._pair(external_id, self.cancelled[external_id])
+        else:
+            await self._apply(tx, monzo_account_id, backfill=backfill)
+
+    async def _pair(self, authorisation_id: str, reversal_id: str) -> None:
+        """Post a card reversal pair from the latest copies: the authorisation first, then
+        the reversal naming it; each alone when either is void after (the owner voided it
+        meanwhile: one voided before is in no pair, prepare_pairs)."""
+        self.settled |= {authorisation_id, reversal_id}
+        sides = [self.copies[authorisation_id], self.copies[reversal_id]]
+        authorisation = await self._apply(*sides[0], paired=True)
+        cancels = None if authorisation is None else authorisation.id
+        reversal = await self._apply(*sides[1], paired=True, cancels=cancels)
+        if any(side is None or side.status == "void" for side in (authorisation, reversal)):
+            for tx, monzo_account_id in sides:
+                await self._apply(tx, monzo_account_id, backfill=True)
+
+    async def _apply(
+        self,
+        tx: dict[str, Any],
+        monzo_account_id: str,
+        *,
+        backfill: bool = False,
+        paired: bool = False,
+        cancels: UUID | None = None,
+    ) -> TransactionRecord | None:
+        """Apply one Monzo transaction as its record says, or with `paired` as a side of a
+        card reversal pair (module doc), cancelling `cancels`. The transaction it posted, or
+        None when it posted none."""
         external_id: str = tx["id"]
         read = _Reader(tx, "", self.unmapped)
         # What it says about its merchant holds whatever the ledger makes of it: declined,
@@ -903,34 +1105,41 @@ class _Normalizer:
             if not await self.void_if_posted(external_id):
                 self.report.skipped_declined += 1
             await self.declined(tx, monzo_account_id, counterparty, place, reason)
-            return
+            return None
         if tx["amount"] == 0:
             # A reversed pending payment; a new zero-amount one moves no money.
             await self.void_if_posted(external_id)
-            return
+            return None
         if backfill and (
             await _connector_transaction(self.session, self.connection_id, external_id) is None
         ):
-            return
+            return None
         currency = await self.currency(tx["currency"])
         own_account_id = self.require_mapped(monzo_account_id)
         pot_id = _pot_id(tx)
         fields = await self.counterparty_fields(tx, read)
         fees = self._fees(tx, currency)
-        # A move to a pot Monzo didn't list is posted like any other payment.
-        other = (self.mapped(pot_id) if pot_id is not None else None) or (
-            # Its fee postings are the postings it has besides its own and the contra.
-            await self.contra(external_id, own_account_id, fields, other_postings=len(fees))
-        )
+        if paired:
+            other = await self.system_account("in_transit")
+        else:
+            # A move to a pot Monzo didn't list is posted like any other payment.
+            other = (self.mapped(pot_id) if pot_id is not None else None) or (
+                # Its fee postings are the postings it has besides its own and the contra.
+                await self.contra(external_id, own_account_id, fields, other_postings=len(fees))
+            )
         created = _parse(tx["created"])
         settled = tx.get("settled") or ""
-        _, outcome = await upsert_connector_transaction(
+        details = await self._details(tx, read, currency, place)
+        if paired:  # a cancelled reversal is no refund
+            details = replace(details, refund=False)
+        record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
                 occurred_at=created,
                 booking_date=local_date(created, self.tz),
                 value_date=local_date(_parse(settled), self.tz) if settled else None,
-                status="booked" if settled else "pending",
+                # A reversed authorisation is closed, though it never settles.
+                status="booked" if settled or paired else "pending",
                 description=_description(tx),
                 counterparty_entity_id=counterparty,
                 origin="connector",
@@ -938,21 +1147,30 @@ class _Normalizer:
                 external_id=external_id,
                 postings=self._postings(tx, currency, own_account_id, other, fees),
                 counterparty=fields,
-                details=await self._details(tx, read, currency, place),
+                details=details,
+                cancels_transaction_id=cancels,
             ),
         )
         self.count(outcome)
+        if (
+            details.card_reversal
+            and details.refund
+            and external_id not in self.matched
+            and record.status != "void"
+        ):
+            self.unmatched.add(external_id)
+        return record
 
-    async def replay_copies(self, skipping: Collection[str]) -> list[tuple[dict[str, Any], str]]:
-        """The latest raw copy of every Monzo transaction this connection fetched, except those
-        in `skipping`, for a replay (structured-fields Decision 12): each is run through
-        transaction(backfill=True), which decides what it is as for a sync and only refuses to
-        post one the ledger does not hold. Through its upserts, an owner's void survives and
-        an unchanged transaction is not written."""
+    def replay_copies(
+        self, latest: Sequence[tuple[dict[str, Any], str]], skipping: Collection[str]
+    ) -> list[tuple[dict[str, Any], str]]:
+        """The latest raw copy of every Monzo transaction this connection fetched
+        (_latest_transactions), except those in `skipping`, for a replay (structured-fields
+        Decision 12): each is run through transaction(backfill=True), which decides what it
+        is as for a sync and only refuses to post one the ledger does not hold. Through its
+        upserts, an owner's void survives and an unchanged transaction is not written."""
         return [
-            (tx, monzo_account_id)
-            for tx, monzo_account_id in await _latest_transactions(self.session, self.connection_id)
-            if tx["id"] not in skipping
+            (tx, monzo_account_id) for tx, monzo_account_id in latest if tx["id"] not in skipping
         ]
 
     def _fees(self, tx: dict[str, Any], currency: InstrumentRecord) -> dict[str, int]:
@@ -1015,12 +1233,16 @@ class _Normalizer:
             # Always null so far: nothing shows its shape yet.
             self.unmapped.add("atm_fees_detailed")
         original_quantity, original_instrument_id = await self._original(read)
+        metadata = read.object("metadata")
         return TransactionDetails(
             original_quantity=original_quantity,
             original_instrument_id=original_instrument_id,
             category=read.text("category"),
             labels=self._labels(tx.get("labels")),
             include_in_spending=read.flag("include_in_spending"),
+            refund=_is_refund(tx),
+            card_lifecycle_id=metadata.text("mastercard_lifecycle_id"),
+            card_reversal=_card_reversal(metadata),
             payment_scheme=read.text("scheme"),
             place_entity_id=place,
             category_splits=self._category_splits(tx, read, currency.decimals),
@@ -1108,12 +1330,20 @@ class _Normalizer:
             await self.prepare_places([read.fields])
         return organization, self._places[merchant_id]
 
-    async def prepare_places(self, txs: Iterable[dict[str, Any]]) -> None:
+    async def prepare_places(
+        self, txs: Iterable[dict[str, Any]], quiet: Iterable[dict[str, Any]] = ()
+    ) -> None:
         """Write each merchant's place once, from everything these transactions say about it,
         folded by statement time (_fold), before any of them is applied: so neither the order
         they come in, the replay's included, nor how many of them disagree decides what is
-        stored, and an unchanged sync writes nothing."""
+        stored, and an unchanged sync writes nothing. The `quiet` ones' merchants get their
+        places, but what those say is not stored: a copy posted again only for its pairing
+        (settle_pairs) told it already, and may be older than what another one said since."""
         said: dict[str, list[_Statement]] = {}
+        for tx in quiet:
+            merchant_id = _Reader(tx, "", self.unmapped).object("merchant").text("id")
+            if merchant_id is not None:
+                said.setdefault(merchant_id, [])
         for tx in txs:
             read = _Reader(tx, "", self.unmapped)
             merchant = read.object("merchant")
@@ -1398,23 +1628,33 @@ async def _normalize(
         for record_type, request, _, content in responses
         if record_type == "transactions_page"
     ]
+    page_ids = {tx["id"] for _, content in pages for tx in content}
+    # The latest copy of every transaction fetched, this sync's pages included (stored before
+    # normalize runs): what the replay and the card reversal pairs read.
+    latest = await _latest_transactions(session, ctx.connection.id)
     # Under a new version, first the history this sync's pages don't cover, once the accounts
     # and pots it posts to are mapped (and after adopt_boundary, which must precede any posting).
     replayed = (
-        await n.replay_copies(skipping={tx["id"] for _, content in pages for tx in content})
+        n.replay_copies(latest, skipping=page_ids)
         if connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
         or connection.config.get(CARD_MERCHANTS_KEY) != merchants_digest
         else []
     )
+    await n.prepare_pairs(latest, page_ids)
     # Every merchant's place from all it is said to be in this sync, before anything links it.
+    told = [tx for tx, _ in replayed] + [tx for _, content in pages for tx in content]
+    told_ids = {tx["id"] for tx in told}
     await n.prepare_places(
-        [tx for tx, _ in replayed] + [tx for _, content in pages for tx in content]
+        told,
+        quiet=[n.copies[i][0] for i in sorted(n.involved) if i not in told_ids],
     )
+    await n.relink()
     for tx, monzo_account_id in replayed:
         await n.transaction(tx, monzo_account_id, backfill=True)
     for monzo_account_id, content in pages:
         for tx in content:
             await n.transaction(tx, monzo_account_id)
+    await n.settle_pairs()
     await n.finish()
 
     checked = set(reconciled) | set(openings)
@@ -1441,6 +1681,17 @@ async def _normalize(
     # warnings, which are taken out and added again on each sync, so the order holds.
     for name in sorted(n.unmapped):
         if (warning := _unmapped_warning(name)) not in warnings:
+            warnings.append(warning)
+    # A reversal that now matches, or that is no longer one (declined or zero), warns no
+    # more; one that still matches nothing warns once, until the owner clears it.
+    settled_reversals = {
+        _unmatched_warning(monzo_id)
+        for monzo_id, (tx, _) in n.copies.items()
+        if monzo_id in n.matched or _is_stated(tx.get("decline_reason")) or tx["amount"] == 0
+    }
+    warnings = [w for w in warnings if w not in settled_reversals]
+    for monzo_id in sorted(n.unmatched):
+        if (warning := _unmatched_warning(monzo_id)) not in warnings:
             warnings.append(warning)
     for monzo_id, mismatch in mismatches.items():
         if mismatch is None:

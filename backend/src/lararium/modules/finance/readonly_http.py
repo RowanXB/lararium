@@ -137,6 +137,7 @@ class ReadOnlyClient:
         sleep: Sleep = asyncio.sleep,
         clock: Clock = monotonic,
         wall_clock: Clock = wall_time,
+        default_reset_wait: Decimal = Decimal(1),
     ) -> None:
         self._http = http
         self._base = httpx.URL(base_url)
@@ -146,6 +147,7 @@ class ReadOnlyClient:
         self._sleep = sleep
         self._clock = clock
         self._wall_clock = wall_clock
+        self._default_reset_wait = default_reset_wait
         self._sent: dict[str, deque[Decimal]] = {pool: deque() for pool in limits}
         self._locks = {pool: asyncio.Lock() for pool in limits}
 
@@ -204,7 +206,8 @@ class ReadOnlyClient:
             sent.append(self._clock())
 
     def _reset_wait(self, response: httpx.Response) -> Decimal:
-        """Seconds to wait before retrying a 429: the first reset header that parses."""
+        """Seconds to wait before retrying a 429: the first reset header that parses, else the
+        client's default."""
         for name in _RESET_HEADERS:
             raw = response.headers.get(name)
             if raw is None:
@@ -216,7 +219,7 @@ class ReadOnlyClient:
             if not value.is_finite() or value < 0:
                 continue
             return value - self._wall_clock() if value >= _EPOCH_FROM else value
-        return Decimal(1)
+        return self._default_reset_wait
 
     async def get(
         self, path: str, *, pool: str, params: Mapping[str, str] | None = None

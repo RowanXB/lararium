@@ -33,8 +33,11 @@ from lararium.modules.finance.binance.parse import ApiValue, Row
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.ledger import (
+    ChainFields,
     CounterpartyFields,
+    IncomeKind,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     compute_residuals,
     upsert_connector_transaction,
@@ -304,6 +307,8 @@ async def post(
     counterparty_identifier_id: UUID | None = None,
     counterparty_name: str | None = None,
     transfer_leg: bool = False,
+    chain: ChainFields | None = None,
+    income_kind: IncomeKind | None = None,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
     postings it creates, changes or removes; its id. A zero posting is left out (the ledger
@@ -340,6 +345,8 @@ async def post(
                 name=counterparty_name,
                 never_transfer=not transfer_leg,
             ),
+            chain=chain,
+            details=TransactionDetails(income_kind=income_kind),
         ),
     )
     _count(run, outcome)

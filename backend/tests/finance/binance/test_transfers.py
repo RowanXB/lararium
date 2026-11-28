@@ -492,3 +492,129 @@ async def test_a_connection_normalised_before_marks_its_records_on_the_next_run(
         {"k": key},
     )
     assert never is True
+
+
+# On-chain BTC movements carry the chain, hash and address the Bitcoin wallet pairs on.
+BTC_HASH = "ab" * 32
+BTC_ADDRESS = "bc1q" + "x" * 20
+
+
+async def _chain_of(session, key: str):
+    return (
+        await session.execute(
+            text(
+                "select chain, tx_hash, chain_address from finance.transactions"
+                " where external_id = :k"
+            ),
+            {"k": key},
+        )
+    ).one()
+
+
+async def test_btc_withdrawal_carries_chain_fields(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="BTC", txId=BTC_HASH.upper(), address=BTC_ADDRESS)
+
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    found = await _chain_of(session, f"withdrawal:{row['id']}")
+    assert tuple(found) == ("bitcoin", BTC_HASH, BTC_ADDRESS)
+
+
+async def test_btc_deposit_carries_chain_fields(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _deposit(1, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS)
+
+    await normalize_rows(session, connection.id, ("deposits", [row]))
+
+    found = await _chain_of(session, f"deposit:{row['id']}")
+    assert tuple(found) == ("bitcoin", BTC_HASH, BTC_ADDRESS)
+
+
+async def test_segwitbtc_maps_to_bitcoin(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="SEGWITBTC", txId=BTC_HASH, address=BTC_ADDRESS)
+
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    assert (await _chain_of(session, f"withdrawal:{row['id']}")).chain == "bitcoin"
+
+
+async def test_bsc_btc_has_no_chain_fields(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="BSC", txId="0x" + BTC_HASH, address=WALLET_ADDRESS)
+
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    found = await _chain_of(session, f"withdrawal:{row['id']}")
+    assert tuple(found) == (None, None, None)
+
+
+async def test_lightning_has_none(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="LIGHTNING", txId=BTC_HASH, address="lnbc1invented")
+
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    found = await _chain_of(session, f"withdrawal:{row['id']}")
+    assert tuple(found) == (None, None, None)
+
+
+async def test_a_hash_that_is_not_64_hex_has_none(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="BTC", txId="0x" + BTC_HASH, address=BTC_ADDRESS)
+
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    found = await _chain_of(session, f"withdrawal:{row['id']}")
+    assert tuple(found) == (None, None, None)
+
+
+async def test_fee_and_refund_have_none(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(5, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS)
+    key = f"withdrawal:{row['id']}"
+    live = _withdrawal(4, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS, completeTime=None)
+    await normalize_rows(session, connection.id, ("withdrawals", [live]))
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+
+    assert tuple(await _chain_of(session, f"{key}:fee")) == (None, None, None)
+    assert tuple(await _chain_of(session, f"{key}:refund")) == (None, None, None)
+
+
+async def test_ended_withdrawal_has_none(session, run) -> None:
+    connection = await binance_connection(run)
+    live = _withdrawal(4, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS, completeTime=None)
+    await normalize_rows(session, connection.id, ("withdrawals", [live]))
+    key = f"withdrawal:{live['id']}"
+    assert (await _chain_of(session, key)).chain == "bitcoin"
+
+    failed = _withdrawal(5, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS)
+    await normalize_rows(session, connection.id, ("withdrawals", [failed]))
+
+    assert tuple(await _chain_of(session, key)) == (None, None, None)
+
+
+async def test_version_bump_fills_existing_rows(session, run) -> None:
+    connection = await binance_connection(run)
+    row = _withdrawal(6, network="BTC", txId=BTC_HASH, address=BTC_ADDRESS)
+    await normalize_rows(session, connection.id, ("withdrawals", [row]))
+    key = f"withdrawal:{row['id']}"
+    await session.execute(
+        text(
+            "update finance.transactions set chain = null, tx_hash = null, chain_address = null"
+            " where external_id = :k"
+        ),
+        {"k": key},
+    )
+    await session.execute(
+        text(
+            "update core.connections set config = config"
+            ' || \'{"normalizer_version": "binance-norm-3"}\' where id = :c'
+        ),
+        {"c": connection.id},
+    )
+
+    await run_normalize(session, connection.id)
+
+    assert tuple(await _chain_of(session, key)) == ("bitcoin", BTC_HASH, BTC_ADDRESS)

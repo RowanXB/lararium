@@ -1276,3 +1276,56 @@ async def test_repeated_balance_row_mistaken_across_exports_is_flagged(
     ):
         await stage(profile, late, filename="b.csv")
     assert await _balance(session, account.id) == Decimal("110.00")
+
+
+_TYPED_COLUMNS = {
+    "date": "Date",
+    "type": "Type",
+    "description": ["Description"],
+    "amount": "Amount",
+}
+
+
+async def _refunds(session: AsyncSession, batch_id: UUID) -> list[tuple[str, bool]]:
+    r, t = models.ImportRow, models.Transaction
+    found = await session.execute(
+        select(r.description, t.refund)
+        .join(t, t.id == r.transaction_id)
+        .where(r.batch_id == batch_id, r.kind == "statement")
+        .order_by(r.position)
+    )
+    return [(description, refund) for description, refund in found]
+
+
+async def test_a_positive_card_row_commits_as_a_refund(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    profile = await _csv_profile(run, columns=_TYPED_COLUMNS, card_payment_types=["VIS"])
+    content = (
+        "Date,Type,Description,Amount\n"
+        "10/11/2026,VIS,Shop refund,60.00\n"
+        "11/11/2026,VIS,Shop,-100.00\n"
+        "12/11/2026,CHQ,Cheque in,25.00\n"
+    )
+    batch = await commit((await stage(profile, content)).id)
+
+    assert await _refunds(session, batch.id) == [
+        ("Shop refund", True),
+        ("Shop", False),
+        ("Cheque in", False),
+    ]
+
+
+async def test_a_card_number_marks_a_refund_whatever_its_type(
+    session: AsyncSession, run: Run, stage: Stage, commit: Commit
+) -> None:
+    profile = await _csv_profile(run, columns=_TYPED_COLUMNS)
+    content = "Date,Type,Description,Amount\n10/11/2026,,Shop refund,60.00\n"
+    batch = await stage(profile, content)
+    r = models.ImportRow
+    await session.execute(
+        update(r).where(r.batch_id == batch.id).values(card_number="123456******1234")
+    )
+    await commit(batch.id)
+
+    assert await _refunds(session, batch.id) == [("Shop refund", True)]

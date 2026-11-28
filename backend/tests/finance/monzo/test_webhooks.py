@@ -126,6 +126,7 @@ async def _sync(
 ) -> JSONValue:
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
         sync_ctx = SyncContext(
+            esplora_url="https://esplora.test/api",
             command=CommandContext(session, CONNECTOR, uuid.uuid4()),
             connection=await get_connection(session, connection.id),
             sync_id=uuid.uuid4(),
@@ -275,6 +276,7 @@ async def test_a_webhook_registered_by_a_failed_sync_is_still_known(
             ):
                 await MonzoConnector().sync(
                     SyncContext(
+                        esplora_url="https://esplora.test/api",
                         command=ctx,
                         connection=await get_connection(session, connection_id),
                         sync_id=uuid.uuid4(),

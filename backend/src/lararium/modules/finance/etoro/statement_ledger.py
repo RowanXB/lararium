@@ -102,7 +102,12 @@ from lararium.modules.finance.instruments import (
     find_by_identifier,
     normalize_identifier,
 )
-from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    IncomeKind,
+    PostingInput,
+    TransactionDetails,
+)
 from lararium.modules.finance.typed_tables import Value, typed_values, upsert_typed
 
 ACTIVITY = "activity:"
@@ -136,22 +141,23 @@ _BANK = {WITHDRAW_REQUEST: "Withdrawal", WITHDRAW_REQUEST_CANCELLED: "Withdrawal
 class _Kind:
     description: str
     fee: bool
+    income_kind: IncomeKind | None = None
 
 
 # Against Unassigned, by Type in lower case.
 _UNASSIGNED: Mapping[str, _Kind] = {
     "withdraw fee": _Kind("Withdrawal fee", True),
-    DIVIDEND: _Kind("Dividend", False),
+    DIVIDEND: _Kind("Dividend", False, "dividend"),
     "overnight fee": _Kind("Overnight fee", True),
     "rollover fee": _Kind("Overnight fee", True),
     "sdrt": _Kind("SDRT charge", True),
     "sdrt charge": _Kind("SDRT charge", True),
-    "interest": _Kind("Interest", False),
-    "interest payment": _Kind("Interest", False),
+    "interest": _Kind("Interest", False, "interest"),
+    "interest payment": _Kind("Interest", False, "interest"),
     "refund": _Kind("Refund", False),
     "credit": _Kind("Credit", False),
     "adjustment": _Kind("Adjustment", False),
-    "stocks lending": _Kind("Stocks lending", False),
+    "stocks lending": _Kind("Stocks lending", False, "share_lending"),
 }
 # Closed Positions' Type of a position the ledger holds, in lower case.
 _KINDS: Mapping[str, InstrumentKind] = {"stocks": "equity", "etf": "etf"}
@@ -767,7 +773,13 @@ async def _unassigned(
             PostingInput(run.trading, usd.id, -tax, is_fee=True, memo="Withholding tax"),
             PostingInput(unassigned, usd.id, tax),
         ]
-    return await run.post(key, _when(row), kind.description, postings)
+    return await run.post(
+        key,
+        _when(row),
+        kind.description,
+        postings,
+        details=TransactionDetails(income_kind=kind.income_kind),
+    )
 
 
 @dataclass(frozen=True)

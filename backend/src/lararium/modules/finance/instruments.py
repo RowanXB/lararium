@@ -37,10 +37,11 @@ IdentifierScheme = Literal[
     "chain_contract",
     "coingecko",
     "binance_asset",
+    "chain_native",
 ]
 
 _UPPERCASE_SCHEMES = frozenset({"iso4217", "isin", "figi", "binance_asset"})
-_LOWERCASE_SCHEMES = frozenset({"coingecko", "chain_contract"})
+_LOWERCASE_SCHEMES = frozenset({"coingecko", "chain_contract", "chain_native"})
 
 
 @dataclass(frozen=True)

@@ -416,6 +416,7 @@ def _sync_ctx(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=ctx,
         connection=connection,
         sync_id=uuid.uuid4(),

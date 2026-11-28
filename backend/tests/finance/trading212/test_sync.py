@@ -245,6 +245,7 @@ async def _set_warnings(session, connection, warnings: list[str]) -> None:
 
 async def _ctx(session, connection, http: httpx.AsyncClient) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),
@@ -701,7 +702,7 @@ async def test_normalize_is_called_and_reports_nothing_yet(session, run, api, mo
     connection = await _connection(run)
     await _sync(session, connection, api)
     assert called == [len(await _records(session, connection))]
-    assert NORMALIZER_VERSION == "trading212-norm-3"
+    assert NORMALIZER_VERSION == "trading212-norm-5"
 
 
 async def test_warnings_written_during_the_sync_survive(session, run, api, monkeypatch) -> None:

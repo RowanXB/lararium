@@ -2,15 +2,38 @@
 
 It is computed once, set-wise, from the own records that can pair at all (a bank transfer,
 or one naming a bank account or a card merchant, or one on an account a card merchant pays
-into or whose type is funded by bank transfer, or one the owner paired) and the owner's
-decisions, and then read by matching, heal and review alike. It depends only on the records
-and the decisions, never on which transfers exist, and nothing matching writes changes it
-(re-pointing a contra, opening or dissolving a transfer, posting a placeholder), so one
-computation holds for a whole heal pass."""
+into or whose type is funded by bank transfer, or an on-chain movement, or one the owner
+paired) and the owner's decisions, and then read by matching, heal and review alike. It
+depends only on the records and the decisions, never on which transfers exist, and nothing
+matching writes changes it (re-pointing a contra, opening or dissolving a transfer, posting a
+placeholder), so one computation holds for a whole heal pass.
+
+A record naming an account family (a provider's move between its own accounts that doesn't
+name the other one) pairs only within the family (account family identifier design §5.3,
+owner's decision 2026-11-27): with a record on an account it names that names the family
+back, or with one there naming nobody when both are timed and at most the near window
+apart. No other tier pairs it, so it is never an external top-up or withdrawal. A record
+naming nobody that is such a move's counterpart is that move's first: no shared payee's
+record and no funding alone gives it another edge (_registry_edges), unless the owner
+decided the two apart.
+
+Where the source says which kind a movement is, that decides (account family identifier
+design §5.9, owner's decision 2026-11-27): Trading 212's History CSV gives an internal move
+empty Notes, and its record names the family; an external one a transaction id or a bank
+account, and its record is outside the family (outside_family), never a family move's
+counterpart however close in time to one, so it pairs with its payment as any deposit does.
+
+Where a record has several candidates of the same amount, two more rules apply
+(account family identifier design §5.10 and §5.7, owner's decisions 2026-11-27;
+_several): a group of interchangeable records, one side of which is alike, pairs in time
+order (_twins), and stays whole; every other record pairs with the one of its candidates
+that is, both timed, its only candidate of any tier time doesn't rule out (an untimed one
+is never ruled out: its real time is unknown), within the near window, when it is that
+one's only one too and the pair is takeable (_near_split)."""
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -34,20 +57,23 @@ from lararium.modules.finance.transfers.contra import (
     leg_fee_columns,
     names_source,
 )
-from lararium.modules.finance.transfers.settings import TransferSettings
+from lararium.modules.finance.transfers.settings import DEFAULTS, TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
-# owner paired them; each names the other's account; only one names the other's account, or
-# a bank account the other's account is one of the holders of (the other is a bank transfer
-# naming nobody, or names nobody on an account funded by bank transfer); only one prints
-# the sort code of the other's account, and nothing else of it (the other names no bank
-# account at all). Two records in different currencies that name each other's accounts are
-# MUTUAL too (cross_currency_tier).
-type Tier = Literal[1, 2, 3, 4]
+# owner paired them; both are the same on-chain movement, of one transaction, address and
+# amount (hash_tier); each names the other's account; only one names the other's account,
+# or a bank account the other's account is one of the holders of (the other is a bank
+# transfer naming nobody, or names nobody on an account funded by bank transfer); only one
+# prints the sort code of the other's account, and nothing else of it (the other names no
+# bank account at all). Two records in different currencies that name each other's accounts
+# are MUTUAL too (cross_currency_tier). Only this module compares the numbers; nothing
+# stores them.
+type Tier = Literal[1, 2, 3, 4, 5]
 DECIDED: Tier = 1
-MUTUAL: Tier = 2
-ONE_SIDED: Tier = 3
-WEAK: Tier = 4
+HASH: Tier = 2
+MUTUAL: Tier = 3
+ONE_SIDED: Tier = 4
+WEAK: Tier = 5
 
 # Why the rule could not decide, apart from the status ("needs review"; PairRelation's
 # review_reason): several candidates; a mutually identified one of another amount; or one
@@ -81,19 +107,35 @@ class Pairable:
     # any other record. Never `holder` (it identifies the record to the set, not to one
     # account), and apart from `holders`, which only card_tier reads.
     payee_holders: frozenset[UUID] = frozenset()
+    # It names an account family (contra.eligible_records' family, account family identifier
+    # design §5.2): `holder` is the family's one other account, or NULL with the other
+    # accounts in `payee_holders` (two or more) or none at all.
+    family: bool = False
+    # Its source says the money went outside its account's family (contra.eligible_records'
+    # outside_family, account family identifier design §5.9): never a family move's
+    # counterpart (_family_pair).
+    outside_family: bool = False
     # Its account's type lists bank transfer among the ways it is funded
     # (contra.eligible_records' funded_by_transfer): a deposit naming nobody there may be
     # one, though its source doesn't say (account type catalog design §8.2).
     funded_by_transfer: bool = False
     # Its occurred_at is a real instant (contra.eligible_records' timed): a connector's
-    # record, or an imported row its file gives to the second. Only the coverage gate reads
-    # it, of a receipt (_gate_day: a payment counts as timed only as a connector's record);
-    # a row giving only its date is stamped 00:00.
+    # record, or an imported row its file gives to the second. The coverage gate reads it,
+    # of a receipt (_gate_day: a payment counts as timed only as a connector's record), and
+    # the family rule, of both sides (_family_pair); a row giving only its date is stamped
+    # 00:00.
     timed: bool = False
     # The time zone its time was read in (Transaction.occurred_tz): an imported row's
     # profile's, which a CSV row is booked on its time's date in. Only _gate_day reads it,
     # of a timed receipt; None reads the owner's.
     occurred_tz: str | None = None
+    # The on-chain movement it is (contra.eligible_records' chain, tx_hash, chain_address),
+    # and the own account the registry gives that address (address_holder): only hash_tier
+    # reads them. None for a record that is no on-chain movement, or one at no address.
+    chain: str | None = None
+    tx_hash: str | None = None
+    chain_address: str | None = None
+    address_holder: UUID | None = None
 
     @property
     def sends(self) -> bool:
@@ -148,7 +190,38 @@ def _names_held(x: Pairable, other: Pairable) -> bool:
     return other.account_id in x.payee_holders and not other.identified and _may_be_transfer(other)
 
 
-def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
+def _names_nobody(x: Pairable) -> bool:
+    """Whether the record names nobody: no own account, no card merchant, no bank account
+    (a shared one included), no account family."""
+    return x.holder is None and not x.holders and not x.payee_holders and not x.names_account
+
+
+def _family_pair(x: Pairable, other: Pairable, near_window: timedelta) -> bool:
+    """Whether x, naming an account family, and other may be one move within the family
+    (account family identifier design §5.3 item 2): other is on an account x names (its
+    holder, or one of its set), and either names the family back, x's account among those
+    it names, or names nobody, its source not saying it went outside the family
+    (outside_family, §5.9), both timed (a connector's record, or an imported row timed to the
+    second) and their instants at most `near_window` apart. A source books an internal move
+    on both sides at about the same instant, and a real bank top-up or withdrawal practically
+    never falls within two minutes of one (owner, 2026-11-27); where the source says the
+    record went outside the family, that decides, however near it is."""
+    if not x.family or not (other.account_id == x.holder or other.account_id in x.payee_holders):
+        return False
+    if other.family:
+        return x.account_id == other.holder or x.account_id in other.payee_holders
+    return (
+        _names_nobody(other)
+        and not other.outside_family
+        and x.timed
+        and other.timed
+        and abs(x.occurred_at - other.occurred_at) <= near_window
+    )
+
+
+def registry_tier(
+    r: Pairable, c: Pairable, near_window: timedelta = DEFAULTS.near_window
+) -> Tier | None:
     """The tier the registry gives two records of opposite sign, in the same instrument,
     the receiving one in the sending one's window, or None when it doesn't pair them: they
     must be on different accounts, at least one identified, each identified one naming the
@@ -158,8 +231,20 @@ def registry_tier(r: Pairable, c: Pairable) -> Tier | None:
     be a transfer (_names_held: ONE_SIDED). A record naming a bank account several own
     accounts hold says where its money went: its other side is on one of them, or there is
     none. A record naming a card merchant (holders) is none of these tiers' (card_tier pairs
-    it). Decisions are not considered."""
+    it). Decisions are not considered.
+
+    A record naming an account family pairs by the family rule alone (account family
+    identifier design §5.3, owner's decision 2026-11-27): MUTUAL with a family move on the
+    one account it names that names its account back; ONE_SIDED with any other family move
+    or record naming nobody that _family_pair takes (the latter only within `near_window`);
+    with nothing else, whatever either is marked."""
     if c.account_id == r.account_id:
+        return None
+    if r.family or c.family:
+        if r.family and c.family and r.holder == c.account_id and c.holder == r.account_id:
+            return MUTUAL
+        if _family_pair(r, c, near_window) or _family_pair(c, r, near_window):
+            return ONE_SIDED
         return None
     if r.holders or c.holders:
         return None
@@ -191,8 +276,11 @@ def weak_tier(r: Pairable, c: Pairable) -> Tier | None:
     when it doesn't pair them: they must be on different accounts, neither identified, both
     bank transfers, and one's sort code alone naming the other's account, which names no
     bank account at all. Weak evidence never identifies a record, so it pairs only records
-    that are both there. Decisions are not considered."""
+    that are both there. A record naming an account family is never this tier's (it pairs
+    only within its family, registry_tier). Decisions are not considered."""
     if c.account_id == r.account_id or r.identified or c.identified:
+        return None
+    if r.family or c.family:
         return None
     if not (r.bank_transfer and c.bank_transfer) or r.holders or c.holders:
         return None
@@ -221,6 +309,29 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     return MUTUAL
 
 
+def hash_tier(r: Pairable, c: Pairable) -> Tier | None:
+    """The tier two on-chain movements get (Bitcoin wallet design §5.8), or None when they
+    don't pair: the same chain, transaction hash and address, on different accounts, in one
+    instrument, of opposite and equal amounts; and the registry doesn't disagree: the
+    address is registered to no account, or to the receiving record's. When it is another
+    account's, the owner's registration says where that address's money goes, and the
+    engine acts on it (a placeholder on a manual account, say): the registry wins. The
+    booking window does not apply (an exchange applies a withdrawal hours before its block),
+    nor does uniqueness (the caller's: pair_relation). Decisions are not considered."""
+    if r.chain is None or r.tx_hash is None or r.chain_address is None:
+        return None
+    if (r.chain, r.tx_hash, r.chain_address) != (c.chain, c.tx_hash, c.chain_address):
+        return None
+    if r.account_id == c.account_id or r.instrument_id != c.instrument_id:
+        return None
+    if r.quantity == 0 or r.quantity != -c.quantity:
+        return None
+    receiving = c if r.sends else r
+    if receiving.address_holder not in (None, receiving.account_id):
+        return None
+    return HASH
+
+
 def _card_payer(x: Pairable) -> bool:
     """A connector's record naming a card merchant that pays into own accounts."""
     return bool(x.holders) and x.holder is None and x.source[0] == "connection"
@@ -228,9 +339,14 @@ def _card_payer(x: Pairable) -> bool:
 
 def _card_receiver(x: Pairable) -> bool:
     """A connector's record that could be a card payment's other side: naming no own
-    account, no card merchant and no bank account (a Trading 212 DEPOSIT or WITHDRAW)."""
+    account, no card merchant, no bank account and no account family (a Trading 212 DEPOSIT
+    or WITHDRAW; a family move names someone, account family identifier design §5.3)."""
     return (
-        x.source[0] == "connection" and x.holder is None and not x.holders and not x.names_account
+        x.source[0] == "connection"
+        and x.holder is None
+        and not x.holders
+        and not x.names_account
+        and not x.family
     )
 
 
@@ -577,10 +693,10 @@ async def _load_records(
     """The own records that can pair at all: those a bank transfer, naming a bank
     account, a card merchant or an own account by its number (the registry's), those on an
     account a card merchant pays into (card_tier's other side) or funded by bank transfer
-    (registry_tier's, _may_be_transfer), and those the owner paired. (A record on an account
-    holding a shared payee bank account pairs with one naming it only if it may be a
-    transfer, so it is among those already.) Read from `own` (a snapshot of
-    eligible_records) when given."""
+    (registry_tier's, _may_be_transfer), those on-chain (hash_tier's), and those the owner
+    paired. (A record on an account holding a shared payee bank account pairs with one
+    naming it only if it may be a transfer, so it is among those already.) Read from `own`
+    (a snapshot of eligible_records) when given."""
     e = eligible_records(system) if own is None else own
     t = models.Transaction
     h = models.AccountIdentifierHolder
@@ -599,6 +715,8 @@ async def _load_records(
         e.c.holder.is_not(None),
         e.c.account_id.in_(select(h.account_id).where(h.kind == "card_merchant")),
         e.c.funded_by_transfer,
+        # An on-chain movement: a wallet's receipt names nobody, and only its hash pairs it.
+        e.c.tx_hash.is_not(None),
     ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
@@ -617,9 +735,15 @@ async def _load_records(
         e.c.names_account,
         e.c.holders,
         e.c.payee_holders,
+        e.c.family,
+        e.c.outside_family,
         e.c.funded_by_transfer,
         e.c.timed,
         e.c.occurred_tz,
+        e.c.chain,
+        e.c.tx_hash,
+        e.c.chain_address,
+        e.c.address_holder,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -641,9 +765,15 @@ async def _load_records(
             names_account=row.names_account,
             holders=frozenset(row.holders or ()),
             payee_holders=frozenset(row.payee_holders or ()),
+            family=row.family,
+            outside_family=row.outside_family,
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
             occurred_tz=row.occurred_tz,
+            chain=row.chain,
+            tx_hash=row.tx_hash,
+            chain_address=row.chain_address,
+            address_holder=row.address_holder,
             fiat=bool(row.fiat),
             fee=(
                 None
@@ -717,6 +847,27 @@ def _gate_day(record: Pairable, other: Pairable, settings: TransferSettings, kno
     return earliest
 
 
+def _family_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
+    """The coverage gate for a pair with a family record (controller's ruling, 2026-11-27,
+    on #48's rule): every account a family side names (its holder, or its set) is held,
+    the one the other record is on from _gate_day's day and every other manual one from the
+    start of that side's window. A family record identified to one account (a family of two)
+    is so gated as any identified record is, on that account. The family record's own
+    account is never asked, nor is a side guessed to be the identified one."""
+    for x, y in ((s, c), (c, s)):
+        if not x.family:
+            continue
+        named = x.payee_holders if x.holder is None else x.payee_holders | {x.holder}
+        start = counterpart_bounds(x, settings)[0]
+        gate = _gate_day(x, y, settings, known)
+        if not all(
+            known.holds_account(h, y.instrument_id, gate if h == y.account_id else start)
+            for h in named
+        ):
+            return False
+    return True
+
+
 def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Known) -> bool:
     """Design §5.8: an identified record's counterpart found by amount and date (one naming
     nobody) is taken automatically only if the identified record's window doesn't start
@@ -729,7 +880,10 @@ def _one_sided_known(s: Pairable, c: Pairable, settings: TransferSettings, known
     names (payee_holders) is held to the gate from the start of that side's window: the
     real row may be on any of them, inside its opening. Only the holder the other record is
     on is asked from _gate_day's day instead: a timed receipt's evidence is about its own
-    account alone."""
+    account alone. A pair with a family record is gated by the accounts the family side
+    names (_family_known)."""
+    if s.family or c.family:
+        return _family_known(s, c, settings, known)
     if s.identified or c.identified:
         identified, other = (s, c) if s.identified else (c, s)
     else:
@@ -756,6 +910,24 @@ def _weak_known(s: Pairable, c: Pairable, settings: TransferSettings, known: Kno
     return known.holds_from(other, _gate_day(w, other, settings, known))
 
 
+def _same_amount(
+    records: list[Pairable], settings: TransferSettings
+) -> Iterator[tuple[Pairable, Pairable]]:
+    """Each sender with each receiver in its instrument of its opposite amount booked in
+    its window (counterpart_bounds): the pairs the same-amount tiers are asked about."""
+    receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
+    for x in records:
+        if not x.sends:
+            receivers[(x.instrument_id, x.quantity)].append(x)
+    by_amount = {key: _Timeline(found) for key, found in receivers.items()}
+    for s in records:
+        if not s.sends:
+            continue
+        timeline = by_amount.get((s.instrument_id, -s.quantity))
+        for c in timeline.between(*counterpart_bounds(s, settings)) if timeline else ():
+            yield s, c
+
+
 def _registry_edges(
     records: list[Pairable],
     settings: TransferSettings,
@@ -770,15 +942,51 @@ def _registry_edges(
     payment naming nobody is no evidence of a differing transfer). Card evidence comes
     first: a record with a card payment's candidate (`carded`, card_partners') gets no edge
     through its account's funding alone (_funded_only), so a card top-up stays the card
-    payment's."""
+    payment's.
+
+    Family evidence comes first too (account family identifier design §5.3 item 3): a
+    record naming nobody that is a family move's counterpart (_family_pair, within the near
+    window, the owner not having decided the two apart: `familied`) gets no edge from a
+    record naming a shared payee (payee_holders) and none through its account's funding
+    alone. By the owner's reasoning (2026-11-27), a row within two minutes of a same-amount
+    family move is that move's other side; else a Cash ISA row of an internal move would
+    also be the candidate of any same-amount shared-payee payment in the window, and neither
+    would pair. Its other edges stand. The owner's decisions win: a record whose only family
+    counterparts the owner ruled out keeps its shared-payee and funding edges. A record its
+    source says went outside the family (§5.9) is no family move's counterpart at all."""
     same, differing = _Edges(), _Edges()
     refused: set[frozenset[UUID]] = set()
-    # Same amount: a sender meets the receivers in its instrument of its amount.
-    receivers: dict[tuple[UUID, Decimal], list[Pairable]] = defaultdict(list)
-    for x in records:
-        if not x.sends:
-            receivers[(x.instrument_id, x.quantity)].append(x)
-    by_amount = {key: _Timeline(found) for key, found in receivers.items()}
+    # Two passes over the pairs rather than one list of them: their count grows with the
+    # product of the records sharing an amount, and the first pass only runs for a family.
+    familied = (
+        {
+            x.id
+            for s, c in _same_amount(records, settings)
+            if (s.family or c.family) and not decisions.apart(s, c)
+            for x, y in ((s, c), (c, s))
+            if not x.family and _family_pair(y, x, settings.near_window)
+        }
+        if any(x.family for x in records)
+        else set[UUID]()
+    )
+    for s, c in _same_amount(records, settings):
+        tier = registry_tier(s, c, settings.near_window)
+        if tier is not None and any(_funded_only(x) and x.id in carded for x in (s, c)):
+            tier = None
+        if tier is None:
+            tier = weak_tier(s, c)
+        if tier is None or decisions.apart(s, c):
+            continue
+        if not (s.family or c.family) and any(
+            x.id in familied and (_funded_only(x) or bool(y.payee_holders))
+            for x, y in ((s, c), (c, s))
+        ):
+            continue
+        if (tier == ONE_SIDED and not _one_sided_known(s, c, settings, known)) or (
+            tier == WEAK and not _weak_known(s, c, settings, known)
+        ):
+            refused.add(frozenset((s.id, c.id)))
+        same.add(s.id, c.id, tier)
     # Another amount: a sender naming account H meets the receivers on H naming its account.
     named: dict[tuple[UUID, UUID, UUID], list[Pairable]] = defaultdict(list)
     for x in records:
@@ -786,27 +994,10 @@ def _registry_edges(
             named[(x.instrument_id, x.holder, x.account_id)].append(x)
     by_accounts = {key: _Timeline(found) for key, found in named.items()}
     for s in records:
-        if not s.sends:
-            continue
-        window = counterpart_bounds(s, settings)
-        timeline = by_amount.get((s.instrument_id, -s.quantity))
-        for c in timeline.between(*window) if timeline else ():
-            tier = registry_tier(s, c)
-            if tier is not None and any(_funded_only(x) and x.id in carded for x in (s, c)):
-                tier = None
-            if tier is None:
-                tier = weak_tier(s, c)
-            if tier is None or decisions.apart(s, c):
-                continue
-            if (tier == ONE_SIDED and not _one_sided_known(s, c, settings, known)) or (
-                tier == WEAK and not _weak_known(s, c, settings, known)
-            ):
-                refused.add(frozenset((s.id, c.id)))
-            same.add(s.id, c.id, tier)
-        if not s.identified or s.holder is None:
+        if not s.sends or not s.identified or s.holder is None:
             continue
         timeline = by_accounts.get((s.instrument_id, s.account_id, s.holder))
-        for c in timeline.between(*window) if timeline else ():
+        for c in timeline.between(*counterpart_bounds(s, settings)) if timeline else ():
             if c.quantity != -s.quantity and not decisions.apart(s, c):
                 differing.add(s.id, c.id, MUTUAL)
     return same, differing, refused
@@ -830,6 +1021,24 @@ def _decided_edges(
             edges.add(r.id, c.id, DECIDED)
             decided.add(frozenset((r.id, c.id)))
     return decided
+
+
+def _hash_edges(records: list[Pairable], decisions: _Decisions) -> _Edges:
+    """The pairs hash_tier gives that no decision keeps apart: a sender meets the records of
+    its chain, hash and address, whenever they were booked."""
+    edges = _Edges()
+    movements: dict[tuple[str, str, str], list[Pairable]] = defaultdict(list)
+    for x in records:
+        if x.chain is not None and x.tx_hash is not None and x.chain_address is not None:
+            movements[(x.chain, x.tx_hash, x.chain_address)].append(x)
+    for found in movements.values():
+        for s in found:
+            if not s.sends:
+                continue
+            for c in found:
+                if hash_tier(s, c) is not None and not decisions.apart(s, c):
+                    edges.add(s.id, c.id, HASH)
+    return edges
 
 
 def _cross_currency_edges(
@@ -870,11 +1079,15 @@ class PairRelation:
 
     records: Mapping[UUID, Pairable]  # those that can pair at all
     rejected: frozenset[UUID]  # those of them the owner said are not a transfer
-    # Every pair of the same amount, and every pair the owner made (DECIDED, whose sides
-    # may differ: _decided_edges), both ways round, with its strongest tier.
+    # Every pair of the same amount, the chain's (HASH: _hash_edges) included, and every
+    # pair the owner made (DECIDED, whose sides may differ: _decided_edges), both ways
+    # round, with its strongest tier.
     tiers: Mapping[UUID, Mapping[UUID, Tier]]
     # A record's candidates of the same amount, or the owner's: those in the strongest tier
-    # it has any in, for which that is also their own strongest (Ruling 7).
+    # it has any in, for which that is also their own strongest (Ruling 7); a record with
+    # several, outside an interchangeable group, only the one the near window gives it
+    # (_several, _near_split). A record dropped so still lists the one that dropped it
+    # (`partner` reads both ways).
     exact: Mapping[UUID, frozenset[UUID]]
     # The pairs of the same amount that can't be taken by themselves: the coverage gate
     # refused them (_one_sided_known, _weak_known). They are candidates all the same
@@ -909,7 +1122,7 @@ class PairRelation:
 
     def partner(self, record_id: UUID) -> UUID | None:
         """The record's unique partner: its only candidate, whose only candidate it is, when
-        the pair is takeable; or, among interchangeable candidates, the one a fixed order
+        the pair is takeable; or, among interchangeable candidates, the one time order
         gives it (_twins). With no candidate of the same amount, the one it converts with
         across currencies (`converts`), else the card payment or deposit it pairs with
         (`by_card`)."""
@@ -920,7 +1133,8 @@ class PairRelation:
         if len(found) != 1:
             return self.twins.get(record_id)
         [partner] = found
-        if len(self.exact.get(partner, frozenset())) != 1:
+        # Its only candidate may have been narrowed to another (_near_split).
+        if self.exact.get(partner, frozenset()) != frozenset({record_id}):
             return None
         return partner if self.takeable(record_id, partner) else None
 
@@ -971,21 +1185,98 @@ class PairRelation:
         return any(self.records[c].account_id == account_id for c in found)
 
 
+def _near_split(
+    records: Mapping[UUID, Pairable],
+    tiers: Mapping[UUID, Mapping[UUID, Tier]],
+    exact: Mapping[UUID, frozenset[UUID]],
+    untakeable: Collection[frozenset[UUID]],
+    near_window: timedelta,
+    whole: Collection[UUID] = (),
+) -> dict[UUID, frozenset[UUID]]:
+    """`exact` with several candidates split by the near window (account family identifier
+    design §5.10, owner's decision 2026-11-27): a record r with two or more, neither it nor
+    c in `whole` (the members of interchangeable groups, _several), keeps only c,
+    one of them, and c only r, when both are timed (a connector's record, or an imported
+    row timed to the second), c is within `near_window` of r's instant, every other record
+    in r's `tiers` (of any tier, `untakeable` included) is timed and further than
+    `near_window` from it, the same holds of c's, and the pair is takeable. The owner
+    moves the same amount into an account every few days, and a payment and its deposit
+    are normally seconds apart, so the one nearby is the other side; a nearby candidate of
+    a lower tier, or one the coverage gate refuses, still might be, and then nothing is
+    split. So might an untimed candidate (a row giving only its date, stamped 00:00): its
+    real time is unknown, so it can't be shown to lie outside the window, and only timed
+    candidates are ruled out by time (owner's ruling, 2026-11-27). The split is for records
+    that would otherwise go to review: a group that pairs as interchangeable is left whole.
+    It only narrows: no record gains a candidate. A record dropped from r's or c's
+    candidates still lists r or c among its own, so it pairs with neither
+    (PairRelation.partner reads both ways); it was in no pair before either (it isn't in an
+    interchangeable group, and r or c had several), and its candidates and review reason
+    are unchanged. Whatever is left with several goes to review as before. The owner's
+    decisions win: a record with a pair the owner made (DECIDED) among its candidates, or
+    whose nearby candidate has one, is never split, so two of the owner's pair decisions
+    for one record stay for the owner however close in time one of them is."""
+
+    def near(r: UUID) -> set[UUID]:
+        """r's candidates time doesn't rule out: untimed ones, and timed ones within the
+        window. None when r itself is untimed."""
+        x = records[r]
+        if not x.timed:
+            return set()
+        return {
+            c
+            for c in tiers.get(r, {})
+            if not records[c].timed or abs(records[c].occurred_at - x.occurred_at) <= near_window
+        }
+
+    def decided(r: UUID) -> bool:
+        return DECIDED in tiers.get(r, {}).values()
+
+    split = dict(exact)
+    for r, found in exact.items():
+        if len(found) < 2 or decided(r):
+            continue
+        nearby = near(r)
+        if len(nearby) != 1:
+            continue
+        [c] = nearby
+        if (
+            c in found
+            and r not in whole
+            and c not in whole
+            and records[c].timed
+            and not decided(c)
+            and near(c) == {r}
+            and frozenset((r, c)) not in untakeable
+        ):
+            split[r], split[c] = frozenset({c}), frozenset({r})
+    return split
+
+
 def _twins(
     records: Mapping[UUID, Pairable],
     exact: Mapping[UUID, frozenset[UUID]],
     untakeable: Collection[frozenset[UUID]],
 ) -> dict[UUID, UUID]:
     """Partners for groups of interchangeable records: n records whose candidates are
-    exactly the same n others, and the reverse, each side alike (account, instrument,
-    amount, booking date: a transfer split into equal parts, say). Any pairing of them
-    gives the same ledger, so they pair in a fixed order, by time and then by reference,
-    which doesn't depend on which side arrived first. Anything less alike stays for the
-    owner's review. A side naming no account is found by amount and date, as a single
-    counterpart is: an unrelated row can be among it until the real one arrives, and the
-    group then no longer matches (design §5.8). A group with a pair that can't be taken by
-    itself (`untakeable`) pairs none: which of its rows are the real ones is unknown until
-    an upload lists their days, and a group pairs as a whole or not at all."""
+    exactly the same n others, and the reverse, one side or both alike (account,
+    instrument, amount, booking date: a transfer split into equal parts, or the same amount
+    moved from two accounts into one, seconds apart). Owner's decision (account family
+    identifier design §5.7, 2026-11-27): one alike side is enough. Any pairing of such a
+    group gives the same ledger, the same transfers between the same accounts for the same
+    amounts, differing only in which of identical rows each links, so a fixed order can't
+    be wrong. Which links: time order, the one rule, which doesn't depend on which side
+    arrived first: each side sorted by instant (a record without a real time is stamped
+    00:00 on its booking date, so it sorts by that date), then by reference, the k-th of
+    one linked to the k-th of the other. With real times on both sides it is time
+    matching: in one dimension a sorted matching gives the least total time difference.
+    (An earlier draft also asked for exactly one counterpart within the near window; the
+    owner dropped it, 2026-11-27, since it never gave a link time order wouldn't.)
+    Anything less alike stays for the owner's review. A side naming no account is found by
+    amount and date, as a single counterpart is: an unrelated row can be among it until
+    the real one arrives, and the group then no longer matches (design §5.8). A group with
+    a pair that can't be taken by itself (`untakeable`) pairs none: which of its rows are
+    the real ones is unknown until an upload lists their days, and a group pairs as a
+    whole or not at all."""
 
     def alike(group: frozenset[UUID]) -> bool:
         return (
@@ -1012,13 +1303,30 @@ def _twins(
             len(others) == len(found)
             and all(exact.get(x) == others for x in found)
             and all(exact.get(x) == found for x in others)
-            and alike(found)
-            and alike(others)
+            and (alike(found) or alike(others))
             and not any(frozenset((x, y)) in untakeable for x in found for y in others)
         ):
             for x, y in zip(order(others), order(found), strict=True):
                 twins[x], twins[y] = y, x
     return twins
+
+
+def _several(
+    records: Mapping[UUID, Pairable],
+    tiers: Mapping[UUID, Mapping[UUID, Tier]],
+    exact: Mapping[UUID, frozenset[UUID]],
+    untakeable: Collection[frozenset[UUID]],
+    near_window: timedelta,
+) -> tuple[dict[UUID, frozenset[UUID]], dict[UUID, UUID]]:
+    """(exact, twins) once the rules for several candidates have applied (account family
+    identifier design §5.10 and §5.7, owner's decisions 2026-11-27), in this order: the
+    groups interchangeable on the candidates as found (_twins) are kept whole, to pair in
+    time order; every other record is split by the near window (_near_split). The split
+    is for records that would otherwise go to review, and such a group doesn't; it only
+    leaves singletons, so the twins are those of the first pass."""
+    twins = _twins(records, exact, untakeable)
+    split = _near_split(records, tiers, exact, untakeable, near_window, twins.keys())
+    return split, twins
 
 
 async def pair_relation(
@@ -1043,15 +1351,33 @@ async def pair_relation(
     a bank account several own accounts hold counts as identified to that set: it pairs so
     with a record on one of them that identifies no account (_names_held). Where the
     registry doesn't pair two records, a sort code alone may, as the weakest tier
-    (weak_tier). Two records in different currencies pair when
+    (weak_tier). A record naming an account family pairs by the family rule alone (account
+    family identifier design §5.3, owner's decision 2026-11-27): with a record on an account
+    it names that names the family back, or with one there naming nobody when both are
+    timed and their instants at most the near window apart; and a record naming nobody that
+    is such a move's counterpart gets no edge from a shared payee's record or through its
+    account's funding alone (family evidence comes first). Two records in different
+    currencies pair when
     cross_currency_tier takes them, within the near window, each the other's only such
     candidate and neither with one of the same amount; their conversion's fee must fit
     (conversion_postings), else they are for review as of another amount. A card payment
     and a deposit on one of its merchant's holder accounts pair when card_tier takes them,
     each the other's only such candidate and neither with a candidate in another tier
-    (card_partners). The owner pairs two records with a pair decision. A pair of the same
-    amount the coverage gate refuses (design §5.8) is a candidate like any other, one that
-    can't be taken by itself (`untakeable`).
+    (card_partners). Two on-chain movements of one transaction, address and amount pair
+    when hash_tier takes them, whenever they were booked, above every tier but the owner's
+    (Bitcoin wallet design §5.8). The owner pairs two records with a pair decision. A pair
+    of the same amount the coverage gate refuses (design §5.8) is a candidate like any
+    other, one that can't be taken by itself (`untakeable`), unless the owner or the chain's
+    hash pairs it.
+
+    Where a record has several candidates of the same amount, two rules follow (account
+    family identifier design §5.10 and §5.7, owner's decisions 2026-11-27; _several),
+    after the one above of whether two records may pair at all. A group of interchangeable
+    records, one side of which (or both) is alike, pairs in time order and stays whole
+    (_twins). Every other record pairs with the one candidate that is, both timed, each
+    the other's only candidate of any tier time doesn't rule out, within the near window,
+    when that pair is takeable (_near_split); an untimed candidate is never ruled out, its
+    real time being unknown. Whatever is left with several is for review.
 
     `excluding` leaves records out as if they were gone (a row about to be deleted);
     `adding` puts records in as if they were posted (a row being staged), decisions about
@@ -1064,7 +1390,16 @@ async def pair_relation(
     same, differing, refused = _registry_edges(
         records, settings, decisions, await _load_known(session, listing), carded=carded.keys()
     )
-    untakeable = frozenset(refused - _decided_edges(records, decisions, same))
+    decided = _decided_edges(records, decisions, same)
+    hashed = _hash_edges(records, decisions)
+    for r, found in hashed.tiers.items():
+        for c in found:
+            same.add(r, c, HASH)
+    # The coverage gate is for a counterpart found by amount and date: a pair the owner
+    # made, or the chain's hash gives, is no such guess.
+    untakeable = frozenset(
+        refused - decided - {frozenset((r, c)) for r, found in hashed.tiers.items() for c in found}
+    )
     best = {r: min(found.values()) for r, found in same.tiers.items()}
     exact = {
         r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])
@@ -1072,6 +1407,7 @@ async def pair_relation(
     }
     exact = {r: found for r, found in exact.items() if found}
     by_id = {x.id: x for x in records}
+    exact, twins = _several(by_id, same.tiers, exact, untakeable, settings.near_window)
     across = {
         r: frozenset(found)
         for r, found in _cross_currency_edges(records, settings, decisions).tiers.items()
@@ -1110,7 +1446,7 @@ async def pair_relation(
         exact=exact,
         untakeable=untakeable,
         differing={r: frozenset(found) for r, found in differing.tiers.items()},
-        twins=_twins(by_id, exact, untakeable),
+        twins=twins,
         across=across,
         alone_across=frozenset(alone),
         converts=converts,

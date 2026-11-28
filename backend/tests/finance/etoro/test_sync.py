@@ -330,6 +330,7 @@ async def _set_cursor(session, connection, cursor: JSONValue) -> None:
 
 async def _ctx(session, connection, http: httpx.AsyncClient, tmp_path=None) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),
@@ -772,7 +773,7 @@ async def test_normalize_is_called_with_the_records(session, run, api, monkeypat
     notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, notifier)
     assert called == [len(await _records(session, connection))]
-    assert NORMALIZER_VERSION == "etoro-norm-4"
+    assert NORMALIZER_VERSION == "etoro-norm-6"
     assert after.warnings == ["eToro flagged: pnl.someNewField"]
     assert notifier.messages == ["eToro: eToro flagged: pnl.someNewField"]
     await _run_sync(session, connection, api, notifier)

@@ -17,6 +17,14 @@ account, shared by every one of the owner's accounts there) is held the same way
 uk_bank_account row may keep `account_id` NULL and name its holders there too (account type
 catalog design §8.1). A record naming it is identified to that set, never to one account. An
 identifier has an account or holders, never both.
+
+An account family (`account_family`, its value a family key of the account type catalog,
+`trading212`) is the third way an identifier names accounts: it has neither an account nor
+holder rows. A record naming it names the family's other accounts, read from the accounts'
+`type_key` when the record is resolved (`named_accounts`): one account is named as if the
+record named that account's own identifier, several are a set it is identified to, none
+leaves it naming nobody. A source writes it where it says the other side is in the same
+family but not which account.
 """
 
 import logging
@@ -33,7 +41,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.core.commands import CommandContext
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance import models
-from lararium.modules.finance.accounts import get_account
+from lararium.modules.finance.account_types import families, family_keys
+from lararium.modules.finance.accounts import accounts_of_types, get_account
 from lararium.modules.finance.errors import (
     AccountIdentifierNotFoundError,
     AccountNotFoundError,
@@ -50,6 +59,7 @@ IdentifierKind = Literal[
     "etoro_account",
     "card_merchant",
     "chain_address",
+    "account_family",
 ]
 # The kinds that may be held by several own accounts (finance.account_identifier_holders).
 HeldKind = Literal["card_merchant", "uk_bank_account"]
@@ -87,11 +97,19 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     """The stored form: `<6-digit sort code>:<8-digit account number>` for a UK bank account,
     the upper-case account id for an IBKR account, the account number for Trading 212,
     eToro's account id with a UUID in lower case, Monzo's merchant id as written, and the
-    address as written for a chain address (lower-cased when it begins `0x`, as EVM addresses
-    are case-insensitive)."""
+    address as written for a chain address (lower-cased when it begins `0x` or `bc1`, as EVM
+    and Bitcoin bech32 addresses are case-insensitive; a wallet shows bech32 in lower case),
+    and a family key of the account type catalog for an account family."""
+    if kind == "account_family":
+        family = value.strip()
+        if family not in families():
+            raise FinanceValidationError(
+                f"an account family is one of: {', '.join(sorted(families()))}"
+            )
+        return family
     if kind == "chain_address":
         address = value.strip()
-        if address.lower().startswith("0x"):
+        if address.lower().startswith(("0x", "bc1")):
             address = address.lower()
         if _CHAIN_ADDRESS.fullmatch(address) is None:
             raise FinanceValidationError(
@@ -131,6 +149,16 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
             "a UK bank account is a 6-digit sort code and an 8-digit account number"
         )
     return f"{found[1]}:{found[2]}"
+
+
+def _check_families() -> None:
+    """Every family of the catalog is a value `normalize_identifier` keeps as it is."""
+    for family in families():
+        if normalize_identifier("account_family", family) != family:
+            raise RuntimeError(f"account family {family!r} is not a valid identifier value")
+
+
+_check_families()
 
 
 def uk_bank_account_parts(value: str) -> tuple[str, str]:
@@ -233,6 +261,35 @@ async def identifier_account(session: AsyncSession, identifier_id: UUID) -> UUID
     )
 
 
+async def named_accounts(
+    session: AsyncSession, identifier_id: UUID, own_account_id: UUID
+) -> tuple[UUID | None, frozenset[UUID]]:
+    """Whom a record of `own_account_id` naming the identifier names: (the one account it
+    names, the accounts it is identified to as a set).
+
+    An account family names its other accounts, whatever their status: those whose
+    `type_key` is one of the family's, other than `own_account_id`. One is named as if the
+    record named that account's own identifier; several are the set; none leaves it naming
+    nobody. Any other identifier names the account it is assigned to (identifier_account).
+    `contra.eligible_records` holds the SQL twin of this rule.
+    """
+    i = models.AccountIdentifier
+    row = (
+        await session.execute(select(i.kind, i.value, i.account_id).where(i.id == identifier_id))
+    ).one_or_none()
+    if row is None or row.kind != "account_family":
+        return (None if row is None else row.account_id), frozenset()
+    others = frozenset(await accounts_of_types(session, family_keys(row.value))) - {own_account_id}
+    if len(others) == 1:
+        return next(iter(others)), frozenset()
+    return None, others
+
+
+async def family_identifier(ctx: CommandContext, family: str) -> UUID:
+    """The row for an account family, created if new."""
+    return await get_or_create_identifier(ctx, "account_family", family)
+
+
 async def _get_or_create(ctx: CommandContext, kind: IdentifierKind, normalized: str) -> UUID:
     i = models.AccountIdentifier
     found = await ctx.session.scalar(select(i.id).where(i.kind == kind, i.value == normalized))
@@ -268,6 +325,10 @@ async def get_or_create_identifier(ctx: CommandContext, kind: IdentifierKind, va
 
 
 def _require_single_holder(kind: IdentifierKind) -> None:
+    if kind == "account_family":
+        raise FinanceValidationError(
+            "an account family names the accounts of its type; it is not assigned to one"
+        )
     if kind == "card_merchant":
         raise FinanceValidationError(
             "a card merchant is registered with the accounts it pays into, not assigned to one"
@@ -406,6 +467,8 @@ async def unassign_identifier(ctx: CommandContext, identifier_id: UUID) -> Ident
 async def dismiss_identifier(ctx: CommandContext, identifier_id: UUID) -> IdentifierRecord:
     """The owner saying an unassigned identifier is not one of theirs."""
     current = await _get(ctx.session, identifier_id)
+    if current.kind == "account_family":
+        raise FinanceValidationError("an account family can't be dismissed")
     if current.dismissed_at is not None:
         return current
     if current.holders:
