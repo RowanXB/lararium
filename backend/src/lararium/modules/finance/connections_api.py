@@ -84,6 +84,7 @@ from lararium.modules.finance.binance.reconcile import open_differences
 from lararium.modules.finance.binance.sync import (
     ACCOUNT_LABEL,
     FIRST_SYNC_DONE_KEY,
+    REFUSED_HOSTS_KEY,
     make_client,
     pass_gate,
     uid_of,
@@ -1535,7 +1536,10 @@ async def update_binance_connection(
                 "this key belongs to another Binance account than this connection",
             )
         await _store_key(ctx, master_key, connection_id, material)
-        await update_config(ctx, connection_id, {"key_type": body.key_type})
+        # A host that refused the old key's type is asked again with the new key at once.
+        await update_config(
+            ctx, connection_id, {"key_type": body.key_type}, remove=[REFUSED_HOSTS_KEY]
+        )
         moved = await transition_status(
             ctx,
             connection_id,

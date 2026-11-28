@@ -4,9 +4,9 @@
 The fake is the history at Binance's clock: every request first sets what it lists (the rows
 listed by then, in their state then: a deposit credited, a withdrawal failed) and what each
 wallet reports (the true balance then). The first sync walks back to the fetch floor and reads
-the daily Spot snapshots; the later ones walk forwards from their cursors with the 7-day
-overlap. A record the test removes is the history's still (its effects are in every report)
-but the fake never lists it.
+the daily Spot, Cross Margin and USDⓈ-M snapshots; the later ones walk forwards from their
+cursors with the 7-day overlap. A record the test removes is the history's still (its effects
+are in every report) but the fake never lists it.
 
 - Windows and order: two schedules of the same history give the same transactions, postings
   and typed record rows; only an opening dated at its wallet's first report (no record, or
@@ -14,10 +14,13 @@ but the fake never lists it.
 - Balance: after every sync, every transaction balances.
 - Balances: on every drawn day, `v1_balances_asof` is the true balance at the end of that day,
   for every wallet from the day its ledger starts (the opening's date, or its first report).
+- No asset counted in two wallets: on every drawn day once every wallet's ledger has started,
+  the sum per asset over every account of the connection is the account's true total.
 - Reconciliation: a consistent history leaves no difference open and no difference warning.
 - A removed record: a difference in each interval of two reports of the record's account in
   which it changed an instrument, of what it changed there (none where the Earn allowance
-  covers it; none before the account's first report, where the opening holds it): exactly one
+  covers it; none where a debt grew, which is a flexible loan's interest; none before the
+  account's first report, where the opening holds it): exactly one
   for a record that moves one instrument of one wallet, one per (account, instrument) it moved
   for a record that moves two.
 - Regeneration: with the connection's transactions and typed record rows deleted, normalising
@@ -31,6 +34,7 @@ end; rows are compared by external id and content, never by UUID.
 
 import itertools
 import uuid
+from collections import defaultdict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -58,7 +62,7 @@ from lararium.db import create_engine
 from lararium.modules import finance
 from lararium.modules.finance.binance import layout
 from lararium.modules.finance.binance import sync as sync_module
-from lararium.modules.finance.binance.fetch import HISTORY_LABELS, TRADES_LABEL
+from lararium.modules.finance.binance.fetch import HISTORY_LABELS, TRADE_LABELS
 from lararium.modules.finance.binance.normalize import regenerate
 from lararium.modules.finance.binance.parse import ApiValue
 from lararium.modules.finance.binance.reconcile import report_times
@@ -69,13 +73,22 @@ from .fixtures import FakeBinance, build_row
 from .strategies import (
     ACCOUNT_NAMES,
     ASSETS,
+    CROSS,
+    DEBTS,
+    FIAT,
+    ISOLATED,
+    ISOLATED_PAIR,
+    ISOLATED_PARAM,
+    OPTIONS,
     PAIRS,
+    RECORD_LESS,
     SINGLE_SIDED,
     TWO_SIDED,
     WALLET_KEYS,
     History,
     Record,
     Schedule,
+    collateral_of,
     histories,
     holdings_of,
     schedule,
@@ -97,7 +110,7 @@ VOLATILE = frozenset({"id", "created_at", "updated_at", "recorded_at", "fetched_
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _CHANGED = "changed by something no record explains"
 # The history labels with records of their own (the daily snapshots are a report).
-RECORD_LABELS = [label for label in [*HISTORY_LABELS, TRADES_LABEL] if label != "snapshot"]
+RECORD_LABELS = [label for label in [*HISTORY_LABELS, *TRADE_LABELS] if label != "snapshot"]
 _ACCRUING_MS = 48 * 3_600_000
 # The profile's examples (tests/finance/conftest.py): "ci" by default, "deep" with
 # HYPOTHESIS_PROFILE=deep (HYPOTHESIS_MAX_EXAMPLES of them, random).
@@ -128,6 +141,18 @@ async def connection(backend_url: str, migrated: None) -> AsyncIterator[AsyncCon
 
 # The fake as the history at Binance's clock.
 
+# The variant each label's row is listed under: a transfer under its own type, a dust
+# conversion under Spot (the only wallet the histories convert dust on), a margin history's row
+# only when no isolated pair is asked (an isolated pair's record says its pair, `Record.asked`).
+_CROSS_ONLY: dict[str, str | None] = {ISOLATED_PARAM: None}
+_ASKED_FOR: dict[str, Callable[[dict[str, ApiValue]], dict[str, str | None]]] = {
+    "universal-transfer": lambda row: {"type": str(row["type"])},
+    "dust": lambda row: {"accountType": "SPOT"},
+    "c2c": lambda row: {"tradeType": str(row["tradeType"])},
+    "margin-transfers": lambda row: _CROSS_ONLY,
+    "margin-interest": lambda row: _CROSS_ONLY,
+}
+
 
 class World:
     """Sets, before each request, what the fake lists and reports at that moment."""
@@ -137,7 +162,13 @@ class World:
         self.clock = clock
         hidden_ids = {id(record) for record in hidden}
         self.listed = [r for r in history.records if id(r) not in hidden_ids]
-        self.fake = FakeBinance(now=clock, secret=API_SECRET)
+        # The account has the isolated pair when the history ever holds anything on it.
+        self.isolated = any(w == ISOLATED for w, _ in history.initial) or any(
+            e.wallet == ISOLATED for e in history.effects()
+        )
+        # The histories trade and transfer on Cross Margin: the account has it.
+        # And on Options.
+        self.fake = FakeBinance(now=clock, secret=API_SECRET, margin=True, options=True)
         self.fake.set_rows(
             "exchange-info",
             [
@@ -145,39 +176,139 @@ class World:
                 for symbol, base, quote in PAIRS
             ],
         )
-        self.fake.set_rows("snapshot", self._daily(), when={"type": "SPOT"})
+        # Binance marks the fiat kinds' currency legal money: it is the ledger's EUR.
+        self.fake.set_rows("coin-config", [build_row("coin-config", coin=FIAT, isLegalMoney=True)])
+        self.fake.set_rows("snapshot", self._daily("spot"), when={"type": "SPOT"})
+        self.fake.add("snapshot", *self._daily("cross_margin"), when={"type": "MARGIN"})
+        self.fake.add("snapshot", *self._daily("um_futures"), when={"type": "FUTURES"})
 
-    def _daily(self) -> list[dict[str, ApiValue]]:
-        """A Spot snapshot at 23:59:59 of every day, from the day before the history to three
-        days after it; the fake lists only those up to the request's end."""
+    def _daily(self, wallet: str) -> list[dict[str, ApiValue]]:
+        """A Spot (Cross Margin, USDⓈ-M) snapshot at 23:59:59 of every day, from the day before
+        the history to three days after it; the fake lists only those up to the request's end."""
         first = _at(self.history.start_ms).date() - timedelta(days=1)
         last = _at(self.history.end_ms).date() + timedelta(days=3)
         rows: list[dict[str, ApiValue]] = []
         day = first
         while day <= last:
             at = _day_end_ms(day) - 999
-            held = holdings_of(self.history.balance(at), "spot")
-            row = build_row("snapshot", type="spot", updateTime=at)
+            held = holdings_of(self.history.balance(at), wallet)
+            kind = {"spot": "spot", "cross_margin": "margin", "um_futures": "futures"}[wallet]
+            row = build_row("snapshot", type=kind, updateTime=at)
             data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
-            data["balances"] = [
-                {"asset": asset, "free": format(q, "f"), "locked": "0"}
-                for asset, q in sorted(held.items())
-            ]
+            if wallet == "um_futures":
+                data["assets"] = [
+                    {
+                        "asset": asset,
+                        "marginBalance": format(q, "f"),
+                        "walletBalance": format(q, "f"),
+                    }
+                    for asset, q in sorted(held.items())
+                ]
+                data["position"] = []
+            elif wallet == "spot":
+                data["balances"] = [
+                    {"asset": asset, "free": format(q, "f"), "locked": "0"}
+                    for asset, q in sorted(held.items())
+                ]
+            else:
+                data["userAssets"] = [
+                    {
+                        "asset": asset,
+                        "borrowed": "0",
+                        "free": format(q, "f"),
+                        "interest": "0",
+                        "locked": "0",
+                        "netAsset": format(q, "f"),
+                    }
+                    for asset, q in sorted(held.items())
+                ]
             rows.append({**row, "data": data})
             day += timedelta(days=1)
         return rows
 
     def update(self, now_ms: int) -> None:
-        listed: dict[str, list[dict[str, ApiValue]]] = {label: [] for label in RECORD_LABELS}
+        listed: dict[str, list[tuple[dict[str, ApiValue], dict[str, str | None]]]] = {
+            label: [] for label in RECORD_LABELS
+        }
         for record in self.listed:
             for label, versions in record.rows:
                 shown = [row for at, row in versions if at <= now_ms]
                 if shown:
-                    listed[label].append(dict(shown[-1]))
+                    listed[label].append((dict(shown[-1]), dict(record.asked)))
         for label, rows in listed.items():
-            self.fake.set_rows(label, rows)
+            asked = _ASKED_FOR.get(label)
+            # A row answers only the request for its own variant: the one its record was
+            # asked for (the row does not say it), or the one the row names.
+            self.fake.set_rows(label, [])
+            for row, when in rows:
+                self.fake.add(label, row, when=when or (asked(row) if asked else None))
         held = self.history.balance(now_ms)
-        spot, funding, earn = (holdings_of(held, w) for w in WALLET_KEYS)
+        wallets = {w: holdings_of(held, w) for w in WALLET_KEYS}
+        spot, funding, earn, loans = (wallets[w] for w in ("spot", "funding", "earn", DEBTS))
+        cross, isolated, options = (wallets[w] for w in (CROSS, ISOLATED, OPTIONS))
+        # No position: the equity is the margin balance.
+        self.fake.set_rows(
+            "opt-account",
+            [
+                build_row(
+                    "opt-account", asset=a, marginBalance=format(q, "f"), equity=format(q, "f")
+                )
+                for a, q in sorted(options.items())
+            ],
+        )
+        # No position: the reported balance is the wallet balance.
+        for wallet, label in (("um_futures", "um-account"), ("cm_futures", "cm-account")):
+            self.fake.set_rows(
+                label,
+                [
+                    build_row(label, asset=a, walletBalance=format(q, "f"), unrealizedProfit="0")
+                    for a, q in sorted(wallets[wallet].items())
+                ],
+            )
+        self.fake.set_rows(
+            "margin-account",
+            [
+                build_row(
+                    "margin-account",
+                    asset=a,
+                    free=format(q, "f"),
+                    locked="0",
+                    borrowed="0",
+                    interest="0",
+                    netAsset=format(q, "f"),
+                )
+                for a, q in sorted(cross.items())
+            ],
+        )
+        # The isolated pair, once the history has one: each leg's net asset.
+        symbol, base, quote = ISOLATED_PAIR
+        self.fake.set_rows(
+            "margin-isolated-account",
+            [
+                build_row(
+                    "margin-isolated-account",
+                    symbol=symbol,
+                    isolatedCreated=True,
+                    baseAsset=_leg(base, isolated),
+                    quoteAsset=_leg(quote, isolated),
+                )
+            ]
+            if self.isolated
+            else [],
+        )
+        self.fake.set_rows(
+            "loan-flexible-ongoing",
+            [
+                build_row(
+                    "loan-flexible-ongoing",
+                    loanCoin=a,
+                    totalDebt=format(-q, "f"),
+                    collateralCoin=collateral_of(a),
+                    collateralAmount="1",
+                )
+                for a, q in sorted(loans.items())
+            ],
+        )
         self.fake.set_rows(
             "spot-account",
             [
@@ -199,18 +330,7 @@ class World:
                 for a, q in sorted(funding.items())
             ],
         )
-        earn_listed: list[ApiValue] = [
-            {
-                "asset": a,
-                "assetName": a,
-                "free": format(q, "f"),
-                "locked": "0",
-                "freeze": "0",
-                "withdrawing": "0",
-                "btcValuation": "0",
-            }
-            for a, q in sorted(earn.items())
-        ]
+        earn_listed = _listed(earn)
         self.fake.set_rows(
             "wallet-balance",
             [
@@ -226,12 +346,53 @@ class World:
                     balance=_any(earn),
                     assetBalances=earn_listed,
                 ),
+                # Counted from the list: Binance has no record endpoint for them.
+                *(
+                    build_row(
+                        "wallet-balance",
+                        walletName=ACCOUNT_NAMES[w].removeprefix("Binance "),
+                        balance=_any(wallets[w]),
+                        assetBalances=_listed(wallets[w]),
+                    )
+                    for w in RECORD_LESS
+                ),
             ],
         )
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.update(self.clock())
         return self.fake.handler(request)
+
+
+def _leg(asset: str, held: dict[str, Decimal]) -> ApiValue:
+    """An isolated pair's leg holding `held`'s quantity of the asset, nothing borrowed."""
+    quantity = format(held.get(asset, Decimal(0)), "f")
+    leg = dict(build_row("margin-isolated-account")["baseAsset"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    zero = dict.fromkeys(("borrowed", "interest", "locked", "netAssetOfBtc"), "0")
+    return {
+        **leg,
+        **zero,
+        "asset": asset,
+        "free": quantity,
+        "netAsset": quantity,
+        "totalAsset": quantity,
+    }
+
+
+def _listed(held: dict[str, Decimal]) -> list[ApiValue]:
+    """A wallet list row's asset detail for what the wallet holds."""
+    return [
+        {
+            "asset": a,
+            "assetName": a,
+            "free": format(q, "f"),
+            "locked": "0",
+            "freeze": "0",
+            "withdrawing": "0",
+            "btcValuation": "0",
+        }
+        for a, q in sorted(held.items())
+    ]
 
 
 def _any(held: dict[str, Decimal]) -> str:
@@ -479,6 +640,21 @@ class Env:
         )
         return {(r.name, r.symbol): r.quantity for r in rows if r.quantity != 0}
 
+    async def totals(self, day: date) -> dict[str, Decimal]:
+        """What every account of the connection holds at the end of the day, summed per
+        asset: the wallets the histories know and any other (Pending redemptions)."""
+        rows = await self.session.execute(
+            text(
+                "select i.symbol, sum(b.quantity) as quantity"
+                " from finance.v1_balances_asof(:d) b"
+                " join finance.accounts a on a.id = b.account_id"
+                " join finance.instruments i on i.id = b.instrument_id"
+                " where a.source_connection_id = :c group by i.symbol"
+            ),
+            {"d": day, "c": self.connection_id},
+        )
+        return {r.symbol: r.quantity for r in rows if r.quantity != 0}
+
     async def starts(self) -> dict[str, date]:
         """The day each wallet's ledger starts: its opening's date or earliest record's
         booking date, or its first report's date."""
@@ -653,6 +829,43 @@ async def test_balance_is_the_latest_report_plus_later_records(
                 assert shown == expected, (day, wallet)
 
 
+def _true_totals(history: History, at_ms: int) -> dict[str, Decimal]:
+    """What the account holds at `at_ms`, summed per asset over every wallet, plus what a
+    redemption Binance pays out later has bought and not yet delivered (on its way to Spot)."""
+    totals: defaultdict[str, Decimal] = defaultdict(Decimal)
+    for (_, asset), quantity in history.balance(at_ms).items():
+        totals[asset] += quantity
+    for record in history.records:
+        if record.kind == "delayed_redemption":
+            arrival = record.effects[1]
+            if record.listed_ms <= at_ms < arrival.at_ms:
+                totals[arrival.asset] += arrival.delta
+    return {asset: q for asset, q in totals.items() if q != 0}
+
+
+@EXAMPLES
+@given(history=histories(), data=st.data())
+async def test_no_asset_is_counted_in_two_wallets(
+    connection: AsyncConnection, history: History, data: st.DataObject
+) -> None:
+    """Design 2's anti-goal: on every drawn day once each wallet's ledger has started, what all
+    the connection's accounts hold per asset is what the account holds in all, so no asset is
+    counted on two wallets (nor on an account no wallet reports)."""
+    plan = data.draw(schedule(history), label="schedule")
+    _notes(history, plan)
+    async with isolated(connection, history) as env:
+        await env.play(plan)
+        starts = await env.starts()
+        first_day = max(starts.values(), default=_at(history.start_ms).date())
+        last_day = _at(plan.syncs[-1]).date()
+        span = max((last_day - first_day).days, 0)
+        offsets = data.draw(st.lists(st.integers(0, span), max_size=5, unique=True))
+        days = sorted({first_day + timedelta(days=n) for n in offsets} | {last_day})
+        note(f"days: {', '.join(d.isoformat() for d in days)}")
+        for day in days:
+            assert await env.totals(day) == _true_totals(history, _day_end_ms(day)), day
+
+
 @EXAMPLES
 @given(history=histories(), data=st.data())
 async def test_consistent_history_has_no_difference(
@@ -665,11 +878,21 @@ async def test_consistent_history_has_no_difference(
         assert await env.open_differences() == []
         after = await get_connection(env.session, env.connection_id)
         assert [w for w in after.warnings if _CHANGED in w] == []
+        # The histories accrue no interest: no debt grows beyond its records.
+        interest = await env.session.scalar(
+            text(
+                "select count(*) from finance.transactions where connection_id = :c"
+                " and external_id like 'loan\\_interest:%'"
+            ),
+            {"c": env.connection_id},
+        )
+        assert interest == 0
 
 
 async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ...]]:
     """A difference in each interval of two consecutive reports of each account the removed
-    record changed, of what it changed there; none where Earn's allowance covers it."""
+    record changed, of what it changed there; none where Earn's allowance covers it, nor where
+    the debt on Crypto Loans grew (a flexible loan's interest absorbs it)."""
     history = env.history
     reports = await env.reports()
     expected: list[tuple[Any, ...]] = []
@@ -688,6 +911,9 @@ async def _expected_differences(env: Env, removed: Record) -> list[tuple[Any, ..
             if delta == 0:
                 continue
             if wallet == "earn" and abs(delta) <= _accruing(history, removed, asset, high):
+                continue
+            if wallet == DEBTS and delta < 0:
+                # A debt that grew with no record is a flexible loan's interest (design 5.7).
                 continue
             zero = Decimal(0)
             change = history.balance(high).get((wallet, asset), zero) - history.balance(low).get(
@@ -788,7 +1014,9 @@ async def test_removing_a_two_sided_record_gives_one_difference_per_leg(
     if reported:
         got = {(d[0], d[1]): d[4] - d[5] for d in found}
         wanted = {
-            (ACCOUNT_NAMES[w], a): q for (w, a), q in legs.items() if not (w == "earn" and 0 < q)
+            (ACCOUNT_NAMES[w], a): q
+            for (w, a), q in legs.items()
+            if not (w == "earn" and 0 < q) and not (w == DEBTS and q < 0)
         }
         for holding, quantity in wanted.items():
             assert got.get(holding) == quantity, holding
@@ -832,7 +1060,7 @@ async def test_opening_plus_records_equal_the_first_report(
             if not times:
                 continue
             earliest = _ms(times[0])
-            for asset in ASSETS:
+            for asset in (*ASSETS, FIAT):
                 quantity = history.initial.get((wallet, asset), Decimal(0))
                 quantity += sum(
                     (

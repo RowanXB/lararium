@@ -7,9 +7,12 @@ fetch minus 7 days. Each window is stored in a short transaction of its own, wit
 records and its cursor, so an interrupted walk continues where it stopped.
 
 `config["cursors"]` maps a cursor key to `{"fetched_to": ms, "backfilled_to": ms,
-"complete": bool}` (a label, or `<label>:<value>` per variant) or, for trades, `<label>:<symbol>`
-to the last trade id. `config["not_present"]` maps a key Binance said it does not serve to
-when it said so (epoch ms); such a key is asked again after 7 days.
+"complete": bool}` (a label, or `<label>:<value>` per variant, `:<pair>` per isolated margin
+pair) or, for trades, `<label>:<symbol>` (`:isolated` for an isolated pair's margin trades) to
+the last trade id. `config["not_present"]` maps a key Binance said it does not serve to
+when it said so (epoch ms); such a key is asked again after 7 days. While Portfolio Margin is on,
+the keys of the wallets it replaces are there too, from the latest sync that saw it on
+(`portfolio_margin`).
 """
 
 import itertools
@@ -21,6 +24,8 @@ from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
+from sqlalchemy import text
+
 from lararium.core.commands import command_context
 from lararium.core.connections import get_connection, lock_connection, update_config
 from lararium.core.connectors import SyncContext
@@ -28,8 +33,16 @@ from lararium.core.errors import DisplayableError
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance.binance import layout, notices, tables
-from lararium.modules.finance.binance.catalogue import ENDPOINTS, FIELDS, Endpoint, paging_params
-from lararium.modules.finance.binance.client import BinanceClient, BinanceNotPresent
+from lararium.modules.finance.binance.catalogue import (
+    ENDPOINTS,
+    FIELDS,
+    ISOLATED_PARAMS,
+    ISOLATED_TRANSFER_TYPES,
+    Endpoint,
+    paging_params,
+    time_range,
+)
+from lararium.modules.finance.binance.client import BinanceClient, BinanceError, BinanceNotPresent
 from lararium.modules.finance.binance.parse import (
     ApiValue,
     BinanceDataError,
@@ -44,6 +57,11 @@ from lararium.modules.finance.binance.tables import moment, store_response
 VERSION = "binance-sync-1"
 CURSORS_KEY = "cursors"
 NOT_PRESENT_KEY = "not_present"
+# Per derivatives host (its limit kind: `fapi`, `dapi`, `eapi`, `papi`), when it refused the key
+# `api` had accepted (`client.BinanceHostRefused`, ruling R22). Kept apart from `not_present`: it
+# is the host's word on the key, not Binance's on a product, so a key update clears it; the sync
+# asks the host again once the retry is due (`due_refusals`).
+REFUSED_HOSTS_KEY = "refused_hosts"
 
 DAY_MS = 86_400_000
 # 2017-07-01 00:00 UTC: Binance opened in July 2017; no history is older.
@@ -58,22 +76,178 @@ LOOKBACK_MARGIN_MS = 60_000
 FIRST_SYNC_ONLY = frozenset({"snapshot"})
 RECORD_NAMES = {"my-trades": "spot_trade"}
 TRADES_LABEL = "my-trades"
+MARGIN_TRADES = "margin-trades"
+# The trade histories: walked by symbol and trade id (`walk_trades`), not by window.
+TRADE_LABELS = (TRADES_LABEL, MARGIN_TRADES)
 # The longest time range a trade request may ask (end minus start, in ms): the catalogue's
-# my-trades says it "can't be longer than 24 hours".
+# my-trades says it "can't be longer than 24 hours", margin-trades "less than 24 hours".
 TRADE_SPAN_MS = DAY_MS - 1
+# The margin trade request's flag for an isolated pair ("TRUE"/"FALSE" text, default FALSE).
+ISOLATED_FLAG = "isIsolated"
+# What Binance answers a margin trade request for a symbol it does not margin trade (its margin
+# error-code page): -3021 "Margin account are not allowed to trade this trading pair", -3028
+# "Not a valid margin pair". For margin trades only, such a refusal means the symbol has none.
+MARGIN_PAIR_REFUSALS = frozenset({-3021, -3028})
+ISOLATED_MARGIN_LABEL = "margin-isolated-account"
 
-# The phases built so far: what a sync reads (kind account, balance or position) and walks.
-BALANCE_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind in ("account", "balance", "position")
-]
+# Locked Simple Earn, the flexible collateral record, BFUSD and RWUSD, ETH and SOL staking,
+# on-chain yields, soft staking, dual investment and discount buy.
+EARN_PRODUCTS = (
+    "earn-locked-subscriptions",
+    "earn-locked-redemptions",
+    "earn-locked-rewards",
+    "earn-flexible-collateral",
+    "bfusd-subscriptions",
+    "bfusd-redemptions",
+    "bfusd-rewards",
+    "rwusd-subscriptions",
+    "rwusd-redemptions",
+    "rwusd-rewards",
+    "eth-stakes",
+    "eth-redemptions",
+    "wbeth-rewards",
+    "wbeth-wraps",
+    "wbeth-unwraps",
+    "sol-stakes",
+    "sol-redemptions",
+    "bnsol-rewards",
+    "sol-boost-rewards",
+    "onchain-subscriptions",
+    "onchain-redemptions",
+    "onchain-rewards",
+    "soft-staking-rewards",
+    "earn-locked-position",
+    "bfusd-account",
+    "rwusd-account",
+    "eth-staking-account",
+    "sol-staking-account",
+    "sol-unclaimed-rewards",
+    "onchain-account",
+    "onchain-locked-position",
+    "soft-staking-list",
+    "dci-accounts",
+    "dci-positions",
+    "discount-accounts",
+    "discount-positions",
+)
+# Flexible and VIP crypto loans: the histories, then the ongoing orders (read one after the
+# other: together they are the Crypto Loans wallet's report, `balances.LOAN_READS`) and the VIP
+# collateral accounts.
+LOAN_PRODUCTS = (
+    "loan-flexible-borrows",
+    "loan-flexible-repays",
+    "loan-flexible-ltv-adjustments",
+    "loan-flexible-liquidations",
+    "vip-loan-repays",
+    "vip-loan-interest",
+    "vip-loan-requests",
+    "loan-flexible-ongoing",
+    "vip-loan-ongoing",
+    "vip-loan-collateral-account",
+)
+# Cross and isolated margin: the histories, then the two accounts (each a wallet's report) and
+# the liquidation loan. Margin trades are walked by symbol (`MARGIN_TRADES`), not here.
+MARGIN_PRODUCTS = (
+    "margin-transfers",
+    "margin-borrow-repay",
+    "margin-interest",
+    "margin-capital-flow",
+    "margin-liquidations",
+    "margin-small-liability",
+    "margin-liquidation-loan-repays",
+    "margin-account",
+    ISOLATED_MARGIN_LABEL,
+    "margin-liquidation-loan",
+)
+# USDⓈ-M and COIN-M futures: the income histories, then each wallet's balance, account (its
+# report, `balances.FUTURES_SOURCES`) and positions. The trades are walked per symbol the income
+# rows name (`SYMBOL_TRADES`), each host's exchange information read first (`LIMITS_INFO`).
+FUTURES_PRODUCTS = (
+    "um-income",
+    "cm-income",
+    "um-balance",
+    "um-account",
+    "um-positions",
+    "cm-balance",
+    "cm-account",
+    "cm-positions",
+)
+# The Options wallet: the bill and exercise histories, then its margin account (the wallet's
+# report, `balances.OPTIONS_SOURCES`) and positions. Its trades are walked per symbol the bill
+# rows name (`SYMBOL_TRADES`), its host's exchange information read first (`LIMITS_INFO`).
+OPTIONS_PRODUCTS = (
+    "opt-bill",
+    "opt-exercises",
+    "opt-account",
+    "opt-positions",
+)
+# Fiat by bank, card purchases and sales, P2P orders, Pay and rebates.
+FIAT_PRODUCTS = ("fiat-orders", "fiat-payments", "c2c", "pay", "rebate")
+# The Portfolio Margin account (design 5.6): its account and its balance (the wallet's report,
+# `balances.PORTFOLIO_SOURCES`), read only while `account-info` says it is on. Its records are not
+# posted (design 2).
+PORTFOLIO_MARGIN_PRODUCTS = ("pm-account", "pm-balance")
+ACCOUNT_INFO_LABEL = "account-info"
+# Portfolio Margin unifies cross margin and the USDⓈ-M and COIN-M futures accounts (its balance
+# states each asset's cross margin, UM and CM parts, the catalogue's section 12): while it is on,
+# these are not asked, as a product Binance does not serve is not (`portfolio_margin`). Isolated
+# Margin is no part of it and stays asked, as do the futures hosts' public exchange information.
+PORTFOLIO_MARGIN_REPLACES = (
+    *(label for label in MARGIN_PRODUCTS if label != ISOLATED_MARGIN_LABEL),
+    MARGIN_TRADES,
+    *FUTURES_PRODUCTS,
+    "um-trades",
+    "cm-trades",
+)
+# When Portfolio Margin was first seen on (epoch ms); removed by the sync that sees it off. It
+# says the replaced keys in `not_present` are there because of it, not by Binance's word.
+PORTFOLIO_MARGIN_KEY = "portfolio_margin"
+# Each trade label walked per symbol, and the history whose rows name its symbols (design 5.2):
+# a futures trade's commission is an income row of its symbol, an options trade's premium and
+# fee are bill rows of its symbol, so every symbol traded is named there.
+SYMBOL_TRADES = {"um-trades": "um-income", "cm-trades": "cm-income", "opt-trades": "opt-bill"}
+# Each derivatives host's exchange information: its `rateLimits` give the host's request weight
+# per minute (plan Decision 4), read at the start of a sync before any other request to it.
+LIMITS_INFO = ("um-exchange-info", "cm-exchange-info", "opt-exchange-info")
+# The Phase B labels built so far; each Phase B task adds its own here, and a sync then reads
+# or walks them as it does Phase A's.
+PHASE_B_BUILT = (
+    "universal-transfer",
+    "dust",
+    "cloud-mining",
+    "travel-deposits",
+    "travel-withdrawals",
+    # The other Earn products (Task 16): histories, then positions and accounts.
+    *EARN_PRODUCTS,
+    # Crypto loans (Task 17).
+    *LOAN_PRODUCTS,
+    # The margin wallets (Task 18).
+    *MARGIN_PRODUCTS,
+    # The futures wallets (Task 19).
+    *FUTURES_PRODUCTS,
+    # The Options wallet (Task 20).
+    *OPTIONS_PRODUCTS,
+    # Fiat, cards, P2P, Pay and rebates (Task 21).
+    *FIAT_PRODUCTS,
+    # Portfolio Margin (Task 22).
+    *PORTFOLIO_MARGIN_PRODUCTS,
+)
+UNIVERSAL_TRANSFER = "universal-transfer"
+
+
+def _built() -> list[Endpoint]:
+    """The endpoints built so far: Phase A's in the catalogue's order, then Phase B's in the
+    order they were built."""
+    return [
+        *(e for e in ENDPOINTS.values() if e.phase == "A"),
+        *(ENDPOINTS[label] for label in PHASE_B_BUILT),
+    ]
+
+
+# What a sync reads (kind account, balance or position) and walks.
+BALANCE_LABELS = [e.label for e in _built() if e.kind in ("account", "balance", "position")]
 # Trades are walked by symbol and trade id (walk_trades), not by window.
-HISTORY_LABELS = [
-    e.label
-    for e in ENDPOINTS.values()
-    if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
-]
+HISTORY_LABELS = [e.label for e in _built() if e.kind == "history" and e.label not in TRADE_LABELS]
 
 
 def record_type(label: str) -> str:
@@ -104,6 +278,8 @@ def _int(value: JSONValue) -> int | None:
 
 def _floor(endpoint: Endpoint, now_ms: int) -> int:
     floor = LAUNCH_MS
+    if endpoint.earliest_ms is not None:
+        floor = max(floor, endpoint.earliest_ms)
     if endpoint.lookback_days is not None:
         floor = max(floor, now_ms - endpoint.lookback_days * DAY_MS + LOOKBACK_MARGIN_MS)
     return floor
@@ -115,8 +291,8 @@ def windows(
     """The (start, end) windows to ask, in epoch ms, both inclusive, in the order they are asked.
 
     While the backfill is not complete: newest first, from now (or from below `backfilled_to`)
-    back to July 2017 or the endpoint's lookback. Afterwards: oldest first, from `fetched_to`
-    minus 7 days to now. No window spans more than `window_days`.
+    back to July 2017, the endpoint's earliest date or its lookback. Afterwards: oldest first,
+    from `fetched_to` minus 7 days to now. No window spans more than `window_days`.
     """
     floor = _floor(endpoint, now_ms)
     span = endpoint.window_days * DAY_MS if endpoint.window_days is not None else None
@@ -149,10 +325,36 @@ def _mapping(value: JSONValue) -> dict[str, JSONValue]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def refused_hosts(config: Mapping[str, JSONValue]) -> dict[str, int]:
+    """The hosts (limit kinds) that refused the connection's key, and since when."""
+    held = _mapping(config.get(REFUSED_HOSTS_KEY))
+    return {host: since for host, value in held.items() if (since := _int(value)) is not None}
+
+
+def host_refused(config: Mapping[str, JSONValue], key: str) -> bool:
+    """Whether the key's host refused the connection's key (`refused_hosts`): a cursor or label
+    key, `<label>[:<more>]`."""
+    endpoint = ENDPOINTS.get(key.split(":", 1)[0])
+    return endpoint is not None and endpoint.limit in refused_hosts(config)
+
+
+def due_refusals(config: Mapping[str, JSONValue], now_ms: int) -> list[str]:
+    """The hosts to ask again now: those refused 7 days ago or more, and an entry that holds
+    no time."""
+    held = _mapping(config.get(REFUSED_HOSTS_KEY))
+    kept = refused_hosts(config)
+    return sorted(
+        host for host in held if host not in kept or now_ms - kept[host] >= NOT_PRESENT_RETRY_MS
+    )
+
+
 def absent(config: Mapping[str, JSONValue], key: str, now_ms: int) -> bool:
-    """Whether Binance said, less than 7 days ago, that it does not serve this key."""
+    """Whether Binance said, less than 7 days ago, that it does not serve this key, or the
+    key's host refused the connection's key (`refused_hosts`)."""
     since = _int(_mapping(config.get(NOT_PRESENT_KEY)).get(key))
-    return since is not None and now_ms - since < NOT_PRESENT_RETRY_MS
+    if since is not None and now_ms - since < NOT_PRESENT_RETRY_MS:
+        return True
+    return host_refused(config, key)
 
 
 @dataclass(frozen=True)
@@ -329,14 +531,15 @@ async def window_pages(
     """Every answer of one window, through every page; an endpoint that cannot page and answers
     a full page, or says there is more (`moreData`), has its window split in two until each
     half fits (the full answer is kept as an answer, its rows are not). A window of one
-    millisecond that still does not fit fails: what it holds cannot all be asked.
+    millisecond that still does not fit fails: what it holds cannot all be asked. An endpoint
+    paged by id inside its window (the margin capital flow) is split the same way: the order of
+    an answer asked without an id is not documented, a time range and a `limit` are.
 
     Only the window's first request being refused can mean its history ends there. A later
     one (a half of a split window, a later page) is refused inside a window that answered,
     so it fails: the walk keeps its cursor and asks again. A refusal seen on a later sync is
     not known to follow an answer (design §6)."""
-    low, high = endpoint.time_params
-    params: dict[str, str | int] = {**fixed, low: start, high: end}
+    params: dict[str, str | int] = {**fixed, **time_range(endpoint, start, end)}
     cursor_name, size_name, first = paging_params(endpoint)
     size = endpoint.page_size
     if size_name and size:
@@ -350,7 +553,9 @@ async def window_pages(
         unknown = tuple(unknown_flags(endpoint.label, parsed))
         return Page(endpoint.label, start, end, index, parsed.body, parsed.rows, unknown)
 
-    if endpoint.paging == "none":
+    if endpoint.paging == "from_id" and endpoint.label in TRADE_LABELS:
+        raise ValueError(f"{endpoint.label} is walked by trade id, not by window")
+    if endpoint.paging in ("none", "from_id"):
         answer = await ask(0, params)
         more = _beside(endpoint, answer.body, "moreData") is True
         if (size and len(answer.rows) >= size) or more:
@@ -370,8 +575,6 @@ async def window_pages(
             except BinanceNotPresent:
                 raise _refused_inside(endpoint) from None
         return [answer]
-    if endpoint.paging == "from_id":
-        raise ValueError(f"{endpoint.label} is walked by trade id, not by window")
     pages: list[Page] = []
     position = first
     while True:
@@ -415,23 +618,141 @@ def cursor_keys(endpoint: Endpoint) -> list[tuple[str, dict[str, str]]]:
     ]
 
 
-def backfill_complete(config: Mapping[str, JSONValue]) -> bool:
+def walk_keys(label: str, isolated: Collection[str] = ()) -> list[tuple[str, dict[str, str]]]:
+    """Every cursor key of a label and its fixed parameters: one per variant (`cursor_keys`)
+    and, for `universal-transfer`, each isolated-margin type once per isolated pair in
+    `isolated` (`universal-transfer:ISOLATEDMARGIN_MARGIN:<pair>`), once per ordered pair of
+    two pairs for a transfer from one isolated pair to another; for a margin history that
+    takes a pair (`ISOLATED_PARAMS`), each variant again per pair (`<key>:<pair>`)."""
+    keys = cursor_keys(ENDPOINTS[label])
+    symbols = sorted(isolated)
+    if label in ISOLATED_PARAMS:
+        name = ISOLATED_PARAMS[label]
+        return [
+            *keys,
+            *(
+                (f"{key}:{symbol}", {**fixed, name: symbol})
+                for key, fixed in cursor_keys(ENDPOINTS[label])
+                for symbol in symbols
+            ),
+        ]
+    if label != UNIVERSAL_TRANSFER:
+        return keys
+    for symbol in symbols:
+        for kind, names in ISOLATED_TRANSFER_TYPES.items():
+            if len(names) == 1:
+                keys.append((f"{label}:{kind}:{symbol}", {"type": kind, names[0]: symbol}))
+    for kind, names in ISOLATED_TRANSFER_TYPES.items():
+        if len(names) == 2:
+            for pair in itertools.permutations(symbols, 2):
+                fixed = {"type": kind, **dict(zip(names, pair, strict=True))}
+                keys.append((":".join([label, kind, *pair]), fixed))
+    return keys
+
+
+def portfolio_margin_keys() -> list[str]:
+    """The keys Portfolio Margin takes out while it is on: each replaced label (a read, a trade
+    label) and every cursor key of a replaced history but an isolated pair's."""
+    keys = list(PORTFOLIO_MARGIN_REPLACES)
+    for label in PORTFOLIO_MARGIN_REPLACES:
+        keys += [key for key, _ in walk_keys(label) if key not in keys]
+    return keys
+
+
+async def portfolio_margin(ctx: SyncContext, on: bool, now_ms: int) -> None:
+    """What `account-info` says of Portfolio Margin, in a short transaction of its own, before
+    any replaced label is asked. On: every key it replaces (`portfolio_margin_keys`) is put in
+    `not_present` from now, again on each sync while it stays on, so none is asked meanwhile, and
+    `config["portfolio_margin"]` records since when. Off after being on: they leave `not_present`
+    at once, and the sync asks them as it would any present product; a key Binance itself had
+    refused is asked again too, and goes back if Binance refuses it again. Kept apart from
+    `refused_hosts`, which is a host's word on the key, not the account's products."""
+    # An account that never had it writes nothing, and no audit row, on each sync.
+    if not on and PORTFOLIO_MARGIN_KEY not in await fresh_config(ctx):
+        return
+    connection_id = ctx.connection.id
+    args: dict[str, JSONValue] = {"connection_id": str(connection_id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.portfolio_margin", args) as cmd,
+    ):
+        config = (await lock_connection(cmd, connection_id)).config
+        held = PORTFOLIO_MARGIN_KEY in config
+        if not on and not held:
+            return
+        missing = _mapping(config.get(NOT_PRESENT_KEY))
+        for key in portfolio_margin_keys():
+            if on:
+                missing[key] = now_ms
+            else:
+                missing.pop(key, None)
+        if on:
+            values: dict[str, JSONValue] = {NOT_PRESENT_KEY: missing}
+            if _int(config.get(PORTFOLIO_MARGIN_KEY)) is None:
+                values[PORTFOLIO_MARGIN_KEY] = now_ms
+            await update_config(cmd, connection_id, values)
+        else:
+            await update_config(
+                cmd, connection_id, {NOT_PRESENT_KEY: missing}, remove=[PORTFOLIO_MARGIN_KEY]
+            )
+
+
+def created_pairs(body: ApiValue) -> frozenset[str]:
+    """The pairs an isolated margin account answer lists as created: each `assets[].symbol`
+    whose `isolatedCreated` is not false (a pair not created holds nothing and has no
+    records)."""
+    listed = body.get("assets") if isinstance(body, dict) else None
+    found: set[str] = set()
+    for entry in listed if isinstance(listed, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        symbol = entry.get("symbol")
+        if isinstance(symbol, str) and entry.get("isolatedCreated") is not False:
+            found.add(symbol)
+    return frozenset(found)
+
+
+async def isolated_symbols(ctx: SyncContext) -> frozenset[str]:
+    """The isolated margin pairs the account has (ruling R1): those the latest stored read of
+    the isolated margin account lists as created. A sync stores its reads before it walks, so
+    its walks ask for the pairs it has just read."""
+    async with ctx.session_factory() as session:
+        content = await session.scalar(
+            text(
+                "select content from core.raw_records where connection_id = :c"
+                " and record_type = :t order by id desc limit 1"
+            ),
+            {"c": ctx.connection.id, "t": record_type(ISOLATED_MARGIN_LABEL)},
+        )
+    stored = cast(JSONValue, content)
+    body = stored.get("body") if isinstance(stored, dict) else None
+    return created_pairs(as_api(body))
+
+
+def backfill_complete(config: Mapping[str, JSONValue], isolated: Collection[str] = ()) -> bool:
     """Whether every history label's first walk has ended: each of its keys complete, or not
-    served by Binance (`not_present`)."""
+    served by Binance (`not_present`), or of a host that refused the key. The keys of
+    the isolated pairs in `isolated` (those known when it is asked, ruling R17) count; a pair
+    that appears after the first sync walks its own history from then on."""
     cursors = _mapping(config.get(CURSORS_KEY))
     missing = _mapping(config.get(NOT_PRESENT_KEY))
     return all(
-        key in missing or _mapping(cursors.get(key)).get("complete") is True
+        key in missing
+        or host_refused(config, key)
+        or _mapping(cursors.get(key)).get("complete") is True
         for label in HISTORY_LABELS
-        for key, _ in cursor_keys(ENDPOINTS[label])
+        for key, _ in walk_keys(label, isolated)
     )
 
 
 async def walk(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
-    """Fetch one history label (every variant) from its cursor; the raw record ids stored."""
+    """Fetch one history label (every key `walk_keys` gives it) from its cursor; the raw record
+    ids stored."""
     endpoint = ENDPOINTS[label]
+    paired = label == UNIVERSAL_TRANSFER or label in ISOLATED_PARAMS
+    isolated = await isolated_symbols(ctx) if paired else frozenset[str]()
     ids: list[UUID] = []
-    for key, fixed in cursor_keys(endpoint):
+    for key, fixed in walk_keys(label, isolated):
         ids += await _walk_key(ctx, client, endpoint, key, fixed)
     return ids
 
@@ -487,8 +808,7 @@ async def _walk_key(
                 # Refused before it ever answered: the product is not present.
                 await commit(ctx, key, absent_since=now_ms)
             return ids
-        low, high = endpoint.time_params
-        request: dict[str, JSONValue] = {**fixed, low: start, high: end}
+        request: dict[str, JSONValue] = {**fixed, **time_range(endpoint, start, end)}
         if backfilling:
             state: dict[str, JSONValue] = {
                 "fetched_to": fetched_to,
@@ -518,11 +838,14 @@ def trade_symbols(
     *,
     everything: bool = False,
     either_side_of: str | None = None,
+    margin: bool = False,
 ) -> list[str]:
     """The symbols to ask for trades, in `exchangeInfo`'s order.
 
     `either_side_of`: every symbol with that asset as base or quote. `everything`: every
     symbol (the first sync). Otherwise: the symbols both of whose assets are in `seen`.
+    `margin`: only those `exchangeInfo` says are margin traded (`isMarginTradingAllowed`), the
+    symbols cross margin trades can be in (ruling R18).
     """
     listed = exchange_info.get("symbols") if isinstance(exchange_info, dict) else None
     chosen: list[str] = []
@@ -531,6 +854,8 @@ def trade_symbols(
             continue
         symbol, base, quote = entry.get("symbol"), entry.get("baseAsset"), entry.get("quoteAsset")
         if not isinstance(symbol, str):
+            continue
+        if margin and entry.get("isMarginTradingAllowed") is not True:
             continue
         if either_side_of is not None:
             wanted = either_side_of in (base, quote)
@@ -541,6 +866,58 @@ def trade_symbols(
     return chosen
 
 
+def listed_symbols(exchange_info: ApiValue) -> set[str]:
+    """Every symbol an `exchangeInfo` answer lists."""
+    listed = exchange_info.get("symbols") if isinstance(exchange_info, dict) else None
+    return {
+        symbol
+        for entry in (listed if isinstance(listed, list) else [])
+        if isinstance(entry, dict) and isinstance(symbol := entry.get("symbol"), str)
+    }
+
+
+async def traded_symbols(ctx: SyncContext) -> set[str]:
+    """The symbols the connection's stored Spot and cross margin trades name: those whose trades
+    are asked by `exchangeInfo`'s list (an isolated pair's, by the row's `isIsolated` or the
+    request's, are asked by the isolated account's)."""
+    async with ctx.session_factory() as session:
+        found = await session.scalars(
+            text(
+                "select distinct content ->> 'symbol' from core.raw_records"
+                " where connection_id = :c and (record_type = :spot"
+                " or (record_type = :margin"
+                " and lower(coalesce(content ->> :flag, request ->> :flag, '')) <> 'true'))"
+            ),
+            {
+                "c": ctx.connection.id,
+                "spot": record_type(TRADES_LABEL),
+                "margin": record_type(MARGIN_TRADES),
+                "flag": ISOLATED_FLAG,
+            },
+        )
+        return {symbol for symbol in found if symbol}
+
+
+@dataclass(frozen=True)
+class TradeWalk:
+    """The trades a sync walks of one trade label: its symbols, and whether they are isolated
+    margin pairs (asked with `isIsolated=TRUE`)."""
+
+    label: str
+    symbols: tuple[str, ...]
+    isolated: bool = False
+
+
+def trade_cursor_key(label: str, symbol: str, *, isolated: bool = False) -> str:
+    """The cursor of a symbol's trades: `<label>:<symbol>`, an isolated pair's margin trades
+    `<label>:<symbol>:isolated` (their ids are counted apart from the cross ones')."""
+    return f"{label}:{symbol}:isolated" if isolated else f"{label}:{symbol}"
+
+
+def _trade_params(symbol: str, isolated: bool) -> dict[str, str | int]:
+    return {"symbol": symbol, ISOLATED_FLAG: "TRUE"} if isolated else {"symbol": symbol}
+
+
 async def walk_trades(
     ctx: SyncContext,
     client: BinanceClient,
@@ -548,18 +925,25 @@ async def walk_trades(
     symbols: Sequence[str],
     since_ms: int | None = None,
     until_ms: int | None = None,
+    *,
+    isolated: bool = False,
 ) -> list[UUID]:
     """Fetch each symbol's trades after its last trade id; the raw record ids stored. Each
-    page is stored with its symbol's cursor.
+    page is stored with its symbol's cursor. `isolated`: the symbols are isolated margin pairs,
+    whose margin trades are asked apart (`isIsolated=TRUE`).
 
     With `since_ms`, the sweep instead: every trade of each symbol from `since_ms` to
     `until_ms` (now when None), whatever the interval's length, by time windows Binance
     accepts (`TRADE_SPAN_MS`). The sweep leaves the cursors as they are: the walk by trade id
     still asks everything after a symbol's last id, so nothing before the interval is skipped.
+
+    A margin trade request Binance refuses as not served (`BinanceNotPresent`) or as not a
+    margin pair (`MARGIN_PAIR_REFUSALS`) leaves that symbol out and the walk goes on with the
+    next: a symbol Binance does not margin trade has no margin trades (ruling R18).
     """
     if since_ms is not None:
         until = until_ms if until_ms is not None else client.now_ms()
-        return await _sweep_trades(ctx, client, label, symbols, since_ms, until)
+        return await _sweep_trades(ctx, client, label, symbols, since_ms, until, isolated)
     endpoint = ENDPOINTS[label]
     cursor_name, size_name, first = paging_params(endpoint)
     id_field = endpoint.id_fields[-1]
@@ -568,15 +952,21 @@ async def walk_trades(
     record = record_type(label)
     ids: list[UUID] = []
     for symbol in symbols:
-        key = f"{label}:{symbol}"
+        key = trade_cursor_key(label, symbol, isolated=isolated)
         last = _int(cursors.get(key))
+        fixed = _trade_params(symbol, isolated)
         params: dict[str, str | int] = {
-            "symbol": symbol,
+            **fixed,
             size_name: size,
             cursor_name: last + 1 if last is not None else first,
         }
         while True:
-            rows = await _ask(client, endpoint, params)
+            try:
+                rows = await _ask(client, endpoint, params)
+            except BinanceError as error:
+                if not _no_margin_trades(label, error):
+                    raise
+                break
             if not rows:
                 break
             top = max(int(str(row[id_field])) for row in rows)
@@ -591,8 +981,16 @@ async def walk_trades(
             )
             if len(rows) < size:
                 break
-            params = {"symbol": symbol, size_name: size, cursor_name: top + 1}
+            params = {**fixed, size_name: size, cursor_name: top + 1}
     return ids
+
+
+def _no_margin_trades(label: str, error: BinanceError) -> bool:
+    """Whether a refused trade request says the symbol has no margin trades: only for margin
+    trades, a "not present" code or a margin pair refusal."""
+    if label != MARGIN_TRADES:
+        return False
+    return isinstance(error, BinanceNotPresent) or error.code in MARGIN_PAIR_REFUSALS
 
 
 async def _sweep_trades(
@@ -602,6 +1000,7 @@ async def _sweep_trades(
     symbols: Sequence[str],
     since_ms: int,
     until_ms: int,
+    isolated: bool,
 ) -> list[UUID]:
     endpoint = ENDPOINTS[label]
     record = record_type(label)
@@ -610,19 +1009,22 @@ async def _sweep_trades(
         start = since_ms
         while start <= until_ms:
             end = min(start + TRADE_SPAN_MS, until_ms)
-            rows = await _trades_between(client, endpoint, symbol, start, end)
+            try:
+                rows = await _trades_between(client, endpoint, symbol, start, end, isolated)
+            except BinanceError as error:
+                if not _no_margin_trades(label, error):
+                    raise
+                break
             if rows:
-                low, high = endpoint.time_params
                 _, size_name, _ = paging_params(endpoint)
                 request: dict[str, JSONValue] = {
-                    "symbol": symbol,
-                    low: start,
-                    high: end,
+                    **_trade_params(symbol, isolated),
+                    **time_range(endpoint, start, end),
                     size_name: endpoint.page_size,
                 }
                 ids += await commit(
                     ctx,
-                    f"{label}:{symbol}",
+                    trade_cursor_key(label, symbol, isolated=isolated),
                     record=record,
                     request=request,
                     contents=_contents(endpoint, rows),
@@ -632,15 +1034,18 @@ async def _sweep_trades(
 
 
 async def _trades_between(
-    client: BinanceClient, endpoint: Endpoint, symbol: str, start: int, end: int
+    client: BinanceClient, endpoint: Endpoint, symbol: str, start: int, end: int, isolated: bool
 ) -> list[Row]:
     """Every trade of the symbol in [start, end]. A time range cannot be paged by id (the
     catalogue lists no such combination), so a full answer has its range split in two until
     each half fits, whichever trades of the range Binance gave first."""
-    low, high = endpoint.time_params
     _, size_name, _ = paging_params(endpoint)
     size = endpoint.page_size
-    params: dict[str, str | int] = {"symbol": symbol, low: start, high: end, size_name: size}
+    params: dict[str, str | int] = {
+        **_trade_params(symbol, isolated),
+        **time_range(endpoint, start, end),
+        size_name: size,
+    }
     rows = await _ask(client, endpoint, params)
     if len(rows) < size:
         return rows
@@ -650,6 +1055,50 @@ async def _trades_between(
         )
     middle = start + (end - start) // 2
     return [
-        *await _trades_between(client, endpoint, symbol, start, middle),
-        *await _trades_between(client, endpoint, symbol, middle + 1, end),
+        *await _trades_between(client, endpoint, symbol, start, middle, isolated),
+        *await _trades_between(client, endpoint, symbol, middle + 1, end, isolated),
     ]
+
+
+async def named_symbols(ctx: SyncContext, history: str, since_ms: int) -> list[str]:
+    """The symbols the connection's stored rows of a history (a futures income history, the
+    options bill) dated `since_ms` or later name, sorted; a row with no symbol (a transfer)
+    names none."""
+    time_field = ENDPOINTS[history].time_field
+    assert time_field is not None and "." not in time_field, history
+    async with ctx.session_factory() as session:
+        found = await session.scalars(
+            text(
+                "select distinct content ->> 'symbol' from core.raw_records"
+                " where connection_id = :c and record_type = :t"
+                " and (content ->> :f)::bigint >= :since"
+            ),
+            {"c": ctx.connection.id, "t": record_type(history), "f": time_field, "since": since_ms},
+        )
+        return sorted({symbol.strip() for symbol in found if symbol and symbol.strip()})
+
+
+def symbol_trade_key(label: str, symbol: str) -> str:
+    """The cursor of a symbol's futures or options trades: `<label>:<symbol>`, a window
+    cursor."""
+    return f"{label}:{symbol}"
+
+
+async def walk_symbol_trades(ctx: SyncContext, client: BinanceClient, label: str) -> list[UUID]:
+    """Walk a futures or options trade label for every symbol its history names (design 5.2,
+    `SYMBOL_TRADES`); the raw record ids stored. Binance keeps 3 months of them (the catalogue),
+    so each symbol is walked by windows as a history label is, from its own cursor
+    (`symbol_trade_key`): its first walk back 3 months, later ones from the last minus 7 days
+    (a futures request takes at most 7 days; an options one has no documented limit and is one
+    window, split when full). Only a symbol named within those 3 months is asked: Binance serves
+    no older trade, so a symbol traded long ago is not walked for ever. A label Binance said it
+    does not serve, or whose host refused the key (`absent`), is not asked."""
+    endpoint = ENDPOINTS[label]
+    if absent(await fresh_config(ctx), label, client.now_ms()):
+        return []
+    since = _floor(endpoint, client.now_ms())
+    ids: list[UUID] = []
+    for symbol in await named_symbols(ctx, SYMBOL_TRADES[label], since):
+        key = symbol_trade_key(label, symbol)
+        ids += await _walk_key(ctx, client, endpoint, key, {"symbol": symbol})
+    return ids

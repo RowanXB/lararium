@@ -15,7 +15,8 @@ The rule, in short:
 - Below the root, every array of objects and every map is a child table `<parent>_<path>`,
   keyed by the parent's key and the element's position (or the map's key). An array of scalars
   is a `text[]`/`numeric[]` column; an array of arrays is a child table with a `value` array.
-- A column is the field's path in snake case; its type follows the field's type.
+- A column is the field's path in snake case; its type follows the field's type. A field named as
+  a column the table has of its own (`transaction_id`) takes the label's name as a prefix.
 - A history label is a table of records (nullable `transaction_id`, keyed by the record's id, or
   by a hash of its content and its occurrence); any other label is a report, keyed by
   `snapshot_at` and the row's id, with the `read_to` of the read.
@@ -52,6 +53,101 @@ TABLE_LABELS: tuple[str, ...] = (
     "earn-flexible-rewards",
     "my-trades",
     "klines",
+    # Phase B: wallet-to-wallet transfers, dust and Cloud Mining, the travel-rule histories.
+    "universal-transfer",
+    "dust",
+    "cloud-mining",
+    "travel-deposits",
+    "travel-withdrawals",
+    # Phase B: the other Earn products.
+    "earn-locked-subscriptions",
+    "earn-locked-redemptions",
+    "earn-locked-rewards",
+    "earn-flexible-collateral",
+    "bfusd-subscriptions",
+    "bfusd-redemptions",
+    "bfusd-rewards",
+    "rwusd-subscriptions",
+    "rwusd-redemptions",
+    "rwusd-rewards",
+    "eth-stakes",
+    "eth-redemptions",
+    "wbeth-rewards",
+    "wbeth-wraps",
+    "wbeth-unwraps",
+    "sol-stakes",
+    "sol-redemptions",
+    "bnsol-rewards",
+    "sol-boost-rewards",
+    "onchain-subscriptions",
+    "onchain-redemptions",
+    "onchain-rewards",
+    "soft-staking-rewards",
+    "earn-locked-position",
+    "bfusd-account",
+    "rwusd-account",
+    "eth-staking-account",
+    "sol-staking-account",
+    "sol-unclaimed-rewards",
+    "onchain-account",
+    "onchain-locked-position",
+    "soft-staking-list",
+    "dci-accounts",
+    "dci-positions",
+    "discount-accounts",
+    "discount-positions",
+    # Phase B: crypto loans, flexible and VIP.
+    "loan-flexible-borrows",
+    "loan-flexible-repays",
+    "loan-flexible-ltv-adjustments",
+    "loan-flexible-liquidations",
+    "vip-loan-repays",
+    "vip-loan-interest",
+    "vip-loan-requests",
+    "loan-flexible-ongoing",
+    "vip-loan-ongoing",
+    "vip-loan-collateral-account",
+    # Phase B: the margin wallets.
+    "margin-account",
+    "margin-isolated-account",
+    "margin-trades",
+    "margin-transfers",
+    "margin-borrow-repay",
+    "margin-interest",
+    "margin-capital-flow",
+    "margin-liquidations",
+    "margin-small-liability",
+    "margin-liquidation-loan",
+    "margin-liquidation-loan-repays",
+    # Phase B: the futures wallets, USDⓈ-M and COIN-M, and each host's exchange information.
+    "um-exchange-info",
+    "um-balance",
+    "um-account",
+    "um-positions",
+    "um-income",
+    "um-trades",
+    "cm-exchange-info",
+    "cm-balance",
+    "cm-account",
+    "cm-positions",
+    "cm-income",
+    "cm-trades",
+    # Phase B: the Options wallet, and its host's exchange information.
+    "opt-exchange-info",
+    "opt-account",
+    "opt-positions",
+    "opt-bill",
+    "opt-trades",
+    "opt-exercises",
+    # Phase B: fiat by bank, card purchases and sales, P2P, Pay and rebates.
+    "fiat-orders",
+    "fiat-payments",
+    "c2c",
+    "pay",
+    "rebate",
+    # Phase B: the Portfolio Margin account (its records are not posted, design 2).
+    "pm-account",
+    "pm-balance",
 )
 
 # Columns a record's table has beyond the catalogue's fields (design 5.12).
@@ -60,6 +156,39 @@ EXTRA_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "withdrawals": (("tx_hash", "text"), ("is_onchain", "boolean")),
     # The key of the dividend a reward is linked to (rule 3).
     "earn-flexible-rewards": (("dividend_id", "text"),),
+    # The isolated pair a transfer was asked for: the row does not name it (the catalogue).
+    "universal-transfer": (("from_symbol", "text"), ("to_symbol", "text")),
+    # The wallet a conversion was asked for (`accountType`): the row does not name it.
+    "dust": (("account_type", "text"),),
+    # The id of the deposit or withdrawal a travel-rule row describes, once it is stored.
+    "travel-deposits": (("deposit_id", "text"),),
+    "travel-withdrawals": (("withdrawal_id", "text"),),
+    # The key of the dividend a reward is linked to (rule 3), for every product's rewards.
+    "earn-locked-rewards": (("dividend_id", "text"),),
+    "onchain-rewards": (("dividend_id", "text"),),
+    "bfusd-rewards": (("dividend_id", "text"),),
+    "rwusd-rewards": (("dividend_id", "text"),),
+    "soft-staking-rewards": (("dividend_id", "text"),),
+    # The `type` a boost reward was asked for (CLAIM or DISTRIBUTE): the row does not say it.
+    "sol-boost-rewards": (("type", "text"), ("dividend_id", "text")),
+    # The key of the movement an earlier listing posts that a margin transfer is (rule 2).
+    "margin-transfers": (("movement_key", "text"),),
+    # The `type` a borrow or repay row was asked for (BORROW or REPAY): the row's own `type`
+    # says only how (AUTO, MANUAL).
+    "margin-borrow-repay": (("request_type", "text"),),
+    # The key of the movement an earlier listing posts that a futures income `TRANSFER` is
+    # (rule 2).
+    "um-income": (("movement_key", "text"),),
+    "cm-income": (("movement_key", "text"),),
+    # The key of the movement an earlier listing posts that an options bill `TRANSFER` is
+    # (rule 2).
+    "opt-bill": (("movement_key", "text"),),
+    # The `transactionType` a fiat order (0 deposit, 1 withdraw) or a card payment (0 buy,
+    # 1 sell) was asked for: the row does not say which.
+    "fiat-orders": (("transaction_type", "text"),),
+    "fiat-payments": (("transaction_type", "text"),),
+    # The key of the dividend a rebate is linked to (rule 3).
+    "rebate": (("dividend_id", "text"),),
 }
 INDEXES: dict[str, tuple[tuple[str, ...], ...]] = {
     "deposits": (("network", "tx_hash"),),
@@ -367,18 +496,21 @@ def _root_table(
     if root and not root[-1].startswith("<") and record and not id_fields:
         head += [Column(CONTENT_HASH, "text", False), Column(OCCURRENCE, "integer", False)]
         key += [CONTENT_HASH, OCCURRENCE]
-    fields = _field_columns(mine, objects, frozenset(), "")
+    system = (
+        [Column("transaction_id", "uuid", True)]
+        if record
+        else [Column("read_to", "timestamptz", False)]
+    )
+    # A field named as one of the table's own columns (pay's `transactionId`) takes the
+    # label's name as a prefix (`pay_transaction_id`).
+    own = frozenset(c.name for c in (*head, *system))
+    fields = _field_columns(mine, objects, own, label.replace("-", "_"))
     for path in ids:
         found = next((c for c in fields if c.path == path and not c.twin), None)
         if found is None:
             raise ValueError(f"{label}: no field {path} to key the rows by")
         key.append(found.name)
     fields = [replace(c, nullable=False) if c.name in key else c for c in fields]
-    system = (
-        [Column("transaction_id", "uuid", True)]
-        if record
-        else [Column("read_to", "timestamptz", False)]
-    )
     extras = [Column(name, sql, True) for name, sql in EXTRA_COLUMNS.get(label, ())]
     return Table(
         name=table_name(label),

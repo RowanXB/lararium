@@ -8,6 +8,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,7 +32,7 @@ from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys
 from lararium.modules.finance.binance.sync import HISTORY_LABELS
 from lararium.worker import jobs
 
-from .fixtures import NOW_MS, build_response
+from .fixtures import NOW_MS, build_response, build_row
 
 KEY = bytes(range(32))
 API_KEY = "ak-TEST-do-not-log-0123"
@@ -42,6 +44,16 @@ SETTINGS = Settings(
     master_key=SecretStr(base64.b64encode(KEY).decode()),
 )
 MINUTE_MS = 60_000
+# An Ed25519 key of the test's own, made once: `binance_connection(key_type="ed25519")`.
+ED25519_PEM = (
+    Ed25519PrivateKey.generate()
+    .private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    .decode()
+)
 # The account the fake's spot-account answers for.
 _uid = build_response("spot-account", [])
 assert isinstance(_uid, dict)
@@ -84,16 +96,22 @@ async def binance_connection(
     config: Mapping[str, JSONValue] | None = None,
     cursor: JSONValue = None,
     status: str = "healthy",
+    key_type: str = "hmac",
 ) -> ConnectionRecord:
+    """A connection with an HMAC key (`API_SECRET`), or an Ed25519 one (`ED25519_PEM`)."""
+
     async def setup(ctx: CommandContext) -> ConnectionRecord:
         connection = await create_connection(
             ctx,
             connector="binance",
             display_name="Binance",
-            config={"key_type": "hmac", "uid": UID, **(config or {})},
+            config={"key_type": key_type, "uid": UID, **(config or {})},
         )
         await store_credential(ctx, KEY, connection.id, "api_key", API_KEY, None)
-        await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
+        if key_type == "ed25519":
+            await store_credential(ctx, KEY, connection.id, "private_key", ED25519_PEM, None)
+        else:
+            await store_credential(ctx, KEY, connection.id, "api_secret", API_SECRET, None)
         await ctx.session.execute(
             text(
                 "update core.connections set status = :s, cursor = cast(:c as jsonb) where id = :id"
@@ -157,3 +175,16 @@ async def run_binance_sync(
             session_factory=session_factory or async_sessionmaker(bind=session.bind),
         )
     return await get_connection(session, connection_id)
+
+
+def spot_rows(*balances: tuple[str, str]) -> list[dict[str, Any]]:
+    """A Spot account report holding each (asset, free)."""
+    return [build_row("spot-account", asset=code, free=free, locked="0") for code, free in balances]
+
+
+def funding_rows(*balances: tuple[str, str]) -> list[dict[str, Any]]:
+    """A Funding report holding each (asset, free)."""
+    return [
+        build_row("funding-asset", asset=code, free=free, locked="0", freeze="0", withdrawing="0")
+        for code, free in balances
+    ]

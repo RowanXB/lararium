@@ -43,8 +43,32 @@ type Rowdict = dict[str, ApiValue]
 # Text fields that hold an asset code.
 _ASSET_NAMES = {"currency", "token", "coin", "fiat", "feeAsset"}
 # Values the catalogue document records for a field Binance answers with no listed enum: the
-# daily snapshot's `type` is lower-case in the answer although the request asks `SPOT`.
-_RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {"snapshot": {"snapshotVos[].type": "spot"}}
+# daily snapshot's `type` is lower-case in the answer although the request asks `SPOT`. A
+# futures host's exchange information states its request weight per minute as Binance's example
+# does (2400).
+_RATE_LIMIT: dict[str, ApiValue] = {
+    "rateLimits[].rateLimitType": "REQUEST_WEIGHT",
+    "rateLimits[].interval": "MINUTE",
+    "rateLimits[].intervalNum": 1,
+    "rateLimits[].limit": 2400,
+}
+# The account has no Portfolio Margin, as the owner's key reports (the catalogue document): a
+# test that needs it sets `account-info`.
+_RESPONSE_VALUES: dict[str, dict[str, ApiValue]] = {
+    "account-info": {"isPortfolioMarginRetailEnabled": False},
+    "snapshot": {"snapshotVos[].type": "spot"},
+    "um-exchange-info": _RATE_LIMIT,
+    "cm-exchange-info": _RATE_LIMIT,
+    "opt-exchange-info": _RATE_LIMIT,
+}
+# The futures accounts answer as the probe's did: present, holding nothing (no asset, no
+# position) until a test stores rows or sets `positions` (`set_envelope`).
+_EMPTY_FUTURES: dict[str, dict[str, ApiValue]] = {
+    "um-account": {"positions": []},
+    "cm-account": {"positions": []},
+    # An options account, once a test opens one (`options`), holds nothing and has no greeks.
+    "opt-account": {"greek": []},
+}
 # Text times written as "YYYY-MM-DD HH:MM:SS" (UTC); every other text time is epoch ms digits.
 _UTC_TEXT_LABELS = {"withdrawals", "travel-withdrawals"}
 
@@ -226,7 +250,30 @@ _DEFAULT_SIZES = {"current": 10, "pageIndex": 10, "page": 100, "fromId": 500}
 # The catalogue's my-trades: "The time between startTime and endTime can't be longer than 24
 # hours"; a start (or an end) alone asks the 24 hours from (or to) it; a time and `fromId` are
 # not a supported combination.
-_TIME_SPANS = {"my-trades": DAY_MS}
+_TIME_SPANS = {"my-trades": DAY_MS, "margin-trades": DAY_MS}
+# A margin trade request asks cross margin's trades, or an isolated pair's with
+# `isIsolated=TRUE` (the default is FALSE): a row answers the one its `isIsolated` says.
+_ISOLATED_FLAG = "isIsolated"
+# What an account without margin answers (the probe's account): the cross margin account
+# `created: false`, the isolated one no pair, and these -3003 "Margin account does not exist".
+_NO_MARGIN = frozenset(
+    {
+        "margin-trades",
+        "margin-transfers",
+        "margin-borrow-repay",
+        "margin-interest",
+        "margin-capital-flow",
+        "margin-liquidations",
+        "margin-small-liability",
+        "margin-liquidation-loan",
+        "margin-liquidation-loan-repays",
+    }
+)
+_NO_MARGIN_CODE = -3003
+# What an account without options answers on the options host's signed endpoints: the docs give
+# no answer for it; their error-code page's -5002 USER_NOT_ACCESS ("Option user not access") is
+# what the connector takes as not present there.
+_NO_OPTIONS_CODE = -5002
 
 
 @dataclass(frozen=True)
@@ -247,12 +294,14 @@ class _Failure:
     older_than_ms: int | None
     times: int | None
     retry_after: int | None
+    when: Mapping[str, str]
 
 
 @dataclass(frozen=True)
 class _Stored:
     row: Rowdict
-    when: Mapping[str, str]
+    # None: the request does not carry the parameter.
+    when: Mapping[str, str | None]
 
 
 # What `FakeBinance.when_asked` runs: told how many earlier asks there were.
@@ -269,12 +318,26 @@ class FakeBinance:
     many answers with none. The rows come back oldest first, cut to the request's window and
     page. `now` is the clock `/api/v3/time` reads. Give `secret` and a request with the wrong
     HMAC signature is refused.
+
+    By default the account has no margin, as the probe's: the cross margin account answers
+    `created: false` and the margin histories -3003. `margin=True` (or setting `margin`) opens
+    it: then they answer from what is stored, as every other label does. The futures wallets
+    are there and empty, as the probe's were: a test that needs them stores their rows. The
+    account has no options: every signed options request answers -5002 (`_NO_OPTIONS_CODE`);
+    `options=True` (or setting `options`) opens it, empty.
     """
 
     def __init__(
-        self, *, now: Callable[[], int] = lambda: NOW_MS, secret: str | None = None
+        self,
+        *,
+        now: Callable[[], int] = lambda: NOW_MS,
+        secret: str | None = None,
+        margin: bool = False,
+        options: bool = False,
     ) -> None:
         self.now = now
+        self.margin = margin
+        self.options = options
         self.permissions: dict[str, ApiValue] = dict(PERMISSIONS)
         self.requests: list[Seen] = []
         self._secret = secret
@@ -282,20 +345,29 @@ class FakeBinance:
         self._failures: list[_Failure] = []
         self._hooks: dict[str, Hook] = {}
         self._caps: dict[str, int] = {}
+        self._envelopes: dict[str, dict[str, ApiValue]] = {
+            label: dict(fields) for label, fields in _EMPTY_FUTURES.items()
+        }
         self._routes = {(e.method, e.host, e.path): e for e in ENDPOINTS.values()}
 
     # What it holds.
 
-    def add(self, label: str, *rows: Rowdict, when: Mapping[str, str] | None = None) -> None:
-        """Store rows; with `when`, they answer only requests with those parameters."""
+    def add(self, label: str, *rows: Rowdict, when: Mapping[str, str | None] | None = None) -> None:
+        """Store rows; with `when`, they answer only requests with those parameters (a
+        parameter given as None: only requests without it)."""
         assert label in ENDPOINTS, label
         self._stored.setdefault(label, []).extend(_Stored(dict(r), when or {}) for r in rows)
 
     def set_rows(
-        self, label: str, rows: Iterable[Rowdict], when: Mapping[str, str] | None = None
+        self, label: str, rows: Iterable[Rowdict], when: Mapping[str, str | None] | None = None
     ) -> None:
         self._stored[label] = []
         self.add(label, *rows, when=when)
+
+    def set_envelope(self, label: str, **fields: ApiValue) -> None:
+        """Answer the label with these top-level fields beside its records (a margin account
+        that says `created: false`)."""
+        self._envelopes.setdefault(label, {}).update(fields)
 
     def rows(self, label: str) -> list[Rowdict]:
         return [stored.row for stored in self._stored.get(label, [])]
@@ -323,10 +395,13 @@ class FakeBinance:
         older_than_ms: int | None = None,
         times: int | None = None,
         retry_after: int | None = None,
+        when: Mapping[str, str] | None = None,
     ) -> None:
         """Answer `label` with an error: always, or `times` times, or only for a request whose
-        start time is before `older_than_ms`."""
-        self._failures.append(_Failure(label, status, code, older_than_ms, times, retry_after))
+        start time is before `older_than_ms`, or only for one with the parameters `when`."""
+        self._failures.append(
+            _Failure(label, status, code, older_than_ms, times, retry_after, when or {})
+        )
 
     def clear_failures(self) -> None:
         self._failures.clear()
@@ -381,6 +456,10 @@ class FakeBinance:
         failure = self._failure_for(endpoint, own)
         if failure is not None:
             return failure
+        if not self.margin and endpoint.label in _NO_MARGIN:
+            return _error(400, _NO_MARGIN_CODE)
+        if not self.options and endpoint.limit == "eapi" and endpoint.signed:
+            return _error(400, _NO_OPTIONS_CODE)
         return self._answer(endpoint, own)
 
     def _check_signature(
@@ -399,9 +478,11 @@ class FakeBinance:
         return None
 
     def _failure_for(self, endpoint: Endpoint, own: Mapping[str, str]) -> httpx.Response | None:
-        start = own.get(endpoint.time_params[0])
+        start = own.get(endpoint.time_params[0]) if endpoint.time_params else None
         for failure in self._failures:
             if failure.label != endpoint.label:
+                continue
+            if any(own.get(name) != value for name, value in failure.when.items()):
                 continue
             if failure.older_than_ms is not None and (
                 start is None or int(start) >= failure.older_than_ms
@@ -425,6 +506,10 @@ class FakeBinance:
         # A parameter the catalogue always sends is one Binance refuses to go without.
         if any(name not in own for name, _ in endpoint.variants):
             return _error(400, -1102)
+        # A time range sent to an endpoint whose documents give it none: Binance's code for a
+        # parameter it did not read.
+        if endpoint.time_params is None and {"startTime", "endTime"} & set(own):
+            return _error(400, -1104)
         if too_wide := self._too_wide(endpoint, own):
             return too_wide
         own, refused = self._spanned(endpoint, own)
@@ -437,12 +522,17 @@ class FakeBinance:
         body = build_response(label, page)
         if isinstance(body, dict):
             self._patch_envelope(body, total, more)
+            if label == "margin-account" and not self.margin:
+                body["created"] = False
+            body.update(self._envelopes.get(label, {}))
         return _json(body)
 
     @staticmethod
     def _too_wide(endpoint: Endpoint, own: Mapping[str, str]) -> httpx.Response | None:
+        if endpoint.time_params is None or endpoint.window_days is None:
+            return None
         low, high = endpoint.time_params
-        if endpoint.window_days is None or low not in own or high not in own:
+        if low not in own or high not in own:
             return None
         if int(own[high]) - int(own[low]) >= (endpoint.window_days + 1) * DAY_MS:
             return _error(400, -1127)
@@ -455,8 +545,10 @@ class FakeBinance:
         """The request's time range as Binance reads it for a label with a fixed longest span:
         refused when wider or combined with `fromId`, completed when one end is missing."""
         span = _TIME_SPANS.get(endpoint.label)
+        if span is None or endpoint.time_params is None:
+            return own, None
         low, high = endpoint.time_params
-        if span is None or (low not in own and high not in own):
+        if low not in own and high not in own:
             return own, None
         if "fromId" in own:
             return own, _error(400, -1128)
@@ -476,7 +568,10 @@ class FakeBinance:
         for name in _FILTERS:
             if name in own:
                 rows = [row for row in rows if name not in row or str(row[name]) == own[name]]
-        if endpoint.time_field is not None:
+        if endpoint.label == "margin-trades":
+            isolated = own.get(_ISOLATED_FLAG, "FALSE") == "TRUE"
+            rows = [row for row in rows if row.get(_ISOLATED_FLAG) in (None, isolated)]
+        if endpoint.time_field is not None and endpoint.time_params is not None:
             low, high = endpoint.time_params
             field = endpoint.time_field
 

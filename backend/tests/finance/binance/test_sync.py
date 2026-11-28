@@ -33,7 +33,14 @@ from lararium.db import create_engine, make_sessionmaker
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance.binance import sync as sync_module
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
-from lararium.modules.finance.binance.fetch import CURSORS_KEY, cursor_keys, record_type
+from lararium.modules.finance.binance.client import ALLOWED
+from lararium.modules.finance.binance.fetch import (
+    CURSORS_KEY,
+    PHASE_B_BUILT,
+    PORTFOLIO_MARGIN_PRODUCTS,
+    cursor_keys,
+    record_type,
+)
 from lararium.modules.finance.binance.layout import TABLE_LABELS, layout
 from lararium.modules.finance.binance.sync import (
     BALANCE_LABELS,
@@ -69,11 +76,21 @@ def test_connector_identity() -> None:
     assert connector.capabilities == frozenset({"balances", "holdings", "transactions"})
 
 
-def test_the_phase_a_labels() -> None:
+def test_the_labels_built_so_far() -> None:
     assert "my-trades" not in HISTORY_LABELS
-    assert all(ENDPOINTS[label].phase == "A" for label in HISTORY_LABELS + BALANCE_LABELS)
+    built = [label for label in HISTORY_LABELS + BALANCE_LABELS if ENDPOINTS[label].phase == "B"]
+    assert sorted(built) == sorted(PHASE_B_BUILT)
+    # Phase A's labels are walked first, in the catalogue's order.
+    phase_b = [label for label in PHASE_B_BUILT if ENDPOINTS[label].kind == "history"]
+    assert HISTORY_LABELS[: -len(phase_b)] == [
+        e.label
+        for e in ENDPOINTS.values()
+        if e.phase == "A" and e.kind == "history" and e.paging != "from_id"
+    ]
     assert {"spot-account", "api-restrictions", "funding-asset"} <= set(BALANCE_LABELS)
-    assert "rebate" not in HISTORY_LABELS
+    assert "rebate" in HISTORY_LABELS
+    # Portfolio Margin's two reads are the last built.
+    assert BALANCE_LABELS[-2:] == ["pm-account", "pm-balance"]
 
 
 def test_gate_problem_at_any_depth() -> None:
@@ -155,6 +172,9 @@ async def test_uid_mismatch_fails(session, run, fake, connector) -> None:
 
 
 async def test_balances_are_read_with_their_bracket(session, run, fake, connector) -> None:
+    # With a margin and an options account: every balance label answers.
+    fake.margin = True
+    fake.options = True
     connection = await binance_connection(run, config=later_config())
 
     after = await run_binance_sync(session, connection.id, fake.handler)
@@ -171,7 +191,9 @@ async def test_balances_are_read_with_their_bracket(session, run, fake, connecto
         )
     ).all()
     types = [row.record_type for row in rows]
-    assert sorted(types) == sorted(record_type(label) for label in BALANCE_LABELS)
+    # Portfolio Margin's are read only while `account-info` says it is on.
+    expected = [label for label in BALANCE_LABELS if label not in PORTFOLIO_MARGIN_PRODUCTS]
+    assert sorted(types) == sorted(record_type(label) for label in expected)
     for row in rows:
         assert row.request["read_from_ms"] <= row.request["read_to_ms"]
     # Each read has its own bracket: the reads follow one another.
@@ -485,9 +507,15 @@ async def test_a_flag_is_told_after_a_sync_that_failed_later(
 
 
 def _windows(fake: FakeBinance) -> set[tuple[str, str, str, str]]:
-    """The history windows asked: label, variant, start, end."""
+    """The history windows asked: label, variant, start, end (none for a label asked without
+    a time range)."""
     return {
-        (s.label, s.params.get("type", ""), s.params["startTime"], s.params["endTime"])
+        (
+            s.label,
+            s.params.get("type", ""),
+            s.params.get("startTime", ""),
+            s.params.get("endTime", ""),
+        )
         for s in fake.requests
         if s.label in HISTORY_LABELS
     }
@@ -703,14 +731,18 @@ async def test_an_unknown_field_in_any_answer_is_flagged_once(
     assert all(sum(flag in m for m in told) == 1 for flag in expected)
 
 
-# Every Phase A label is fetched by a sync.
+# Every request a sync sends is in the allowlist, and every catalogue label is asked.
 
 
-async def test_a_first_sync_asks_every_phase_a_label(
-    session, run, fake: FakeBinance, connector
-) -> None:
+async def test_allowlist_is_exactly_the_catalogue(session, run, clock: Clock, connector) -> None:
+    """Two syncs of one connection against a fake with every product: the first, with margin and
+    options open, asks every label but Portfolio Margin's; the second, with Portfolio Margin on
+    (which replaces the classic margin and futures wallets), asks its two. Every request is in
+    `ALLOWED` and, as `ALLOWED` is the catalogue's, every catalogue label is asked."""
+    fake = FakeBinance(now=clock, secret=API_SECRET, margin=True, options=True)
     # Enough for every step to ask: an asset held since a daily snapshot two days ago, with a
-    # EUR market (bars) and a symbol of its own (trades).
+    # EUR market (bars) and a symbol of its own (trades); an income or bill row naming a futures
+    # or options symbol (that symbol's trades).
     day = NOW_MS - 2 * DAY_MS - 1_000
     snapshot = build_row("snapshot", type="spot", updateTime=day)
     data = dict(snapshot["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
@@ -721,14 +753,27 @@ async def test_a_first_sync_asks_every_phase_a_label(
         "exchange-info",
         build_row("exchange-info", symbol="AAAEUR", baseAsset="AAA", quoteAsset="EUR"),
     )
+    recent = NOW_MS - 2 * HOUR_MS
+    for label, symbol in (("um-income", "AAASTB"), ("cm-income", "AAAUSD_PERP")):
+        fake.add(label, build_row(label, symbol=symbol, incomeType="COMMISSION", time=recent))
+    fake.add("opt-bill", build_row("opt-bill", symbol="AAA-261231-100-C", createDate=recent))
+    routes: set[tuple[str, str, str]] = set()
+
+    def handler(request: httpx.Request) -> Any:
+        routes.add((request.method, request.url.host, request.url.path))
+        return fake.handler(request)
+
     connection = await binance_connection(run)
-
-    after = await run_binance_sync(session, connection.id, fake.handler)
-
+    after = await run_binance_sync(session, connection.id, handler)
     assert after.status == "healthy", after.last_error
-    phase_a = {label for label, endpoint in ENDPOINTS.items() if endpoint.phase == "A"}
+    fake.set_rows("account-info", [build_row("account-info", isPortfolioMarginRetailEnabled=True)])
+    clock.ms += 5 * HOUR_MS
+    after = await run_binance_sync(session, connection.id, handler)
+    assert after.status == "healthy", after.last_error
+
+    assert sorted(routes - ALLOWED) == []
     asked = {seen.label for seen in fake.requests}
-    assert sorted(phase_a - asked) == []
+    assert sorted(set(ENDPOINTS) - asked) == []
     assert await session.scalar(
         text("select count(*) from finance.binance_asset_detail where connection_id = :c"),
         {"c": connection.id},

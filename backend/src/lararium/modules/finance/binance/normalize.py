@@ -4,8 +4,10 @@ A run applies every history raw record after `config["normalized_through"]` (raw
 are UUIDv7, so in the order they were stored): each is checked against the catalogue (a field
 or value it does not list becomes a flag), its typed row upserted, and its label's handler
 run. A row that changed (a withdrawal that failed) is a new raw record, so it is applied again
-and updates its typed row and transactions in place. Then rewards are linked to the dividends
-that paid them (rule 3), and the new flags published.
+and updates its typed row and transactions in place. Then a movement two endpoints list is
+posted once (rule 2), rewards are linked to the dividends that paid them (rule 3), travel-rule
+rows to the deposits and withdrawals they describe, a flexible loan's interest derived from the
+reports (`loans.set_interest`), and the new flags published.
 
 The run writes in a transaction of its own: making a wallet's account and setting the
 connection's config lock its row, which a later step of the sync that walks (in short
@@ -48,13 +50,22 @@ from lararium.modules.finance.binance.records import (
     Run,
     capital,
     earn,
+    fiat,
+    futures,
+    loans,
+    margin,
+    options,
     post,
     remove,
     spot,
+    staking,
+    structured,
+    transfers,
 )
 
 __all__ = [
     "HANDLERS",
+    "MOVEMENT_LISTINGS",
     "NORMALIZER_VERSION",
     "BinanceRecordError",
     "Handler",
@@ -68,7 +79,7 @@ __all__ = [
     "remove",
 ]
 
-NORMALIZER_VERSION = "binance-norm-4"
+NORMALIZER_VERSION = "binance-norm-5"
 VERSION_KEY = "normalizer_version"
 NORMALIZED_THROUGH_KEY = "normalized_through"
 FLAGS_KEY = notices.FLAGS_KEY
@@ -86,11 +97,66 @@ HANDLERS: dict[str, Handler] = {
     earn.SUBSCRIPTIONS: earn.flexible_subscription,
     earn.REDEMPTIONS: earn.flexible_redemption,
     earn.REWARDS: earn.flexible_reward,
+    transfers.UNIVERSAL: transfers.universal,
+    spot.DUST: spot.dust,
+    transfers.CLOUD_MINING: transfers.cloud_mining,
+    earn.LOCKED_SUBSCRIPTIONS: earn.locked_subscription,
+    earn.LOCKED_REDEMPTIONS: earn.locked_earn_redemption,
+    earn.LOCKED_REWARDS: earn.locked_reward,
+    earn.ONCHAIN_SUBSCRIPTIONS: earn.onchain_subscription,
+    earn.ONCHAIN_REDEMPTIONS: earn.onchain_redemption,
+    earn.ONCHAIN_REWARDS: earn.onchain_reward,
+    **staking.SWAP_HANDLERS,
+    staking.BFUSD_REWARDS.label: staking.bfusd_reward,
+    staking.RWUSD_REWARDS.label: staking.rwusd_reward,
+    staking.SOFT_STAKING_REWARDS.label: staking.soft_staking_reward,
+    staking.BOOST_REWARDS: staking.boost_reward,
+    loans.BORROWS: loans.borrow,
+    loans.REPAYS: loans.repay,
+    loans.LIQUIDATIONS: loans.liquidation,
+    loans.VIP_REPAYS: loans.vip_repay,
+    margin.TRADES: margin.trade,
+    margin.TRANSFERS: margin.transfer,
+    margin.BORROW_REPAY: margin.borrow_repay,
+    margin.INTEREST: margin.interest,
+    margin.CAPITAL_FLOW: margin.capital_flow,
+    futures.UM_INCOME: futures.income,
+    futures.CM_INCOME: futures.income,
+    options.BILL: options.bill,
+    fiat.ORDERS: fiat.order,
+    fiat.PAYMENTS: fiat.payment,
+    fiat.C2C: fiat.c2c,
+    fiat.PAY: fiat.pay,
+    fiat.REBATES: fiat.rebate,
 }
+# The report labels whose rows post (each row of each read, keyed by the row's id): the
+# products with no history endpoint.
+POSITION_HANDLERS: dict[str, Handler] = {
+    structured.DUAL_INVESTMENT: structured.dual_investment,
+    structured.DISCOUNT_BUY: structured.discount_buy,
+}
+# Rule 3: every reward history whose rows a dividend can have paid.
+REWARD_HISTORIES: tuple[earn.Rewards, ...] = (
+    *earn.REWARD_HISTORIES,
+    *staking.REWARD_HISTORIES,
+    *fiat.REWARD_HISTORIES,
+)
+# Rule 2: the endpoints that list wallet-to-wallet movements, the one that posts a movement first
+# (`transfers.link_movements`): the universal transfer history, then the margin transfer
+# history, then the futures income TRANSFER rows, then the options bill TRANSFER rows.
+MOVEMENT_LISTINGS: tuple[transfers.Listing, ...] = (
+    transfers.UNIVERSAL_LISTING,
+    margin.MARGIN_LISTING,
+    futures.UM_LISTING,
+    futures.CM_LISTING,
+    options.LISTING,
+)
 # The history labels whose rows have typed tables, by raw record type.
 _LABEL_OF = {
     record_type(label): label for label in layout.TABLE_LABELS if ENDPOINTS[label].kind == "history"
 }
+# The report labels whose reads are applied, by raw record type.
+_REPORT_OF = {record_type(label): label for label in POSITION_HANDLERS}
 
 
 def _body(label: str, row: Row) -> ApiValue:
@@ -105,7 +171,34 @@ def _body(label: str, row: Row) -> ApiValue:
     return body
 
 
+async def _apply_report(run: Run, record: RawRecord) -> None:
+    """Each position row of one read: its report tables are stored with the sync's reports
+    (`balances.store_reports`); here only its postings."""
+    label = _REPORT_OF[record.record_type]
+    content = as_api(record.content)
+    assert isinstance(content, dict)
+    started = content["read_from_ms"]
+    assert isinstance(started, int)
+    name = structured.RECORDS[label]
+    read: dict[str, object] = {
+        "connection_id": run.connection.id,
+        "snapshot_at": tables.moment(started),
+    }
+    root = layout.layout(label)[0]
+    for row in parse(label, content["body"]).rows:
+        ids = [tables.key_part(label, row, field) for field in ENDPOINTS[label].id_fields]
+        # The row's own key in its report table: the read and the row's id fields.
+        values = tables.columns_for(label, row)
+        typed_key = {column: read.get(column, values.get(column)) for column in root.key}
+        run.current = Current(label, record, ":".join([name, *ids]), typed_key)
+        await POSITION_HANDLERS[label](run, row)
+    run.current = None
+
+
 async def _apply(run: Run, record: RawRecord) -> None:
+    if record.record_type in _REPORT_OF:
+        await _apply_report(run, record)
+        return
     label = _LABEL_OF[record.record_type]
     content = as_api(record.content)
     occurrence: int | None = None
@@ -141,10 +234,12 @@ async def _apply(run: Run, record: RawRecord) -> None:
 
 
 async def _records(run: Run, after: UUID | None) -> list[RawRecord]:
-    """The connection's history raw records stored after `after` (all with None), in order."""
+    """The connection's history raw records, and the reads of its posting report labels,
+    stored after `after` (all with None), in order."""
     r = core_models.RawRecord
     query = select(r.id).where(
-        r.connection_id == run.connection.id, r.record_type.in_(list(_LABEL_OF))
+        r.connection_id == run.connection.id,
+        r.record_type.in_([*_LABEL_OF, *_REPORT_OF]),
     )
     if after is not None:
         query = query.where(r.id > after)
@@ -152,68 +247,88 @@ async def _records(run: Run, after: UUID | None) -> list[RawRecord]:
     return await get_raw_records(run.session, ids)
 
 
+def _rewards_sql(columns: str, condition: str) -> str:
+    """Every reward history's rows as one set: (label, content_hash, occurrence, asset, amount,
+    time, dividend_id), those of each history meeting `condition` (and its own `linkable` when
+    `columns` asks for it)."""
+    parts: list[str] = []
+    for index, rewards in enumerate(REWARD_HISTORIES):
+        where = condition.replace("{linkable}", f"({rewards.linkable})")
+        parts.append(
+            f"select :l{index} as label, content_hash, occurrence,"
+            f" {rewards.asset_sql} as asset, {rewards.amount_sql} as amount,"
+            f" {rewards.time_sql} as time, dividend_id"
+            f" from finance.{rewards.table} where connection_id = :c and {where}"
+        )
+    return f"select {columns} from (" + " union all ".join(parts) + ") r"
+
+
+def _labels() -> dict[str, str]:
+    return {f"l{index}": rewards.label for index, rewards in enumerate(REWARD_HISTORIES)}
+
+
 async def link_payouts(run: Run) -> None:
     """Rule 3: a reward and an asset dividend of the same asset and amount within 26 hours of
     each other are one payout, posted where it landed (the dividend, on Spot): the reward is
-    linked to the dividend and its own posting removed. Only a reward of a type known to be
-    paid out (`earn.PAID_OUT`) can be: a `REALTIME` one accrues inside the Earn position
-    (design 5.7), and a missing or other type is never linked.
+    linked to the dividend and its own posting removed. Every product's rewards can be
+    (`REWARD_HISTORIES`), each only those of its rows known to be paid out (`linkable`): a
+    flexible `REALTIME` reward accrues inside the Earn position (design 5.7), and a missing or
+    other type is never linked; a distributed SOL boost reward is not paid out until claimed.
 
     The links are worked out afresh from every reward and dividend the connection has, so
     they do not depend on how the records were split across runs: candidate pairs are taken
-    nearest first (ties by the reward's time and key, then the dividend's time and id), each
-    reward and each dividend at most once. A reward whose link changes is updated; one no
-    longer linked is posted again."""
+    nearest first (ties by the reward's time, product and key, then the dividend's time and
+    id), each reward and each dividend at most once. A reward whose link changes is updated;
+    one no longer linked is posted again."""
+    rewards_by_label = {rewards.label: rewards for rewards in REWARD_HISTORIES}
+    candidates = _rewards_sql(
+        "r.label, r.content_hash, r.occurrence, r.time, d.id as dividend_id, d.div_time",
+        "{linkable}",
+    )
     rows = await run.session.execute(
         text(
-            "select r.content_hash, r.occurrence, d.id as dividend_id"
-            " from finance.binance_earn_flexible_rewards r"
-            " join finance.binance_dividends d on d.connection_id = r.connection_id"
-            "  and d.asset = r.asset and d.amount = r.rewards"
+            f"{candidates}"
+            " join finance.binance_dividends d on d.connection_id = :c"
+            "  and d.asset = r.asset and d.amount = r.amount"
             "  and coalesce(d.direction, 1) = 1"
             "  and d.div_time between r.time - make_interval(hours => :h)"
             "   and r.time + make_interval(hours => :h)"
-            " where r.connection_id = :c and r.type = any(:paid)"
-            " order by abs(extract(epoch from d.div_time - r.time)), r.time, r.content_hash,"
-            "  r.occurrence, d.div_time, d.id"
+            " order by abs(extract(epoch from d.div_time - r.time)), r.time, r.label,"
+            "  r.content_hash, r.occurrence, d.div_time, d.id"
         ),
-        {"c": run.connection.id, "h": PAYOUT_WINDOW_HOURS, "paid": list(earn.PAID_OUT)},
+        {"c": run.connection.id, "h": PAYOUT_WINDOW_HOURS, **_labels()},
     )
-    wanted: dict[tuple[str, int], str] = {}
+    wanted: dict[tuple[str, str, int], str] = {}
     paid: set[str] = set()
     for row in rows.all():
-        reward = (row.content_hash, row.occurrence)
+        reward = (row.label, row.content_hash, row.occurrence)
         if reward in wanted or row.dividend_id in paid:
             continue
         wanted[reward] = row.dividend_id
         paid.add(row.dividend_id)
     held = await run.session.execute(
-        text(
-            "select content_hash, occurrence, dividend_id, asset, rewards, time"
-            " from finance.binance_earn_flexible_rewards"
-            " where connection_id = :c and dividend_id is not null"
-        ),
-        {"c": run.connection.id},
+        text(_rewards_sql("*", "dividend_id is not null")), {"c": run.connection.id, **_labels()}
     )
-    current = {(r.content_hash, r.occurrence): r for r in held.all()}
-    name = record_type(earn.REWARDS).removeprefix("binance.")
+    current = {(r.label, r.content_hash, r.occurrence): r for r in held.all()}
     for reward in sorted(set(wanted) | set(current)):
         dividend_id = wanted.get(reward)
         before = current.get(reward)
         if before is not None and before.dividend_id == dividend_id:
             continue
-        key = f"{name}:{reward[0]}:{reward[1]}"
+        label, digest, occurrence = reward
+        rewards = rewards_by_label[label]
+        key = f"{rewards.record}:{digest}:{occurrence}"
         transaction_id = None
         if dividend_id is not None:
             await remove(run, key)
         else:
             assert before is not None
             transaction_id = await earn.post_reward(
-                run, key, before.asset, before.rewards, before.time
+                run, rewards, key, before.asset, before.amount, before.time
             )
         await run.session.execute(
             text(
-                "update finance.binance_earn_flexible_rewards"
+                f"update finance.{rewards.table}"
                 " set dividend_id = :d, transaction_id = :t"
                 " where connection_id = :c and content_hash = :h and occurrence = :o"
             ),
@@ -221,8 +336,8 @@ async def link_payouts(run: Run) -> None:
                 "d": dividend_id,
                 "t": transaction_id,
                 "c": run.connection.id,
-                "h": reward[0],
-                "o": reward[1],
+                "h": digest,
+                "o": occurrence,
             },
         )
 
@@ -280,9 +395,14 @@ async def _normalize(
             for record in await _records(run, after):
                 await _apply(run, record)
                 last = record.id
+            await transfers.link_movements(run, MOVEMENT_LISTINGS)
             await link_payouts(run)
+            await capital.link_travel_rule(run)
             if reads is not None:
                 await record_reads(cmd, connection, reads, daily=daily, flag=run.flag)
+            # After the reports: a flexible loan's interest is what they show the records do
+            # not explain.
+            await loans.set_interest(run)
             run.report.new_flags = await publish_flags(run)
             run.report.touched = run.touched
             await queue_touched(cmd, connection.id, run.touched)

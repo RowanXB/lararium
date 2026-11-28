@@ -392,6 +392,22 @@ async def test_update_can_switch_the_key_type(api, session, run) -> None:
     assert stored is not None and stored.reveal() == pem
 
 
+async def test_an_update_asks_the_hosts_the_old_key_type_was_refused_on_again(
+    api, session, run, fake
+) -> None:
+    created = await _create(api)
+    await run(update_config, created["id"], {"refused_hosts": {"eapi": 1, "fapi": 2}})
+
+    response = await api.put(
+        f"/api/v1/connections/{created['id']}/binance",
+        json={"key_type": "ed25519", "api_key": "ak-TEST-ed-7777", "private_key": _pem()},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 200, response.text
+    assert "refused_hosts" not in (await get_connection(session, created["id"])).config
+
+
 async def test_update_refuses_another_account(api, session, run, fake, queue) -> None:
     created = await _create(api)
     queue.jobs.clear()

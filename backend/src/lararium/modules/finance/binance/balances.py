@@ -13,7 +13,7 @@ Nothing here logs or reports an amount, an address or a hash: a flag names a wal
 
 import hashlib
 import json
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,7 +32,11 @@ from lararium.core.raw_records import store_raw_record
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import get_account
 from lararium.modules.finance.binance import layout, tables
-from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_account
+from lararium.modules.finance.binance.accounts import (
+    ACCOUNT_MAP_KEY,
+    wallet_account,
+    wallet_name,
+)
 from lararium.modules.finance.binance.catalogue import (
     ENDPOINTS,
     FIELDS,
@@ -43,9 +47,12 @@ from lararium.modules.finance.binance.catalogue import (
 )
 from lararium.modules.finance.binance.client import BinanceClient
 from lararium.modules.finance.binance.fetch import (
+    ACCOUNT_INFO_LABEL,
     HISTORY_LABELS,
-    TRADES_LABEL,
+    ISOLATED_MARGIN_LABEL,
+    TRADE_LABELS,
     VERSION,
+    TradeWalk,
     record_type,
     to_json,
     typed,
@@ -59,6 +66,7 @@ from lararium.modules.finance.binance.parse import (
     Row,
     as_api,
     parse,
+    row_prefix,
     unknown_flags,
 )
 from lararium.modules.finance.binance.tables import millis, moment
@@ -70,11 +78,74 @@ type Flag = Callable[[str], None]
 # Times Binance gives to the second may be up to a second early (plan Decision 9).
 MARGIN = timedelta(seconds=2)
 ROUNDS = 3
+# The two reads of the Crypto Loans wallet, flexible first, made one after the other: its debt
+# per loan coin is minus the `totalDebt` of every ongoing order of both (design 5.6). Their one
+# report is cut at the first read's start and is clear only when nothing happened from then to
+# the end of the second (`loan_bracket`), so they are made again together.
+LOAN_READS = ("loan-flexible-ongoing", "vip-loan-ongoing")
+# The two margin accounts: Cross Margin holds each asset's `netAsset`, Isolated Margin the base
+# and quote `netAsset` of each of its pairs, summed per asset (design 5.6).
+CROSS_MARGIN_LABEL = "margin-account"
+# The futures wallets' reports: each account's `assets[]`, an asset's balance its wallet balance
+# plus its unrealised profit (design 5.6). Reconciliation compares the records with the change of
+# the wallet balance alone (`reconcile.reported_at`, plan Decision 11).
+FUTURES_SOURCES = {"um_futures": "um-account", "cm_futures": "cm-account"}
+_FUTURES_FIELDS = ("walletBalance", "unrealizedProfit")
+# The Options wallet's report: its margin account's `asset[]`, an asset's balance its `equity`
+# (design 5.6), which Binance's example gives as the margin balance plus the unrealised profit.
+# Reconciliation compares the records with the change of the margin balance alone
+# (`reconcile.reported_at`), as a futures wallet's with its wallet balance.
+OPTIONS_SOURCES = {"options": "opt-account"}
+# The Portfolio Margin wallet's report (while `account-info` says it is on): its balance's rows,
+# an asset's balance its `totalWalletBalance` less what it owes (`crossMarginBorrowed`,
+# `crossMarginInterest`: a borrowed asset is negative, as in Cross Margin) plus its unrealised
+# USDⓈ-M and COIN-M profit (design 5.6). Binance's example has `totalWalletBalance` equal to the
+# cross margin free and locked amounts plus the UM and CM wallet balances, debt not netted.
+# Reconciliation compares the records with the change of the net wallet balance alone
+# (`reconcile.reported_at`), as a futures wallet's.
+PORTFOLIO_SOURCES = {"portfolio_margin": "pm-balance"}
+# The wallets Portfolio Margin holds the content of while it is on (its balance states each
+# asset's cross margin, UM and CM parts): each gets an empty report when it is seen on, and the
+# Portfolio Margin wallet one when it is seen off (`empty_reports`), so no asset counts twice.
+PORTFOLIO_REPLACED = ("cross_margin", "um_futures", "cm_futures")
+# `account-info`'s word that the account uses Portfolio Margin (design 5.13).
+PORTFOLIO_MARGIN_FIELD = "isPortfolioMarginRetailEnabled"
+# Each derivatives account's quantity per asset: the sum of these fields of its rows.
+_ACCOUNT_FIELDS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(FUTURES_SOURCES.values(), _FUTURES_FIELDS),
+    "opt-account": ("equity",),
+    "pm-balance": ("totalWalletBalance", "umUnrealizedPNL", "cmUnrealizedPNL"),
+}
+# Fields an account's rows owe, taken from the sum: Portfolio Margin's debt.
+_ACCOUNT_OWED: dict[str, tuple[str, ...]] = {
+    "pm-balance": ("crossMarginBorrowed", "crossMarginInterest"),
+}
+# Fields a derivatives account must state for each asset beside those summed: what reconciliation
+# compares with the records (`reconcile.ACCOUNT_REPORTS`). A futures account sums its wallet
+# balance already.
+_ACCOUNT_STATED: dict[str, tuple[str, ...]] = {"opt-account": ("marginBalance",)}
 # The reads a snapshot comes from: only these are made again when a movement falls into them.
-SOURCE_LABELS = ("spot-account", "funding-asset", "wallet-balance")
+SOURCE_LABELS = (
+    "spot-account",
+    "funding-asset",
+    "wallet-balance",
+    *LOAN_READS,
+    CROSS_MARGIN_LABEL,
+    ISOLATED_MARGIN_LABEL,
+    *FUTURES_SOURCES.values(),
+    *OPTIONS_SOURCES.values(),
+    *PORTFOLIO_SOURCES.values(),
+)
 WALLET_LIST = "wallet-balance"
 # Reference data, not a wallet's balance: read each sync, stored when it changed.
-REFERENCE_LABELS = ("coin-config", "asset-detail", "exchange-info")
+REFERENCE_LABELS = (
+    "coin-config",
+    "asset-detail",
+    "exchange-info",
+    "um-exchange-info",
+    "cm-exchange-info",
+    "opt-exchange-info",
+)
 # Request parameters a read sends.
 READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
     WALLET_LIST: {"needBalanceDetail": True},
@@ -85,16 +156,55 @@ READ_PARAMS: dict[str, dict[str, str | int | bool]] = {
 # The digest of each report label's last stored answer: an unchanged answer is not stored again.
 DIGESTS_KEY = "report_digests"
 # Fields that change with every answer without the report changing.
-_VOLATILE = {"exchange-info": frozenset({"serverTime"})}
+_VOLATILE = {
+    label: frozenset({"serverTime"})
+    for label in ("exchange-info", "um-exchange-info", "cm-exchange-info", "opt-exchange-info")
+}
 # Wallets with a source of their own; every other wallet's balance comes from the wallet list
 # (design 5.6) until a later phase gives it one.
-OWN_SOURCES = {"spot": "spot-account", "funding": "funding-asset"}
+OWN_SOURCES = {
+    "spot": "spot-account",
+    "funding": "funding-asset",
+    "loans": LOAN_READS[0],
+    "cross_margin": CROSS_MARGIN_LABEL,
+    "isolated_margin": ISOLATED_MARGIN_LABEL,
+    **FUTURES_SOURCES,
+    **OPTIONS_SOURCES,
+    **PORTFOLIO_SOURCES,
+}
+# The wallets counted from the wallet list for which Binance has no record endpoint (design
+# 5.13): any change of theirs is a reconciliation difference, so a balance is flagged once.
+RECORD_LESS = ("trading_bots", "copy_trading")
+LOANS = "loans"
 _SPOT_FIELDS = ("free", "locked")
+_NET_FIELDS = ("netAsset",)
+_LEGS = ("baseAsset", "quoteAsset")
 _HELD_FIELDS = ("free", "locked", "freeze", "withdrawing")
 _DAILY = "snapshot"
-# Binance answers the daily snapshot's `type` in lower case (`spot`) although the request asks
-# for `SPOT` (the catalogue document): it is compared without case.
-_DAILY_SPOT = "SPOT"
+
+
+@dataclass(frozen=True)
+class _DailyWallet:
+    """Which wallet a daily snapshot of one `type` reports, where its quantities are and which
+    of their fields sum to an asset's quantity there."""
+
+    wallet: str
+    entries: str
+    fields: tuple[str, ...]
+
+
+# The daily snapshot types written as reports, by the request's `type`. Binance answers the
+# daily snapshot's `type` in lower case (`spot`) although the request asks for `SPOT` (the
+# catalogue document): it is compared without case. Cross Margin's day holds each asset's
+# `netAsset`, as its account does. A FUTURES day is USDⓈ-M's (Binance's example lists a USDT
+# asset and a BTCUSDT position; the page does not say which futures wallet): its `walletBalance`
+# alone, as it gives no unrealised profit to add (its `marginBalance` "can ignore", its
+# positions' profit is "at the time of opening"). That is the balance reconciliation compares.
+DAILY_WALLETS: dict[str, _DailyWallet] = {
+    "SPOT": _DailyWallet("spot", "balances", _SPOT_FIELDS),
+    "MARGIN": _DailyWallet("cross_margin", "userAssets", _NET_FIELDS),
+    "FUTURES": _DailyWallet("um_futures", "assets", ("walletBalance",)),
+}
 
 
 @dataclass(frozen=True)
@@ -232,7 +342,7 @@ async def record_assets(ctx: SyncContext, after: UUID | None) -> set[str]:
     None) name: what the next normalising run will see."""
     found: set[str] = set()
     async with ctx.session_factory() as session:
-        for label in [*HISTORY_LABELS, TRADES_LABEL]:
+        for label in [*HISTORY_LABELS, *TRADE_LABELS]:
             paths = _asset_paths(label)
             if not paths:
                 continue
@@ -261,7 +371,7 @@ async def record_times(ctx: SyncContext) -> list[datetime]:
     only their time fields are read."""
     found: list[datetime] = []
     async with ctx.session_factory() as session:
-        for label in [*HISTORY_LABELS, TRADES_LABEL]:
+        for label in [*HISTORY_LABELS, *TRADE_LABELS]:
             paths = _time_paths(label)
             if not paths:
                 continue
@@ -288,48 +398,75 @@ async def record_times(ctx: SyncContext) -> list[datetime]:
     return found
 
 
+type Reread = Callable[[str], Awaitable[Read | None]]
+type Rewalk = Callable[[str], Awaitable[object]]
+
+
 async def settle_reads(
     ctx: SyncContext,
     client: BinanceClient,
-    reads: dict[str, Read],
+    reads: Mapping[str, Read],
     *,
-    symbols: Sequence[str] = (),
-) -> dict[str, Read]:
+    trades: Sequence[TradeWalk] = (),
+    reread: Reread | None = None,
+    rewalk: Rewalk | None = None,
+) -> dict[str, Read | None]:
     """Make the ambiguous reads again, then walk the history labels forwards again (and the
-    trades of `symbols`), at most 3 rounds; a read still ambiguous after them is the last one
+    trades of `trades`), at most 3 rounds; a read still ambiguous after them is the last one
     made, marked `unclear`.
 
     Only the reads a snapshot comes from are made again; every other read is kept as it is.
     Each read made again is stored as a raw record, as the first one was. After each round
     every source read is checked again against every record this sync fetched, so a record a
     round's walk finds inside a read that was clear until then has that read made again too.
+
+    `reread` makes one read again and `rewalk` walks one history label; the sync's handle a
+    refusal as its first reads and walks do (`sync.read_or_absent`, `sync.on_host`). A read
+    `reread` gives None for (not served now, its host refused the key) is None in the result:
+    its wallet gets no snapshot in this sync, as an unclear one does.
     """
-    settled = dict(reads)
+    settled: dict[str, Read | None] = dict(reads)
+
+    async def read_again(label: str) -> Read | None:
+        return (await read_balances(client, [label]))[label]
+
+    async def walk_again(label: str) -> object:
+        return await walk(ctx, client, label)
+
+    reread = reread or read_again
+    rewalk = rewalk or walk_again
 
     async def unsettled() -> list[str]:
         times = await record_times(ctx)
+        loans = loan_bracket(settled)
+        unclear_loans = loans is not None and ambiguous(loans, times)
         return [
             label
             for label in SOURCE_LABELS
-            if label in settled and ambiguous(settled[label], times)
+            if (read := settled.get(label)) is not None
+            and (unclear_loans if label in LOAN_READS else ambiguous(read, times))
         ]
 
     pending = await unsettled()
     for _ in range(ROUNDS):
         if not pending:
             break
-        again = await read_balances(client, pending)
+        again = {label: await reread(label) for label in pending}
         for read in again.values():
-            await store_read(ctx, read)
+            if read is not None:
+                await store_read(ctx, read)
         # After the reads: what happened while they were made is what the walks must find.
         for label in HISTORY_LABELS:
-            await walk(ctx, client, label)
-        if symbols:
-            await walk_trades(ctx, client, TRADES_LABEL, symbols)
+            await rewalk(label)
+        for trade in trades:
+            if trade.symbols:
+                await walk_trades(ctx, client, trade.label, trade.symbols, isolated=trade.isolated)
         settled.update(again)
         pending = await unsettled()
     for label in pending:
-        settled[label] = replace(settled[label], unclear=True)
+        read = settled[label]
+        if read is not None:
+            settled[label] = replace(read, unclear=True)
     return settled
 
 
@@ -420,6 +557,81 @@ class _Wallet:
     held: dict[str, Decimal]
 
 
+def loan_bracket(reads: Mapping[str, Read | None]) -> Read | None:
+    """The Crypto Loans wallet's one read: from the start of the first of its reads the sync
+    made to the end of the last (`LOAN_READS`; a product Binance does not serve is not read and
+    holds no debt). None when it made neither; `unclear` when one of them is, or is None."""
+    made = [reads[label] for label in LOAN_READS if label in reads]
+    if not made:
+        return None
+    present = [read for read in made if read is not None]
+    if not present:
+        return None
+    unclear = len(present) < len(made) or any(read.unclear for read in present)
+    return replace(
+        present[0],
+        read_from=min(read.read_from for read in present),
+        read_to=max(read.read_to for read in present),
+        unclear=unclear,
+    )
+
+
+def _loan_rows(read: Read) -> list[Row]:
+    """An ongoing-orders read's rows. An answer that leaves its list out is empty only when its
+    `total` says it has no records; otherwise it does not state the debt (`_stated`)."""
+    body = as_api(read.body)
+    if isinstance(body, dict) and "rows" not in body and body.get("total") in (0, "0"):
+        return []
+    return _source_rows(read)
+
+
+def margin_created(read: Read) -> bool:
+    """Whether a cross margin account read says the account exists: an answer `created: false`
+    is the account Binance has not opened, which is not present (design 6)."""
+    body = as_api(read.body)
+    return not (isinstance(body, dict) and body.get("created") is False)
+
+
+def _isolated_held(read: Read) -> dict[str, Decimal]:
+    """Each asset's net quantity over the isolated pairs created: the base and the quote leg's
+    `netAsset`, summed per asset; a pair not created holds nothing."""
+    label = read.label
+    held: dict[str, Decimal] = {}
+    for row in _source_rows(read):
+        if row.get("isolatedCreated") is False:
+            continue
+        for leg in _LEGS:
+            entry = row.get(leg)
+            if not isinstance(entry, dict):
+                raise BinanceDataError(label, f"assets[].{leg}")
+            code = entry.get("asset")
+            if not isinstance(code, str):
+                raise BinanceDataError(label, f"assets[].{leg}.asset")
+            net = _amount(label, f"assets[].{leg}.netAsset", entry.get("netAsset"))
+            held[code] = held.get(code, Decimal(0)) + net
+    return held
+
+
+def _debts(reads: Mapping[str, Read | None]) -> _Wallet | None:
+    """The Crypto Loans wallet from its clear reads: minus the `totalDebt` of every ongoing
+    order, per loan coin (design 5.6)."""
+    bracket = loan_bracket(reads)
+    if bracket is None or bracket.unclear:
+        return None
+    held: dict[str, Decimal] = {}
+    for label in LOAN_READS:
+        read = reads.get(label)
+        if read is None:
+            continue
+        for row in _loan_rows(read):
+            code = row.get("loanCoin")
+            if not isinstance(code, str):
+                raise BinanceDataError(label, "rows[].loanCoin")
+            debt = _amount(label, "rows[].totalDebt", row.get("totalDebt"))
+            held[code] = held.get(code, Decimal(0)) - debt
+    return _Wallet(LOANS, bracket, held)
+
+
 def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     """Each wallet whose source read is clear (not None, not `unclear`) and states what it
     holds, with its quantity per asset (design 5.6). A source whose list is not stated fails
@@ -427,6 +639,7 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     quantity, is left out (and flagged, `wallet_flags`): it gets no snapshot and no report time
     from this read, and its earlier balance stands."""
     wallets: list[_Wallet] = []
+    loans = _debts(reads)
     reads = {label: read for label, read in reads.items() if read is not None and not read.unclear}
     spot = reads.get("spot-account")
     if spot is not None:
@@ -436,6 +649,24 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
     if funding is not None:
         held = _per_asset(funding.label, "[].", _source_rows(funding), _HELD_FIELDS)
         wallets.append(_Wallet("funding", funding, held))
+    cross = reads.get(CROSS_MARGIN_LABEL)
+    if cross is not None and margin_created(cross):
+        held = _per_asset(cross.label, "userAssets[].", _source_rows(cross), _NET_FIELDS)
+        wallets.append(_Wallet("cross_margin", cross, held))
+    isolated = reads.get(ISOLATED_MARGIN_LABEL)
+    if isolated is not None:
+        wallets.append(_Wallet("isolated_margin", isolated, _isolated_held(isolated)))
+    for key, label in {**FUTURES_SOURCES, **OPTIONS_SOURCES, **PORTFOLIO_SOURCES}.items():
+        account = reads.get(label)
+        if account is not None:
+            prefix = row_prefix(label)
+            rows = _source_rows(account)
+            held = _per_asset(label, prefix, rows, _ACCOUNT_FIELDS[label])
+            owed = _per_asset(label, prefix, rows, _ACCOUNT_OWED.get(label, ()))
+            held = {code: quantity - owed.get(code, Decimal(0)) for code, quantity in held.items()}
+            # Never read as 0 where it is left out.
+            _per_asset(label, prefix, rows, _ACCOUNT_STATED.get(label, ()))
+            wallets.append(_Wallet(key, account, held))
     listed = reads.get(WALLET_LIST)
     if listed is not None:
         for row in _source_rows(listed):
@@ -449,6 +680,8 @@ def _wallets(reads: Mapping[str, Read | None]) -> list[_Wallet]:
             held = _per_asset(WALLET_LIST, "[].assetBalances[].", entries, _HELD_FIELDS)
             if _list_states_holdings(row, held):
                 wallets.append(_Wallet(key, listed, held))
+    if loans is not None:
+        wallets.append(loans)
     return wallets
 
 
@@ -462,11 +695,47 @@ def _listed_non_zero(row: Row) -> bool:
     return any(quantity != 0 for quantity in _listed_held(row).values())
 
 
-def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> list[str]:
+def record_less_flag(name: str) -> str:
+    return f"{name} has a balance: Binance lists no records for it"
+
+
+def unread_flag(name: str) -> str:
+    """A wallet the list shows a balance in whose own source this sync did not read
+    (`unread_wallets`): it is not counted."""
+    return f"wallet {name} has a balance but its own report was not read: it is not counted"
+
+
+def portfolio_margin_on(account_info: Read) -> bool:
+    """Whether an `account-info` read says Portfolio Margin is on; a field left out is off."""
+    body = as_api(account_info.body)
+    return isinstance(body, dict) and body.get(PORTFOLIO_MARGIN_FIELD) is True
+
+
+def unread_wallets(reads: Mapping[str, Read | None]) -> set[str]:
+    """The wallets with a source of their own (`OWN_SOURCES`) whose source this sync did not
+    read: not served (`not_present`, a cross margin account not created), its host refused the
+    key, or made again and refused (`settle_reads`). Not those the Portfolio Margin state of
+    this sync's `account-info` read leaves out on purpose: on, the wallets it holds; off, its
+    own. A source read that is only unclear was read."""
+    account_info = reads.get(ACCOUNT_INFO_LABEL)
+    on = account_info is not None and portfolio_margin_on(account_info)
+    replaced = set(PORTFOLIO_REPLACED) if on else set(PORTFOLIO_SOURCES)
+    unread = {wallet for wallet, label in OWN_SOURCES.items() if reads.get(label) is None}
+    cross = reads.get(CROSS_MARGIN_LABEL)
+    if cross is not None and not margin_created(cross):
+        unread.add("cross_margin")
+    return unread - replaced
+
+
+def wallet_flags(
+    wallet_balance: Sequence[Row], derived: Mapping[str, bool], unread: Collection[str] = ()
+) -> list[str]:
     """What the wallet list says that the connector cannot account for: a wallet name it does
     not know, a wallet (by key, in `derived`) whose zero or non-zero state in the list
-    disagrees with its own source, and a wallet counted from the list whose `balance` is not
-    zero but which lists no asset to count."""
+    disagrees with its own source, a wallet (by key, in `unread`) the list shows a balance in
+    whose own source was not read, a wallet counted from the list whose `balance` is not zero
+    but which lists no asset to count, and a wallet with no record endpoint (`RECORD_LESS`)
+    that is not empty."""
     flags: list[str] = []
     for row in wallet_balance:
         name = wallet_name_of(row)
@@ -475,6 +744,8 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
         key = wallet_key(name)
         if key in derived and _listed_non_zero(row) != derived[key]:
             flags.append(f"wallet {name} disagrees with its own report")
+        if key in unread and _listed_non_zero(row):
+            flags.append(unread_flag(name))
         balance = _amount(WALLET_LIST, "[].balance", row.get("balance"))
         listed = any(quantity != 0 for quantity in _listed_held(row).values())
         if key in OWN_SOURCES:
@@ -483,6 +754,8 @@ def wallet_flags(wallet_balance: Sequence[Row], derived: Mapping[str, bool]) -> 
             flags.append(f"wallet {name} lists no asset detail")
         elif balance != 0 and not listed:
             flags.append(f"wallet {name} has a balance but lists no asset")
+        if key in RECORD_LESS and _listed_non_zero(row):
+            flags.append(record_less_flag(name))
     return flags
 
 
@@ -633,6 +906,45 @@ async def record_report(
     return gone
 
 
+async def holding_wallets(
+    session: AsyncSession, connection_id: UUID, wallets: Collection[str], at: datetime
+) -> list[str]:
+    """The `wallets` whose account exists and holds something at `at` (`_held_at`, the `hybrid`
+    rule): those an empty report at `at` would change. A wallet whose last report is empty
+    already, with no posting after it, holds nothing."""
+    config = (await get_connection(session, connection_id)).config
+    mapped = config.get(ACCOUNT_MAP_KEY)
+    holding: list[str] = []
+    for wallet in wallets:
+        found = mapped.get(wallet) if isinstance(mapped, dict) else None
+        if not isinstance(found, str):
+            continue
+        try:
+            account = (await get_account(session, UUID(found))).id
+        except (AccountNotFoundError, ValueError):
+            continue
+        if any(quantity != 0 for quantity in (await _held_at(session, account, at)).values()):
+            holding.append(wallet)
+    return holding
+
+
+async def empty_reports(
+    ctx: CommandContext, connection: ConnectionRecord, wallets: Collection[str], read: Read
+) -> list[str]:
+    """An empty, complete report at the `read`'s bracket for each of the wallets that has an
+    account: another report holds their content now (ruling R21: Portfolio Margin on holds
+    Cross Margin's and the futures wallets'; off, the classic wallets hold its), so what their
+    last reports said must stop counting. Each instrument they held gets a snapshot of 0
+    (`record_report`); the wallets reported."""
+    reported: list[str] = []
+    for wallet in wallets:
+        account = await _mapped_account(ctx, connection, wallet)
+        if account is not None:
+            await record_report(ctx, connection, account, read.read_from, read.read_to, listed=())
+            reported.append(wallet)
+    return reported
+
+
 class _Assets:
     """Asset codes to instruments, each code resolved once."""
 
@@ -727,7 +1039,8 @@ async def report_balances(
             written[(wallet.key, instrument)] = Decimal(0)
 
     if listed is not None and not listed.unclear:
-        for name in wallet_flags(parse(listed.label, as_api(listed.body)).rows, derived):
+        rows = parse(listed.label, as_api(listed.body)).rows
+        for name in wallet_flags(rows, derived, unread_wallets(reads)):
             flag(name)
     return written
 
@@ -744,8 +1057,8 @@ async def record_reads(
     read: for every wallet whose source read is clear and whose account exists now, its report
     (`record_report`: its time, and a 0 for each instrument it does not list that the records
     would otherwise hold then); with `daily`, the first sync's daily snapshots again
-    (`backfill_daily_snapshots`), which reports the days it writes on the Spot account if it
-    exists now. Run, in the transaction that applies the records, after they made the accounts
+    (`backfill_daily_snapshots`), which reports the days it writes on each wallet's account
+    that exists now. Run, in the transaction that applies the records, after they made the accounts
     and postings they name; writing one twice writes nothing."""
     wallets = _wallets(reads)
     assets = _Assets(ctx, connection, flag or (lambda _: None))
@@ -763,13 +1076,14 @@ async def record_reads(
 
 
 async def daily_rows(session: AsyncSession, connection_id: UUID) -> list[Row]:
-    """The Spot daily snapshots the connection fetched (on its first sync)."""
+    """The daily snapshots the connection fetched (on its first sync) of the types written as
+    reports (`DAILY_WALLETS`)."""
     contents = await session.scalars(
         text(
             "select content from core.raw_records where connection_id = :c"
-            " and record_type = :t and upper(content ->> 'type') = :k"
+            " and record_type = :t and upper(content ->> 'type') = any(:k)"
         ),
-        {"c": connection_id, "t": record_type(_DAILY), "k": _DAILY_SPOT},
+        {"c": connection_id, "t": record_type(_DAILY), "k": list(DAILY_WALLETS)},
     )
     return [cast(Row, content) for content in contents if isinstance(content, dict)]
 
@@ -792,14 +1106,21 @@ async def _reported_at(
     return found is not None
 
 
-def _daily_day(row: Row) -> tuple[datetime, dict[str, Decimal]]:
-    """A daily Spot snapshot's time and quantity per asset; a `BinanceDataError` naming the
-    field when it cannot be read in full (its list not stated, an entry, an amount, its time)."""
+def _daily_kind(row: Row) -> str | None:
+    kind = row.get("type")
+    kind = kind.upper() if isinstance(kind, str) else None
+    return kind if kind in DAILY_WALLETS else None
+
+
+def _daily_day(row: Row, daily: _DailyWallet) -> tuple[datetime, dict[str, Decimal]]:
+    """A daily snapshot's time and quantity per asset; a `BinanceDataError` naming the field
+    when it cannot be read in full (its list not stated, an entry, an amount, its time)."""
     data = row.get("data")
-    balances = data.get("balances") if isinstance(data, dict) else None
-    entries = _stated(_DAILY, "snapshotVos[].data.balances", balances)
+    listed = data.get(daily.entries) if isinstance(data, dict) else None
+    where = f"snapshotVos[].data.{daily.entries}"
+    entries = _stated(_DAILY, where, listed)
     at = tables.time_value(_DAILY, "snapshotVos[].updateTime", row.get("updateTime"))
-    return at, _per_asset(_DAILY, "snapshotVos[].data.balances[].", entries, _SPOT_FIELDS)
+    return at, _per_asset(_DAILY, f"{where}[].", entries, daily.fields)
 
 
 async def backfill_daily_snapshots(
@@ -809,49 +1130,50 @@ async def backfill_daily_snapshots(
     *,
     flag: Flag | None = None,
 ) -> int:
-    """Each `snapshot` row of type SPOT as `reported` Spot snapshots at its own `updateTime`
-    (`free + locked`, `LD` mirrors dropped), an asset held then that the day does not list at
-    0 (`record_report`); how many were written. A snapshot already written is not written
-    again.
+    """Each daily snapshot row of a type in `DAILY_WALLETS` (Spot: `free + locked`, `LD` mirrors
+    dropped; Cross Margin: `netAsset`; USDⓈ-M Futures: `walletBalance`) as `reported` snapshots
+    of its wallet at its own `updateTime`, an asset held then that the day does not list at 0
+    (`record_report`); how many were written. A snapshot already written is not written again.
 
     A day's report time (`record_report`) is written with its snapshots, by this pass alone: a
     report says every instrument it does not list was 0, so a day is reported only when the
-    Spot account exists and every quantity of the day has its instrument. A day with a code
+    wallet's account exists and every quantity of the day has its instrument. A day with a code
     that has none (other than an `LD` mirror), or that cannot be read in full (any
     `BinanceDataError`: its list, an entry, an amount, its `updateTime`), is not written at all
     and is flagged: the rows are fetched on the first sync only, so a failure raised from one
     could never be healed by a later sync."""
     flag = flag or (lambda _: None)
-    days: list[tuple[datetime, dict[str, Decimal]]] = []
-    for row in rows:
-        kind = row.get("type")
-        if not isinstance(kind, str) or kind.upper() != _DAILY_SPOT:
-            continue
-        try:
-            days.append(_daily_day(row))
-        except BinanceDataError as error:
-            flag(
-                f"a daily Spot snapshot was not written: {error.label}.{error.field} is unreadable"
-            )
-    days.sort(key=lambda day: day[0])
-    assets = _Assets(ctx, connection, flag)
-    await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
-
-    account = await _mapped_account(ctx, connection, "spot")
     written = 0
-    for at, held in days:
-        missing = assets.unresolved(held)
-        if missing is not None:
-            flag(f"a daily Spot snapshot was not written: {missing} has no instrument")
-            continue
-        quantities = assets.per_instrument(held)
-        if quantities and account is None:
-            account = await wallet_account(ctx, connection, "spot")
-        if account is None:
-            continue
-        for instrument, quantity in quantities.items():
-            if not await _reported_at(ctx.session, account, instrument, at, quantity):
-                await _snapshot(ctx, account, instrument, quantity, at)
-                written += 1
-        written += len(await record_report(ctx, connection, account, at, at, listed=quantities))
+    for kind, daily in DAILY_WALLETS.items():
+        shown = wallet_name(daily.wallet)
+        days: list[tuple[datetime, dict[str, Decimal]]] = []
+        for row in rows:
+            if _daily_kind(row) != kind:
+                continue
+            try:
+                days.append(_daily_day(row, daily))
+            except BinanceDataError as error:
+                flag(
+                    f"a daily {shown} snapshot was not written:"
+                    f" {error.label}.{error.field} is unreadable"
+                )
+        days.sort(key=lambda day: day[0])
+        assets = _Assets(ctx, connection, flag)
+        await assets.resolve({code for _, held in days for code, q in held.items() if q != 0})
+        account = await _mapped_account(ctx, connection, daily.wallet)
+        for at, held in days:
+            missing = assets.unresolved(held)
+            if missing is not None:
+                flag(f"a daily {shown} snapshot was not written: {missing} has no instrument")
+                continue
+            quantities = assets.per_instrument(held)
+            if quantities and account is None:
+                account = await wallet_account(ctx, connection, daily.wallet)
+            if account is None:
+                continue
+            for instrument, quantity in quantities.items():
+                if not await _reported_at(ctx.session, account, instrument, at, quantity):
+                    await _snapshot(ctx, account, instrument, quantity, at)
+                    written += 1
+            written += len(await record_report(ctx, connection, account, at, at, listed=quantities))
     return written

@@ -218,6 +218,216 @@ def test_deposit_and_withdrawal_extras() -> None:
     assert layout.layout("earn-flexible-rewards")[0].column("dividend_id").sql == "text"
 
 
+def test_transfer_family_tables_and_extras() -> None:
+    family = ("universal-transfer", "dust", "cloud-mining", "travel-deposits", "travel-withdrawals")
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # What a row does not say itself: the request's isolated symbols and wallet, and the
+    # deposit or withdrawal a travel-rule row describes.
+    transfer = layout.layout("universal-transfer")[0]
+    assert (transfer.column("from_symbol").sql, transfer.column("to_symbol").sql) == (
+        "text",
+        "text",
+    )
+    assert layout.layout("dust")[0].column("account_type").sql == "text"
+    assert layout.layout("travel-deposits")[0].column("deposit_id").sql == "text"
+    assert layout.layout("travel-withdrawals")[0].column("withdrawal_id").sql == "text"
+    # A dust conversion's lines are a child table keyed by the conversion.
+    dust = layout.layout("dust")
+    assert [t.name for t in dust] == [
+        "binance_dust",
+        "binance_dust_user_asset_dribblet_details",
+        "binance_dust_responses",
+    ]
+    assert dust[0].key == ("connection_id", "trans_id")
+
+
+_EARN_REWARDS = (
+    "earn-locked-rewards",
+    "onchain-rewards",
+    "bfusd-rewards",
+    "rwusd-rewards",
+    "soft-staking-rewards",
+    "sol-boost-rewards",
+)
+
+
+def test_earn_product_tables_and_extras() -> None:
+    family = (
+        *_EARN_REWARDS,
+        "earn-locked-position",
+        "earn-locked-subscriptions",
+        "earn-locked-redemptions",
+        "earn-flexible-collateral",
+        "bfusd-subscriptions",
+        "eth-redemptions",
+        "wbeth-rewards",
+        "onchain-locked-position",
+        "dci-positions",
+        "discount-positions",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Every reward rule 3 can link records the dividend it is linked to.
+    for label in _EARN_REWARDS:
+        assert layout.layout(label)[0].column("dividend_id").sql == "text", label
+    # A boost reward's row does not say which type it was asked for.
+    assert layout.layout("sol-boost-rewards")[0].column("type").sql == "text"
+    # A position is a report: keyed by the read and the position's id.
+    assert layout.layout("dci-positions")[0].key == ("connection_id", "snapshot_at", "id")
+    assert not layout.layout("dci-positions")[0].record
+    # On-chain yields give their times as epoch-millisecond text: each has its timestamptz twin.
+    onchain = layout.layout("onchain-locked-position")[0]
+    assert onchain.column("purchase_time_at").sql == "timestamptz"
+
+
+def test_loan_tables_and_keys() -> None:
+    family = (
+        "loan-flexible-borrows",
+        "loan-flexible-repays",
+        "loan-flexible-ltv-adjustments",
+        "loan-flexible-liquidations",
+        "vip-loan-repays",
+        "vip-loan-interest",
+        "vip-loan-requests",
+        "loan-flexible-ongoing",
+        "vip-loan-ongoing",
+        "vip-loan-collateral-account",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # The histories with no id are keyed by the row's hash and occurrence.
+    borrows = layout.layout("loan-flexible-borrows")[0]
+    assert borrows.key == ("connection_id", "content_hash", "occurrence")
+    assert borrows.record
+    assert layout.layout("vip-loan-requests")[0].key == ("connection_id", "request_id")
+    # A flexible order has no id: its loan coin and collateral coin identify it in a read.
+    ongoing = layout.layout("loan-flexible-ongoing")[0]
+    assert ongoing.key == ("connection_id", "snapshot_at", "loan_coin", "collateral_coin")
+    assert not ongoing.record
+    assert layout.layout("vip-loan-ongoing")[0].key == ("connection_id", "snapshot_at", "order_id")
+    # VIP loans give their times as epoch-millisecond text: each has its timestamptz twin.
+    repays = layout.layout("vip-loan-repays")[0]
+    assert repays.column("repay_time_at").sql == "timestamptz"
+    assert repays.column("loan_date_at").sql == "timestamptz"
+
+
+def test_margin_tables_and_keys() -> None:
+    family = (
+        "margin-account",
+        "margin-isolated-account",
+        "margin-trades",
+        "margin-transfers",
+        "margin-borrow-repay",
+        "margin-interest",
+        "margin-capital-flow",
+        "margin-liquidations",
+        "margin-small-liability",
+        "margin-liquidation-loan",
+        "margin-liquidation-loan-repays",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Each account is one report per read; its assets (and isolated pairs) are child rows.
+    cross, assets = layout.layout("margin-account")
+    assert (cross.key, cross.record) == (("connection_id", "snapshot_at"), False)
+    assert assets.name == "binance_margin_account_user_assets"
+    assert assets.column("net_asset").sql == "numeric"
+    isolated, pairs = layout.layout("margin-isolated-account")
+    assert not isolated.record
+    assert pairs.name == "binance_margin_isolated_account_assets"
+    assert {"base_asset_net_asset", "quote_asset_net_asset", "symbol"} <= {
+        c.name for c in pairs.columns
+    }
+    # A trade is keyed by its symbol and id, as a spot trade is.
+    trades = layout.layout("margin-trades")[0]
+    assert (trades.key, trades.record) == (("connection_id", "symbol", "id"), True)
+    interest = layout.layout("margin-interest")[0]
+    assert interest.key == ("connection_id", "tx_id", "interest_accured_time", "asset")
+    assert layout.layout("margin-small-liability")[0].key == (
+        "connection_id",
+        "content_hash",
+        "occurrence",
+    )
+    # The movement a margin transfer is linked to (rule 2), the type a borrow or repay was
+    # asked for.
+    assert layout.layout("margin-transfers")[0].column("movement_key").sql == "text"
+    assert layout.layout("margin-borrow-repay")[0].column("request_type").sql == "text"
+
+
+def test_futures_tables_and_keys() -> None:
+    family = (
+        "um-exchange-info",
+        "um-balance",
+        "um-account",
+        "um-positions",
+        "um-income",
+        "um-trades",
+        "cm-exchange-info",
+        "cm-balance",
+        "cm-account",
+        "cm-positions",
+        "cm-income",
+        "cm-trades",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # Each account is one report per read; its assets and positions are child rows, and an
+    # asset's wallet balance is what reconciliation compares (Decision 11).
+    for host in ("um", "cm"):
+        account, assets, positions = layout.layout(f"{host}-account")
+        assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+        assert assets.name == f"binance_{host}_account_assets"
+        assert assets.column("wallet_balance").sql == "numeric"
+        assert not assets.column("wallet_balance").nullable
+        assert positions.name == f"binance_{host}_account_positions"
+        # Income is keyed by its type and id, as Binance says it is unique; a transfer row is
+        # linked to the movement an earlier listing posts (rule 2).
+        income = layout.layout(f"{host}-income")[0]
+        assert (income.key, income.record) == (("connection_id", "income_type", "tran_id"), True)
+        assert income.column("movement_key").sql == "text"
+        trades = layout.layout(f"{host}-trades")[0]
+        assert (trades.key, trades.record) == (("connection_id", "symbol", "id"), True)
+        positions_read = layout.layout(f"{host}-positions")[0]
+        assert positions_read.key == ("connection_id", "snapshot_at", "symbol", "position_side")
+        info = [t.name for t in layout.layout(f"{host}-exchange-info")]
+        assert f"binance_{host}_exchange_info_rate_limits" in info
+        assert f"binance_{host}_exchange_info_symbols" in info
+
+
+def test_options_tables_and_keys() -> None:
+    family = (
+        "opt-exchange-info",
+        "opt-account",
+        "opt-positions",
+        "opt-bill",
+        "opt-trades",
+        "opt-exercises",
+    )
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # The account is one report per read; its assets (whose margin balance reconciliation
+    # compares) and greeks are child rows.
+    account, assets, greeks = layout.layout("opt-account")
+    assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+    assert assets.name == "binance_opt_account_asset"
+    assert {assets.column(n).sql for n in ("margin_balance", "equity")} == {"numeric"}
+    assert greeks.name == "binance_opt_account_greek"
+    # The bill is keyed by its id; a transfer row is linked to the movement an earlier listing
+    # posts (rule 2).
+    bill = layout.layout("opt-bill")[0]
+    assert (bill.key, bill.record) == (("connection_id", "id"), True)
+    assert bill.column("movement_key").sql == "text"
+    for label in ("opt-trades", "opt-exercises"):
+        table = layout.layout(label)[0]
+        assert (table.key, table.record) == (("connection_id", "id"), True)
+    positions = layout.layout("opt-positions")[0]
+    assert positions.key == ("connection_id", "snapshot_at", "symbol", "side")
+    info = [t.name for t in layout.layout("opt-exchange-info")]
+    assert info == [
+        "binance_opt_exchange_info",
+        "binance_opt_exchange_info_option_assets",
+        "binance_opt_exchange_info_option_contracts",
+        "binance_opt_exchange_info_option_symbols",
+        "binance_opt_exchange_info_rate_limits",
+        "binance_opt_exchange_info_option_symbols_filters",
+    ]
+
+
 # The models are what the migration made.
 
 
@@ -676,3 +886,45 @@ async def test_a_table_without_its_own_non_finite_check_is_found(session) -> Non
         "binance_deposits": [d for d in checks["binance_deposits"] if "amount" not in d],
     }
     assert _missing_checks(mutated) == [("binance_deposits", "amount")]
+
+
+def test_fiat_tables_and_keys() -> None:
+    family = ("fiat-orders", "fiat-payments", "c2c", "pay", "rebate")
+    assert set(family) <= set(layout.TABLE_LABELS)
+    # A fiat order and a card payment keep the transactionType they were asked for.
+    for label in ("fiat-orders", "fiat-payments"):
+        root = layout.layout(label)[0]
+        assert (root.key, root.record) == (("connection_id", "order_no"), True)
+        assert root.column("transaction_type").sql == "text"
+    c2c = layout.layout("c2c")[0]
+    assert (c2c.key, c2c.record) == (("connection_id", "order_number"), True)
+    # Pay's `transactionId` is not the ledger link `transaction_id`: it takes the label's name.
+    pay, detail, costs, _ = layout.layout("pay")
+    assert pay.key == ("connection_id", "pay_transaction_id")
+    assert pay.column("transaction_id").sql == "uuid"
+    assert layout.locate("pay", "data[].transactionId")[1].name == "pay_transaction_id"
+    assert detail.name == "binance_pay_funds_detail"
+    assert costs.key == (
+        "connection_id",
+        "pay_transaction_id",
+        "funds_detail_ordinal",
+        "wallet_type",
+    )
+    assert layout.locate("pay", "data[].walletTypes[]")[1].sql == "bigint[]"
+    # A rebate has no id: its content and occurrence key it, and it keeps its dividend.
+    rebate = layout.layout("rebate")[0]
+    assert rebate.key == ("connection_id", "content_hash", "occurrence")
+    assert rebate.column("dividend_id").sql == "text"
+
+
+def test_portfolio_margin_tables_and_keys() -> None:
+    assert {"pm-account", "pm-balance"} <= set(layout.TABLE_LABELS)
+    # Each is one report per read: the account a row, the balance a row per asset, which states
+    # the wallet balance reconciliation compares.
+    [account] = layout.layout("pm-account")
+    assert (account.key, account.record) == (("connection_id", "snapshot_at"), False)
+    [balance] = layout.layout("pm-balance")
+    assert (balance.key, balance.record) == (("connection_id", "snapshot_at", "asset"), False)
+    assert balance.column("total_wallet_balance").nullable is False
+    for name in ("um_unrealized_pnl", "cm_unrealized_pnl", "cross_margin_borrowed"):
+        assert balance.column(name).sql == "numeric"

@@ -12,6 +12,7 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from lararium.core.connections import get_connection
 from lararium.core.json_types import JSONValue
 from lararium.modules.finance.binance import balances
 from lararium.modules.finance.binance.balances import (
@@ -19,13 +20,22 @@ from lararium.modules.finance.binance.balances import (
     ambiguous,
     backfill_daily_snapshots,
     read_balances,
+    record_less_flag,
     report_balances,
     settle_reads,
+    unread_flag,
     wallet_flags,
 )
-from lararium.modules.finance.binance.fetch import to_json, walk
+from lararium.modules.finance.binance.client import hmac_refused_flag
+from lararium.modules.finance.binance.fetch import (
+    NOT_PRESENT_KEY,
+    REFUSED_HOSTS_KEY,
+    to_json,
+    walk,
+)
 from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError
 from lararium.modules.finance.binance.reconcile import open_differences
+from lararium.modules.finance.binance.sync import settle
 
 from .fixtures import HOUR_MS, NOW_MS, FakeBinance, build_response, build_row
 from .syncing import (
@@ -413,7 +423,10 @@ async def test_other_wallets_come_from_the_wallet_list_until_they_have_their_own
     listed = [
         _wallet("Spot", ("AAA", "9")),
         _wallet("Funding", ("AAA", "9")),
-        _wallet("Cross Margin", ("BBB", "2")),
+        _wallet("Trading Bots", ("BBB", "2")),
+        # Cross Margin has its own source (the margin account), which was not read: the list
+        # does not stand in for it.
+        _wallet("Cross Margin", ("BBB", "5")),
     ]
     reads: dict[str, Read | None] = {
         "spot-account": _read("spot-account", _spot(("AAA", "1", "0"))),
@@ -425,9 +438,9 @@ async def test_other_wallets_come_from_the_wallet_list_until_they_have_their_own
 
     found = sorted((w, s, q) for w, s, q, _ in await _snapshots(session, connection.id))
     assert found == [
-        ("Binance Cross Margin", "BBB", 2),
         ("Binance Funding", "AAA", 2),
         ("Binance Spot", "AAA", 1),
+        ("Binance Trading Bots", "BBB", 2),
     ]
 
 
@@ -494,6 +507,45 @@ def test_wallet_flags() -> None:
     assert wallet_flags([_wallet("Earn", ("AAA", "1"), balance="2")], {}) == []
 
 
+def test_a_listed_wallet_whose_own_source_was_not_read_is_flagged() -> None:
+    listed = [_wallet("Cross Margin", ("AAA", "1")), _wallet("USDⓈ-M Futures")]
+    assert wallet_flags(listed, {}, {"cross_margin", "um_futures"}) == [unread_flag("Cross Margin")]
+    assert unread_flag("Cross Margin") == (
+        "wallet Cross Margin has a balance but its own report was not read: it is not counted"
+    )
+    # Read (or only unclear): not flagged so.
+    assert wallet_flags(listed, {"cross_margin": True}) == []
+
+
+@pytest.mark.parametrize("portfolio", [False, True])
+async def test_a_wallet_the_sync_did_not_read_is_flagged_by_name(
+    session, run, portfolio: bool
+) -> None:
+    # Cross Margin answers `created: false` and USDⓈ-M Futures was not read (not served, or its
+    # host refused the key), yet the wallet list shows both holding something.
+    connection = await binance_connection(run)
+    flags: list[str] = []
+    margin = _read("margin-account", [])
+    assert isinstance(margin.body, dict)
+    margin = Read(margin.label, {**margin.body, "created": False}, margin.read_from, margin.read_to)
+    listed = [_wallet("Cross Margin", ("AAA", "1")), _wallet("USDⓈ-M Futures", ("BBB", "2"))]
+    info = build_row("account-info", isPortfolioMarginRetailEnabled=portfolio)
+    reads: dict[str, Read | None] = {
+        "account-info": _read("account-info", [info]),
+        "margin-account": margin,
+        "wallet-balance": _read("wallet-balance", listed),
+    }
+
+    await _report(run, connection, reads, flags)
+
+    if portfolio:
+        # Portfolio Margin holds them while it is on: left out on purpose, counted there.
+        assert flags == []
+    else:
+        assert flags == [unread_flag("Cross Margin"), unread_flag("USDⓈ-M Futures")]
+    assert await _snapshots(session, connection.id) == []
+
+
 async def test_a_wallet_with_a_balance_and_no_assets_listed_is_flagged(session, run) -> None:
     connection = await binance_connection(run)
     flags: list[str] = []
@@ -501,7 +553,11 @@ async def test_a_wallet_with_a_balance_and_no_assets_listed_is_flagged(session, 
 
     await _report(run, connection, {"wallet-balance": _read("wallet-balance", listed)}, flags)
 
-    assert flags == ["wallet Trading Bots has a balance but lists no asset"]
+    # A wallet with no record endpoint that is not empty is named as such as well.
+    assert flags == [
+        "wallet Trading Bots has a balance but lists no asset",
+        record_less_flag("Trading Bots"),
+    ]
     assert await _snapshots(session, connection.id) == []
 
 
@@ -515,6 +571,35 @@ def _daily(kind: str, at_ms: int, *balances: tuple[str, str]) -> dict[str, Any]:
     return {**row, "data": data}
 
 
+def _margin_day(at_ms: int, *held: tuple[str, str]) -> dict[str, Any]:
+    """A daily MARGIN snapshot: each asset's net quantity in `userAssets`."""
+    row = build_row("snapshot", type="margin", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["userAssets"] = [
+        {
+            "asset": code,
+            "borrowed": "0",
+            "free": net,
+            "interest": "0",
+            "locked": "0",
+            "netAsset": net,
+        }
+        for code, net in held
+    ]
+    return {**row, "data": data}
+
+
+def _futures_day(at_ms: int, *held: tuple[str, str]) -> dict[str, Any]:
+    """A daily FUTURES snapshot: each asset's wallet balance in `assets`, no position."""
+    row = build_row("snapshot", type="futures", updateTime=at_ms)
+    data = dict(row["data"])  # pyright: ignore[reportArgumentType,reportCallIssue]
+    data["assets"] = [
+        {"asset": code, "marginBalance": wallet, "walletBalance": wallet} for code, wallet in held
+    ]
+    data["position"] = []
+    return {**row, "data": data}
+
+
 async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> None:
     connection = await binance_connection(run)
     day_one = NOW_MS - 2 * 24 * HOUR_MS - 1_000  # 23:59:59 UTC
@@ -522,7 +607,9 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     rows = [
         _daily("spot", day_two, ("AAA", "3")),
         _daily("spot", day_one, ("AAA", "2"), ("BBB", "1"), ("LDAAA", "5")),
-        _daily("margin", day_two, ("CCC", "7")),
+        _margin_day(day_two, ("CCC", "7")),
+        # A FUTURES day is USDⓈ-M's wallet balance.
+        _futures_day(day_two, ("DDD", "9")),
     ]
 
     written = await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None)
@@ -531,10 +618,12 @@ async def test_daily_snapshots_backfilled_at_their_own_time(session, run) -> Non
     assert found == [
         ("Binance Spot", "AAA", 2, _at(day_one)),
         ("Binance Spot", "BBB", 1, _at(day_one)),
+        ("Binance Cross Margin", "CCC", 7, _at(day_two)),
         ("Binance Spot", "AAA", 3, _at(day_two)),
         ("Binance Spot", "BBB", 0, _at(day_two)),
+        ("Binance USDⓈ-M Futures", "DDD", 9, _at(day_two)),
     ]
-    assert written == 4
+    assert written == 6
     # Once written, the same rows write nothing.
     assert await run(backfill_daily_snapshots, connection, rows, flag=lambda _: None) == 0
 
@@ -1108,3 +1197,37 @@ async def test_an_asset_counted_before_binance_marks_it_legal_money_keeps_its_in
         ("AAA", 4),
         ("AAA", 4),
     ]
+
+
+@pytest.mark.parametrize("refusal", ["not served", "host refused"])
+async def test_a_read_refused_when_made_again_is_left_out_as_a_first_read_is(
+    session, run, fake: FakeBinance, clock: Clock, refusal: str
+) -> None:
+    connection = await binance_connection(run, config=later_config())
+    flags: list[str] = []
+    async with fake.http() as http:
+        ctx = await context(session, connection.id, http)
+        client = client_for(clock, http)
+        await client.sync_clock()
+        # `api` has accepted the key in this sync.
+        await read_balances(client, ["spot-account"])
+        start = clock.ms
+        # A deposit inside the USDⓈ-M read: it is made again, and refused then.
+        reads = {"um-account": _read("um-account", [], start + 1_000, 9_000)}
+        fake.add("deposits", _deposit(0, start + 5_000, "1"))
+        clock.ms = start + 20_000
+        await walk(ctx, client, "deposits")
+        fake.fail("um-account", status=404 if refusal == "not served" else 401)
+
+        settled = await settle(ctx, client, reads, trades=(), flag=flags.append)
+
+    assert settled["um-account"] is None
+    config = (await get_connection(session, connection.id)).config
+    if refusal == "not served":
+        assert "um-account" in config[NOT_PRESENT_KEY]  # pyright: ignore[reportOperatorIssue]
+        assert flags == []
+    else:
+        assert set(config[REFUSED_HOSTS_KEY]) == {"fapi"}  # pyright: ignore[reportArgumentType]
+        assert flags == [hmac_refused_flag("fapi.binance.com")]
+        # Its host's histories are not walked again in the rounds after.
+        assert fake.calls("um-income") == []

@@ -48,7 +48,12 @@ class Endpoint:
     # the documents give none.
     window_days: int | None
     lookback_days: int | None
-    time_params: tuple[str, str]
+    # The earliest time Binance answers for, in epoch ms, when the documents give a date
+    # rather than a span; `None` when they give none.
+    earliest_ms: int | None
+    # The names of a request's time range (start, end); None when the documents give the
+    # endpoint none: it is asked without one.
+    time_params: tuple[str, str] | None
     paging: Literal["none", "offset", "page", "from_id"]
     # The `limit` or page size to ask for; 0 when the endpoint takes none.
     page_size: int
@@ -67,6 +72,8 @@ _HOSTS = {
     "papi": "papi.binance.com",
 }
 _TIME_PARAMS = ("startTime", "endTime")
+# 2020-06-10 00:00 UTC: the rebate history's earliest supported start (the catalogue).
+_REBATE_EARLIEST_MS = 1_591_747_200_000
 
 
 def _ep(
@@ -82,7 +89,8 @@ def _ep(
     time: str | None = None,
     window: int | None = None,
     lookback: int | None = None,
-    params: tuple[str, str] = _TIME_PARAMS,
+    earliest: int | None = None,
+    params: tuple[str, str] | None = _TIME_PARAMS,
     paging: Literal["none", "offset", "page", "from_id"] = "none",
     page: int = 0,
     variants: tuple[tuple[str, tuple[str, ...]], ...] = (),
@@ -102,6 +110,7 @@ def _ep(
         time_field=time,
         window_days=window,
         lookback_days=lookback,
+        earliest_ms=earliest,
         time_params=params,
         paging=paging,
         page_size=page,
@@ -235,6 +244,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="assets",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
     ),
     "cm-balance": _ep(
@@ -246,7 +256,20 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
+    ),
+    "cm-exchange-info": _ep(
+        "cm-exchange-info",
+        "GET",
+        "/dapi/v1/exchangeInfo",
+        1,
+        "dapi",
+        signed=False,
+        rows="symbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "cm-income": _ep(
         "cm-income",
@@ -271,6 +294,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "positionSide"),
         time="updateTime",
+        params=None,
         kind="position",
     ),
     "cm-trades": _ep(
@@ -674,6 +698,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         300,
         "ip",
         rows="rows",
+        # No id: the catalogue says a loan coin and its collateral coin identify a row.
+        ids=("loanCoin", "collateralCoin"),
         paging="page",
         page=100,
         kind="position",
@@ -911,6 +937,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         "eapi",
         rows="asset",
         ids=("asset",),
+        params=None,
         kind="balance",
     ),
     "opt-bill": _ep(
@@ -927,6 +954,18 @@ ENDPOINTS: dict[str, Endpoint] = {
         page=1000,
         variants=(("currency", ("USDT",)),),
         kind="history",
+    ),
+    "opt-exchange-info": _ep(
+        "opt-exchange-info",
+        "GET",
+        "/eapi/v1/exchangeInfo",
+        1,
+        "eapi",
+        signed=False,
+        rows="optionSymbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "opt-exercises": _ep(
         "opt-exercises",
@@ -950,6 +989,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "side"),
         time="time",
+        params=None,
         kind="position",
     ),
     "opt-trades": _ep(
@@ -1002,6 +1042,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="data.data",
         time="updateTime",
         window=29,
+        # "The earliest supported startTime is June 10, 2020" (00:00 UTC).
+        earliest=_REBATE_EARLIEST_MS,
         paging="page",
         page=200,
         kind="history",
@@ -1202,6 +1244,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="assets",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
     ),
     "um-balance": _ep(
@@ -1213,7 +1256,20 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("asset",),
         time="updateTime",
+        params=None,
         kind="balance",
+    ),
+    "um-exchange-info": _ep(
+        "um-exchange-info",
+        "GET",
+        "/fapi/v1/exchangeInfo",
+        1,
+        "fapi",
+        signed=False,
+        rows="symbols",
+        ids=("symbol",),
+        params=None,
+        kind="public",
     ),
     "um-income": _ep(
         "um-income",
@@ -1222,7 +1278,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         30,
         "fapi",
         rows=".",
-        ids=("incomeType", "tranId", "asset", "symbol"),
+        ids=("incomeType", "tranId"),
         time="time",
         lookback=90,
         paging="none",
@@ -1238,6 +1294,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows=".",
         ids=("symbol", "positionSide"),
         time="updateTime",
+        params=None,
         kind="position",
     ),
     "um-trades": _ep(
@@ -1375,6 +1432,8 @@ ENDPOINTS: dict[str, Endpoint] = {
         rows="rows",
         ids=("requestId",),
         time="loanDate",
+        # The documents give it paging only: no time range is sent.
+        params=None,
         paging="page",
         page=100,
         kind="history",
@@ -1653,6 +1712,42 @@ updateTime time_ms
 [].crossUnPnl decimal
 [].availableBalance decimal
 [].updateTime time_ms!
+""",
+    "cm-exchange-info": """
+timezone text
+serverTime time_ms
+exchangeFilters[] text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
+symbols[].symbol text!
+symbols[].pair text
+symbols[].contractType text
+symbols[].deliveryDate time_ms
+symbols[].onboardDate time_ms
+symbols[].contractStatus text
+symbols[].contractSize integer
+symbols[].baseAsset text
+symbols[].quoteAsset text
+symbols[].marginAsset text
+symbols[].pricePrecision integer
+symbols[].quantityPrecision integer
+symbols[].baseAssetPrecision integer
+symbols[].quotePrecision integer
+symbols[].equalQtyPrecision integer
+symbols[].triggerProtect decimal
+symbols[].maintMarginPercent decimal
+symbols[].requiredMarginPercent decimal
+symbols[].underlyingType text
+symbols[].underlyingSubType[] text
+symbols[].filters[] array~
+symbols[].filters[].filterType text
+symbols[].orderTypes[] text
+symbols[].timeInForce[] text
+symbols[].liquidationFee decimal
+symbols[].marketTakeBound decimal
 """,
     "cm-income": """
 [].symbol text
@@ -2447,8 +2542,49 @@ tradeGroupId id
 [].asset text!
 [].amount decimal!
 [].symbol text
-[].type text
+[].type text = FEE|CONTRACT|EXERCISE_PNL|EXERCISE_FEE|TRANSFER
 [].createDate time_ms!
+""",
+    "opt-exchange-info": """
+timezone text
+serverTime time_ms
+optionContracts[].baseAsset text
+optionContracts[].quoteAsset text
+optionContracts[].underlying text
+optionContracts[].settleAsset text
+optionAssets[].name text
+optionSymbols[].expiryDate time_ms
+optionSymbols[].filters[].filterType text
+optionSymbols[].filters[].minPrice decimal
+optionSymbols[].filters[].maxPrice decimal
+optionSymbols[].filters[].tickSize decimal
+optionSymbols[].filters[].minQty decimal
+optionSymbols[].filters[].maxQty decimal
+optionSymbols[].filters[].stepSize decimal
+optionSymbols[].symbol text!
+optionSymbols[].side text
+optionSymbols[].strikePrice decimal
+optionSymbols[].underlying text
+optionSymbols[].unit integer
+optionSymbols[].liquidationFeeRate decimal
+optionSymbols[].minQty decimal
+optionSymbols[].maxQty decimal
+optionSymbols[].initialMargin decimal
+optionSymbols[].maintenanceMargin decimal
+optionSymbols[].minInitialMargin decimal
+optionSymbols[].minMaintenanceMargin decimal
+optionSymbols[].priceScale integer
+optionSymbols[].quantityScale integer
+optionSymbols[].quoteAsset text
+optionSymbols[].contractType text
+optionSymbols[].underlyingType text
+optionSymbols[].nakedSell boolean
+optionSymbols[].status text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
 """,
     "opt-exercises": """
 [].id text!
@@ -2802,6 +2938,44 @@ positions[].updateTime time_ms
 [].marginAvailable boolean
 [].updateTime time_ms!
 """,
+    "um-exchange-info": """
+timezone text
+serverTime time_ms
+exchangeFilters[] text
+rateLimits[] array
+rateLimits[].rateLimitType text
+rateLimits[].interval text
+rateLimits[].intervalNum integer
+rateLimits[].limit integer
+assets[].asset text!
+assets[].marginAvailable boolean
+assets[].autoAssetExchange decimal
+symbols[].symbol text!
+symbols[].pair text
+symbols[].contractType text
+symbols[].deliveryDate time_ms
+symbols[].onboardDate time_ms
+symbols[].status text
+symbols[].maintMarginPercent decimal
+symbols[].requiredMarginPercent decimal
+symbols[].baseAsset text
+symbols[].quoteAsset text
+symbols[].marginAsset text
+symbols[].pricePrecision integer
+symbols[].quantityPrecision integer
+symbols[].baseAssetPrecision integer
+symbols[].quotePrecision integer
+symbols[].underlyingType text
+symbols[].underlyingSubType[] text
+symbols[].settlePlan integer
+symbols[].triggerProtect decimal
+symbols[].filters[] array~
+symbols[].filters[].filterType text
+symbols[].orderTypes[] text
+symbols[].timeInForce[] text
+symbols[].liquidationFee decimal
+symbols[].marketTakeBound decimal
+""",
     "um-income": """
 [].symbol text
 [].incomeType text! = TRANSFER|WELCOME_BONUS|REALIZED_PNL|FUNDING_FEE|COMMISSION|
@@ -3014,6 +3188,31 @@ WALLETS: dict[str, str] = {
 }
 
 
+# The universal-transfer types that need an isolated margin pair, and the parameters it goes in
+# (the catalogue document: `fromSymbol` for ISOLATEDMARGIN_MARGIN and
+# ISOLATEDMARGIN_ISOLATEDMARGIN, `toSymbol` for MARGIN_ISOLATEDMARGIN and
+# ISOLATEDMARGIN_ISOLATEDMARGIN). They are not variants of the endpoint: each is asked once per
+# isolated pair the account has (`fetch.walk_keys`).
+ISOLATED_TRANSFER_TYPES: dict[str, tuple[str, ...]] = {
+    "ISOLATEDMARGIN_MARGIN": ("fromSymbol",),
+    "MARGIN_ISOLATEDMARGIN": ("toSymbol",),
+    "ISOLATEDMARGIN_ISOLATEDMARGIN": ("fromSymbol", "toSymbol"),
+}
+
+
+# The histories that list cross margin when asked without a pair, and an isolated pair's records
+# when asked with one, and the parameter the pair goes in (the catalogue document: `symbol` for
+# the capital flow, "mandatory for Isolated data"). Each is asked once more per isolated pair the
+# account has (`fetch.walk_keys`).
+ISOLATED_PARAMS: dict[str, str] = {
+    "margin-transfers": "isolatedSymbol",
+    "margin-borrow-repay": "isolatedSymbol",
+    "margin-interest": "isolatedSymbol",
+    "margin-capital-flow": "symbol",
+    "margin-liquidations": "isolatedSymbol",
+}
+
+
 def wallet_key(wallet_name: str) -> str:
     """The key of a wallet; one Binance adds later gets `other:<name>`."""
     return WALLETS.get(wallet_name, f"other:{wallet_name}")
@@ -3063,6 +3262,15 @@ _PAGING_PARAMS: dict[str, tuple[str, str, int]] = {
     ),
     "opt-bill": ("recordId", "limit", 0),
 }
+
+
+def time_range(endpoint: Endpoint, start: int, end: int) -> dict[str, int]:
+    """The parameters asking for [start, end] (epoch ms): none for an endpoint that takes no
+    time range, which then answers its whole history whatever the window."""
+    if endpoint.time_params is None:
+        return {}
+    low, high = endpoint.time_params
+    return {low: start, high: end}
 
 
 def paging_params(endpoint: Endpoint) -> tuple[str, str, int]:

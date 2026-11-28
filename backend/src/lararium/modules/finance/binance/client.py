@@ -44,6 +44,23 @@ CLOCK_SLOW_MS = 500
 CLOCK_SAMPLES = 3
 KEY_REJECTED_CODES = frozenset({-2014, -2015, -1022})
 NOT_PRESENT = frozenset({-3003, -30105, -6021, -5026, -4047, 403004})
+# What the options host answers an account it does not serve (its error-code page: -5002
+# USER_NOT_ACCESS, "Option user not access"); on `eapi` only, as the code means another thing on
+# the other hosts. Binance does not say an account without options gets it: unverified (design 6).
+HOST_NOT_PRESENT: dict[str, frozenset[int]] = {"eapi": frozenset({-5002})}
+# The VIP loan reads (ruling R23): Binance says VIP loans are "available for VIP users only" and
+# does not document what another account gets back, so any refusal of one (HTTP 4xx: not a
+# rejected key, a ban or the rate limit, which keep their meaning) is the product's absence.
+# `account-info`'s `vipLevel` is documented as an integer with no meaning and Binance ties no
+# VIP loan to it, so it gates nothing (design 6).
+VIP_LOAN_LABELS = frozenset(label for label in ENDPOINTS if label.startswith("vip-loan-"))
+RATE_LIMITED = 429
+# The derivatives hosts (design 5.1, ruling R22): once `api` has accepted the key in this sync (its
+# gate), a rejection there (HTTP 401, -2014, -2015 or -1022) is that host's refusal of the key,
+# whatever its type (Binance documents no Ed25519 key for them; an account without the product
+# may be refused so), not a rejected key (`BinanceHostRefused`). A key truly revoked meanwhile is
+# rejected by the next sync's gate on `api`.
+REFUSING_HOSTS = frozenset({"fapi", "dapi", "eapi", "papi"})
 # Parameters the client sets itself; a caller may not.
 RESERVED = frozenset({"recvWindow", "timestamp", "signature"})
 
@@ -59,7 +76,7 @@ BLOCK_PERCENT = 85
 SPACING_MS = 100
 
 # Per minute. The futures, options and portfolio hosts publish theirs only in their own
-# `exchangeInfo`; until a task reads it, 600 is assumed.
+# `exchangeInfo` (`rateLimits`); until a sync has read it, 600 is assumed (`read_limits`).
 DEFAULT_CAPS: dict[str, int] = {
     "api": 6_000,
     "ip": 12_000,
@@ -74,6 +91,9 @@ USED_WEIGHT_HEADERS = {
     "uid": "X-SAPI-USED-UID-WEIGHT-1M",
 }
 DEFAULT_USED_WEIGHT_HEADER = "X-MBX-USED-WEIGHT-1M"
+# The `rateLimits` entry an `exchangeInfo` answer states a host's request weight per minute in.
+REQUEST_WEIGHT = "REQUEST_WEIGHT"
+_MINUTE = "MINUTE"
 
 
 class BinanceError(DisplayableError):
@@ -99,6 +119,41 @@ class BinanceKeyRejected(BinanceError, CredentialRejectedError):
         BinanceError.__init__(self, http_status, code)
         shown = code if code is not None else http_status
         self.args = (f"Binance rejected the key (code {shown})",)
+
+
+class BinanceHostRefused(BinanceError):
+    """A derivatives host (`REFUSING_HOSTS`) refused the key that `api` accepted in this sync:
+    the key is good there, this host does not take it (an Ed25519 key's type, or a product the
+    account does not have). Not a rejected key; the host's labels are left out
+    (`sync.refuse_host`). Its message is the owner's flag (`host_refused_flag`)."""
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        http_status: int,
+        code: int | None,
+        key_type: Literal["hmac", "ed25519"],
+    ) -> None:
+        BinanceError.__init__(self, http_status, code)
+        self.host = endpoint.host
+        # The limit kind that names the host (`fapi`, `dapi`, `eapi`, `papi`).
+        self.limit: str = endpoint.limit
+        self.args = (host_refused_flag(endpoint.host, key_type),)
+
+
+def key_type_flag(host: str) -> str:
+    """What the owner is told of a host that refuses an Ed25519 key (design 5.1)."""
+    return f"{host} does not accept this key type; use an HMAC key to include it"
+
+
+def hmac_refused_flag(host: str) -> str:
+    """What the owner is told of a host that refuses an HMAC key `api` accepted (design 5.1)."""
+    return f"{host} refused this key: its wallets are not read"
+
+
+def host_refused_flag(host: str, key_type: Literal["hmac", "ed25519"]) -> str:
+    """The flag of a host that refused the key (`BinanceHostRefused`), by the key's type."""
+    return key_type_flag(host) if key_type == "ed25519" else hmac_refused_flag(host)
 
 
 class BinanceBanned(BinanceError):
@@ -228,6 +283,24 @@ class Limiter:
             return
 
 
+def minute_weight_limit(body: ApiValue) -> int | None:
+    """The request weight per minute an `exchangeInfo` answer states: its `rateLimits` entry of
+    type `REQUEST_WEIGHT` over one `MINUTE`, a positive whole number; None when it states
+    none (another interval is not converted: the limiter counts by the minute)."""
+    listed = body.get("rateLimits") if isinstance(body, dict) else None
+    for entry in listed if isinstance(listed, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if (entry.get("rateLimitType"), entry.get("interval")) != (REQUEST_WEIGHT, _MINUTE):
+            continue
+        number, limit = entry.get("intervalNum"), entry.get("limit")
+        if number != 1 or isinstance(limit, bool) or not isinstance(limit, int | Decimal):
+            continue
+        if limit > 0 and limit == int(limit):
+            return int(limit)
+    return None
+
+
 def load_json(text: str) -> ApiValue:
     """A JSON answer with its numbers exact (`Decimal`); a non-finite number is a ValueError."""
 
@@ -276,6 +349,9 @@ class BinanceClient:
         self._limiter = limiter or Limiter(clock, sleep)
         self._retries = retries
         self._offset = 0
+        # Whether `api.binance.com` has answered a signed request: only then can another host's
+        # refusal of the key be about the host and not the key (`BinanceHostRefused`).
+        self._api_accepted = False
         # Per limit kind; a task that reads a host's own limits replaces its entry.
         self.caps = dict(DEFAULT_CAPS)
 
@@ -289,6 +365,14 @@ class BinanceClient:
 
     def __repr__(self) -> str:
         return "BinanceClient()"
+
+    def read_limits(self, endpoint: Endpoint, body: ApiValue) -> None:
+        """Take a host's request weight per minute from its own `exchangeInfo` answer
+        (`minute_weight_limit`, plan Decision 4): the cap of the limit kind the endpoint's
+        host counts in. An answer that states none leaves the cap as it was."""
+        found = minute_weight_limit(body)
+        if found is not None:
+            self.caps[endpoint.limit] = found
 
     def now_ms(self) -> int:
         """Binance's clock: the local one plus the offset the last `sync_clock` measured."""
@@ -408,25 +492,32 @@ class BinanceClient:
             received = self._clock()
             self._note_used_weight(endpoint, response)
             status = response.status_code
-            if status == 429 and retries < self._retries:
+            if status == RATE_LIMITED and retries < self._retries:
                 retries += 1
                 await self._sleep(retry_after(response) * 1000)
                 continue
-            return self._result(response), sent, received
+            return self._result(endpoint, response), sent, received
 
-    @staticmethod
-    def _result(response: httpx.Response) -> ApiValue:
+    def _result(self, endpoint: Endpoint, response: httpx.Response) -> ApiValue:
         status = response.status_code
         if 200 <= status < 300:
             try:
-                return load_json(response.text)
+                body = load_json(response.text)
             except ValueError:
                 raise BinanceError(status) from None
+            if endpoint.signed and endpoint.limit in ("api", "ip", "uid"):
+                self._api_accepted = True
+            return body
         code = _error_code(response)
-        if status == 401 or code in KEY_REJECTED_CODES:
+        # Only a signed request carries the key: an unsigned one refused is no word on it.
+        if endpoint.signed and (status == 401 or code in KEY_REJECTED_CODES):
+            if endpoint.limit in REFUSING_HOSTS and self._api_accepted:
+                raise BinanceHostRefused(endpoint, status, code, self._signer.kind)
             raise BinanceKeyRejected(status, code)
         if status == 418:
             raise BinanceBanned(status, code)
-        if status == 404 or code in NOT_PRESENT:
+        if status == 404 or code in NOT_PRESENT or code in HOST_NOT_PRESENT.get(endpoint.limit, ()):
+            raise BinanceNotPresent(status, code)
+        if endpoint.label in VIP_LOAN_LABELS and 400 <= status < 500 and status != RATE_LIMITED:
             raise BinanceNotPresent(status, code)
         raise BinanceError(status, code)

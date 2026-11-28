@@ -19,11 +19,17 @@ INSTITUTION = "Binance"
 # The debt of Crypto Loans is a liability; every other wallet holds assets.
 _LIABILITY_WALLETS = frozenset({"loans"})
 _OTHER = "other:"
-_NAMES = {key: name for name, key in WALLETS.items()}
+# Accounts of the connection's own that are no Binance wallet: what a redemption Binance has
+# taken but not yet paid out is worth until it arrives (design 5.4). Binance reports no balance
+# for it, so it is the sum of its postings, and no wallet list names it.
+REDEEMING = "redeeming"
+OWN_ACCOUNTS = {REDEEMING: "Pending redemptions"}
+_NAMES = {key: name for name, key in WALLETS.items()} | OWN_ACCOUNTS
 
 
 def wallet_name(wallet: str) -> str:
-    """Binance's name for a wallet key (`um_futures` is `USDⓈ-M Futures`)."""
+    """Binance's name for a wallet key (`um_futures` is `USDⓈ-M Futures`), or the name of an
+    account of the connection's own (`redeeming` is `Pending redemptions`)."""
     if wallet.startswith(_OTHER):
         return wallet.removeprefix(_OTHER)
     if wallet not in _NAMES:

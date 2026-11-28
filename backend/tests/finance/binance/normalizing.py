@@ -13,15 +13,26 @@ from uuid import UUID
 import httpx
 from sqlalchemy import text
 
+from lararium.core.actors import Actor
 from lararium.core.commands import command_context
+from lararium.core.connections import create_connection
 from lararium.core.json_types import JSONValue
 from lararium.core.raw_records import store_raw_record
+from lararium.modules.finance.accounts import create_account
 from lararium.modules.finance.binance.balances import Read, store_reports
 from lararium.modules.finance.binance.catalogue import ENDPOINTS
 from lararium.modules.finance.binance.fetch import VERSION, record_type, to_json
 from lararium.modules.finance.binance.normalize import NormalizeReport, normalize, regenerate
 from lararium.modules.finance.binance.parse import ApiValue
-from lararium.modules.finance.ledger import find_unbalanced_transactions
+from lararium.modules.finance.identifiers import register_card_merchant
+from lararium.modules.finance.ledger import (
+    CounterpartyFields,
+    PostingInput,
+    TransactionInput,
+    find_unbalanced_transactions,
+    upsert_connector_transaction,
+)
+from lararium.modules.finance.transfers import heal_transfers, transfer_contra
 
 from .fixtures import NOW_MS, build_response, build_row
 from .syncing import CONNECTOR, context
@@ -48,9 +59,16 @@ def contents(label: str, rows: Rows) -> list[JSONValue]:
 
 
 async def ingest(
-    session, connection_id: UUID, label: str, rows: Rows, *, sync_id: UUID | None = None
+    session,
+    connection_id: UUID,
+    label: str,
+    rows: Rows,
+    *,
+    sync_id: UUID | None = None,
+    request: dict[str, JSONValue] | None = None,
 ) -> list[UUID]:
-    """Store the rows as one response set of the label."""
+    """Store the rows as one response set of the label, answering `request` (its parameters:
+    a variant's value, an isolated symbol)."""
     sync = sync_id or uuid.uuid4()
     async with command_context(session, CONNECTOR, "binance.fetch", {}) as ctx:
         return [
@@ -58,13 +76,32 @@ async def ingest(
                 ctx,
                 connection_id=connection_id,
                 record_type=record_type(label),
-                request={},
+                request=request or {},
                 content=content,
                 connector_version=VERSION,
                 sync_id=sync,
             )
             for content in contents(label, rows)
         ]
+
+
+async def ingest_report(
+    session, connection_id: UUID, label: str, rows: Rows, *, at_ms: int = NOW_MS
+) -> UUID:
+    """Store one read of a report label listing the rows, made at `at_ms`, as a sync stores
+    it (`balances.store_read`): its bracket and its answer."""
+    bracket: dict[str, JSONValue] = {"read_from_ms": at_ms, "read_to_ms": at_ms}
+    body = to_json(build_response(label, rows))
+    async with command_context(session, CONNECTOR, "binance.read", {}) as ctx:
+        return await store_raw_record(
+            ctx,
+            connection_id=connection_id,
+            record_type=record_type(label),
+            request=bracket,
+            content={**bracket, "body": body},
+            connector_version=VERSION,
+            sync_id=uuid.uuid4(),
+        )
 
 
 async def run_normalize(session, connection_id: UUID, *, again: bool = False) -> NormalizeReport:
@@ -207,3 +244,65 @@ async def assert_balanced_and_quiet(session, connection_id: UUID) -> None:
 
 def at(ms: int) -> datetime:
     return datetime.fromtimestamp(ms // 1000, UTC).replace(microsecond=(ms % 1000) * 1000)
+
+
+async def differences(session, connection_id: UUID) -> list[Any]:
+    """The (account, symbol) of every reconciliation difference on the connection's accounts."""
+    rows = await session.execute(
+        text(
+            "select a.name, i.symbol from finance.binance_reconciliation_differences d"
+            " join finance.accounts a on a.id = d.account_id"
+            " join finance.instruments i on i.id = d.instrument_id"
+            " where a.source_connection_id = :c"
+        ),
+        {"c": connection_id},
+    )
+    return list(rows)
+
+
+async def heal(session) -> int:
+    """heal_transfers in a command of its own, as the worker runs it."""
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        return await heal_transfers(ctx)
+
+
+CARD_MERCHANT = "merch_TESTBIN"
+
+
+async def card_payment(session, run, account_id, instrument_id, quantity, occurred_at) -> None:
+    """A card connection's payment naming the card merchant `CARD_MERCHANT`, registered as
+    paying into `account_id`: the opposite of that account's `quantity`."""
+    card = await run(create_connection, connector="monzo", display_name="Card", config={})
+    bank = await run(
+        create_account,
+        name="Card",
+        ledger_type="asset",
+        subtype="bank",
+        balance_mode="transactions",
+        source_connection_id=card.id,
+    )
+    merchant = await run(register_card_merchant, CARD_MERCHANT, [account_id])
+    contra = await transfer_contra(
+        session,
+        source=("connection", f"{card.id}:card_1"),
+        own_account_id=bank.id,
+        counterparty_identifier_id=merchant.id,
+        other_postings=0,
+    )
+    await run(
+        upsert_connector_transaction,
+        TransactionInput(
+            occurred_at=occurred_at,
+            description="Binance",
+            origin="connector",
+            connection_id=card.id,
+            external_id="card_1",
+            postings=[
+                PostingInput(bank.id, instrument_id, -quantity),
+                PostingInput(contra, instrument_id, quantity),
+            ],
+            counterparty=CounterpartyFields(identifier_id=merchant.id, bank_transfer=False),
+        ),
+    )

@@ -838,14 +838,37 @@ Each Binance wallet with a balance becomes an account in Lararium whose balance 
 Binance reports, and the records Binance lists (deposits, withdrawals, trades and so on)
 explain how it got there.
 
-What is built so far (phase A):
+What Lararium reads from Binance:
 
-- **Wallets**: Spot, Funding and Earn. Every other wallet with a balance in Binance's wallet
-  list (Cross Margin, Futures, Trading Bots, an unknown one and so on) is counted from that
-  list, per asset, without records of its own in phase A, so its changes show as
-  reconciliation differences; a wallet Lararium doesn't know is flagged by name and still gets
-  an account, and one whose balance is not zero but which lists no asset is flagged by name.
-  Crypto-loan debt is not read until phase B.
+- **Wallets.** Each wallet with a balance is an account named "Binance <wallet>" that holds,
+  per asset, what Binance reports:
+  - Spot (`spot-account`), Funding (`funding-asset`) and Earn (Binance's wallet list);
+  - Cross Margin and Isolated Margin (`margin-account`, `margin-isolated-account`): each
+    asset's net quantity, so a borrowed asset is a negative holding (Isolated Margin sums its
+    pairs per asset);
+  - USDⓈ-M and COIN-M Futures (`um-account`, `cm-account`): each asset's wallet balance plus
+    its unrealised profit, reconciled on the wallet balance alone;
+  - Options (`opt-account`): each asset's equity in the options margin account, reconciled on
+    the margin balance alone;
+  - Crypto Loans (`loan-flexible-ongoing`, `vip-loan-ongoing`): the debt of the ongoing loans,
+    a negative holding (a liability);
+  - Portfolio Margin (`pm-balance`, with `pm-account` stored), while Binance's account
+    information says it is on: each asset's wallet balance less what it borrowed and the
+    interest on it (a borrowed asset is a negative holding) plus its unrealised USDⓈ-M and
+    COIN-M profit, reconciled without the unrealised profit. Its records are not posted. It
+    takes the place of Cross Margin and the two futures wallets, so those are not asked while
+    it is on and report nothing; the sync that sees it off asks them again and Portfolio
+    Margin reports nothing. An asset is never counted on both sides: the switch shows as
+    reconciliation differences.
+  - Trading Bots and Copy Trading, from Binance's wallet list. Binance lists no records for
+    them, so each change of theirs shows as a reconciliation difference.
+  - Pending redemptions: what a redemption Binance pays out later has bought, until it arrives
+    on Spot.
+
+  A product the account does not have (a margin account Binance says it has not created, an
+  account without options) is skipped. Any other wallet with a balance in Binance's wallet
+  list is counted from that list, per asset, and flagged by name, and still gets an account;
+  one whose balance is not zero but which lists no asset is flagged by name.
 - **Fiat on Binance** (an asset Binance marks as legal money, such as EUR) is the currency
   Lararium already has. If Lararium has no currency with that ISO 4217 code and no instrument
   for the code exists yet, the asset is not counted: the connection is flagged with the code,
@@ -862,12 +885,100 @@ What is built so far (phase A):
   on: at the next report the crypto instrument reads 0 and the currency the amount, two equal
   and opposite reconciliation differences that stay open, and the earlier postings stay on the
   crypto instrument until Lararium replays its records.
-- **Records**: deposits, withdrawals, spot trades, convert, asset dividends and flexible Earn
-  (subscriptions, redemptions and rewards).
+- **Records.** Every record type Binance's read API documents is fetched and stored with one
+  typed column per field, and posted where it moves a balance:
+  - Deposits and withdrawals (`deposits`, `withdrawals`; a withdrawal's fee is its own
+    posting), spot trades (`my-trades`), convert (`convert`) and asset dividends
+    (`dividends`). The travel-rule deposit and withdrawal histories (`travel-deposits`,
+    `travel-withdrawals`) are stored and linked to the deposit or withdrawal they describe,
+    never posted a second time.
+  - Wallet-to-wallet transfers (`universal-transfer`): each is one transaction on the two
+    wallets' accounts, never a transfer in transit. Transfers to and from isolated margin are
+    asked once per isolated pair the account has. A transfer that another history also lists
+    (a margin transfer, or a futures income or options bill row of type `TRANSFER`) is posted
+    once.
+  - Dust conversions into BNB (`dust`), with the service charge as a fee, and Cloud Mining
+    payments and refunds on Spot (`cloud-mining`).
+  - Flexible and locked Simple Earn and on-chain yields (`earn-flexible-subscriptions`,
+    `earn-flexible-redemptions`, `earn-flexible-rewards`, `earn-locked-subscriptions`,
+    `earn-locked-redemptions`, `earn-locked-rewards`, `onchain-subscriptions`,
+    `onchain-redemptions`, `onchain-rewards`): moves between a wallet and Earn, and rewards as
+    income. Their positions and accounts (`earn-flexible-position`, `earn-locked-position`,
+    `earn-account`, `onchain-locked-position`, `onchain-account`) and the flexible collateral
+    record (`earn-flexible-collateral`) are stored only. Every reward Binance paid out as an
+    asset dividend is posted once, as the dividend.
+  - BFUSD and RWUSD (`bfusd-subscriptions`, `bfusd-redemptions`, `bfusd-rewards`,
+    `rwusd-subscriptions`, `rwusd-redemptions`, `rwusd-rewards`, `bfusd-account`,
+    `rwusd-account`), ETH and SOL staking (`eth-stakes`, `eth-redemptions`, `wbeth-wraps`,
+    `wbeth-unwraps`, `sol-stakes`, `sol-redemptions`, `sol-boost-rewards`,
+    `eth-staking-account`, `sol-staking-account`, `sol-unclaimed-rewards`): swaps on Spot
+    between the asset and its token. A redemption that Binance pays out later waits on a
+    "Binance Pending redemptions" account until it arrives. WBETH and BNSOL rewards
+    (`wbeth-rewards`, `bnsol-rewards`) accrue inside the token's rate and are stored only.
+  - Soft Staking (`soft-staking-rewards`, `soft-staking-list`): rewards on Spot.
+  - Dual Investment and Discount Buy (`dci-positions`, `discount-positions`, `dci-accounts`,
+    `discount-accounts`): the invested asset moves to Earn and leaves it when the position
+    settles. Binance does not say what a position settles into, so what arrives on Spot shows
+    as a reconciliation difference.
+  - Crypto loans, flexible and VIP (`loan-flexible-borrows`, `loan-flexible-repays`,
+    `loan-flexible-ltv-adjustments`, `loan-flexible-liquidations`, `vip-loan-repays`,
+    `vip-loan-interest`, `vip-loan-requests`, `vip-loan-collateral-account`): a borrow moves
+    the coin to Spot against the debt and a repay moves it back; a VIP repay's interest is a
+    fee. Binance lists no interest for a flexible loan, so the growth of its debt between two
+    reports that no record explains is posted as its interest. A liquidation sells the
+    collateral from Earn. A loan's records never move its collateral: it stays in the wallet
+    Binance reports it in.
+  - Margin, cross and isolated (`margin-trades`, `margin-transfers`, `margin-borrow-repay`,
+    `margin-interest`, `margin-capital-flow`, `margin-liquidations`, `margin-small-liability`,
+    `margin-liquidation-loan`, `margin-liquidation-loan-repays`): a margin trade is posted as
+    a spot trade on its wallet; interest and the liquidation fee are fees. Borrowing and
+    repaying change no net quantity and are stored only, as are the capital flow, forced
+    liquidations, small liability exchanges and the liquidation loan.
+  - USDⓈ-M and COIN-M futures (`um-income`, `um-trades`, `um-balance`, `um-positions`,
+    `um-exchange-info`, `cm-income`, `cm-trades`, `cm-balance`, `cm-positions`,
+    `cm-exchange-info`): every income row is posted against Unassigned (commissions, funding
+    and insurance clearance paid as fees) except a transfer. Trades (fetched for the symbols
+    the income history names) and positions are stored only; a contract is never an
+    instrument. Each futures host's request limit is read from its own exchange information.
+  - Options (`opt-bill`, `opt-trades`, `opt-exercises`, `opt-positions`,
+    `opt-exchange-info`): every bill row is posted against Unassigned (fees paid as fees)
+    except a transfer. Trades (fetched for the symbols the bill names), exercises and
+    positions are stored only; a contract is never an instrument. The options host's request
+    limit is read from its own exchange information.
+  - Fiat by bank, card purchases and sales, P2P, Pay and rebates (`fiat-orders`,
+    `fiat-payments`, `c2c`, `pay`, `rebate`): a fiat deposit or withdrawal is a transfer
+    between your bank and "Binance Spot" (see [Fiat deposits from your
+    bank](#fiat-deposits-from-your-bank)); a card purchase is the fiat arriving from the card
+    and its swap for the crypto, with the fee (one paid from the cash balance is the swap
+    only); a P2P order is the same on "Binance Funding", at its unit price. Only completed
+    ones are posted. A Pay transaction moves what it paid or received on each wallet it drew
+    on (a combined payment on several) against Unassigned; a rebate is income on Spot, posted
+    once when an asset dividend paid it. Binance serves rebates from 10 June 2020 only, which
+    makes the first sync about 7 minutes longer. With a margin account, the borrow and repay
+    history is served in 6-day windows back to 2017: about 1,150 more requests on the first
+    sync (roughly 2 minutes), and as many again for each isolated margin pair. Each sync also
+    asks transfers between two isolated pairs once per ordered pair of pairs, N × (N − 1)
+    requests for N pairs.
 
-Spot, flexible Earn, deposits, withdrawals, trades, convert and dividends were checked
-against a real account. Funding and the rest of phase A's response shapes follow Binance's
-documentation and have not been checked against a real account.
+Checked against a real account: the key check and HMAC signing on `api.binance.com`,
+`fapi.binance.com` and `dapi.binance.com`; the Spot and Earn balances; deposits, withdrawals,
+spot trades, convert, asset dividends and flexible Earn, including exact Spot reconciliation
+and a reward paid out as a dividend.
+
+Built from Binance's documentation, not yet seen on a real account (the first real record of
+each is checked against its reconciliation, and a wrong rule is corrected then):
+
+- the Funding, Cross Margin, Isolated Margin, USDⓈ-M and COIN-M Futures, Options, Crypto Loans
+  and Portfolio Margin balances, and the wallet list's detail of Trading Bots and Copy Trading;
+- wallet-to-wallet transfers, dust conversions, Cloud Mining and the travel-rule histories;
+- locked Simple Earn, on-chain yields, the flexible collateral record, BFUSD and RWUSD, ETH
+  and SOL staking (WBETH and BNSOL included), Soft Staking, Dual Investment and Discount Buy;
+- crypto loans, flexible and VIP;
+- every margin, futures and options record, and Portfolio Margin's switch;
+- fiat by bank, card purchases and sales, P2P, Pay and rebates;
+- HMAC signing on the options and Portfolio Margin hosts (`eapi.binance.com`,
+  `papi.binance.com`), and Ed25519 signing;
+- which wallet each of these records lands in.
 
 ### 1. Create a reading-only API key
 
@@ -875,7 +986,15 @@ On Binance, create an API key with only **Enable Reading** ticked. Lararium chec
 permissions at the start of every sync: any other permission that is on, known or unknown,
 makes the sync refuse the key, and a key without **Enable Reading** is refused too. An IP
 restriction is optional. Both key types are accepted: HMAC ("system generated") and Ed25519
-("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only.
+("self-generated"). Note that Binance documents Ed25519 keys for `api.binance.com` only. If
+a futures, options or Portfolio Margin host refuses the key after `api.binance.com` accepted
+it, the connection is not rejected: that host is not read (it is asked again a week later, or
+at once when you update the key), and a warning names the host (for an Ed25519 key, it asks
+for an HMAC key to include it). Its wallets' earlier balances keep counting until it is read
+again, except Portfolio Margin's: while Portfolio Margin is on, the Cross Margin and futures
+wallets it holds count nothing, so if `papi.binance.com` refuses the key (as it may an Ed25519
+key), Portfolio Margin's assets are not counted at all. A key `api.binance.com` refuses is
+rejected.
 
 ### 2. Add the connection
 
@@ -908,6 +1027,22 @@ difference** and sends one notification. The balance stays what Binance reports;
 difference stays listed until a record explains it, and nothing is corrected automatically.
 Notifications never carry values, addresses or hashes.
 
+### What is reported instead of handled
+
+Lararium names, once, what it cannot handle. Each one is listed in the connection's warnings,
+and all the new ones of a sync come in one notification, on one line. Each names a field, a
+record type, a wallet, a symbol or an asset, never a value:
+
+- a permission of the key Lararium does not know (the key is also refused when it is on), a
+  wallet, field, record type, status or value Binance's documentation does not list;
+- Portfolio Margin being on: its balance is counted, its records are not posted;
+- Trading Bots or Copy Trading holding something: Binance lists no records for them, so each
+  change of theirs shows as a reconciliation difference;
+- a symbol you traded that Binance no longer lists: its trades cannot be fetched, so trades of
+  it that were not fetched before show as reconciliation differences;
+- an asset no source can price, and a fiat currency Lararium has no instrument for (it is not
+  counted).
+
 ### Withdrawals to your own wallet
 
 An on-chain withdrawal to an address Lararium doesn't know goes to Unassigned, and the address
@@ -916,6 +1051,17 @@ Accounts page and add the wallet's address as a **Chain address**, as in
 [Registering identifiers](#registering-identifiers). Withdrawals to it then show as transfers
 in transit, with the network fee posted separately. Each deposit and withdrawal also stores
 its transaction hash, network and addresses, so wallets can be paired by hash later.
+
+### Fiat deposits from your bank
+
+A fiat deposit or withdrawal by bank is a transfer between your bank account and "Binance Spot"
+once your bank's row names the account Binance's fiat channel pays into or from. Register that
+bank account, as your bank shows it, on the "Binance Spot" account (its **Identifiers**, as in
+[Registering identifiers](#registering-identifiers)), as you would for IBKR. A card purchase
+pairs with your card payment once Binance is registered as a **card merchant** of "Binance
+Spot". A P2P order's bank payment goes to someone else's account, so it never pairs by itself:
+pair the two by hand if you want them shown as one transfer. Unpaired, the bank's row and
+Binance's cancel out on Unassigned, so net worth is right either way.
 
 ### Prices
 
@@ -937,23 +1083,6 @@ Binance holdings are valued in EUR from a daily price for each asset:
   on every installation, with or without a Binance connection, so EUR prices can be shown in
   your reporting currency. They only fill days for which no other source has a rate between
   those two currencies.
-
-### What phase B adds
-
-Not built yet. When built, these will follow Binance's documentation and will not have been
-checked against a real account:
-
-- Wallet-to-wallet transfers, dust conversion and Cloud Mining, and the travel-rule deposit and
-  withdrawal histories
-- The other Earn products: locked, on-chain yields, BFUSD and RWUSD, ETH and SOL staking, Dual
-  Investment, Discount Buy and Soft Staking
-- Crypto loans, as debt
-- Margin, cross and isolated
-- USD-M and COIN-M futures
-- Options
-- Fiat orders, card payments, P2P, Pay and rebates
-- Portfolio Margin, and the Trading Bots and Copy Trading wallets, for which Binance lists no
-  records
 
 ## Connecting a Bitcoin wallet
 

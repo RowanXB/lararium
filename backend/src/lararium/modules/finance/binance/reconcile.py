@@ -42,6 +42,7 @@ from lararium.modules.finance import models
 from lararium.modules.finance.binance import notices
 from lararium.modules.finance.binance.accounts import ACCOUNT_MAP_KEY, wallet_name
 from lararium.modules.finance.binance.balances import millis
+from lararium.modules.finance.binance.fetch import record_type
 from lararium.modules.finance.binance.models import ReconciliationDifference
 from lararium.modules.finance.binance.records import Run
 from lararium.modules.finance.binance.tables import moment
@@ -87,10 +88,44 @@ class Difference:
         return (self.account_id, self.instrument_id, self.from_at, self.to_at)
 
 
-# An account's reports: one definition, which the opening uses too.
-# Phase A: every wallet's reports are its snapshots. Phase B gives the futures wallets theirs
-# from `wallet_balance` (Decision 11: their snapshot also carries unrealised profit), as a
-# second source beside these, with those accounts left out of them.
+# An account's reports: one definition, which the opening uses too. Every wallet's reports are
+# its snapshots, but a futures wallet's quantities are its account's `wallet_balance` (Decision
+# 11), and the Options wallet's its margin account's `margin_balance`: their snapshots also carry
+# unrealised profit, which no record explains.
+# The derivatives wallets' typed account reports, by wallet key: the label read, the report
+# table, its table of assets, and the column that holds what the records change.
+ACCOUNT_REPORTS: dict[str, tuple[str, str, str, str]] = {
+    "um_futures": (
+        "um-account",
+        "binance_um_account",
+        "binance_um_account_assets",
+        "wallet_balance",
+    ),
+    "cm_futures": (
+        "cm-account",
+        "binance_cm_account",
+        "binance_cm_account_assets",
+        "wallet_balance",
+    ),
+    "options": (
+        "opt-account",
+        "binance_opt_account",
+        "binance_opt_account_asset",
+        "margin_balance",
+    ),
+}
+# The wallets whose report has no row of its own per read (its answer is the list of its assets,
+# so an empty one stores nothing typed): the read itself, by the raw record of the read its
+# snapshots were cut from, and the fields of each asset, with their signs, that hold what the
+# records change. The Portfolio Margin wallet's is its `totalWalletBalance` less what it owes
+# (`crossMarginBorrowed`, `crossMarginInterest`), without the unrealised profit its snapshot also
+# carries (design 5.11).
+READ_REPORTS: dict[str, tuple[str, tuple[tuple[str, int], ...]]] = {
+    "portfolio_margin": (
+        "pm-balance",
+        (("totalWalletBalance", 1), ("crossMarginBorrowed", -1), ("crossMarginInterest", -1)),
+    ),
+}
 
 
 async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime]:
@@ -104,9 +139,26 @@ async def report_times(session: AsyncSession, account_id: UUID) -> list[datetime
     return list(rows)
 
 
-async def reported_at(session: AsyncSession, account_id: UUID, at: datetime) -> dict[UUID, Decimal]:
+async def reported_at(
+    session: AsyncSession, account_id: UUID, at: datetime, wallet: str | None = None
+) -> dict[UUID, Decimal]:
     """Each instrument's quantity in the account's report at `at` (the latest recorded of a
-    time). A report is complete: an instrument it does not list is 0 there."""
+    time). A report is complete: an instrument it does not list is 0 there.
+
+    A futures wallet's (`wallet`, `ACCOUNT_REPORTS`) is its wallet balance instead, the Options
+    wallet's its margin balance (`_wallet_balances`), when its account was read then; a daily
+    snapshot of the first sync was no read, and is a wallet balance itself; nor is the empty
+    report of a wallet Portfolio Margin holds (`balances.empty_reports`), which is 0. The
+    Portfolio Margin wallet's (`READ_REPORTS`) is its wallet balance net of its debt in the read
+    made then (`_read_balances`)."""
+    if wallet in ACCOUNT_REPORTS:
+        found = await _wallet_balances(session, account_id, ACCOUNT_REPORTS[wallet], at)
+        if found is not None:
+            return found
+    if wallet in READ_REPORTS:
+        found = await _read_balances(session, account_id, READ_REPORTS[wallet], at)
+        if found is not None:
+            return found
     s = models.BalanceSnapshot
     rows = await session.execute(
         select(s.instrument_id, s.quantity)
@@ -115,6 +167,96 @@ async def reported_at(session: AsyncSession, account_id: UUID, at: datetime) -> 
         .order_by(s.instrument_id, s.recorded_at.desc(), s.id.desc())
     )
     return {row.instrument_id: row.quantity for row in rows}
+
+
+async def _read_at(
+    session: AsyncSession, connection_id: UUID | None, label: str, at: datetime
+) -> UUID | None:
+    """The raw record of the label's read made at `at` (its `read_from`), the latest if several;
+    None when no read of the label was made then."""
+    return await session.scalar(
+        text(
+            "select id from core.raw_records where connection_id = :c and record_type = :t"
+            " and (content ->> 'read_from_ms')::bigint = :ms order by id desc limit 1"
+        ),
+        {"c": connection_id, "t": record_type(label), "ms": millis(at)},
+    )
+
+
+async def _wallet_balances(
+    session: AsyncSession, account_id: UUID, report: tuple[str, str, str, str], at: datetime
+) -> dict[UUID, Decimal] | None:
+    """Each instrument's balance without unrealised profit (`report`'s column: a futures
+    account's `wallet_balance`, the options account's `margin_balance`) in the account's typed
+    report at `at`: the latest stored at or before it, since an answer is stored only when it
+    changed (`balances.store_reports`), so the one before is what the read at `at` said. None
+    when the account was not read at `at` (a daily snapshot, an empty report): nothing typed is
+    stored then and no raw read of the label was made then. A report states the column for
+    every asset (`balances` refuses one that does not)."""
+    label, table, assets, column = report
+    connection_id = await session.scalar(
+        select(models.Account.source_connection_id).where(models.Account.id == account_id)
+    )
+    read = await session.scalar(
+        text(
+            f"select max(snapshot_at) from finance.{table}"
+            " where connection_id = :c and snapshot_at <= :t"
+        ),
+        {"c": connection_id, "t": at},
+    )
+    if read is None:
+        return None
+    if read != at and await _read_at(session, connection_id, label, at) is None:
+        return None
+    rows = await session.execute(
+        text(
+            f"select i.instrument_id, sum(a.{column}) as held"
+            f" from finance.{assets} a"
+            " join finance.instrument_identifiers i"
+            "  on i.scheme = 'binance_asset' and i.value = a.asset"
+            " where a.connection_id = :c and a.snapshot_at = :s"
+            " group by i.instrument_id"
+        ),
+        {"c": connection_id, "s": read},
+    )
+    return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
+
+
+async def _read_balances(
+    session: AsyncSession,
+    account_id: UUID,
+    report: tuple[str, tuple[tuple[str, int], ...]],
+    at: datetime,
+) -> dict[UUID, Decimal] | None:
+    """Each instrument's `report` fields, signed (the Portfolio Margin wallet's
+    `totalWalletBalance` less its debt), in the read made at `at` (its `read_from`, the
+    snapshots' `as_of`), summed per asset; None when no read was made then (an empty report).
+    An empty answer is an empty report. A read states each field for every asset (`balances`
+    refuses one that does not)."""
+    label, fields = report
+    connection_id = await session.scalar(
+        select(models.Account.source_connection_id).where(models.Account.id == account_id)
+    )
+    read = await _read_at(session, connection_id, label, at)
+    if read is None:
+        return None
+    terms = " + ".join(f":s{i} * (e ->> :f{i})::numeric" for i in range(len(fields)))
+    rows = await session.execute(
+        text(
+            f"select i.instrument_id, sum({terms}) as held"
+            " from core.raw_records r"
+            " cross join lateral jsonb_array_elements(r.content -> 'body') e"
+            " join finance.instrument_identifiers i"
+            "  on i.scheme = 'binance_asset' and i.value = e ->> 'asset'"
+            " where r.id = :r group by i.instrument_id"
+        ),
+        {
+            "r": read,
+            **{f"f{i}": name for i, (name, _) in enumerate(fields)},
+            **{f"s{i}": sign for i, (_, sign) in enumerate(fields)},
+        },
+    )
+    return {row.instrument_id: Decimal(row.held) for row in rows if row.held != 0}
 
 
 async def _posted(
@@ -250,7 +392,8 @@ async def check(
     for account_id, low, high in _pending(config):
         spans[account_id].append((low, high))
     accounts = list(await session.scalars(_owned(connection_id).order_by(models.Account.id)))
-    earn = {a for a, key in (await wallets(session, connection_id)).items() if key == _EARN}
+    owned = await wallets(session, connection_id)
+    earn = {a for a, key in owned.items() if key == _EARN}
     decimals: dict[UUID, int] = {}
     found: list[Difference] = []
     with localcontext(prec=MAX_PREC):
@@ -261,8 +404,9 @@ async def check(
                 held = any(low <= to_at and from_at < high for low, high in spans[account_id])
                 if not fresh and not held:
                     continue
-                before = await reported_at(session, account_id, from_at)
-                after = await reported_at(session, account_id, to_at)
+                wallet = owned.get(account_id)
+                before = await reported_at(session, account_id, from_at, wallet)
+                after = await reported_at(session, account_id, to_at, wallet)
                 posted = await _posted(session, account_id, from_at, to_at)
                 for instrument_id in sorted({*before, *after, *posted}):
                     zero = Decimal(0)
