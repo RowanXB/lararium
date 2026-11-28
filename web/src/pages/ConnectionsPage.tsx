@@ -1021,40 +1021,6 @@ function MultilineField({
   );
 }
 
-// The server's own words for a seed phrase, shown before anything is sent.
-const SEED_MESSAGE =
-  "This looks like a seed phrase. Never enter it anywhere: Lararium needs the master public key from Wallet → Information.";
-const SEED_MIN_WORDS = 12;
-// A seed's words in any case: written out by hand, they are often in capitals.
-const SEED_WORD = /^[a-z]{3,8}$/i;
-
-// How many words the text is when it is nothing but short lowercase words, as a seed phrase
-// is (or the start of one); undefined otherwise. Such text is never sent.
-function seedWords(text: string): number | undefined {
-  const tokens = text.split(/\s+/).filter(Boolean);
-  return tokens.length > 0 && tokens.every((token) => SEED_WORD.test(token))
-    ? tokens.length
-    : undefined;
-}
-
-// The shape of each form's public material, line by line. Anything else (a seed phrase in
-// any language, case or layout, a sentence) is never sent: only text shaped like the chosen
-// material leaves the browser.
-const PUBLIC_ENTRY: Record<WalletForm, RegExp> = {
-  electrum: /^(?:[xyzYZ]pub[1-9A-HJ-NP-Za-km-z]{100,}|[0-9a-f]{128})$/,
-  descriptor: /^[a-z_]+\(.+\)(?:#[0-9a-z]{8})?$/,
-  addresses: /^(?:[13][1-9A-HJ-NP-Za-km-z]{25,34}|bc1[0-9a-z]{8,87}|BC1[0-9A-Z]{8,87})$/,
-};
-const NOT_PUBLIC_MESSAGE: Record<WalletForm, string> = {
-  electrum: "A line doesn't look like a master public key. Never enter a seed phrase anywhere.",
-  descriptor: "A line doesn't look like an output descriptor. Never enter a seed phrase anywhere.",
-  addresses: "A line doesn't look like a Bitcoin address. Never enter a seed phrase anywhere.",
-};
-
-function looksPublic(form: WalletForm, entries: string[]): boolean {
-  return entries.every((entry) => PUBLIC_ENTRY[form].test(entry));
-}
-
 // The gap limits of the first descriptor (an Electrum wallet's only one), as the API takes
 // them; an empty field keeps the default.
 function firstGaps(receiving: string, change: string): Record<string, number> {
@@ -1109,9 +1075,6 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
   const [done, setDone] = useState<string>();
 
   const entries = lines(material);
-  const seedCount = seedWords(material);
-  const notPublic =
-    entries.length > 0 && seedCount === undefined && !looksPublic(walletForm, entries);
   const isMultisig = walletForm === "electrum" && electrumType === "multisig";
   const wallet: BitcoinPreviewInWritable =
     walletForm === "electrum"
@@ -1132,12 +1095,7 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
     setPreviewError(undefined);
     const body = JSON.parse(walletKey) as BitcoinPreviewInWritable;
     const given = body.keys ?? body.descriptors ?? body.addresses ?? [];
-    if (
-      given.length === 0 ||
-      seedWords(given.join("\n")) !== undefined ||
-      !looksPublic(body.form, given)
-    )
-      return;
+    if (given.length === 0) return;
     let current = true;
     const timer = setTimeout(() => {
       previewBitcoinWallet({ body, throwOnError: true }).then(
@@ -1171,16 +1129,6 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
     event.preventDefault();
     setError(undefined);
     setDone(undefined);
-    if (seedCount !== undefined) {
-      setMaterial("");
-      setError(SEED_MESSAGE);
-      return;
-    }
-    // Kept as typed, to be corrected: it is no seed phrase, and a long list keeps its lines.
-    if (notPublic) {
-      setError(NOT_PUBLIC_MESSAGE[walletForm]);
-      return;
-    }
     const branches = firstGaps(receivingGap, changeGap);
     mutation.mutate(
       {
@@ -1256,16 +1204,6 @@ function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
               First receiving address ({preview.script_type}):{" "}
               <code className="break-all">{preview.first_receiving_address}</code>. Check that
               it is the first address your wallet shows.
-            </p>
-          )}
-          {seedCount !== undefined && seedCount >= SEED_MIN_WORDS && (
-            <p role="alert" className="text-sm text-destructive sm:col-span-2">
-              {SEED_MESSAGE}
-            </p>
-          )}
-          {notPublic && (
-            <p role="alert" className="text-sm text-destructive sm:col-span-2">
-              {NOT_PUBLIC_MESSAGE[walletForm]}
             </p>
           )}
           {previewError && (

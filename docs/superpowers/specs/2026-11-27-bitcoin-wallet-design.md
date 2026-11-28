@@ -146,7 +146,7 @@ The parent spec's M8 is Bitcoin and EVM chains. The owner holds only bitcoin, in
 - **Storage.** The owner's input and the descriptors are a credential (encrypted at rest, purpose `descriptor`): a master public key reveals every past and future address. The connection's config holds what is not secret: the form, the wallet type, the gap limits and a fingerprint (the SHA-256 of the sorted descriptors) that refuses connecting the same wallet twice (409, as for a duplicate Binance account). No secret is needed to read the chain, so `check_access` returns true.
 - **Gap limits**, per branch and changeable on the connection: 20 receiving and 10 change for Electrum keys (Electrum's defaults), 20 and 20 for descriptors (BIP 44). An address list has none.
   - Changed on the connection card through `PATCH /api/v1/connections/{id}/bitcoin/gaps`; a change requests a sync. (decided during implementation, 2026-11-27)
-  - Inputs are capped: at most 20 keys, 2 descriptors and 10,000 addresses; a key or address at most 1,000 characters, a descriptor at most 10,000. The web form also refuses, before sending anything, text made only of short lowercase words (a seed phrase). (decided during implementation, 2026-11-27)
+  - Inputs are capped: at most 20 keys, 2 descriptors and 10,000 addresses; a key or address at most 1,000 characters, a descriptor at most 10,000. (decided during implementation, 2026-11-27) Private material is refused by the server only: the web form sends what it is given, and the server refuses it without storing, logging or echoing it. Entering a seed phrase or a private key is the person's mistake, not one the code guards against twice (owner, 2026-11-28).
 
 ### 5.2 Fetching and pacing
 
