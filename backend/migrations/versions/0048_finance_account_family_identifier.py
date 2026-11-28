@@ -16,7 +16,9 @@ account its Notes name as sent to: `trading212_export_rows.notes_sort_code` and
 `notes_account_number` (digits only).
 
 Downgrading clears `counterparty_identifier_id` on the transactions naming such a row,
-deletes the rows, restores the kind CHECK as 0041 left it and drops the four columns.
+deletes the rows, removes `family_notes` from stored profiles and staged batches (the older
+code refuses a config with it), restores the kind CHECK as 0041 left it and drops the four
+columns.
 
 Revision ID: 0048
 Revises: 0047
@@ -67,6 +69,11 @@ DOWNGRADE = [
     " WHERE counterparty_identifier_id IN"
     " (SELECT id FROM finance.account_identifiers WHERE kind = 'account_family')",
     "DELETE FROM finance.account_identifiers WHERE kind = 'account_family'",
+    # Every CSV config is stored with the key, null where unset; the older code refuses it.
+    "UPDATE finance.import_profiles SET config = config - 'family_notes'"
+    " WHERE config ? 'family_notes'",
+    "UPDATE finance.import_batches SET profile_config = profile_config - 'family_notes'"
+    " WHERE profile_config ? 'family_notes'",
     """
     ALTER TABLE finance.account_identifiers
       DROP CONSTRAINT account_identifiers_account_family_check
