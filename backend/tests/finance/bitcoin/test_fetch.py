@@ -235,6 +235,30 @@ async def test_a_short_history_answer_is_asked_again_in_full(
     assert chain.asked_txs() == []
 
 
+async def test_a_history_lagging_its_count_is_walked_again(
+    session, run, chain: FakeEsplora
+) -> None:
+    """A walk that stops where the last whole history was is whole only when what it saw anew
+    accounts for the count's growth: a history answer lagging the stats' new count leaves
+    the history to be walked again, and the late transaction is stored when it shows."""
+    chain.add(_receive(1, receiving(0), height=TIP - 100))
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+
+    late = chain.add(_receive(2, receiving(0), height=TIP))
+    chain.lagging.add(late["txid"])
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    stored = "select count(*) from finance.bitcoin_transactions where txid = :t"
+    assert (await _rows(session, stored, t=late["txid"]))[0][0] == 0
+
+    chain.lagging.clear()
+    chain.requests.clear()
+    result = await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert f"/address/{receiving(0)}/txs" in chain.asked_txs()
+    assert (await _rows(session, stored, t=late["txid"]))[0][0] == 1
+    assert late["txid"] in result.changed_txids
+
+
 async def test_recheck_detects_a_dropped_transaction(session, run, chain: FakeEsplora) -> None:
     unconfirmed = chain.add(_receive(1, receiving(0), height=TIP - 1))  # 2 confirmations
     dropped = chain.add(_receive(2, receiving(1), height=TIP - 1))

@@ -120,6 +120,9 @@ class FakeEsplora:
         # Address -> how many more first history pages to answer with only the newest
         # confirmed transaction (a server answering short of its own count).
         self.short_history: dict[str, int] = {}
+        # Transaction ids the next history answers leave out, though the stats count them (a
+        # backend whose history lags its counts); each is shown again once cleared.
+        self.lagging: set[str] = set()
         self.now = Decimal(1000)
 
     # Pacing: a fake clock that sleeping advances.
@@ -201,7 +204,7 @@ class FakeEsplora:
         if parts[0] == "address" and len(parts) == 2:
             return self._json(self.stats(parts[1]))
         if parts[0] == "address" and parts[2:] == ["txs"]:
-            history = self.history(parts[1])
+            history = [tx for tx in self.history(parts[1]) if tx["txid"] not in self.lagging]
             mempool = [tx for tx in history if not tx["status"]["confirmed"]][:MEMPOOL_PAGE]
             confirmed = [tx for tx in history if tx["status"]["confirmed"]][:PAGE]
             if self.short_history.get(parts[1], 0) > 0:

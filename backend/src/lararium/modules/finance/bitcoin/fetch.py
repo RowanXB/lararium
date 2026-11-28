@@ -374,6 +374,9 @@ class _Fetch:
         # scans that far, as an address once used can be paid again.
         self.highest_used: dict[tuple[str, int], int] = {}
         self.stored_confirmed: set[str] = set()
+        # Every transaction stored, whatever its status: what a walk that stops early saw
+        # anew is the history's growth it can account for.
+        self.stored_txids: set[str] = set()
         self.scanned: dict[str, AddressStats] = {}
         self.unknown: set[str] = set()
 
@@ -498,12 +501,14 @@ class _Fetch:
             self.highest_used = {(source, branch): top for source, branch, top in used}
             found = await session.execute(
                 text(
-                    "select txid from finance.bitcoin_transactions"
-                    " where connection_id = :c and confirmed is true"
+                    "select txid, confirmed is true from finance.bitcoin_transactions"
+                    " where connection_id = :c"
                 ),
                 params,
             )
-            self.stored_confirmed = set(found.scalars())
+            rows = found.all()
+            self.stored_txids = {txid for txid, _ in rows}
+            self.stored_confirmed = {txid for txid, confirmed in rows if confirmed}
 
     async def _address(self, position: _Position) -> bool:
         """Scan one address, and fetch its history if it changed; whether it was ever used."""
@@ -559,7 +564,7 @@ class _Fetch:
             )
         stored = self.histories.get(address, _Stored())
         if total != (stored.count or 0) or chain.tx_count != (stored.chain_count or 0):
-            await self._history(position, address, stats, stored.height)
+            await self._history(position, address, stats, stored)
         return total > 0
 
     def _reaches_stored(self, txs: Sequence[Tx], stored_height: int | None) -> bool:
@@ -576,7 +581,7 @@ class _Fetch:
         )
 
     async def _history(
-        self, position: _Position, address: str, stats: AddressStats, stored_height: int | None
+        self, position: _Position, address: str, stats: AddressStats, stored: _Stored
     ) -> None:
         """The address's history, newest first, until it reaches what was stored or ends;
         stored whole, with the count it holds, in one transaction.
@@ -597,7 +602,7 @@ class _Fetch:
             raise MalformedResponse("txs", "the body")
         truncated = sum(1 for tx in txs if not tx.status.confirmed) < stats.mempool.tx_count
         ended = False
-        while not self._reaches_stored(txs, stored_height):
+        while not self._reaches_stored(txs, stored.height):
             confirmed = [tx for tx in txs if tx.status.confirmed]
             if len(confirmed) < CHAIN_PAGE:
                 ended = True
@@ -613,7 +618,15 @@ class _Fetch:
             if len(seen) > total:
                 raise MalformedResponse("txs", "the body")
             pages.append(_Page(position.request(TXS_AFTER, last_seen_txid=after), body, txs))
-        count = None if truncated else len(seen) if ended else total
+        if truncated:
+            count = None
+        elif ended:
+            count = len(seen)
+        else:
+            # Stopped where the last whole history was: it holds what was stored then and
+            # what this walk saw anew. Short of the stats' count (a server whose history
+            # lags its counts), the history is not whole, and the next sync walks it again.
+            count = (stored.count or 0) + len(seen - self.stored_txids)
         # The tip is kept as where later walks may stop only when the stored history is
         # whole: one the server answered short of its own count would otherwise become a
         # stopping point, and the missing transactions would never be asked again.
