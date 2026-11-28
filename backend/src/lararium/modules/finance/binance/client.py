@@ -168,6 +168,18 @@ class Ed25519Signer:
         return "Ed25519Signer()"
 
 
+class _PublicSigner:
+    """A public client's: it holds no secret, so a signed query is refused before it is sent."""
+
+    kind: Literal["hmac", "ed25519"] = "hmac"
+
+    def sign(self, payload: str) -> str:
+        raise RequestRefused("Binance request refused: a public client sends no signed query")
+
+    def __repr__(self) -> str:
+        return "_PublicSigner()"
+
+
 def wall_clock() -> int:
     return time.time_ns() // 1_000_000
 
@@ -266,6 +278,14 @@ class BinanceClient:
         self._offset = 0
         # Per limit kind; a task that reads a host's own limits replaces its entry.
         self.caps = dict(DEFAULT_CAPS)
+
+    @classmethod
+    def public(
+        cls, http: httpx.AsyncClient, *, clock: Clock = wall_clock, sleep: Sleep = real_sleep
+    ) -> "BinanceClient":
+        """A client with no key, for the catalogue's public queries (market data): what prices
+        an asset held where there is no Binance connection. A signed query is refused."""
+        return cls(http, Secret(""), _PublicSigner(), clock=clock, sleep=sleep)
 
     def __repr__(self) -> str:
         return "BinanceClient()"

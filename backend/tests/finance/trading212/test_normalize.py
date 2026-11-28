@@ -151,6 +151,7 @@ class Ledger:
 
     async def context(self, sync_id: uuid.UUID | None = None) -> SyncContext:
         self.ctx = SyncContext(
+            esplora_url="https://esplora.test/api",
             command=CommandContext(self.session, CONNECTOR, uuid.uuid4()),
             connection=await get_connection(self.session, self.connection.id),
             sync_id=sync_id or uuid.uuid4(),

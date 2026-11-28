@@ -10,6 +10,7 @@ import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -28,7 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.config import Settings, load_master_key
@@ -87,7 +88,23 @@ from lararium.modules.finance.binance.sync import (
     pass_gate,
     uid_of,
 )
-from lararium.modules.finance.errors import ReviewNotFoundError
+from lararium.modules.finance.bitcoin.derive import Branch, Wallet, build_wallet
+from lararium.modules.finance.bitcoin.keys import (
+    ElectrumType,
+    PrivateMaterialError,
+    UnsupportedNetworkError,
+    WalletForm,
+    WalletInput,
+    parse_input,
+)
+from lararium.modules.finance.bitcoin.sync import (
+    DESCRIPTOR_PURPOSE,
+    GAPS_KEY,
+    input_json,
+    load_input,
+)
+from lararium.modules.finance.connector_flags import RECONCILIATION_KEYS
+from lararium.modules.finance.errors import FinanceValidationError, ReviewNotFoundError
 from lararium.modules.finance.etoro.client import GATE_MESSAGE, EtoroClient, ReadOnlyGateError
 from lararium.modules.finance.etoro.normalize import EtoroDataError
 from lararium.modules.finance.etoro.normalize import normalize as etoro_normalize
@@ -227,6 +244,8 @@ class ConnectionOut(BaseModel):
     webhook_enabled: bool
     # A Binance connection's own state; None for every other connector.
     binance: "BinanceConnectionState | None" = None
+    # A Bitcoin wallet's own state; None for every other connector.
+    bitcoin: "BitcoinStateOut | None" = None
 
 
 class BinanceDifferenceOut(BaseModel):
@@ -315,6 +334,60 @@ class BinanceConnectionCreate(_BinanceKey):
 
 class BinanceConnectionUpdate(_BinanceKey):
     pass
+
+
+class BitcoinPreviewIn(BaseModel):
+    """A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
+    are secret: a master public key reveals every address the wallet will ever use. Checked in
+    the route (keys.py), whose messages never repeat the input."""
+
+    form: WalletForm
+    electrum_type: ElectrumType | None = None
+    keys: list[SecretStr] = []
+    # The m of an m-of-n multisig wallet.
+    threshold: int | None = None
+    descriptors: list[SecretStr] = []
+    addresses: list[SecretStr] = []
+
+
+class BitcoinWalletCreate(BitcoinPreviewIn):
+    display_name: str = Field(min_length=1, max_length=200)
+    # Per source ("d0", "d1", … in descriptor order) and branch ("0" receiving, "1" change):
+    # the gap limit replacing the default. Checked in the route, so that any limit that is not
+    # valid gets the same message.
+    gaps: dict[str, dict[str, Any]] | None = None
+
+
+class BitcoinGapsUpdate(BaseModel):
+    # As on create; replaces the stored limits in full (an empty map restores the defaults).
+    gaps: dict[str, dict[str, Any]]
+
+
+class BitcoinPreviewOut(BaseModel):
+    first_receiving_address: str
+    script_type: str
+
+
+class BitcoinBranchesOut(BaseModel):
+    receiving: int
+    change: int
+
+
+class BitcoinStateOut(BaseModel):
+    """What the connection card shows; never a key, a descriptor or an address."""
+
+    form: WalletForm
+    electrum_type: ElectrumType | None
+    scanned: BitcoinBranchesOut
+    used: BitcoinBranchesOut
+    # "agrees", or the difference the last balance check found; None before the first check.
+    last_check: str | None
+    # Transactions the server reports that are not confirmed yet.
+    unconfirmed: int
+    # The Esplora server's host (and port): never its path or query, which may hold a key.
+    server: str
+    # The gap limits set in place of the defaults, as on create; empty when none are.
+    gaps: dict[str, dict[str, int]]
 
 
 class IbkrUploadOut(BaseModel):
@@ -442,6 +515,8 @@ async def _out_with_state(
     out = _out(record, settings)
     if record.connector == "binance":
         out.binance = await _binance_state(session, record)
+    elif record.connector == "bitcoin":
+        out.bitcoin = await _bitcoin_state(session, record, settings)
     return out
 
 
@@ -941,6 +1016,7 @@ async def upload_ibkr_statement(
         async with healing_command(session, actor, "upload_ibkr_statement", args) as ctx:
             sync_id = (await session.execute(select(func.uuidv7()))).scalar_one()
             sync_ctx = SyncContext(
+                esplora_url=settings.esplora_url,
                 command=ctx,
                 connection=connection,
                 sync_id=sync_id,
@@ -1071,6 +1147,7 @@ def _upload_sync_context(
     session_factory: SessionFactoryDep,
 ) -> SyncContext:
     return SyncContext(
+        esplora_url=settings.esplora_url,
         command=ctx,
         connection=connection,
         sync_id=sync_id,
@@ -1469,6 +1546,306 @@ async def update_binance_connection(
         if moved is not None:
             await reset_failures(ctx, connection_id)
         # As "Sync now" does: the queued sync runs although the last one is recent.
+        await request_sync(ctx, connection_id)
+        record = await get_connection(session, connection_id)
+    await defer_sync(connection_id)
+    return await _out_with_state(session, record, settings)
+
+
+# Bitcoin wallet (design 5.1 and 5.10)
+
+# Serialises creates, so two that name one wallet can't both pass the check for it.
+BITCOIN_CREATE_LOCK = 7_104_002
+MAX_GAP_LIMIT = 1000
+_BRANCH_NAMES: dict[int, str] = {0: "receiving", 1: "change"}
+_GAP_BRANCHES: dict[str, Branch] = {"0": 0, "1": 1}
+MAX_WALLET_KEYS = 20
+MAX_WALLET_DESCRIPTORS = 2
+MAX_WALLET_ADDRESSES = 10_000
+MAX_ENTRY_CHARS = 1000
+_WALLET_UNREADABLE = "The Bitcoin wallet's stored keys or addresses could not be read."
+
+
+def _capped(body: BitcoinPreviewIn) -> None:
+    """Refuse an input too large to be a wallet, before reading any of it."""
+    counts = (
+        (
+            body.keys,
+            MAX_WALLET_KEYS,
+            f"A wallet takes at most {MAX_WALLET_KEYS} master public keys.",
+        ),
+        (
+            body.descriptors,
+            MAX_WALLET_DESCRIPTORS,
+            f"A wallet takes at most {MAX_WALLET_DESCRIPTORS} output descriptors.",
+        ),
+        (
+            body.addresses,
+            MAX_WALLET_ADDRESSES,
+            f"An address list takes at most {MAX_WALLET_ADDRESSES:,} addresses.",
+        ),
+    )
+    for entries, most, message in counts:
+        if len(entries) > most:
+            raise _unprocessable("wallet_invalid", message)
+    # A descriptor of a large multisig wallet is several keys long (20 xpubs with origins are
+    # some 3,000 characters), so it gets Binance's key limit; a key or an address is short.
+    entries = [*body.keys, *body.addresses]
+    if any(len(e.get_secret_value()) > MAX_ENTRY_CHARS for e in entries) or any(
+        len(d.get_secret_value()) > MAX_KEY_CHARS for d in body.descriptors
+    ):
+        raise _unprocessable("wallet_invalid", "A key, descriptor or address is too long.")
+
+
+def _wallet_refused(error: FinanceValidationError) -> HTTPException:
+    """The 422 for a wallet keys.py or derive.py refused: their fixed message, never the input."""
+    if isinstance(error, PrivateMaterialError):
+        code = "private_material"
+    elif isinstance(error, UnsupportedNetworkError):
+        code = "unsupported_network"
+    else:
+        code = "wallet_invalid"
+    return _unprocessable(code, str(error))
+
+
+def _bitcoin_wallet(body: BitcoinPreviewIn) -> tuple[WalletInput, Wallet]:
+    """The validated input and the wallet it derives, locally: nothing is asked of a server."""
+    _capped(body)
+    raw = WalletInput(
+        body.form,
+        body.electrum_type,
+        tuple(key.get_secret_value() for key in body.keys),
+        body.threshold,
+        tuple(d.get_secret_value() for d in body.descriptors),
+        tuple(a.get_secret_value() for a in body.addresses),
+    )
+    try:
+        spec = parse_input(raw)
+        return spec, build_wallet(spec)
+    except FinanceValidationError as error:
+        raise _wallet_refused(error) from None
+
+
+def _checked_gaps(wallet: Wallet, given: Mapping[str, Mapping[str, Any]]) -> dict[str, JSONValue]:
+    """The gap limits to store, as the config keeps them: only the wallet's sources and
+    branches, each limit a whole number from 1 to MAX_GAP_LIMIT."""
+    invalid = _unprocessable("gap_invalid", "A gap limit is not valid.")
+    branches = {source.name: set(source.gaps) for source in wallet.sources}
+    gaps: dict[str, JSONValue] = {}
+    for source, limits in given.items():
+        have = branches.get(source)
+        if have is None or not limits:
+            raise invalid
+        checked: dict[str, JSONValue] = {}
+        for branch, limit in limits.items():
+            if (
+                _GAP_BRANCHES.get(branch) not in have
+                or not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or not 1 <= limit <= MAX_GAP_LIMIT
+            ):
+                raise invalid
+            checked[branch] = limit
+        gaps[source] = checked
+    return gaps
+
+
+def _server(esplora_url: str) -> str:
+    """The server's host and port: its user, path and query may hold a key."""
+    parts = urlsplit(esplora_url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    return host if parts.port is None else f"{host}:{parts.port}"
+
+
+def _last_check(cursor: JSONValue) -> str | None:
+    """What the last balance check published (connector_flags' reconciliation part)."""
+    held = cursor.get(RECONCILIATION_KEYS[0]) if isinstance(cursor, dict) else None
+    if not isinstance(held, dict):
+        return None
+    warnings = sorted(
+        {w for part in held.values() if isinstance(part, list) for w in part if isinstance(w, str)}
+    )
+    return "\n".join(warnings) if warnings else "agrees"
+
+
+async def _bitcoin_state(
+    session: AsyncSession, record: ConnectionRecord, settings: Settings
+) -> BitcoinStateOut:
+    counts = await session.execute(
+        text(
+            "select branch, count(*) as scanned, count(first_used_at) as used"
+            " from finance.bitcoin_addresses where connection_id = :c group by branch"
+        ),
+        {"c": record.id},
+    )
+    scanned = dict.fromkeys(_BRANCH_NAMES.values(), 0)
+    used = dict(scanned)
+    for row in counts:
+        name = _BRANCH_NAMES[row.branch]
+        scanned[name], used[name] = row.scanned, row.used
+    # A transaction the server no longer knows has no seen_at_height: it is not waiting.
+    unconfirmed = await session.scalar(
+        text(
+            "select count(*) from finance.bitcoin_transactions where connection_id = :c"
+            " and confirmed is false and seen_at_height is not null"
+        ),
+        {"c": record.id},
+    )
+    form = record.config.get("form")
+    kind = record.config.get("electrum_type")
+    stored = record.config.get(GAPS_KEY)
+    gaps = {
+        source: {b: n for b, n in limits.items() if isinstance(n, int)}
+        for source, limits in (stored.items() if isinstance(stored, dict) else ())
+        if isinstance(limits, dict)
+    }
+    return BitcoinStateOut(
+        form=cast(WalletForm, form),
+        electrum_type=cast(ElectrumType | None, kind),
+        scanned=BitcoinBranchesOut(**scanned),
+        used=BitcoinBranchesOut(**used),
+        last_check=_last_check(record.cursor),
+        unconfirmed=unconfirmed or 0,
+        server=_server(settings.esplora_url),
+        gaps=gaps,
+    )
+
+
+@router.post("/bitcoin/preview", name="preview_bitcoin_wallet")
+async def preview_bitcoin_wallet(body: BitcoinPreviewIn) -> BitcoinPreviewOut:
+    """The wallet's first receiving address, to compare with the wallet's own before saving.
+    Derived here, stored nowhere, asked of no server."""
+    _, wallet = _bitcoin_wallet(body)
+    address, script_type = wallet.address(wallet.sources[0].name, 0, 0)
+    return BitcoinPreviewOut(first_receiving_address=address, script_type=script_type)
+
+
+@router.post("/bitcoin", name="create_bitcoin_connection", status_code=status.HTTP_201_CREATED)
+async def create_bitcoin_connection(
+    body: BitcoinWalletCreate, request: Request, session: SessionDep, actor: ActorDep
+) -> ConnectionOut:
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    spec, wallet = _bitcoin_wallet(body)
+    gaps = _checked_gaps(wallet, body.gaps or {})
+    config: dict[str, JSONValue] = {
+        "form": spec.form,
+        "electrum_type": spec.electrum_type,
+        "fingerprint": wallet.fingerprint,
+    }
+    if gaps:
+        config[GAPS_KEY] = gaps
+    args = body.model_dump(mode="json", include={"display_name", "form", "electrum_type"})
+    async with command_context(session, actor, "create_bitcoin_connection", args) as ctx:
+        await session.execute(select(func.pg_advisory_xact_lock(BITCOIN_CREATE_LOCK)))
+        taken = await session.scalar(
+            select(Connection.id).where(
+                Connection.connector == "bitcoin",
+                Connection.config["fingerprint"].as_string() == wallet.fingerprint,
+            )
+        )
+        if taken is not None:
+            # Adding a disabled wallet again is how it comes back (it has no key to replace,
+            # as other connectors' do): its account, ledger and config are kept.
+            restored = await _restore_bitcoin(ctx, master_key, taken, body.gaps or {})
+            if restored is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {"error": "already_connected", "message": "this wallet is already connected"},
+                )
+            record = restored
+        else:
+            record = await _new_bitcoin(ctx, master_key, body.display_name, config, spec)
+    # After the commit, so the job finds the connection.
+    await defer_sync(record.id)
+    return await _out_with_state(session, record, settings)
+
+
+async def _restore_bitcoin(
+    ctx: CommandContext,
+    master_key: bytes,
+    connection_id: UUID,
+    given_gaps: Mapping[str, Mapping[str, Any]],
+) -> ConnectionRecord | None:
+    """Bring a disabled connection of the same wallet back, healthy and due for a sync, with
+    the gap limits just given; None when it is not disabled (the wallet is already
+    connected). Its stored input is kept: the same fingerprint can come from the same
+    descriptors in another order, which would rename its sources (d0, d1) under the
+    addresses and gap limits already stored. Its name is kept too."""
+    connection = await lock_connection(ctx, connection_id)
+    if connection.status != "disabled":
+        return None
+    gaps = _checked_gaps(await _stored_wallet(ctx.session, master_key, connection_id), given_gaps)
+    await update_config(
+        ctx,
+        connection_id,
+        {GAPS_KEY: gaps} if gaps else None,
+        remove=() if gaps else (GAPS_KEY,),
+    )
+    await transition_status(
+        ctx, connection_id, "healthy", only_from=("disabled",), clear_error=True
+    )
+    await reset_failures(ctx, connection_id)
+    await request_sync(ctx, connection_id)
+    return await get_connection(ctx.session, connection_id)
+
+
+async def _new_bitcoin(
+    ctx: CommandContext,
+    master_key: bytes,
+    display_name: str,
+    config: dict[str, JSONValue],
+    spec: WalletInput,
+) -> ConnectionRecord:
+    created = await create_connection(
+        ctx, connector="bitcoin", display_name=display_name, config=config
+    )
+    await store_credential(ctx, master_key, created.id, DESCRIPTOR_PURPOSE, input_json(spec), None)
+    # The chain is public: there is nothing to approve, so it works at once.
+    return await set_status(ctx, created.id, "healthy")
+
+
+def _require_bitcoin(connection: ConnectionRecord) -> None:
+    if connection.connector != "bitcoin":
+        raise ConnectionNotFoundError(str(connection.id))
+
+
+async def _stored_wallet(session: AsyncSession, master_key: bytes, connection_id: UUID) -> Wallet:
+    """The wallet the stored credential describes, with the default gap limits."""
+    try:
+        stored = await load_credential(session, master_key, connection_id, DESCRIPTOR_PURPOSE)
+        if stored is None:
+            raise ValueError
+        return build_wallet(parse_input(load_input(stored.reveal())))
+    except (ValueError, FinanceValidationError, CredentialDecryptError):
+        # The message of a FinanceValidationError may describe the input: never repeated.
+        raise _unprocessable("wallet_unreadable", _WALLET_UNREADABLE) from None
+
+
+@router.patch("/{connection_id}/bitcoin/gaps", name="update_bitcoin_gaps")
+async def update_bitcoin_gaps(
+    connection_id: UUID,
+    body: BitcoinGapsUpdate,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> ConnectionOut:
+    """Replace the wallet's gap limits (design 5.1, 6: raise one when the balance is lower than
+    the wallet's own), and sync at once with them, the six-hour wait aside."""
+    settings = _settings(request)
+    master_key = _require_master_key(settings)
+    _require_bitcoin(await get_connection(session, connection_id))
+    gaps = _checked_gaps(await _stored_wallet(session, master_key, connection_id), body.gaps)
+    args = {"connection_id": str(connection_id)}
+    async with command_context(session, actor, "update_bitcoin_gaps", args) as ctx:
+        _require_bitcoin(await lock_connection(ctx, connection_id))
+        if gaps:
+            await update_config(ctx, connection_id, {GAPS_KEY: gaps})
+        else:
+            await update_config(ctx, connection_id, remove=[GAPS_KEY])
+        # As "Sync now" does: recorded before the job is queued.
         await request_sync(ctx, connection_id)
         record = await get_connection(session, connection_id)
     await defer_sync(connection_id)

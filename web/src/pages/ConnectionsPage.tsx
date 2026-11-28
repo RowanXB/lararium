@@ -1,12 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 
 import {
   type AccountTypeOut,
   authorizeConnection,
   type BinanceConnectionCreateWritable,
+  type BitcoinPreviewInWritable,
+  type BitcoinPreviewOut,
+  type BitcoinStateOut,
+  type BitcoinWalletCreateWritable,
   type ConnectionOut,
   createBinanceConnection,
+  createBitcoinConnection,
   createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
@@ -14,8 +19,10 @@ import {
   disableConnection,
   listAccounts,
   listConnections,
+  previewBitcoinWallet,
   syncConnectionNow,
   updateBinanceConnection,
+  updateBitcoinGaps,
   updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
@@ -658,6 +665,10 @@ function ConnectionCard({
           <BinanceState state={connection.binance} accountNames={accountNames} />
         )}
         {connection.connector === "binance" && <UpdateBinanceKeyForm connection={connection} />}
+        {connection.bitcoin && <BitcoinState state={connection.bitcoin} />}
+        {connection.bitcoin && connection.bitcoin.form !== "addresses" && (
+          <UpdateBitcoinGapsForm connection={connection} />
+        )}
         {isIbkr && <UpdateIbkrTokenForm connection={connection} />}
         {isTrading212 && <UpdateTrading212KeysForm connection={connection} />}
         {isEtoro && <UpdateEtoroKeysForm connection={connection} />}
@@ -955,6 +966,346 @@ function AddBinanceForm({ onAdded }: { onAdded?: () => void }) {
   );
 }
 
+type WalletForm = BitcoinPreviewInWritable["form"];
+type ElectrumType = NonNullable<BitcoinPreviewInWritable["electrum_type"]>;
+
+const WALLET_FORMS: { value: WalletForm; label: string }[] = [
+  { value: "electrum", label: "Electrum master public key" },
+  { value: "descriptor", label: "Output descriptor" },
+  { value: "addresses", label: "Address list" },
+];
+
+const ELECTRUM_TYPES: { value: ElectrumType; label: string }[] = [
+  { value: "single", label: "Standard" },
+  { value: "multisig", label: "Multi-signature" },
+  { value: "2fa", label: "Two-factor authentication" },
+  { value: "old", label: "Old seed (Electrum 1.x)" },
+];
+
+// How long typing pauses before the first address is derived again.
+const PREVIEW_DELAY_MS = 300;
+
+// One entry per line: a seed phrase pasted on one line stays one entry, so the server
+// recognises it (and refuses it) instead of seeing twelve short words.
+function lines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function MultilineField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const id = useId();
+  return (
+    <div className="grid gap-1.5 sm:col-span-2">
+      <Label htmlFor={id}>{label}</Label>
+      <textarea
+        id={id}
+        value={value}
+        required
+        rows={2}
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 font-mono text-base outline-none md:text-sm"
+      />
+    </div>
+  );
+}
+
+// The gap limits of the first descriptor (an Electrum wallet's only one), as the API takes
+// them; an empty field keeps the default.
+function firstGaps(receiving: string, change: string): Record<string, number> {
+  const branches: Record<string, number> = {};
+  if (receiving.trim()) branches["0"] = Number(receiving.trim());
+  if (change.trim()) branches["1"] = Number(change.trim());
+  return branches;
+}
+
+function GapFields({
+  receiving,
+  change,
+  onReceiving,
+  onChange,
+}: {
+  receiving: string;
+  change: string;
+  onReceiving: (value: string) => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <>
+      <TextField
+        label="Receiving gap limit"
+        type="number"
+        value={receiving}
+        onChange={onReceiving}
+      />
+      <TextField label="Change gap limit" type="number" value={change} onChange={onChange} />
+      <p className="text-sm text-muted-foreground sm:col-span-2">
+        Compare the balance with Electrum's. If it is lower, raise the gap limit.
+      </p>
+    </>
+  );
+}
+
+// The keys, descriptors and addresses are cleared as soon as they are sent, whether the request
+// then succeeds or fails; the request variables are dropped from the mutation cache (gcTime 0
+// and reset). The preview's request is never cached: it is sent directly.
+function AddBitcoinForm({ onAdded }: { onAdded?: () => void }) {
+  const queryClient = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const [walletForm, setWalletForm] = useState<WalletForm>("electrum");
+  const [electrumType, setElectrumType] = useState<ElectrumType>("single");
+  const [material, setMaterial] = useState("");
+  const [threshold, setThreshold] = useState("");
+  const [receivingGap, setReceivingGap] = useState("");
+  const [changeGap, setChangeGap] = useState("");
+  const [preview, setPreview] = useState<BitcoinPreviewOut>();
+  const [previewError, setPreviewError] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+
+  const entries = lines(material);
+  const isMultisig = walletForm === "electrum" && electrumType === "multisig";
+  const wallet: BitcoinPreviewInWritable =
+    walletForm === "electrum"
+      ? {
+          form: walletForm,
+          electrum_type: electrumType,
+          keys: entries,
+          ...(isMultisig && threshold ? { threshold: Number(threshold) } : {}),
+        }
+      : walletForm === "descriptor"
+        ? { form: walletForm, descriptors: entries }
+        : { form: walletForm, addresses: entries };
+  const walletKey = JSON.stringify(wallet);
+
+  // Keyed by the wallet's JSON: the object itself is new on every render.
+  useEffect(() => {
+    setPreview(undefined);
+    setPreviewError(undefined);
+    const body = JSON.parse(walletKey) as BitcoinPreviewInWritable;
+    const given = body.keys ?? body.descriptors ?? body.addresses ?? [];
+    if (given.length === 0) return;
+    let current = true;
+    const timer = setTimeout(() => {
+      previewBitcoinWallet({ body, throwOnError: true }).then(
+        (response) => current && setPreview(response.data),
+        (failure: unknown) => current && setPreviewError(errorMessage(failure)),
+      );
+    }, PREVIEW_DELAY_MS);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [walletKey]);
+
+  const mutation = useMutation({
+    gcTime: 0,
+    mutationFn: async (body: BitcoinWalletCreateWritable) =>
+      await createBitcoinConnection({ body, throwOnError: true }),
+    onSuccess: () => {
+      setDone("Bitcoin wallet connected");
+      setDisplayName("");
+      setThreshold("");
+      setReceivingGap("");
+      setChangeGap("");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+      onAdded?.();
+    },
+    onError: (failure) => setError(errorMessage(failure)),
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setDone(undefined);
+    const branches = firstGaps(receivingGap, changeGap);
+    mutation.mutate(
+      {
+        display_name: displayName.trim(),
+        ...wallet,
+        // The gap limits apply to the first descriptor; an address list has none.
+        ...(walletForm !== "addresses" && Object.keys(branches).length > 0
+          ? { gaps: { d0: branches } }
+          : {}),
+      },
+      { onSettled: () => mutation.reset() },
+    );
+    setMaterial("");
+  }
+
+  const materialLabel =
+    walletForm === "descriptor"
+      ? "Output descriptors (one per line)"
+      : walletForm === "addresses"
+        ? "Addresses (one per line)"
+        : electrumType === "single" || electrumType === "old"
+          ? "Master public key"
+          : "Master public keys (one per line)";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add Bitcoin wallet</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form
+          aria-label="Add Bitcoin wallet"
+          onSubmit={submit}
+          className="grid gap-4 sm:grid-cols-2"
+        >
+          <TextField label="Display name" value={displayName} onChange={setDisplayName} required />
+          <LabelledSelect
+            label="Wallet form"
+            value={walletForm}
+            options={WALLET_FORMS}
+            onChange={setWalletForm}
+          />
+          {walletForm === "electrum" && (
+            <LabelledSelect
+              label="Wallet type"
+              value={electrumType}
+              options={ELECTRUM_TYPES}
+              onChange={setElectrumType}
+            />
+          )}
+          {isMultisig && (
+            <TextField
+              label="Signatures required"
+              type="number"
+              value={threshold}
+              onChange={setThreshold}
+              required
+            />
+          )}
+          <MultilineField label={materialLabel} value={material} onChange={setMaterial} />
+          {walletForm === "electrum" && (
+            <p className="text-sm text-muted-foreground sm:col-span-2">
+              In Electrum: Wallet → Information → Master Public Key. Never enter your seed
+              phrase.
+            </p>
+          )}
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Lightning channel balances can't be seen from a public key; record them as a manual
+            account.
+          </p>
+          {preview && (
+            <p role="status" className="text-sm sm:col-span-2">
+              First receiving address ({preview.script_type}):{" "}
+              <code className="break-all">{preview.first_receiving_address}</code>. Check that
+              it is the first address your wallet shows.
+            </p>
+          )}
+          {previewError && (
+            <p className="text-sm text-destructive sm:col-span-2">{previewError}</p>
+          )}
+          {walletForm !== "addresses" && (
+            <details className="sm:col-span-2">
+              <summary className="cursor-pointer text-sm">Advanced</summary>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                <GapFields
+                  receiving={receivingGap}
+                  change={changeGap}
+                  onReceiving={setReceivingGap}
+                  onChange={setChangeGap}
+                />
+              </div>
+            </details>
+          )}
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={mutation.isPending}>
+              Add Bitcoin wallet
+            </Button>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            {done && <p role="status" className="text-sm">{done}</p>}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function UpdateBitcoinGapsForm({ connection }: { connection: ConnectionOut }) {
+  const queryClient = useQueryClient();
+  const stored = connection.bitcoin?.gaps.d0 ?? {};
+  const [receiving, setReceiving] = useState(stored["0"]?.toString() ?? "");
+  const [change, setChange] = useState(stored["1"]?.toString() ?? "");
+  const [error, setError] = useState<string>();
+  const [done, setDone] = useState<string>();
+  const mutation = useMutation({
+    mutationFn: async (branches: Record<string, number>) => {
+      // The PATCH replaces the whole map, and this form edits only the first descriptor's
+      // limits: every other descriptor's are sent back as stored. Every field empty restores
+      // the first descriptor's defaults.
+      const { d0: _first, ...others } = connection.bitcoin?.gaps ?? {};
+      const gaps = Object.keys(branches).length > 0 ? { ...others, d0: branches } : others;
+      return await updateBitcoinGaps({
+        path: { connection_id: connection.id },
+        body: { gaps },
+        throwOnError: true,
+      });
+    },
+    onSuccess: () => {
+      setDone("Gap limits saved; syncing");
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+    onError: (failure) => setError(errorMessage(failure)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(undefined);
+    setDone(undefined);
+    mutation.mutate(firstGaps(receiving, change));
+  }
+  return (
+    <form aria-label="Gap limits" onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+      <p className="text-sm font-medium sm:col-span-2">Gap limits</p>
+      <GapFields
+        receiving={receiving}
+        change={change}
+        onReceiving={setReceiving}
+        onChange={setChange}
+      />
+      <div className="flex items-center gap-3 sm:col-span-2">
+        <Button type="submit" variant="outline" disabled={mutation.isPending}>
+          Save gap limits
+        </Button>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        {done && <p role="status" className="text-sm">{done}</p>}
+      </div>
+    </form>
+  );
+}
+
+function BitcoinState({ state }: { state: BitcoinStateOut }) {
+  const form = WALLET_FORMS.find((option) => option.value === state.form)?.label ?? state.form;
+  const kind = ELECTRUM_TYPES.find((option) => option.value === state.electrum_type)?.label;
+  return (
+    <div className="space-y-1 text-sm">
+      <p>{kind ? `${form}, ${kind}` : form}</p>
+      <p>
+        {`Addresses scanned: ${state.scanned.receiving} receiving, ${state.scanned.change} change;` +
+          ` used: ${state.used.receiving} receiving, ${state.used.change} change`}
+      </p>
+      <p className={state.last_check && state.last_check !== "agrees" ? "text-warning" : undefined}>
+        {state.last_check ? `Last balance check: ${state.last_check}` : "Not checked yet"}
+      </p>
+      <p>{`Unconfirmed transactions waiting: ${state.unconfirmed}`}</p>
+      <p className="text-muted-foreground">{`Server: ${state.server}`}</p>
+    </div>
+  );
+}
+
 // The form that connects an account type's API; onAdded runs once the connection exists.
 export function ConnectForm({ type, onAdded }: { type: AccountTypeOut; onAdded?: () => void }) {
   const connector = type.api?.connector;
@@ -987,6 +1338,8 @@ export function ConnectForm({ type, onAdded }: { type: AccountTypeOut; onAdded?:
       return <AddEtoroForm onAdded={onAdded} />;
     case "binance":
       return <AddBinanceForm onAdded={onAdded} />;
+    case "bitcoin":
+      return <AddBitcoinForm onAdded={onAdded} />;
     default:
       return null;
   }

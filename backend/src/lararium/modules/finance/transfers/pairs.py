@@ -2,11 +2,11 @@
 
 It is computed once, set-wise, from the own records that can pair at all (a bank transfer,
 or one naming a bank account or a card merchant, or one on an account a card merchant pays
-into or whose type is funded by bank transfer, or one the owner paired) and the owner's
-decisions, and then read by matching, heal and review alike. It depends only on the records
-and the decisions, never on which transfers exist, and nothing matching writes changes it
-(re-pointing a contra, opening or dissolving a transfer, posting a placeholder), so one
-computation holds for a whole heal pass.
+into or whose type is funded by bank transfer, or an on-chain movement, or one the owner
+paired) and the owner's decisions, and then read by matching, heal and review alike. It
+depends only on the records and the decisions, never on which transfers exist, and nothing
+matching writes changes it (re-pointing a contra, opening or dissolving a transfer, posting a
+placeholder), so one computation holds for a whole heal pass.
 
 A record naming an account family (a provider's move between its own accounts that doesn't
 name the other one) pairs only within the family (account family identifier design §5.3,
@@ -60,17 +60,20 @@ from lararium.modules.finance.transfers.contra import (
 from lararium.modules.finance.transfers.settings import DEFAULTS, TransferSettings
 
 # How strong the evidence is that two records are one transfer, strongest first: the
-# owner paired them; each names the other's account; only one names the other's account, or
-# a bank account the other's account is one of the holders of (the other is a bank transfer
-# naming nobody, or names nobody on an account funded by bank transfer); only one prints
-# the sort code of the other's account, and nothing else of it (the other names no bank
-# account at all). Two records in different currencies that name each other's accounts are
-# MUTUAL too (cross_currency_tier).
-type Tier = Literal[1, 2, 3, 4]
+# owner paired them; both are the same on-chain movement, of one transaction, address and
+# amount (hash_tier); each names the other's account; only one names the other's account,
+# or a bank account the other's account is one of the holders of (the other is a bank
+# transfer naming nobody, or names nobody on an account funded by bank transfer); only one
+# prints the sort code of the other's account, and nothing else of it (the other names no
+# bank account at all). Two records in different currencies that name each other's accounts
+# are MUTUAL too (cross_currency_tier). Only this module compares the numbers; nothing
+# stores them.
+type Tier = Literal[1, 2, 3, 4, 5]
 DECIDED: Tier = 1
-MUTUAL: Tier = 2
-ONE_SIDED: Tier = 3
-WEAK: Tier = 4
+HASH: Tier = 2
+MUTUAL: Tier = 3
+ONE_SIDED: Tier = 4
+WEAK: Tier = 5
 
 # Why the rule could not decide, apart from the status ("needs review"; PairRelation's
 # review_reason): several candidates; a mutually identified one of another amount; or one
@@ -126,6 +129,13 @@ class Pairable:
     # profile's, which a CSV row is booked on its time's date in. Only _gate_day reads it,
     # of a timed receipt; None reads the owner's.
     occurred_tz: str | None = None
+    # The on-chain movement it is (contra.eligible_records' chain, tx_hash, chain_address),
+    # and the own account the registry gives that address (address_holder): only hash_tier
+    # reads them. None for a record that is no on-chain movement, or one at no address.
+    chain: str | None = None
+    tx_hash: str | None = None
+    chain_address: str | None = None
+    address_holder: UUID | None = None
 
     @property
     def sends(self) -> bool:
@@ -297,6 +307,29 @@ def cross_currency_tier(r: Pairable, c: Pairable) -> Tier | None:
     if not (r.fiat and c.fiat) or r.instrument_id == c.instrument_id:
         return None
     return MUTUAL
+
+
+def hash_tier(r: Pairable, c: Pairable) -> Tier | None:
+    """The tier two on-chain movements get (Bitcoin wallet design §5.8), or None when they
+    don't pair: the same chain, transaction hash and address, on different accounts, in one
+    instrument, of opposite and equal amounts; and the registry doesn't disagree: the
+    address is registered to no account, or to the receiving record's. When it is another
+    account's, the owner's registration says where that address's money goes, and the
+    engine acts on it (a placeholder on a manual account, say): the registry wins. The
+    booking window does not apply (an exchange applies a withdrawal hours before its block),
+    nor does uniqueness (the caller's: pair_relation). Decisions are not considered."""
+    if r.chain is None or r.tx_hash is None or r.chain_address is None:
+        return None
+    if (r.chain, r.tx_hash, r.chain_address) != (c.chain, c.tx_hash, c.chain_address):
+        return None
+    if r.account_id == c.account_id or r.instrument_id != c.instrument_id:
+        return None
+    if r.quantity == 0 or r.quantity != -c.quantity:
+        return None
+    receiving = c if r.sends else r
+    if receiving.address_holder not in (None, receiving.account_id):
+        return None
+    return HASH
 
 
 def _card_payer(x: Pairable) -> bool:
@@ -659,9 +692,9 @@ async def _load_records(
     """The own records that can pair at all: those a bank transfer, naming a bank
     account, a card merchant or an own account by its number (the registry's), those on an
     account a card merchant pays into (card_tier's other side) or funded by bank transfer
-    (registry_tier's, _may_be_transfer), and those the owner paired. (A record on an account
-    holding a shared payee bank account pairs with one naming it only if it may be a
-    transfer, so it is among those already.)"""
+    (registry_tier's, _may_be_transfer), those on-chain (hash_tier's), and those the owner
+    paired. (A record on an account holding a shared payee bank account pairs with one
+    naming it only if it may be a transfer, so it is among those already.)"""
     e = eligible_records(system)
     t = models.Transaction
     h = models.AccountIdentifierHolder
@@ -680,6 +713,8 @@ async def _load_records(
         e.c.holder.is_not(None),
         e.c.account_id.in_(select(h.account_id).where(h.kind == "card_merchant")),
         e.c.funded_by_transfer,
+        # An on-chain movement: a wallet's receipt names nobody, and only its hash pairs it.
+        e.c.tx_hash.is_not(None),
     ]
     if decided_ids is not None:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
@@ -703,6 +738,10 @@ async def _load_records(
         e.c.funded_by_transfer,
         e.c.timed,
         e.c.occurred_tz,
+        e.c.chain,
+        e.c.tx_hash,
+        e.c.chain_address,
+        e.c.address_holder,
         fiat.label("fiat"),
         fee_instrument_id.label("fee_instrument_id"),
         fee_amount.label("fee_amount"),
@@ -729,6 +768,10 @@ async def _load_records(
             funded_by_transfer=row.funded_by_transfer,
             timed=row.timed,
             occurred_tz=row.occurred_tz,
+            chain=row.chain,
+            tx_hash=row.tx_hash,
+            chain_address=row.chain_address,
+            address_holder=row.address_holder,
             fiat=bool(row.fiat),
             fee=(
                 None
@@ -978,6 +1021,24 @@ def _decided_edges(
     return decided
 
 
+def _hash_edges(records: list[Pairable], decisions: _Decisions) -> _Edges:
+    """The pairs hash_tier gives that no decision keeps apart: a sender meets the records of
+    its chain, hash and address, whenever they were booked."""
+    edges = _Edges()
+    movements: dict[tuple[str, str, str], list[Pairable]] = defaultdict(list)
+    for x in records:
+        if x.chain is not None and x.tx_hash is not None and x.chain_address is not None:
+            movements[(x.chain, x.tx_hash, x.chain_address)].append(x)
+    for found in movements.values():
+        for s in found:
+            if not s.sends:
+                continue
+            for c in found:
+                if hash_tier(s, c) is not None and not decisions.apart(s, c):
+                    edges.add(s.id, c.id, HASH)
+    return edges
+
+
 def _cross_currency_edges(
     records: list[Pairable], settings: TransferSettings, decisions: _Decisions
 ) -> _Edges:
@@ -1016,8 +1077,9 @@ class PairRelation:
 
     records: Mapping[UUID, Pairable]  # those that can pair at all
     rejected: frozenset[UUID]  # those of them the owner said are not a transfer
-    # Every pair of the same amount, and every pair the owner made (DECIDED, whose sides
-    # may differ: _decided_edges), both ways round, with its strongest tier.
+    # Every pair of the same amount, the chain's (HASH: _hash_edges) included, and every
+    # pair the owner made (DECIDED, whose sides may differ: _decided_edges), both ways
+    # round, with its strongest tier.
     tiers: Mapping[UUID, Mapping[UUID, Tier]]
     # A record's candidates of the same amount, or the owner's: those in the strongest tier
     # it has any in, for which that is also their own strongest (Ruling 7); a record with
@@ -1298,9 +1360,12 @@ async def pair_relation(
     (conversion_postings), else they are for review as of another amount. A card payment
     and a deposit on one of its merchant's holder accounts pair when card_tier takes them,
     each the other's only such candidate and neither with a candidate in another tier
-    (card_partners). The owner pairs two records with a pair decision. A pair of the same
-    amount the coverage gate refuses (design §5.8) is a candidate like any other, one that
-    can't be taken by itself (`untakeable`).
+    (card_partners). Two on-chain movements of one transaction, address and amount pair
+    when hash_tier takes them, whenever they were booked, above every tier but the owner's
+    (Bitcoin wallet design §5.8). The owner pairs two records with a pair decision. A pair
+    of the same amount the coverage gate refuses (design §5.8) is a candidate like any
+    other, one that can't be taken by itself (`untakeable`), unless the owner or the chain's
+    hash pairs it.
 
     Where a record has several candidates of the same amount, two rules follow (account
     family identifier design §5.10 and §5.7, owner's decisions 2026-11-27; _several),
@@ -1321,7 +1386,16 @@ async def pair_relation(
     same, differing, refused = _registry_edges(
         records, settings, decisions, await _load_known(session, listing), carded=carded.keys()
     )
-    untakeable = frozenset(refused - _decided_edges(records, decisions, same))
+    decided = _decided_edges(records, decisions, same)
+    hashed = _hash_edges(records, decisions)
+    for r, found in hashed.tiers.items():
+        for c in found:
+            same.add(r, c, HASH)
+    # The coverage gate is for a counterpart found by amount and date: a pair the owner
+    # made, or the chain's hash gives, is no such guess.
+    untakeable = frozenset(
+        refused - decided - {frozenset((r, c)) for r, found in hashed.tiers.items() for c in found}
+    )
     best = {r: min(found.values()) for r, found in same.tiers.items()}
     exact = {
         r: frozenset(c for c, tier in found.items() if tier == best[r] == best[c])

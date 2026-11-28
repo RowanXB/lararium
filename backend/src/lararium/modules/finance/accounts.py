@@ -394,6 +394,23 @@ async def set_type_key(ctx: CommandContext, account_id: UUID, type_key: str | No
     return True
 
 
+async def set_opened_on_if_unknown(ctx: CommandContext, account_id: UUID, opened_on: date) -> bool:
+    """Give the account the day it opened, if it has none; False (and no event) if it has
+    one already, which is left as it is."""
+    a = models.Account
+    written = await ctx.session.scalar(
+        update(a)
+        .where(a.id == account_id, a.opened_on.is_(None))
+        .values(opened_on=opened_on)
+        .returning(a.id)
+    )
+    if written is None:
+        await get_account(ctx.session, account_id)  # raises AccountNotFoundError if missing
+        return False
+    _publish(ctx, "finance.account.updated", await get_account(ctx.session, account_id))
+    return True
+
+
 async def close_account(ctx: CommandContext, account_id: UUID, closed_on: date) -> AccountRecord:
     """Close the account. It stays a holder of the card merchants it held, so its
     card-deposit history stands, as a bank identifier stays assigned after a close; it

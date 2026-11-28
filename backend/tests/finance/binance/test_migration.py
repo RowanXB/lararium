@@ -174,9 +174,10 @@ def _assert_lists(connection: Connection, *, binance: bool) -> None:
     schemes = _allowed(
         _check(connection, "instrument_identifiers", "instrument_identifiers_scheme_check")
     )
-    # At head 0048 (the account family identifier) has added account_family too.
+    # At head 0048 (the account family identifier) has added account_family too, and 0050
+    # (Bitcoin) chain_native on top of what 0041 adds.
     assert kinds == (_M6_KINDS | {"chain_address", "account_family"} if binance else _M6_KINDS)
-    assert schemes == (_M6_SCHEMES | {"binance_asset"} if binance else _M6_SCHEMES)
+    assert schemes == (_M6_SCHEMES | {"binance_asset", "chain_native"} if binance else _M6_SCHEMES)
     # M6's own value checks are left as they are.
     for name in (
         "account_identifiers_trading212_account_check",

@@ -114,6 +114,7 @@ async def _normalize(
             await store("transactions_page", {"account_id": ACCOUNT_ID}, list(transactions))
         async with httpx.AsyncClient(transport=httpx.MockTransport(_no_http)) as http:
             ctx = SyncContext(
+                esplora_url="https://esplora.test/api",
                 command=command,
                 connection=await get_connection(session, connection.id),
                 sync_id=sync_id,

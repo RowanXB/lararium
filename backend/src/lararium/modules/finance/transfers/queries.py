@@ -190,9 +190,10 @@ async def weak_transfers(
 ) -> frozenset[UUID]:
     """The ids of those of the transfers that neither leg names an own account for (a sort code
     alone, a card merchant's or a held payee's holders; pairs.WEAK): matched,
-    neither own record naming another own account (eligible_records' holder), and no pair
-    decision linking them. Read from their records, not from the pair relation, since the
-    Transfers page asks on every load."""
+    neither own record naming another own account (eligible_records' holder), not two
+    movements of one chain transaction (pairs.HASH: the chain names both sides, though
+    neither names an account), and no pair decision linking them. Read from their records,
+    not from the pair relation, since the Transfers page asks on every load."""
     legs = {
         t.id: (t.out_transaction_id, t.in_transaction_id)
         for t in transfers
@@ -205,18 +206,28 @@ async def weak_transfers(
     e = eligible_records(await system_account_ids(session))
     rows = await session.execute(
         select(
-            e.c.transaction_id, e.c.account_id, e.c.holder, e.c.source_kind, e.c.source_ref
+            e.c.transaction_id,
+            e.c.account_id,
+            e.c.holder,
+            e.c.source_kind,
+            e.c.source_ref,
+            e.c.chain,
+            e.c.tx_hash,
         ).where(e.c.transaction_id.in_([leg for pair in legs.values() for leg in pair]))
     )
-    naming_nobody: dict[UUID, SourceRef] = {
-        row.transaction_id: (row.source_kind, row.source_ref)
-        for row in rows
-        if row.holder is None or row.holder == row.account_id
-    }
+    naming_nobody: dict[UUID, SourceRef] = {}
+    on_chain: dict[UUID, tuple[str, str]] = {}
+    for row in rows:
+        if row.holder is None or row.holder == row.account_id:
+            naming_nobody[row.transaction_id] = (row.source_kind, row.source_ref)
+        if row.tx_hash is not None:
+            on_chain[row.transaction_id] = (row.chain, row.tx_hash)
     unnamed = {
         transfer_id: (naming_nobody[sent], naming_nobody[received])
         for transfer_id, (sent, received) in legs.items()
-        if sent in naming_nobody and received in naming_nobody
+        if sent in naming_nobody
+        and received in naming_nobody
+        and (sent not in on_chain or on_chain.get(sent) != on_chain.get(received))
     }
     if not unnamed:
         return frozenset()
