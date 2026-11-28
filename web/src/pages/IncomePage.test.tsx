@@ -21,6 +21,7 @@ const ENTRY = {
   quantity: "1500.00",
   source_category: null,
   transaction_id: "t1",
+  hidden_account_name: null,
 };
 const INTEREST = {
   ...ENTRY,
@@ -40,7 +41,6 @@ const INCOME = {
   bucket: "week",
   total: "1512.00",
   missing_count: 0,
-  hidden_moved_in: "0",
   known_categories: ["salary"],
   periods: [{ start: "2026-11-16", total: "1512.00", by_category: [] }],
   categories: [
@@ -96,6 +96,21 @@ it("shows totals, categories and entries", async () => {
   );
   expect(screen.getByRole("button", { name: /Interest/ })).toBeInTheDocument();
   expect(screen.getByText("Gross Interest")).toBeInTheDocument();
+});
+
+it("marks a move from a hidden account with where it came from", async () => {
+  const moved = {
+    ...ENTRY,
+    counterparty_name: null,
+    description: "Pension payout",
+    hidden_account_name: "Pension",
+    transaction_id: "t3",
+  };
+  vi.mocked(getIncome).mockResolvedValue({ data: { ...INCOME, entries: [moved, ENTRY] } } as never);
+  renderPage();
+
+  expect(await screen.findByText("From Pension")).toBeInTheDocument();
+  expect(rowOf("ACME LTD").queryByText(/^From /)).toBeNull();
 });
 
 it("filters by account and by category", async () => {

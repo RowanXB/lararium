@@ -89,7 +89,6 @@ async def test_entries_totals_and_filters(session, run, make_account, post, btc)
         (date(2026, 11, 1), Decimal("18.50")),
     ]
     assert report.known_categories == ["gift"]
-    assert report.hidden_moved_in == 0
 
     by_account = await income_report(session, START, END, account_id=wallet.id)
     assert (by_account.total, by_account.missing_count) == (Decimal("5"), 1)
@@ -105,6 +104,32 @@ async def test_entries_totals_and_filters(session, run, make_account, post, btc)
 
 
 OWNER_CATEGORIES = [None, "family_money", "gift"]
+
+
+async def test_a_move_from_a_hidden_account_is_an_entry(session, run, make_account, gbp) -> None:
+    """Money moved in from a hidden pot is income naming the pot, on the shown account."""
+    bank = await make_account(name="Bank", balance_mode="transactions")
+    pot = await make_account(name="Rainy day pot", subtype="savings_pot", balance_mode="hybrid")
+    moved = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Rainy day pot",
+            postings=[
+                PostingInput(pot.id, gbp.id, Decimal("-20")),
+                PostingInput(bank.id, gbp.id, Decimal("20")),
+            ],
+        ),
+    )
+    await run(set_owner_category, [moved.id], "from savings")
+
+    report = await income_report(session, START, END, "month", [pot.id])
+    assert [
+        (e.transaction_id, e.account_name, e.amount, e.category, e.hidden_account_name)
+        for e in report.entries
+    ] == [(moved.id, "Bank", Decimal("20"), "from_savings", "Rainy day pot")]
+    assert report.known_categories == ["from_savings"]
+    assert (await income_report(session, START, END, "month", ())).entries == []
 
 
 async def test_a_refund_is_not_income(session, make_account, post) -> None:
@@ -126,7 +151,8 @@ async def test_a_refund_is_not_income(session, make_account, post) -> None:
 @st.composite
 def moves(draw):
     """Signed fiat flows on two accounts, some with the source's category, some with the
-    owner's; a coin reward, priced or not; and one hidden-pot move."""
+    owner's; a coin reward, priced or not; and one move from a hidden pot, with the owner's
+    category or not."""
     return {
         "flows": draw(
             st.lists(
@@ -151,6 +177,7 @@ def moves(draw):
             )
         ),
         "pot": draw(st.integers(1, 900)),
+        "pot_owner": draw(st.sampled_from(OWNER_CATEGORIES)),
     }
 
 
@@ -192,8 +219,8 @@ async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, btc,
             )
             if owner:
                 await run(set_owner_category, [reward.id], owner)
-        # Money moved in from a hidden pot: income for the Overview, not an entry here.
-        await run(
+        # Money moved in from a hidden pot: income, an entry like any other.
+        pot_move = await run(
             post_transaction,
             TransactionInput(
                 occurred_at=datetime(2026, 11, 10, 12, tzinfo=LON),
@@ -204,11 +231,13 @@ async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, btc,
                 ],
             ),
         )
+        if scenario["pot_owner"]:
+            await run(set_owner_category, [pot_move.id], scenario["pot_owner"])
         excluded = [pot.id]
         for bucket in ("day", "week", "month"):
             report = await income_report(session, START, END, bucket, excluded)
             flow = await cash_flow(session, START, END, bucket, excluded)
-            assert report.total + report.hidden_moved_in == flow.income
+            assert report.total == flow.income
             assert report.missing_count == flow.missing_count
             assert sum((c.amount for c in report.categories), Decimal(0)) == report.total
             assert sum((p.total for p in report.periods), Decimal(0)) == report.total

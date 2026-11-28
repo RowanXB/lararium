@@ -19,6 +19,7 @@ import { IncomePage } from "./pages/IncomePage";
 import { InstrumentsPage } from "./pages/InstrumentsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PricesPage } from "./pages/PricesPage";
+import { SpendingPage } from "./pages/SpendingPage";
 import { TransfersPage } from "./pages/TransfersPage";
 
 // Four places, by what the owner comes to do; the pages inside one are its tabs.
@@ -29,6 +30,7 @@ const SECTIONS = [
     pages: [
       { to: "/", label: "Overview" },
       { to: "/income", label: "Income" },
+      { to: "/spending", label: "Spending" },
     ],
   },
   {
@@ -129,9 +131,19 @@ const incomeRoute = createRoute({
   },
 });
 
+const spendingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/spending",
+  validateSearch: readRangeSearch,
+  component: function SpendingRoute() {
+    return <SpendingPage initialRange={spendingRoute.useSearch()} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: OverviewPage }),
   incomeRoute,
+  spendingRoute,
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts", component: AccountsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/accounts/new", component: AddAccountPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/transfers", component: TransfersPage }),

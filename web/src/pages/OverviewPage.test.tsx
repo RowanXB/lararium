@@ -155,6 +155,15 @@ it("opens the Income page on the same dates", async () => {
   ]);
 });
 
+it("opens the Spending page on the same dates", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await user.click(await screen.findByRole("button", { name: "12 months" }));
+  const link = screen.getByRole("link", { name: "See all spending" });
+  expect(link.getAttribute("href")).toMatch(/^\/spending\?/);
+  expect(new URLSearchParams(link.getAttribute("href")!.split("?")[1]).get("preset")).toBe("1y");
+});
+
 it("asks for everything over the chosen preset", async () => {
   const user = userEvent.setup();
   renderPage();
@@ -244,12 +253,16 @@ it("shows a category its refunds took below zero without a share", async () => {
   expect(screen.queryByText("500%")).not.toBeInTheDocument();
 });
 
-it("shows money moved to and from hidden accounts apart from categories", async () => {
+it("shows money moved to and from hidden accounts, which is in the categories too", async () => {
   vi.mocked(getCashFlow).mockResolvedValue({
     data: {
       ...FLOW,
       spending: "700.00",
       net: "1300.00",
+      categories: [
+        ...FLOW.categories.slice(0, 2),
+        { category: null, income: "1600.00", spending: "400.00" },
+      ],
       hidden_accounts: [
         { account_id: "a9", name: "Pension", moved_in: "0", moved_out: "200.00" },
       ],
@@ -260,6 +273,7 @@ it("shows money moved to and from hidden accounts apart from categories", async 
   expect(await screen.findByText("Moved to and from hidden accounts")).toBeInTheDocument();
   expect(screen.getByText("Pension")).toBeInTheDocument();
   expect(screen.getByText("Moved in £200.00")).toBeInTheDocument();
-  // Categories' shares are of what categories hold, not of spending with the moves in it.
-  expect(screen.getByText("60%")).toBeInTheDocument();
+  // The move is uncategorised spending, so it is in that category's share.
+  expect(screen.getByText("43%")).toBeInTheDocument();
+  expect(screen.getByText("57%")).toBeInTheDocument();
 });

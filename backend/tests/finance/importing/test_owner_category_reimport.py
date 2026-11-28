@@ -55,7 +55,7 @@ async def test_category_survives_reimport(
     second = await _transaction_id(session)
     assert second != first
 
-    assert await known_owner_categories(session) == ["family_money"]
+    assert await known_owner_categories(session, "income", ()) == ["family_money"]
     found = (
         await session.execute(
             text(f"select {OWNER_CATEGORY_SQL} from finance.transactions t where t.id = :id"),

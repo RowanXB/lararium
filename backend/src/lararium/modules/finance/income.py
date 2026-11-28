@@ -1,9 +1,10 @@
 """The Income page's report: what came in over a range, by period, category and entry.
 
 It reads the same flows as the cash-flow report (`cashflow.flows`), keeps the positive ones
-that are not refunds (a refund is negative spending there, never income)
-and groups them. An entry is the positive flows of one transaction and instrument added up,
-in the source's instrument (a reward of 0.00012 BTC is one entry) beside its value in the
+that are not refunds (a refund is negative spending there, never income), money moved in from
+a hidden account among them, and groups them, so its total is the cash-flow report's income.
+An entry is the positive flows of one transaction and instrument added up, in the source's
+instrument (a reward of 0.00012 BTC is one entry) beside its value in the
 reporting currency. An entry without a price or an FX rate is listed with no amount and left
 out of every total, as the cash-flow report leaves out such a flow (income-categories design
 §4.5).
@@ -28,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.modules.finance.cashflow import (
     Bucket,
     Flow,
-    cash_flow,
     flows,
     period_start,
     periods_of,
@@ -64,6 +64,7 @@ class IncomeEntry:
     income_kind: str | None
     owner_category: str | None
     category: str | None  # the effective category
+    hidden_account_name: str | None  # a move from a hidden account: that account's name
 
 
 @dataclass(frozen=True)
@@ -77,8 +78,6 @@ class IncomeReport:
     categories: list[IncomeCategory]  # largest first, then by name; none last
     entries: list[IncomeEntry]  # newest first, then by transaction id
     known_categories: list[str]  # every owner category in use, for the picker
-    # What the Overview counts as income from hidden accounts and this page does not list.
-    hidden_moved_in: Decimal
 
 
 def _entries(positive: list[Flow]) -> list[IncomeEntry]:
@@ -109,6 +108,9 @@ def _entries(positive: list[Flow]) -> list[IncomeEntry]:
                 income_kind=first.income_kind,
                 owner_category=first.owner_category,
                 category=first.category,
+                hidden_account_name=next(
+                    (part.hidden_account_name for part in parts if part.hidden_account_name), None
+                ),
             )
         )
     # Newest first; two sorts, because the date reverses and the id does not.
@@ -117,9 +119,14 @@ def _entries(positive: list[Flow]) -> list[IncomeEntry]:
     return entries
 
 
+def by_amount(totals: dict[str | None, Decimal]) -> list[tuple[str | None, Decimal]]:
+    """Category totals, largest first, then by name; no category last. The Spending page's
+    order too."""
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0] is None, item[0] or ""))
+
+
 def _by_amount(totals: dict[str | None, Decimal]) -> list[IncomeCategory]:
-    ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0] is None, item[0] or ""))
-    return [IncomeCategory(category, amount) for category, amount in ordered]
+    return [IncomeCategory(category, amount) for category, amount in by_amount(totals)]
 
 
 async def income_report(
@@ -164,11 +171,6 @@ async def income_report(
     else:
         shown = entries
 
-    hidden_moved_in = Decimal(0)
-    if account_id is None:
-        moved = await cash_flow(session, start, end, bucket, excluded)
-        hidden_moved_in = sum((h.moved_in for h in moved.hidden_accounts), Decimal(0))
-
     return IncomeReport(
         start=start,
         end=end,
@@ -181,6 +183,5 @@ async def income_report(
         ],
         categories=_by_amount(by_category),
         entries=shown,
-        known_categories=await known_owner_categories(session),
-        hidden_moved_in=hidden_moved_in,
+        known_categories=await known_owner_categories(session, "income", excluded),
     )

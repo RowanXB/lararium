@@ -60,8 +60,9 @@ async def _accounts(run: Run) -> tuple[AccountRecord, AccountRecord]:
         await run(
             create_account, name="A", ledger_type="asset", subtype="bank", balance_mode="hybrid"
         ),
+        # Income, so the transaction (A +5, B -5) is income and its category is known there.
         await run(
-            create_account, name="B", ledger_type="asset", subtype="bank", balance_mode="hybrid"
+            create_account, name="B", ledger_type="income", subtype="other", balance_mode="hybrid"
         ),
     )
 
@@ -112,11 +113,11 @@ async def test_set_and_clear_leave_source_marks(
     assert before == [("income", "interest")]
 
     await run(set_owner_category, [transaction_id], "Family money")
-    assert await known_owner_categories(session) == ["family_money"]
+    assert await known_owner_categories(session, "income", ()) == ["family_money"]
     assert await _marks(session) == before
 
     await run(set_owner_category, [transaction_id], "Gifts")
-    assert await known_owner_categories(session) == ["gifts"]
+    assert await known_owner_categories(session, "income", ()) == ["gifts"]
     assert await _owner_rows(session) == 1
 
     await run(set_owner_category, [transaction_id], None)
@@ -198,3 +199,64 @@ async def test_sql_finds_the_category_for_a_connector_and_a_plain_transaction(
         )
     ).scalars()
     assert list(kinds) == ["connection", "transaction"]
+
+
+async def test_known_categories_per_side(
+    session: AsyncSession, run: Run, gbp: InstrumentRecord
+) -> None:
+    a, income = await _accounts(run)
+    shop = await run(
+        create_account, name="Shop", ledger_type="expense", subtype="other", balance_mode="hybrid"
+    )
+
+    async def post(*postings: tuple[AccountRecord, str], refund: bool = False) -> UUID:
+        record = await run(
+            post_transaction,
+            TransactionInput(
+                occurred_at=datetime(2026, 11, 10, 12, tzinfo=UTC),
+                description="",
+                postings=[PostingInput(acc.id, gbp.id, Decimal(q)) for acc, q in postings],
+                details=TransactionDetails(refund=refund),
+            ),
+        )
+        return record.id
+
+    pay = await post((a, "-5"), (shop, "5"))
+    wage = await post((a, "5"), (income, "-5"))
+    back = await post((a, "5"), (shop, "-5"), refund=True)
+    own = await post((a, "-1"), (shop, "4"), (income, "-3"))  # both sides at once
+    moved = await post((a, "-1"), (income, "1"), refund=True)  # a refund posts spending
+    for transaction_id, name in [
+        (pay, "groceries"),
+        (wage, "salary"),
+        (back, "returns"),
+        (own, "mixed"),
+        (moved, "moved"),
+    ]:
+        await run(set_owner_category, [transaction_id], name)
+    # Not a flow at all (asset to asset), void, and uncategorised ones are on no side.
+    between = await run(
+        create_account, name="C", ledger_type="asset", subtype="bank", balance_mode="hybrid"
+    )
+    await run(set_owner_category, [await post((a, "1"), (between, "-1"))], "nowhere")
+    voided = await post((a, "-4"), (shop, "4"))
+    await run(set_owner_category, [voided], "voided")
+    await run(void_transaction, voided)
+
+    assert await known_owner_categories(session, "spending", ()) == [
+        "groceries",
+        "mixed",
+        "moved",
+        "returns",
+    ]
+    assert await known_owner_categories(session, "income", ()) == ["mixed", "salary"]
+    # With C hidden, money from it is a move into the reports: income, never a refund.
+    assert await known_owner_categories(session, "income", [between.id]) == [
+        "mixed",
+        "nowhere",
+        "salary",
+    ]
+    # With A hidden, what it paid and received alone is wholly on the hidden side, and its
+    # money to C a move out of the reports: spending.
+    assert await known_owner_categories(session, "spending", [a.id]) == ["nowhere"]
+    assert await known_owner_categories(session, "income", [a.id]) == []

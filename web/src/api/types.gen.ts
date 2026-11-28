@@ -1917,6 +1917,10 @@ export type IncomeEntryOut = {
      */
     description: string;
     /**
+     * Hidden Account Name
+     */
+    hidden_account_name: string | null;
+    /**
      * Income Kind
      */
     income_kind: string | null;
@@ -1964,10 +1968,6 @@ export type IncomeOut = {
      * Entries
      */
     entries: Array<IncomeEntryOut>;
-    /**
-     * Hidden Moved In
-     */
-    hidden_moved_in: string;
     /**
      * Known Categories
      */
@@ -2503,6 +2503,147 @@ export type SnapshotOut = {
      * Quantity
      */
     quantity: string;
+};
+
+/**
+ * SpendingCategoryOut
+ */
+export type SpendingCategoryOut = {
+    /**
+     * Amount
+     */
+    amount: string;
+    /**
+     * Category
+     */
+    category: string | null;
+};
+
+/**
+ * SpendingEntryOut
+ *
+ * The spending flows of one transaction in one instrument, added up: what went out is
+ * positive, a refund negative.
+ */
+export type SpendingEntryOut = {
+    /**
+     * Account Id
+     */
+    account_id: string | null;
+    /**
+     * Account Name
+     */
+    account_name: string | null;
+    /**
+     * Amount
+     */
+    amount: string | null;
+    /**
+     * Booking Date
+     */
+    booking_date: string;
+    /**
+     * Category
+     */
+    category: string | null;
+    /**
+     * Counterparty Name
+     */
+    counterparty_name: string | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Hidden Account Name
+     */
+    hidden_account_name: string | null;
+    /**
+     * Instrument
+     */
+    instrument: string;
+    /**
+     * Owner Category
+     */
+    owner_category: string | null;
+    /**
+     * Quantity
+     */
+    quantity: string;
+    /**
+     * Refund
+     */
+    refund: boolean;
+    /**
+     * Source Category
+     */
+    source_category: string | null;
+    /**
+     * Transaction Id
+     */
+    transaction_id: string;
+};
+
+/**
+ * SpendingOut
+ *
+ * What went out over a range, in the reporting currency.
+ */
+export type SpendingOut = {
+    /**
+     * Bucket
+     */
+    bucket: 'day' | 'week' | 'month';
+    /**
+     * Categories
+     */
+    categories: Array<SpendingCategoryOut>;
+    /**
+     * End
+     */
+    end: string;
+    /**
+     * Entries
+     */
+    entries: Array<SpendingEntryOut>;
+    /**
+     * Known Categories
+     */
+    known_categories: Array<string>;
+    /**
+     * Missing Count
+     */
+    missing_count: number;
+    /**
+     * Periods
+     */
+    periods: Array<SpendingPeriodOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
+};
+
+/**
+ * SpendingPeriodOut
+ */
+export type SpendingPeriodOut = {
+    /**
+     * By Category
+     */
+    by_category: Array<SpendingCategoryOut>;
+    /**
+     * Start
+     */
+    start: string;
+    /**
+     * Total
+     */
+    total: string;
 };
 
 /**
@@ -4630,6 +4771,52 @@ export type UpdateFinanceSettingsResponses = {
 };
 
 export type UpdateFinanceSettingsResponse = UpdateFinanceSettingsResponses[keyof UpdateFinanceSettingsResponses];
+
+export type GetSpendingData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Start
+         */
+        start?: string | null;
+        /**
+         * End
+         */
+        end?: string | null;
+        /**
+         * Bucket
+         */
+        bucket?: 'day' | 'week' | 'month';
+        /**
+         * Account Id
+         */
+        account_id?: string | null;
+        /**
+         * Category
+         */
+        category?: string | null;
+    };
+    url: '/api/v1/finance/spending';
+};
+
+export type GetSpendingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSpendingError = GetSpendingErrors[keyof GetSpendingErrors];
+
+export type GetSpendingResponses = {
+    /**
+     * Successful Response
+     */
+    200: SpendingOut;
+};
+
+export type GetSpendingResponse = GetSpendingResponses[keyof GetSpendingResponses];
 
 export type SetTransactionCategoriesData = {
     body: TransactionCategoriesUpdate;
