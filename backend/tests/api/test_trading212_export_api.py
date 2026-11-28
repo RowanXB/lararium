@@ -436,7 +436,9 @@ def _deposit(isa: dict[str, Any], notes: str) -> bytes:
 
 
 async def test_a_later_export_pairs_an_unpaired_move(api, session, run) -> None:
-    isa = await _invest_and_isa(api, session, run, minutes=10)
+    # The API's DEPOSIT is outside the family by its type, however near the TRANSFER
+    # (owner, 2026-11-28): unpaired until an upload's empty Notes name the family.
+    isa = await _invest_and_isa(api, session, run, minutes=2)
     assert await _matched(session) == []
 
     response = await _upload(api, isa["id"], _deposit(isa, ""))
@@ -446,9 +448,19 @@ async def test_a_later_export_pairs_an_unpaired_move(api, session, run) -> None:
     assert transfer.status == "matched"
 
 
+async def test_empty_notes_pair_no_move_more_than_two_minutes_away(api, session, run) -> None:
+    # Both sides of a move are booked at the same instant: Notes don't stretch the window.
+    isa = await _invest_and_isa(api, session, run, minutes=10)
+
+    response = await _upload(api, isa["id"], _deposit(isa, ""))
+
+    assert response.status_code == 202, response.text
+    assert await _matched(session) == []
+
+
 async def test_a_later_transaction_id_takes_no_family_edge(api, session, run) -> None:
     isa = await _invest_and_isa(api, session, run, minutes=2)
-    assert len(await _matched(session)) == 1  # paired by the near window
+    assert await _matched(session) == []
 
     response = await _upload(api, isa["id"], _deposit(isa, "Transaction ID: card-tx-0001"))
 
@@ -459,8 +471,9 @@ async def test_a_later_transaction_id_takes_no_family_edge(api, session, run) ->
 async def test_an_owner_s_never_pair_decision_holds_after_an_empty_notes_upload(
     api, session, run
 ) -> None:
-    # Ten minutes apart: no pair is possible until the owner pairs them, then says never.
-    isa = await _invest_and_isa(api, session, run, minutes=10)
+    # Two minutes apart: the API's DEPOSIT pairs with nothing until the owner pairs them,
+    # then says never; empty Notes would otherwise pair them.
+    isa = await _invest_and_isa(api, session, run, minutes=2)
     ids = {
         key: await session.scalar(
             text("select id from finance.transactions where external_id = :k"),

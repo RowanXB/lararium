@@ -15,9 +15,10 @@ movement's sign comes from its type; a TRANSFER's is taken as given and flagged.
 A TRANSFER names the Trading 212 family (accounts.family_identifier; account family identifier
 design §5.5), not an account: pairing finds the other accounts of the family. A DEPOSIT or
 WITHDRAW names nobody, unless the export's row for it says more in its Notes (merge.evidence,
-design §5.9): empty Notes name the family, a bank account sent to names that account, and a
-transaction ID or a bank account marks it outside the family. A stale `family_accounts` config
-key is ignored.
+design §5.9): empty Notes name the family, and a bank account sent to names that account. One
+not naming the family is outside it: its type says so, as every internal move the API gives
+is a TRANSFER on both sides (owner, 2026-11-28). A stale `family_accounts` config key is
+ignored.
 
 Opening balances (design §5.5): Trading 212's history depth is undocumented. What the
 account's first summary reports (cash and the positions its sync saw), less what the history
@@ -96,6 +97,9 @@ _INCOME_KINDS: Mapping[str, IncomeKind] = {
 # Movements with another account of the owner's, or the owner's card (design §5.12); every
 # other item (a dividend, a fee, interest, a fill but a FOP) is marked never a transfer.
 _THROUGH_CONTRA = frozenset({"DEPOSIT", "WITHDRAW", "TRANSFER"})
+# Money from or to outside the family by its type, unless its export row's Notes say it's a
+# move within (account family identifier design §5.9).
+_BANK_MOVES = frozenset({"DEPOSIT", "WITHDRAW"})
 TRANSFER = "TRANSFER"
 # The owner checks the first real TRANSFER's sign (design §10).
 TRANSFER_FLAG = "TRANSFER"
@@ -343,11 +347,14 @@ async def _post_movement(
 ) -> UUID:
     """The movement's transaction. A TRANSFER names the family (accounts.family_identifier).
     A deposit or withdrawal names nobody, unless its export row's Notes say more (`evidence`,
-    design §5.9): empty Notes name the family, a bank account sent to names that account, and
-    any money outside the family marks the record so. Without an export row it says nothing."""
+    design §5.9): empty Notes name the family, and a bank account sent to names that account.
+    One not naming the family is outside it: its type says the money came from or went
+    outside the family, as every internal move is a TRANSFER on both sides (owner,
+    2026-11-28)."""
     currency = await run.currency(values.currency)
     identifier: UUID | None = None
-    if kind == TRANSFER or (evidence is not None and evidence.family):
+    family = kind == TRANSFER or (evidence is not None and evidence.family)
+    if family:
         identifier = await accounts.family_identifier(run)
     elif evidence is not None and evidence.sort_code is not None:
         value = f"{evidence.sort_code}:{evidence.account_number}"
@@ -372,7 +379,7 @@ async def _post_movement(
         CounterpartyFields(
             identifier_id=identifier,
             never_transfer=kind not in _THROUGH_CONTRA,
-            outside_family=evidence is not None and evidence.outside,
+            outside_family=kind in _BANK_MOVES and not family,
         ),
         details=TransactionDetails(income_kind=_INCOME_KINDS.get(kind)),
     )

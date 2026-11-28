@@ -325,18 +325,17 @@ async def _follow_marked(
         for e in history.events
         if x.first <= e.n <= x.last and e.kind in ("deposit", "withdrawal")
     }
-    expected_outside: set[str] = set()
-    for e in history.events:
-        if e.n not in covered:
-            continue
-        # A deposit's Notes are a transaction ID (outside the family); a withdrawal's, empty.
-        if e.kind == "deposit":
-            expected_outside.add(f"transaction:{e.reference}")
+    # A covered withdrawal's Notes are empty (a move within the family); every other deposit
+    # or withdrawal is outside it by its type, a covered deposit's transaction ID adding
+    # nothing.
     withdrawals = {
         f"transaction:{e.reference}"
         for e in history.events
         if e.n in covered and e.kind == "withdrawal"
     }
+    expected_outside = {
+        f"transaction:{e.reference}" for e in history.events if e.kind in ("deposit", "withdrawal")
+    } - withdrawals
     for t in ledger:
         assert t[6] == ("trading212" if t[0] in withdrawals else None), t[0]
     assert outside == expected_outside

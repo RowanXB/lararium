@@ -1,11 +1,12 @@
 """Properties of the family rule in the pair relation (account family identifier design §5.3),
 over in-memory records through pairs._registry_edges.
 
-A record naming an account family pairs only within the family: with a record naming the
-family back, on one of the accounts it names and naming its account (MUTUAL when each is
-identified to the other's account, else ONE_SIDED); or with a record there naming nobody,
-when both are timed and their instants are at most the near window apart (ONE_SIDED), unless
-its source says it moved money outside the family (§5.9, outside_family). No other rule
+A record naming an account family pairs only within the family, and only when both are
+timed and their instants are at most the near window apart (owner, 2026-11-28): with a
+record naming the family back, on one of the accounts it names and naming its account
+(MUTUAL when each is identified to the other's account, else ONE_SIDED); or with a record
+there naming nobody (ONE_SIDED), unless its source says it moved money outside the family
+(§5.9, outside_family). No other rule
 gives it an edge (item 2). A record naming nobody that is a family move's
 counterpart so (item 3) gets no edge from a record naming a shared payee and none through
 its account's funding alone; its other edges are as without the family moves.
@@ -197,12 +198,12 @@ def _familied(records: list[Pairable]) -> set[UUID]:
 def test_a_family_record_pairs_only_inside_its_family(
     case: tuple[frozenset[UUID], list[Pairable]],
 ) -> None:
-    """Every same-amount edge touching a family record is between two family accounts, and
-    its other side, if it names no family, names nobody, is timed and is at most the near
-    window from it. Exactly, the edges are §5.3 item 2's: two family moves each naming the
-    other's account (MUTUAL when each is identified to it, else ONE_SIDED), or a family
-    move and a record naming nobody on an account it names, its source not saying it went
-    outside the family, both timed and at most the near window apart (ONE_SIDED)."""
+    """Every same-amount edge touching a family record is between two family accounts, both
+    timed and at most the near window apart, and its other side, if it names no family,
+    names nobody. Exactly, the edges are §5.3 item 2's, both timed and at most the near
+    window apart: two family moves each naming the other's account (MUTUAL when each is
+    identified to it, else ONE_SIDED), or a family move and a record naming nobody on an
+    account it names, its source not saying it went outside the family (ONE_SIDED)."""
     family, records = case
     same, _, _ = _registry_edges(records, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     given_edges = {
@@ -215,6 +216,8 @@ def test_a_family_record_pairs_only_inside_its_family(
         if not (s.family or c.family):
             continue
         pair = frozenset((s.id, c.id))
+        if not (s.timed and c.timed and abs(s.occurred_at - c.occurred_at) <= NEAR):
+            continue
         if s.family and c.family:
             if s.account_id in (c.payee_holders | {c.holder}) and c.account_id in (
                 s.payee_holders | {s.holder}
@@ -229,9 +232,6 @@ def test_a_family_record_pairs_only_inside_its_family(
             and not other.payee_holders
             and not other.names_account
             and not other.outside_family
-            and x.timed
-            and other.timed
-            and abs(x.occurred_at - other.occurred_at) <= NEAR
         ):
             expected[pair] = ONE_SIDED
     by_id = {x.id: x for x in records}
@@ -239,10 +239,10 @@ def test_a_family_record_pairs_only_inside_its_family(
         a, b = (by_id[x] for x in pair)
         assert {a.account_id, b.account_id} <= family, (a, b)
         assert not (a.outside_family or b.outside_family), (a, b)
+        assert a.timed and b.timed and abs(a.occurred_at - b.occurred_at) <= NEAR, (a, b)
         for x, other in ((a, b), (b, a)):
             if x.family and not other.family:
-                assert _names_nobody(other) and x.timed and other.timed, (x, other)
-                assert abs(x.occurred_at - other.occurred_at) <= NEAR, (x, other)
+                assert _names_nobody(other), (x, other)
     assert given_edges == expected
     event("a family edge" if given_edges else "no family edge")
 
@@ -324,20 +324,19 @@ def test_family_evidence_comes_first(case: tuple[frozenset[UUID], list[Pairable]
 
 @settings(max_examples=300, deadline=None)
 @given(case=_case())
-def test_time_only_narrows_family_pairs(case: tuple[frozenset[UUID], list[Pairable]]) -> None:
-    """With every record's `timed` off, the edges touching a family record are exactly
-    those between two family records, as with it on: time decides only whether a family
-    move pairs with a record naming nobody."""
+def test_untimed_records_never_pair_by_the_family_rule(
+    case: tuple[frozenset[UUID], list[Pairable]],
+) -> None:
+    """With every record's `timed` off, no edge touches a family record: time decides
+    every family pair (owner, 2026-11-28), and the other edges stay as they were."""
     _, records = case
     untimed = [replace(x, timed=False) for x in records]
     on, _, _ = _registry_edges(records, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     off, _, _ = _registry_edges(untimed, DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
     family = {x.id for x in records if x.family}
-
-    def touching(edges: _Edges) -> dict[frozenset[UUID], int]:
-        return {pair: tier for pair, tier in _edges(edges).items() if pair & family}
-
-    assert touching(off) == {pair: tier for pair, tier in touching(on).items() if pair <= family}
+    assert not any(pair & family for pair in _edges(off))
+    # A record naming nobody that only a family move's edge kept from others gets them back.
+    assert {p: t for p, t in _edges(on).items() if not p & family}.items() <= _edges(off).items()
 
 
 # Several candidates: the only one within the near window (§5.10).

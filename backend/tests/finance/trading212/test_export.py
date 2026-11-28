@@ -655,14 +655,13 @@ def _record(**cells: str) -> merge.ExportRecord:
 
 
 def test_evidence_of_the_three_forms() -> None:
-    assert merge.evidence(_record(notes="")) == merge.Evidence(True, False, None, None)
-    assert merge.evidence(_record(notes=f"Transaction ID: {CARD_TX}")) == merge.Evidence(
-        False, True, None, None
-    )
+    assert merge.evidence(_record(notes="")) == merge.Evidence(True, None, None)
     assert merge.evidence(_record(action="Withdrawal", notes=SENT)) == merge.Evidence(
-        False, True, "123456", "87654321"
+        False, "123456", "87654321"
     )
-    # Another form, or another action, says nothing.
+    # A transaction id adds nothing to the type; another form, or another action, says
+    # nothing.
+    assert merge.evidence(_record(notes=f"Transaction ID: {CARD_TX}")) == merge.NO_EVIDENCE
     assert merge.evidence(_record(notes="Bank transfer")) == merge.NO_EVIDENCE
     assert merge.evidence(_record(action="Market buy", notes="")) == merge.NO_EVIDENCE
 
@@ -689,8 +688,9 @@ async def test_an_export_row_s_notes_are_evidence_on_the_posted_record(session, 
         ("transactions", transaction_item(reference="w-bank", kind="WITHDRAW", amount="-40.00")),
         ("transactions", transaction_item(reference="d-none")),
     )
+    # Its type says the money came from or went outside the family (owner, 2026-11-28).
     for reference in ("d-empty", "d-card", "w-bank", "d-none"):
-        assert tuple(await _posted(session, f"transaction:{reference}")) == (None, None, False)
+        assert tuple(await _posted(session, f"transaction:{reference}")) == (None, None, True)
 
     await _ingest(
         ledger,
@@ -712,8 +712,8 @@ async def test_an_export_row_s_notes_are_evidence_on_the_posted_record(session, 
         "123456:87654321",
         True,
     )
-    # No export row: the source says nothing.
-    assert tuple(await _posted(session, "transaction:d-none")) == (None, None, False)
+    # No export row: its type alone.
+    assert tuple(await _posted(session, "transaction:d-none")) == (None, None, True)
 
 
 async def test_an_export_only_row_posts_with_its_evidence(session, run) -> None:
@@ -746,7 +746,7 @@ async def test_an_export_without_a_notes_column_says_nothing(session, run) -> No
     await ledger.normalize(SUMMARY, ("transactions", transaction_item(reference="d-bare")))
     header = tuple(h for h in HEADER if h != "Notes")
     await _ingest(ledger, export_csv(row(reference="d-bare"), header=header))
-    assert tuple(await _posted(session, "transaction:d-bare")) == (None, None, False)
+    assert tuple(await _posted(session, "transaction:d-bare")) == (None, None, True)
     assert (
         merge.evidence(
             merge.ExportRecord(

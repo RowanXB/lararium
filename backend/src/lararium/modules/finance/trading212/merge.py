@@ -208,17 +208,17 @@ def notes_bank_account(notes: str) -> tuple[str, str] | None:
 @dataclass(frozen=True)
 class Evidence:
     """What an export row's Notes say of a deposit or withdrawal (design §5.9): `family`, a
-    move from or to another Trading 212 account (empty Notes); `outside`, money outside the
-    family (a transaction id, or a bank account, whose parts are then given)."""
+    move from or to another Trading 212 account (empty Notes); the parts of the bank account
+    a withdrawal was sent to. A transaction id adds nothing to the type, which already says
+    the money is outside the family (records._post_movement)."""
 
     family: bool
-    outside: bool
     sort_code: str | None
     account_number: str | None
 
 
 # What a row of another form, or of another action, says: nothing.
-NO_EVIDENCE = Evidence(False, False, None, None)
+NO_EVIDENCE = Evidence(False, None, None)
 
 
 def has_known_notes(notes: str) -> bool:
@@ -237,11 +237,9 @@ def evidence(record: ExportRecord) -> Evidence:
         return NO_EVIDENCE
     notes = record.cells["Notes"]
     if not notes.strip():
-        return Evidence(True, False, None, None)
-    if notes_transaction_id(notes) is not None:
-        return Evidence(False, True, None, None)
+        return Evidence(True, None, None)
     if (account := notes_bank_account(notes)) is not None:
-        return Evidence(False, True, *account)
+        return Evidence(False, *account)
     return NO_EVIDENCE
 
 
