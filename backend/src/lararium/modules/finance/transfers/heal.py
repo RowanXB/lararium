@@ -7,18 +7,14 @@ from decimal import Decimal
 from itertools import chain
 from uuid import UUID
 
-from sqlalchemy import and_, case, exists, func, or_, select, union
+from sqlalchemy import Table, and_, case, exists, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.modules.finance import models
 from lararium.modules.finance.ledger import PostingInput
 from lararium.modules.finance.system_accounts import SystemAccountKey, system_account_ids
-from lararium.modules.finance.transfers.contra import (
-    record_columns,
-    rejoins,
-    snapshot_own_records,
-)
+from lararium.modules.finance.transfers.contra import record_columns, rejoins
 from lararium.modules.finance.transfers.pairs import (
     PairRelation,
     conversion_postings,
@@ -185,18 +181,19 @@ async def _pair_states(
 
 
 async def records_to_heal(
-    session: AsyncSession, settings: TransferSettings, relation: PairRelation
+    session: AsyncSession, settings: TransferSettings, relation: PairRelation, own: Table
 ) -> list[UUID]:
     """Records whose ledger state disagrees with the rule (Decision 8) and `relation` (the
     pair relation as the ledger stands), in occurrence order: matching each of them
-    (engine.match_transaction) brings it in line."""
+    (engine.match_transaction) brings it in line. `own` is the snapshot of the own records
+    `relation` was computed from (contra.snapshot_own_records)."""
     system = await system_account_ids(session)
     in_transit, unassigned = system.get("in_transit"), system.get("unassigned")
     if unassigned is None:
         return []  # no connector has posted anything yet
-    # The own records once, with statistics, for the arms below to join: re-derived in each
-    # arm from the ledger's tables, the plan rests on their statistics, which may be stale.
-    own = await snapshot_own_records(session, system)
+    # The arms below join the own records' snapshot, which has statistics of its own:
+    # re-derived in each arm from the ledger's tables, the plan would rest on theirs, which
+    # may be stale.
     tr, d, t = models.Transfer, models.TransferDecision, models.Transaction
     active = tr.status != "rejected"
     identified = and_(own.c.holder.is_not(None), own.c.holder != own.c.account_id)

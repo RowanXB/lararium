@@ -35,19 +35,21 @@ CARD_PAYMENTS = 5_000
 IMPORTED_ROWS = 4_900
 TRANSFERS_TO_B = 100
 # Measured on docker-test through its ssh tunnel, either way the statistics stand: a heal
-# with nothing due takes about 0.5 s (two set-wise scans of the own records, one into a
-# snapshot); healing 100 newly identified transfers about 4.5 s, nearly all of it the ~27
-# small indexed statements each record's own matching runs (its contra, its transfer, its
-# placeholder, their audit). Without the imported rows, the same day: 0.3 s and 3.7 s.
-# With JIT on (lararium.db turns it off), a heal with nothing due took 5.5 s without
-# statistics, 2.4 s of it compiling the scan of the own records, whose estimated cost the
-# missing statistics inflate (and 3.2-3.4 s on CI); 1 s with it off, as with stale ones.
+# with nothing due takes 0.5-1 s, most of it the one set-wise scan of the own records into
+# the snapshot that the pair relation and what is due both read (some 6 index lookups for
+# each of the 10,000 records, slower without statistics, as bitmap scans); healing 100
+# newly identified transfers 5-11 s, nearly all of it the ~27 small indexed statements
+# each record's own matching runs (its contra, its transfer, its placeholder, their
+# audit), each a round trip through the tunnel. With JIT on (lararium.db turns it off), a
+# heal with nothing due took 5.5 s without statistics, 2.4 s of it compiling the scan
+# whose estimated cost the missing statistics inflate; with JIT off but the scan run twice
+# (once for the pair relation, once for the snapshot), 1.1-2.3 s, and up to 3.4 s on CI.
 # Before the snapshot, with stale statistics, finding what was due alone hit the 30 s
 # statement timeout (and took 26 s before the pair relation was computed set-wise); so did
 # reading what the imported rows print while rows and batches were joined (and took 11 s
-# without statistics). The bounds allow a CI runner several times slower and still fail
-# long before that timeout would.
-NOTHING_DUE_BOUND = 3.0
+# without statistics). The bounds allow a CI runner several times slower (CI has taken up
+# to 3x what docker-test does) and still fail long before that timeout would.
+NOTHING_DUE_BOUND = 6.0
 REGISTERED_BOUND = 15.0
 TABLES = (
     "transactions",

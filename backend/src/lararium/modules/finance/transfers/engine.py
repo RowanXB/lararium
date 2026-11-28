@@ -63,6 +63,7 @@ from lararium.modules.finance.transfers.contra import (
     load_own_record,
     rejection_of,
     rejoins,
+    snapshot_own_records,
 )
 from lararium.modules.finance.transfers.heal import records_to_heal
 from lararium.modules.finance.transfers.pairs import (
@@ -677,9 +678,13 @@ async def heal_transfers(ctx: CommandContext) -> int:
     matched = 0
     dissolved: _Dissolved = {}
     for _ in range(_MAX_HEAL_PASSES):
-        # Matching doesn't change the pair relation, so one serves the whole pass.
-        relation = await pair_relation(ctx.session, await system_account_ids(ctx.session), settings)
-        due = await records_to_heal(ctx.session, settings, relation)
+        # Matching doesn't change the pair relation, so one serves the whole pass; both it
+        # and what is due read one snapshot of the own records, the costliest scan of a
+        # heal with nothing due.
+        system_ids = await system_account_ids(ctx.session)
+        own = await snapshot_own_records(ctx.session, system_ids)
+        relation = await pair_relation(ctx.session, system_ids, settings, own=own)
+        due = await records_to_heal(ctx.session, settings, relation, own)
         if not due:
             return matched
         system = await _system(ctx)

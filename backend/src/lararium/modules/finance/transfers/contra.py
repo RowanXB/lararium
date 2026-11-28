@@ -573,6 +573,10 @@ _OWN_RECORDS = Table(
     Column("occurred_tz", String),
     Column("source_kind", String, nullable=False),
     Column("source_ref", String, nullable=False),
+    Column("chain", String),
+    Column("tx_hash", String),
+    Column("chain_address", String),
+    Column("address_holder", Uuid),
     prefixes=["TEMPORARY"],
     postgresql_on_commit="DROP",
 )
