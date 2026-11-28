@@ -36,6 +36,7 @@ from lararium.modules.finance.binance.parse import BinanceDataError
 from lararium.modules.finance.binance.reconcile import check
 from lararium.modules.finance.binance.records.futures import (
     INCOME_FEES,
+    INCOME_REWARDS,
     TRANSFER,
     income_types,
 )
@@ -51,6 +52,7 @@ from .normalizing import (
     normalize_rows,
     plain,
     postings,
+    transaction,
     typed,
 )
 from .syncing import (
@@ -322,6 +324,13 @@ async def test_income_types_cover_the_catalogue_enum(session, run, label: str) -
             ("Unassigned", "STB", Decimal(-2)),
         ], row["incomeType"]
         assert await _never_transfer(session, _key(label, row)) is True
+    # A rebate, kickback, bonus or reward is a reward whatever its sign (income categories
+    # design 4.3); profit, funding, fees and the rest state no income kind.
+    assert INCOME_REWARDS <= income_types(UM)
+    for row in [*paid, *received]:
+        found = (await transaction(session, _key(label, row))).income_kind
+        expected = "reward" if row["incomeType"] in INCOME_REWARDS else None
+        assert found == expected, row["incomeType"]
     # A type the catalogue does not list is flagged by name and not posted.
     assert len(await keys(session, connection.id)) == 2 * len(kinds)
     assert f"{label}.incomeType=SOMETHING_NEW" in report.new_flags

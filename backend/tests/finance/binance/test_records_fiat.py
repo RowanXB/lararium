@@ -755,6 +755,10 @@ async def test_only_a_pay_refund_is_marked_a_refund(session, run) -> None:
 
     marked = {k for k in await keys(session, connection.id) if await _refund(session, k)}
     assert marked == {f"pay:{refunded['transactionId']}"}
+    # No Pay order or card payment states an income kind: money from others is the owner's to
+    # categorise, and a refund is negative spending.
+    for key in await keys(session, connection.id):
+        assert (await transaction(session, key)).income_kind is None, key
     await assert_balanced_and_quiet(session, connection.id)
 
 
@@ -785,6 +789,9 @@ async def test_rebate_is_income_on_spot_unless_a_dividend_paid_it(session, run) 
     assert rows["BBB"].transaction_id is None
     assert rows["AAA"].transaction_id is not None
     assert rows["AAA"].update_time == at(BASE_TIME_MS)
+    # A rebate is a reward, as the dividend that pays one is (income categories design 4.3).
+    [key] = [k for k in await keys(session, connection.id) if k.startswith("rebate:")]
+    assert (await transaction(session, key)).income_kind == "reward"
     await assert_balanced_and_quiet(session, connection.id)
 
 

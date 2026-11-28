@@ -313,6 +313,7 @@ async def test_reward_without_a_dividend_accrues_on_its_product(session, run, la
         (wallet, coin, Decimal("0.25")),
         ("Unassigned", coin, Decimal("-0.25")),
     ]
+    assert (await transaction(session, key)).income_kind == "reward"
     [row] = await typed(session, _table(label), connection.id)
     assert row.dividend_id is None and row.transaction_id is not None
     await assert_balanced_and_quiet(session, connection.id)

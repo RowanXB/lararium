@@ -7,7 +7,9 @@ only; a contract is never an instrument (design 5.5).
 
 - Every documented `incomeType` but `TRANSFER` is `income` of `asset` on the wallet against
   Unassigned; a negative commission, funding fee or insurance clearance (`INCOME_FEES`) is a fee
-  (`is_fee`). A type the catalogue does not list is flagged by the parser and not posted.
+  (`is_fee`). A rebate, kickback, bonus or reward type (`INCOME_REWARDS`) has the income kind
+  `reward` whatever its sign (income categories design 4.3). A type the catalogue does not list
+  is flagged by the parser and not posted.
 - A `TRANSFER` row is a wallet-to-wallet movement through `link_movements` (rule 2): one the
   universal or the margin transfer history lists first is linked to it and not posted. The row
   names only the futures side (into it when `income` is positive): posted by itself, its other
@@ -44,6 +46,18 @@ WALLETS = {UM_INCOME: "um_futures", CM_INCOME: "cm_futures"}
 TRANSFER = "TRANSFER"
 # The income types whose negative amounts are fees the wallet paid.
 INCOME_FEES = frozenset({"COMMISSION", "FUNDING_FEE", "INSURANCE_CLEAR"})
+# The income types that are free coins the account is given, as an Earn reward is: income of
+# the kind `reward`. Profit, funding, fee returns and the rest are not an income kind.
+INCOME_REWARDS = frozenset(
+    {
+        "API_REBATE",
+        "BFUSD_REWARD",
+        "COMMISSION_REBATE",
+        "CONTEST_REWARD",
+        "REFERRAL_KICKBACK",
+        "WELCOME_BONUS",
+    }
+)
 
 
 def income_types(label: str) -> frozenset[str]:
@@ -127,6 +141,7 @@ async def income(run: Run, row: Row) -> None:
         occurred_at=occurred_at,
         description=f"Futures {memo} {coin}",
         postings=postings,
+        income_kind="reward" if kind in INCOME_REWARDS else None,
     )
     await run.typed(transaction_id=transaction_id)
 

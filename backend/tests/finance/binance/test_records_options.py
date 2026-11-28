@@ -51,6 +51,7 @@ from .normalizing import (
     normalize_rows,
     plain,
     postings,
+    transaction,
     typed,
 )
 from .syncing import (
@@ -240,6 +241,9 @@ async def test_bill_types_cover_the_catalogue_enum(session, run) -> None:
             ("Unassigned", "STB", Decimal(-2)),
         ], row["type"]
         assert await _never_transfer(session, _key(row)) is True
+    # Premiums, exercise profit and fees state no income kind.
+    for row in [*paid, *received]:
+        assert (await transaction(session, _key(row))).income_kind is None, row["type"]
     # A type the catalogue does not list is flagged by name and not posted.
     assert len(await keys(session, connection.id)) == 2 * len(kinds)
     assert f"{BILL}.type=SOMETHING_NEW" in report.new_flags
