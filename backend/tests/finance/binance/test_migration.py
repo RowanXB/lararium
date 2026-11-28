@@ -64,7 +64,9 @@ _CONFIG: dict[str, object] = {
     "coingecko_ids_asked": {"at_ms": 1, "ok": True},
     "sync_requested": True,
 }
-# What each downgrade removes, by the revision it goes down to.
+# What each downgrade removes, by the revision it goes down to. Every one passes 0049's, which
+# takes the replay marker from Binance and IBKR alike (their next sync replays).
+_REPLAY = {"normalizer_version"}
 _REMOVED = {
     "0043": {"bars_asked", "coingecko_ids_asked"},
     "0042": {"bars_asked", "coingecko_ids_asked", "reconciled_through"},
@@ -80,8 +82,8 @@ _REMOVED = {
 
 
 def _seed(connection: Connection) -> tuple[object, object, object]:
-    """A Binance connection and an IBKR one, which no downgrade from 0040 on touches,
-    each with every key; (owner, binance, other)."""
+    """A Binance connection and an IBKR one, which no downgrade from 0040 on touches but for
+    0049's replay marker, each with every key; (owner, binance, other)."""
     owner = connection.execute(
         text("insert into core.entities (kind, name) values ('person', 'Config test') returning id")
     ).scalar_one()
@@ -108,8 +110,9 @@ def _assert_config(engine: Engine, seeded: tuple[object, object, object], down_t
             ).scalar_one()
             for id_ in (binance, other)
         }
-    assert config[binance] == {k: v for k, v in _CONFIG.items() if k not in _REMOVED[down_to]}
-    assert config[other] == _CONFIG
+    removed = _REMOVED[down_to] | _REPLAY
+    assert config[binance] == {k: v for k, v in _CONFIG.items() if k not in removed}
+    assert config[other] == {k: v for k, v in _CONFIG.items() if k not in _REPLAY}
 
 
 def _unseed(engine: Engine, seeded: tuple[object, object, object]) -> None:
@@ -171,7 +174,7 @@ def _assert_lists(connection: Connection, *, binance: bool) -> None:
     schemes = _allowed(
         _check(connection, "instrument_identifiers", "instrument_identifiers_scheme_check")
     )
-    # At head 0048 (the account family identifier) has added account_family too, and 0049
+    # At head 0048 (the account family identifier) has added account_family too, and 0050
     # (Bitcoin) chain_native on top of what 0041 adds.
     assert kinds == (_M6_KINDS | {"chain_address", "account_family"} if binance else _M6_KINDS)
     assert schemes == (_M6_SCHEMES | {"binance_asset", "chain_native"} if binance else _M6_SCHEMES)

@@ -16,6 +16,7 @@ from lararium.modules.finance.instruments import create_instrument
 from lararium.modules.finance.ledger import (
     ChainFields,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     find_unbalanced_transactions,
     post_transaction,
@@ -486,3 +487,32 @@ async def test_chain_fields_are_stored_and_compared(session, run, make_account, 
     assert changed.chain == other
     _, outcome = await run(upsert_connector_transaction, tx(None))
     assert outcome == "updated"
+
+
+async def test_income_kind_round_trips(run, make_account, gbp) -> None:
+    a, b = await make_account(name="A"), await make_account(name="B")
+    posted = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=LATE_31_MARCH,
+            description="Interest",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-1.20")),
+                PostingInput(b.id, gbp.id, Decimal("1.20")),
+            ],
+            details=TransactionDetails(income_kind="interest"),
+        ),
+    )
+    assert posted.details.income_kind == "interest"
+    plain = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=LATE_31_MARCH,
+            description="Coffee",
+            postings=[
+                PostingInput(a.id, gbp.id, Decimal("-3")),
+                PostingInput(b.id, gbp.id, Decimal("3")),
+            ],
+        ),
+    )
+    assert plain.details.income_kind is None

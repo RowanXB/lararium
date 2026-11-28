@@ -65,6 +65,8 @@ _LABELS = (_ACCOUNT_NO, _OPENED, _ACCOUNT_TYPE, _AVAILABLE, _PLAN_VALUE, _VALUAT
 _IN = frozenset({"Deposit", "Transfer In", "Interest"})
 _OUT = frozenset({"Withdrawal", "Transfer Out"})
 _EITHER = frozenset({"Interest Adjustment"})
+# The types that pay interest (or correct it). Tembo prints no interest total.
+_INTEREST = frozenset({"Interest", "Interest Adjustment"})
 _COLUMN = Decimal(15)
 _MARGIN = Decimal(5)
 
@@ -263,6 +265,7 @@ def _rows(entries: list[_Entry]) -> tuple[list[LayoutRow], list[PrintedBalance]]
                 paid_in=quantity if quantity >= 0 else None,
                 paid_out=-quantity if quantity < 0 else None,
                 amounts=split.moves,
+                interest=kind in _INTEREST,
             )
         )
         if balance is not None:

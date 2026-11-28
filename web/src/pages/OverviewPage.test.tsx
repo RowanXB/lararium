@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -20,7 +20,8 @@ const FLOW = {
   periods: [{ start: "2026-11-01", income: "2000.00", spending: "500.00" }],
   categories: [
     { category: "eating_out", income: "0", spending: "300.00" },
-    { category: null, income: "2000.00", spending: "200.00" },
+    { category: "salary", income: "400.00", spending: "0" },
+    { category: null, income: "1600.00", spending: "200.00" },
   ],
   payees: [{ name: "Corner cafe", spending: "300.00" }],
   hidden_accounts: [],
@@ -39,7 +40,15 @@ vi.mock("../api", () => ({
 vi.mock("../components/charts/EChart", () => ({ EChart: () => null }));
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
+  Link: ({
+    children,
+    to,
+    search,
+  }: {
+    children: ReactNode;
+    to: string;
+    search?: Record<string, string>;
+  }) => <a href={search ? `${to}?${new URLSearchParams(search)}` : to}>{children}</a>,
 }));
 
 beforeEach(() => {
@@ -111,8 +120,39 @@ it("shows income, spending and what is left, by category and payee", async () =>
   expect(screen.getByText("75% of income")).toBeInTheDocument();
   // A category is free text from the source; none is "Uncategorised".
   expect(screen.getByText("Eating out")).toBeInTheDocument();
-  expect(screen.getByText("Uncategorised")).toBeInTheDocument();
+  // Uncategorised is in both the spending and the income cards.
+  expect(screen.getAllByText("Uncategorised")).toHaveLength(2);
   expect(screen.getByText("Corner cafe")).toBeInTheDocument();
+});
+
+it("shows where income came from, largest first, with a link to the Income page", async () => {
+  renderPage();
+
+  const card = screen.getByText("Where it came from").closest("[data-slot=card]");
+  if (!card) throw new Error("the income card is missing");
+  // The fixture lists salary before uncategorised income; the bars follow the amounts. The
+  // currency loads after the title, so wait for the bars.
+  const rows = await within(card as HTMLElement).findAllByRole("listitem");
+  expect(rows.map((row) => row.textContent)).toEqual(["Uncategorised£1,600.00", "Salary£400.00"]);
+  expect(screen.getByRole("link", { name: "See all income" })).toBeInTheDocument();
+});
+
+it("opens the Income page on the same dates", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  const link = () => screen.getByRole("link", { name: "See all income" });
+  await user.click(await screen.findByRole("button", { name: "12 months" }));
+  expect(new URLSearchParams(link().getAttribute("href")!.split("?")[1]).get("preset")).toBe("1y");
+
+  await user.click(screen.getByRole("button", { name: "Custom" }));
+  fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
+  fireEvent.change(screen.getByLabelText("to"), { target: { value: "2026-01-31" } });
+  const search = new URLSearchParams(link().getAttribute("href")!.split("?")[1]);
+  expect([search.get("preset"), search.get("start"), search.get("end")]).toEqual([
+    "custom",
+    "2026-01-01",
+    "2026-01-31",
+  ]);
 });
 
 it("asks for everything over the chosen preset", async () => {

@@ -1,5 +1,5 @@
-"""Migration 0049 (the Bitcoin wallet tables, the chain columns on transactions and the
-`chain_native` instrument scheme) goes down to 0048 and up again, and the CHECKs hold."""
+"""Migration 0050 (the Bitcoin wallet tables, the chain columns on transactions and the
+`chain_native` instrument scheme) goes down to 0049 and up again, and the CHECKs hold."""
 
 import re
 from pathlib import Path
@@ -54,7 +54,7 @@ def _schemes(connection: Connection) -> set[str]:
 
 
 def test_migration_creates_its_own_tables() -> None:
-    [path] = VERSIONS.glob("0049_*.py")
+    [path] = VERSIONS.glob("0050_*.py")
     assert re.findall(r"CREATE TABLE finance\.(\w+)", path.read_text()) == TABLES
 
 
@@ -90,7 +90,7 @@ def test_migration_round_trips(owner_url: str, migrated: None) -> None:
             assert "chain_native" in _schemes(connection)
             assert _link_indexes(connection) == LINK_INDEXES
         try:
-            command.downgrade(config, "0048")
+            command.downgrade(config, "0049")
             with engine.begin() as connection:
                 assert set(_present(connection).values()) == {False}
                 assert _chain_columns(connection) == set()
@@ -114,14 +114,14 @@ _TWIN_UPPER = "BC1QTWINADDRESSFORTESTSONLY00000000000000"
 
 
 def test_upgrade_lower_cases_stored_bech32_addresses(owner_url: str, migrated: None) -> None:
-    """A bech32 address stored upper-case before 0049 is lower-cased, so it still matches
+    """A bech32 address stored upper-case before 0050 is lower-cased, so it still matches
     the normalised form; one whose lower-cased form is already stored is left alone."""
     config = Config(str(BACKEND / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", owner_url)
     engine = create_engine(owner_url)
     values = (_UPPER, _TWIN_UPPER, _TWIN_UPPER.lower())
     try:
-        command.downgrade(config, "0048")
+        command.downgrade(config, "0049")
         try:
             with engine.begin() as connection:
                 for value in values:

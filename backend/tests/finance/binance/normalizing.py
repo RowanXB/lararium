@@ -123,7 +123,8 @@ async def transaction(session, key: str) -> Any:
     return (
         await session.execute(
             text(
-                "select id, status, occurred_at, booking_date, occurred_tz, description"
+                "select id, status, occurred_at, booking_date, occurred_tz, description,"
+                " income_kind"
                 " from finance.transactions where external_id = :e"
             ),
             {"e": key},

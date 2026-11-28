@@ -649,7 +649,10 @@ def _savings_row(
         bank_type=description,  # the description is the row's kind
         raw=raw,
     )
-    return LayoutRow(row, line[0].page, paid_in, paid_out, moves), balance
+    layout_row = LayoutRow(
+        row, line[0].page, paid_in, paid_out, moves, interest=description == "Gross Interest"
+    )
+    return layout_row, balance
 
 
 def parse_savings(lines: list[list[Word]]) -> LayoutResult:
@@ -700,8 +703,9 @@ def parse_savings(lines: list[list[Word]]) -> LayoutResult:
         rows=rows,
         period=header.period,
         opening_balance=totals[_OPENING],
-        money_in=totals["Total Deposit"] + totals["Total Interest Paid"],
+        money_in=totals["Total Deposit"],
         money_out=totals["Total Withdrawal"],
+        interest=totals["Total Interest Paid"],
         closing_balance=totals[_CLOSING],
         balances=balances,
         unplaced=unplaced,

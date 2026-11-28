@@ -105,6 +105,8 @@ async def test_trade_rounding_residual(session, run) -> None:
     found = await postings(session, f"spot_trade:AAABBB:{row['id']}")
     rounded = ("Unassigned", "BBB", Decimal("2E-7"), None, None, None, None, False, "rounding")
     assert found[-1] == rounded
+    # A trade states no income.
+    assert (await transaction(session, f"spot_trade:AAABBB:{row['id']}")).income_kind is None
     await assert_balanced_and_quiet(session, connection.id)
 
 
@@ -204,6 +206,7 @@ async def test_dividend_is_income_on_spot(session, run) -> None:
         ("Unassigned", "AAA", Decimal("-0.5")),
     ]
     assert (await transaction(session, key)).occurred_at == at(BASE_TIME_MS)  # divTime
+    assert (await transaction(session, key)).income_kind == "reward"
     await assert_balanced_and_quiet(session, connection.id)
 
 

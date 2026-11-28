@@ -773,7 +773,7 @@ async def test_normalize_is_called_with_the_records(session, run, api, monkeypat
     notifier = RecordingNotifier()
     after = await _run_sync(session, connection, api, notifier)
     assert called == [len(await _records(session, connection))]
-    assert NORMALIZER_VERSION == "etoro-norm-5"
+    assert NORMALIZER_VERSION == "etoro-norm-6"
     assert after.warnings == ["eToro flagged: pnl.someNewField"]
     assert notifier.messages == ["eToro: eToro flagged: pnl.someNewField"]
     await _run_sync(session, connection, api, notifier)

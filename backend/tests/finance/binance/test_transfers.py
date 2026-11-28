@@ -610,7 +610,7 @@ async def test_version_bump_fills_existing_rows(session, run) -> None:
     await session.execute(
         text(
             "update core.connections set config = config"
-            ' || \'{"normalizer_version": "binance-norm-2"}\' where id = :c'
+            ' || \'{"normalizer_version": "binance-norm-3"}\' where id = :c'
         ),
         {"c": connection.id},
     )

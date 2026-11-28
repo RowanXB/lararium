@@ -425,6 +425,36 @@ async def test_dividend_and_tax_against_unassigned(session, run, tmp_path) -> No
     assert list(related) == ["ETFA", "ETFA"]
 
 
+async def test_income_kinds_from_cash_types(session, run, tmp_path) -> None:
+    connection = await _connection(run)
+    types = {
+        "8100001": ("Dividends", "dividend"),
+        "8100002": ("Payment In Lieu Of Dividends", "dividend"),
+        "8100003": ("Broker Interest Received", "interest"),
+        "8100004": ("Bond Interest Received", "interest"),
+        "8100005": ("Withholding Tax", None),
+        "8100006": ("Other Fees", None),
+    }
+    rows = [
+        RowSpec(
+            "CashTransaction",
+            "U0000001",
+            **(ETFA | {"description": "income"}),
+            transactionID=tid,
+            type=kind,
+            amount="-1.00" if kind in ("Withholding Tax", "Other Fees") else "2.00",
+        )
+        for tid, (kind, _) in types.items()
+    ]
+    await _sync(session, connection, tmp_path, rows)
+    for tid, (_, expected) in types.items():
+        found = await session.scalar(
+            text("select income_kind from finance.transactions where external_id = :e"),
+            {"e": f"cash:U0000001:{tid}"},
+        )
+        assert found == expected, tid
+
+
 async def test_split_quantity_from_unassigned(session, run, tmp_path) -> None:
     connection = await _connection(run)
     rows = [
@@ -1271,7 +1301,7 @@ async def test_normalizer_version_stored_and_replayed(session, run, tmp_path) ->
     rows = [RowSpec("Trade", "U0000001", **ETFA, transactionID="9000001")]
     await _sync(session, connection, tmp_path, rows)
     stored = await get_connection(session, connection.id)
-    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-4"
+    assert stored.config["normalizer_version"] == NORMALIZER_VERSION == "ibkr-norm-5"
     # An older version that did not fill ibkr_trades: the next run, with nothing new,
     # replays every raw record of the connection and fills it in.
     await session.execute(text("delete from finance.ibkr_trades"))

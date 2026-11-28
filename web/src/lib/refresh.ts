@@ -14,3 +14,10 @@ const AFFECTED = [
 export async function refreshAfterTransferWrite(queryClient: QueryClient) {
   await Promise.all(AFFECTED.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
 }
+
+// A category set by the owner moves income between categories on this page and the Overview.
+export async function refreshAfterCategoryWrite(queryClient: QueryClient) {
+  await Promise.all(
+    [["income"], ["cash-flow"]].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+  );
+}

@@ -196,6 +196,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             date_format="%b %d, %Y",
             amount_format=_REVOLUT_AMOUNTS,
             card_types=_REVOLUT_INTEREST,
+            interest_descriptions=_REVOLUT_INTEREST,
         ),
     ),
     CatalogEntry(
