@@ -5,8 +5,8 @@ same rule as 0041 (plan Decision 3): a report table per label keyed by the read.
 Margin's records are not posted (design 2), so it has no record table. The statements were
 emitted from the catalogue (`tests/finance/binance/emit_ddl.py`) and are frozen here.
 
-Revision ID: 0055
-Revises: 0054
+Revision ID: 0057
+Revises: 0056
 Create Date: 2026-11-27
 """
 
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0055"
-down_revision: str | None = "0054"
+revision: str = "0057"
+down_revision: str | None = "0056"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

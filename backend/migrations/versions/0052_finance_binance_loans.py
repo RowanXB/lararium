@@ -7,8 +7,8 @@ the row's id, and a `_responses` table for what an answer says beside its record
 statements were emitted from the catalogue (`tests/finance/binance/emit_ddl.py`) and are frozen
 here.
 
-Revision ID: 0050
-Revises: 0049
+Revision ID: 0052
+Revises: 0051
 Create Date: 2026-11-27
 """
 
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0050"
-down_revision: str | None = "0049"
+revision: str = "0052"
+down_revision: str | None = "0051"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
