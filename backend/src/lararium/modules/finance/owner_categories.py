@@ -131,11 +131,13 @@ async def set_owner_category(
 # The owner's categories in use on one side of the books (spending-page design §3.3): a
 # transaction carrying one that posts a flow of that side, by the one definition of a flow's
 # posting (flow_postings.py). Spending is a posting with positive quantity (the flow is its
-# negation), or any posting of a refund; income is a negative one that is not a refund. A move
-# to or from a hidden account is never a refund, so it is on the side of its sign.
+# negation), or any posting of a refund, unless the source marks it as not spending; income is
+# a negative one that is not a refund. A move to or from a hidden account is never a refund
+# and the source's mark never applies to it, so it is on the side of its sign.
 _REFUND = f"(t.refund and not {MOVE_SQL})"
 _SIDE_POSTING = {
-    "spending": f"(p.quantity > 0 or {_REFUND})",
+    "spending": f"((p.quantity > 0 or {_REFUND})"
+    f" and (t.include_in_spending is not false or {MOVE_SQL}))",
     "income": f"(p.quantity < 0 and not {_REFUND})",
 }
 

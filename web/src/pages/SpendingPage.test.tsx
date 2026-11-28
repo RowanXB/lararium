@@ -99,6 +99,18 @@ it("lists the entries with the source category, and a refund negative and marked
   expect(refund.getByText("Eating out")).toBeInTheDocument();
 });
 
+it("gives a category its share of what was spent, and one below zero none", async () => {
+  renderPage();
+
+  await screen.findByText("Corner Shop");
+  // The by-category list's rows are toggles.
+  const rows = screen.getAllByRole("button", { pressed: false });
+  const row = (name: string) => rows.find((button) => button.textContent?.startsWith(name));
+  expect(row("Shopping")).toHaveTextContent("£42.50100%");
+  expect(row("Eating out")).toHaveTextContent("-£10.00");
+  expect(row("Eating out")).not.toHaveTextContent("%");
+});
+
 it("marks a move to a hidden account with where it went", async () => {
   const moved = {
     ...SHOP,

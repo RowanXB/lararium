@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getFinanceSettings, listAccounts, setTransactionCategories } from "../api";
 import { categoryLabel } from "../lib/category";
 import { errorMessage } from "../lib/errors";
-import { formatMoney, formatQuantity } from "../lib/format";
+import { formatMoney, formatQuantity, sumDecimalStrings } from "../lib/format";
 import { bucketFor, periodLabel } from "../lib/range";
 import { refreshAfterCategoryWrite } from "../lib/refresh";
 import { CHART } from "../lib/theme";
@@ -98,8 +98,10 @@ function ByCategory({ report, currency, selected, onSelect, emptyText, chartLabe
       })),
     [report.categories],
   );
-  // A category its refunds took below zero has no share of the whole.
+  // A category its refunds took below zero has no share of the whole: shares, in the chart
+  // and the list alike, are of the positive categories' sum.
   const shares: Share[] = rows.filter((r) => Number(r.value) > 0);
+  const whole = sumDecimalStrings(shares.map((share) => share.value));
   if (rows.length === 0) {
     return <p className="text-sm text-muted-foreground">{emptyText}</p>;
   }
@@ -125,9 +127,11 @@ function ByCategory({ report, currency, selected, onSelect, emptyText, chartLabe
               </span>
               <span className="shrink-0 tabular-nums">
                 {format(row.value)}
-                <span className="ml-2 text-muted-foreground">
-                  {Math.round(percent(row.value, report.total))}%
-                </span>
+                {Number(row.value) > 0 && (
+                  <span className="ml-2 text-muted-foreground">
+                    {Math.round(percent(row.value, whole))}%
+                  </span>
+                )}
               </span>
             </button>
           </li>

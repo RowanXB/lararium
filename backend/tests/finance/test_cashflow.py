@@ -28,6 +28,7 @@ from lararium.modules.finance.ledger import (
 )
 from lararium.modules.finance.owner_categories import set_owner_category
 from lararium.modules.finance.pricing import record_fx_rate, record_price
+from lararium.modules.finance.spending import spending_report
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.valuation import holdings_asof, net_worth_series
 
@@ -428,6 +429,11 @@ async def test_a_transfer_fee_goes_with_an_excluded_side(
     )
 
     assert (await cash_flow(session, START, END)).spending == Decimal("5")
+    # The settlement posts to no shown account: its fee is the sending account's.
+    assert [(f.account_id, f.quantity) for f in await flows(session, START, END, [])] == [
+        (bank.id, Decimal("-5"))
+    ]
+    assert (await spending_report(session, START, END, account_id=bank.id)).total == 5
     # With one side hidden, the side still shown moved the whole amount, the fee within it.
     to_hidden = await cash_flow(session, START, END, excluded=[other.id])
     assert (to_hidden.income, to_hidden.spending) == (Decimal("0"), Decimal("100"))

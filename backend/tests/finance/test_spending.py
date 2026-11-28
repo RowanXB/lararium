@@ -156,8 +156,11 @@ async def test_known_categories_are_the_spending_sides(session, run, make_accoun
     bank = await make_account(name="Bank", balance_mode="transactions")
     salary = await post(bank, "100", date(2026, 11, 2))
     shop = await post(bank, "-10", date(2026, 11, 3))
+    # The source leaves it out of spending, so the page never lists it.
+    moved = await post(bank, "-20", date(2026, 11, 4), include_in_spending=False)
     await run(set_owner_category, [salary.id], "salary")
     await run(set_owner_category, [shop.id], "groceries")
+    await run(set_owner_category, [moved.id], "savings")
 
     assert (await spending_report(session, START, END)).known_categories == ["groceries"]
     assert await known_owner_categories(session, "income", ()) == ["salary"]

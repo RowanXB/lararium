@@ -95,8 +95,8 @@ class Flow:
     transaction_id: UUID
     day: date  # the booking day, on which it is valued
     # The shown asset or liability account its transaction posts to (not hidden, not In
-    # transit), first by position: whose money it is. None when it posts to none (a
-    # transfer's settlement).
+    # transit), first by position: whose money it is. A transfer's settlement posts to none,
+    # so its fee is the transfer's sending account's.
     account_id: UUID | None
     account_name: str | None
     instrument_id: UUID
@@ -212,7 +212,8 @@ _FLOWS = (
          limit 1)
       ) pr on true
     )
-    select base.transaction_id, base.day, own.id as account_id, own.name as account_name,
+    select base.transaction_id, base.day,
+      coalesce(own.id, sender.id) as account_id, coalesce(own.name, sender.name) as account_name,
       base.instrument_id, i.symbol as instrument_code, base.quantity,
       round(base.quantity * valuations.unit_value, """
     + str(_PLACES)
@@ -240,6 +241,14 @@ _FLOWS = (
       order by ap.position
       limit 1
     ) own on true
+    -- A transfer's settlement posts to no shown account: its fee is the sending account's.
+    left join lateral (
+      select a.id, a.name
+      from finance.transfers st
+      join finance.accounts a on a.id = st.from_account_id
+      where st.settlement_transaction_id = base.transaction_id
+      limit 1
+    ) sender on own.id is null
     order by base.day, base.transaction_id, base.position
 """
 )
