@@ -159,6 +159,16 @@ def account_type(key: str | None) -> AccountType | None:
     return _BY_KEY.get(key) if key is not None else None
 
 
+def families() -> frozenset[str]:
+    """Every family some account type belongs to."""
+    return frozenset(t.family for t in ACCOUNT_TYPES if t.family)
+
+
+def family_of(type_key: str | None) -> str | None:
+    found = account_type(type_key)
+    return None if found is None else found.family
+
+
 def family_keys(family: str) -> frozenset[str]:
     return frozenset(t.key for t in ACCOUNT_TYPES if t.family == family)
 

@@ -2,6 +2,15 @@
 
 A profile's config is validated here, before it is stored; parsers trust it.
 
+A CSV profile's family_notes (account family identifier design §5.9, owner's decision
+2026-11-27) reads whether a row moved money within its account's family from a column
+that says so: Trading 212's History CSV gives a deposit or withdrawal between its own
+accounts empty Notes, and an external one a transaction id or the bank account it went
+to. The row then stores the answer typed (family_move), and commit posts a move within
+the family naming the family, and one outside it as never a family move's counterpart.
+Notes of another form are a row error: the source changed, and a guess could pair a bank
+top-up with an internal move.
+
 A config lists two sets of type codes, which are not the same: `card_types` are the codes
 that are not bank transfers (card, cash machine, cheque, interest), for transfer matching;
 `card_payment_types` are the codes of a payment made by card, which decide whether a positive
@@ -273,6 +282,52 @@ class CsvExtract(BaseModel):
         return {name for pattern in self.patterns for name in re.compile(pattern).groupindex}
 
 
+def _check_regex(pattern: str) -> str:
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        raise ValueError(f"not a regular expression: {error}") from None
+    return pattern
+
+
+# A pattern a whole cell is matched against; the empty one matches an empty cell.
+type CellPattern = Annotated[str, Field(max_length=500), AfterValidator(_check_regex)]
+type CellPatterns = Annotated[list[CellPattern], Field(min_length=1, max_length=10)]
+
+
+class FamilyNotes(BaseModel):
+    """Whether a row moved money within its account's family, as `column` says (account
+    family identifier design §5.9): for a row whose type (the type column's value) is one
+    of `types`, a stripped cell matching one of `within` in full is a move within the
+    family (family_move true), one matching one of `outside` a movement outside it (false),
+    and any other a row error naming the column and the rule, never the value. Every other
+    row's family_move is None: the profile says nothing of it."""
+
+    model_config = _CONFIG
+
+    column: str
+    types: Annotated[
+        list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]],
+        Field(min_length=1, max_length=20),
+    ]
+    within: CellPatterns
+    outside: CellPatterns
+
+    def family_move(self, bank_type: str | None, cell: str) -> bool | None:
+        """The row's family_move; ValueError for a cell neither list matches."""
+        if bank_type is None or bank_type.strip() not in self.types:
+            return None
+        text = cell.strip()
+        if any(re.fullmatch(pattern, text) for pattern in self.within):
+            return True
+        if any(re.fullmatch(pattern, text) for pattern in self.outside):
+            return False
+        raise ValueError(
+            f"{self.column}: the cell is of no form family_notes knows (within the family or "
+            "outside it)"
+        )
+
+
 class CsvProfileConfig(BaseModel):
     model_config = _CONFIG
 
@@ -308,14 +363,23 @@ class CsvProfileConfig(BaseModel):
     # file's period, listed in full but for its last day, which the export may have been
     # taken partway through.
     period_from_filename: PeriodPattern | None = None
+    family_notes: FamilyNotes | None = None
 
     def read_columns(self) -> list[str]:
-        """Every column the profile reads: mapped, filtered on or extracted from."""
+        """Every column the profile reads: mapped, filtered on, extracted from or read for
+        family_notes."""
         return [
             *self.columns.names(),
             *self.include_only,
             *(extract.column for extract in self.extract),
+            *([] if self.family_notes is None else [self.family_notes.column]),
         ]
+
+    @model_validator(mode="after")
+    def _family_notes_need_types(self) -> Self:
+        if self.family_notes is not None and self.columns.type is None:
+            raise ValueError("family_notes applies to rows by their type: map the type column")
+        return self
 
     @model_validator(mode="after")
     def _one_currency_source(self) -> Self:

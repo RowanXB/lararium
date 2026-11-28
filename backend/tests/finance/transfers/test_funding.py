@@ -287,8 +287,10 @@ async def test_only_the_named_account_s_one_deposit(
     second: str,
 ) -> None:
     """Review Focus 3: a bank transfer naming X, with same-amount unmarked
-    deposits on X and on Y in the window, pairs with X's only; with two on X, with
-    neither."""
+    deposits on X and on Y in the window, pairs with X's only; with two on X within the
+    near window of it, with neither (a second one further away would leave the first the
+    only candidate nearby, which the near-window split takes: account family identifier
+    design §5.10)."""
     m = await connected_bank("M")
     x = await trading212("X", INVEST)
     y = await trading212("Y", STOCKS_ISA)
@@ -298,7 +300,7 @@ async def test_only_the_named_account_s_one_deposit(
         y if second == "on_y" else x,
         "100",
         external_id="second",
-        occurred_at=WHEN + timedelta(days=1),
+        occurred_at=WHEN + (timedelta(days=1) if second == "on_y" else timedelta(minutes=1)),
         bank_transfer=False,
     )
     sent = await connector_tx(m, "-100", identifier_id=named)

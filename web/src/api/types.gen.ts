@@ -818,6 +818,10 @@ export type CashFlowPeriodOut = {
     start: string;
 };
 
+export type CellPattern = string;
+
+export type CellPatterns = Array<CellPattern>;
+
 /**
  * ConnectionOut
  */
@@ -1003,6 +1007,7 @@ export type CsvProfileConfig = {
      * Extract
      */
     extract?: Array<CsvExtract>;
+    family_notes?: FamilyNotes | null;
     /**
      * Format
      */
@@ -1077,6 +1082,29 @@ export type EtoroUploadOut = {
      * Raw Records
      */
     raw_records: number;
+};
+
+/**
+ * FamilyNotes
+ *
+ * Whether a row moved money within its account's family, as `column` says (account
+ * family identifier design §5.9): for a row whose type (the type column's value) is one
+ * of `types`, a stripped cell matching one of `within` in full is a move within the
+ * family (family_move true), one matching one of `outside` a movement outside it (false),
+ * and any other a row error naming the column and the rule, never the value. Every other
+ * row's family_move is None: the profile says nothing of it.
+ */
+export type FamilyNotes = {
+    /**
+     * Column
+     */
+    column: string;
+    outside: CellPatterns;
+    /**
+     * Types
+     */
+    types: Array<string>;
+    within: CellPatterns;
 };
 
 /**
@@ -1303,7 +1331,7 @@ export type IdentifierOut = {
     /**
      * Kind
      */
-    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address';
+    kind: 'uk_bank_account' | 'ibkr_account' | 'trading212_account' | 'etoro_account' | 'card_merchant' | 'chain_address' | 'account_family';
     /**
      * Sort Code
      */
@@ -1557,6 +1585,10 @@ export type ImportRowOut = {
      * External Id
      */
     external_id: string | null;
+    /**
+     * Family Move
+     */
+    family_move: boolean | null;
     /**
      * Fee
      */
@@ -2749,6 +2781,8 @@ export type BitcoinWalletCreateWritable = {
      */
     threshold?: number | null;
 };
+
+export type CellPatternsWritable = Array<CellPattern>;
 
 /**
  * EtoroConnectionIn

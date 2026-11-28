@@ -6,8 +6,8 @@ scheme (Bitcoin wallet design).
 `chain` / `tx_hash` / `chain_address` let the transfer engine pair an on-chain movement with an
 exchange's withdrawal or deposit without reading a connector's tables; Binance fills them too.
 
-Revision ID: 0048
-Revises: 0047
+Revision ID: 0049
+Revises: 0048
 Create Date: 2026-11-27
 """
 
@@ -15,12 +15,12 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0048"
-down_revision: str | None = "0047"
+revision: str = "0049"
+down_revision: str | None = "0048"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# The list as 0047 leaves it (0041 added `binance_asset`); the downgrade restores exactly this.
+# The list as 0048 leaves it (0041 added `binance_asset`); the downgrade restores exactly this.
 _SCHEMES = """'iso4217', 'isin', 'figi', 'ticker_mic', 'ibkr_conid', 'etoro_id',
           'chain_contract', 'coingecko', 'trading212_ticker', 'binance_asset'"""
 
