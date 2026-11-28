@@ -8,6 +8,8 @@ const SUGGESTIONS = ["salary", "family"];
 type Props = {
   value: string | null;
   known: readonly string[];
+  // Shown while nothing is in use yet; the Income page's by default.
+  suggestions?: readonly string[];
   // A write's promise, when there is one: the picker sends the same value again after it
   // fails, and only once while it is in flight or after it succeeded.
   onChange: (category: string) => void | Promise<unknown>;
@@ -17,7 +19,13 @@ type Props = {
 // A combobox over the categories in use that also takes a new one typed in. The change is
 // reported when the field is left or Enter is pressed, not on every key, so a write is
 // never made for half a word. The server normalises what is typed.
-export function CategoryPicker({ value, known, onChange, label = "Category" }: Props) {
+export function CategoryPicker({
+  value,
+  known,
+  suggestions = SUGGESTIONS,
+  onChange,
+  label = "Category",
+}: Props) {
   const listId = useId();
   const [draft, setDraft] = useState(value ?? "");
   // What was last sent, so Enter followed by a blur before the refetch lands sends once. A
@@ -57,7 +65,7 @@ export function CategoryPicker({ value, known, onChange, label = "Category" }: P
         }}
       />
       <datalist id={listId}>
-        {(known.length > 0 ? known : SUGGESTIONS).map((category) => (
+        {(known.length > 0 ? known : suggestions).map((category) => (
           <option key={category} value={category} />
         ))}
       </datalist>

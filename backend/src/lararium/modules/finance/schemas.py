@@ -425,6 +425,52 @@ class IncomeOut(_Out):
     hidden_moved_in: DecimalStr
 
 
+class SpendingCategoryOut(_Out):
+    category: str | None  # None: neither the owner nor the source gave one
+    amount: DecimalStr
+
+
+class SpendingPeriodOut(_Out):
+    start: date
+    total: DecimalStr
+    by_category: list[SpendingCategoryOut]
+
+
+class SpendingEntryOut(_Out):
+    """The spending flows of one transaction in one instrument, added up: what went out is
+    positive, a refund negative."""
+
+    transaction_id: UUID
+    booking_date: date
+    account_id: UUID | None
+    account_name: str | None
+    description: str
+    counterparty_name: str | None
+    quantity: DecimalStr  # in the instrument the source gave; same sign as amount
+    instrument: str  # a currency code or an asset's symbol
+    amount: DecimalStr | None  # reporting currency; None without a price or FX rate
+    source_category: str | None
+    owner_category: str | None
+    category: str | None  # the effective category
+    refund: bool
+
+
+class SpendingOut(_Out):
+    """What went out over a range, in the reporting currency."""
+
+    start: date
+    end: date
+    bucket: Bucket
+    total: DecimalStr
+    missing_count: int
+    periods: list[SpendingPeriodOut]
+    categories: list[SpendingCategoryOut]
+    entries: list[SpendingEntryOut]
+    known_categories: list[str]
+    # Moved out to hidden accounts: in the Overview's spending, not listed here.
+    hidden_moved_out: DecimalStr
+
+
 # Imports
 
 

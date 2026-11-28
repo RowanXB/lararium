@@ -117,9 +117,14 @@ def _entries(positive: list[Flow]) -> list[IncomeEntry]:
     return entries
 
 
+def by_amount(totals: dict[str | None, Decimal]) -> list[tuple[str | None, Decimal]]:
+    """Category totals, largest first, then by name; no category last. The Spending page's
+    order too."""
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0] is None, item[0] or ""))
+
+
 def _by_amount(totals: dict[str | None, Decimal]) -> list[IncomeCategory]:
-    ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0] is None, item[0] or ""))
-    return [IncomeCategory(category, amount) for category, amount in ordered]
+    return [IncomeCategory(category, amount) for category, amount in by_amount(totals)]
 
 
 async def income_report(
@@ -181,6 +186,6 @@ async def income_report(
         ],
         categories=_by_amount(by_category),
         entries=shown,
-        known_categories=await known_owner_categories(session),
+        known_categories=await known_owner_categories(session, "income"),
         hidden_moved_in=hidden_moved_in,
     )

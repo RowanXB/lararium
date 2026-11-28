@@ -5212,6 +5212,268 @@
         "title": "SnapshotOut",
         "type": "object"
       },
+      "SpendingCategoryOut": {
+        "properties": {
+          "amount": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          }
+        },
+        "required": [
+          "category",
+          "amount"
+        ],
+        "title": "SpendingCategoryOut",
+        "type": "object"
+      },
+      "SpendingEntryOut": {
+        "description": "The spending flows of one transaction in one instrument, added up: what went out is\npositive, a refund negative.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Name"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "booking_date": {
+            "format": "date",
+            "title": "Booking Date",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "counterparty_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Name"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "instrument": {
+            "title": "Instrument",
+            "type": "string"
+          },
+          "owner_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Category"
+          },
+          "quantity": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "refund": {
+            "title": "Refund",
+            "type": "boolean"
+          },
+          "source_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Category"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "booking_date",
+          "account_id",
+          "account_name",
+          "description",
+          "counterparty_name",
+          "quantity",
+          "instrument",
+          "amount",
+          "source_category",
+          "owner_category",
+          "category",
+          "refund"
+        ],
+        "title": "SpendingEntryOut",
+        "type": "object"
+      },
+      "SpendingOut": {
+        "description": "What went out over a range, in the reporting currency.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/SpendingCategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SpendingEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "hidden_moved_out": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Hidden Moved Out",
+            "type": "string"
+          },
+          "known_categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Known Categories",
+            "type": "array"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "periods": {
+            "items": {
+              "$ref": "#/components/schemas/SpendingPeriodOut"
+            },
+            "title": "Periods",
+            "type": "array"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "bucket",
+          "total",
+          "missing_count",
+          "periods",
+          "categories",
+          "entries",
+          "known_categories",
+          "hidden_moved_out"
+        ],
+        "title": "SpendingOut",
+        "type": "object"
+      },
+      "SpendingPeriodOut": {
+        "properties": {
+          "by_category": {
+            "items": {
+              "$ref": "#/components/schemas/SpendingCategoryOut"
+            },
+            "title": "By Category",
+            "type": "array"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "total",
+          "by_category"
+        ],
+        "title": "SpendingPeriodOut",
+        "type": "object"
+      },
       "SuggestionOut": {
         "properties": {
           "account_number": {
@@ -8453,6 +8715,122 @@
           }
         },
         "summary": "Update Finance Settings",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/spending": {
+      "get": {
+        "description": "What went out by period, category and entry, without the accounts left out of reports;\ndefaults to the 365 days up to and including today. `category` narrows the entries only\n(\"uncategorised\" for none).",
+        "operationId": "get_spending",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Spending",
         "tags": [
           "finance"
         ]

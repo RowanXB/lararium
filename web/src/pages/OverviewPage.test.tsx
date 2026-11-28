@@ -155,6 +155,15 @@ it("opens the Income page on the same dates", async () => {
   ]);
 });
 
+it("opens the Spending page on the same dates", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  await user.click(await screen.findByRole("button", { name: "12 months" }));
+  const link = screen.getByRole("link", { name: "See all spending" });
+  expect(link.getAttribute("href")).toMatch(/^\/spending\?/);
+  expect(new URLSearchParams(link.getAttribute("href")!.split("?")[1]).get("preset")).toBe("1y");
+});
+
 it("asks for everything over the chosen preset", async () => {
   const user = userEvent.setup();
   renderPage();

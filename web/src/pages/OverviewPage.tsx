@@ -398,6 +398,13 @@ export function OverviewPage() {
               </CardHeader>
               <CardContent>
                 <SpendingByCategory flow={flow} currency={currency} />
+                <Link
+                  to="/spending"
+                  search={rangeSearch(choice)}
+                  className="mt-4 inline-block text-sm text-muted-foreground hover:text-foreground"
+                >
+                  See all spending
+                </Link>
               </CardContent>
             </Card>
           </div>

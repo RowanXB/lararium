@@ -14,9 +14,10 @@ reference."""
 
 import re
 from collections.abc import Sequence
+from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import delete, func, literal_column, select
+from sqlalchemy import delete, func, literal_column, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,7 +125,35 @@ async def set_owner_category(
     ctx.record_change("transaction_count", len(ids))
 
 
-async def known_owner_categories(session: AsyncSession) -> list[str]:
-    """Every owner category in use, sorted."""
-    o = models.TransactionOwnerCategory
-    return list(await session.scalars(select(o.category).distinct().order_by(o.category)))
+# The owner's categories in use on one side of the books (spending-page design §3.3): a
+# non-void transaction carrying one that posts a flow of that side, as `cashflow.flows` reads
+# its postings. Spending is a positive posting to an income, expense or equity account, or any
+# such posting of a refund; income is a negative one that is not a refund.
+_SIDE_POSTING = {
+    "spending": "(p.quantity > 0 or t.refund)",
+    "income": "(p.quantity < 0 and not t.refund)",
+}
+
+
+async def known_owner_categories(
+    session: AsyncSession, side: Literal["income", "spending"]
+) -> list[str]:
+    """Every owner category in use on the income or the spending side, sorted."""
+    rows = await session.scalars(
+        text(
+            f"""
+            select distinct {OWNER_CATEGORY_SQL} as category
+            from finance.transactions t
+            where t.status <> 'void'
+              and exists (
+                select 1 from finance.postings p
+                join finance.accounts a on a.id = p.account_id
+                where p.transaction_id = t.id
+                  and a.ledger_type in ('income', 'expense', 'equity')
+                  and {_SIDE_POSTING[side]}
+              )
+            order by 1
+            """
+        )
+    )
+    return [category for category in rows if category is not None]

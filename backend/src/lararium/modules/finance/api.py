@@ -38,6 +38,7 @@ from lararium.modules.finance import (
     owner_categories,
     pricing,
     snapshots,
+    spending,
     valuation,
 )
 from lararium.modules.finance.importing import catalog, commit, parsed, profiles, staging
@@ -71,6 +72,7 @@ from lararium.modules.finance.schemas import (
     PriceCreate,
     SnapshotCreate,
     SnapshotOut,
+    SpendingOut,
     TransactionCategoriesUpdate,
     TransactionCreate,
     TransactionOut,
@@ -579,6 +581,25 @@ async def get_income(
     excluded = await accounts.excluded_account_ids(session)
     return IncomeOut.model_validate(
         await income.income_report(session, start, end, bucket, excluded, account_id, category)
+    )
+
+
+@router.get("/spending", name="get_spending")
+async def get_spending(
+    session: SessionDep,
+    start: date | None = None,
+    end: date | None = None,
+    bucket: cashflow.Bucket = "month",
+    account_id: UUID | None = None,
+    category: str | None = None,
+) -> SpendingOut:
+    """What went out by period, category and entry, without the accounts left out of reports;
+    defaults to the 365 days up to and including today. `category` narrows the entries only
+    ("uncategorised" for none)."""
+    start, end = await _year_to(session, start, end)
+    excluded = await accounts.excluded_account_ids(session)
+    return SpendingOut.model_validate(
+        await spending.spending_report(session, start, end, bucket, excluded, account_id, category)
     )
 
 

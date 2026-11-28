@@ -666,3 +666,22 @@ async def test_get_income(client) -> None:
     }
     bad = await client.get("/api/v1/finance/income", params={"bucket": "year"})
     assert bad.status_code == 422
+
+
+async def test_get_spending(client) -> None:
+    day = {"start": "2026-11-02", "end": "2026-11-02", "bucket": "day"}
+    spending = (await client.get("/api/v1/finance/spending", params=day)).json()
+    assert spending == {
+        "start": "2026-11-02",
+        "end": "2026-11-02",
+        "bucket": "day",
+        "total": "0",
+        "missing_count": 0,
+        "periods": [{"start": "2026-11-02", "total": "0", "by_category": []}],
+        "categories": [],
+        "entries": [],
+        "known_categories": [],
+        "hidden_moved_out": "0",
+    }
+    bad = await client.get("/api/v1/finance/spending", params={"bucket": "year"})
+    assert bad.status_code == 422
