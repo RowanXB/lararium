@@ -108,6 +108,54 @@ def test_migration_round_trips(owner_url: str, migrated: None) -> None:
         engine.dispose()
 
 
+# Invented bech32-shaped values (the CHECK wants 20 to 128 letters and digits).
+_UPPER = "BC1QUPPERCASEADDRESSFORTESTSONLY0000000000"
+_TWIN_UPPER = "BC1QTWINADDRESSFORTESTSONLY00000000000000"
+
+
+def test_upgrade_lower_cases_stored_bech32_addresses(owner_url: str, migrated: None) -> None:
+    """A bech32 address stored upper-case before 0048 is lower-cased, so it still matches
+    the normalised form; one whose lower-cased form is already stored is left alone."""
+    config = Config(str(BACKEND / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", owner_url)
+    engine = create_engine(owner_url)
+    values = (_UPPER, _TWIN_UPPER, _TWIN_UPPER.lower())
+    try:
+        command.downgrade(config, "0047")
+        try:
+            with engine.begin() as connection:
+                for value in values:
+                    connection.execute(
+                        text(
+                            "insert into finance.account_identifiers (kind, value, created_by)"
+                            " values ('chain_address', :v, 'test')"
+                        ),
+                        {"v": value},
+                    )
+        finally:
+            command.upgrade(config, "head")
+        with engine.begin() as connection:
+            stored = set(
+                connection.execute(
+                    text(
+                        "select value from finance.account_identifiers"
+                        " where kind = 'chain_address' and lower(value) = any(:v)"
+                    ),
+                    {"v": [v.lower() for v in values]},
+                ).scalars()
+            )
+            connection.execute(
+                text(
+                    "delete from finance.account_identifiers"
+                    " where kind = 'chain_address' and lower(value) = any(:v)"
+                ),
+                {"v": [v.lower() for v in values]},
+            )
+        assert stored == {_UPPER.lower(), _TWIN_UPPER, _TWIN_UPPER.lower()}
+    finally:
+        engine.dispose()
+
+
 def _insert_transaction(connection: Connection, **chain: object) -> None:
     owner = connection.execute(
         text("insert into core.entities (kind, name) values ('person', 'Schema test') returning id")

@@ -45,8 +45,8 @@ class WalletInput:
 
 _GUIDE = "Lararium needs the master public key from Wallet → Information."
 _SEED_MESSAGE = f"This looks like a seed phrase. Never enter it anywhere: {_GUIDE}"
-_PRIVATE_MESSAGE = f"This looks like a private key. Never enter it anywhere: {_GUIDE}"
-_NETWORK_MESSAGE = "Only Bitcoin mainnet wallets are supported."
+PRIVATE_MESSAGE = f"This looks like a private key. Never enter it anywhere: {_GUIDE}"
+NETWORK_MESSAGE = "Only Bitcoin mainnet wallets are supported."
 
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _BASE58_RUN = re.compile(f"[{_BASE58}]{{51,}}")
@@ -77,13 +77,13 @@ def refuse_private(text: str) -> None:
     if _looks_like_seed(text):
         raise PrivateMaterialError(_SEED_MESSAGE)
     if _HEX_RUN.search(text) is not None:
-        raise PrivateMaterialError(_PRIVATE_MESSAGE)
+        raise PrivateMaterialError(PRIVATE_MESSAGE)
     runs = _BASE58_RUN.findall(text)
     for run in runs:
         if run.startswith(_PRIVATE_PREFIXES) or _is_wif(run):
-            raise PrivateMaterialError(_PRIVATE_MESSAGE)
+            raise PrivateMaterialError(PRIVATE_MESSAGE)
     if any(run.startswith(_TESTNET_PUBLIC_PREFIXES) for run in runs):
-        raise UnsupportedNetworkError(_NETWORK_MESSAGE)
+        raise UnsupportedNetworkError(NETWORK_MESSAGE)
 
 
 def _is_extended_public_key(key: str) -> bool:
@@ -141,7 +141,7 @@ def _check_address(address: str) -> str:
     refuse_private(address)
     lowered = address.lower()
     if lowered.startswith(("tb1", "bcrt1")) or address[:1] in "mn2":
-        raise UnsupportedNetworkError(_NETWORK_MESSAGE)
+        raise UnsupportedNetworkError(NETWORK_MESSAGE)
     if lowered.startswith("bc1"):
         address = lowered
     elif address[:1] not in "13":

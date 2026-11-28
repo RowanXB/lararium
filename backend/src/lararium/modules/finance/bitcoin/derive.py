@@ -19,7 +19,14 @@ from embit.base import EmbitError  # pyright: ignore[reportMissingTypeStubs]
 from embit.descriptor import checksum, descriptor, miniscript  # pyright: ignore[reportMissingTypeStubs]
 from embit.misc import secp256k1  # pyright: ignore[reportMissingTypeStubs]
 
-from lararium.modules.finance.bitcoin.keys import WalletInput, WalletInputError
+from lararium.modules.finance.bitcoin.keys import (
+    NETWORK_MESSAGE,
+    PRIVATE_MESSAGE,
+    PrivateMaterialError,
+    UnsupportedNetworkError,
+    WalletInput,
+    WalletInputError,
+)
 
 # embit is untyped, so its objects are handled as `Any` past these names.
 _Descriptor: Any = descriptor.Descriptor
@@ -74,6 +81,10 @@ _NO_BRANCH = "A gap limit names a branch the wallet does not have."
 _ELECTRUM_GAPS: dict[Branch, int] = {0: 20, 1: 10}
 _DESCRIPTOR_GAPS: dict[Branch, int] = {0: 20, 1: 20}
 _XPUB_VERSION = bytes.fromhex("0488b21e")  # BIP32 mainnet public key version
+# The mainnet public versions (SLIP-0132): xpub, ypub, zpub, Ypub, Zpub.
+_MAINNET_PUBLIC = frozenset(
+    bytes.fromhex(v) for v in ("0488b21e", "049d7cb2", "04b24746", "0295b43f", "02aa7ed3")
+)
 _SPLIT_STEP = re.compile(r"/([01])/\*")
 _MULTIPATH_STEP = "/<0;1>/*"
 
@@ -117,6 +128,15 @@ def _shape(parsed: Any) -> tuple[bool, bool, bool, bool, bool]:
     return (parsed.sh, parsed.wsh, parsed.wpkh, parsed.taproot, multisig)
 
 
+def _check_public(key: Any) -> None:
+    """Refuse a key the descriptor parser read as private (whatever its encoding: the text
+    checks in keys.py know only some), or an extended key of another network."""
+    if key.is_private:
+        raise PrivateMaterialError(PRIVATE_MESSAGE)
+    if key.is_extended and key.key.version not in _MAINNET_PUBLIC:
+        raise UnsupportedNetworkError(NETWORK_MESSAGE)
+
+
 def _key_text(key: Any) -> str:
     # The origin says where a key came from, not which addresses it gives, so it is
     # dropped: the same wallet from Electrum and from Sparrow is then one fingerprint.
@@ -135,6 +155,10 @@ def _canonical_body(text: str) -> str:
     if mark and given != right:
         raise WalletInputError(_UNREADABLE)
     parsed = _parse(body)
+    # Every key the parser read, before anything else is judged: a private one is the
+    # more serious problem, also in a descriptor this module would refuse for its shape.
+    for key in parsed.keys:
+        _check_public(key)
     inner = parsed.miniscript
     shape = _shape(parsed)
     if shape not in _SHAPES or (inner is not None and not shape[4]) or parsed.taptree:

@@ -370,6 +370,9 @@ class _Fetch:
         # From before the scan: each address's last complete history (count, tip), and the
         # transactions stored as confirmed.
         self.histories: dict[str, _Stored] = {}
+        # The highest index of each (source, branch) ever used: a lowered gap limit still
+        # scans that far, as an address once used can be paid again.
+        self.highest_used: dict[tuple[str, int], int] = {}
         self.stored_confirmed: set[str] = set()
         self.scanned: dict[str, AddressStats] = {}
         self.unknown: set[str] = set()
@@ -414,7 +417,8 @@ class _Fetch:
                 continue
             for branch, gap in sorted(source.gaps.items()):
                 index, unused = 0, 0
-                while unused < gap:
+                last_used = self.highest_used.get((source.name, branch), -1)
+                while unused < gap or index <= last_used:
                     if index >= MAX_INDEX:
                         raise TooManyAddresses
                     used = await self._address(_Position(source.name, branch, index))
@@ -483,6 +487,15 @@ class _Fetch:
                 r.address: _Stored(r.history_tx_count, r.history_chain_count, r.history_height)
                 for r in rows
             }
+            used = await session.execute(
+                text(
+                    "select source, branch, max(address_index) from finance.bitcoin_addresses"
+                    " where connection_id = :c and first_used_at is not null"
+                    " group by source, branch"
+                ),
+                params,
+            )
+            self.highest_used = {(source, branch): top for source, branch, top in used}
             found = await session.execute(
                 text(
                     "select txid from finance.bitcoin_transactions"
@@ -601,6 +614,10 @@ class _Fetch:
                 raise MalformedResponse("txs", "the body")
             pages.append(_Page(position.request(TXS_AFTER, last_seen_txid=after), body, txs))
         count = None if truncated else len(seen) if ended else total
+        # The tip is kept as where later walks may stop only when the stored history is
+        # whole: one the server answered short of its own count would otherwise become a
+        # stopping point, and the missing transactions would never be asked again.
+        height = self.tip if count == total else None
         mempool = sum(1 for tx in pages[0].txs if not tx.status.confirmed)
         chain_count = None if count is None else count - mempool
         seen_at = _now()
@@ -618,7 +635,7 @@ class _Fetch:
                 {
                     "n": count,
                     "chain": chain_count,
-                    "tip": self.tip,
+                    "tip": height,
                     "c": self.ctx.connection.id,
                     "a": address,
                 },

@@ -184,6 +184,16 @@ UPGRADE = [
       ON finance.bitcoin_outputs (transaction_id)
       WHERE transaction_id IS NOT NULL
     """,
+    # Bech32 addresses are case-insensitive, and chain_address now stores them lower-cased
+    # (identifiers.normalize_identifier): a stored upper-case one is lower-cased so its
+    # holder still matches. One whose lower-cased form another row already has (or would
+    # get) is left as it is: two registrations of one address are the owner's to merge.
+    """
+    UPDATE finance.account_identifiers AS i SET value = lower(i.value)
+    WHERE i.kind = 'chain_address' AND i.value ~* '^bc1' AND i.value <> lower(i.value)
+      AND (SELECT count(*) FROM finance.account_identifiers AS o
+           WHERE o.kind = 'chain_address' AND lower(o.value) = lower(i.value)) = 1
+    """,
 ]
 
 DOWNGRADE = [

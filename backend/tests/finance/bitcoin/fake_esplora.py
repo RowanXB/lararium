@@ -117,6 +117,9 @@ class FakeEsplora:
         self.requests: list[str] = []  # paths under the API's base
         # Raise HttpRetryableError when this many address requests have been answered.
         self.fail_after_stats: int | None = None
+        # Address -> how many more first history pages to answer with only the newest
+        # confirmed transaction (a server answering short of its own count).
+        self.short_history: dict[str, int] = {}
         self.now = Decimal(1000)
 
     # Pacing: a fake clock that sleeping advances.
@@ -201,6 +204,9 @@ class FakeEsplora:
             history = self.history(parts[1])
             mempool = [tx for tx in history if not tx["status"]["confirmed"]][:MEMPOOL_PAGE]
             confirmed = [tx for tx in history if tx["status"]["confirmed"]][:PAGE]
+            if self.short_history.get(parts[1], 0) > 0:
+                self.short_history[parts[1]] -= 1
+                confirmed = confirmed[:1]
             return self._json(mempool + confirmed)
         if parts[0] == "address" and parts[2:4] == ["txs", "chain"] and len(parts) == 5:
             confirmed = [tx for tx in self.history(parts[1]) if tx["status"]["confirmed"]]

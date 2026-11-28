@@ -2,13 +2,21 @@ import hashlib
 
 import pytest
 from embit.descriptor.checksum import add_checksum
+from embit.ec import PrivateKey
+from embit.networks import NETWORKS
 
 from lararium.modules.finance.bitcoin.derive import (
     Source,
     build_wallet,
     first_receiving,
 )
-from lararium.modules.finance.bitcoin.keys import WalletInput, WalletInputError, parse_input
+from lararium.modules.finance.bitcoin.keys import (
+    PRIVATE_MESSAGE,
+    PrivateMaterialError,
+    WalletInput,
+    WalletInputError,
+    parse_input,
+)
 
 # BIP84's account key (m/84'/0'/0' of "abandon ... about"), also Electrum's
 # test_bip39_seed_bip84_native_segwit.
@@ -296,6 +304,33 @@ def test_gap_override_is_applied() -> None:
 def test_unsupported_descriptor_is_refused(descriptor: str) -> None:
     with pytest.raises(WalletInputError):
         build_wallet(_descriptors(descriptor))
+
+
+def _test_wif(compressed: bool) -> str:
+    """A test-network WIF of an invented secret: the text checks in keys.py don't know it."""
+    key = PrivateKey(bytes(range(1, 33)))
+    key.compressed = compressed
+    return key.wif(NETWORKS["test"])
+
+
+@pytest.mark.parametrize("compressed", [True, False], ids=["compressed", "uncompressed"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "wsh(sortedmulti(1,{xpub}/<0;1>/*,{wif}))",
+        "wsh(and_v(v:pk({wif}),pk({xpub}/<0;1>/*)))",
+        "tr({xpub}/<0;1>/*,pk({wif}))",
+    ],
+    ids=["multisig", "miniscript", "taptree"],
+)
+def test_a_private_key_the_text_checks_miss_is_refused(shape: str, compressed: bool) -> None:
+    """Whatever its encoding, a key the parser reads as private is refused (as private, not
+    as an unsupported shape), so the input never reaches the credential store."""
+    descriptor = shape.format(xpub=_ZPUB_AS_XPUB, wif=_test_wif(compressed))
+    spec = parse_input(WalletInput("descriptor", descriptors=(descriptor,)))
+    with pytest.raises(PrivateMaterialError) as caught:
+        build_wallet(spec)
+    assert str(caught.value) == PRIVATE_MESSAGE
 
 
 def test_old_key_off_the_curve_is_refused() -> None:

@@ -1747,21 +1747,64 @@ async def create_bitcoin_connection(
             )
         )
         if taken is not None:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                {"error": "already_connected", "message": "this wallet is already connected"},
-            )
-        created = await create_connection(
-            ctx, connector="bitcoin", display_name=body.display_name, config=config
-        )
-        await store_credential(
-            ctx, master_key, created.id, DESCRIPTOR_PURPOSE, input_json(spec), None
-        )
-        # The chain is public: there is nothing to approve, so it works at once.
-        record = await set_status(ctx, created.id, "healthy")
+            # Adding a disabled wallet again is how it comes back (it has no key to replace,
+            # as other connectors' do): its account, ledger and config are kept.
+            restored = await _restore_bitcoin(ctx, master_key, taken, body.gaps or {})
+            if restored is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    {"error": "already_connected", "message": "this wallet is already connected"},
+                )
+            record = restored
+        else:
+            record = await _new_bitcoin(ctx, master_key, body.display_name, config, spec)
     # After the commit, so the job finds the connection.
     await defer_sync(record.id)
     return await _out_with_state(session, record, settings)
+
+
+async def _restore_bitcoin(
+    ctx: CommandContext,
+    master_key: bytes,
+    connection_id: UUID,
+    given_gaps: Mapping[str, Mapping[str, Any]],
+) -> ConnectionRecord | None:
+    """Bring a disabled connection of the same wallet back, healthy and due for a sync, with
+    the gap limits just given; None when it is not disabled (the wallet is already
+    connected). Its stored input is kept: the same fingerprint can come from the same
+    descriptors in another order, which would rename its sources (d0, d1) under the
+    addresses and gap limits already stored. Its name is kept too."""
+    connection = await lock_connection(ctx, connection_id)
+    if connection.status != "disabled":
+        return None
+    gaps = _checked_gaps(await _stored_wallet(ctx.session, master_key, connection_id), given_gaps)
+    await update_config(
+        ctx,
+        connection_id,
+        {GAPS_KEY: gaps} if gaps else None,
+        remove=() if gaps else (GAPS_KEY,),
+    )
+    await transition_status(
+        ctx, connection_id, "healthy", only_from=("disabled",), clear_error=True
+    )
+    await reset_failures(ctx, connection_id)
+    await request_sync(ctx, connection_id)
+    return await get_connection(ctx.session, connection_id)
+
+
+async def _new_bitcoin(
+    ctx: CommandContext,
+    master_key: bytes,
+    display_name: str,
+    config: dict[str, JSONValue],
+    spec: WalletInput,
+) -> ConnectionRecord:
+    created = await create_connection(
+        ctx, connector="bitcoin", display_name=display_name, config=config
+    )
+    await store_credential(ctx, master_key, created.id, DESCRIPTOR_PURPOSE, input_json(spec), None)
+    # The chain is public: there is nothing to approve, so it works at once.
+    return await set_status(ctx, created.id, "healthy")
 
 
 def _require_bitcoin(connection: ConnectionRecord) -> None:

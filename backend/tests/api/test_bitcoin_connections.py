@@ -29,7 +29,7 @@ from lararium.core.connections import (
 from lararium.deps import get_session
 from lararium.modules.finance.bitcoin.derive import build_wallet
 from lararium.modules.finance.bitcoin.keys import WalletInput, parse_input
-from lararium.modules.finance.bitcoin.sync import DESCRIPTOR_PURPOSE, input_json
+from lararium.modules.finance.bitcoin.sync import DESCRIPTOR_PURPOSE, input_json, load_input
 from lararium.worker.app import procrastinate_app
 
 from ..finance.bitcoin.fixtures import CHANGE_0, RECEIVING_0
@@ -212,6 +212,63 @@ async def test_duplicate_wallet_is_409(api, session, queue) -> None:
     assert ZPUB_AS_XPUB not in response.text
     assert await _count(session, "core.connections") == 1
     assert _queued(queue) == []
+
+
+async def test_adding_a_disabled_wallet_again_brings_it_back(api, session, queue) -> None:
+    """A disabled wallet has no key to replace: adding it again is how it comes back, as the
+    same connection (its account and ledger kept), healthy, with a sync queued."""
+    created = await _create(api)
+    disabled = await api.post(f"/api/v1/connections/{created['id']}/disable", headers=OWNER)
+    assert disabled.status_code == 200
+    queue.jobs.clear()
+
+    response = await api.post(
+        CREATE,
+        json={
+            "display_name": "Sparrow",
+            "form": "descriptor",
+            "descriptors": [DESCRIPTOR],
+            "gaps": {"d0": {"0": 30}},
+        },
+        headers=OWNER,
+    )
+
+    assert response.status_code == 201
+    back = response.json()
+    assert back["id"] == created["id"]
+    assert back["status"] == "healthy"
+    assert back["bitcoin"]["gaps"] == {"d0": {"0": 30}}
+    # The stored input stands: the wallet was given as an Electrum key, and is still.
+    assert back["bitcoin"]["form"] == "electrum"
+    assert back["display_name"] == "Electrum"
+    assert await _count(session, "core.connections") == 1
+    assert _queued(queue) == ["sync_connection"]
+    # Healthy now, so a second add is the duplicate again.
+    again = await api.post(CREATE, json={"display_name": "Again", **ELECTRUM}, headers=OWNER)
+    assert again.status_code == 409
+
+
+async def test_a_restore_keeps_the_stored_descriptor_order(api, session) -> None:
+    """Two descriptors in another order are the same wallet (one fingerprint), but their
+    order names the sources (d0, d1) under the stored addresses: a restore keeps the order
+    the wallet was connected with."""
+    first, second = f"wpkh({ZPUB_AS_XPUB}/<0;1>/*)", f"pkh({ZPUB_AS_XPUB}/<0;1>/*)"
+    created = await _create(
+        api, display_name="Two", form="descriptor", descriptors=[first, second], keys=[]
+    )
+    await api.post(f"/api/v1/connections/{created['id']}/disable", headers=OWNER)
+
+    response = await api.post(
+        CREATE,
+        json={"display_name": "Two", "form": "descriptor", "descriptors": [second, first]},
+        headers=OWNER,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["id"] == created["id"]
+    stored = await load_credential(session, KEY, created["id"], DESCRIPTOR_PURPOSE)
+    assert stored is not None
+    assert load_input(stored.reveal()).descriptors == (first, second)
 
 
 @pytest.mark.parametrize("path", [CREATE, PREVIEW])

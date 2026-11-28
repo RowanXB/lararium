@@ -199,6 +199,42 @@ async def test_history_only_for_changed_addresses(session, run, chain: FakeEsplo
     assert third.changed_txids == {new["txid"]}
 
 
+async def test_a_lowered_gap_still_scans_used_addresses(session, run, chain: FakeEsplora) -> None:
+    """An address once used is watched whatever the gap limit is lowered to: it can be paid
+    again, and the check, which sums scanned addresses only, could not see it either."""
+    chain.add(_receive(1, receiving(3)))
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC, {"d0": {0: 4}}))
+
+    again = chain.add(_receive(2, receiving(3), height=TIP))
+    chain.requests.clear()
+    result = await _fetch(session, connection, chain, build_wallet(SPEC, {"d0": {0: 2}}))
+
+    assert chain.asked_stats()[:6] == [receiving(i) for i in range(6)]
+    assert again["txid"] in result.changed_txids
+
+
+async def test_a_short_history_answer_is_asked_again_in_full(
+    session, run, chain: FakeEsplora
+) -> None:
+    """A history answered short of the address's own count is no place to stop later walks:
+    the next sync walks it whole, and stores every transaction."""
+    for n in range(30):
+        chain.add(_receive(300 + n, receiving(1), value=1_000 + n, height=TIP - 500 + n))
+    chain.short_history[receiving(1)] = 1
+    connection = await _connection(run)
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    stored = "select count(*) from finance.bitcoin_outputs where scriptpubkey_address = :a"
+    assert (await _rows(session, stored, a=receiving(1)))[0][0] == 1
+
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert (await _rows(session, stored, a=receiving(1)))[0][0] == 30
+
+    chain.requests.clear()
+    await _fetch(session, connection, chain, build_wallet(SPEC))
+    assert chain.asked_txs() == []
+
+
 async def test_recheck_detects_a_dropped_transaction(session, run, chain: FakeEsplora) -> None:
     unconfirmed = chain.add(_receive(1, receiving(0), height=TIP - 1))  # 2 confirmations
     dropped = chain.add(_receive(2, receiving(1), height=TIP - 1))
