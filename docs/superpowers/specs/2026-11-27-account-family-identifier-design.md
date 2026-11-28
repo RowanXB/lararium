@@ -124,7 +124,7 @@ Trading 212's History CSV (the Cash ISA's import, and the Invest or Stocks ISA e
 
 The owner often makes several movements within minutes (on 2026-11-26 two internal moves and a withdrawal fell within three minutes), so time alone would send a same-amount bank top-up near an internal move to review. Where the source says which it is, that decides, without the two-minute condition:
 
-- **Empty Notes:** the record names the family (its account's type's `family`), exactly as a TRANSFER does: it pairs only within the family, by amount and date window (§5.3 item 2's first arm), and no shared-payee or card payment can take it.
+- **Empty Notes:** the record names the family (its account's type's `family`), exactly as a TRANSFER does: it pairs only within the family, by amount and, since §5.11, only both timed within two minutes (§5.3 item 2's first arm), and no shared-payee or card payment can take it.
 - **A transaction id:** the record is outside the family: `outside_family` true, a typed column on the transaction. It is never a family move's counterpart (§5.3 item 2) and never kept from other evidence by item 3, so an external deposit near an internal move still pairs with its Monzo payment.
 - **A bank account:** the record names that bank account (it is no longer "naming nobody"), as any row printing a counterparty's account does.
 - **Notes of another form:** fail closed. The Cash ISA profile makes it a row error (PR #51); the Invest or Stocks ISA export upload refuses the file, naming the row's line and the rule, never its value.
@@ -134,7 +134,7 @@ Where it is stored, typed:
 - **Imported rows (the Cash ISA):** a CSV profile option names a column, the row types it applies to (`Deposit`, `Withdrawal`), and the patterns that say "within the family" (an empty cell) and "outside" (the transaction id). The import row stores the answer typed (`family_move`: true, false, or NULL when the profile says nothing); commit posts a true row naming its account's family identifier (refused as a row error on an account of no family type) and a false one with `outside_family` true.
 - **Export rows (Invest, Stocks ISA):** the typed export row already holds `notes_transaction_id`; it gains the sent-to bank account's parts. When an export row merges with the API's record by Trading 212's ID (`merge.py`), the posted record takes its evidence: empty Notes name the family, a transaction id sets `outside_family`, a bank account names it. The API's values still make the postings.
 
-**Evidence arriving later.** A record that could not pair without Notes (an API-only move whose two sides are more than two minutes apart, say) pairs by itself once a later upload brings them: the upload's normalise re-posts the merged record with its evidence, and the upload's heal (`upload_trading212_export` and an import commit both heal) recomputes the pair relation. The owner's decisions (pairs, rejects, never-pair) are unchanged by it.
+**Evidence arriving later.** A record that could not pair without Notes (an API-only move's DEPOSIT, outside the family by its type since §5.11, say) pairs by itself once a later upload brings them, its sides within two minutes: the upload's normalise re-posts the merged record with its evidence, and the upload's heal (`upload_trading212_export` and an import commit both heal) recomputes the pair relation. The owner's decisions (pairs, rejects, never-pair) are unchanged by it.
 
 ### 5.11 What the owner's test showed (owner, 2026-11-28)
 
