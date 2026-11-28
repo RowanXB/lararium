@@ -79,7 +79,7 @@ __all__ = [
     "remove",
 ]
 
-NORMALIZER_VERSION = "binance-norm-4"
+NORMALIZER_VERSION = "binance-norm-5"
 VERSION_KEY = "normalizer_version"
 NORMALIZED_THROUGH_KEY = "normalized_through"
 FLAGS_KEY = notices.FLAGS_KEY
