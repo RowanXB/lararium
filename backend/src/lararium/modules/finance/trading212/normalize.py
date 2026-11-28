@@ -1,12 +1,16 @@
 """Trading 212 raw records into the ledger (design §5.5-5.11).
 
 Deterministic from its inputs and versioned (NORMALIZER_VERSION, stored in the connection's
-config, Decision 8): when the stored version differs, or the accounts of the Trading 212
-family (FAMILY_KEY: whom a TRANSFER names, accounts.sibling), the run replays every raw record
+config, Decision 8): when the stored version differs, the run replays every raw record
 the connection holds (the latest copy of each history and metadata item, and every sighting of a
 report, report_sightings), so what a new version stores is filled in for what an older one
 saw, dated as it was then. A run otherwise applies the records it was given and its own
 sync's sightings.
+
+A TRANSFER names the Trading 212 family (accounts.family_identifier; account family identifier
+design §5.5), so which accounts are in the family is no input of the run and a change of
+membership needs no replay. A `family_accounts` key a connection's config still holds from an
+older version is ignored.
 
 In order: the account (accounts.py); instrument and exchange metadata (reports.py); order
 fills, dividends and cash movements as connector transactions, with the optional CSV export's
@@ -21,7 +25,6 @@ postings, types of instrument the ledger does not hold, a TRANSFER) are reported
 to publish, as are the instruments still without a type, which every run finds in full.
 """
 
-import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
 from decimal import MAX_PREC, localcontext
@@ -54,12 +57,9 @@ from lararium.modules.finance.trading212.state import (
 
 __all__ = ["NORMALIZER_VERSION", "NormalizeReport", "Trading212DataError", "normalize"]
 
-NORMALIZER_VERSION = "trading212-norm-3"
+NORMALIZER_VERSION = "trading212-norm-4"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
-# A digest of the family's accounts (accounts.family) the connection was last normalized
-# with, in its config: when they differ, a TRANSFER may name another sibling, or none.
-FAMILY_KEY = "family_accounts"
 # Items a key names once per connection, the ledger's (Decision 9) and the metadata's: the
 # latest copy of each is what counts. The others are reports, each dated by its fetch.
 _LEDGER = ("orders", "dividends", "transactions")
@@ -118,14 +118,10 @@ async def _movements(
 ) -> tuple[list[Record], dict[str, ExportRecord]]:
     """The API's cash movements to apply, and the export's rows (merge), by reference.
 
-    The movements given, the TRANSFERs to name their sibling in, and the latest stored copy
-    of each one an export row given (or an owner's decision) concerns; the latest stored copy
-    of each export row given, and the stored one of each movement applied. A replay has
-    every stored record of both."""
-    keys = {record_key(r) for r in given}
-    movements = given + [
-        r for r in await records.unidentified_transfers(run) if record_key(r) not in keys
-    ]
+    The movements given, and the latest stored copy of each one an export row given (or an
+    owner's decision) concerns; the latest stored copy of each export row given, and the
+    stored one of each movement applied. A replay has every stored record of both."""
+    movements = list(given)
     if replay:
         return movements, await merge.stored(run, None)
     # The rows given name the references; each resolves to its latest stored copy, as a
@@ -154,11 +150,6 @@ async def _movements(
     return movements, exports
 
 
-def _digest(account_ids: Sequence[UUID]) -> str:
-    """What FAMILY_KEY stores of the family's accounts."""
-    return hashlib.sha256("\n".join(sorted(map(str, account_ids))).encode()).hexdigest()
-
-
 def _tickers(by_endpoint: dict[str, list[Record]], reports_: Sequence[Report]) -> set[str]:
     found = {text_at(r.content, "order.instrument.ticker") for r in by_endpoint["orders"]}
     found |= {text_at(r.content, "instrument.ticker") for r in by_endpoint["dividends"]}
@@ -180,10 +171,7 @@ async def normalize(ctx: SyncContext, raw_record_ids: Sequence[UUID]) -> Normali
 
 async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeReport:
     connection = await get_connection(ctx.command.session, ctx.connection.id)
-    decided_on = await accounts.family(ctx.command.session)
-    replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION or (
-        connection.config.get(FAMILY_KEY) != _digest(decided_on)
-    )
+    replay = connection.config.get(NORMALIZER_VERSION_KEY) != NORMALIZER_VERSION
     keyed, seen = await _records(ctx, raw_record_ids, replay)
     report = NormalizeReport(replayed=replay)
     run = Run(ctx, connection, report)
@@ -202,14 +190,6 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     summary = summaries[-1] if summaries else None
     latest = [r for r in seen if r.endpoint == "summary"]
     await accounts.account(run, (summary or latest[-1]).record if summary or latest else None)
-    # The family with this account in it (accounts.account sets its type), stored so the
-    # next run does not replay for it: outside the family, the account named no sibling, so
-    # there is no counterpart to strip (unidentified_transfers adds one). Only when that is
-    # the whole difference from the family the replay was decided on: another account
-    # created or typed meanwhile (read committed) keeps the decided-on digest, so the next
-    # run sees the change and replays.
-    now_in = await accounts.family(run.session)
-    family = _digest(now_in if set(now_in) == {*decided_on, run.account} else decided_on)
 
     unsupported = await reports.instruments(run, by_endpoint["instruments"], replay)
     await reports.exchanges(run, by_endpoint["exchanges"], replay)
@@ -262,7 +242,6 @@ async def _normalize(ctx: SyncContext, raw_record_ids: list[UUID]) -> NormalizeR
     values: dict[str, JSONValue] = {
         accounts.ACCOUNT_MAP_KEY: run.account_map,
         NORMALIZER_VERSION_KEY: NORMALIZER_VERSION,
-        FAMILY_KEY: family,
     }
     if any(connection.config.get(key) != value for key, value in values.items()):
         await update_config(ctx.command, connection.id, values)

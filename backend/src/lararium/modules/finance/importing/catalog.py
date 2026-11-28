@@ -12,11 +12,13 @@ from lararium.modules.finance.importing.profiles import (
     CsvColumns,
     CsvExtract,
     CsvProfileConfig,
+    FamilyNotes,
     OfxProfileConfig,
     PdfProfileConfig,
     ProfileConfigModel,
     QifProfileConfig,
 )
+from lararium.modules.finance.trading212_notes import SENT_TO_BANK_NOTES, TRANSACTION_ID_NOTES
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,12 @@ _UK_DATE = "%d/%m/%Y"
 _GROUPED = AmountFormat(thousands_separator=",")
 # Card (Visa, contactless), cash machine and cheque codes, which are no bank transfers.
 _HSBC_CARD_TYPES = [")))", "VIS", "ATM", "CHQ"]
+_HSBC_CARD_PAYMENTS = [")))", "VIS"]
 _LLOYDS_CARD_TYPES = ["DEB", "CPT", "CHQ"]
+_LLOYDS_CARD_PAYMENTS = ["DEB"]
 _REVOLUT_CARD_TYPES = ["Card Payment", "Card Refund"]
+# Every card_types code of Revolut Current is a card payment.
+_REVOLUT_CARD_PAYMENTS = _REVOLUT_CARD_TYPES
 # Revolut pays savings interest itself, never from another bank account.
 _REVOLUT_INTEREST = ["Gross Interest"]
 _REVOLUT_AMOUNTS = AmountFormat(thousands_separator=",")
@@ -45,7 +51,12 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         "HSBC UK",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="hsbc_uk_statement", card_types=_HSBC_CARD_TYPES),
+        PdfProfileConfig(
+            format="pdf",
+            layout="hsbc_uk_statement",
+            card_types=_HSBC_CARD_TYPES,
+            card_payment_types=_HSBC_CARD_PAYMENTS,
+        ),
         recommended=True,
     ),
     CatalogEntry(
@@ -66,6 +77,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             overdraft_footer_label="Arranged overdraft limit",
             amount_format=_GROUPED,
             card_types=_HSBC_CARD_TYPES,
+            card_payment_types=_HSBC_CARD_PAYMENTS,
         ),
     ),
     CatalogEntry("HSBC UK", "OFX", OfxProfileConfig(format="ofx")),
@@ -101,19 +113,30 @@ CATALOG: tuple[CatalogEntry, ...] = (
             row_order="newest_first",
             amount_format=_GROUPED,
             card_types=_LLOYDS_CARD_TYPES,
+            card_payment_types=_LLOYDS_CARD_PAYMENTS,
         ),
         recommended=True,
     ),
     CatalogEntry(
         "Lloyds",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="lloyds_statement", card_types=_LLOYDS_CARD_TYPES),
+        PdfProfileConfig(
+            format="pdf",
+            layout="lloyds_statement",
+            card_types=_LLOYDS_CARD_TYPES,
+            card_payment_types=_LLOYDS_CARD_PAYMENTS,
+        ),
     ),
     CatalogEntry("Lloyds", "QIF", QifProfileConfig(format="qif", date_format=_UK_DATE)),
     CatalogEntry(
         "BOC UK",
         "PDF statement",
-        PdfProfileConfig(format="pdf", layout="boc_uk_statement"),
+        # Its kind for a completed card pre-authorisation (pdf/boc_uk.py).
+        PdfProfileConfig(
+            format="pdf",
+            layout="boc_uk_statement",
+            card_payment_types=["Pre-Authorization Completed"],
+        ),
         recommended=True,
     ),
     # Two accounts with different exports, so two entries: each account's PDF statement
@@ -145,6 +168,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             # Pending and reverted payments have not moved the balance.
             include_only={"State": ["COMPLETED"]},
             card_types=_REVOLUT_CARD_TYPES,
+            card_payment_types=_REVOLUT_CARD_PAYMENTS,
         ),
     ),
     CatalogEntry(
@@ -233,6 +257,21 @@ CATALOG: tuple[CatalogEntry, ...] = (
             card_types=[],
             # The export states no period; Trading 212 names it by the one chosen.
             period_from_filename=r"from_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})",
+            # What a deposit's or withdrawal's Notes say (account family identifier design
+            # §5.9, owner's decision 2026-11-27): empty, a move from or to another Trading 212
+            # account; Trading 212's transaction id (a deposit by bank transfer or card), or the
+            # bank account a withdrawal was sent to, a movement outside the family. The extract
+            # reads that bank account, which names the own account it went to; Notes of any
+            # other form make the row an error, so a new form is seen rather than dropped.
+            extract=[
+                CsvExtract(column="Notes", patterns=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES])
+            ],
+            family_notes=FamilyNotes(
+                column="Notes",
+                types=["Deposit", "Withdrawal"],
+                within=[r""],
+                outside=[TRANSACTION_ID_NOTES, SENT_TO_BANK_NOTES],
+            ),
         ),
         recommended=True,
     ),

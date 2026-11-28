@@ -16,10 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lararium.api.app import create_app
 from lararium.config import Settings
+from lararium.core.actors import Actor
+from lararium.core.commands import command_context
 from lararium.core.connections import create_connection, get_connection, set_status
 from lararium.deps import get_session, get_session_factory
 from lararium.modules.finance import connections_api
 from lararium.modules.finance.trading212.normalize import Trading212DataError
+from lararium.modules.finance.transfers import heal_transfers, list_transfers, unpair
+from lararium.modules.finance.transfers.decisions import pair_records
 from lararium.worker.app import procrastinate_app
 
 from ..finance.trading212.fixtures import summary_json, transaction_item
@@ -372,3 +376,106 @@ async def test_a_failed_resolve_leaves_the_review_open_422(api, session, monkeyp
     assert response.status_code == 422
     [still] = (await api.get(f"/api/v1/connections/{created['id']}/reviews", headers=OWNER)).json()
     assert still["resolution"] is None
+
+
+# Notes arriving later as evidence (account family identifier design §5.9) ------------------
+
+ISA_ID = 20000002
+DEPOSIT_REF = "isa-deposit"
+
+
+async def _heal(session) -> None:
+    async with command_context(
+        session, Actor("system", "transfers"), "finance.heal_transfers", {}
+    ) as ctx:
+        await heal_transfers(ctx)
+
+
+async def _matched(session) -> list[Any]:
+    return await list_transfers(session, statuses=["matched"])
+
+
+async def _invest_and_isa(api, session, run, minutes: int) -> dict[str, Any]:
+    """An Invest TRANSFER of -100 and a Stocks ISA DEPOSIT of +100 `minutes` apart, from the
+    API alone, healed; the ISA connection is returned."""
+    created = await _create(api)
+    invest = Ledger(session, await get_connection(session, created["id"]))
+    await invest.normalize(
+        ("summary", summary_json(account_id=ACCOUNT_ID)),
+        ("transactions", transaction_item(reference="out", kind="TRANSFER", amount="-100.00")),
+    )
+    isa_connection = await run(
+        lambda ctx: create_connection(
+            ctx, connector="trading212", display_name="ISA", config={"account_kind": "isa"}
+        )
+    )
+    await Ledger(session, isa_connection).normalize(
+        ("summary", summary_json(account_id=ISA_ID)),
+        (
+            "transactions",
+            transaction_item(
+                reference=DEPOSIT_REF,
+                amount="100.00",
+                dateTime=f"2026-03-01T09:{15 + minutes}:00Z",
+            ),
+        ),
+    )
+    await _heal(session)
+    return {"id": str(isa_connection.id), "minutes": minutes}
+
+
+def _deposit(isa: dict[str, Any], notes: str) -> bytes:
+    return export_csv(
+        row(
+            reference=DEPOSIT_REF,
+            total="100.00",
+            time=f"2026-03-01 09:{15 + isa['minutes']}:00+00:00",
+            notes=notes,
+        )
+    )
+
+
+async def test_a_later_export_pairs_an_unpaired_move(api, session, run) -> None:
+    isa = await _invest_and_isa(api, session, run, minutes=10)
+    assert await _matched(session) == []
+
+    response = await _upload(api, isa["id"], _deposit(isa, ""))
+
+    assert response.status_code == 202, response.text
+    [transfer] = await _matched(session)
+    assert transfer.status == "matched"
+
+
+async def test_a_later_transaction_id_takes_no_family_edge(api, session, run) -> None:
+    isa = await _invest_and_isa(api, session, run, minutes=2)
+    assert len(await _matched(session)) == 1  # paired by the near window
+
+    response = await _upload(api, isa["id"], _deposit(isa, "Transaction ID: card-tx-0001"))
+
+    assert response.status_code == 202, response.text
+    assert await _matched(session) == []
+
+
+async def test_an_owner_s_never_pair_decision_holds_after_an_empty_notes_upload(
+    api, session, run
+) -> None:
+    # Ten minutes apart: no pair is possible until the owner pairs them, then says never.
+    isa = await _invest_and_isa(api, session, run, minutes=10)
+    ids = {
+        key: await session.scalar(
+            text("select id from finance.transactions where external_id = :k"),
+            {"k": f"transaction:{key}"},
+        )
+        for key in ("out", DEPOSIT_REF)
+    }
+    async with command_context(session, Actor("user", "me"), "finance.pair", {}) as ctx:
+        await pair_records(ctx, ids["out"], ids[DEPOSIT_REF])
+    [transfer] = await _matched(session)
+    async with command_context(session, Actor("user", "me"), "finance.unpair", {}) as ctx:
+        await unpair(ctx, transfer.id)
+    assert await _matched(session) == []
+
+    response = await _upload(api, isa["id"], _deposit(isa, ""))
+
+    assert response.status_code == 202, response.text
+    assert await _matched(session) == []

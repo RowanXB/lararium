@@ -8,8 +8,13 @@ on:
 permissions:
   contents: read
 
+# Superseded PR commits can stop. Each main push still gets its own run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +27,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # Same entry point as local development; installs strictly from uv.lock and
-      # pnpm-lock.yaml. testcontainers uses the runner's built-in Docker.
-      - run: make check
+      - run: make backend-static license-check openapi-check web-check
+
+  backend-tests:
+    name: pytest (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: transfers
+            args: tests/finance/transfers
+          - suite: binance
+            args: tests/finance/binance
+          # Keep discovery open so new test directories run automatically.
+          - suite: remaining
+            args: --ignore=tests/finance/transfers --ignore=tests/finance/binance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.27"
+      - run: make backend-test
+        env:
+          PYTEST_ARGS: --durations=10 ${{ matrix.args }}
+
+  # The main ruleset requires this exact check name.
+  check:
+    if: ${{ always() }}
+    needs: [quality, backend-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every check to pass
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          TESTS: ${{ needs.backend-tests.result }}
+        run: '[[ "$QUALITY" == success && "$TESTS" == success ]]'

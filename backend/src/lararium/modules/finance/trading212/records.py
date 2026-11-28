@@ -12,6 +12,13 @@ currency; the cash besides the fees weighs the shares, at |cash| / quantity per 
 whose postings still do not balance within rounding fails the run, naming the fill. A cash
 movement's sign comes from its type; a TRANSFER's is taken as given and flagged.
 
+A TRANSFER names the Trading 212 family (accounts.family_identifier; account family identifier
+design §5.5), not an account: pairing finds the other accounts of the family. A DEPOSIT or
+WITHDRAW names nobody, unless the export's row for it says more in its Notes (merge.evidence,
+design §5.9): empty Notes name the family, a bank account sent to names that account, and a
+transaction ID or a bank account marks it outside the family. A stale `family_accounts` config
+key is ignored.
+
 Opening balances (design §5.5): Trading 212's history depth is undocumented. What the
 account's first summary reports (cash and the positions its sync saw), less what the history
 posts up to the time that summary arrived, is one opening adjustment per instrument, against
@@ -26,7 +33,6 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text
 
-from lararium.core import models as core_models
 from lararium.core.timeutil import local_date
 from lararium.modules.finance import models, source_merge
 from lararium.modules.finance.connector_run import (
@@ -35,13 +41,14 @@ from lararium.modules.finance.connector_run import (
     per_unit,
     settle_rounding,
 )
+from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
 from lararium.modules.finance.ledger import CounterpartyFields, PostingInput
 from lararium.modules.finance.money import to_plain_str, tolerance
 from lararium.modules.finance.report_sightings import first_sighting, list_sightings
 from lararium.modules.finance.trading212 import accounts, merge, reports
 from lararium.modules.finance.trading212.fields import ENDPOINTS
-from lararium.modules.finance.trading212.merge import CashEvent, ExportRecord
+from lararium.modules.finance.trading212.merge import CashEvent, Evidence, ExportRecord
 from lararium.modules.finance.trading212.state import (
     LONDON,
     Item,
@@ -56,7 +63,6 @@ from lararium.modules.finance.trading212.state import (
     objects_at,
     record_key,
     reports_of,
-    stored,
     text_at,
 )
 
@@ -317,12 +323,27 @@ async def dividend(run: Run, record: Record) -> None:
 
 
 async def _post_movement(
-    run: Run, key: str, kind: str, description: str, values: CashEvent
+    run: Run,
+    key: str,
+    kind: str,
+    description: str,
+    values: CashEvent,
+    evidence: Evidence | None = None,
 ) -> UUID:
+    """The movement's transaction. A TRANSFER names the family (accounts.family_identifier).
+    A deposit or withdrawal names nobody, unless its export row's Notes say more (`evidence`,
+    design §5.9): empty Notes name the family, a bank account sent to names that account, and
+    any money outside the family marks the record so. Without an export row it says nothing."""
     currency = await run.currency(values.currency)
-    # A TRANSFER is with the sibling account when there is one (accounts.sibling); a deposit
-    # or withdrawal names nothing: the card payment pairs with it.
-    identifier = await accounts.sibling(run) if kind == TRANSFER else None
+    identifier: UUID | None = None
+    if kind == TRANSFER or (evidence is not None and evidence.family):
+        identifier = await accounts.family_identifier(run)
+    elif evidence is not None and evidence.sort_code is not None:
+        value = f"{evidence.sort_code}:{evidence.account_number}"
+        identifier = await run.shared(
+            ("identifier", "uk_bank_account", value),
+            lambda cmd: get_or_create_identifier(cmd, "uk_bank_account", value),
+        )
     contra = (
         await run.contra(key, 0, identifier)
         if kind in _THROUGH_CONTRA
@@ -337,7 +358,11 @@ async def _post_movement(
             PostingInput(contra, currency.id, -values.amount),
         ],
         # Anything else (a fee, interest) is no transfer: the funding rule must not take it.
-        CounterpartyFields(identifier_id=identifier, never_transfer=kind not in _THROUGH_CONTRA),
+        CounterpartyFields(
+            identifier_id=identifier,
+            never_transfer=kind not in _THROUGH_CONTRA,
+            outside_family=evidence is not None and evidence.outside,
+        ),
     )
 
 
@@ -369,7 +394,14 @@ async def cash_movement(run: Run, record: Record, export: ExportRecord | None = 
             run.session, run.connection_id, key, api, other, merge.FIELDS, merge.TOGETHER
         )
         if choice.values.amount != 0:
-            transaction_id = await _post_movement(run, key, kind, description, choice.values)
+            transaction_id = await _post_movement(
+                run,
+                key,
+                kind,
+                description,
+                choice.values,
+                merge.evidence(export) if other is not None and export is not None else None,
+            )
         await source_merge.record_reviews(
             run.command, run.connection_id, key, transaction_id, choice
         )
@@ -392,7 +424,9 @@ async def export_movement(run: Run, export: ExportRecord) -> None:
         await run.void(export.key)
         return
     _, kind = merge.ACTIONS[export.action]
-    await _post_movement(run, export.key, kind, TRANSACTIONS[kind][1], found)
+    await _post_movement(
+        run, export.key, kind, TRANSACTIONS[kind][1], found, merge.evidence(export)
+    )
 
 
 async def export_rows(run: Run, exports: Sequence[ExportRecord]) -> None:
@@ -401,36 +435,6 @@ async def export_rows(run: Run, exports: Sequence[ExportRecord]) -> None:
     for export in exports:
         merge.flag(run, export)
         await merge.write(run, export, await run.live(export.key))
-
-
-async def unidentified_transfers(run: Run) -> list[Record]:
-    """The connection's stored TRANSFERs posted before the sibling was known: once it is,
-    they are posted again, naming it."""
-    if await accounts.sibling(run) is None:
-        return []
-    t, r = models.Transaction, core_models.RawRecord
-    keys = set(
-        await run.session.scalars(
-            select(t.external_id).where(
-                t.connection_id == run.connection_id,
-                t.external_id.like("transaction:%"),
-                t.status != "void",
-                t.counterparty_identifier_id.is_(None),
-            )
-        )
-    )
-    if not keys:
-        return []
-    latest: dict[str, Record] = {}
-    for record in await stored(
-        run.session, run.connection_id, ["transactions"], r.content["type"].astext == TRANSFER
-    ):
-        if record_key(record) in keys:
-            latest[record_key(record)] = record
-    return list(latest.values())
-
-
-# Openings ------------------------------------------------------------------------------
 
 
 async def _earliest_report(run: Run) -> tuple[Report, list[Record]] | None:

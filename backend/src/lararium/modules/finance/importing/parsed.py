@@ -176,6 +176,10 @@ class ParsedRow:
     time_unit: TimeUnit = "day"
     # The row pays interest (the bank's own, never a transfer from another account).
     interest: bool = False
+    # What the profile's family_notes read of it (account family identifier design §5.9):
+    # a move within its account's family (True), one outside it (False), or None, nothing
+    # said.
+    family_move: bool | None = None
 
     def __post_init__(self) -> None:
         if (self.occurred_at is None) != (self.time_unit == "day"):

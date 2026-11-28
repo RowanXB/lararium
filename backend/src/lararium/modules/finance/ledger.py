@@ -66,6 +66,9 @@ class CounterpartyFields:
     account_number: str | None = None
     # The source says it was not a transfer at all: it is never a transfer's leg.
     never_transfer: bool = False
+    # The source says the money went outside the account's family (account family
+    # identifier design §5.9): it may be a transfer, but never a family move's counterpart.
+    outside_family: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,9 @@ class TransactionDetails:
     category: str | None = None
     labels: tuple[str, ...] = ()
     include_in_spending: bool | None = None
+    refund: bool = False
+    card_lifecycle_id: str | None = None
+    card_reversal: bool | None = None
     payment_scheme: str | None = None
     place_entity_id: UUID | None = None
     category_splits: tuple[CategorySplit, ...] = ()
@@ -134,6 +140,18 @@ class TransactionRecord:
     postings: tuple[PostingRecord, ...]  # sorted by position
     details: TransactionDetails
     cancels_transaction_id: UUID | None
+
+    @property
+    def refund(self) -> bool:
+        return self.details.refund
+
+    @property
+    def card_lifecycle_id(self) -> str | None:
+        return self.details.card_lifecycle_id
+
+    @property
+    def card_reversal(self) -> bool | None:
+        return self.details.card_reversal
 
 
 def _weight(posting: PostingInput) -> tuple[UUID, Decimal]:
@@ -234,11 +252,15 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.bank_transfer,
                 t.counterparty_account_number,
                 t.never_transfer,
+                t.outside_family,
                 t.original_quantity,
                 t.original_instrument_id,
                 t.category,
                 t.labels,
                 t.include_in_spending,
+                t.refund,
+                t.card_lifecycle_id,
+                t.card_reversal,
                 t.payment_scheme,
                 t.place_entity_id,
                 t.cancels_transaction_id,
@@ -284,6 +306,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             bank_transfer=row.bank_transfer,
             account_number=row.counterparty_account_number,
             never_transfer=row.never_transfer,
+            outside_family=row.outside_family,
         ),
         postings=tuple(
             PostingRecord(
@@ -307,6 +330,9 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             category=row.category,
             labels=tuple(row.labels),
             include_in_spending=row.include_in_spending,
+            refund=row.refund,
+            card_lifecycle_id=row.card_lifecycle_id,
+            card_reversal=row.card_reversal,
             payment_scheme=row.payment_scheme,
             place_entity_id=row.place_entity_id,
             category_splits=tuple(CategorySplit(r.category, r.quantity) for r in split_rows),
@@ -330,6 +356,9 @@ def _details_data(details: TransactionDetails) -> dict[str, JSONValue]:
         "category": details.category,
         "labels": list(details.labels),
         "include_in_spending": details.include_in_spending,
+        "refund": details.refund,
+        "card_lifecycle_id": details.card_lifecycle_id,
+        "card_reversal": details.card_reversal,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": _optional_str(details.place_entity_id),
         "category_splits": [
@@ -379,6 +408,8 @@ def _counterparty_data(fields: CounterpartyFields) -> dict[str, JSONValue]:
     }
     if fields.account_number is not None:
         data["account_number"] = fields.account_number
+    if fields.outside_family:
+        data["outside_family"] = True
     return data
 
 
@@ -390,6 +421,7 @@ def _counterparty_values(fields: CounterpartyFields) -> dict[str, object]:
         "bank_transfer": fields.bank_transfer,
         "counterparty_account_number": fields.account_number,
         "never_transfer": fields.never_transfer,
+        "outside_family": fields.outside_family,
     }
 
 
@@ -485,6 +517,9 @@ def _details_values(details: TransactionDetails) -> dict[str, object]:
         "category": details.category,
         "labels": list(details.labels),
         "include_in_spending": details.include_in_spending,
+        "refund": details.refund,
+        "card_lifecycle_id": details.card_lifecycle_id,
+        "card_reversal": details.card_reversal,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": details.place_entity_id,
     }
@@ -592,6 +627,7 @@ async def upsert_connector_transaction(
                 t.counterparty_account_number,
                 t.cancels_transaction_id,
                 t.never_transfer,
+                t.outside_family,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
     ).one_or_none()
@@ -622,6 +658,7 @@ async def upsert_connector_transaction(
         and existing.counterparty_account_number == tx.counterparty.account_number
         and existing.cancels_transaction_id == tx.cancels_transaction_id
         and existing.never_transfer == tx.counterparty.never_transfer
+        and existing.outside_family == tx.counterparty.outside_family
     )
     details_unchanged = before.details == tx.details
     # Postings compare by position: the connector emits them in a stable order.
