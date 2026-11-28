@@ -23,6 +23,12 @@ function offered(report: SpendingOut): string[] {
 
 const NO_SUGGESTIONS: readonly string[] = [];
 
+// A move to a hidden account is never a refund, so at most one note applies.
+function noteOf(entry: SpendingEntryOut): string | null {
+  if (entry.hidden_account_name) return `To ${entry.hidden_account_name}`;
+  return entry.refund ? "Refund" : null;
+}
+
 // `initialRange`: the dates a link opened the page on (the Overview's), else its default.
 export function SpendingPage({ initialRange = {} }: { initialRange?: RangeSearch }) {
   return (
@@ -32,7 +38,7 @@ export function SpendingPage({ initialRange = {} }: { initialRange?: RangeSearch
       fetchReport={async (query) => (await getSpending({ query, throwOnError: true })).data}
       payeeHeading="To / description"
       sourceOf={sourceOf}
-      noteOf={(entry) => (entry.refund ? "Refund" : null)}
+      noteOf={noteOf}
       offered={offered}
       suggestions={NO_SUGGESTIONS}
       initialRange={initialRange}

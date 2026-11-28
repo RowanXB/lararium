@@ -4079,6 +4079,17 @@
             "title": "Description",
             "type": "string"
           },
+          "hidden_account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hidden Account Name"
+          },
           "income_kind": {
             "anyOf": [
               {
@@ -4140,7 +4151,8 @@
           "source_category",
           "income_kind",
           "owner_category",
-          "category"
+          "category",
+          "hidden_account_name"
         ],
         "title": "IncomeEntryOut",
         "type": "object"
@@ -4175,11 +4187,6 @@
             },
             "title": "Entries",
             "type": "array"
-          },
-          "hidden_moved_in": {
-            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
-            "title": "Hidden Moved In",
-            "type": "string"
           },
           "known_categories": {
             "items": {
@@ -4219,8 +4226,7 @@
           "periods",
           "categories",
           "entries",
-          "known_categories",
-          "hidden_moved_in"
+          "known_categories"
         ],
         "title": "IncomeOut",
         "type": "object"
@@ -5307,6 +5313,17 @@
             "title": "Description",
             "type": "string"
           },
+          "hidden_account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hidden Account Name"
+          },
           "instrument": {
             "title": "Instrument",
             "type": "string"
@@ -5361,7 +5378,8 @@
           "source_category",
           "owner_category",
           "category",
-          "refund"
+          "refund",
+          "hidden_account_name"
         ],
         "title": "SpendingEntryOut",
         "type": "object"
@@ -5396,11 +5414,6 @@
             },
             "title": "Entries",
             "type": "array"
-          },
-          "hidden_moved_out": {
-            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
-            "title": "Hidden Moved Out",
-            "type": "string"
           },
           "known_categories": {
             "items": {
@@ -5440,8 +5453,7 @@
           "periods",
           "categories",
           "entries",
-          "known_categories",
-          "hidden_moved_out"
+          "known_categories"
         ],
         "title": "SpendingOut",
         "type": "object"

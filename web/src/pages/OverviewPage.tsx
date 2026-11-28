@@ -196,8 +196,8 @@ function SpendingByCategory({ flow, currency }: { flow: CashFlowOut; currency: s
   );
   const format = useCallback((value: string) => formatMoney(value, currency), [currency]);
   // A category its refunds took below zero has no share of what was spent: shares are of
-  // the categories that spent. Money moved to hidden accounts is spending too, but no
-  // category's.
+  // the categories that spent. Money moved to hidden accounts is in its categories as any
+  // spending is.
   const spent = useMemo(() => shares.filter((share) => !share.value.startsWith("-")), [shares]);
   const categorised = sumDecimalStrings(spent.map((share) => share.value));
   if (shares.length === 0) {

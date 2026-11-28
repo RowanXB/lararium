@@ -662,7 +662,6 @@ async def test_get_income(client) -> None:
         "categories": [],
         "entries": [],
         "known_categories": [],
-        "hidden_moved_in": "0",
     }
     bad = await client.get("/api/v1/finance/income", params={"bucket": "year"})
     assert bad.status_code == 422
@@ -681,7 +680,6 @@ async def test_get_spending(client) -> None:
         "categories": [],
         "entries": [],
         "known_categories": [],
-        "hidden_moved_out": "0",
     }
     bad = await client.get("/api/v1/finance/spending", params={"bucket": "year"})
     assert bad.status_code == 422

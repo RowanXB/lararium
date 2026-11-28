@@ -113,11 +113,11 @@ async def test_set_and_clear_leave_source_marks(
     assert before == [("income", "interest")]
 
     await run(set_owner_category, [transaction_id], "Family money")
-    assert await known_owner_categories(session, "income") == ["family_money"]
+    assert await known_owner_categories(session, "income", ()) == ["family_money"]
     assert await _marks(session) == before
 
     await run(set_owner_category, [transaction_id], "Gifts")
-    assert await known_owner_categories(session, "income") == ["gifts"]
+    assert await known_owner_categories(session, "income", ()) == ["gifts"]
     assert await _owner_rows(session) == 1
 
     await run(set_owner_category, [transaction_id], None)
@@ -243,10 +243,20 @@ async def test_known_categories_per_side(
     await run(set_owner_category, [voided], "voided")
     await run(void_transaction, voided)
 
-    assert await known_owner_categories(session, "spending") == [
+    assert await known_owner_categories(session, "spending", ()) == [
         "groceries",
         "mixed",
         "moved",
         "returns",
     ]
-    assert await known_owner_categories(session, "income") == ["mixed", "salary"]
+    assert await known_owner_categories(session, "income", ()) == ["mixed", "salary"]
+    # With C hidden, money from it is a move into the reports: income, never a refund.
+    assert await known_owner_categories(session, "income", [between.id]) == [
+        "mixed",
+        "nowhere",
+        "salary",
+    ]
+    # With A hidden, what it paid and received alone is wholly on the hidden side, and its
+    # money to C a move out of the reports: spending.
+    assert await known_owner_categories(session, "spending", [a.id]) == ["nowhere"]
+    assert await known_owner_categories(session, "income", [a.id]) == []

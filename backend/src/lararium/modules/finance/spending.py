@@ -2,12 +2,13 @@
 
 It mirrors the Income page's report (income.py) on the other side of `cashflow.flows`: the
 flows the cash-flow report counts as spending, a negative flow or a positive one the source
-marks as a refund, unless the source marks it as not spending (`include_in_spending` false).
-An entry is the flows of one transaction and instrument added up, signed as spending: what
-went out is positive and a refund is negative, so a category's total can be negative when its
-refunds outweigh its payments. An entry without a price or an FX rate is listed with no
-amount and left out of every total, as the cash-flow report leaves out such a flow
-(spending-page design §3.1).
+marks as a refund, unless the source marks it as not spending (`include_in_spending` false),
+money moved out to a hidden account among them (the source's mark never applies to a move),
+so its total is the cash-flow report's spending. An entry is the flows of one transaction and
+instrument added up, signed as spending: what went out is positive and a refund is negative,
+so a category's total can be negative when its refunds outweigh its payments. An entry
+without a price or an FX rate is listed with no amount and left out of every total, as the
+cash-flow report leaves out such a flow (spending-page design §3.1).
 
 As on the Income page, an entry has one effective category and does not share its amount
 between its transaction's category splits, so the category totals are its entries added up.
@@ -25,7 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lararium.modules.finance.cashflow import (
     Bucket,
     Flow,
-    cash_flow,
     flows,
     period_start,
     periods_of,
@@ -62,6 +62,7 @@ class SpendingEntry:
     owner_category: str | None
     category: str | None  # the effective category
     refund: bool  # the source marks it money back, so its amount is negative
+    hidden_account_name: str | None  # a move to a hidden account: that account's name
 
 
 @dataclass(frozen=True)
@@ -75,8 +76,6 @@ class SpendingReport:
     categories: list[SpendingCategory]  # largest first, then by name; none last
     entries: list[SpendingEntry]  # newest first, then by transaction id
     known_categories: list[str]  # every owner category in use on this side, for the picker
-    # What the Overview counts as spending to hidden accounts and this page does not list.
-    hidden_moved_out: Decimal
 
 
 def _entries(spent: list[Flow]) -> list[SpendingEntry]:
@@ -108,6 +107,9 @@ def _entries(spent: list[Flow]) -> list[SpendingEntry]:
                 owner_category=first.owner_category,
                 category=first.category,
                 refund=first.refund,
+                hidden_account_name=next(
+                    (part.hidden_account_name for part in parts if part.hidden_account_name), None
+                ),
             )
         )
     # Newest first; two sorts, because the date reverses and the id does not.
@@ -164,11 +166,6 @@ async def spending_report(
     else:
         shown = entries
 
-    hidden_moved_out = Decimal(0)
-    if account_id is None:
-        moved = await cash_flow(session, start, end, bucket, excluded)
-        hidden_moved_out = sum((h.moved_out for h in moved.hidden_accounts), Decimal(0))
-
     return SpendingReport(
         start=start,
         end=end,
@@ -181,6 +178,5 @@ async def spending_report(
         ],
         categories=_by_amount(by_category),
         entries=shown,
-        known_categories=await known_owner_categories(session, "spending"),
-        hidden_moved_out=hidden_moved_out,
+        known_categories=await known_owner_categories(session, "spending", excluded),
     )

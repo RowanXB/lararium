@@ -9,6 +9,11 @@ function sourceOf(entry: IncomeEntryOut): string {
   return entry.source_category ? categoryLabel(entry.source_category) : "—";
 }
 
+// Money moved in from a hidden account, which counts as someone else's.
+function noteOf(entry: IncomeEntryOut): string | null {
+  return entry.hidden_account_name ? `From ${entry.hidden_account_name}` : null;
+}
+
 // `initialRange`: the dates a link opened the page on (the Overview's), else its default.
 export function IncomePage({ initialRange = {} }: { initialRange?: RangeSearch }) {
   return (
@@ -18,6 +23,7 @@ export function IncomePage({ initialRange = {} }: { initialRange?: RangeSearch }
       fetchReport={async (query) => (await getIncome({ query, throwOnError: true })).data}
       payeeHeading="From / description"
       sourceOf={sourceOf}
+      noteOf={noteOf}
       initialRange={initialRange}
     />
   );

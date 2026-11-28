@@ -305,10 +305,12 @@ async def test_money_moved_to_or_from_a_hidden_account_is_a_flow(
     session, run, move, make_account, bank, gbp
 ) -> None:
     """A hidden account is as good as someone else's: what moves between it and an account
-    still in the reports is income or spending, apart from categories and payees."""
+    still in the reports is income or spending, in categories and payees like any flow."""
     pension = await make_account(name="Pension", balance_mode="transactions")
     in_transit = await run(get_or_create_system_account, "in_transit")
-    out = await move("-100", date(2026, 10, 30), contra=in_transit)
+    out = await move(
+        "-100", date(2026, 10, 30), contra=in_transit, category="savings", payee="Pension Co"
+    )
     arrived = await move("100", date(2026, 11, 2), account=pension, contra=in_transit)
     await _transfer(
         session, sent=out, received=arrived, from_account=bank, to_account=pension, gbp=gbp
@@ -338,12 +340,24 @@ async def test_money_moved_to_or_from_a_hidden_account_is_a_flow(
     assert flow.hidden_accounts == [
         HiddenAccountTotal(pension.id, "Pension", Decimal("30"), Decimal("120"))
     ]
-    # Counted on the day the shown side moved, and kept out of categories and payees.
+    # Counted on the day the shown side moved, under its category and payee as any flow.
     assert [(p.start, p.income, p.spending) for p in flow.periods] == [
         (date(2026, 10, 1), Decimal("0"), Decimal("100")),
         (date(2026, 11, 1), Decimal("30"), Decimal("20")),
     ]
-    assert (flow.categories, flow.payees) == ([], [])
+    assert flow.categories == [
+        CategoryTotal("savings", Decimal("0"), Decimal("100")),
+        CategoryTotal(None, Decimal("30"), Decimal("20")),
+    ]
+    assert flow.payees == [PayeeTotal("Pension Co", Decimal("100"))]
+    # Each move is a flow on the shown account, naming the hidden one.
+    moved = await flows(session, START, END, [pension.id])
+    assert [(f.transaction_id, f.account_id, f.quantity, f.hidden_account_name) for f in moved] == [
+        (out.id, bank.id, Decimal("-100"), "Pension"),
+        (landed.id, bank.id, Decimal("30"), "Pension"),
+        (waiting.id, bank.id, Decimal("-20"), "Pension"),
+    ]
+    assert {f.hidden_account_id for f in moved} == {pension.id}
 
 
 async def test_a_move_straight_to_a_hidden_pot_is_a_flow(
@@ -370,6 +384,9 @@ async def test_a_move_straight_to_a_hidden_pot_is_a_flow(
     assert flow.hidden_accounts == [
         HiddenAccountTotal(pot.id, "Holiday pot", Decimal("0"), Decimal("50"))
     ]
+    # Its payee is its description, as for any flow.
+    assert flow.categories == [CategoryTotal(None, Decimal("0"), Decimal("50"))]
+    assert flow.payees == [PayeeTotal("Holiday pot", Decimal("50"))]
     # With the main account hidden instead, the pot's side arrived from it.
     flow = await cash_flow(session, START, END, excluded=[bank.id])
     assert (flow.income, flow.spending) == (Decimal("50"), Decimal("0"))
@@ -418,6 +435,96 @@ async def test_a_transfer_fee_goes_with_an_excluded_side(
     assert (from_hidden.income, from_hidden.spending) == (Decimal("95"), Decimal("0"))
     both = await cash_flow(session, START, END, excluded=[bank.id, other.id])
     assert (both.income, both.spending, both.hidden_accounts) == (Decimal("0"), Decimal("0"), [])
+
+
+async def test_a_fee_inside_a_move_is_its_own_flow(
+    session, run, make_account, bank, unassigned, gbp
+) -> None:
+    """A side of a transfer to a hidden account that books its fee in the same transaction:
+    what reached In transit is the move, the fee on Unassigned an ordinary flow, so the shown
+    side's whole fall is counted once."""
+    other = await make_account(name="Other", balance_mode="transactions")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    sent = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="To other",
+            postings=[
+                PostingInput(bank.id, gbp.id, Decimal("-102")),
+                PostingInput(in_transit, gbp.id, Decimal("100")),
+                PostingInput(unassigned, gbp.id, Decimal("2"), is_fee=True),
+            ],
+        ),
+    )
+    await _transfer(session, sent=sent, received=None, from_account=bank, to_account=other, gbp=gbp)
+
+    assert (await cash_flow(session, START, END)).spending == Decimal("2")
+    flow = await cash_flow(session, START, END, excluded=[other.id])
+    assert (flow.income, flow.spending) == (Decimal("0"), Decimal("102"))
+    assert flow.hidden_accounts == [
+        HiddenAccountTotal(other.id, "Other", Decimal("0"), Decimal("100"))
+    ]
+    moved = await flows(session, START, END, [other.id])
+    assert [(f.quantity, f.account_id, f.hidden_account_id) for f in moved] == [
+        (Decimal("-100"), bank.id, other.id),
+        (Decimal("-2"), bank.id, None),
+    ]
+
+
+async def test_what_is_wholly_on_the_hidden_side_is_no_flow(
+    session, run, move, make_account, bank, unassigned, gbp
+) -> None:
+    """A hidden account's own payment, its side of a transfer and a placeholder on its side
+    are no flows; a settlement of a transfer between shown accounts still counts its fee."""
+    hidden = await make_account(name="Hidden", balance_mode="transactions")
+    other = await make_account(name="Other", balance_mode="transactions")
+    in_transit = await run(get_or_create_system_account, "in_transit")
+    day = date(2026, 11, 2)
+    await move("-12", day, account=hidden, payee="Cafe")  # its own card payment
+    out = await move("-100", day, contra=in_transit)
+    arrived = await move("100", day, account=hidden, contra=in_transit)
+    await _transfer(
+        session, sent=out, received=arrived, from_account=bank, to_account=hidden, gbp=gbp
+    )
+    placeholder = await move("40", day, account=hidden, contra=in_transit)
+    back = await move("-40", day, account=hidden, contra=in_transit)
+    await _transfer(
+        session,
+        sent=back,
+        received=None,
+        from_account=hidden,
+        to_account=other,
+        gbp=gbp,
+        placeholder_transaction_id=placeholder.id,
+    )
+    sent = await move("-50", day, contra=in_transit)
+    received = await move("47", day, account=other, contra=in_transit)
+    fee = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Transfer fee",
+            postings=[
+                PostingInput(in_transit, gbp.id, Decimal("-3"), is_fee=True),
+                PostingInput(unassigned, gbp.id, Decimal("3")),
+            ],
+        ),
+    )
+    await _transfer(
+        session,
+        sent=sent,
+        received=received,
+        from_account=bank,
+        to_account=other,
+        gbp=gbp,
+        settlement_transaction_id=fee.id,
+    )
+
+    moved = await flows(session, START, END, [hidden.id])
+    assert sorted((f.transaction_id, f.quantity) for f in moved) == sorted(
+        [(out.id, Decimal("-100")), (fee.id, Decimal("-3"))]
+    )
 
 
 async def test_money_on_its_way_to_or_from_a_hidden_account_is_left_out(
@@ -649,11 +756,16 @@ async def test_coin_without_income_kind_is_not_a_flow(
 async def test_periods_and_categories_add_up_to_the_totals(
     session, run, move, make_account, bank, unassigned, gbp, btc, eur
 ) -> None:
-    """Every flow is counted once in its period and shared out whole among categories.
-    Moves to or from a hidden account are left out of this data: they count in the totals
-    and periods but not in categories."""
+    """Every flow is counted once in its period and shared out whole among categories, moves
+    to or from a hidden account too."""
     wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    pot = await make_account(name="Rainy day pot", subtype="savings_pot", balance_mode="hybrid")
     thirds = tuple(CategorySplit(name, Decimal("-1")) for name in ("a", "b", "c"))
+    # Into a hidden pot, which the source leaves out of spending, split; and back from it.
+    await move(
+        "-60", date(2026, 10, 9), contra=pot.id, include_in_spending=False, category_splits=thirds
+    )
+    await move("15", date(2026, 11, 6), contra=pot.id, category="savings")
     await move("-10", date(2026, 10, 3), category="groceries", category_splits=thirds)
     await move("2000", date(2026, 10, 28), category="income", payee="Employer")
     owned = await move("-25", date(2026, 11, 1), category="shopping", category_splits=thirds)
@@ -679,10 +791,13 @@ async def test_periods_and_categories_add_up_to_the_totals(
     await _reward(run, wallet, unassigned, btc, "0.0001", day, income_kind="reward")
     await _reward(run, wallet, unassigned, btc, "-0.00002", day, income_kind="reward")
 
-    flow = await cash_flow(session, START, END)
+    flow = await cash_flow(session, START, END, excluded=[pot.id])
 
     zero = Decimal(0)
-    assert (flow.income, flow.spending) == (Decimal("2014.25"), Decimal("44.35"))
+    assert (flow.income, flow.spending) == (Decimal("2029.25"), Decimal("104.35"))
+    assert flow.hidden_accounts == [
+        HiddenAccountTotal(pot.id, "Rainy day pot", Decimal("15"), Decimal("60"))
+    ]
     assert sum((p.income for p in flow.periods), zero) == flow.income
     assert sum((p.spending for p in flow.periods), zero) == flow.spending
     assert sum((c.income for c in flow.categories), zero) == flow.income

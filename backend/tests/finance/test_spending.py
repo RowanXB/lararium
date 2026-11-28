@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from sqlalchemy import text
 
 from lararium.modules.finance.cashflow import cash_flow
 from lararium.modules.finance.ledger import (
@@ -97,7 +98,6 @@ async def test_entries_totals_and_filters(session, run, make_account, post, btc)
         (date(2026, 11, 1), Decimal("25")),
     ]
     assert report.known_categories == ["gift"]
-    assert report.hidden_moved_out == 0
 
     by_account = await spending_report(session, START, END, account_id=wallet.id)
     assert (by_account.total, by_account.missing_count) == (Decimal("5"), 1)
@@ -160,7 +160,58 @@ async def test_known_categories_are_the_spending_sides(session, run, make_accoun
     await run(set_owner_category, [shop.id], "groceries")
 
     assert (await spending_report(session, START, END)).known_categories == ["groceries"]
-    assert await known_owner_categories(session, "income") == ["salary"]
+    assert await known_owner_categories(session, "income", ()) == ["salary"]
+
+
+async def test_a_move_to_a_hidden_account_is_an_entry(session, run, make_account, gbp) -> None:
+    """Money moved to a hidden pot is spending naming the pot, even when the source leaves
+    it out of spending, and the owner can categorise it. Shown again, the pot makes the move
+    a transfer between own accounts, no entry, while the owner's category is kept for when
+    it is hidden again."""
+    bank = await make_account(name="Bank", balance_mode="transactions")
+    pot = await make_account(name="Rainy day pot", subtype="savings_pot", balance_mode="hybrid")
+    moved = await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Rainy day pot",
+            postings=[
+                PostingInput(bank.id, gbp.id, Decimal("-75")),
+                PostingInput(pot.id, gbp.id, Decimal("75")),
+            ],
+            details=TransactionDetails(category="savings", include_in_spending=False),
+        ),
+    )
+    hidden = [pot.id]
+
+    [entry] = (await spending_report(session, START, END, "month", hidden)).entries
+    assert (
+        entry.transaction_id,
+        entry.account_id,
+        entry.amount,
+        entry.category,
+        entry.hidden_account_name,
+        entry.refund,
+    ) == (moved.id, bank.id, Decimal("75"), "savings", "Rainy day pot", False)
+
+    await run(set_owner_category, [moved.id], "saving up")
+    report = await spending_report(session, START, END, "month", hidden)
+    assert [(e.category, e.source_category) for e in report.entries] == [("saving_up", "savings")]
+    assert report.total == (await cash_flow(session, START, END, "month", hidden)).spending
+    assert report.known_categories == ["saving_up"]
+    assert await known_owner_categories(session, "income", hidden) == []
+
+    shown = await spending_report(session, START, END, "month", ())
+    assert (shown.entries, shown.total) == ([], Decimal("0"))
+    assert shown.known_categories == []
+    assert (await cash_flow(session, START, END, "month", ())).spending == 0
+    assert (
+        await session.scalar(text("select category from finance.transaction_owner_categories"))
+        == "saving_up"
+    )
+
+    [again] = (await spending_report(session, START, END, "month", hidden)).entries
+    assert (again.category, again.amount) == ("saving_up", Decimal("75"))
 
 
 OWNER_CATEGORIES = [None, "groceries", "gift"]
@@ -170,7 +221,8 @@ OWNER_CATEGORIES = [None, "groceries", "gift"]
 def moves(draw):
     """Signed fiat flows on two accounts, some with the source's category, some a refund or
     marked as not spending, some with the owner's category; a coin spent, priced or not; and
-    one hidden-pot move."""
+    one move to a hidden pot, which the source may mark as not spending, with the owner's
+    category or not."""
     return {
         "flows": draw(
             st.lists(
@@ -197,6 +249,8 @@ def moves(draw):
             )
         ),
         "pot": draw(st.integers(1, 900)),
+        "pot_counted": draw(st.sampled_from([None, False])),
+        "pot_owner": draw(st.sampled_from(OWNER_CATEGORIES)),
     }
 
 
@@ -239,8 +293,9 @@ async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, btc,
             )
             if owner:
                 await run(set_owner_category, [coin.id], owner)
-        # Money moved out to a hidden pot: spending for the Overview, not an entry here.
-        await run(
+        # Money moved out to a hidden pot: spending, an entry like any other, whatever the
+        # source says of it.
+        pot_move = await run(
             post_transaction,
             TransactionInput(
                 occurred_at=datetime(2026, 11, 10, 12, tzinfo=LON),
@@ -249,13 +304,16 @@ async def test_agrees_with_cash_flow(session, run, make_account, post, gbp, btc,
                     PostingInput(a.id, gbp.id, -Decimal(scenario["pot"])),
                     PostingInput(pot.id, gbp.id, Decimal(scenario["pot"])),
                 ],
+                details=TransactionDetails(include_in_spending=scenario["pot_counted"]),
             ),
         )
+        if scenario["pot_owner"]:
+            await run(set_owner_category, [pot_move.id], scenario["pot_owner"])
         excluded = [pot.id]
         for bucket in ("day", "week", "month"):
             report = await spending_report(session, START, END, bucket, excluded)
             flow = await cash_flow(session, START, END, bucket, excluded)
-            assert report.total + report.hidden_moved_out == flow.spending
+            assert report.total == flow.spending
             assert report.missing_count == flow.missing_count
             assert sum((c.amount for c in report.categories), Decimal(0)) == report.total
             assert sum((p.total for p in report.periods), Decimal(0)) == report.total

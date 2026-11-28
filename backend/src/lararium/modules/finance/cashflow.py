@@ -1,23 +1,27 @@
 """Income and spending over a range of days, in the reporting currency.
 
-Money comes in or goes out where a transaction posts to an account outside net worth: an
+Money comes in or goes out where a transaction posts to an account outside the reports: an
 income, expense or equity account, which is also where a connector puts the unknown side of
-what it reads (Unassigned). A posting there is the mirror of what happened to the owner's
-money, so its negation is the flow: positive is income, negative is spending, except
-that a positive flow the source marks as a refund (money back for an earlier payment) is
-negative spending, counted in the period it is booked. A transfer
-between own accounts posts to In transit, an asset, and a trade moves value inside one
-account, so neither is a flow. Opening balances are where an account's history starts, not
-income. Money counts, and an asset other than money only when the source states its
-transaction is income of a kind (a coin reward, and its reversal), valued at the asset's
-price on its booking day: a security arriving from nowhere (a corporate action, a transfer
-in kind) or a coin spent on a fee is neither income nor spending.
+what it reads (Unassigned); an account left out of reports, which counts as someone else's;
+or In transit on a side of a transfer to or from such a hidden account. A posting there is
+the mirror of what happened to the owner's money, so its negation is the flow: positive is
+income, negative is spending, except that a positive flow the source marks as a refund (money
+back for an earlier payment) is negative spending, counted in the period it is booked. A
+transaction wholly on the hidden side (a hidden account's own payment, its side of a
+transfer, the settlement of a transfer to or from it) is no flow. `flow_postings.py` holds
+that definition. A transfer between shown accounts posts to In transit, an asset, and a trade
+moves value inside one account, so neither is a flow. Opening balances are where an account's
+history starts, not income. Money counts, and an asset other than money only when the source
+states its transaction is income of a kind (a coin reward, and its reversal), valued at the
+asset's price on its booking day: a security arriving from nowhere (a corporate action, a
+transfer in kind) or a coin spent on a fee is neither income nor spending.
 
-An account left out of reports is treated as if it were someone else's: money moved between
-it and an account still in the reports is a flow, income when it arrives and spending when it
-leaves, so net worth's change and income less spending agree. These moves are counted in the
-totals and periods but kept apart from categories and payees (`hidden_accounts`), as a
-transfer to a hidden pension is saving, not a shop.
+Money moved between a hidden account and a shown one is so a flow like any other, income
+when it arrives and spending when it leaves, so net worth's change and income less spending
+agree. It has a category and a payee, and names the hidden account it crossed; the source's
+include_in_spending and refund marks do not apply to it. The cash-flow report also totals
+these moves by hidden account (`hidden_accounts`), and the Income and Spending pages list
+them (spending-page design §3.5).
 
 A category is whatever text decides it, not one of a fixed list: the owner's category for the
 whole transaction; else, for income only, the kind of income the source states; else the
@@ -39,6 +43,12 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lararium.modules.finance import models
+from lararium.modules.finance.flow_postings import (
+    FLOW_POSTING_SQL,
+    HIDDEN_ACCOUNT_SQL,
+    HIDDEN_LEGS_SQL,
+    MOVE_SQL,
+)
 from lararium.modules.finance.owner_categories import OWNER_CATEGORY_SQL
 from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.valuation import require_series_range
@@ -80,12 +90,13 @@ class HiddenAccountTotal:
 
 @dataclass(frozen=True)
 class Flow:
-    """Income or spending: one posting outside net worth, negated."""
+    """Income or spending: one posting outside the reports, negated."""
 
     transaction_id: UUID
     day: date  # the booking day, on which it is valued
-    # The asset or liability account its transaction posts to (not In transit), first by
-    # position: whose money it is. None when it posts to none (a transfer's settlement).
+    # The shown asset or liability account its transaction posts to (not hidden, not In
+    # transit), first by position: whose money it is. None when it posts to none (a
+    # transfer's settlement).
     account_id: UUID | None
     account_name: str | None
     instrument_id: UUID
@@ -100,8 +111,12 @@ class Flow:
     payee: str | None  # the counterparty, else the description
     description: str
     counterparty_name: str | None
-    include_in_spending: bool | None
-    refund: bool  # the source marks it money back for an earlier payment: negative spending
+    include_in_spending: bool | None  # always None for a move to or from a hidden account
+    # The source marks it money back for an earlier payment: negative spending. Never a move.
+    refund: bool
+    # The hidden account a move crossed to or from; None for any other flow.
+    hidden_account_id: UUID | None
+    hidden_account_name: str | None
 
 
 @dataclass(frozen=True)
@@ -116,7 +131,7 @@ class CashFlow:
     periods: list[PeriodTotal]  # every period of the range, in order
     categories: list[CategoryTotal]  # largest spending first
     payees: list[PayeeTotal]  # the TOP_PAYEES largest, by spending
-    hidden_accounts: list[HiddenAccountTotal]  # by name; their moves are in the totals too
+    hidden_accounts: list[HiddenAccountTotal]  # by name; their moves are flows like any other
 
 
 # Every amount, and every split's share of one, is rounded once to this many places. Postgres
@@ -147,37 +162,37 @@ _REPORTING = """
 _FLOWS = (
     "with"
     + _REPORTING
+    + ","
+    + HIDDEN_LEGS_SQL
     + """,
     base as (
       select t.id as transaction_id, t.booking_date as day, p.position, p.instrument_id,
-        -p.quantity as quantity, t.category as source_category, t.income_kind,
+        -p.quantity as quantity, """
+    + HIDDEN_ACCOUNT_SQL
+    + """ as hidden_id,
+        t.category as source_category, t.income_kind,
         """
     + OWNER_CATEGORY_SQL
     + """ as owner_category,
         coalesce(nullif(t.counterparty_name, ''), nullif(t.description, '')) as payee,
-        t.description, t.counterparty_name, t.include_in_spending, t.refund
+        t.description, t.counterparty_name,
+        case when """
+    + MOVE_SQL
+    + """ then null else t.include_in_spending end as include_in_spending,
+        t.refund and not """
+    + MOVE_SQL
+    + """ as refund
       from finance.postings p
       join finance.transactions t on t.id = p.transaction_id
       join finance.accounts a on a.id = p.account_id
       join finance.instruments i on i.id = p.instrument_id
-      where t.status <> 'void' and t.booking_date between :start and :end
-        and a.ledger_type in ('income', 'expense', 'equity')
-        and a.id <> all(:skipped)
+      where t.booking_date between :start and :end and """
+    + FLOW_POSTING_SQL
+    + """
         and not i.hidden and p.quantity <> 0
         -- Another asset is income only when the source says what kind, whatever its sign:
         -- a reward and its reversal both count, as money does.
         and (i.kind = 'fiat' or t.income_kind is not null)
-        and not exists (
-          select 1 from finance.postings x
-          where x.transaction_id = t.id and x.account_id = any(:excluded)
-        )
-        -- A transfer's settlement (its fee, or its conversion) posts only to In transit and
-        -- Unassigned; it belongs to the transfer's two accounts.
-        and not exists (
-          select 1 from finance.transfers tr
-          where tr.settlement_transaction_id = t.id
-            and (tr.from_account_id = any(:excluded) or tr.to_account_id = any(:excluded))
-        )
     ),
     valuations as (
       select k.instrument_id, k.day,
@@ -207,80 +222,25 @@ _FLOWS = (
                base.source_category) as category,
       base.owner_category is not null as has_owner_category,
       base.source_category, base.income_kind, base.owner_category, base.payee,
-      base.description, base.counterparty_name, base.include_in_spending, base.refund
+      base.description, base.counterparty_name, base.include_in_spending, base.refund,
+      base.hidden_id as hidden_account_id, hidden.name as hidden_account_name
     from base
     join valuations
       on valuations.instrument_id = base.instrument_id and valuations.day = base.day
     join finance.instruments i on i.id = base.instrument_id
+    left join finance.accounts hidden on hidden.id = base.hidden_id
+    -- Whose money it is: the first shown account its transaction posts to.
     left join lateral (
       select a.id, a.name
       from finance.postings ap
       join finance.accounts a on a.id = ap.account_id
       where ap.transaction_id = base.transaction_id
-        and a.ledger_type in ('asset', 'liability') and a.id is distinct from :in_transit
+        and a.ledger_type in ('asset', 'liability')
+        and a.id <> all(:excluded) and a.id is distinct from :in_transit
       order by ap.position
       limit 1
     ) own on true
     order by base.day, base.transaction_id, base.position
-"""
-)
-
-
-# Money crossing between the hidden accounts and those still in the reports: the postings on
-# a shown asset or liability account (not In transit) of a transaction that either posts to a
-# hidden account itself (a Monzo pot move) or is a side of a transfer to or from one (its own
-# record, or the placeholder standing in for it), valued as _FLOWS values a flow. Its sign is
-# the move's: positive arrived from the hidden account. A rejected transfer is no transfer,
-# and its record's other side on Unassigned is a flow already.
-_HIDDEN_MOVES = (
-    "with"
-    + _REPORTING
-    + """,
-    crossing as (
-      select x.transaction_id, x.account_id as hidden_id
-      from finance.postings x
-      where x.account_id = any(:excluded)
-      union
-      select leg.id, case when tr.from_account_id = any(:excluded)
-                       then tr.from_account_id else tr.to_account_id end
-      from finance.transfers tr
-      cross join lateral unnest(array[tr.out_transaction_id, tr.in_transaction_id,
-                                      tr.placeholder_transaction_id]) as leg(id)
-      where tr.status <> 'rejected' and leg.id is not null
-        and (tr.from_account_id = any(:excluded) or tr.to_account_id = any(:excluded))
-    ),
-    -- One hidden account per transaction, should it touch several: the first by id.
-    named as (
-      select distinct on (crossing.transaction_id) crossing.transaction_id, crossing.hidden_id
-      from crossing
-      order by crossing.transaction_id, crossing.hidden_id
-    ),
-    moves as (
-      select t.booking_date as day, named.hidden_id, p.instrument_id, p.quantity
-      from named
-      join finance.transactions t on t.id = named.transaction_id
-      join finance.postings p on p.transaction_id = t.id
-      join finance.accounts a on a.id = p.account_id
-      join finance.instruments i on i.id = p.instrument_id
-      where a.ledger_type in ('asset', 'liability')
-        and a.id <> all(:excluded) and a.id is distinct from :in_transit
-        and t.status <> 'void' and t.booking_date between :start and :end
-        and i.kind = 'fiat' and not i.hidden and p.quantity <> 0
-    ),
-    rates as (
-      select k.instrument_id, k.day,
-        finance.v1_fx_rate(k.instrument_id, (select reporting.id from reporting), k.day)
-          as fx_rate
-      from (select distinct moves.instrument_id, moves.day from moves) k
-    )
-    select moves.day, moves.hidden_id, a.name,
-      round(moves.quantity * rates.fx_rate, """
-    + str(_PLACES)
-    + """) as amount
-    from moves
-    join finance.accounts a on a.id = moves.hidden_id
-    join rates on rates.instrument_id = moves.instrument_id and rates.day = moves.day
-    order by a.name, a.id, moves.day
 """
 )
 
@@ -354,9 +314,9 @@ async def flows(
 ) -> list[Flow]:
     """Every flow from start to end, both included, by day.
 
-    A transaction touching one of the `excluded` accounts is left out whole, and so is the
-    settlement of a transfer to or from one, which touches neither side. What a transfer to
-    or from a hidden account moved is not a flow here (cash_flow's hidden_accounts).
+    A posting on one of the `excluded` accounts, or on In transit for a side of a transfer
+    to or from one, is a flow naming it; a transaction wholly on their side is none
+    (flow_postings.py).
     """
     require_series_range(start, end)
     system = await system_account_ids(session)
@@ -388,37 +348,21 @@ async def cash_flow(
 ) -> CashFlow:
     """Income and spending from start to end, both included.
 
-    A transaction touching one of the `excluded` accounts is left out whole, and so is the
-    settlement of a transfer to or from one, which touches neither side; what such a transfer
-    moved on the side still in the reports counts instead (hidden_accounts). Spending the
-    source itself marks as not spending (include_in_spending false) is left out too.
+    Every flow counts alike in the totals, periods, categories and payees, a move to or
+    from one of the `excluded` accounts too (`flows`); the moves are also totalled by hidden
+    account. Spending the source itself marks as not spending (include_in_spending false) is
+    left out, which never applies to a move.
     """
     entries = await flows(session, start, end, excluded)
     # The owner's category covers the whole transaction, so its splits are not read.
     splits = await _splits(session, {e.transaction_id for e in entries if not e.has_owner_category})
-    system = await system_account_ids(session)
-    uuids = ARRAY(PG_UUID(as_uuid=True))
-    moves = (
-        await session.execute(
-            text(_HIDDEN_MOVES).bindparams(
-                bindparam("excluded", type_=uuids),
-                bindparam("in_transit", type_=PG_UUID(as_uuid=True)),
-            ),
-            {
-                "start": start,
-                "end": end,
-                "excluded": list(excluded),
-                "in_transit": system.get("in_transit"),
-            },
-        )
-    ).all()
-
     zero = Decimal(0)
     income_by_period: dict[date, Decimal] = defaultdict(Decimal)
     spending_by_period: dict[date, Decimal] = defaultdict(Decimal)
     income_by_category: dict[str | None, Decimal] = defaultdict(Decimal)
     spending_by_category: dict[str | None, Decimal] = defaultdict(Decimal)
     spending_by_payee: dict[str, Decimal] = defaultdict(Decimal)
+    hidden: dict[UUID, HiddenAccountTotal] = {}
     missing_count = 0
     for entry in entries:
         amount = entry.amount
@@ -437,28 +381,18 @@ async def cash_flow(
                 spending_by_category[category] -= share
             if entry.payee is not None:
                 spending_by_payee[entry.payee] -= amount
-
-    hidden: dict[UUID, HiddenAccountTotal] = {}
-    for move in moves:
-        amount = move.amount
-        if amount is None:
-            missing_count += 1
-            continue
-        period = period_start(move.day, bucket)
-        total = hidden.get(move.hidden_id) or HiddenAccountTotal(
-            move.hidden_id, move.name, zero, zero
-        )
-        if amount > 0:
-            income_by_period[period] += amount
-            total = HiddenAccountTotal(
-                total.account_id, total.name, total.moved_in + amount, total.moved_out
+        # A move is never a refund nor left out (its include_in_spending is None), so it was
+        # counted above as income or spending by its sign.
+        if entry.hidden_account_id is not None:
+            total = hidden.get(entry.hidden_account_id) or HiddenAccountTotal(
+                entry.hidden_account_id, entry.hidden_account_name or "", zero, zero
             )
-        else:
-            spending_by_period[period] -= amount
-            total = HiddenAccountTotal(
-                total.account_id, total.name, total.moved_in, total.moved_out - amount
+            hidden[entry.hidden_account_id] = HiddenAccountTotal(
+                total.account_id,
+                total.name,
+                total.moved_in + max(amount, zero),
+                total.moved_out + max(-amount, zero),
             )
-        hidden[move.hidden_id] = total
 
     categories = [
         CategoryTotal(category, income_by_category[category], spending_by_category[category])
@@ -482,5 +416,5 @@ async def cash_flow(
         ],
         categories=categories,
         payees=[PayeeTotal(name, spending) for name, spending in payees[:TOP_PAYEES]],
-        hidden_accounts=list(hidden.values()),
+        hidden_accounts=sorted(hidden.values(), key=lambda h: (h.name, h.account_id)),
     )

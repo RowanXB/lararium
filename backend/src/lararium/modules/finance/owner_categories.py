@@ -13,19 +13,22 @@ select list or a COALESCE of a raw `text()` query; the same SQL is the join cond
 reference."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import delete, func, literal_column, select, text
+from sqlalchemy import bindparam, delete, func, literal_column, select, text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import ARRAY, insert
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from lararium.core.commands import CommandContext
 from lararium.modules.finance import models
 from lararium.modules.finance.errors import FinanceValidationError, TransactionNotFoundError
+from lararium.modules.finance.flow_postings import FLOW_POSTING_SQL, HIDDEN_LEGS_SQL, MOVE_SQL
+from lararium.modules.finance.system_accounts import system_account_ids
 from lararium.modules.finance.transfers.contra import source_columns
 
 MAX_CATEGORY_LENGTH = 64
@@ -126,34 +129,51 @@ async def set_owner_category(
 
 
 # The owner's categories in use on one side of the books (spending-page design §3.3): a
-# non-void transaction carrying one that posts a flow of that side, as `cashflow.flows` reads
-# its postings. Spending is a positive posting to an income, expense or equity account, or any
-# such posting of a refund; income is a negative one that is not a refund.
+# transaction carrying one that posts a flow of that side, by the one definition of a flow's
+# posting (flow_postings.py). Spending is a posting with positive quantity (the flow is its
+# negation), or any posting of a refund; income is a negative one that is not a refund. A move
+# to or from a hidden account is never a refund, so it is on the side of its sign.
+_REFUND = f"(t.refund and not {MOVE_SQL})"
 _SIDE_POSTING = {
-    "spending": "(p.quantity > 0 or t.refund)",
-    "income": "(p.quantity < 0 and not t.refund)",
+    "spending": f"(p.quantity > 0 or {_REFUND})",
+    "income": f"(p.quantity < 0 and not {_REFUND})",
 }
 
 
 async def known_owner_categories(
-    session: AsyncSession, side: Literal["income", "spending"]
+    session: AsyncSession,
+    side: Literal["income", "spending"],
+    excluded: Collection[UUID],
 ) -> list[str]:
-    """Every owner category in use on the income or the spending side, sorted."""
+    """Every owner category in use on the income or the spending side, sorted, with the
+    `excluded` accounts hidden."""
+    system = await system_account_ids(session)
+    opening = system.get("opening_balances")
+    uuids = ARRAY(PG_UUID(as_uuid=True))
     rows = await session.scalars(
         text(
             f"""
+            with {HIDDEN_LEGS_SQL}
             select distinct {OWNER_CATEGORY_SQL} as category
             from finance.transactions t
-            where t.status <> 'void'
-              and exists (
-                select 1 from finance.postings p
-                join finance.accounts a on a.id = p.account_id
-                where p.transaction_id = t.id
-                  and a.ledger_type in ('income', 'expense', 'equity')
-                  and {_SIDE_POSTING[side]}
-              )
+            where exists (
+              select 1 from finance.postings p
+              join finance.accounts a on a.id = p.account_id
+              where p.transaction_id = t.id
+                and {FLOW_POSTING_SQL}
+                and {_SIDE_POSTING[side]}
+            )
             order by 1
             """
-        )
+        ).bindparams(
+            bindparam("skipped", type_=uuids),
+            bindparam("excluded", type_=uuids),
+            bindparam("in_transit", type_=PG_UUID(as_uuid=True)),
+        ),
+        {
+            "skipped": [] if opening is None else [opening],
+            "excluded": list(excluded),
+            "in_transit": system.get("in_transit"),
+        },
     )
     return [category for category in rows if category is not None]

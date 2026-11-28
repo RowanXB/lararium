@@ -376,7 +376,7 @@ class CashFlowOut(_Out):
     periods: list[CashFlowPeriodOut]
     categories: list[CashFlowCategoryOut]
     payees: list[CashFlowPayeeOut]
-    # Also in the totals and periods, apart from categories and payees.
+    # Moves to and from each hidden account, which are flows in every total above too.
     hidden_accounts: list[CashFlowHiddenAccountOut]
 
 
@@ -407,6 +407,7 @@ class IncomeEntryOut(_Out):
     income_kind: str | None
     owner_category: str | None
     category: str | None  # the effective category
+    hidden_account_name: str | None  # moved in from this hidden account
 
 
 class IncomeOut(_Out):
@@ -421,8 +422,6 @@ class IncomeOut(_Out):
     categories: list[IncomeCategoryOut]
     entries: list[IncomeEntryOut]
     known_categories: list[str]
-    # Moved in from hidden accounts: in the Overview's income, not listed here.
-    hidden_moved_in: DecimalStr
 
 
 class SpendingCategoryOut(_Out):
@@ -453,6 +452,7 @@ class SpendingEntryOut(_Out):
     owner_category: str | None
     category: str | None  # the effective category
     refund: bool
+    hidden_account_name: str | None  # moved out to this hidden account
 
 
 class SpendingOut(_Out):
@@ -467,8 +467,6 @@ class SpendingOut(_Out):
     categories: list[SpendingCategoryOut]
     entries: list[SpendingEntryOut]
     known_categories: list[str]
-    # Moved out to hidden accounts: in the Overview's spending, not listed here.
-    hidden_moved_out: DecimalStr
 
 
 # Imports

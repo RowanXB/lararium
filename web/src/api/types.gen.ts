@@ -1917,6 +1917,10 @@ export type IncomeEntryOut = {
      */
     description: string;
     /**
+     * Hidden Account Name
+     */
+    hidden_account_name: string | null;
+    /**
      * Income Kind
      */
     income_kind: string | null;
@@ -1964,10 +1968,6 @@ export type IncomeOut = {
      * Entries
      */
     entries: Array<IncomeEntryOut>;
-    /**
-     * Hidden Moved In
-     */
-    hidden_moved_in: string;
     /**
      * Known Categories
      */
@@ -2555,6 +2555,10 @@ export type SpendingEntryOut = {
      */
     description: string;
     /**
+     * Hidden Account Name
+     */
+    hidden_account_name: string | null;
+    /**
      * Instrument
      */
     instrument: string;
@@ -2602,10 +2606,6 @@ export type SpendingOut = {
      * Entries
      */
     entries: Array<SpendingEntryOut>;
-    /**
-     * Hidden Moved Out
-     */
-    hidden_moved_out: string;
     /**
      * Known Categories
      */

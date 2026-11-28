@@ -20,6 +20,7 @@ const SHOP = {
   refund: false,
   source_category: "shopping",
   transaction_id: "t1",
+  hidden_account_name: null,
 };
 const REFUND = {
   ...SHOP,
@@ -41,7 +42,6 @@ const SPENDING = {
   bucket: "week",
   total: "32.50",
   missing_count: 0,
-  hidden_moved_out: "0",
   known_categories: ["groceries"],
   periods: [{ start: "2026-11-16", total: "32.50" }],
   categories: [
@@ -97,6 +97,24 @@ it("lists the entries with the source category, and a refund negative and marked
   expect(refund.getByText("-£10.00")).toBeInTheDocument();
   expect(refund.getByText("Refund")).toBeInTheDocument();
   expect(refund.getByText("Eating out")).toBeInTheDocument();
+});
+
+it("marks a move to a hidden account with where it went", async () => {
+  const moved = {
+    ...SHOP,
+    counterparty_name: null,
+    description: "Rainy day pot",
+    hidden_account_name: "Rainy day pot",
+    transaction_id: "t3",
+  };
+  vi.mocked(getSpending).mockResolvedValue({
+    data: { ...SPENDING, entries: [moved, SHOP] },
+  } as never);
+  renderPage();
+
+  expect(await screen.findByText("To Rainy day pot")).toBeInTheDocument();
+  expect(rowOf("Corner Shop").queryByText(/^To /)).toBeNull();
+  expect(screen.queryByText("Refund")).toBeNull();
 });
 
 it("filters by account and by category", async () => {
