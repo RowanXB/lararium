@@ -608,6 +608,7 @@ def test_tembo_rows_and_summary() -> None:
         (date(2027, 5, 31), "Interest Adjustment", Decimal("-0.02"), Decimal("44.60")),
     ]
     assert [r.description for r in rows] == [r.bank_type for r in rows]
+    assert [r.interest for r in rows] == [False, False, True, True]
     assert {r.currency for r in rows} == {"GBP"}
     assert rows[1].raw == {
         "Date": "10/05/2027",
@@ -629,12 +630,14 @@ def test_tembo_rows_and_summary() -> None:
     assert statement.currency == "GBP"
     # The Plan value: undated, as the last day may not be listed in full.
     assert (statement.closing_balance, statement.closing_balance_date) == (Decimal("44.60"), None)
-    # Tembo prints no opening balance and no totals: nothing is stored for them.
-    assert (statement.opening_balance, statement.money_in, statement.money_out) == (
-        None,
-        None,
-        None,
-    )
+    # Tembo prints no opening balance and no totals, not even of its interest: nothing is
+    # stored for them, and the summary check skips them.
+    assert (
+        statement.opening_balance,
+        statement.money_in,
+        statement.money_out,
+        statement.interest,
+    ) == (None, None, None, None)
     assert (statement.payments_in, statement.payments_out) == (None, None)
     assert (statement.available_balance, statement.available_balance_date) == (
         Decimal("44.60"),
@@ -1245,8 +1248,14 @@ def test_revolut_savings_rows_and_summary() -> None:
         (date(2027, 10, 2), "Gross Interest", Decimal("0.10"), Decimal("1300.22")),
     ]
     assert rows[0].description == "Deposit"
+    assert [row.interest for row in rows] == [False, True, False, True]
     assert statement.period == (date(2027, 10, 1), date(2027, 10, 31))
-    assert (statement.money_in, statement.money_out) == (Decimal("1000.22"), Decimal("200.00"))
+    # The interest paid is totalled apart from money in, as the summary prints it.
+    assert (statement.money_in, statement.money_out, statement.interest) == (
+        Decimal("1000.00"),
+        Decimal("200.00"),
+        Decimal("0.22"),
+    )
     assert (statement.opening_balance, statement.closing_balance) == (
         Decimal("500.00"),
         Decimal("1300.22"),

@@ -11,6 +11,40 @@ export function initialChoice(preset: PresetKey = "90d"): RangeChoice {
   return { preset, range: presetRange(preset) };
 }
 
+// The dates a link carries to the page it opens, as search params.
+export type RangeSearch = { preset?: PresetKey | "custom"; start?: string; end?: string };
+
+export function rangeSearch(choice: RangeChoice): RangeSearch {
+  return { preset: choice.preset, ...choice.range };
+}
+
+// A route's validateSearch: what the URL says, keeping only what can be a range.
+export function readRangeSearch(search: Record<string, unknown>): RangeSearch {
+  const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+  const preset = PRESETS.find((p) => p.key === search.preset)?.key;
+  return {
+    preset: search.preset === "custom" ? "custom" : preset,
+    start: text(search.start),
+    end: text(search.end),
+  };
+}
+
+// A link opens on the dates it was made with: a preset whose dates were another day's
+// ("This month" linked on 30 November, opened on 1 December) opens them as custom, one
+// without dates or with today's as the preset; a custom range only when it is one. Anything
+// else opens on the default.
+export function choiceFrom(search: RangeSearch): RangeChoice {
+  const range = { start: search.start ?? "", end: search.end ?? "" };
+  if (search.preset && search.preset !== "custom") {
+    const today = presetRange(search.preset);
+    const moved = range.start !== today.start || range.end !== today.end;
+    if (moved && isValidRange(range)) return { preset: "custom", range };
+    return initialChoice(search.preset);
+  }
+  if (search.preset === "custom" && isValidRange(range)) return { preset: "custom", range };
+  return initialChoice();
+}
+
 type Props = { choice: RangeChoice; onChange: (choice: RangeChoice) => void };
 
 const chip =

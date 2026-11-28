@@ -208,8 +208,6 @@ class Run(ConnectorRun):
         # The account's Trading 212 id.
         self.trading212_id = ""
         self.account_map: dict[str, JSONValue] = {}
-        # The sibling account's registry row (accounts.sibling), once looked up.
-        self.sibling: UUID | None = None
         # Ticker → the metadata's (type, short name), or None when it lists none.
         self.metadata: dict[str, tuple[str, str] | None] = {}
         # (instrument, currency, day) → price.

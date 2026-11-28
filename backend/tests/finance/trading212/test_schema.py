@@ -24,6 +24,8 @@ from lararium.modules.finance.trading212.fields import (
     KEYS,
     KINDS,
     MAP_ENTRIES,
+    NOTES_ACCOUNT_NUMBER,
+    NOTES_SORT_CODE,
     NOTES_TRANSACTION_ID,
     OWN_COLUMNS,
     PERSONAL,
@@ -160,7 +162,12 @@ async def test_every_column_is_a_field_or_its_own(session) -> None:
     for tables in COLUMNS.values():
         for table, paths in tables.items():
             fields.setdefault(table, set()).update(paths.values())
-    fields[EXPORT_TABLE] = {*EXPORT_COLUMNS.values(), NOTES_TRANSACTION_ID}
+    fields[EXPORT_TABLE] = {
+        *EXPORT_COLUMNS.values(),
+        NOTES_TRANSACTION_ID,
+        NOTES_SORT_CODE,
+        NOTES_ACCOUNT_NUMBER,
+    }
     stray = {
         table: sorted(set(columns) - fields.get(table, set()) - OWN_COLUMNS)
         for table, columns in found.items()
@@ -262,6 +269,8 @@ async def test_export_table_has_every_known_column(session) -> None:
         assert kind == _DATA_TYPES[EXPORT_KINDS[header]], header
         assert nullable == (header not in EXPORT_REQUIRED), header
     assert found[NOTES_TRANSACTION_ID] == ("text", True)
+    assert found["notes_sort_code"] == ("text", True)
+    assert found["notes_account_number"] == ("text", True)
     assert found["transaction_id"] == ("uuid", True)
     assert EXPORT_COLUMNS["Time (UTC)"] == "time_utc"
     assert EXPORT_COLUMNS["Currency (Total)"] == "currency_total"

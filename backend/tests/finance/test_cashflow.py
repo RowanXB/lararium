@@ -4,7 +4,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, text
 
 from lararium.modules.finance import models
 from lararium.modules.finance.accounts import set_excluded_from_reports
@@ -13,8 +13,10 @@ from lararium.modules.finance.cashflow import (
     HiddenAccountTotal,
     PayeeTotal,
     cash_flow,
+    flows,
 )
 from lararium.modules.finance.errors import FinanceValidationError
+from lararium.modules.finance.instruments import create_instrument
 from lararium.modules.finance.ledger import (
     CategorySplit,
     CounterpartyFields,
@@ -24,7 +26,8 @@ from lararium.modules.finance.ledger import (
     post_transaction,
     void_transaction,
 )
-from lararium.modules.finance.pricing import record_fx_rate
+from lararium.modules.finance.owner_categories import set_owner_category
+from lararium.modules.finance.pricing import record_fx_rate, record_price
 from lararium.modules.finance.system_accounts import get_or_create_system_account
 from lararium.modules.finance.valuation import holdings_asof, net_worth_series
 
@@ -49,7 +52,13 @@ def move(run, bank, unassigned, gbp):
     async def _move(amount: str, day: date, *, account=None, contra=None, instrument=None, **more):
         details = {
             key: more.pop(key)
-            for key in ("category", "include_in_spending", "category_splits", "refund")
+            for key in (
+                "category",
+                "include_in_spending",
+                "category_splits",
+                "income_kind",
+                "refund",
+            )
             if key in more
         }
         instrument_id = (instrument or gbp).id
@@ -445,3 +454,275 @@ async def test_many_transactions_take_one_parameter(session) -> None:
     from lararium.modules.finance.cashflow import _splits
 
     assert await _splits(session, [uuid4() for _ in range(70_000)]) == {}
+
+
+async def test_owner_category_wins_and_covers_splits(session, run, move) -> None:
+    """The owner's word is for the whole transaction: it replaces the source's category and
+    its splits."""
+    splits = (CategorySplit("salary", Decimal("60")), CategorySplit("gift", Decimal("40")))
+    tx = await move("100", date(2026, 11, 2), category="transfers", category_splits=splits)
+    await run(set_owner_category, [tx.id], "family")
+
+    flow = await cash_flow(session, START, END)
+
+    assert flow.categories == [CategoryTotal("family", Decimal("100"), Decimal("0"))]
+    [entry] = await flows(session, START, END, ())
+    assert (entry.category, entry.has_owner_category, entry.source_category) == (
+        "family",
+        True,
+        "transfers",
+    )
+    assert entry.owner_category == "family"
+
+
+async def _dividend(run, bank, unassigned, gbp):
+    """An eToro-like dividend: the gross amount and the tax withheld, both on Unassigned."""
+    return await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(2026, 11, 2, 12, tzinfo=LON),
+            description="Dividend",
+            postings=[
+                PostingInput(bank.id, gbp.id, Decimal("8.5")),
+                PostingInput(unassigned, gbp.id, Decimal("-10")),
+                PostingInput(unassigned, gbp.id, Decimal("1.5")),
+            ],
+            details=TransactionDetails(income_kind="dividend"),
+        ),
+    )
+
+
+async def test_income_kind_groups_positive_flows_only(session, run, bank, unassigned, gbp) -> None:
+    await _dividend(run, bank, unassigned, gbp)
+
+    flow = await cash_flow(session, START, END)
+
+    assert flow.categories == [
+        CategoryTotal(None, Decimal("0"), Decimal("1.5")),
+        CategoryTotal("dividend", Decimal("10"), Decimal("0")),
+    ]
+
+
+async def _coin(run, symbol: str, usd, kind: str = "crypto"):
+    return await run(
+        create_instrument,
+        kind=kind,
+        symbol=symbol,
+        name=symbol,
+        decimals=8,
+        quote_instrument_id=usd.id,
+        identifiers=[],
+    )
+
+
+async def _reward(run, wallet, unassigned, coin, quantity: str, day: date, **details):
+    return await run(
+        post_transaction,
+        TransactionInput(
+            occurred_at=datetime(day.year, day.month, day.day, 12, tzinfo=LON),
+            description="Simple Earn reward",
+            postings=[
+                PostingInput(wallet.id, coin.id, Decimal(quantity)),
+                PostingInput(unassigned, coin.id, -Decimal(quantity)),
+            ],
+            details=TransactionDetails(**details),
+        ),
+    )
+
+
+async def test_coin_reward_valued_on_its_day(
+    session, run, make_account, unassigned, btc, eur, gbp
+) -> None:
+    """At the latest price on or before its day, a manual one first among the day's."""
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    day = date(2026, 11, 2)
+    for value, on, source in (
+        ("40000", date(2026, 11, 1), "manual"),
+        ("50000", day, "manual"),
+        ("45000", day, "coingecko"),
+        ("60000", date(2026, 11, 3), "manual"),
+    ):
+        await run(
+            record_price,
+            instrument_id=btc.id,
+            quote_instrument_id=eur.id,
+            price=Decimal(value),
+            as_of_date=on,
+            source=source,
+        )
+    # Recorded later, so only the manual preference keeps it from winning.
+    await session.execute(
+        text(
+            "update finance.prices set recorded_at = now() + interval '1 hour'"
+            " where source = 'coingecko'"
+        )
+    )
+    await run(
+        record_fx_rate,
+        base_instrument_id=eur.id,
+        quote_instrument_id=gbp.id,
+        rate=Decimal("0.85"),
+        as_of_date=day,
+    )
+    tx = await _reward(run, wallet, unassigned, btc, "0.0001", day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.missing_count) == (Decimal("4.25"), 0)
+    assert flow.categories == [CategoryTotal("reward", Decimal("4.25"), Decimal("0"))]
+    [entry] = await flows(session, START, END, ())
+    assert (entry.transaction_id, entry.day, entry.account_id, entry.account_name) == (
+        tx.id,
+        day,
+        wallet.id,
+        "Exchange",
+    )
+    assert (entry.instrument_id, entry.instrument_code, entry.quantity, entry.amount) == (
+        btc.id,
+        "BTC",
+        Decimal("0.0001"),
+        Decimal("4.25"),
+    )
+    assert (entry.category, entry.income_kind, entry.has_owner_category) == (
+        "reward",
+        "reward",
+        False,
+    )
+
+
+async def test_coin_reward_without_price_is_missing(
+    session, run, move, make_account, unassigned, btc
+) -> None:
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    await move("100", date(2026, 11, 1))
+    await _reward(run, wallet, unassigned, btc, "0.0001", date(2026, 11, 2), income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.missing_count) == (Decimal("100"), 1)
+
+
+async def test_coin_reward_without_fx_rate_is_missing(
+    session, run, make_account, unassigned, btc, eur
+) -> None:
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    day = date(2026, 11, 2)
+    await run(
+        record_price,
+        instrument_id=btc.id,
+        quote_instrument_id=eur.id,
+        price=Decimal("50000"),
+        as_of_date=day,
+    )  # but no EUR rate is recorded
+    await _reward(run, wallet, unassigned, btc, "0.0001", day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    assert (flow.income, flow.missing_count) == (Decimal("0"), 1)
+
+
+async def test_coin_without_income_kind_is_not_a_flow(
+    session, run, make_account, unassigned, usd
+) -> None:
+    """A coin spent on a fee, or a security arriving from nowhere, is not money: only a
+    source's income kind makes an asset other than money a flow."""
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    bnb = await _coin(run, "BNB", usd)
+    stock = await _coin(run, "ACME", usd, kind="equity")
+    day = date(2026, 11, 2)
+    for coin in (bnb, stock):
+        await run(
+            record_price,
+            instrument_id=coin.id,
+            quote_instrument_id=usd.id,
+            price=Decimal("10"),
+            as_of_date=day,
+        )
+    await _reward(run, wallet, unassigned, bnb, "-0.01", day)  # a fee paid in BNB
+    await _reward(run, wallet, unassigned, stock, "1", day)  # a share arriving
+
+    assert await flows(session, START, END, ()) == []
+    flow = await cash_flow(session, START, END)
+    assert (flow.income, flow.spending, flow.missing_count) == (0, 0, 0)
+
+
+async def test_periods_and_categories_add_up_to_the_totals(
+    session, run, move, make_account, bank, unassigned, gbp, btc, eur
+) -> None:
+    """Every flow is counted once in its period and shared out whole among categories.
+    Moves to or from a hidden account are left out of this data: they count in the totals
+    and periods but not in categories."""
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    thirds = tuple(CategorySplit(name, Decimal("-1")) for name in ("a", "b", "c"))
+    await move("-10", date(2026, 10, 3), category="groceries", category_splits=thirds)
+    await move("2000", date(2026, 10, 28), category="income", payee="Employer")
+    owned = await move("-25", date(2026, 11, 1), category="shopping", category_splits=thirds)
+    await run(set_owner_category, [owned.id], "gifts")
+    await move("-7", date(2026, 11, 3))
+    await move("-40", date(2026, 11, 4), include_in_spending=False)
+    await _dividend(run, bank, unassigned, gbp)
+    day = date(2026, 11, 5)
+    await run(
+        record_price,
+        instrument_id=btc.id,
+        quote_instrument_id=eur.id,
+        price=Decimal("50000"),
+        as_of_date=day,
+    )
+    await run(
+        record_fx_rate,
+        base_instrument_id=eur.id,
+        quote_instrument_id=gbp.id,
+        rate=Decimal("0.85"),
+        as_of_date=day,
+    )
+    await _reward(run, wallet, unassigned, btc, "0.0001", day, income_kind="reward")
+    await _reward(run, wallet, unassigned, btc, "-0.00002", day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    zero = Decimal(0)
+    assert (flow.income, flow.spending) == (Decimal("2014.25"), Decimal("44.35"))
+    assert sum((p.income for p in flow.periods), zero) == flow.income
+    assert sum((p.spending for p in flow.periods), zero) == flow.spending
+    assert sum((c.income for c in flow.categories), zero) == flow.income
+    assert sum((c.spending for c in flow.categories), zero) == flow.spending
+
+
+async def test_amounts_at_an_inverse_rate_still_add_up(
+    session, run, move, make_account, unassigned, btc, eur, gbp
+) -> None:
+    """Only GBP to EUR is recorded, so EUR to GBP is its inverse, with as many digits as
+    Postgres gives a division; times a coin's eight places and a price it is past Decimal's
+    28. Each amount is rounded once, so periods and categories still add up exactly."""
+    wallet = await make_account(name="Exchange", subtype="wallet", balance_mode="transactions")
+    for day in (date(2026, 10, 1), date(2026, 11, 1)):
+        await run(
+            record_fx_rate,
+            base_instrument_id=gbp.id,
+            quote_instrument_id=eur.id,
+            rate=Decimal("1.1734"),
+            as_of_date=day,
+        )
+        await run(
+            record_price,
+            instrument_id=btc.id,
+            quote_instrument_id=eur.id,
+            price=Decimal("50123.47"),
+            as_of_date=day,
+        )
+    thirds = tuple(CategorySplit(name, Decimal("-1")) for name in ("a", "b", "c"))
+    for day in (date(2026, 10, 3), date(2026, 11, 3)):
+        await move("-10.07", day, instrument=eur, category_splits=thirds)
+        await move("1234.56", day, instrument=eur, category="salary")
+        for quantity in ("0.96843464", "0.30703946", "0.79343271", "-0.00012347"):
+            await _reward(run, wallet, unassigned, btc, quantity, day, income_kind="reward")
+
+    flow = await cash_flow(session, START, END)
+
+    zero = Decimal(0)
+    assert flow.missing_count == 0
+    assert sum((p.income for p in flow.periods), zero) == flow.income
+    assert sum((p.spending for p in flow.periods), zero) == flow.spending
+    assert sum((c.income for c in flow.categories), zero) == flow.income
+    assert sum((c.spending for c in flow.categories), zero) == flow.spending

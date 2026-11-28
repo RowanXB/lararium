@@ -244,6 +244,7 @@ async def post_reward(
         key,
         occurred_at=occurred_at,
         description=f"{rewards.description} {coin}",
+        income_kind="reward",
         postings=[
             PostingInput(await run.account(rewards.wallet), instrument_id, quantity),
             PostingInput(run.unassigned, instrument_id, -quantity),

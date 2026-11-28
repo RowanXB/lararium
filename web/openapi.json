@@ -1241,6 +1241,18 @@
         "title": "CashFlowPeriodOut",
         "type": "object"
       },
+      "CellPattern": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "CellPatterns": {
+        "items": {
+          "$ref": "#/components/schemas/CellPattern"
+        },
+        "maxItems": 10,
+        "minItems": 1,
+        "type": "array"
+      },
       "ConnectionOut": {
         "properties": {
           "binance": {
@@ -1675,6 +1687,16 @@
             "title": "Extract",
             "type": "array"
           },
+          "family_notes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FamilyNotes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "format": {
             "const": "csv",
             "title": "Format",
@@ -1866,6 +1888,40 @@
           "raw_records"
         ],
         "title": "EtoroUploadOut",
+        "type": "object"
+      },
+      "FamilyNotes": {
+        "additionalProperties": false,
+        "description": "Whether a row moved money within its account's family, as `column` says (account\nfamily identifier design \u00a75.9): for a row whose type (the type column's value) is one\nof `types`, a stripped cell matching one of `within` in full is a move within the\nfamily (family_move true), one matching one of `outside` a movement outside it (false),\nand any other a row error naming the column and the rule, never the value. Every other\nrow's family_move is None: the profile says nothing of it.",
+        "properties": {
+          "column": {
+            "title": "Column",
+            "type": "string"
+          },
+          "outside": {
+            "$ref": "#/components/schemas/CellPatterns"
+          },
+          "types": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Types",
+            "type": "array"
+          },
+          "within": {
+            "$ref": "#/components/schemas/CellPatterns"
+          }
+        },
+        "required": [
+          "column",
+          "types",
+          "within",
+          "outside"
+        ],
+        "title": "FamilyNotes",
         "type": "object"
       },
       "FinanceSettingsOut": {
@@ -2255,7 +2311,8 @@
               "trading212_account",
               "etoro_account",
               "card_merchant",
-              "chain_address"
+              "chain_address",
+              "account_family"
             ],
             "title": "Kind",
             "type": "string"
@@ -2783,6 +2840,17 @@
             ],
             "title": "External Id"
           },
+          "family_move": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Move"
+          },
           "fee": {
             "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
             "title": "Fee",
@@ -3055,6 +3123,7 @@
           "occurred_at",
           "time_unit",
           "interest",
+          "family_move",
           "value_date",
           "description",
           "payee",
@@ -3597,6 +3666,275 @@
           "frequency"
         ],
         "title": "ImportStatementRateOut",
+        "type": "object"
+      },
+      "IncomeCategoryOut": {
+        "properties": {
+          "amount": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          }
+        },
+        "required": [
+          "category",
+          "amount"
+        ],
+        "title": "IncomeCategoryOut",
+        "type": "object"
+      },
+      "IncomeEntryOut": {
+        "description": "The positive flows of one transaction in one instrument, added up.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Name"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "booking_date": {
+            "format": "date",
+            "title": "Booking Date",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "counterparty_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterparty Name"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "income_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Income Kind"
+          },
+          "instrument": {
+            "title": "Instrument",
+            "type": "string"
+          },
+          "owner_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Category"
+          },
+          "quantity": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "source_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Category"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "booking_date",
+          "account_id",
+          "account_name",
+          "description",
+          "counterparty_name",
+          "quantity",
+          "instrument",
+          "amount",
+          "source_category",
+          "income_kind",
+          "owner_category",
+          "category"
+        ],
+        "title": "IncomeEntryOut",
+        "type": "object"
+      },
+      "IncomeOut": {
+        "description": "What came in over a range, in the reporting currency.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/IncomeCategoryOut"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/IncomeEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "hidden_moved_in": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Hidden Moved In",
+            "type": "string"
+          },
+          "known_categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Known Categories",
+            "type": "array"
+          },
+          "missing_count": {
+            "title": "Missing Count",
+            "type": "integer"
+          },
+          "periods": {
+            "items": {
+              "$ref": "#/components/schemas/IncomePeriodOut"
+            },
+            "title": "Periods",
+            "type": "array"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "bucket",
+          "total",
+          "missing_count",
+          "periods",
+          "categories",
+          "entries",
+          "known_categories",
+          "hidden_moved_in"
+        ],
+        "title": "IncomeOut",
+        "type": "object"
+      },
+      "IncomePeriodOut": {
+        "properties": {
+          "by_category": {
+            "items": {
+              "$ref": "#/components/schemas/IncomeCategoryOut"
+            },
+            "title": "By Category",
+            "type": "array"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?[0-9]{1,40}(\\.[0-9]{1,40})?$",
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "total",
+          "by_category"
+        ],
+        "title": "IncomePeriodOut",
         "type": "object"
       },
       "InstrumentCreate": {
@@ -4736,6 +5074,38 @@
           "raw_records"
         ],
         "title": "Trading212UploadOut",
+        "type": "object"
+      },
+      "TransactionCategoriesUpdate": {
+        "description": "Set the owner's category on transactions, or clear it with null.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "transaction_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Transaction Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transaction_ids",
+          "category"
+        ],
+        "title": "TransactionCategoriesUpdate",
         "type": "object"
       },
       "TransactionCreate": {
@@ -7213,6 +7583,122 @@
         ]
       }
     },
+    "/api/v1/finance/income": {
+      "get": {
+        "description": "What came in by period, category and entry, without the accounts left out of reports;\ndefaults to the 365 days up to and including today. `category` narrows the entries only\n(\"uncategorised\" for none).",
+        "operationId": "get_income",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "month",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncomeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Income",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
     "/api/v1/finance/instruments": {
       "get": {
         "operationId": "list_instruments",
@@ -7513,6 +7999,41 @@
           }
         },
         "summary": "Update Finance Settings",
+        "tags": [
+          "finance"
+        ]
+      }
+    },
+    "/api/v1/finance/transaction-categories": {
+      "put": {
+        "description": "Set the owner's category on the transactions, or clear it with null. All or nothing.",
+        "operationId": "set_transaction_categories",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransactionCategoriesUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Transaction Categories",
         "tags": [
           "finance"
         ]

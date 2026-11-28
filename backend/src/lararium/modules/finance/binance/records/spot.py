@@ -186,6 +186,7 @@ async def dividend(run: Run, row: Row) -> None:
         run.record.key,
         occurred_at=occurred_at,
         description=f"Dividend {coin}",
+        income_kind="reward",
         postings=[
             PostingInput(account_id, instrument_id, quantity),
             PostingInput(run.unassigned, instrument_id, -quantity),

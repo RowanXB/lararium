@@ -24,7 +24,9 @@ from lararium.modules.finance.identifiers import get_or_create_identifier, norma
 from lararium.modules.finance.instruments import InstrumentRecord, get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
+    IncomeKind,
     PostingInput,
+    TransactionDetails,
     TransactionInput,
     compute_residuals,
     upsert_connector_transaction,
@@ -50,6 +52,13 @@ POSITIONS_SECTION = "OpenPositions"
 CASH_SECTION = "CashReport"
 _DEPOSITS = "Deposits/Withdrawals"
 _CASH = "CASH"
+# CashTransaction types that state what the income is; every other type is none.
+_INCOME_KINDS: Mapping[str, IncomeKind] = {
+    "Dividends": "dividend",
+    "Payment In Lieu Of Dividends": "dividend",
+    "Broker Interest Received": "interest",
+    "Bond Interest Received": "interest",
+}
 
 type Upsert = Callable[[CommandContext, tables.Fields, tables.Fields], Awaitable[bool]]
 
@@ -77,6 +86,7 @@ async def _post(
     postings: Sequence[PostingInput],
     value_date: date | None,
     counterparty: CounterpartyFields | None = None,
+    income_kind: IncomeKind | None = None,
 ) -> UUID:
     moment = item.moment()
     record, outcome = await upsert_connector_transaction(
@@ -92,6 +102,7 @@ async def _post(
             connection_id=run.connection_id,
             external_id=external_id(item),
             counterparty=counterparty or CounterpartyFields(),
+            details=TransactionDetails(income_kind=income_kind),
         ),
     )
     run.count(outcome)
@@ -287,6 +298,7 @@ async def cash_transaction(run: Run, item: Item) -> None:
         ],
         value_date=item.optional_day("settleDate"),
         counterparty=counterparty,
+        income_kind=_INCOME_KINDS.get(kind),
     )
     await _typed(
         run,

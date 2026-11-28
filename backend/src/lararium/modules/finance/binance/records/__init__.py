@@ -34,6 +34,7 @@ from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
+    IncomeKind,
     PostingInput,
     TransactionDetails,
     TransactionInput,
@@ -307,6 +308,7 @@ async def post(
     transfer_leg: bool = False,
     bank_transfer: bool = False,
     refund: bool = False,
+    income_kind: IncomeKind | None = None,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
     postings it creates, changes or removes; its id. A zero posting is left out (the ledger
@@ -342,7 +344,7 @@ async def post(
             origin="connector",
             connection_id=run.connection.id,
             external_id=key,
-            details=TransactionDetails(refund=refund),
+            details=TransactionDetails(income_kind=income_kind, refund=refund),
             counterparty=CounterpartyFields(
                 identifier_id=counterparty_identifier_id,
                 name=counterparty_name,

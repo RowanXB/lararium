@@ -347,7 +347,8 @@ class ConnectorRun:
         details: TransactionDetails | None = None,
     ) -> UUID:
         """Post the connection's transaction under the key (`cancels`: the transaction it
-        cancels, cancelled-withdrawal design §4.2)."""
+        cancels, cancelled-withdrawal design §4.2; `details`: the source's typed fields, such
+        as what it says the income is)."""
         record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
