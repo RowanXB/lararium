@@ -24,8 +24,9 @@ row's own: most CSV profiles cannot state interest while the PDF layouts do, so 
 committed first the PDF's rows land as duplicates. Connectors fill the column when their next
 sync replays under a new normalizer version.
 
-Downgrading unmarks those rows, takes the Revolut Savings CSV's interest descriptions off
-again, and drops the table and the column.
+Downgrading drops the table and the column, and clears the replay markers of the four
+connectors that set income_kind. The rows' interest marks and the interest descriptions stay:
+the older code reads them the same way.
 
 Revision ID: 0048
 Revises: 0047
@@ -62,21 +63,21 @@ INTEREST_TYPES = [
 ]
 
 
-def _mark_rows(value: str) -> str:
-    """Sets `interest` to value on the statement rows, of any status, that pay interest by
+def _mark_rows() -> str:
+    """Sets `interest` on the statement rows, of any status, that pay interest by
     the config that parsed them: their batch's own."""
     matches = " OR ".join(
         f"({match.format(c='b.profile_config')} AND btrim(r.bank_type) IN {types})"
         for match, types in INTEREST_TYPES
     )
     return (
-        f"UPDATE finance.import_rows AS r SET interest = {value}"
+        "UPDATE finance.import_rows AS r SET interest = true"
         " FROM finance.import_batches AS b"
         f" WHERE b.id = r.batch_id AND r.kind = 'statement' AND ({matches})"
     )
 
 
-MARK_ROWS = _mark_rows("true")
+MARK_ROWS = _mark_rows()
 
 _DESCRIPTIONS = """'{"interest_descriptions": ["Gross Interest"]}'::jsonb"""
 _NONE_YET = "coalesce({c} -> 'interest_descriptions', '[]'::jsonb) = '[]'::jsonb"
@@ -153,15 +154,17 @@ UPGRADE = [
     *DATA,
 ]
 
-# The older code takes interest descriptions too: only those the upgrade added go.
-_ADDED = """{c} -> 'interest_descriptions' = '["Gross Interest"]'::jsonb"""
+# The older code reads `interest` and interest descriptions as this one does, so the rows'
+# marks and the configs stay: they are facts about the files, and a config may have said so
+# before the upgrade. The replay markers of the connectors whose normalizers set income_kind
+# go, so the first sync after upgrading again replays their history (as 0047 does): without
+# that, a downgrade and upgrade with no older sync between would leave their income unmarked.
+DOWNGRADE_DATA = [
+    "UPDATE core.connections SET config = config - 'normalizer_version'"
+    " WHERE connector IN ('trading212', 'etoro', 'ibkr', 'binance')",
+]
 DOWNGRADE = [
-    _mark_rows("false"),
-    "UPDATE finance.import_profiles SET config = config - 'interest_descriptions'"
-    f" WHERE {_ADDED.format(c='config')} AND {_REVOLUT_SAVINGS_CSV.format(c='config')}",
-    "UPDATE finance.import_batches SET profile_config = profile_config - 'interest_descriptions'"
-    f" WHERE {_ADDED.format(c='profile_config')}"
-    f" AND {_REVOLUT_SAVINGS_CSV.format(c='profile_config')}",
+    *DOWNGRADE_DATA,
     "DROP TABLE finance.transaction_owner_categories",
     "ALTER TABLE finance.transactions DROP COLUMN income_kind",
 ]
