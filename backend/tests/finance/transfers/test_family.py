@@ -38,6 +38,7 @@ from lararium.modules.finance.transfers.pairs import (
     Pairable,
     PairRelation,
     Tier,
+    _cross_currency_edges,
     _Decisions,
     _near_split,
     _registry_edges,
@@ -242,6 +243,31 @@ def test_a_family_move_takes_a_record_naming_nobody_only_within_the_near_window(
     assert registry_tier(two, _pairable(CASH, "100", bank_transfer=True)) == ONE_SIDED
     far = _pairable(CASH, "100", bank_transfer=True, occurred_at=T0 + timedelta(hours=1))
     assert registry_tier(two, far) is None and registry_tier(far, two) is None
+
+
+def test_a_family_pair_of_another_amount_or_currency_is_within_the_near_window_too() -> None:
+    """Review of #57: the family rule holds in every tier (owner, 2026-11-28). In a family
+    of two, each move is identified to the other account, so a move of another amount a day
+    away would be a differing candidate (a review item), and one in another currency read
+    only to the minute a cross-currency pair. Neither is, unless both are timed and near."""
+    two = {INVEST, STOCKS}
+    sent = _move(INVEST, "-100", two)
+    later = T0 + timedelta(days=1)
+    for other, differs in (
+        (_move(STOCKS, "95", two, occurred_at=later, booking_date=later.date()), False),
+        (_move(STOCKS, "95", two, occurred_at=T0 + timedelta(seconds=30)), True),
+        (_move(STOCKS, "95", two, timed=False), False),
+    ):
+        _, differing, _ = _registry_edges([sent, other], DEFAULTS, _NO_DECISIONS, _ALL_KNOWN)
+        assert (other.id in differing.tiers.get(sent.id, {})) == differs, other
+    usd: dict[str, Any] = {"instrument_id": UUID(int=2), "fiat": True}
+    gbp_sent = replace(sent, fiat=True)
+    for other, pairs in (
+        (_move(STOCKS, "95", two, occurred_at=T0 + timedelta(seconds=30), **usd), True),
+        (_move(STOCKS, "95", two, timed=False, **usd), False),
+    ):
+        edges = _cross_currency_edges([gbp_sent, other], DEFAULTS, _NO_DECISIONS)
+        assert (other.id in edges.tiers.get(gbp_sent.id, {})) == pairs, other
 
 
 def test_a_family_move_is_never_a_payee_or_card_record_s() -> None:

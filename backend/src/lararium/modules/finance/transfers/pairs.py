@@ -221,6 +221,15 @@ def _family_pair(x: Pairable, other: Pairable, near_window: timedelta) -> bool:
     )
 
 
+def _family_allows(r: Pairable, c: Pairable, near_window: timedelta) -> bool:
+    """Whether the family rule lets two records pair, in any tier: always when neither
+    names a family; else only as _family_pair takes them, both timed and within the near
+    window (owner, 2026-11-28), whatever their amounts or currencies."""
+    if not (r.family or c.family):
+        return True
+    return _family_pair(r, c, near_window) or _family_pair(c, r, near_window)
+
+
 def registry_tier(
     r: Pairable, c: Pairable, near_window: timedelta = DEFAULTS.near_window
 ) -> Tier | None:
@@ -243,7 +252,7 @@ def registry_tier(
     if c.account_id == r.account_id:
         return None
     if r.family or c.family:
-        if not (_family_pair(r, c, near_window) or _family_pair(c, r, near_window)):
+        if not _family_allows(r, c, near_window):
             return None
         if r.family and c.family and r.holder == c.account_id and c.holder == r.account_id:
             return MUTUAL
@@ -939,7 +948,8 @@ def _registry_edges(
     both tiers, and, where the registry gives none, a weak one; `refused`, those of them the
     coverage gate refuses to take automatically (_one_sided_known, _weak_known), which stay
     candidates all the same. Of another amount, only mutually identified ones (Ruling 8: a
-    payment naming nobody is no evidence of a differing transfer). Card evidence comes
+    payment naming nobody is no evidence of a differing transfer), and a family move's only
+    as the family rule allows (_family_allows: a move a day away is none). Card evidence comes
     first: a record with a card payment's candidate (`carded`, card_partners') gets no edge
     through its account's funding alone (_funded_only), so a card top-up stays the card
     payment's.
@@ -998,7 +1008,11 @@ def _registry_edges(
             continue
         timeline = by_accounts.get((s.instrument_id, s.account_id, s.holder))
         for c in timeline.between(*counterpart_bounds(s, settings)) if timeline else ():
-            if c.quantity != -s.quantity and not decisions.apart(s, c):
+            if (
+                c.quantity != -s.quantity
+                and _family_allows(s, c, settings.near_window)
+                and not decisions.apart(s, c)
+            ):
                 differing.add(s.id, c.id, MUTUAL)
     return same, differing, refused
 
@@ -1045,7 +1059,8 @@ def _cross_currency_edges(
     records: list[Pairable], settings: TransferSettings, decisions: _Decisions
 ) -> _Edges:
     """The pairs cross_currency_tier gives whose occurred_at are at most the near window
-    apart (settings.near_window), and which no decision keeps apart. A sender naming
+    apart (settings.near_window), and which no decision keeps apart; one naming a family
+    only as the family rule allows (_family_allows: both timed too). A sender naming
     account H meets the receivers on H naming its account, sorted by time."""
     edges = _Edges()
     named: dict[tuple[UUID, UUID], list[Pairable]] = defaultdict(list)
@@ -1068,7 +1083,11 @@ def _cross_currency_edges(
             s.occurred_at + settings.near_window,
         )
         for c in found[bisect_left(times, earliest) : bisect_right(times, latest)]:
-            if cross_currency_tier(s, c) is not None and not decisions.apart(s, c):
+            if (
+                cross_currency_tier(s, c) is not None
+                and _family_allows(s, c, settings.near_window)
+                and not decisions.apart(s, c)
+            ):
                 edges.add(s.id, c.id, MUTUAL)
     return edges
 

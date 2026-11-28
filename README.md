@@ -824,8 +824,9 @@ itself.
   coverage check) opens no transfer and no review item: it shows on Unassigned, as a
   shared-payee payment does.
 - A Cash ISA row read without Notes and a same-amount real top-up within two minutes of a move
-  on another account of the family would be taken as that move's side; uploading the file again
-  with Notes corrects it.
+  on another account of the family would be taken as that move's side. To correct it, roll back
+  that batch and upload its file again from the account's **Upload file** tile (an upload while
+  the old batch stands skips its rows as duplicates).
 - An Invest↔Stocks ISA move is taken to be a TRANSFER on both sides, as every move to and from
   the Cash ISA is; Trading 212 doesn't document it. If its receiving side were a deposit, the
   move would pair with nothing until an export upload's empty Notes name the family.
