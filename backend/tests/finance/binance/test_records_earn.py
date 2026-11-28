@@ -18,6 +18,7 @@ from .normalizing import (
     plain,
     postings,
     run_normalize,
+    transaction,
     typed,
 )
 from .syncing import binance_connection
@@ -117,6 +118,7 @@ async def test_realtime_reward_accrues_in_earn(session, run) -> None:
         ("Binance Earn", "AAA", Decimal("0.25")),
         ("Unassigned", "AAA", Decimal("-0.25")),
     ]
+    assert (await transaction(session, key)).income_kind == "reward"
     [row] = await typed(session, "binance_earn_flexible_rewards", connection.id)
     assert row.transaction_id is not None and row.dividend_id is None
     await assert_balanced_and_quiet(session, connection.id)

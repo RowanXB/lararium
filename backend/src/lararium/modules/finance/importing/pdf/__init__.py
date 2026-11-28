@@ -70,17 +70,20 @@ def _opening(result: LayoutResult) -> Decimal:
 
 
 def _summary_check(result: LayoutResult) -> None:
-    """Interest rows count towards the summary's interest, the others towards money in. Money
-    in or out the layout says is cut down to the penny may be up to a penny below its rows';
-    interest is exact."""
+    """Interest rows count towards the summary's interest, the others towards money in. A
+    total the statement doesn't print (None) is not checked, as Tembo prints none, not even of
+    its interest; but a summary that totals money in and no interest says none was paid
+    (LemFi's current account). Money in or out the layout says is cut down to the penny may
+    be up to a penny below its rows'; interest is exact."""
     paid_in = [r.paid_in for r in result.rows if r.paid_in is not None and not r.interest]
     paid_out = [r.paid_out for r in result.rows if r.paid_out is not None]
     interest = [r.paid_in for r in result.rows if r.paid_in is not None and r.interest]
     shortfall = _PENNY if result.truncated_totals else Decimal(0)
+    none_paid = None if result.money_in is None else Decimal(0)
     for what, stated, rows, short in (
         ("money in", result.money_in, paid_in, shortfall),
         ("money out", result.money_out, paid_out, shortfall),
-        ("interest", Decimal(0) if result.interest is None else result.interest, interest, 0),
+        ("interest", none_paid if result.interest is None else result.interest, interest, 0),
     ):
         if stated is None:
             continue

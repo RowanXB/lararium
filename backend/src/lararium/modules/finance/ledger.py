@@ -38,6 +38,7 @@ from lararium.modules.finance.money import require_amount, to_plain_str, toleran
 
 TransactionStatus = Literal["pending", "booked", "inferred", "confirmed", "void"]
 TransactionOrigin = Literal["connector", "manual", "inference", "rule"]
+IncomeKind = Literal["interest", "dividend", "share_lending", "reward"]
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,8 @@ class TransactionDetails:
     payment_scheme: str | None = None
     place_entity_id: UUID | None = None
     category_splits: tuple[CategorySplit, ...] = ()
+    # What the source says this income is, never the owner's word (that is the owner category).
+    income_kind: IncomeKind | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.payment_scheme,
                 t.place_entity_id,
                 t.cancels_transaction_id,
+                t.income_kind,
             ).where(t.id == transaction_id)
         )
     ).one_or_none()
@@ -336,6 +340,7 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             payment_scheme=row.payment_scheme,
             place_entity_id=row.place_entity_id,
             category_splits=tuple(CategorySplit(r.category, r.quantity) for r in split_rows),
+            income_kind=cast(IncomeKind | None, row.income_kind),
         ),
         cancels_transaction_id=row.cancels_transaction_id,
     )
@@ -361,6 +366,7 @@ def _details_data(details: TransactionDetails) -> dict[str, JSONValue]:
         "card_reversal": details.card_reversal,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": _optional_str(details.place_entity_id),
+        "income_kind": details.income_kind,
         "category_splits": [
             {"category": split.category, "quantity": to_plain_str(split.quantity)}
             for split in details.category_splits
@@ -522,6 +528,7 @@ def _details_values(details: TransactionDetails) -> dict[str, object]:
         "card_reversal": details.card_reversal,
         "payment_scheme": details.payment_scheme,
         "place_entity_id": details.place_entity_id,
+        "income_kind": details.income_kind,
     }
 
 

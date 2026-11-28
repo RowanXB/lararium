@@ -57,7 +57,7 @@ from lararium.modules.finance.trading212.state import (
 
 __all__ = ["NORMALIZER_VERSION", "NormalizeReport", "Trading212DataError", "normalize"]
 
-NORMALIZER_VERSION = "trading212-norm-4"
+NORMALIZER_VERSION = "trading212-norm-5"
 # The version that last normalized the connection, in its config (Decision 8).
 NORMALIZER_VERSION_KEY = "normalizer_version"
 # Items a key names once per connection, the ledger's (Decision 9) and the metadata's: the
