@@ -20,8 +20,8 @@ In transit and Unassigned and goes with the transfer's accounts.
 
 The fragments are spliced into a raw `text()` query that binds `:excluded` (the hidden
 accounts' ids), `:skipped` (Opening balances, or none) and `:in_transit`, and in which the
-posting, its account and its transaction are aliased `p`, `a` and `t`. HIDDEN_LEGS_SQL is a
-common table expression to put after `with` (or a comma) before them.
+posting, its account, its instrument and its transaction are aliased `p`, `a`, `i` and `t`.
+HIDDEN_LEGS_SQL is a common table expression to put after `with` (or a comma) before them.
 """
 
 # Each side of a transfer to or from a hidden account, with that hidden account: one per
@@ -40,10 +40,13 @@ HIDDEN_LEGS_SQL = """
     )
 """
 
-# The posting `p` (on account `a`, of transaction `t`) is a flow's, before the instrument
-# rule (cashflow.py).
+# The posting `p` (on account `a`, in instrument `i`, of transaction `t`) is a flow's. Money
+# counts, and another asset only when the source states its transaction is income of a kind
+# (a reward and its reversal both count, as money does); a hidden instrument never does.
 FLOW_POSTING_SQL = """(
     t.status <> 'void'
+    and not i.hidden and p.quantity <> 0
+    and (i.kind = 'fiat' or t.income_kind is not null)
     and (
       (a.ledger_type in ('income', 'expense', 'equity') and a.id <> all(:skipped))
       or a.id = any(:excluded)

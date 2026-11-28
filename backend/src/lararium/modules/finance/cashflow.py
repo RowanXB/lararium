@@ -189,10 +189,6 @@ _FLOWS = (
       where t.booking_date between :start and :end and """
     + FLOW_POSTING_SQL
     + """
-        and not i.hidden and p.quantity <> 0
-        -- Another asset is income only when the source says what kind, whatever its sign:
-        -- a reward and its reversal both count, as money does.
-        and (i.kind = 'fiat' or t.income_kind is not null)
     ),
     valuations as (
       select k.instrument_id, k.day,

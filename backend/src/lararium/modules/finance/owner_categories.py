@@ -161,6 +161,7 @@ async def known_owner_categories(
             where exists (
               select 1 from finance.postings p
               join finance.accounts a on a.id = p.account_id
+              join finance.instruments i on i.id = p.instrument_id
               where p.transaction_id = t.id
                 and {FLOW_POSTING_SQL}
                 and {_SIDE_POSTING[side]}

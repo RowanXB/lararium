@@ -8,6 +8,7 @@ from hypothesis import strategies as st
 from sqlalchemy import text
 
 from lararium.modules.finance.cashflow import cash_flow
+from lararium.modules.finance.instruments import set_hidden
 from lararium.modules.finance.ledger import (
     CounterpartyFields,
     PostingInput,
@@ -152,15 +153,21 @@ async def test_owner_category_beats_source_category(session, run, make_account, 
     )
 
 
-async def test_known_categories_are_the_spending_sides(session, run, make_account, post) -> None:
+async def test_known_categories_are_the_spending_sides(
+    session, run, make_account, post, usd
+) -> None:
     bank = await make_account(name="Bank", balance_mode="transactions")
     salary = await post(bank, "100", date(2026, 11, 2))
     shop = await post(bank, "-10", date(2026, 11, 3))
     # The source leaves it out of spending, so the page never lists it.
     moved = await post(bank, "-20", date(2026, 11, 4), include_in_spending=False)
+    # In a currency the owner hid, so no report counts it.
+    abroad = await post(bank, "-30", date(2026, 11, 5), instrument=usd)
     await run(set_owner_category, [salary.id], "salary")
     await run(set_owner_category, [shop.id], "groceries")
     await run(set_owner_category, [moved.id], "savings")
+    await run(set_owner_category, [abroad.id], "travel")
+    await run(set_hidden, usd.id, True)
 
     assert (await spending_report(session, START, END)).known_categories == ["groceries"]
     assert await known_owner_categories(session, "income", ()) == ["salary"]
