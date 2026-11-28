@@ -34,6 +34,9 @@ from .conftest import (
 CARD_PAYMENTS = 5_000
 IMPORTED_ROWS = 4_900
 TRANSFERS_TO_B = 100
+# The owner's pair decisions. Production had 19 on 2026-11-23, when reading them inside the
+# own-records query took 26 s of a heal (one subplan per reference, run for each record).
+PAIR_DECISIONS = 100
 # Measured on docker-test through its ssh tunnel, either way the statistics stand: a heal
 # with nothing due takes about 0.5 s (two set-wise scans of the own records, one into a
 # snapshot); healing 100 newly identified transfers about 4.5 s, nearly all of it the ~27
@@ -58,6 +61,7 @@ TABLES = (
     "import_rows",
     "import_batches",
     "import_statements",
+    "transfer_decisions",
 )
 
 # The planner's statistics on the seeded tables. The backend role can't ANALYZE them, and
@@ -199,6 +203,24 @@ async def _seed_imported(
         await session.execute(text(statement), params)
 
 
+async def _seed_pair_decisions(session: AsyncSession) -> None:
+    """PAIR_DECISIONS of the owner's pair decisions, each naming two records of every kind of
+    reference, none of which exists (their rows rolled back, say): what each costs to look up
+    stays, and heal has nothing to pair."""
+    await session.execute(
+        text(
+            "insert into finance.transfer_decisions (kind, subject_kind, subject_ref,"
+            "  other_kind, other_ref)"
+            " select 'pair', 'import', 'gone-' || g,"
+            "   case when g % 2 = 0 then 'transaction' else 'connection' end,"
+            "   case when g % 2 = 0 then uuidv7()::text"
+            "     else uuidv7()::text || ':' || 'gone-' || g end"
+            " from generate_series(1, :n) g"
+        ),
+        {"n": PAIR_DECISIONS},
+    )
+
+
 async def _analyze_elsewhere(owner_url: str) -> None:
     """ANALYZE the tables from another connection, as autovacuum would."""
     engine = create_engine(owner_url)
@@ -237,6 +259,7 @@ async def test_heal_is_fast_on_a_large_ledger(
         unassigned=ids.unassigned,
     )
     await _seed_imported(session, run, account_id=i.id, gbp=gbp.id, unassigned=ids.unassigned)
+    await _seed_pair_decisions(session)
     if statistics == "stale":
         await _analyze_elsewhere(owner_url)
 

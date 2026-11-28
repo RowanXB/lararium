@@ -1,7 +1,7 @@
 """Which transactions can be a transfer's leg, their stable reference, and which system
 account their contra belongs on."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -36,6 +36,7 @@ from sqlalchemy import (
     select,
     text,
     true,
+    tuple_,
     type_coerce,
     union,
 )
@@ -66,12 +67,16 @@ class _SourceKind:
     name: str
     applies: Callable[[type[models.Transaction]], ColumnElement[bool]]
     ref: Callable[[type[models.Transaction]], ColumnElement[str]]
-    names: Callable[[type[models.Transaction], str], ColumnElement[bool]]
+    # Whether the transaction is one these refs of this kind name, by index: one condition
+    # for any number of refs.
+    names: Callable[[type[models.Transaction], list[str]], ColumnElement[bool]]
 
 
-def _connection_names(t: type[models.Transaction], ref: str) -> ColumnElement[bool]:
-    connection_id, external_id = ref.split(":", 1)
-    return and_(t.connection_id == UUID(connection_id), t.external_id == external_id)
+def _connection_names(t: type[models.Transaction], refs: list[str]) -> ColumnElement[bool]:
+    pairs = [ref.split(":", 1) for ref in refs]
+    return tuple_(t.connection_id, t.external_id).in_(
+        [(UUID(connection_id), external_id) for connection_id, external_id in pairs]
+    )
 
 
 def _imported(t: type[models.Transaction]) -> ColumnElement[bool]:
@@ -89,11 +94,11 @@ def _import_key(t: type[models.Transaction]) -> ColumnElement[str]:
     )
 
 
-def _import_names(t: type[models.Transaction], ref: str) -> ColumnElement[bool]:
+def _import_names(t: type[models.Transaction], refs: list[str]) -> ColumnElement[bool]:
     # The live one: a rolled-back row keeps its voided transaction, and the same row
     # imported again (the same key) posts a new one.
     r = models.ImportRow
-    return t.id.in_(select(r.transaction_id).where(r.dedupe_key == ref, r.status == "committed"))
+    return t.id.in_(select(r.transaction_id).where(r.dedupe_key.in_(refs), r.status == "committed"))
 
 
 _SOURCE_KINDS = (
@@ -110,7 +115,7 @@ _SOURCE_KINDS = (
         name="transaction",
         applies=lambda t: true(),
         ref=lambda t: cast(t.id, String),
-        names=lambda t, ref: t.id == UUID(ref),
+        names=lambda t, refs: t.id.in_([UUID(ref) for ref in refs]),
     ),
 )
 
@@ -129,10 +134,24 @@ def source_columns(
 def names_source(t: type[models.Transaction], source: SourceRef) -> ColumnElement[bool]:
     """Whether the transaction is the one the reference names (looked up by index), false
     for a kind no transaction has."""
-    for k in _SOURCE_KINDS:
-        if k.name == source[0]:
-            return and_(k.names(t, source[1]), source_columns(t)[0] == k.name)
-    return false()
+    return names_sources(t, [source])
+
+
+def names_sources(
+    t: type[models.Transaction], sources: Collection[SourceRef]
+) -> ColumnElement[bool]:
+    """Whether the transaction is one of those the references name, by index: one condition
+    per kind of reference, not one per reference, so many cost about what one does (the
+    owner's decisions grow with every pair they make)."""
+    kind = source_columns(t)[0]
+    return or_(
+        false(),
+        *(
+            and_(k.names(t, refs), kind == k.name)
+            for k in _SOURCE_KINDS
+            if (refs := sorted({ref for name, ref in sources if name == k.name}))
+        ),
+    )
 
 
 def cancelled_pairs() -> Subquery:

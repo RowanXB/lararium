@@ -55,7 +55,7 @@ from lararium.modules.finance.transfers.contra import (
     SourceRef,
     eligible_records,
     leg_fee_columns,
-    names_source,
+    names_sources,
 )
 from lararium.modules.finance.transfers.settings import DEFAULTS, TransferSettings
 
@@ -666,10 +666,12 @@ async def _load_records(
     t = models.Transaction
     h = models.AccountIdentifierHolder
     decided = {source for pair in decisions.paired for source in pair}
+    # Looked up first and passed as values: nested in the own-records query as a subquery,
+    # the planner may run it for each record (26 s of a heal on 19 decisions, 2026-11-23).
     decided_ids = (
-        select(t.id).where(or_(*(names_source(t, source) for source in decided)))
+        list(await session.scalars(select(t.id).where(names_sources(t, decided))))
         if decided
-        else None
+        else []
     )
     fee_instrument_id, fee_amount = leg_fee_columns(e.c.transaction_id)
     i = aliased(models.Instrument, name="record_instrument")
@@ -681,7 +683,7 @@ async def _load_records(
         e.c.account_id.in_(select(h.account_id).where(h.kind == "card_merchant")),
         e.c.funded_by_transfer,
     ]
-    if decided_ids is not None:
+    if decided_ids:
         can_pair.append(e.c.transaction_id.in_(decided_ids))
     query = select(
         e.c.transaction_id,
