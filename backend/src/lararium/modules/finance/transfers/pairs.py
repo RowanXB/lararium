@@ -10,18 +10,21 @@ placeholder), so one computation holds for a whole heal pass.
 
 A record naming an account family (a provider's move between its own accounts that doesn't
 name the other one) pairs only within the family (account family identifier design §5.3,
-owner's decision 2026-11-27): with a record on an account it names that names the family
-back, or with one there naming nobody when both are timed and at most the near window
-apart. No other tier pairs it, so it is never an external top-up or withdrawal. A record
+owner's decisions 2026-11-27 and 2026-11-28): with a record on an account it names that
+names the family back, or with one there naming nobody, and only when both are timed and at
+most the near window apart. No other tier pairs it, so it is never an external top-up or
+withdrawal. A record
 naming nobody that is such a move's counterpart is that move's first: no shared payee's
 record and no funding alone gives it another edge (_registry_edges), unless the owner
 decided the two apart.
 
 Where the source says which kind a movement is, that decides (account family identifier
-design §5.9, owner's decision 2026-11-27): Trading 212's History CSV gives an internal move
-empty Notes, and its record names the family; an external one a transaction id or a bank
-account, and its record is outside the family (outside_family), never a family move's
-counterpart however close in time to one, so it pairs with its payment as any deposit does.
+design §5.9, owner's decisions 2026-11-27 and 2026-11-28): Trading 212's History CSV gives
+an internal move empty Notes, and its record names the family; an external one a transaction
+id or a bank account, and so does its API's type (a DEPOSIT or WITHDRAW, where an internal
+move is a TRANSFER), and its record is outside the family (outside_family), never a family
+move's counterpart however close in time to one, so it pairs with its payment as any deposit
+does.
 
 Where a record has several candidates of the same amount, two more rules apply
 (account family identifier design §5.10 and §5.7, owner's decisions 2026-11-27;
@@ -199,23 +202,22 @@ def _names_nobody(x: Pairable) -> bool:
 def _family_pair(x: Pairable, other: Pairable, near_window: timedelta) -> bool:
     """Whether x, naming an account family, and other may be one move within the family
     (account family identifier design §5.3 item 2): other is on an account x names (its
-    holder, or one of its set), and either names the family back, x's account among those
-    it names, or names nobody, its source not saying it went outside the family
-    (outside_family, §5.9), both timed (a connector's record, or an imported row timed to the
-    second) and their instants at most `near_window` apart. A source books an internal move
-    on both sides at about the same instant, and a real bank top-up or withdrawal practically
-    never falls within two minutes of one (owner, 2026-11-27); where the source says the
-    record went outside the family, that decides, however near it is."""
+    holder, or one of its set), either names the family back, x's account among those it
+    names, or names nobody, its source not saying it went outside the family
+    (outside_family, §5.9); and both are timed (a connector's record, or an imported row
+    timed to the second) with their instants at most `near_window` apart. A source books an
+    internal move on both sides at about the same instant (every real Trading 212 move did,
+    to the second; owner, 2026-11-28), so a family move whose other side hasn't arrived yet
+    (a Cash ISA file not uploaded) takes no other move of the same amount days away; where
+    the source says the record went outside the family, that decides, however near it is."""
     if not x.family or not (other.account_id == x.holder or other.account_id in x.payee_holders):
         return False
     if other.family:
-        return x.account_id == other.holder or x.account_id in other.payee_holders
+        named = x.account_id == other.holder or x.account_id in other.payee_holders
+    else:
+        named = _names_nobody(other) and not other.outside_family
     return (
-        _names_nobody(other)
-        and not other.outside_family
-        and x.timed
-        and other.timed
-        and abs(x.occurred_at - other.occurred_at) <= near_window
+        named and x.timed and other.timed and abs(x.occurred_at - other.occurred_at) <= near_window
     )
 
 
@@ -234,18 +236,18 @@ def registry_tier(
     it). Decisions are not considered.
 
     A record naming an account family pairs by the family rule alone (account family
-    identifier design §5.3, owner's decision 2026-11-27): MUTUAL with a family move on the
-    one account it names that names its account back; ONE_SIDED with any other family move
-    or record naming nobody that _family_pair takes (the latter only within `near_window`);
-    with nothing else, whatever either is marked."""
+    identifier design §5.3, owner's decisions 2026-11-27 and 2026-11-28), and only within
+    `near_window` (_family_pair): MUTUAL with a family move on the one account it names that
+    names its account back; ONE_SIDED with any other family move or record naming nobody
+    that _family_pair takes; with nothing else, whatever either is marked."""
     if c.account_id == r.account_id:
         return None
     if r.family or c.family:
+        if not (_family_pair(r, c, near_window) or _family_pair(c, r, near_window)):
+            return None
         if r.family and c.family and r.holder == c.account_id and c.holder == r.account_id:
             return MUTUAL
-        if _family_pair(r, c, near_window) or _family_pair(c, r, near_window):
-            return ONE_SIDED
-        return None
+        return ONE_SIDED
     if r.holders or c.holders:
         return None
     for x, other in ((r, c), (c, r)):

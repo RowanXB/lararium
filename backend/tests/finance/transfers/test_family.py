@@ -192,11 +192,20 @@ def test_two_family_moves_pair_within_the_family() -> None:
     for marked in (
         replace(received, bank_transfer=True),
         replace(received, funded_by_transfer=True),
-        # Untimed, or far apart: time decides nothing between two family moves.
-        replace(received, timed=False),
-        replace(received, occurred_at=T0 + timedelta(days=1)),
+        replace(received, occurred_at=T0 + NEAR),
     ):
         assert registry_tier(sent, marked) == registry_tier(marked, sent) == ONE_SIDED, marked
+    # Only both timed and within the near window (owner, 2026-11-28): Trading 212 books both
+    # sides of a move at the same instant, so a move whose other side hasn't arrived (a Cash
+    # ISA file not uploaded yet) takes no move of the same amount a day away.
+    for apart in (
+        replace(received, timed=False),
+        replace(received, occurred_at=T0 + NEAR + timedelta(seconds=1)),
+        replace(received, occurred_at=T0 - timedelta(days=1)),
+    ):
+        assert registry_tier(sent, apart) is None and registry_tier(apart, sent) is None, apart
+    far = replace(pair[1], occurred_at=T0 + timedelta(days=1))
+    assert registry_tier(pair[0], far) is None and registry_tier(far, pair[0]) is None
 
 
 def test_a_family_move_takes_a_record_naming_nobody_only_within_the_near_window() -> None:
@@ -348,12 +357,11 @@ def test_the_coverage_gate_holds_every_account_a_family_record_names() -> None:
     the family side names (its holder or its set), the other record's from _gate_day and
     every other manual one from the start of that side's window; never on the family
     record's own account. A Cash ISA row naming the family of three (a manual account, its
-    Notes empty) and an Invest TRANSFER (connected) naming it too, ten minutes apart (two
-    family records pair by the date window alone): ONE_SIDED, taken only when the Cash ISA
-    is listed from before the TRANSFER's window."""
+    Notes empty) and an Invest TRANSFER (connected) naming it too, 30 s apart: ONE_SIDED,
+    taken only when the Cash ISA is listed from before the TRANSFER's window."""
     gbp = UUID(int=1)
     row = _move(
-        CASH, "100", THREE, source=("import", "cash"), occurred_at=T0 + timedelta(minutes=10)
+        CASH, "100", THREE, source=("import", "cash"), occurred_at=T0 + timedelta(seconds=30)
     )
     transfer = _move(INVEST, "-100", THREE)
     start = T0.date() - timedelta(days=DEFAULTS.window_before.days)
@@ -512,6 +520,78 @@ def test_several_candidates_split_by_the_only_one_within_the_near_window() -> No
     relation = _relation([*paid, *rows, weak])
     assert relation.tiers[rows[0].id][weak.id] > relation.tiers[rows[0].id][paid[0].id]
     assert _partners(relation) == {frozenset((paid[1].id, rows[1].id))}
+
+
+def test_two_days_of_moves_and_withdrawals_each_pair_with_their_own() -> None:
+    """The owner's test (2026-11-28; amounts and times invented, the shape real). Day one:
+    Stocks ISA and Invest each move 100 to the Cash ISA, 20 s apart (each side booked at
+    the same second), and the Cash ISA withdraws 100 to Monzo, Monzo's receipt 45 s before
+    the Cash ISA's row. Day two: the Cash ISA moves 100 back to each, 150 s apart; 3 s after
+    the move into Invest, Stocks ISA withdraws 100 to Monzo, the receipt 50 s before; an hour
+    later Invest withdraws 100 to its card. Every receipt names the payout account all three
+    hold; the API's withdrawals are outside the family by their type. Each move pairs with
+    its own side, each receipt with its own withdrawal, and the card withdrawal with none of
+    them: not the day-two move into Invest 3 s from Stocks ISA's withdrawal, nor a day-one
+    move with a day-two one."""
+    day2 = T0 + timedelta(days=1, hours=1)
+
+    def at(when: datetime) -> dict[str, Any]:
+        return {"occurred_at": when, "booking_date": when.date()}
+
+    def imported(when: datetime) -> dict[str, Any]:
+        return at(when) | {"source": ("import", str(when))}
+
+    receipt: dict[str, Any] = {
+        "bank_transfer": True,
+        "names_account": True,
+        "payee_holders": frozenset(THREE),
+    }
+    withdrawal: dict[str, Any] = {"funded_by_transfer": True, "outside_family": True}
+    stocks_out = _move(STOCKS, "-100", THREE, **at(T0))
+    invest_out = _move(INVEST, "-100", THREE, **at(T0 + timedelta(seconds=20)))
+    cash_in = [_move(CASH, "100", THREE, **imported(T0 + timedelta(seconds=s))) for s in (0, 20)]
+    cash_withdrawal = _pairable(
+        CASH,
+        "-100",
+        bank_transfer=True,
+        holder=MONZO,
+        names_account=True,
+        outside_family=True,
+        **imported(T0 + timedelta(minutes=3)),
+    )
+    receipt_1 = _pairable(MONZO, "100", **receipt, **at(T0 + timedelta(seconds=135)))
+    cash_out = [
+        _move(CASH, "-100", THREE, **imported(day2 + timedelta(seconds=s))) for s in (0, 150)
+    ]
+    stocks_in = _move(STOCKS, "100", THREE, **at(day2))
+    invest_in = _move(INVEST, "100", THREE, **at(day2 + timedelta(seconds=150)))
+    stocks_withdrawal = _pairable(STOCKS, "-100", **withdrawal, **at(day2 + timedelta(seconds=153)))
+    receipt_2 = _pairable(MONZO, "100", **receipt, **at(day2 + timedelta(seconds=103)))
+    card_withdrawal = _pairable(INVEST, "-100", **withdrawal, **at(day2 + timedelta(hours=1)))
+    relation = _relation(
+        [
+            stocks_out,
+            invest_out,
+            *cash_in,
+            cash_withdrawal,
+            receipt_1,
+            *cash_out,
+            stocks_in,
+            invest_in,
+            stocks_withdrawal,
+            receipt_2,
+            card_withdrawal,
+        ]
+    )
+    assert _partners(relation) == {
+        frozenset((stocks_out.id, cash_in[0].id)),
+        frozenset((invest_out.id, cash_in[1].id)),
+        frozenset((cash_withdrawal.id, receipt_1.id)),
+        frozenset((cash_out[0].id, stocks_in.id)),
+        frozenset((cash_out[1].id, invest_in.id)),
+        frozenset((stocks_withdrawal.id, receipt_2.id)),
+    }
+    assert relation.review_reason(card_withdrawal.id) == "several_candidates"
 
 
 def test_one_side_alike_pairs_in_time_order() -> None:

@@ -702,7 +702,7 @@ async def test_normalize_is_called_and_reports_nothing_yet(session, run, api, mo
     connection = await _connection(run)
     await _sync(session, connection, api)
     assert called == [len(await _records(session, connection))]
-    assert NORMALIZER_VERSION == "trading212-norm-5"
+    assert NORMALIZER_VERSION == "trading212-norm-6"
 
 
 async def test_warnings_written_during_the_sync_survive(session, run, api, monkeypatch) -> None:

@@ -65,13 +65,13 @@ Consequences (with whom it pairs is §5.3):
 
 ### 5.3 Pairing
 
-What the sources write (owner's new Cash ISA export, 2026-11-27): Trading 212 books a received internal move as an ordinary deposit. The two moves of 2026-11-26 appear in the Cash ISA's History CSV as `Deposit` rows (with empty Notes, where a bank deposit's Notes carry `Transaction ID: …`). The API's receiving side of an Invest↔Stocks ISA move is very likely a DEPOSIT too. So a family move's other side is usually a deposit or withdrawal naming nobody, not a record naming the family.
+What the sources write (owner's new Cash ISA export, 2026-11-27): Trading 212 books a received internal move as an ordinary deposit. The two moves of 2026-11-26 appear in the Cash ISA's History CSV as `Deposit` rows (with empty Notes, where a bank deposit's Notes carry `Transaction ID: …`). The API's receiving side of an Invest↔Stocks ISA move is very likely a DEPOSIT too. So a family move's other side is usually a deposit or withdrawal naming nobody, not a record naming the family. *(Corrected by the owner's test, §5.11: the API books both sides of a move as TRANSFERs; the CSV's `Deposit` rows are the Cash ISA's, whose file has no TRANSFER action.)*
 
 `Pairable` gains `family: bool`: the record names a family's identifier (with one other account it is identified like any record, so pairing needs to know it is a family move). Pairing changes in three places:
 
 1. **A family move names someone.** A record naming a family identifier counts as naming someone (`names_account` true, as for any identifier that is no card merchant; the builder may reword that column's doc to "names someone"). So `_funded_only` and `_card_receiver` exclude it: no shared-payee or card payment can take a family move, in either direction. Closes goal 2.
 2. **A family move's counterpart.** On one of the accounts it names (its `holder`, or one of its set), a family move pairs with:
-   - **a record naming the same family** (both sides are moves): MUTUAL with one other account (each is identified to the other's account), ONE_SIDED with a set. *(My call: with a set, an Invest→Stocks ISA pair is evidence from both sides but neither names the account; ONE_SIDED leaves a competing candidate to the owner rather than outranking it.)*
+   - **a record naming the same family** (both sides are moves): MUTUAL with one other account (each is identified to the other's account), ONE_SIDED with a set. *(My call: with a set, an Invest→Stocks ISA pair is evidence from both sides but neither names the account; ONE_SIDED leaves a competing candidate to the owner rather than outranking it.)* Since §5.11, only when both are timed and within `near_window`, as below.
    - **a record naming nobody** (no identifier, no account number, no card merchant, identifying no account) whose source doesn't say it moved money outside the family (`outside_family` false, §5.9), a connector's record or an imported row, marked a bank transfer or not, **only when both records are timed** (`Pairable.timed`) **and their instants are within `near_window` (2 minutes)** of each other: ONE_SIDED. Owner's decision, 2026-11-27: Trading 212 books an internal move on both sides at about the same instant, and a real bank top-up practically never falls within two minutes of one, so a family move can't take a real top-up or withdrawal. This lets time decide whether a pair is possible, for family moves only: it narrows again the owner's rule that an imported row's time is display only (2026-11-21/24; already narrowed by the catalog design §8.3 item 4 and §5.7 here), with the owner's explicit approval.
    - nothing else. In particular `_may_be_transfer` no longer admits a counterpart of a family move: a bank transfer or a funded deposit naming nobody but further than two minutes away, or untimed, is not one. With one other account this replaces today's §9 behaviour, where a sibling TRANSFER could pair with any bank transfer or funded deposit on the sibling in the window.
    The day window still applies (the near window lies inside it), as do equal amounts, opposite signs, uniqueness and the coverage gate. The existing guard stays: a record with a set pairs only with a record on one of its accounts, on both sides.
@@ -87,7 +87,7 @@ No change to the rule (§8.3 of the catalog design, and #48's "every manual hold
 
 ### 5.5 The Trading 212 connector
 
-- Every TRANSFER names the family identifier (`account_family:trading212`, created through `run.shared` as the `trading212_account` row is). DEPOSIT and WITHDRAW are unchanged (they name nobody: the card or bank payment pairs with them).
+- Every TRANSFER names the family identifier (`account_family:trading212`, created through `run.shared` as the `trading212_account` row is). DEPOSIT and WITHDRAW are unchanged (they name nobody: the card or bank payment pairs with them). Since §5.11 they are also `outside_family`, unless their export row's empty Notes name the family.
 - Removed: `accounts.sibling`, `Run.sibling`, `records.unidentified_transfers`, the `FAMILY_KEY` digest and the replay it triggers, and the `_movements` code that adds unidentified transfers. Membership is no longer the normaliser's business.
 - `NORMALIZER_VERSION = "trading212-norm-4"`: the next sync of each connection replays once, and every stored TRANSFER is re-posted naming the family. In production the two TRANSFERs were unpaired and stay so unless a candidate now fits.
 - The `trading212_account` registry rows stay: each account keeps its own id.
@@ -136,6 +136,22 @@ Where it is stored, typed:
 
 **Evidence arriving later.** A record that could not pair without Notes (an API-only move whose two sides are more than two minutes apart, say) pairs by itself once a later upload brings them: the upload's normalise re-posts the merged record with its evidence, and the upload's heal (`upload_trading212_export` and an import commit both heal) recomputes the pair relation. The owner's decisions (pairs, rejects, never-pair) are unchanged by it.
 
+### 5.11 What the owner's test showed (owner, 2026-11-28)
+
+The owner moved money from Stocks ISA and Invest into the Cash ISA and back the next day, and withdrew to Monzo from each account: a bank transfer from the Cash ISA and from Stocks ISA, a card (Apple Pay) withdrawal from Invest. In production after #52:
+
+- **The API books every internal move as a TRANSFER, on both sides**, sending and receiving. The Cash ISA's History CSV gives the same moves as `Deposit` or `Withdrawal` with empty Notes, booked in the same second as the TRANSFER.
+- **A withdrawal paired as a move.** Stocks ISA's WITHDRAW (to Monzo) fell seconds after Invest's TRANSFER in from the Cash ISA, whose CSV wasn't uploaded yet. Naming nobody and within two minutes, it was taken as that move's side, and Monzo's receipt was left as income: the premise that a real withdrawal never falls within two minutes of a move failed on the owner's first test (several movements in a row are normal).
+- **Two moves a day apart paired.** Invest's TRANSFER out on day one paired with Stocks ISA's TRANSFER in on day two (both naming the family; the day window allowed it), their real sides being on the Cash ISA.
+
+Rules (owner's decision, 2026-11-28):
+
+1. **The source's type decides, as Notes do (§5.9).** A Trading 212 DEPOSIT or WITHDRAW is `outside_family` unless its export row's empty Notes name the family. It is never a family move's side; it pairs with its bank or card payment as before. An export row's transaction id adds nothing to the type (`merge.Evidence` loses `outside`).
+2. **Every family pair needs both records timed and within `near_window`**, two records naming the family as well as a family move and a record naming nobody. A move whose other side hasn't arrived (a Cash ISA file not uploaded) takes no same-amount move days away; the owner's premise (both sides at about the same instant) is now borne out, to the second.
+3. Trading 212 pays every withdrawal from one bank account: the owner registered it as held by all three accounts (2026-11-28), so a receipt from it pairs with the withdrawal on whichever account it is (§5.10 splits several by time).
+
+`NORMALIZER_VERSION = "trading212-norm-6"` re-posts the stored deposits and withdrawals `outside_family`. Not covered: a card withdrawal (money back to the card that topped up). Monzo names another merchant id for it than for the top-up, in the same merchant group, and books it hours later, past the card rule's two minutes; it stays unpaired (the Trading 212 side spending, Monzo's a refund) and the owner pairs it by hand until card withdrawals are common enough to design for.
+
 ### 5.10 Several candidates: the only one within the near window (owner, 2026-11-27)
 
 The owner moves the same amount into the Cash ISA every few days, so two same-amount moves on different days inside one date window are the normal case, and each would go to review as `several_candidates`. Time order (§5.7) only helps when one side is identical rows.
@@ -145,7 +161,7 @@ Rule: where a record's same-amount candidates (at its best tier, `exact`) are se
 The window is `near_window` (2 minutes, `TransferSettings`, the card rule's). The owner asked about 5 minutes; 2 is kept because the owner often makes several movements within a few minutes (three within three minutes on 2026-11-26), and a wider window more often holds two candidates and splits less. A real delay only falls back to review. It is a setting: widen it if reviews show delays. A group that already pairs as interchangeable (§5.7) is not split: it pairs whole in time order, the same ledger. Known limitation: after a split, the records left with several candidates go to review even when what is left would be unique (the split never re-counts them).
 
 Order of the rules, each applied to what the one before leaves:
-1. Whether two records may pair at all (§5.3; Notes first, §5.9; the two-minute family condition only without Notes).
+1. Whether two records may pair at all (§5.3; Notes first, §5.9; any family pair within two minutes, §5.11).
 2. Several candidates split by the only one within the near window (this section).
 3. Time order inside a group whose one side is interchangeable (§5.7).
 
@@ -179,8 +195,9 @@ Only these run locally (remote Docker host); CI runs the rest.
 
 - Lararium knows only the accounts added to it. An owner with a Trading 212 account not added (a SIPP, a Crypto account, a Cash ISA not yet added) and exactly one other added gets moves to it named as that other account's, as today.
 - A move naming several accounts that can't pair (several candidates, none, or refused by the gate) opens no transfer and no review item: it shows on Unassigned, as a shared-payee payment does.
-- If a source's two sides of an internal move are more than two minutes apart and neither side has Notes (§5.9), they don't pair by themselves until an upload brings Notes; until then the owner may pair them by hand.
-- A record with no Notes (API-only) and a same-amount real top-up within two minutes of a family move on another family account would be taken as that move's side (§5.3 item 2); an upload's Notes correct it at its heal.
+- If a source's two sides of an internal move are more than two minutes apart, they don't pair by themselves, Notes or not (§5.11); the owner pairs them by hand. Every real move so far was booked on both sides in the same second.
+- An imported row naming nobody (a Cash ISA row read without Notes, §10 item 2a) and a same-amount real top-up within two minutes of a family move would be taken as that move's side (§5.3 item 2); an upload's Notes correct it at its heal. The API's deposits and withdrawals can't be taken so since §5.11.
+- Trading 212's API doesn't document that an Invest↔Stocks ISA move is a TRANSFER on both sides: §5.11 rests on the moves to and from the Cash ISA. If its receiving side were a DEPOSIT, the move would pair with nothing (each side on Unassigned) until an export upload's empty Notes name the family; the owner checks with one such move (§10).
 - Every connector's record counts as timed, but an IBKR Flex `dateTime` may give a date alone, which is stamped 00:00 New York (one real withdrawal is). Such a record is read as timed at midnight, so it doesn't block the near split (§5.10) as an untimed candidate would; a wrong pair needs another same-amount candidate within two minutes of the same record, and the owner can undo it. Not fixed here (owner, 2026-11-27): it would need a typed date-only field and an IBKR replay. Fix it when an IBKR change is due anyway, or when such a pair is seen.
 - Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider were a TRANSFER, it would name the family wrongly; it then pairs with nothing (or, with one other account, awaits a record there and goes overdue), and the owner rejects it. Not seen.
 
@@ -204,3 +221,4 @@ After deploy:
 2a. Cash ISA batches committed before deploy were read without Notes (their rows carry no evidence, §5.9; they pair by the two-minute rule meanwhile). Roll each back and upload its file again from the account's **Upload file** tile, which makes a profile that reads Notes.
 3. Diff the matched transfers against the snapshot and review what changed.
 4. Once the owner uploads the Cash ISA export covering 2026-11-26: check each incoming row is within two minutes of its TRANSFER (§5.3 item 2) and the four records pair (§5.7). If they are further apart, the owner pairs them by hand and the near window is revisited with the real gap.
+5. After `trading212-norm-6` deploys (§5.11): each connection replays once; check every DEPOSIT and WITHDRAW is `outside_family`, and diff the matched transfers. Then the owner uploads the Cash ISA export covering the test: the four moves pair with their TRANSFERs, Stocks ISA's withdrawal with its Monzo receipt, the Cash ISA's with its own, and no move pairs with another a day away. Invest's card withdrawal and its Monzo refund are paired by hand. The owner also makes one Invest→Stocks ISA move to check the API books its receiving side as a TRANSFER (§8).

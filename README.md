@@ -650,21 +650,24 @@ opening is uploaded.
 - **Between your Trading 212 accounts.** A Trading 212 TRANSFER names no account on the other
   side, so the accounts of the Trading 212 family (Invest, Stocks ISA and Cash ISA, however
   many you have added, whatever their status) jointly hold one identifier and the TRANSFER names
-  it. It then pairs only within the family, by amount and date, when it is the only candidate,
-  and is never taken as a bank top-up or a card payment. The other side is usually a deposit
-  or withdrawal naming nobody (Trading 212 books a received move as an ordinary deposit): that
-  pairs with it when both have a time and are within two minutes of each other, or when its
-  Notes say it is a move within the family (empty Notes, see the export and the Cash ISA
-  above). A deposit whose Notes say it came from outside (a transaction id) is never a move's
-  other side, even seconds from one, so it still pairs with your bank's payment. When several
-  same-amount candidates fit, the one within two minutes of the other is taken, so repeated
-  top-ups of the same amount pair one by one; equal moves out of two accounts into the Cash ISA
-  pair with its identical rows in time order. What can't be told apart waits under Needs
-  attention or on Unassigned: pair it by hand. A move whose counterpart may be in a manual
-  account's unlisted days isn't taken by itself: upload that account's file for those days.
-  A move whose other side names nobody, is more than two minutes away and has no Notes doesn't
-  pair by itself until an upload brings Notes: pair it by hand. Adding an account of the
-  family, giving one its type or clearing it, re-checks the transfers at once.
+  it. It then pairs only within the family, by amount, when it is the only candidate and both
+  sides have a time within two minutes of each other (Trading 212 books both sides of a move in
+  the same second), and is never taken as a bank top-up or a card payment. The other side is
+  another TRANSFER (the API's), or a Cash ISA row its Notes say is a move within the family
+  (empty Notes, see the export and the Cash ISA above), or a row naming nobody read without
+  Notes. A deposit or withdrawal in the API is never a move's other side, even seconds from
+  one: its type says the money came from or went outside, unless its export row's empty Notes
+  say otherwise. So it still pairs with your bank's payment, and a withdrawal made right after
+  a move pairs with its bank receipt. When several same-amount candidates fit, the one within
+  two minutes of the other is taken, so repeated top-ups of the same amount pair one by one;
+  equal moves out of two accounts into the Cash ISA pair with its identical rows in time
+  order. What can't be told apart waits under Needs attention or on Unassigned: pair it by
+  hand. A move whose counterpart may be in a manual account's unlisted days isn't taken by
+  itself: upload that account's file for those days. A move whose other side is more than two
+  minutes away doesn't pair by itself, Notes or not: pair it by hand. A withdrawal to your card
+  (Apple Pay) arrives on Monzo hours later as a refund from another merchant id, so it doesn't
+  pair by itself either: pair it by hand. Adding an account of the family, giving one its type
+  or clearing it, re-checks the transfers at once.
 
 ### Warnings
 
@@ -820,9 +823,12 @@ itself.
 - A move naming several accounts that can't pair (several candidates, none, or refused by the
   coverage check) opens no transfer and no review item: it shows on Unassigned, as a
   shared-payee payment does.
-- A record with no Notes (API only) and a same-amount real top-up within two minutes of a move
-  on another account of the family would be taken as that move's side; an upload's Notes
-  correct it.
+- A Cash ISA row read without Notes and a same-amount real top-up within two minutes of a move
+  on another account of the family would be taken as that move's side; uploading the file again
+  with Notes corrects it.
+- An Invest↔Stocks ISA move is taken to be a TRANSFER on both sides, as every move to and from
+  the Cash ISA is; Trading 212 doesn't document it. If its receiving side were a deposit, the
+  move would pair with nothing until an export upload's empty Notes name the family.
 - Trading 212 doesn't document what TRANSFER covers. If an ISA transfer in from another provider
   were one, it would name the family wrongly and pair with nothing (or, with one other account of
   the family, await a record there and go overdue); reject it. Not seen.
