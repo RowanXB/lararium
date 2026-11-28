@@ -188,7 +188,9 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     weak_holder (apart from holder:
     for a record naming no bank account in full and no account number, the one own account
     registered under the sort code its import rows print alone), names_account (it names a
-    bank account, or its import rows print part of one; a card merchant is none), holders
+    bank account, or its import rows print part of one; a card merchant is none),
+    by_main_account (holder is the main account, which only its being a sub-account's bank
+    transfer gives), holders
     (the own accounts the card merchant it names pays into, NULL for any other record: such
     evidence never identifies it, so holder stays NULL and it pairs only with a record that
     is there, pairs.card_tier), payee_holders (the own accounts holding the bank account it
@@ -374,6 +376,14 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         number_count == 0,
         ~func.coalesce(evidence.c.partial, false()),
     )
+    # A savings sub-account moves money only to and from its main account. Naming nothing,
+    # it is neither of holder's cases before this one.
+    by_main_account = and_(
+        names_nothing,
+        t.bank_transfer,
+        own_account.c.source_kind == "manual",
+        own_account.c.parent_account_id.is_not(None),
+    )
     # An account family the record names (identifiers.named_accounts is the Python twin of
     # this rule): its other accounts, those whose type is one of the family's, apart from
     # the record's own, whatever their status. Looked up per record, as the laterals above
@@ -412,16 +422,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             select(i.account_id).where(i.id == t.counterparty_identifier_id).scalar_subquery(),
         ),
         (number_count == 1, number_holder),
-        # A savings sub-account moves money only to and from its main account.
-        (
-            and_(
-                names_nothing,
-                t.bank_transfer,
-                own_account.c.source_kind == "manual",
-                own_account.c.parent_account_id.is_not(None),
-            ),
-            own_account.c.parent_account_id,
-        ),
+        (by_main_account, own_account.c.parent_account_id),
         else_=None,
     )
     # Weak evidence, apart from holder, which only pairs.weak_tier reads: the import rows
@@ -496,6 +497,7 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
                 own_number.is_not(None),
                 func.coalesce(evidence.c.partial, false()),
             ).label("names_account"),
+            by_main_account.label("by_main_account"),
             merchants.c.holders,
             case((family_count >= 2, family_accounts.c.ids), else_=payees.c.holders).label(
                 "payee_holders"
@@ -545,6 +547,7 @@ _OWN_RECORDS = Table(
     Column("holder", Uuid),
     Column("weak_holder", Uuid),
     Column("names_account", Boolean, nullable=False),
+    Column("by_main_account", Boolean, nullable=False),
     Column("holders", ARRAY(Uuid)),
     Column("payee_holders", ARRAY(Uuid)),
     Column("family", Boolean, nullable=False),

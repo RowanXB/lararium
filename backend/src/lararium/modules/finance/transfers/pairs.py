@@ -94,6 +94,7 @@ class Pairable:
     bank_transfer: bool
     weak_holder: UUID | None = None  # the account its sort code alone names (weak_tier)
     names_account: bool = False  # it names a bank account, or prints part of one
+    by_main_account: bool = False  # holder is its main account, for it names no bank account
     fiat: bool = False  # its instrument is a currency (cross_currency_tier)
     fee: LegFee | None = None  # the conversion fee its connector gives (conversion_postings)
     # The own accounts the card merchant it names pays into (contra.eligible_records'
@@ -220,8 +221,11 @@ def registry_tier(
     other's account is one of the holders of, and the other identifies no account and may
     be a transfer (_names_held: ONE_SIDED). A record naming a bank account several own
     accounts hold says where its money went: its other side is on one of them, or there is
-    none. A record naming a card merchant (holders) is none of these tiers' (card_tier pairs
-    it). Decisions are not considered.
+    none. A sub-account's move, identified by its main account alone, takes no other one
+    that names a bank account its own account holds no part of: such a move prints none on
+    either side, so that row is a payment to or from somebody else's account (transfer
+    evidence design §5.2). A record naming a card merchant (holders) is none of these tiers'
+    (card_tier pairs it). Decisions are not considered.
 
     A record naming an account family pairs by the family rule alone (account family
     identifier design §5.3, owner's decision 2026-11-27): MUTUAL with a family move on the
@@ -249,6 +253,13 @@ def registry_tier(
         if x.identified and x.holder != other.account_id:
             return None
         if not x.identified and not _may_be_transfer(x):
+            return None
+        if (
+            x.by_main_account
+            and not other.identified
+            and other.names_account
+            and x.account_id not in other.payee_holders
+        ):
             return None
     return MUTUAL if r.identified and c.identified else ONE_SIDED
 
@@ -696,6 +707,7 @@ async def _load_records(
         e.c.bank_transfer,
         e.c.weak_holder,
         e.c.names_account,
+        e.c.by_main_account,
         e.c.holders,
         e.c.payee_holders,
         e.c.family,
@@ -722,6 +734,7 @@ async def _load_records(
             bank_transfer=row.bank_transfer,
             weak_holder=row.weak_holder,
             names_account=row.names_account,
+            by_main_account=row.by_main_account,
             holders=frozenset(row.holders or ()),
             payee_holders=frozenset(row.payee_holders or ()),
             family=row.family,

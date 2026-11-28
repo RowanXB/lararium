@@ -115,6 +115,16 @@ def test_a_held_payee_s_record_pairs_with_none_outside_its_holders() -> None:
     assert registry_tier(sent, elsewhere) is None and registry_tier(elsewhere, sent) is None
 
 
+def test_a_held_payee_pairs_with_a_holder_s_move_naming_its_main_account_alone() -> None:
+    """A sub-account's move, identified by its main account alone, takes no main-account
+    row naming somebody else's bank account (transfer evidence design §5.2); a row naming
+    one the sub-account holds names its own."""
+    received = _pairable(X, "100", bank_transfer=True, holder=M, by_main_account=True)
+    assert registry_tier(SENT, received) == registry_tier(received, SENT) == ONE_SIDED
+    stranger = _pairable(M, "-100", bank_transfer=True, names_account=True)
+    assert registry_tier(stranger, received) is None and registry_tier(received, stranger) is None
+
+
 def test_a_card_merchant_s_holders_are_no_payee_s() -> None:
     """The two sets mean different evidence: a card payment's holders feed only card_tier."""
     card = _pairable(M, "-100", holders=frozenset({X}), source=("connection", "c:1"))
