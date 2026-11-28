@@ -207,7 +207,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
     connector's record, or one whose statement import row gives its time to the second;
     only the coverage gate reads it, of a receipt: a payment counts as timed only as a
     connector's record, pairs._gate_day), occurred_tz (the time zone its time was read in,
-    which the gate reads a timed receipt's booking day in), source_kind, source_ref.
+    which the gate reads a timed receipt's booking day in), source_kind, source_ref; chain,
+    tx_hash, chain_address (the on-chain movement it is, Bitcoin wallet design §5.8) and
+    address_holder (the own account the `chain_address` identifier of that address is
+    registered to, else NULL: pairs.hash_tier takes no pair the registry disagrees with).
     """
     t, i = models.Transaction, models.AccountIdentifier
     p = aliased(models.Posting, name="leg_posting")
@@ -466,6 +469,17 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
         .group_by(ph.identifier_id)
         .subquery("payees")
     )
+    # Looked up only for an on-chain movement at an address, by the registry's (kind, value).
+    ci = aliased(models.AccountIdentifier, name="chain_identifier")
+    address_holder = case(
+        (
+            t.chain_address.is_not(None),
+            select(ci.account_id)
+            .where(ci.kind == "chain_address", ci.value == t.chain_address)
+            .scalar_subquery(),
+        ),
+        else_=None,
+    )
     source_kind, source_ref_ = source_columns(t)
     timed_row = aliased(models.ImportRow, name="timed_row")
     timed = or_(
@@ -508,6 +522,10 @@ def eligible_records(system: Mapping[SystemAccountKey, UUID], name: str = "eligi
             t.occurred_tz,
             source_kind.label("source_kind"),
             source_ref_.label("source_ref"),
+            t.chain,
+            t.tx_hash,
+            t.chain_address,
+            address_holder.label("address_holder"),
         )
         .select_from(t)
         .join(legs, true())

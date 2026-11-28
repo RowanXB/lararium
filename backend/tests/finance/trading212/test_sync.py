@@ -245,6 +245,7 @@ async def _set_warnings(session, connection, warnings: list[str]) -> None:
 
 async def _ctx(session, connection, http: httpx.AsyncClient) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),

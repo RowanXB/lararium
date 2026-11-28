@@ -97,9 +97,9 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
     """The stored form: `<6-digit sort code>:<8-digit account number>` for a UK bank account,
     the upper-case account id for an IBKR account, the account number for Trading 212,
     eToro's account id with a UUID in lower case, Monzo's merchant id as written, and the
-    address as written for a chain address (lower-cased when it begins `0x`, as EVM addresses
-    are case-insensitive), and a family key of the account type catalog for an account
-    family."""
+    address as written for a chain address (lower-cased when it begins `0x` or `bc1`, as EVM
+    and Bitcoin bech32 addresses are case-insensitive; a wallet shows bech32 in lower case),
+    and a family key of the account type catalog for an account family."""
     if kind == "account_family":
         family = value.strip()
         if family not in families():
@@ -109,7 +109,7 @@ def normalize_identifier(kind: IdentifierKind, value: str) -> str:
         return family
     if kind == "chain_address":
         address = value.strip()
-        if address.lower().startswith("0x"):
+        if address.lower().startswith(("0x", "bc1")):
             address = address.lower()
         if _CHAIN_ADDRESS.fullmatch(address) is None:
             raise FinanceValidationError(

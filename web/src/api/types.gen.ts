@@ -378,6 +378,162 @@ export type BinanceDifferenceOut = {
 };
 
 /**
+ * BitcoinBranchesOut
+ */
+export type BitcoinBranchesOut = {
+    /**
+     * Change
+     */
+    change: number;
+    /**
+     * Receiving
+     */
+    receiving: number;
+};
+
+/**
+ * BitcoinGapsUpdate
+ */
+export type BitcoinGapsUpdate = {
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    };
+};
+
+/**
+ * BitcoinPreviewIn
+ *
+ * A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
+ * are secret: a master public key reveals every address the wallet will ever use. Checked in
+ * the route (keys.py), whose messages never repeat the input.
+ */
+export type BitcoinPreviewIn = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<unknown>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<unknown>;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Keys
+     */
+    keys?: Array<unknown>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
+ * BitcoinPreviewOut
+ */
+export type BitcoinPreviewOut = {
+    /**
+     * First Receiving Address
+     */
+    first_receiving_address: string;
+    /**
+     * Script Type
+     */
+    script_type: string;
+};
+
+/**
+ * BitcoinStateOut
+ *
+ * What the connection card shows; never a key, a descriptor or an address.
+ */
+export type BitcoinStateOut = {
+    /**
+     * Electrum Type
+     */
+    electrum_type: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps: {
+        [key: string]: {
+            [key: string]: number;
+        };
+    };
+    /**
+     * Last Check
+     */
+    last_check: string | null;
+    scanned: BitcoinBranchesOut;
+    /**
+     * Server
+     */
+    server: string;
+    /**
+     * Unconfirmed
+     */
+    unconfirmed: number;
+    used: BitcoinBranchesOut;
+};
+
+/**
+ * BitcoinWalletCreate
+ */
+export type BitcoinWalletCreate = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<unknown>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<unknown>;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps?: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    } | null;
+    /**
+     * Keys
+     */
+    keys?: Array<unknown>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
  * Body_stage_import
  */
 export type BodyStageImport = {
@@ -671,6 +827,7 @@ export type CellPatterns = Array<CellPattern>;
  */
 export type ConnectionOut = {
     binance?: BinanceConnectionState | null;
+    bitcoin?: BitcoinStateOut | null;
     /**
      * Connector
      */
@@ -1888,7 +2045,7 @@ export type InstrumentIdentifierModel = {
     /**
      * Scheme
      */
-    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko' | 'binance_asset';
+    scheme: 'iso4217' | 'isin' | 'figi' | 'ticker_mic' | 'ibkr_conid' | 'etoro_id' | 'trading212_ticker' | 'chain_contract' | 'coingecko' | 'binance_asset' | 'chain_native';
     /**
      * Value
      */
@@ -2705,6 +2862,82 @@ export type BinanceConnectionUpdateWritable = {
     private_key_passphrase?: string | null;
 };
 
+/**
+ * BitcoinPreviewIn
+ *
+ * A wallet in one of its three forms (design 5.1). The keys, descriptors and addresses
+ * are secret: a master public key reveals every address the wallet will ever use. Checked in
+ * the route (keys.py), whose messages never repeat the input.
+ */
+export type BitcoinPreviewInWritable = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<string>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<string>;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Keys
+     */
+    keys?: Array<string>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
+/**
+ * BitcoinWalletCreate
+ */
+export type BitcoinWalletCreateWritable = {
+    /**
+     * Addresses
+     */
+    addresses?: Array<string>;
+    /**
+     * Descriptors
+     */
+    descriptors?: Array<string>;
+    /**
+     * Display Name
+     */
+    display_name: string;
+    /**
+     * Electrum Type
+     */
+    electrum_type?: 'single' | 'multisig' | '2fa' | 'old' | null;
+    /**
+     * Form
+     */
+    form: 'electrum' | 'descriptor' | 'addresses';
+    /**
+     * Gaps
+     */
+    gaps?: {
+        [key: string]: {
+            [key: string]: unknown;
+        };
+    } | null;
+    /**
+     * Keys
+     */
+    keys?: Array<string>;
+    /**
+     * Threshold
+     */
+    threshold?: number | null;
+};
+
 export type CellPatternsWritable = Array<CellPattern>;
 
 /**
@@ -2877,6 +3110,56 @@ export type CreateBinanceConnectionResponses = {
 
 export type CreateBinanceConnectionResponse = CreateBinanceConnectionResponses[keyof CreateBinanceConnectionResponses];
 
+export type CreateBitcoinConnectionData = {
+    body: BitcoinWalletCreateWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/bitcoin';
+};
+
+export type CreateBitcoinConnectionErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBitcoinConnectionError = CreateBitcoinConnectionErrors[keyof CreateBitcoinConnectionErrors];
+
+export type CreateBitcoinConnectionResponses = {
+    /**
+     * Successful Response
+     */
+    201: ConnectionOut;
+};
+
+export type CreateBitcoinConnectionResponse = CreateBitcoinConnectionResponses[keyof CreateBitcoinConnectionResponses];
+
+export type PreviewBitcoinWalletData = {
+    body: BitcoinPreviewInWritable;
+    path?: never;
+    query?: never;
+    url: '/api/v1/connections/bitcoin/preview';
+};
+
+export type PreviewBitcoinWalletErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PreviewBitcoinWalletError = PreviewBitcoinWalletErrors[keyof PreviewBitcoinWalletErrors];
+
+export type PreviewBitcoinWalletResponses = {
+    /**
+     * Successful Response
+     */
+    200: BitcoinPreviewOut;
+};
+
+export type PreviewBitcoinWalletResponse = PreviewBitcoinWalletResponses[keyof PreviewBitcoinWalletResponses];
+
 export type CreateEtoroConnectionData = {
     body: EtoroConnectionInWritable;
     path?: never;
@@ -3036,6 +3319,36 @@ export type UpdateBinanceConnectionResponses = {
 };
 
 export type UpdateBinanceConnectionResponse = UpdateBinanceConnectionResponses[keyof UpdateBinanceConnectionResponses];
+
+export type UpdateBitcoinGapsData = {
+    body: BitcoinGapsUpdate;
+    path: {
+        /**
+         * Connection Id
+         */
+        connection_id: string;
+    };
+    query?: never;
+    url: '/api/v1/connections/{connection_id}/bitcoin/gaps';
+};
+
+export type UpdateBitcoinGapsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBitcoinGapsError = UpdateBitcoinGapsErrors[keyof UpdateBitcoinGapsErrors];
+
+export type UpdateBitcoinGapsResponses = {
+    /**
+     * Successful Response
+     */
+    200: ConnectionOut;
+};
+
+export type UpdateBitcoinGapsResponse = UpdateBitcoinGapsResponses[keyof UpdateBitcoinGapsResponses];
 
 export type DisableConnectionData = {
     body?: never;

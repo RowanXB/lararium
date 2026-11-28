@@ -145,6 +145,11 @@ class Transaction(Base):
     # The source says this movement was not a transfer (a withdrawal that failed after it
     # left the balance), so it is never a transfer's leg.
     never_transfer: Mapped[bool] = mapped_column(server_default=text("false"))
+    # The on-chain transaction this is (chain name, lower-case hex hash) and the wallet address
+    # it concerns; chain and hash come together (migration 0050).
+    chain: Mapped[str | None] = mapped_column(Text)
+    tx_hash: Mapped[str | None] = mapped_column(Text)
+    chain_address: Mapped[str | None] = mapped_column(Text)
     # The source says the money went outside the account's family (a Trading 212 History
     # CSV row whose Notes give a transaction id, account family identifier design §5.9), so
     # it is never a family move's counterpart.

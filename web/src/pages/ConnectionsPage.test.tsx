@@ -6,12 +6,15 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   authorizeConnection,
   createBinanceConnection,
+  createBitcoinConnection,
   createEtoroConnection,
   createIbkrConnection,
   createMonzoConnection,
   createTrading212Connection,
   listConnections,
+  previewBitcoinWallet,
   updateBinanceConnection,
+  updateBitcoinGaps,
   updateEtoroConnection,
   updateIbkrConnection,
   updateTrading212Connection,
@@ -42,6 +45,7 @@ const API_TYPES = [
   apiType("trading212.stocks_isa", "Trading 212", "trading212", { account_kind: "isa" }),
   apiType("etoro", "eToro", "etoro"),
   apiType("binance", "Binance", "binance"),
+  apiType("bitcoin_wallet", "Bitcoin", "bitcoin"),
 ];
 
 const CONNECTION = {
@@ -65,6 +69,14 @@ vi.mock("../api", () => ({
   updateIbkrConnection: vi.fn(async () => ({ data: {} })),
   createBinanceConnection: vi.fn(async () => ({ data: {} })),
   updateBinanceConnection: vi.fn(async () => ({ data: {} })),
+  createBitcoinConnection: vi.fn(async () => ({ data: {} })),
+  updateBitcoinGaps: vi.fn(async () => ({ data: {} })),
+  previewBitcoinWallet: vi.fn(async () => ({
+    data: {
+      first_receiving_address: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+      script_type: "p2wpkh",
+    },
+  })),
   listAccounts: vi.fn(async () => ({
     data: [{ id: "0190a0b0-0000-7000-8000-0000000000a1", name: "Binance Spot" }],
   })),
@@ -822,4 +834,157 @@ it("gives Binance connections no Authorise or IBKR forms", async () => {
   expect(screen.queryByRole("button", { name: "Authorise" })).toBeNull();
   expect(screen.queryByRole("form", { name: "Update token" })).toBeNull();
   expect(screen.queryByText(/Webhooks are off/)).toBeNull();
+});
+
+// BIP84's published test account key (m/84'/0'/0' of "abandon ... about").
+const ZPUB =
+  "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs";
+
+it("adds a Bitcoin wallet after showing its first receiving address", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  renderPage(client);
+  const form = await screen.findByRole("form", { name: "Add Bitcoin wallet" });
+  expect(
+    within(form).getByText(
+      "In Electrum: Wallet → Information → Master Public Key. Never enter your seed phrase.",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(form).getByText(
+      "Lightning channel balances can't be seen from a public key; record them as a manual account.",
+    ),
+  ).toBeInTheDocument();
+  await user.click(within(form).getByRole("combobox", { name: "Wallet form" }));
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual([
+    "Electrum master public key",
+    "Output descriptor",
+    "Address list",
+  ]);
+  await user.click(screen.getByRole("option", { name: "Electrum master public key" }));
+  await user.type(within(form).getByLabelText("Display name"), "Electrum");
+  await user.click(within(form).getByLabelText("Master public key"));
+  await user.paste(ZPUB);
+
+  expect(await within(form).findByText("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu")).toBeInTheDocument();
+  expect(previewBitcoinWallet).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      body: { form: "electrum", electrum_type: "single", keys: [ZPUB] },
+    }),
+  );
+  await user.click(within(form).getByText("Advanced"));
+  expect(
+    within(form).getByText("Compare the balance with Electrum's. If it is lower, raise the gap limit."),
+  ).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("Receiving gap limit"), "50");
+  await user.click(within(form).getByRole("button", { name: "Add Bitcoin wallet" }));
+
+  expect(createBitcoinConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      body: {
+        display_name: "Electrum",
+        form: "electrum",
+        electrum_type: "single",
+        keys: [ZPUB],
+        gaps: { d0: { "0": 50 } },
+      },
+    }),
+  );
+  await waitFor(() => expect(within(form).getByLabelText("Master public key")).toHaveValue(""));
+  await waitFor(() => expect(within(form).getByLabelText("Receiving gap limit")).toHaveValue(null));
+  await waitFor(() =>
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not
+      .toContain(ZPUB),
+  );
+});
+
+it("shows a Bitcoin wallet's state, never its key", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [
+      {
+        ...CONNECTION,
+        id: "0190a0b0-0000-7000-8000-0000000000c1",
+        connector: "bitcoin",
+        display_name: "Cold wallet",
+        status: "healthy",
+        redirect_uri: null,
+        bitcoin: {
+          form: "electrum",
+          electrum_type: "multisig",
+          scanned: { receiving: 21, change: 11 },
+          used: { receiving: 1, change: 1 },
+          last_check: "agrees",
+          unconfirmed: 2,
+          server: "mempool.space",
+          gaps: { d0: { "0": 40 } },
+        },
+      },
+    ],
+  } as never);
+  renderPage();
+  expect(await screen.findByText("Cold wallet")).toBeInTheDocument();
+  expect(screen.getByText("Electrum master public key, Multi-signature")).toBeInTheDocument();
+  expect(
+    screen.getByText("Addresses scanned: 21 receiving, 11 change; used: 1 receiving, 1 change"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Last balance check: agrees")).toBeInTheDocument();
+  expect(screen.getByText("Unconfirmed transactions waiting: 2")).toBeInTheDocument();
+  expect(screen.getByText("Server: mempool.space")).toBeInTheDocument();
+
+  const gaps = screen.getByRole("form", { name: "Gap limits" });
+  const user = userEvent.setup();
+  const receiving = within(gaps).getByLabelText("Receiving gap limit");
+  expect(receiving).toHaveValue(40);
+  await user.clear(receiving);
+  await user.type(receiving, "60");
+  await user.type(within(gaps).getByLabelText("Change gap limit"), "15");
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: { connection_id: "0190a0b0-0000-7000-8000-0000000000c1" },
+      body: { gaps: { d0: { "0": 60, "1": 15 } } },
+    }),
+  );
+  expect(await within(gaps).findByText("Gap limits saved; syncing")).toBeInTheDocument();
+});
+
+it("keeps another descriptor's gap limits when saving the first one's", async () => {
+  vi.mocked(listConnections).mockResolvedValue({
+    data: [
+      {
+        ...CONNECTION,
+        id: "0190a0b0-0000-7000-8000-0000000000c2",
+        connector: "bitcoin",
+        display_name: "Descriptor wallet",
+        status: "healthy",
+        redirect_uri: null,
+        bitcoin: {
+          form: "descriptor",
+          electrum_type: null,
+          scanned: { receiving: 21, change: 11 },
+          used: { receiving: 1, change: 1 },
+          last_check: "agrees",
+          unconfirmed: 0,
+          server: "mempool.space",
+          gaps: { d0: { "0": 40 }, d1: { "0": 30 } },
+        },
+      },
+    ],
+  } as never);
+  renderPage();
+  const gaps = await screen.findByRole("form", { name: "Gap limits" });
+  const user = userEvent.setup();
+  const receiving = within(gaps).getByLabelText("Receiving gap limit");
+  await user.clear(receiving);
+  await user.type(receiving, "60");
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenLastCalledWith(
+    expect.objectContaining({ body: { gaps: { d0: { "0": 60 }, d1: { "0": 30 } } } }),
+  );
+  // Emptying the fields restores the first descriptor's defaults only.
+  await user.clear(receiving);
+  await user.click(within(gaps).getByRole("button", { name: "Save gap limits" }));
+  expect(updateBitcoinGaps).toHaveBeenLastCalledWith(
+    expect.objectContaining({ body: { gaps: { d1: { "0": 30 } } } }),
+  );
 });

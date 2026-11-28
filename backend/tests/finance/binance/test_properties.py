@@ -447,6 +447,7 @@ class Env:
 
     async def context(self) -> SyncContext:
         return SyncContext(
+            esplora_url="https://esplora.test/api",
             command=CommandContext(self.session, CONNECTOR, uuid.uuid4()),
             connection=await get_connection(self.session, self.connection_id),
             sync_id=uuid.uuid4(),

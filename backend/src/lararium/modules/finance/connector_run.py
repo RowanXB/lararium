@@ -25,6 +25,7 @@ from lararium.core.timeutil import local_date
 from lararium.modules.finance import models
 from lararium.modules.finance.instruments import InstrumentRecord, get_currency, get_instrument
 from lararium.modules.finance.ledger import (
+    ChainFields,
     CounterpartyFields,
     PostingInput,
     TransactionDetails,
@@ -344,11 +345,12 @@ class ConnectorRun:
         postings: Sequence[PostingInput],
         counterparty: CounterpartyFields | None = None,
         cancels: UUID | None = None,
+        chain: ChainFields | None = None,
         details: TransactionDetails | None = None,
     ) -> UUID:
         """Post the connection's transaction under the key (`cancels`: the transaction it
         cancels, cancelled-withdrawal design §4.2; `details`: the source's typed fields, such
-        as what it says the income is)."""
+        as what it says the income is; `chain`: the on-chain transaction it is)."""
         record, outcome = await upsert_connector_transaction(
             self.command,
             TransactionInput(
@@ -361,6 +363,7 @@ class ConnectorRun:
                 external_id=key,
                 counterparty=counterparty or CounterpartyFields(),
                 cancels_transaction_id=cancels,
+                chain=chain,
                 details=details or TransactionDetails(),
             ),
         )

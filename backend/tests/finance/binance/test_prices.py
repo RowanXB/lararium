@@ -20,6 +20,8 @@ from lararium.core.connectors import SyncContext
 from lararium.core.errors import DisplayableError
 from lararium.core.secrets import Secret
 from lararium.modules.finance.binance import instruments, notices
+from lararium.modules.finance.binance.catalogue import ENDPOINTS
+from lararium.modules.finance.binance.client import BinanceClient, RequestRefused
 from lararium.modules.finance.binance.prices import (
     CoinGeckoClient,
     CoinGeckoError,
@@ -1012,6 +1014,34 @@ async def test_the_client_never_leaves_its_host_or_the_key_its_header() -> None:
         await client.market_chart("../../etc/passwd", "usd", 1, 2)
     assert len(gecko.requests) == 2
     assert repr(client) == "CoinGeckoClient()"
+
+
+# The public client: what prices an asset without a Binance connection (M8 design 5.7)
+
+
+async def test_public_client_refuses_signed_queries() -> None:
+    clock = Clock()
+    fake = FakeBinance(now=clock)
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> Any:
+        sent.append(request)
+        return fake.handler(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BinanceClient.public(http, clock=clock, sleep=clock.sleep)
+        with pytest.raises(RequestRefused) as refused:
+            await client.call(ENDPOINTS["deposits"])
+        assert str(refused.value) == (
+            "Binance request refused: a public client sends no signed query"
+        )
+        assert sent == []
+        # A public query goes, and carries no key.
+        await client.sync_clock()
+        await client.call(ENDPOINTS["exchange-info"])
+    assert [s.label for s in fake.requests] == ["time", "exchange-info"]
+    assert all("X-MBX-APIKEY" not in request.headers for request in sent)
+    assert repr(client) == "BinanceClient()"
 
 
 # The instrument of an asset by its CoinGecko id (design 5.5)

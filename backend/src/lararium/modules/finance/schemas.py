@@ -671,7 +671,8 @@ class TransferOut(BaseModel):
     in_transaction_id: UUID | None
     placeholder_transaction_id: UUID | None
     # A matched pair where neither leg names an own account (a sort code alone, a card
-    # merchant's or a held payee's holders): the Transfers page offers Reject, not Unpair.
+    # merchant's or a held payee's holders) and the two are not one chain transaction's (a
+    # shared tx_hash names both sides): the Transfers page offers Reject, not Unpair.
     weak: bool = False
 
 

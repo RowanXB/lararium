@@ -10,13 +10,17 @@ client can send nothing outside the catalogue. It names each asset's CoinGecko i
 Binance tickers, never from a symbol, and prices an asset Binance has no price for, on the days
 it has no `binance` price (source `coingecko`).
 
+What is held, the pairs listed and where flags go are parameters (`HeldFn`, `PairsFn`,
+`FlagFn`): by default a Binance connection's, as M7 prices; a Bitcoin wallet passes its own
+(M8 design 5.7). The days asked are kept in the config of the connection whose sync runs.
+
 Nothing here logs or reports a price, an amount or a key.
 """
 
 import logging
 import re
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Context, Decimal, localcontext
@@ -73,6 +77,7 @@ EUR = "EUR"
 EUR_QUOTES = ("USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB")
 SOURCE = "binance"
 COINGECKO_SOURCE = "coingecko"
+EXCHANGE_INFO_LABEL = "exchange-info"
 SIGNIFICANT_DIGITS = 12
 # Enough that a quotient and a product lose nothing before the rounding to 12 digits.
 _WORKING_PRECISION = 60
@@ -113,6 +118,14 @@ class PriceReport:
 class Held:
     instrument_id: UUID
     first_day: date
+
+
+# The crypto assets held (by Binance asset code), given the connection whose sync runs.
+type HeldFn = Callable[[AsyncSession, UUID], Awaitable[dict[str, Held]]]
+# Symbol to (base, quote) of the pairs Binance lists, given the connection whose sync runs.
+type PairsFn = Callable[[AsyncSession, UUID], Awaitable[dict[str, tuple[str, str]]]]
+# Where the prices' flags go.
+type FlagFn = Callable[[SyncContext, Sequence[str]], Awaitable[None]]
 
 
 # The path of an asset to EUR.
@@ -282,9 +295,14 @@ def _yesterday(now_ms: int) -> date:
 
 
 async def _held(session: AsyncSession, connection_id: UUID) -> dict[str, Held]:
-    """The crypto assets the connection's accounts have held, with the day of the earliest
-    posting or snapshot of each (a void posting is not one)."""
-    accounts = list(await wallets(session, connection_id))
+    """The crypto assets the connection's accounts have held (`held_on`)."""
+    return await held_on(session, list(await wallets(session, connection_id)))
+
+
+async def held_on(session: AsyncSession, accounts: Collection[UUID]) -> dict[str, Held]:
+    """The crypto assets (by Binance asset code) the accounts have held, with the day of the
+    earliest posting or snapshot of each (a void posting is not one)."""
+    accounts = list(accounts)
     if not accounts:
         return {}
     p, t, s = models.Posting, models.Transaction, models.BalanceSnapshot
@@ -324,6 +342,22 @@ async def _pairs(session: AsyncSession, connection_id: UUID) -> dict[str, tuple[
         {"c": connection_id},
     )
     return {row.symbol: (row.base_asset, row.quote_asset) for row in rows}
+
+
+async def listed_pairs(client: BinanceClient) -> dict[str, tuple[str, str]]:
+    """Symbol to (base, quote) of every pair Binance's `exchangeInfo` lists now, whatever its
+    status, read without a connection and stored nowhere. An entry without the three texts is
+    left out."""
+    body = await client.call(ENDPOINTS[EXCHANGE_INFO_LABEL])
+    listed = body.get("symbols") if isinstance(body, dict) else None
+    found: dict[str, tuple[str, str]] = {}
+    for item in listed if isinstance(listed, list) else []:
+        if not isinstance(item, dict):
+            continue
+        symbol, base, quote = item.get("symbol"), item.get("baseAsset"), item.get("quoteAsset")
+        if isinstance(symbol, str) and isinstance(base, str) and isinstance(quote, str):
+            found[symbol] = (base, quote)
+    return found
 
 
 def _needs(held: Mapping[str, Held], pairs: Mapping[str, tuple[str, str]]) -> dict[str, date]:
@@ -410,6 +444,7 @@ async def _fetch_bars(
     end: date,
     *,
     newest_first: bool = False,
+    flag: FlagFn,
 ) -> None:
     """The closed days from `start` to `end` of a symbol, at most 1,000 bars a request, each
     request's bars stored in a short transaction of their own and marked asked. Days before
@@ -436,7 +471,7 @@ async def _fetch_bars(
         except BinanceNotPresent:
             return
         parsed = parse(layout.BARS_LABEL, body)
-        await _flag(ctx, unknown_flags(layout.BARS_LABEL, parsed))
+        await flag(ctx, unknown_flags(layout.BARS_LABEL, parsed))
         bars = [
             row
             for row in records(layout.BARS_LABEL, parsed)
@@ -464,6 +499,28 @@ async def _closes(session: AsyncSession, symbols: Sequence[str]) -> dict[tuple[s
         {"s": list(symbols)},
     )
     return {(row.symbol, row.open_time.astimezone(UTC).date()): row.close for row in rows}
+
+
+# Flags.
+
+
+async def _flag(ctx: SyncContext, flags: Sequence[str]) -> None:
+    """Name each flag once: the flags are kept in the connection's config, shown in its warnings
+    and queued for the sync's one message (`notices.publish`). A flag stays once raised, also
+    when its cause is gone. A run that has none new writes nothing."""
+    if not flags:
+        return
+    async with ctx.session_factory() as session:
+        connection = await get_connection(session, ctx.connection.id)
+    known = connection.config.get(FLAGS_KEY)
+    if isinstance(known, list) and all(flag in known for flag in flags):
+        return
+    args = {"connection_id": str(ctx.connection.id)}
+    async with (
+        ctx.session_factory() as session,
+        command_context(session, ctx.command.actor, "binance.flags", args) as cmd,
+    ):
+        await notices.publish(cmd, ctx.connection.id, flags)
 
 
 # Prices.
@@ -528,11 +585,11 @@ async def _priced(session: AsyncSession, instruments: Sequence[UUID], day: date)
     return set(found)
 
 
-async def _eligible(ctx: SyncContext, yesterday: date) -> dict[str, Held]:
+async def _eligible(ctx: SyncContext, yesterday: date, held: HeldFn) -> dict[str, Held]:
     """The held assets with a closed day to price: held on or before yesterday."""
     async with ctx.session_factory() as session:
-        held = await _held(session, ctx.connection.id)
-    return {code: one for code, one in held.items() if one.first_day <= yesterday}
+        found = await held(session, ctx.connection.id)
+    return {code: one for code, one in found.items() if one.first_day <= yesterday}
 
 
 async def _unpriced(ctx: SyncContext, held: Mapping[str, Held], day: date) -> list[str]:
@@ -542,29 +599,36 @@ async def _unpriced(ctx: SyncContext, held: Mapping[str, Held], day: date) -> li
     return sorted(code for code, one in held.items() if one.instrument_id not in priced)
 
 
-async def price_assets(ctx: SyncContext, client: BinanceClient) -> PriceReport:
+async def price_assets(
+    ctx: SyncContext,
+    client: BinanceClient,
+    *,
+    held: HeldFn = _held,
+    pairs: PairsFn = _pairs,
+    flag: FlagFn = _flag,
+) -> PriceReport:
     """Fetch the bars the held assets' paths need (only the closed days not stored yet) and
     record each asset's EUR price from its first held day to yesterday; a day no path has a bar
     for is left without one. `unpriced` is every held asset with no price on yesterday."""
     yesterday = _yesterday(client.now_ms())
-    held = await _eligible(ctx, yesterday)
-    if not held:
+    eligible = await _eligible(ctx, yesterday, held)
+    if not eligible:
         return PriceReport(priced=0)
     async with ctx.session_factory() as session:
-        pairs = await _pairs(session, ctx.connection.id)
+        listed = await pairs(session, ctx.connection.id)
         eur = (await get_currency(session, EUR)).id
-    needs = _needs(held, pairs)
+    needs = _needs(eligible, listed)
     async with ctx.session_factory() as session:
         asked = _asked((await get_connection(session, ctx.connection.id)).config)
     for symbol in sorted(needs):
         known = asked.get(symbol)
         for start, end in _to_fetch(needs[symbol], yesterday, known):
             older = known is not None and end < known[0]
-            await _fetch_bars(ctx, client, symbol, start, end, newest_first=older)
+            await _fetch_bars(ctx, client, symbol, start, end, newest_first=older, flag=flag)
     async with ctx.session_factory() as session:
         closes = await _closes(session, list(needs))
     priced = 0
-    for code, one in sorted(held.items()):
+    for code, one in sorted(eligible.items()):
         wanted: dict[date, Decimal] = {}
         day = one.first_day
         while day <= yesterday:
@@ -572,7 +636,7 @@ async def price_assets(ctx: SyncContext, client: BinanceClient) -> PriceReport:
                 wanted[day] = price
             day += timedelta(days=1)
         priced += await _record(ctx, code, one.instrument_id, eur, wanted, SOURCE)
-    return PriceReport(priced=priced, unpriced=await _unpriced(ctx, held, yesterday))
+    return PriceReport(priced=priced, unpriced=await _unpriced(ctx, eligible, yesterday))
 
 
 # CoinGecko.
@@ -691,7 +755,7 @@ async def refresh_ids_quietly(
 
 
 async def _tag_instruments(
-    ctx: SyncContext, codes: Sequence[str], held: Mapping[str, Held]
+    ctx: SyncContext, codes: Sequence[str], held: Mapping[str, Held], flag: FlagFn
 ) -> None:
     """Give each held asset with a stored id that id as its instrument's `coingecko` identifier
     (an instrument that has one keeps it); an id another instrument holds is flagged, not moved.
@@ -723,7 +787,7 @@ async def _tag_instruments(
             elif owner.id != held[code].instrument_id:
                 clashes.append(code)
     # Another instrument holds the id: both stay as they are, and the owner is told.
-    await _flag(ctx, [clash_flag(code) for code in sorted(clashes)])
+    await flag(ctx, [clash_flag(code) for code in sorted(clashes)])
     if not missing:
         return
     args = {"connection_id": str(ctx.connection.id)}
@@ -778,6 +842,8 @@ async def coingecko_prices(
     assets: Sequence[str],
     *,
     id_only: Sequence[str] = (),
+    held: HeldFn = _held,
+    flag: FlagFn = _flag,
     clock: Clock = wall_clock,
     sleep: Sleep = real_sleep,
 ) -> int:
@@ -794,18 +860,18 @@ async def coingecko_prices(
     now_ms = clock()
     yesterday = _yesterday(now_ms)
     async with ctx.session_factory() as session:
-        held = await _held(session, ctx.connection.id)
-    wanted = sorted({*assets, *id_only} & held.keys())
+        holdings = await held(session, ctx.connection.id)
+    wanted = sorted({*assets, *id_only} & holdings.keys())
     if not wanted:
         return 0
     await refresh_coingecko_ids(ctx, client=client, clock=clock, sleep=sleep)
-    await _tag_instruments(ctx, wanted, held)
+    await _tag_instruments(ctx, wanted, holdings, flag)
 
     written = 0
     vs: str | None = None
     earliest = _day(now_ms) - timedelta(days=HISTORY_DAYS - 1)
-    for code in sorted(set(assets) & held.keys()):
-        one = held[code]
+    for code in sorted(set(assets) & holdings.keys()):
+        one = holdings[code]
         async with ctx.session_factory() as session:
             # The instrument's own id (from the tickers, or given by hand) first.
             i = models.InstrumentIdentifier
@@ -847,7 +913,7 @@ async def coingecko_prices(
         try:
             chart = await _chart_prices(client, coin, vs, missing[0], now_ms)
         except CoinGeckoNoChart:
-            await _flag(ctx, [no_chart_flag(code)])
+            await flag(ctx, [no_chart_flag(code)])
             continue
         wanted_prices = {day: price for day, price in chart.items() if day in missing}
         written += await _record(
@@ -859,45 +925,32 @@ async def coingecko_prices(
 # The sync's step.
 
 
-async def _flag(ctx: SyncContext, flags: Sequence[str]) -> None:
-    """Name each flag once: the flags are kept in the connection's config, shown in its warnings
-    and queued for the sync's one message (`notices.publish`). A flag stays once raised, also
-    when its cause is gone. A run that has none new writes nothing."""
-    if not flags:
-        return
-    async with ctx.session_factory() as session:
-        connection = await get_connection(session, ctx.connection.id)
-    known = connection.config.get(FLAGS_KEY)
-    if isinstance(known, list) and all(flag in known for flag in flags):
-        return
-    args = {"connection_id": str(ctx.connection.id)}
-    async with (
-        ctx.session_factory() as session,
-        command_context(session, ctx.command.actor, "binance.flags", args) as cmd,
-    ):
-        await notices.publish(cmd, ctx.connection.id, flags)
-
-
 async def update_prices(
-    ctx: SyncContext, client: BinanceClient, *, sleep: Sleep = real_sleep
+    ctx: SyncContext,
+    client: BinanceClient,
+    *,
+    held: HeldFn = _held,
+    pairs: PairsFn = _pairs,
+    flag: FlagFn = _flag,
+    sleep: Sleep = real_sleep,
 ) -> PriceReport:
     """Binance's prices, then (with a key) CoinGecko's for what Binance has none for, then a
-    one-time flag for each asset still without a price. A CoinGecko failure leaves the Binance
-    prices as they are and the sync going."""
-    report = await price_assets(ctx, client)
+    flag for each asset still without a price (by default a Binance connection's, raised
+    once). A CoinGecko failure leaves the Binance prices as they are and the sync going."""
+    report = await price_assets(ctx, client, held=held, pairs=pairs, flag=flag)
     unpriced = report.unpriced
     if ctx.coingecko_api_key is not None:
         yesterday = _yesterday(client.now_ms())
-        held = await _eligible(ctx, yesterday)
+        eligible = await _eligible(ctx, yesterday, held)
         try:
             # Every held asset: the days Binance has no price for (a halted pair, an asset with
             # no market) are filled, and each asset gets its id.
             report.priced += await coingecko_prices(
-                ctx, list(held), clock=client.now_ms, sleep=sleep
+                ctx, list(eligible), held=held, flag=flag, clock=client.now_ms, sleep=sleep
             )
         except CoinGeckoError as error:
             # The message holds a status only, never the key or a URL.
             logger.warning("CoinGecko prices failed: %s", error)
-        unpriced = await _unpriced(ctx, held, yesterday)
-    await _flag(ctx, [flag_for(code) for code in unpriced])
+        unpriced = await _unpriced(ctx, eligible, yesterday)
+    await flag(ctx, [flag_for(code) for code in unpriced])
     return PriceReport(priced=report.priced, unpriced=unpriced)

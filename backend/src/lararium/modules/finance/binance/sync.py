@@ -139,7 +139,11 @@ from lararium.modules.finance.binance.normalize import NORMALIZED_THROUGH_KEY, R
 from lararium.modules.finance.binance.notices import tell
 from lararium.modules.finance.binance.opening import set_openings
 from lararium.modules.finance.binance.parse import ApiValue, BinanceDataError, as_api, parse
-from lararium.modules.finance.binance.prices import refresh_ids_quietly, update_prices
+from lararium.modules.finance.binance.prices import (
+    EXCHANGE_INFO_LABEL,
+    refresh_ids_quietly,
+    update_prices,
+)
 from lararium.modules.finance.binance.reconcile import (
     Difference,
     Point,
@@ -183,7 +187,6 @@ GATE_LABEL = "api-restrictions"
 ACCOUNT_LABEL = "spot-account"
 COIN_CONFIG_LABEL = "coin-config"
 ASSET_DETAIL_LABEL = "asset-detail"
-EXCHANGE_INFO_LABEL = "exchange-info"
 PORTFOLIO_MARGIN_FLAG = "Portfolio Margin is on: its balance is counted, its records are not posted"
 
 

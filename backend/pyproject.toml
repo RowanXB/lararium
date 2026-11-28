@@ -19,6 +19,7 @@ dependencies = [
     "psycopg-pool>=3.3.3",
     "pdfplumber>=0.11.10",
     "python-multipart>=0.0.33",
+    "embit>=0.8",
 ]
 
 [dependency-groups]

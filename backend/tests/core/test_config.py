@@ -152,3 +152,18 @@ def test_coingecko_key_is_optional_secret_and_empty_means_unset() -> None:
     assert settings.coingecko_api_key is not None
     assert settings.coingecko_api_key.get_secret_value() == "cg-TEST-0123"
     assert "cg-TEST-0123" not in repr(settings)
+
+
+def test_esplora_url_defaults_to_mempool_and_loses_its_trailing_slash() -> None:
+    dev = {"database_url": DATABASE_URL, "auth_mode": "dev"}
+    assert Settings(**dev).esplora_url == "https://mempool.space/api"
+    assert Settings(**dev, esplora_url="http://electrs.lan:3002/api/").esplora_url == (
+        "http://electrs.lan:3002/api"
+    )
+
+
+@pytest.mark.parametrize("value", ["", "/", "ftp://x.test/api", "mempool.space/api", "https://"])
+def test_esplora_url_must_be_an_http_url(value: str) -> None:
+    dev = {"database_url": DATABASE_URL, "auth_mode": "dev"}
+    with pytest.raises(ValidationError, match="esplora_url"):
+        Settings(**dev, esplora_url=value)

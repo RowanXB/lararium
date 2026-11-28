@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # market for. Sent only in a request header, never logged or shown.
     coingecko_api_key: SecretStr | None = None
 
+    # The Esplora HTTP API the Bitcoin connector reads chain data from. The default public
+    # server learns every address asked about; point this at a self-hosted electrs to avoid it.
+    esplora_url: str = "https://mempool.space/api"
+
     @field_validator("webhook_base_url", "webhook_secret", "coingecko_api_key", mode="before")
     @classmethod
     def _empty_is_unset(cls, value: object) -> object:
@@ -85,6 +89,16 @@ class Settings(BaseSettings):
     @classmethod
     def _no_trailing_slash(cls, value: str | None) -> str | None:
         return None if value is None else value.rstrip("/") or None
+
+    @field_validator("esplora_url")
+    @classmethod
+    def _esplora_http_url(cls, value: str) -> str:
+        # Empty or another scheme would fail at the first request, or worse, send nothing
+        # where the operator expects a self-hosted server; refuse at startup.
+        url = value.rstrip("/")
+        if not (url.startswith(("http://", "https://")) and url.split("://", 1)[1]):
+            raise ValueError("esplora_url must be an http(s) URL")
+        return url
 
     @field_validator("webhook_secret")
     @classmethod

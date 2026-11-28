@@ -33,6 +33,7 @@ from lararium.modules.finance.binance.parse import ApiValue, Row
 from lararium.modules.finance.identifiers import get_or_create_identifier
 from lararium.modules.finance.instruments import get_instrument
 from lararium.modules.finance.ledger import (
+    ChainFields,
     CounterpartyFields,
     IncomeKind,
     PostingInput,
@@ -308,6 +309,7 @@ async def post(
     transfer_leg: bool = False,
     bank_transfer: bool = False,
     refund: bool = False,
+    chain: ChainFields | None = None,
     income_kind: IncomeKind | None = None,
 ) -> UUID | None:
     """Upsert the connector transaction `key` (UTC, booked on its UTC date) and record the
@@ -351,6 +353,7 @@ async def post(
                 bank_transfer=bank_transfer,
                 never_transfer=not transfer_leg,
             ),
+            chain=chain,
         ),
     )
     _count(run, outcome)

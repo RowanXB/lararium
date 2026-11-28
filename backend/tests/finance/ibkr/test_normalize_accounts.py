@@ -59,6 +59,7 @@ class _Notifier:
 
 async def _ctx(session, connection, tmp_path, http) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, CONNECTOR, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),

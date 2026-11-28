@@ -64,6 +64,7 @@ def test_the_entries():
         ("trading212.invest", "Trading 212 Invest"),
         ("trading212.stocks_isa", "Trading 212 Stocks ISA"),
         ("trading212.cash_isa", "Trading 212 Cash ISA"),
+        ("bitcoin_wallet", "Bitcoin wallet"),
         ("hsbc_uk", "HSBC UK"),
         ("lloyds", "Lloyds"),
         ("boc_uk", "BOC UK"),
@@ -103,6 +104,18 @@ def test_trading212():
     assert invest is not None and isa is not None
     assert invest.api == Api("trading212", {"account_kind": "invest"})
     assert isa.api == Api("trading212", {"account_kind": "isa"})
+
+
+def test_bitcoin_wallet():
+    wallet = account_type("bitcoin_wallet")
+    assert wallet is not None
+    assert (wallet.institution, wallet.label, wallet.shape, wallet.files) == (
+        "Bitcoin",
+        "wallet",
+        None,
+        (),
+    )
+    assert wallet.api == Api("bitcoin", {})
 
 
 def test_an_unknown_key_is_no_type():

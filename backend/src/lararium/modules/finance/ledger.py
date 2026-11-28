@@ -98,6 +98,16 @@ class TransactionDetails:
 
 
 @dataclass(frozen=True)
+class ChainFields:
+    """The on-chain transaction a record is, and the wallet address it concerns: what the
+    transfer engine pairs on without reading a connector's tables."""
+
+    chain: str
+    tx_hash: str  # lower-case hex, 64 characters
+    address: str | None = None
+
+
+@dataclass(frozen=True)
 class TransactionInput:
     occurred_at: datetime  # must have a timezone
     description: str
@@ -114,6 +124,7 @@ class TransactionInput:
     details: TransactionDetails = TransactionDetails()
     # The transaction this one cancels; at most one transaction cancels any given one.
     cancels_transaction_id: UUID | None = None
+    chain: ChainFields | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +154,7 @@ class TransactionRecord:
     postings: tuple[PostingRecord, ...]  # sorted by position
     details: TransactionDetails
     cancels_transaction_id: UUID | None
+    chain: ChainFields | None
 
     @property
     def refund(self) -> bool:
@@ -267,6 +279,9 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
                 t.payment_scheme,
                 t.place_entity_id,
                 t.cancels_transaction_id,
+                t.chain,
+                t.tx_hash,
+                t.chain_address,
                 t.income_kind,
             ).where(t.id == transaction_id)
         )
@@ -343,7 +358,22 @@ async def _load_transaction(session: AsyncSession, transaction_id: UUID) -> Tran
             income_kind=cast(IncomeKind | None, row.income_kind),
         ),
         cancels_transaction_id=row.cancels_transaction_id,
+        chain=_chain_fields(row.chain, row.tx_hash, row.chain_address),
     )
+
+
+def _chain_fields(
+    chain: str | None, tx_hash: str | None, address: str | None
+) -> ChainFields | None:
+    if chain is None or tx_hash is None:
+        return None
+    return ChainFields(chain, tx_hash, address)
+
+
+def _chain_values(chain: ChainFields | None) -> dict[str, str | None]:
+    if chain is None:
+        return {"chain": None, "tx_hash": None, "chain_address": None}
+    return {"chain": chain.chain, "tx_hash": chain.tx_hash, "chain_address": chain.address}
 
 
 def _optional_str(value: object | None) -> str | None:
@@ -401,6 +431,13 @@ def _change_data(record: TransactionRecord) -> dict[str, JSONValue]:
         ],
         "details": _details_data(record.details),
         "cancels_transaction_id": _optional_str(record.cancels_transaction_id),
+        "chain": None
+        if record.chain is None
+        else {
+            "chain": record.chain.chain,
+            "tx_hash": record.chain.tx_hash,
+            "address": record.chain.address,
+        },
     }
 
 
@@ -573,6 +610,7 @@ async def post_transaction(ctx: CommandContext, tx: TransactionInput) -> Transac
                 external_id=tx.external_id,
                 **_details_values(tx.details),
                 cancels_transaction_id=tx.cancels_transaction_id,
+                **_chain_values(tx.chain),
                 owner_entity_id=await get_self_entity_id(session),
                 **_counterparty_values(tx.counterparty),
             )
@@ -634,6 +672,9 @@ async def upsert_connector_transaction(
                 t.counterparty_account_number,
                 t.cancels_transaction_id,
                 t.never_transfer,
+                t.chain,
+                t.tx_hash,
+                t.chain_address,
                 t.outside_family,
             ).where(t.connection_id == tx.connection_id, t.external_id == tx.external_id)
         )
@@ -665,6 +706,7 @@ async def upsert_connector_transaction(
         and existing.counterparty_account_number == tx.counterparty.account_number
         and existing.cancels_transaction_id == tx.cancels_transaction_id
         and existing.never_transfer == tx.counterparty.never_transfer
+        and _chain_fields(existing.chain, existing.tx_hash, existing.chain_address) == tx.chain
         and existing.outside_family == tx.counterparty.outside_family
     )
     details_unchanged = before.details == tx.details
@@ -693,6 +735,7 @@ async def upsert_connector_transaction(
             **_counterparty_values(tx.counterparty),
             **_details_values(tx.details),
             cancels_transaction_id=tx.cancels_transaction_id,
+            **_chain_values(tx.chain),
         )
         .returning(t.id)
     )

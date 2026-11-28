@@ -64,6 +64,7 @@ def _refuse(request: httpx.Request) -> httpx.Response:
 
 async def _ctx(session, connection, tmp_path, http, actor=CONNECTOR) -> SyncContext:
     return SyncContext(
+        esplora_url="https://esplora.test/api",
         command=CommandContext(session, actor, uuid.uuid4()),
         connection=await get_connection(session, connection.id),
         sync_id=uuid.uuid4(),
