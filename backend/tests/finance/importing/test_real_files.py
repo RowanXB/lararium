@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -223,7 +224,18 @@ async def _bank(
     exports = [file for file in files if file.label != PDF]
     ordered = statements + exports if order == "statements_first" else exports + statements
 
-    account = await make_account(name=f"Real {folder.name}", balance_mode="transactions")
+    # A Cash ISA's rows say by their Notes whether they moved money within its family
+    # (account family identifier design §5.9), which needs the account's type.
+    typed: dict[str, Any] = (
+        {
+            "subtype": "savings_pot",
+            "tax_wrapper": "isa",
+            "type_key": "trading212.cash_isa",
+        }
+        if institution == "Trading 212 Cash ISA"
+        else {}
+    )
+    account = await make_account(name=f"Real {folder.name}", balance_mode="transactions", **typed)
     profiles = {}
     committed = []
     outcome: Counter[str] = Counter()

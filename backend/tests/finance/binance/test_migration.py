@@ -80,7 +80,7 @@ _REMOVED = {
 
 
 def _seed(connection: Connection) -> tuple[object, object, object]:
-    """A Binance connection and a Trading 212 one, which no downgrade from 0040 on touches,
+    """A Binance connection and an IBKR one, which no downgrade from 0040 on touches,
     each with every key; (owner, binance, other)."""
     owner = connection.execute(
         text("insert into core.entities (kind, name) values ('person', 'Config test') returning id")
@@ -94,7 +94,7 @@ def _seed(connection: Connection) -> tuple[object, object, object]:
             ),
             {"c": connector, "config": json.dumps(_CONFIG), "owner": owner},
         ).scalar_one()
-        for connector in ("binance", "trading212")
+        for connector in ("binance", "ibkr")
     ]
     return owner, made[0], made[1]
 
@@ -171,7 +171,8 @@ def _assert_lists(connection: Connection, *, binance: bool) -> None:
     schemes = _allowed(
         _check(connection, "instrument_identifiers", "instrument_identifiers_scheme_check")
     )
-    assert kinds == (_M6_KINDS | {"chain_address"} if binance else _M6_KINDS)
+    # At head 0048 (the account family identifier) has added account_family too.
+    assert kinds == (_M6_KINDS | {"chain_address", "account_family"} if binance else _M6_KINDS)
     assert schemes == (_M6_SCHEMES | {"binance_asset"} if binance else _M6_SCHEMES)
     # M6's own value checks are left as they are.
     for name in (

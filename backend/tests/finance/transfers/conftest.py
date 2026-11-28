@@ -447,7 +447,9 @@ def statement_row(
     dedupe key (record_import_rows), its reference; by default one from the transaction.
     `at`: the row's time, which its file gives to `time_unit`; by default `day`'s midnight,
     a date only. `zone`: the time zone its file is read in (its import profile's), which it
-    is booked on `at`'s date in; by default the owner's, as posting gives."""
+    is booked on `at`'s date in; by default the owner's, as posting gives. `outside_family`:
+    its Notes say it moved money outside its account's family (account family identifier
+    design §5.9)."""
 
     async def _post(
         account: AccountRecord,
@@ -462,6 +464,7 @@ def statement_row(
         at: datetime | None = None,
         time_unit: str = "day",
         zone: str | None = None,
+        outside_family: bool = False,
     ) -> UUID:
         occurred_at = datetime.combine(day, time(), UTC) if at is None else at
         contra = await transfer_contra(
@@ -485,7 +488,9 @@ def statement_row(
                     PostingInput(contra, gbp.id, -amount),
                 ],
                 counterparty=CounterpartyFields(
-                    identifier_id=identifier_id, bank_transfer=bank_transfer
+                    identifier_id=identifier_id,
+                    bank_transfer=bank_transfer,
+                    outside_family=outside_family,
                 ),
             ),
         )

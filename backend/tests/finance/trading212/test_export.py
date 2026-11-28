@@ -1,6 +1,8 @@
 """Trading 212's CSV export, uploaded alongside the API (design §3a, §5.3a): optional, read
 with the API's precedence (§5.7), and nothing depends on it."""
 
+import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -9,6 +11,7 @@ from sqlalchemy import text
 
 from lararium.core.connections import get_connection
 from lararium.modules.finance.source_reviews import list_reviews, resolve_review
+from lararium.modules.finance.trading212 import merge
 from lararium.modules.finance.trading212.export import (
     MAX_CELL,
     MAX_ROWS,
@@ -137,7 +140,8 @@ def test_quoted_commas_and_newlines_stay_in_their_cell() -> None:
     notes = 'Card, "main"\nsecond line'
     body = (
         b"Action,Time (UTC),Notes,ID,Total,Currency (Total)\r\n"
-        b'Deposit,2026-03-01 09:15:00+00:00,"Card, ""main""\nsecond line",ref-q,250.00,GBP\r\n'
+        b'Interest on cash,2026-03-01 09:15:00+00:00,"Card, ""main""\nsecond line",'
+        b"ref-q,250.00,GBP\r\n"
     )
     [only], flagged = parse_export(body)
     assert (only.key, only.cells["Notes"], only.cells["Total"]) == ("ref-q", notes, "250.00")
@@ -190,8 +194,11 @@ async def test_notes_transaction_id_typed(session, run) -> None:
     connection = await _connection(run)
     ledger = Ledger(session, connection)
     await ledger.normalize(SUMMARY)
-    other = row(reference="ref-2", notes="Bank transfer")
-    await _ingest(ledger, export_csv(row(currency=" GBP "), other))
+    other = row(reference="ref-2", action="Interest on cash", notes="Bank transfer")
+    sent = row(
+        reference="ref-3", action="Withdrawal", notes="Sent to Bank Account 12-34-56 / 87654321"
+    )
+    await _ingest(ledger, export_csv(row(currency=" GBP "), other, sent))
 
     typed = await _export_row(session)
     assert (typed.notes, typed.notes_transaction_id) == (f"Transaction ID: {CARD_TX}", CARD_TX)
@@ -203,6 +210,17 @@ async def test_notes_transaction_id_typed(session, run) -> None:
     assert typed.time_utc.isoformat() == "2026-03-01T09:15:00+00:00"
     plain = await _export_row(session, "ref-2")
     assert (plain.notes, plain.notes_transaction_id) == ("Bank transfer", None)
+    assert (typed.notes_sort_code, typed.notes_account_number) == (None, None)
+    to_bank = await _export_row(session, "ref-3")
+    assert (
+        to_bank.notes_transaction_id,
+        to_bank.notes_sort_code,
+        to_bank.notes_account_number,
+    ) == (
+        None,
+        "123456",
+        "87654321",
+    )
     # Each row is a raw record of its cells, from the export's document.
     record = (
         await session.execute(
@@ -607,3 +625,135 @@ async def test_works_without_export(session, run, monkeypatch) -> None:
     exported = await session.scalar(text("select count(*) from finance.trading212_export_rows"))
     assert exported == 0
     assert not [m for m in notifier.messages if "export" in m.lower()]
+
+
+# Notes as evidence (design §5.9) -----------------------------------------------------------
+
+SENT = "Sent to Bank Account 12-34-56 / 87654321"
+
+
+@pytest.mark.parametrize("action", ["Deposit", "Withdrawal"])
+@pytest.mark.parametrize(
+    "notes",
+    ["Bank transfer", "Transaction ID:", "Sent to Bank Account 123456 / 87654321", "x " + SENT],
+)
+def test_notes_of_another_form_refuse_the_export(action: str, notes: str) -> None:
+    body = export_csv(row(reference="ref-ok"), row(reference="ref-bad", action=action, notes=notes))
+    with pytest.raises(ExportError) as refused:
+        parse_export(body)
+    assert str(refused.value).startswith("line 3 of the export: the Notes of a Deposit")
+    assert notes not in str(refused.value) and "ref-bad" not in str(refused.value)
+
+
+def test_notes_of_another_action_are_not_checked() -> None:
+    [only], _ = parse_export(export_csv(row(action="Interest on cash", notes="Bank transfer")))
+    assert only.cells["Notes"] == "Bank transfer"
+
+
+def _record(**cells: str) -> merge.ExportRecord:
+    return merge.ExportRecord(uuid.uuid4(), row(**cells), datetime(2026, 3, 1, tzinfo=UTC))
+
+
+def test_evidence_of_the_three_forms() -> None:
+    assert merge.evidence(_record(notes="")) == merge.Evidence(True, False, None, None)
+    assert merge.evidence(_record(notes=f"Transaction ID: {CARD_TX}")) == merge.Evidence(
+        False, True, None, None
+    )
+    assert merge.evidence(_record(action="Withdrawal", notes=SENT)) == merge.Evidence(
+        False, True, "123456", "87654321"
+    )
+    # Another form, or another action, says nothing.
+    assert merge.evidence(_record(notes="Bank transfer")) == merge.NO_EVIDENCE
+    assert merge.evidence(_record(action="Market buy", notes="")) == merge.NO_EVIDENCE
+
+
+async def _posted(session, key: str):
+    return (
+        await session.execute(
+            text(
+                "select i.kind, i.value, t.outside_family from finance.transactions t"
+                " left join finance.account_identifiers i on i.id = t.counterparty_identifier_id"
+                " where t.external_id = :k"
+            ),
+            {"k": key},
+        )
+    ).one()
+
+
+async def test_an_export_row_s_notes_are_evidence_on_the_posted_record(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(
+        SUMMARY,
+        ("transactions", transaction_item(reference="d-empty")),
+        ("transactions", transaction_item(reference="d-card")),
+        ("transactions", transaction_item(reference="w-bank", kind="WITHDRAW", amount="-40.00")),
+        ("transactions", transaction_item(reference="d-none")),
+    )
+    for reference in ("d-empty", "d-card", "w-bank", "d-none"):
+        assert tuple(await _posted(session, f"transaction:{reference}")) == (None, None, False)
+
+    await _ingest(
+        ledger,
+        export_csv(
+            row(reference="d-empty", notes=""),
+            row(reference="d-card", notes=f"Transaction ID: {CARD_TX}"),
+            row(reference="w-bank", action="Withdrawal", total="40.00", notes=SENT),
+        ),
+    )
+
+    assert tuple(await _posted(session, "transaction:d-empty")) == (
+        "account_family",
+        "trading212",
+        False,
+    )
+    assert tuple(await _posted(session, "transaction:d-card")) == (None, None, True)
+    assert tuple(await _posted(session, "transaction:w-bank")) == (
+        "uk_bank_account",
+        "123456:87654321",
+        True,
+    )
+    # No export row: the source says nothing.
+    assert tuple(await _posted(session, "transaction:d-none")) == (None, None, False)
+
+
+async def test_an_export_only_row_posts_with_its_evidence(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(SUMMARY)
+    await _ingest(ledger, export_csv(row(reference="only", notes="")))
+    assert tuple(await _posted(session, "transaction:only")) == (
+        "account_family",
+        "trading212",
+        False,
+    )
+
+
+async def test_a_transfer_names_the_family_whatever_an_export_row_says(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(
+        SUMMARY,
+        ("transactions", transaction_item(reference="t-1", kind="TRANSFER", amount="-5.00")),
+    )
+    await _ingest(ledger, export_csv(row(reference="t-1", action="Withdrawal", notes=SENT)))
+    assert tuple(await _posted(session, "transaction:t-1")) == (
+        "account_family",
+        "trading212",
+        False,
+    )
+
+
+async def test_an_export_without_a_notes_column_says_nothing(session, run) -> None:
+    ledger = Ledger(session, await _connection(run))
+    await ledger.normalize(SUMMARY, ("transactions", transaction_item(reference="d-bare")))
+    header = tuple(h for h in HEADER if h != "Notes")
+    await _ingest(ledger, export_csv(row(reference="d-bare"), header=header))
+    assert tuple(await _posted(session, "transaction:d-bare")) == (None, None, False)
+    assert (
+        merge.evidence(
+            merge.ExportRecord(
+                uuid.uuid4(),
+                {k: v for k, v in row().items() if k != "Notes"},
+                datetime(2026, 3, 1, tzinfo=UTC),
+            )
+        )
+        == merge.NO_EVIDENCE
+    )
